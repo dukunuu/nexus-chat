@@ -39,13 +39,8 @@ impl App {
     }
 
     pub fn move_space_selection(&mut self, delta: i32) {
-        let len = self.filtered_spaces().len() as i32;
-        if len == 0 {
-            self.space_selected = 0;
-            return;
-        }
-        let next = self.space_selected as i32 + delta;
-        self.space_selected = next.clamp(0, len - 1) as usize;
+        self.space_selected =
+            super::clamp_cursor(self.space_selected, self.filtered_spaces().len(), delta);
     }
 
     pub fn space_filter_push(&mut self, c: char) {

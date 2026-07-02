@@ -18,13 +18,7 @@ impl App {
     }
 
     pub(crate) fn move_skills_selection(&mut self, delta: i32) {
-        let len = self.skills.len() as i32;
-        if len == 0 {
-            self.skills_selected = 0;
-            return;
-        }
-        let next = self.skills_selected as i32 + delta;
-        self.skills_selected = next.clamp(0, len - 1) as usize;
+        self.skills_selected = super::clamp_cursor(self.skills_selected, self.skills.len(), delta);
     }
 
     pub(crate) fn start_skill_install(&mut self) {

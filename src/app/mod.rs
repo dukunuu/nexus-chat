@@ -33,6 +33,16 @@ use chat::{code_blocks, pick_greeting};
 use memory::{parse_fact_line, parse_memory_ops};
 use sessions::parse_topic;
 
+/// Nudge a bounded selection index by `delta`, hard-clamping to `[0, len-1]`
+/// (or `0` if `len` is `0`). Shared by the picker/list selection-movement
+/// methods that clamp at the ends rather than wrapping around.
+pub(super) fn clamp_cursor(current: usize, len: usize, delta: i32) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    (current as i32 + delta).clamp(0, len as i32 - 1) as usize
+}
+
 /// Which modal popover, if any, is open.
 #[derive(PartialEq)]
 pub enum Popup {

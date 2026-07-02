@@ -68,9 +68,6 @@ impl App {
     }
 
     pub(crate) fn move_copy_selection(&mut self, delta: i32) {
-        let n = self.copy_options.len() as i32;
-        if n > 0 {
-            self.copy_selected = (self.copy_selected as i32 + delta).clamp(0, n - 1) as usize;
-        }
+        self.copy_selected = super::clamp_cursor(self.copy_selected, self.copy_options.len(), delta);
     }
 }

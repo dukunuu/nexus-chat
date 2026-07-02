@@ -54,13 +54,8 @@ impl App {
     }
 
     pub(crate) fn move_session_selection(&mut self, delta: i32) {
-        let len = self.filtered_sessions().len() as i32;
-        if len == 0 {
-            self.session_selected = 0;
-            return;
-        }
-        let next = self.session_selected as i32 + delta;
-        self.session_selected = next.clamp(0, len - 1) as usize;
+        self.session_selected =
+            super::clamp_cursor(self.session_selected, self.filtered_sessions().len(), delta);
     }
 
     /// A filter keystroke re-runs the fuzzy match and resets the cursor to the top.
