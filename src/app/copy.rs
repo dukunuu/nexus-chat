@@ -3,19 +3,10 @@ use super::{code_blocks, App, CopyOption, Popup};
 impl App {
     /// Copy arbitrary text to the clipboard and report it in the status line.
     pub(crate) fn copy_text(&mut self, text: String) {
-        if text.is_empty() {
-            return;
+        let msg = crate::input::copy_to_clipboard(&mut self.clipboard, &text);
+        if !msg.is_empty() {
+            self.status = msg;
         }
-        let n = text.chars().count();
-        let ok = self
-            .clipboard
-            .as_mut()
-            .is_some_and(|cb| cb.set_text(text).is_ok());
-        self.status = if ok {
-            format!("copied {n} chars")
-        } else {
-            "clipboard unavailable".into()
-        };
     }
 
     /// Copy a message's exact original content by its index into `self.messages`

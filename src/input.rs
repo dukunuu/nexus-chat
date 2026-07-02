@@ -124,6 +124,22 @@ pub(crate) fn new_textarea() -> TextArea<'static> {
     ta
 }
 
+/// Copy `text` to the OS clipboard and format the status-line message for
+/// it: `"copied {n} chars"` on success, `"clipboard unavailable"` if there's
+/// no clipboard or the set failed, or an empty string if `text` was empty
+/// (callers should leave the existing status untouched in that case).
+pub(crate) fn copy_to_clipboard(clipboard: &mut Option<arboard::Clipboard>, text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let n = text.chars().count();
+    if clipboard.as_mut().is_some_and(|cb| cb.set_text(text.to_string()).is_ok()) {
+        format!("copied {n} chars")
+    } else {
+        "clipboard unavailable".to_string()
+    }
+}
+
 impl App {
     /// Current composer text, newlines joined.
     pub fn input_text(&self) -> String {
@@ -148,16 +164,10 @@ impl App {
         self.input.copy();
         let text = self.input.yank_text();
         self.input.cancel_selection();
-        if text.is_empty() {
-            return;
+        let msg = copy_to_clipboard(&mut self.clipboard, &text);
+        if !msg.is_empty() {
+            self.status = msg;
         }
-        let n = text.chars().count();
-        let ok = self.clipboard.as_mut().is_some_and(|cb| cb.set_text(text).is_ok());
-        self.status = if ok {
-            format!("copied {n} chars")
-        } else {
-            "clipboard unavailable".into()
-        };
     }
 
     /// Copy the current selection to the OS clipboard *without* clearing it —
@@ -179,16 +189,10 @@ impl App {
             out.push_str(&lines[r2].chars().take(c2).collect::<String>());
             out
         };
-        if text.is_empty() {
-            return;
+        let msg = copy_to_clipboard(&mut self.clipboard, &text);
+        if !msg.is_empty() {
+            self.status = msg;
         }
-        let n = text.chars().count();
-        let ok = self.clipboard.as_mut().is_some_and(|cb| cb.set_text(text).is_ok());
-        self.status = if ok {
-            format!("copied {n} chars")
-        } else {
-            "clipboard unavailable".into()
-        };
     }
 
     /// Cut the current selection to the OS clipboard.
