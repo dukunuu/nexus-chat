@@ -274,10 +274,18 @@ fn find_snippet(html: &str, from: usize) -> String {
 
 /// DuckDuckGo's result links redirect through `/l/?uddg=<percent-encoded-url>`.
 fn resolve_ddg_href(href: &str) -> Option<String> {
-    if let Some(idx) = href.find("uddg=") {
-        let rest = &href[idx + 5..];
-        let end = rest.find('&').unwrap_or(rest.len());
-        let decoded = percent_decode(&rest[..end]);
+    if href.contains("uddg=") {
+        let absolute = if let Some(rest) = href.strip_prefix("//") {
+            format!("https://{rest}")
+        } else if href.starts_with("http") {
+            href.to_string()
+        } else {
+            format!("https://duckduckgo.com{href}")
+        };
+        let decoded = reqwest::Url::parse(&absolute)
+            .ok()
+            .and_then(|url| url.query_pairs().find(|(k, _)| k == "uddg").map(|(_, v)| v.into_owned()))
+            .unwrap_or_default();
         return (!decoded.is_empty()).then_some(decoded);
     }
     if let Some(rest) = href.strip_prefix("//") {
@@ -315,27 +323,6 @@ fn html_unescape(s: &str) -> String {
         .replace("&quot;", "\"")
         .replace("&#x27;", "'")
         .replace("&#39;", "'")
-}
-
-/// Minimal percent-decoder for the `uddg` query param (also treats `+` as space,
-/// matching `application/x-www-form-urlencoded`).
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let Ok(b) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
-        {
-            out.push(b);
-            i += 3;
-            continue;
-        }
-        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).to_string()
 }
 
 /// Perplexity-style numbered results the model cites inline as `[n]`.
@@ -418,11 +405,6 @@ mod tests {
         let msg = err.to_string();
         assert!(!msg.contains("no search backend configured"));
         assert!(!msg.contains("API key"));
-    }
-
-    #[test]
-    fn decodes_percent_and_plus_encoding() {
-        assert_eq!(percent_decode("https%3A%2F%2Fexample.com%2Fa+b"), "https://example.com/a b");
     }
 
     #[test]
