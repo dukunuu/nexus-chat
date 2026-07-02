@@ -224,7 +224,7 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Plain text of a rendered line (span contents concatenated).
-fn line_text(line: &Line) -> String {
+pub(crate) fn line_text(line: &Line) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 

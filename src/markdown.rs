@@ -8,6 +8,8 @@ use ratatui::text::{Line, Span};
 use tui_markdown::{DefaultStyleSheet, Options, StyleSheet};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::ui::line_text;
+
 /// Terminal column width of one char (0 for combining marks, 2 for CJK/emoji).
 fn char_width(c: char) -> usize {
     c.width().unwrap_or(0)
@@ -462,10 +464,6 @@ fn list_rest(plain: &str) -> Option<String> {
     None
 }
 
-/// Plain text of a rendered line (span contents concatenated).
-fn line_text(line: &Line) -> String {
-    line.spans.iter().map(|s| s.content.as_ref()).collect()
-}
 
 /// Word-wrap a styled `Line` to `width` terminal columns, preserving per-span
 /// styling. Wraps by display width (CJK/emoji are 2 columns), not char count,
