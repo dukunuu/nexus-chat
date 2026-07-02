@@ -148,19 +148,20 @@ struct SearxngResult {
     content: String,
 }
 
+/// Shared by backends that send a request and expect a JSON body back: send,
+/// raise on a non-2xx status, then deserialize. DuckDuckGo scrapes HTML
+/// instead of parsing JSON, so it doesn't use this helper.
+async fn send_and_parse<T: serde::de::DeserializeOwned>(req: reqwest::RequestBuilder) -> anyhow::Result<T> {
+    req.send().await?.error_for_status()?.json::<T>().await.map_err(Into::into)
+}
+
 /// SearXNG's JSON API needs `search: formats: [html, json]` enabled in the
 /// instance's `settings.yml` — off by default. A misconfigured instance
 /// surfaces as an HTML/error response here, which `error_for_status`/`json`
 /// turns into a readable error for the model rather than a silent empty result.
 async fn searxng_search(client: &reqwest::Client, base_url: &str, query: &str) -> anyhow::Result<Vec<SearchHit>> {
-    let resp = client
-        .get(format!("{base_url}/search"))
-        .query(&[("q", query), ("format", "json")])
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<SearxngResponse>()
-        .await?;
+    let req = client.get(format!("{base_url}/search")).query(&[("q", query), ("format", "json")]);
+    let resp = send_and_parse::<SearxngResponse>(req).await?;
     Ok(resp
         .results
         .into_iter()
@@ -198,15 +199,11 @@ struct LangsearchResult {
 /// required. More reliable than scraping DuckDuckGo — recommended default
 /// once you have a key.
 async fn langsearch_search(client: &reqwest::Client, key: &str, query: &str) -> anyhow::Result<Vec<SearchHit>> {
-    let resp = client
+    let req = client
         .post("https://api.langsearch.com/v1/web-search")
         .bearer_auth(key)
-        .json(&serde_json::json!({ "query": query, "count": 8 }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<LangsearchResponse>()
-        .await?;
+        .json(&serde_json::json!({ "query": query, "count": 8 }));
+    let resp = send_and_parse::<LangsearchResponse>(req).await?;
     Ok(resp
         .data
         .and_then(|d| d.web_pages)
