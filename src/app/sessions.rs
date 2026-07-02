@@ -39,13 +39,7 @@ impl App {
         if needle.is_empty() {
             return self.sessions_cache.iter().collect();
         }
-        let mut scored: Vec<(i32, &Session)> = self
-            .sessions_cache
-            .iter()
-            .filter_map(|s| session_score(s, needle).map(|sc| (sc, s)))
-            .collect();
-        scored.sort_by_key(|(sc, _)| std::cmp::Reverse(*sc));
-        scored.into_iter().map(|(_, s)| s).collect()
+        super::fuzzy_filter_sorted(&self.sessions_cache, |s| session_score(s, needle))
     }
 
     /// The session under the picker cursor (respecting the active filter).

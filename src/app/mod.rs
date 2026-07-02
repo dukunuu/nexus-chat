@@ -43,6 +43,21 @@ pub(super) fn clamp_cursor(current: usize, len: usize, delta: i32) -> usize {
     (current as i32 + delta).clamp(0, len as i32 - 1) as usize
 }
 
+/// Filter `items` down to those `score_fn` returns `Some` for, sorted
+/// descending by score (best match first, stable on ties). Shared by the
+/// space and session pickers' fuzzy filters.
+pub(super) fn fuzzy_filter_sorted<'a, T>(
+    items: &'a [T],
+    score_fn: impl Fn(&T) -> Option<i32>,
+) -> Vec<&'a T> {
+    let mut scored: Vec<(i32, &T)> = items
+        .iter()
+        .filter_map(|item| score_fn(item).map(|sc| (sc, item)))
+        .collect();
+    scored.sort_by_key(|(sc, _)| std::cmp::Reverse(*sc));
+    scored.into_iter().map(|(_, item)| item).collect()
+}
+
 /// Which modal popover, if any, is open.
 #[derive(PartialEq)]
 pub enum Popup {

@@ -25,13 +25,7 @@ impl App {
             return self.spaces_cache.iter().collect();
         }
         use crate::input::fuzzy_score;
-        let mut scored: Vec<(i32, &SpaceRow)> = self
-            .spaces_cache
-            .iter()
-            .filter_map(|s| fuzzy_score(&s.name, needle).map(|sc| (sc, s)))
-            .collect();
-        scored.sort_by_key(|(sc, _)| std::cmp::Reverse(*sc));
-        scored.into_iter().map(|(_, s)| s).collect()
+        super::fuzzy_filter_sorted(&self.spaces_cache, |s| fuzzy_score(&s.name, needle))
     }
 
     pub fn selected_space(&self) -> Option<SpaceRow> {
