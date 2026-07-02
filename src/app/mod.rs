@@ -12,8 +12,13 @@ use crate::config;
 use crate::input::{COMMANDS, new_textarea};
 use crate::db::{Db, Message, Session, Space as SpaceRow, DEFAULT_SPACE};
 use crate::provider::openrouter::OpenRouter;
-use crate::provider::{ChatMessage, ChatParams, Model, StreamEvent, Usage};
+use crate::provider::{ChatMessage, Model, StreamEvent, Usage};
 use crate::space::Space;
+
+mod chat;
+#[cfg(test)]
+use chat::split_inline_reasoning;
+use chat::{code_blocks, pick_greeting};
 
 /// Which modal popover, if any, is open.
 #[derive(PartialEq)]
@@ -723,22 +728,6 @@ impl App {
 
     // --- input handling ---
 
-    pub fn submit(&mut self) -> Result<()> {
-        let text = self.input_text();
-        self.clear_input();
-        self.sel.clear(); // history line indices are about to shift
-        let text = text.trim();
-        if text.is_empty() {
-            return Ok(());
-        }
-        if let Some(cmd) = text.strip_prefix('/') {
-            self.run_command(cmd)?;
-        } else {
-            self.send_message(text.to_string())?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn run_command(&mut self, cmd: &str) -> Result<()> {
         let token = cmd.split_whitespace().next().unwrap_or("");
         // Resolve aliases (e.g. "history" -> "session") to a canonical name.
@@ -941,285 +930,7 @@ impl App {
         }
     }
 
-    fn send_message(&mut self, text: String) -> Result<()> {
-        if self.is_streaming() {
-            self.status = "wait for the current response to finish".to_string();
-            self.set_input(&text);
-            return Ok(());
-        }
-        let Some(provider) = self.provider.clone() else {
-            self.status = "set your API key first with /key".to_string();
-            self.set_input(&text);
-            return Ok(());
-        };
-        let Some(model) = self.current_model.clone() else {
-            self.status = "pick a model first with /model".to_string();
-            self.set_input(&text);
-            return Ok(());
-        };
-
-        // Auto-create a session on the first message.
-        if self.session.is_none() {
-            let title = title_from(&text);
-            let s = self.db.create_session(&title, &model, &self.active_space.id)?;
-            self.session = Some(s);
-        }
-        let session_id = self.session.as_ref().unwrap().id.clone();
-
-        self.db.add_user_message(&session_id, &text)?;
-        self.messages.push(Message {
-            role: "user".to_string(),
-            content: text,
-            model: None,
-            reasoning: None,
-            tokens: None,
-            secs: None,
-            phrase: None,
-        });
-
-        let mut history: Vec<ChatMessage> = Vec::with_capacity(self.messages.len() + 3);
-        history.push(ChatMessage::text("system", self.system_prompt()));
-        // If this session has been auto-compacted, send the digest instead of
-        // the raw messages it covers — only the tail after it goes verbatim.
-        if let Some(summary) = self.session.as_ref().and_then(|s| s.compact_summary.clone()) {
-            history.push(ChatMessage::text(
-                "system",
-                format!("Summary of earlier conversation (auto-compacted for length):\n{summary}"),
-            ));
-        }
-        if let Some(name) = self.forced_skill.take()
-            && let Some(skill) = self.skills.iter().find(|s| s.name == name)
-        {
-            let body = std::fs::read_to_string(skill.dir.join("SKILL.md"))
-                .map(|md| crate::skills::skill_body(&md).to_string())
-                .unwrap_or_default();
-            history.push(ChatMessage::text(
-                "system",
-                format!("The user invoked the skill '{name}'. Follow these instructions:\n{body}"),
-            ));
-        }
-        history.extend(
-            self.effective_messages().iter().map(|m| ChatMessage::text(m.role.clone(), m.content.clone())),
-        );
-
-        let params = ChatParams {
-            reasoning_effort: self.reasoning.get(&model).cloned(),
-            temperature: self.settings.temperature,
-            top_p: self.settings.top_p,
-            max_tokens: self.settings.max_tokens,
-        };
-        let tools = self.toolbox.defs();
-        self.stream_rx = Some(provider.stream_chat(model, history, params, tools, self.toolbox.clone()));
-        self.streaming = Some(String::new());
-        self.thinking_text.clear();
-        self.tool_status = None;
-        self.stream_usage = None;
-        self.stream_started = Some(std::time::Instant::now());
-        self.spinner_frame = 0;
-        let (idx, color) = pick_flavor();
-        self.thinking_idx = idx;
-        self.spinner_color = color;
-        self.status.clear();
-        self.scroll = 0;
-        Ok(())
-    }
-
-    pub fn on_stream_event(&mut self, ev: StreamEvent) -> Result<()> {
-        match ev {
-            StreamEvent::Token(t) => {
-                if let Some(buf) = self.streaming.as_mut() {
-                    buf.push_str(&t);
-                }
-            }
-            StreamEvent::Reasoning(t) => self.thinking_text.push_str(&t),
-            StreamEvent::Usage(u) => self.stream_usage = Some(u),
-            StreamEvent::Status(s) => self.tool_status = Some(s),
-            StreamEvent::Done => self.finish_stream()?,
-            StreamEvent::Error(e) => {
-                self.status = format!("stream error: {e}");
-                self.finish_stream()?;
-            }
-        }
-        Ok(())
-    }
-
-    fn finish_stream(&mut self) -> Result<()> {
-        self.stream_rx = None;
-        self.tool_status = None;
-        let started = self.stream_started.take();
-        let mut reasoning = std::mem::take(&mut self.thinking_text);
-        let Some(buf) = self.streaming.take() else {
-            return Ok(());
-        };
-        if buf.is_empty() {
-            return Ok(());
-        }
-        // Some reasoning models (routed without the separate `reasoning` delta
-        // field) inline their thinking as `<think>...</think>` in `content`
-        // itself. Pull that out so the stored/displayed/copied message is just
-        // the actual answer, not the thinking — same treatment as the explicit
-        // reasoning channel above.
-        let (buf, inline) = split_inline_reasoning(&buf);
-        if let Some(inline) = inline {
-            if !reasoning.is_empty() {
-                reasoning.push('\n');
-            }
-            reasoning.push_str(&inline);
-        }
-        let model = self.current_model.clone();
-        // Prefer the provider's exact usage; fall back to a ~4-chars/token estimate.
-        let usage = self.stream_usage.take();
-        let tokens = Some(match usage {
-            Some(u) => u.completion_tokens as i64,
-            None => buf.chars().count().div_ceil(4) as i64,
-        });
-        if let Some(u) = usage {
-            // Some providers omit total; derive it from prompt + completion.
-            let total = if u.total_tokens > 0 {
-                u.total_tokens
-            } else {
-                u.prompt_tokens + u.completion_tokens
-            };
-            self.context_total = Some(total);
-        }
-        let secs = started.map(|s| s.elapsed().as_secs_f64());
-        let reasoning = (!reasoning.is_empty()).then_some(reasoning);
-        let phrase = Some(THINKING[self.thinking_idx].1.to_string());
-
-        if let Some(session) = &self.session {
-            self.db.add_assistant_message(
-                &session.id,
-                &buf,
-                model.as_deref(),
-                reasoning.as_deref(),
-                tokens,
-                secs,
-                phrase.as_deref(),
-            )?;
-        }
-        self.messages.push(Message {
-            role: "assistant".to_string(),
-            content: buf,
-            model,
-            reasoning,
-            tokens,
-            secs,
-            phrase,
-        });
-        self.maybe_generate_title();
-        self.maybe_extract_memory();
-        self.maybe_compact();
-        Ok(())
-    }
-
-    /// After the first exchange of a session, ask the model for a short topic and
-    /// slug in the background. Runs once per session (guarded by `slug.is_none()`).
-    fn maybe_generate_title(&mut self) {
-        let (Some(session), Some(provider), Some(model)) =
-            (self.session.as_ref(), self.provider.clone(), self.current_model.clone())
-        else {
-            return;
-        };
-        if session.slug.is_some() {
-            return; // already named
-        }
-        // Build a compact transcript of the conversation so far.
-        let convo: String = self
-            .messages
-            .iter()
-            .map(|m| format!("{}: {}", m.role, m.content.chars().take(500).collect::<String>()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let session_id = session.id.clone();
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.title_rx = Some(rx);
-        tokio::spawn(async move {
-            let prompt = format!(
-                "Summarise this conversation as a session name. Reply with ONLY a JSON object, \
-                 no markdown, of the form {{\"topic\": \"<3-5 word title>\", \"id\": \"<short-kebab-slug>\"}}.\n\n{convo}"
-            );
-            let msgs = vec![ChatMessage::text("user", prompt)];
-            if let Ok(text) = provider.complete(&model, msgs).await
-                && let Some((topic, slug)) = parse_topic(&text)
-            {
-                let _ = tx.send((session_id, topic, slug));
-            }
-        });
-    }
-
-    /// Apply a generated topic/slug to the matching session (in memory + db).
-    pub fn on_title_result(&mut self, result: Option<(String, String, String)>) {
-        self.title_rx = None;
-        let Some((id, topic, slug)) = result else { return };
-        let _ = self.db.set_session_title(&id, &topic, Some(&slug));
-        if let Some(s) = self.session.as_mut().filter(|s| s.id == id) {
-            s.title = topic.clone();
-            s.slug = Some(slug.clone());
-        }
-        if let Some(s) = self.sessions_cache.iter_mut().find(|s| s.id == id) {
-            s.title = topic;
-            s.slug = Some(slug);
-        }
-    }
-
     // --- memory (per-space, extracted after every assistant reply) ---
-
-    /// Instructions + memory for the active space, combined into one system
-    /// message. `None` if the space has neither (today's no-system-prompt path).
-    /// The full system prompt: the app's own base prompt (identity/formatting
-    /// rules, `$EDITOR`-editable) first, then space instructions, skills, and
-    /// memory layered on top. Unlike those three, the base prompt is never
-    /// empty — it's the app speaking, not per-space configuration.
-    fn system_prompt(&self) -> String {
-        let mut parts: Vec<String> = vec![self.resolved_base_system_prompt()];
-        let instructions = std::fs::read_to_string(self.space.instructions_path(&self.active_space.name))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        if let Some(i) = instructions {
-            parts.push(i);
-        }
-        if let Some(skills) = self.skills_section() {
-            parts.push(skills);
-        }
-        let memory = self.read_memory();
-        if !memory.trim().is_empty() {
-            parts.push(format!("## Memory\n{memory}"));
-        }
-        parts.join("\n\n")
-    }
-
-    /// `base_system_prompt` (raw, as read from `system_prompt.md`) with the
-    /// `{{verbosity}}` placeholder swapped for the level the user picked.
-    fn resolved_base_system_prompt(&self) -> String {
-        let now = Utc::now().format("%Y-%m-%d %H:%M UTC, %A").to_string();
-        self.base_system_prompt
-            .replace("{{verbosity}}", verbosity_clause(&self.verbosity))
-            .replace("{{datetime}}", &now)
-    }
-
-    /// Re-read `system_prompt.md` after a Ctrl+E hand-edit.
-    pub fn reload_base_system_prompt(&mut self) {
-        if let Ok(text) = crate::config::load_system_prompt() {
-            self.base_system_prompt = text;
-            self.status = "system prompt reloaded".to_string();
-        }
-    }
-
-    /// Names + descriptions of installed skills and how to invoke one — full
-    /// bodies stay off the wire until the model calls the `skill` tool.
-    fn skills_section(&self) -> Option<String> {
-        if self.skills.is_empty() {
-            return None;
-        }
-        let mut s = "## Skills\nYou have skills available. To use one, call the `skill` tool \
-                     with its name; the full instructions will be returned.\n"
-            .to_string();
-        for skill in &self.skills {
-            s.push_str(&format!("- {}: {}\n", skill.name, skill.description));
-        }
-        Some(s.trim_end().to_string())
-    }
 
     /// Raw contents of the active space's memory file, capped to ~16k chars.
     fn read_memory(&self) -> String {
@@ -2264,63 +1975,6 @@ impl App {
     }
 }
 
-/// Pick a thinking-phrase index and spinner colour pseudo-randomly (seeded from
-/// the clock; no rng dep).
-/// Each fenced ``` code block in `md` as `(language, code)`.
-fn code_blocks(md: &str) -> Vec<(Option<String>, String)> {
-    let mut out = Vec::new();
-    let mut inside = false;
-    let mut lang: Option<String> = None;
-    let mut buf = String::new();
-    for line in md.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
-            if inside {
-                out.push((lang.take(), std::mem::take(&mut buf)));
-            } else {
-                let l = trimmed.trim_start_matches('`').trim();
-                lang = (!l.is_empty()).then(|| l.to_string());
-            }
-            inside = !inside;
-            continue;
-        }
-        if inside {
-            buf.push_str(line);
-            buf.push('\n');
-        }
-    }
-    if inside && !buf.is_empty() {
-        out.push((lang.take(), buf)); // unterminated (e.g. mid-stream)
-    }
-    out
-}
-
-fn pick_greeting() -> &'static str {
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as usize)
-        .unwrap_or(0);
-    GREETINGS[n % GREETINGS.len()]
-}
-
-fn pick_flavor() -> (usize, Color) {
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as usize)
-        .unwrap_or(0);
-    (n % THINKING.len(), SPINNER_COLORS[n % SPINNER_COLORS.len()])
-}
-
-/// Short session title from the first user message.
-fn title_from(text: &str) -> String {
-    let t: String = text.chars().take(40).collect();
-    if t.trim().is_empty() {
-        "new chat".to_string()
-    } else {
-        t
-    }
-}
-
 /// Best fuzzy score of `needle` against a session's title, slug, and uuid.
 fn session_score(s: &Session, needle: &str) -> Option<i32> {
     use crate::input::fuzzy_score;
@@ -2362,37 +2016,6 @@ fn slugify(s: &str) -> String {
         .collect::<Vec<_>>()
         .join("-");
     if slug.is_empty() { "chat".to_string() } else { slug }
-}
-
-/// Strip `<think>...</think>` blocks out of `text`, returning the cleaned
-/// content and the extracted reasoning (blocks joined by newlines), if any. An
-/// unterminated tag (e.g. a truncated stream) treats the remainder as
-/// reasoning rather than leaking a dangling tag into the answer.
-fn split_inline_reasoning(text: &str) -> (String, Option<String>) {
-    const OPEN: &str = "<think>";
-    const CLOSE: &str = "</think>";
-    let mut content = String::with_capacity(text.len());
-    let mut reasoning = String::new();
-    let mut rest = text;
-    loop {
-        let Some(start) = rest.find(OPEN) else {
-            content.push_str(rest);
-            break;
-        };
-        content.push_str(&rest[..start]);
-        let after_open = &rest[start + OPEN.len()..];
-        let (block, remainder) = match after_open.find(CLOSE) {
-            Some(end) => (&after_open[..end], &after_open[end + CLOSE.len()..]),
-            None => (after_open, ""),
-        };
-        if !reasoning.is_empty() {
-            reasoning.push('\n');
-        }
-        reasoning.push_str(block.trim());
-        rest = remainder;
-    }
-    let content = content.trim().to_string();
-    (content, (!reasoning.is_empty()).then_some(reasoning))
 }
 
 /// Parse one numbered fact line (`"3. some fact"`) into `(id, text)`.
