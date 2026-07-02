@@ -31,10 +31,6 @@ pub struct Session {
     /// generated — display falls back to a prefix of the uuid.
     pub slug: Option<String>,
     pub created_at: String,
-    // ponytail: not read yet (sessions are always fetched pre-scoped by space_id),
-    // kept so a session row carries its full identity if that changes.
-    #[allow(dead_code)]
-    pub space_id: String,
     /// Caveman-compressed digest of the session's earlier messages, if it's
     /// ever been auto-compacted. `None` until the first compaction.
     pub compact_summary: Option<String>,
@@ -294,7 +290,6 @@ impl Db {
             model: model.to_string(),
             slug: None,
             created_at: now,
-            space_id: space_id.to_string(),
             compact_summary: None,
             compact_through: 0,
         })
@@ -303,7 +298,7 @@ impl Db {
     /// Sessions in `space_id`, most-recently-updated first.
     pub fn list_sessions(&self, space_id: &str) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, model, slug, created_at, space_id, compact_summary, compact_through
+            "SELECT id, title, model, slug, created_at, compact_summary, compact_through
              FROM sessions WHERE space_id = ?1 ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([space_id], |r| {
@@ -313,9 +308,8 @@ impl Db {
                 model: r.get(2)?,
                 slug: r.get(3)?,
                 created_at: r.get(4)?,
-                space_id: r.get(5)?,
-                compact_summary: r.get(6)?,
-                compact_through: r.get(7)?,
+                compact_summary: r.get(5)?,
+                compact_through: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
