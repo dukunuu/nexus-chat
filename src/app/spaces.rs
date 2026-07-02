@@ -4,7 +4,7 @@ use super::{App, Popup, SpaceMode};
 use crate::db::{Space as SpaceRow, DEFAULT_SPACE};
 
 impl App {
-    pub(crate) fn open_space_picker(&mut self) -> Result<()> {
+    pub(super) fn open_space_picker(&mut self) -> Result<()> {
         self.spaces_cache = self.db.list_spaces()?;
         self.space_selected = self
             .spaces_cache
