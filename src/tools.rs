@@ -419,6 +419,12 @@ mod tests {
     }
 
     #[test]
+    fn resolve_ddg_href_decodes_plus_as_space() {
+        let href = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa+b";
+        assert_eq!(resolve_ddg_href(href).as_deref(), Some("https://example.com/a b"));
+    }
+
+    #[test]
     fn strip_tags_drops_markup_and_unescapes_entities() {
         assert_eq!(strip_tags("<b>Rust</b> &amp; friends"), "Rust & friends");
     }
