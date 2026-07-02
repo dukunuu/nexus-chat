@@ -276,9 +276,9 @@ pub enum AppEvent {
 
 pub struct App {
     pub db: Db,
-    space: Space,
-    provider: Option<OpenRouter>,
-    key: Option<String>,
+    pub(crate) space: Space,
+    pub(crate) provider: Option<OpenRouter>,
+    pub(crate) key: Option<String>,
 
     /// The space the current/next session belongs to.
     pub active_space: SpaceRow,
@@ -302,26 +302,26 @@ pub struct App {
     /// Answer-length preference woven into the system prompt: "normal",
     /// "concise" (default), or "caveman".
     pub verbosity: String,
-    memory_rx: Option<mpsc::UnboundedReceiver<(String, Vec<MemoryOp>)>>,
+    pub(crate) memory_rx: Option<mpsc::UnboundedReceiver<(String, Vec<MemoryOp>)>>,
     /// Background compaction result: (session id, digest, messages-covered, pre-compaction %).
-    compact_rx: Option<mpsc::UnboundedReceiver<(String, String, i64, u64)>>,
+    pub(crate) compact_rx: Option<mpsc::UnboundedReceiver<(String, String, i64, u64)>>,
 
     /// Installed skills (name/description only — bodies are read from disk on
     /// invocation, so this list is cheap and reloaded whenever it changes).
     pub skills: Vec<crate::skills::Skill>,
     /// A skill armed by `/<skill-name>`, injected into the next message only.
-    forced_skill: Option<String>,
-    toolbox: std::sync::Arc<crate::tools::ToolBox>,
+    pub(crate) forced_skill: Option<String>,
+    pub(crate) toolbox: std::sync::Arc<crate::tools::ToolBox>,
     pub skills_mode: SkillsMode,
     pub skills_selected: usize,
     /// GitHub `owner/repo/path` shorthand being typed in Install mode.
     pub skills_edit: String,
-    skills_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
+    pub(crate) skills_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
 
     /// Live model catalog (fetched on demand, never hardcoded).
     pub models: Vec<Model>,
     pub current_model: Option<String>,
-    models_rx: Option<mpsc::UnboundedReceiver<ModelsResult>>,
+    pub(crate) models_rx: Option<mpsc::UnboundedReceiver<ModelsResult>>,
     /// Model ids marked favorite, and when each model was last used (rfc3339).
     pub favorites: HashSet<String>,
     pub last_used: HashMap<String, String>,
@@ -343,22 +343,22 @@ pub struct App {
     /// In-progress assistant response while a completion streams.
     pub streaming: Option<String>,
     /// In-progress reasoning/thinking tokens for the current stream (transient).
-    thinking_text: String,
+    pub(crate) thinking_text: String,
     /// Label for a tool currently running mid-stream (e.g. "Searching the web…").
     pub tool_status: Option<String>,
-    stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
+    pub(crate) stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
     /// Wall-clock start of the current stream, for TPS.
-    stream_started: Option<std::time::Instant>,
+    pub(crate) stream_started: Option<std::time::Instant>,
     /// Exact usage reported for the in-flight stream, if any.
-    stream_usage: Option<Usage>,
+    pub(crate) stream_usage: Option<Usage>,
     /// Exact conversation token total from the last completed response.
-    context_total: Option<u64>,
+    pub(crate) context_total: Option<u64>,
 
     pub settings: Settings,
     /// Animated "thinking" indicator shown while a response streams.
-    spinner_frame: usize,
-    thinking_idx: usize,
-    spinner_color: Color,
+    pub(crate) spinner_frame: usize,
+    pub(crate) thinking_idx: usize,
+    pub(crate) spinner_color: Color,
 
     pub popup: Popup,
     pub model_filter: String,
