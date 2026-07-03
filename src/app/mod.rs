@@ -18,6 +18,7 @@ use crate::space::Space;
 mod chat;
 mod compaction;
 mod copy;
+mod files;
 mod memory;
 mod models;
 mod sessions;
@@ -79,6 +80,16 @@ pub enum SkillsMode {
     Browse,
     Install,
     ConfirmRemove,
+}
+
+/// What the files popup is doing: browsing the fileset, typing a path to
+/// import, or confirming removal of the highlighted file.
+#[allow(dead_code)] // Add/ConfirmDelete driven by the files popup (Task 6+); remove with first caller
+#[derive(PartialEq, Clone, Copy)]
+pub enum FilesMode {
+    Browse,
+    Add,
+    ConfirmDelete,
 }
 
 /// What the space picker is doing: browsing, naming a new space, renaming the
@@ -361,6 +372,15 @@ pub struct App {
     pub skills_edit: String,
     pub(crate) skills_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
 
+    /// The active space's imported files (refreshed by `rescan_files`).
+    pub files_cache: Vec<crate::db::FileRow>,
+    pub files_selected: usize,
+    #[allow(dead_code)] // read by the files popup (Task 6+); remove with first caller
+    pub files_mode: FilesMode,
+    /// Path being typed/pasted in the files popup's Add mode.
+    #[allow(dead_code)] // read by the files popup (Task 6+); remove with first caller
+    pub files_edit: String,
+
     /// Live model catalog (fetched on demand, never hardcoded).
     pub models: Vec<Model>,
     pub current_model: Option<String>,
@@ -494,6 +514,10 @@ impl App {
             skills_selected: 0,
             skills_edit: String::new(),
             skills_rx: None,
+            files_cache: Vec::new(),
+            files_selected: 0,
+            files_mode: FilesMode::Browse,
+            files_edit: String::new(),
             active_space,
             spaces_cache: Vec::new(),
             space_selected: 0,

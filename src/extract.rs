@@ -7,13 +7,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 const CHUNK_LINES: usize = 40;
 
 /// Extract searchable text from `path`, dispatching on the (lowercased)
 /// extension. `Ok("")` means the file parsed but had no text (e.g. a scanned
 /// PDF); `Err` means it couldn't be read/parsed at all.
-#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 pub(crate) fn extract_text(path: &Path) -> Result<String> {
     let ext = path
         .extension()
@@ -40,7 +38,6 @@ pub(crate) fn extract_text(path: &Path) -> Result<String> {
     }
 }
 
-#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 enum OfficeKind {
     Docx,
     Pptx,
@@ -50,7 +47,6 @@ enum OfficeKind {
 /// Pull text out of an OOXML zip by scanning member XML for text tags.
 /// ponytail: tag scanning, not an XML parser — same approach as tools.rs's
 /// DDG HTML scraping; swap in a real parser only if a document breaks it.
-#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 fn office_text(path: &Path, kind: OfficeKind) -> Result<String> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut zip = zip::ZipArchive::new(file).context("reading office zip")?;
@@ -135,7 +131,6 @@ fn office_text(path: &Path, kind: OfficeKind) -> Result<String> {
 
 /// Every text content of `<tag ...>text</tag>` occurrences in `xml`, entities
 /// unescaped. Skips self-closing `<tag/>`.
-#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 fn xml_tag_texts(xml: &str, tag: &str) -> Vec<String> {
     let open = format!("<{tag}");
     let close = format!("</{tag}>");
@@ -163,7 +158,6 @@ fn xml_tag_texts(xml: &str, tag: &str) -> Vec<String> {
     out
 }
 
-#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 fn xml_unescape(s: &str) -> String {
     // &amp; must be last: unescaping it earlier fabricates new entities out of
     // compound escapes like &amp;lt; (the encoding of a literal "&lt;").
@@ -175,7 +169,6 @@ fn xml_unescape(s: &str) -> String {
 }
 
 /// Split extracted text into ~40-line chunks labeled with their line range.
-#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 pub(crate) fn chunk_lines(text: &str) -> Vec<(String, String)> {
     if text.trim().is_empty() {
         return Vec::new();

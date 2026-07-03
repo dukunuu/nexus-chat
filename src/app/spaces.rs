@@ -127,6 +127,7 @@ impl App {
         self.messages.clear();
         self.context_total = None;
         self.scroll = 0;
+        self.rescan_files();
         self.status = format!("space: {}", self.active_space.name);
     }
 

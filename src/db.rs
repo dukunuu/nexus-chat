@@ -43,14 +43,16 @@ pub struct Session {
 /// A file imported into a space's fileset. `status` is "ok", "no text
 /// (scanned?)", "unsupported", or "error: …"; extraction text lives in the
 /// `file_chunks` FTS table, not here.
-#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 #[derive(Debug, Clone)]
 pub struct FileRow {
     pub id: String,
+    #[allow(dead_code)] // read by the files popup (Task 6+); remove with first caller
     pub space_id: String,
     pub name: String,
     pub hash: String,
+    #[allow(dead_code)] // read by the files popup (Task 6+); remove with first caller
     pub size: i64,
+    #[allow(dead_code)] // read by the files popup (Task 6+); remove with first caller
     pub status: String,
 }
 
@@ -94,6 +96,11 @@ impl Db {
         };
         db.migrate()?;
         Ok(db)
+    }
+
+    #[cfg(test)]
+    pub fn conn_for_test(&self) -> &Connection {
+        &self.conn
     }
 
     fn migrate(&self) -> Result<()> {
@@ -461,7 +468,6 @@ impl Db {
 
     /// Insert or replace a file row (unique per space+name). Returns the row id;
     /// an existing row keeps its id, so its chunks can be replaced by file_id.
-    #[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
     pub fn upsert_file(&self, space_id: &str, name: &str, hash: &str, size: i64, status: &str) -> Result<String> {
         if let Ok(existing) = self.conn.query_row(
             "SELECT id FROM files WHERE space_id = ?1 AND name = ?2",
@@ -484,7 +490,6 @@ impl Db {
         Ok(id)
     }
 
-    #[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
     pub fn list_files(&self, space_id: &str) -> Result<Vec<FileRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, space_id, name, hash, size, status FROM files
@@ -499,7 +504,6 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    #[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
     pub fn delete_file(&self, file_id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
         self.conn.execute("DELETE FROM files WHERE id = ?1", [file_id])?;
@@ -507,7 +511,6 @@ impl Db {
     }
 
     /// Replace a file's indexed chunks. `chunks` are `(location, text)` in order.
-    #[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
     pub fn set_file_chunks(&self, file_id: &str, chunks: &[(String, String)]) -> Result<()> {
         self.conn.execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
         for (seq, (location, text)) in chunks.iter().enumerate() {

@@ -66,6 +66,11 @@ impl Space {
         self.space_dir(name).join("instructions.md")
     }
 
+    /// Directory holding a space's imported fileset (created on demand).
+    pub fn files_dir(&self, name: &str) -> PathBuf {
+        self.space_dir(name).join("files")
+    }
+
     /// Rename a space's directory (its db row is renamed separately).
     pub fn rename_space_dir(&self, old: &str, new: &str) -> Result<()> {
         let from = self.space_dir(old);
