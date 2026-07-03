@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod db;
 mod events;
+mod extract;
 mod input;
 mod markdown;
 mod provider;
