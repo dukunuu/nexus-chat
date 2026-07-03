@@ -53,7 +53,7 @@ impl App {
     /// Copy `path` into the active space's files dir and index it. Returns
     /// the imported file's name. An existing file with the same name is
     /// overwritten (the rescan re-extracts it).
-    #[allow(dead_code)] // called from the files popup (Task 6+); remove with first caller
+    #[allow(dead_code)] // called by confirm_files_add (Task 6 tests and 7's UI)
     pub fn import_file(&mut self, path: &Path) -> Result<String> {
         let name = path
             .file_name()
@@ -69,7 +69,7 @@ impl App {
     }
 
     /// Delete the highlighted file: disk copy and index rows both go.
-    #[allow(dead_code)] // called from the files popup (Task 6+); remove with first caller
+    #[allow(dead_code)] // called by Task 7's files popup UI
     pub fn confirm_files_delete(&mut self) -> Result<()> {
         if let Some(f) = self.files_cache.get(self.files_selected).cloned() {
             let disk = self.space.files_dir(&self.active_space.name).join(&f.name);
@@ -82,6 +82,54 @@ impl App {
         }
         self.files_mode = super::FilesMode::Browse;
         Ok(())
+    }
+
+    pub(super) fn open_files_popup(&mut self) {
+        self.rescan_files();
+        self.files_mode = super::FilesMode::Browse;
+        self.popup = super::Popup::Files;
+    }
+
+    #[allow(dead_code)] // called by Task 7's files popup UI
+    pub fn move_files_selection(&mut self, delta: i32) {
+        self.files_selected = super::clamp_cursor(self.files_selected, self.files_cache.len(), delta);
+    }
+
+    #[allow(dead_code)] // called by Task 6 tests and Task 7's files popup UI
+    pub fn start_files_add(&mut self) {
+        self.files_edit.clear();
+        self.files_mode = super::FilesMode::Add;
+    }
+
+    /// Import the path typed/pasted in Add mode. Bad paths report in the status
+    /// line and return to Browse (nothing to roll back).
+    #[allow(dead_code)] // called by Task 6 tests and Task 7's files popup UI
+    pub fn confirm_files_add(&mut self) -> Result<()> {
+        let raw = self.files_edit.trim().to_string();
+        self.files_mode = super::FilesMode::Browse;
+        if raw.is_empty() {
+            return Ok(());
+        }
+        let path = std::path::PathBuf::from(&raw);
+        if !path.is_file() {
+            self.status = format!("not a file: {raw}");
+            return Ok(());
+        }
+        match self.import_file(&path) {
+            Ok(name) => self.status = format!("imported {name}"),
+            Err(e) => self.status = format!("import failed: {e}"),
+        }
+        Ok(())
+    }
+
+    /// Open the highlighted file in the system viewer (Enter in Browse).
+    #[allow(dead_code)] // called by Task 7's files popup UI
+    pub fn open_selected_file(&mut self) {
+        if let Some(f) = self.files_cache.get(self.files_selected) {
+            let path = self.space.files_dir(&self.active_space.name).join(&f.name);
+            let _ = open::that_detached(&path);
+            self.status = format!("opened {}", f.name);
+        }
     }
 }
 
@@ -157,5 +205,37 @@ mod tests {
         a.confirm_files_delete().unwrap();
         assert!(a.files_cache.is_empty());
         assert!(!dir.join("gone.txt").exists());
+    }
+
+    #[test]
+    fn files_command_opens_popup_and_rescans() {
+        let mut a = test_app();
+        let dir = a.space.files_dir(&a.active_space.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("seen.txt"), "content").unwrap();
+        a.run_command("files").unwrap();
+        assert!(a.popup == crate::app::Popup::Files);
+        assert_eq!(a.files_cache.len(), 1);
+        assert!(a.files_mode == crate::app::FilesMode::Browse);
+    }
+
+    #[test]
+    fn confirm_files_add_imports_typed_path() {
+        let mut a = test_app();
+        let src = std::env::temp_dir().join(format!("nexus-add-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&src, "typed in").unwrap();
+        a.start_files_add();
+        assert!(a.files_mode == crate::app::FilesMode::Add);
+        a.files_edit = src.to_string_lossy().to_string();
+        a.confirm_files_add().unwrap();
+        assert!(a.files_mode == crate::app::FilesMode::Browse);
+        assert_eq!(a.files_cache.len(), 1);
+
+        // A bad path reports in status and stays recoverable.
+        a.start_files_add();
+        a.files_edit = "/definitely/not/a/file".to_string();
+        a.confirm_files_add().unwrap();
+        assert!(a.status.contains("not a file"));
+        assert_eq!(a.files_cache.len(), 1);
     }
 }

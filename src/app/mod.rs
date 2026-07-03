@@ -71,6 +71,7 @@ pub enum Popup {
     Space,
     Context,
     Skills,
+    Files,
 }
 
 /// What the skills popup is doing: browsing, typing a GitHub `owner/repo/path`
@@ -84,11 +85,11 @@ pub enum SkillsMode {
 
 /// What the files popup is doing: browsing the fileset, typing a path to
 /// import, or confirming removal of the highlighted file.
-#[allow(dead_code)] // Add/ConfirmDelete driven by the files popup (Task 6+); remove with first caller
 #[derive(PartialEq, Clone, Copy)]
 pub enum FilesMode {
     Browse,
     Add,
+    #[allow(dead_code)] // used by Task 7's files popup UI
     ConfirmDelete,
 }
 
@@ -375,10 +376,9 @@ pub struct App {
     /// The active space's imported files (refreshed by `rescan_files`).
     pub files_cache: Vec<crate::db::FileRow>,
     pub files_selected: usize,
-    #[allow(dead_code)] // read by the files popup (Task 6+); remove with first caller
     pub files_mode: FilesMode,
     /// Path being typed/pasted in the files popup's Add mode.
-    #[allow(dead_code)] // read by the files popup (Task 6+); remove with first caller
+    #[allow(dead_code)] // written by Task 6 tests and Task 7's files popup UI
     pub files_edit: String,
 
     /// Live model catalog (fetched on demand, never hardcoded).
@@ -828,6 +828,7 @@ impl App {
                 self.status = list;
             }
             "skills" => self.open_skills_popup(),
+            "files" => self.open_files_popup(),
             other => {
                 if self.skills.iter().any(|s| s.name == other) {
                     self.forced_skill = Some(other.to_string());

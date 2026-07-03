@@ -53,6 +53,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "key", desc: "set API key", aliases: &["apikey", "token", "auth"] },
     Command { name: "config", desc: "settings & stats", aliases: &["settings", "stats", "nerd", "params"] },
     Command { name: "skills", desc: "manage skills", aliases: &["addskill"] },
+    Command { name: "files", desc: "space files", aliases: &["file", "attach", "upload", "docs"] },
     Command { name: "think", desc: "reasoning view", aliases: &["reasoning", "thinking"] },
     Command { name: "copy", desc: "copy last reply", aliases: &["yank", "clip"] },
     Command { name: "help", desc: "list commands", aliases: &["commands"] },
