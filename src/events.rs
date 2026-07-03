@@ -164,7 +164,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
 
     match app.popup {
         Popup::Model => handle_model_popup(app, key)?,
-        Popup::Session => handle_session_popup(app, key)?,
+        Popup::Session => crate::ui::popups::session::handle_key(app, key)?,
         Popup::Key => handle_key_popup(app, key),
         Popup::Settings => handle_settings_popup(app, key)?,
         Popup::Copy => handle_copy_popup(app, key),
@@ -471,42 +471,6 @@ fn handle_copy_popup(app: &mut App, key: KeyEvent) {
         KeyCode::Down => app.move_copy_selection(1),
         _ => {}
     }
-}
-
-fn handle_session_popup(app: &mut App, key: KeyEvent) -> Result<()> {
-    use crate::app::SessionMode;
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    match app.session_mode {
-        // Renaming: type into the edit buffer; Enter saves, Esc cancels.
-        SessionMode::Rename => match key.code {
-            KeyCode::Esc => app.session_mode = SessionMode::Browse,
-            KeyCode::Enter => app.confirm_rename()?,
-            KeyCode::Backspace => {
-                app.session_edit.pop();
-            }
-            KeyCode::Char(c) => app.session_edit.push(c),
-            _ => {}
-        },
-        // Delete confirm: Ctrl+D again deletes, Esc cancels, anything else ignored.
-        SessionMode::ConfirmDelete => match key.code {
-            KeyCode::Char('d') if ctrl => app.confirm_delete()?,
-            KeyCode::Esc => app.session_mode = SessionMode::Browse,
-            _ => {}
-        },
-        SessionMode::Browse => match key.code {
-            KeyCode::Esc => app.popup = Popup::None,
-            KeyCode::Enter => app.confirm_session()?,
-            KeyCode::Up => app.move_session_selection(-1),
-            KeyCode::Down => app.move_session_selection(1),
-            // Ctrl+R rename, Ctrl+D delete — leave plain letters for the filter.
-            KeyCode::Char('r') if ctrl => app.start_rename(),
-            KeyCode::Char('d') if ctrl => app.session_mode = SessionMode::ConfirmDelete,
-            KeyCode::Backspace => app.session_filter_pop(),
-            KeyCode::Char(c) if !ctrl => app.session_filter_push(c),
-            _ => {}
-        },
-    }
-    Ok(())
 }
 
 fn handle_space_popup(app: &mut App, key: KeyEvent) -> Result<()> {
