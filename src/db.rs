@@ -50,9 +50,7 @@ pub struct FileRow {
     pub space_id: String,
     pub name: String,
     pub hash: String,
-    #[allow(dead_code)] // read by the files popup (Task 6+); remove with first caller
     pub size: i64,
-    #[allow(dead_code)] // read by the files popup (Task 6+); remove with first caller
     pub status: String,
 }
 

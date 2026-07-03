@@ -264,6 +264,9 @@ impl App {
         if let Some(skills) = self.skills_section() {
             parts.push(skills);
         }
+        if let Some(files) = self.files_section() {
+            parts.push(files);
+        }
         let memory = self.read_memory();
         if !memory.trim().is_empty() {
             parts.push(format!("## Memory\n{memory}"));
@@ -299,6 +302,27 @@ impl App {
             .to_string();
         for skill in &self.skills {
             s.push_str(&format!("- {}: {}\n", skill.name, skill.description));
+        }
+        Some(s.trim_end().to_string())
+    }
+
+    /// Names/types/sizes of the space's imported files — content stays off the
+    /// wire until the model calls `search_files`/`read_file`.
+    fn files_section(&self) -> Option<String> {
+        if self.files_cache.is_empty() {
+            return None;
+        }
+        let mut s = "## Files\nThe user has imported these files into this space. Do not guess \
+                     their contents: call `search_files` to find relevant passages, or \
+                     `read_file` to read one (200 lines per call, use offset to page).\n"
+            .to_string();
+        for f in &self.files_cache {
+            let kind = std::path::Path::new(&f.name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("file")
+                .to_lowercase();
+            s.push_str(&format!("- {} ({kind}, {}, {})\n", f.name, human_size(f.size), f.status));
         }
         Some(s.trim_end().to_string())
     }
@@ -358,6 +382,15 @@ pub(super) fn title_from(text: &str) -> String {
         "new chat".to_string()
     } else {
         t
+    }
+}
+
+/// Compact byte counts: 940 B, 1.2 KB, 3.4 MB.
+pub(super) fn human_size(bytes: i64) -> String {
+    match bytes {
+        b if b < 1024 => format!("{b} B"),
+        b if b < 1024 * 1024 => format!("{:.1} KB", b as f64 / 1024.0),
+        b => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
     }
 }
 

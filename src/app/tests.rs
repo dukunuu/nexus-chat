@@ -427,6 +427,26 @@ fn compact_summary_view_and_edit_roundtrip() {
 }
 
 #[test]
+fn system_prompt_lists_files_but_not_their_content() {
+    let mut a = app_with_key();
+    let dir = a.space.files_dir(&a.active_space.name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("plan.md"), "SECRET-CONTENT-MARKER inside").unwrap();
+    a.rescan_files();
+
+    let sp = a.system_prompt();
+    assert!(sp.contains("## Files"));
+    assert!(sp.contains("plan.md"));
+    assert!(sp.contains("search_files"));
+    assert!(!sp.contains("SECRET-CONTENT-MARKER")); // names only, never content
+
+    // No files → no section.
+    std::fs::remove_file(dir.join("plan.md")).unwrap();
+    a.rescan_files();
+    assert!(!a.system_prompt().contains("## Files"));
+}
+
+#[test]
 fn pick_model_at_sets_current_and_closes() {
     let mut a = app_with_key();
     a.popup = Popup::Model;

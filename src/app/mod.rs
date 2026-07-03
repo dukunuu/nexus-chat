@@ -680,6 +680,7 @@ impl App {
         if self.provider.is_some() {
             self.fetch_models();
         }
+        self.rescan_files();
     }
 
     pub fn is_streaming(&self) -> bool {

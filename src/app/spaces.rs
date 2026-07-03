@@ -128,6 +128,7 @@ impl App {
         self.context_total = None;
         self.scroll = 0;
         self.rescan_files();
+        self.refresh_toolbox();
         self.status = format!("space: {}", self.active_space.name);
     }
 
