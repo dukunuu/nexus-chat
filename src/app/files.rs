@@ -82,7 +82,7 @@ impl App {
         Ok(())
     }
 
-    pub fn open_files_popup(&mut self) {
+    pub(crate) fn open_files_popup(&mut self) {
         self.rescan_files();
         self.files_mode = super::FilesMode::Browse;
         self.popup = super::Popup::Files;
