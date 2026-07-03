@@ -40,6 +40,19 @@ pub struct Session {
     pub compact_through: i64,
 }
 
+/// A file imported into a space's fileset. `status` is "ok", "no text
+/// (scanned?)", "unsupported", or "error: …"; extraction text lives in the
+/// `file_chunks` FTS table, not here.
+#[derive(Debug, Clone)]
+pub struct FileRow {
+    pub id: String,
+    pub space_id: String,
+    pub name: String,
+    pub hash: String,
+    pub size: i64,
+    pub status: String,
+}
+
 /// One message in a session. `model`/`reasoning`/`tokens`/`secs` are populated
 /// for assistant replies (None for user/system messages).
 #[derive(Debug, Clone)]
@@ -113,6 +126,22 @@ impl Db {
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
                 created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS files (
+                id TEXT PRIMARY KEY,
+                space_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(space_id, name)
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS file_chunks USING fts5(
+                file_id UNINDEXED,
+                seq UNINDEXED,
+                location UNINDEXED,
+                text
             );",
         )?;
         // Columns added after v1; ignore "duplicate column" on existing dbs.
@@ -426,6 +455,121 @@ impl Db {
         )?;
         Ok(())
     }
+
+    // --- space filesets ---
+
+    /// Insert or replace a file row (unique per space+name). Returns the row id;
+    /// an existing row keeps its id, so its chunks can be replaced by file_id.
+    pub fn upsert_file(&self, space_id: &str, name: &str, hash: &str, size: i64, status: &str) -> Result<String> {
+        if let Ok(existing) = self.conn.query_row(
+            "SELECT id FROM files WHERE space_id = ?1 AND name = ?2",
+            (space_id, name),
+            |r| r.get::<_, String>(0),
+        ) {
+            self.conn.execute(
+                "UPDATE files SET hash = ?2, size = ?3, status = ?4 WHERE id = ?1",
+                (&existing, hash, size, status),
+            )?;
+            return Ok(existing);
+        }
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO files (id, space_id, name, hash, size, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (&id, space_id, name, hash, size, status, &now),
+        )?;
+        Ok(id)
+    }
+
+    pub fn list_files(&self, space_id: &str) -> Result<Vec<FileRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, space_id, name, hash, size, status FROM files
+             WHERE space_id = ?1 ORDER BY name ASC",
+        )?;
+        let rows = stmt.query_map([space_id], |r| {
+            Ok(FileRow {
+                id: r.get(0)?, space_id: r.get(1)?, name: r.get(2)?,
+                hash: r.get(3)?, size: r.get(4)?, status: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn delete_file(&self, file_id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
+        self.conn.execute("DELETE FROM files WHERE id = ?1", [file_id])?;
+        Ok(())
+    }
+
+    /// Replace a file's indexed chunks. `chunks` are `(location, text)` in order.
+    pub fn set_file_chunks(&self, file_id: &str, chunks: &[(String, String)]) -> Result<()> {
+        self.conn.execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
+        for (seq, (location, text)) in chunks.iter().enumerate() {
+            self.conn.execute(
+                "INSERT INTO file_chunks (file_id, seq, location, text) VALUES (?1, ?2, ?3, ?4)",
+                (file_id, seq as i64, location, text),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Quote a query for FTS5 MATCH: each whitespace token becomes a quoted
+/// phrase (inner quotes doubled), so model-supplied text can't be an FTS
+/// syntax error. Tokens are implicitly ANDed by FTS5.
+pub fn fts_quote(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// BM25-ranked chunk search within one space: `(file name, location, snippet)`.
+pub fn search_chunks(
+    conn: &Connection,
+    space_id: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<(String, String, String)>> {
+    let q = fts_quote(query);
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT files.name, file_chunks.location,
+                snippet(file_chunks, 3, '', '', '…', 24)
+         FROM file_chunks JOIN files ON files.id = file_chunks.file_id
+         WHERE file_chunks MATCH ?1 AND files.space_id = ?2
+         ORDER BY bm25(file_chunks) LIMIT ?3",
+    )?;
+    let rows = stmt.query_map((q, space_id, limit as i64), |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// A file's full extracted text (chunks re-joined in order), by display name.
+pub fn file_text(conn: &Connection, space_id: &str, name: &str) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT file_chunks.text
+         FROM file_chunks JOIN files ON files.id = file_chunks.file_id
+         WHERE files.space_id = ?1 AND files.name = ?2
+         ORDER BY CAST(file_chunks.seq AS INTEGER) ASC",
+    )?;
+    let rows = stmt.query_map((space_id, name), |r| r.get::<_, String>(0))?;
+    let parts = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok((!parts.is_empty()).then(|| parts.join("\n")))
+}
+
+pub fn count_files(conn: &Connection, space_id: &str) -> Result<u64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM files WHERE space_id = ?1",
+        [space_id],
+        |r| r.get(0),
+    )?;
+    Ok(n as u64)
 }
 
 #[cfg(test)]
@@ -530,5 +674,64 @@ mod tests {
         let default_id = db.default_space_id().unwrap();
         let moved = db.list_sessions(&default_id).unwrap();
         assert!(moved.iter().any(|c| c.id == s.id)); // session survived, moved to default
+    }
+
+    #[test]
+    fn files_upsert_list_delete_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let id = db.upsert_file(&space, "notes.md", "h1", 10, "ok").unwrap();
+        db.set_file_chunks(&id, &[("lines 1-40".into(), "hello fts world".into())]).unwrap();
+
+        let files = db.list_files(&space).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "notes.md");
+        assert_eq!(files[0].hash, "h1");
+        assert_eq!(files[0].status, "ok");
+
+        // Re-import with a new hash keeps one row (same id or replaced) and replaces chunks.
+        let id2 = db.upsert_file(&space, "notes.md", "h2", 12, "ok").unwrap();
+        db.set_file_chunks(&id2, &[("lines 1-40".into(), "goodbye".into())]).unwrap();
+        let files = db.list_files(&space).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].hash, "h2");
+
+        db.delete_file(&files[0].id).unwrap();
+        assert!(db.list_files(&space).unwrap().is_empty());
+    }
+
+    #[test]
+    fn chunk_search_ranks_and_scopes_by_space() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let other = db.create_space("other").unwrap();
+        let a = db.upsert_file(&space, "a.md", "h", 1, "ok").unwrap();
+        let b = db.upsert_file(&other.id, "b.md", "h", 1, "ok").unwrap();
+        db.set_file_chunks(&a, &[("lines 1-40".into(), "rust borrow checker".into())]).unwrap();
+        db.set_file_chunks(&b, &[("lines 1-40".into(), "rust in other space".into())]).unwrap();
+
+        let hits = search_chunks(&db.conn, &space, "rust", 8).unwrap();
+        assert_eq!(hits.len(), 1); // other space's chunk is excluded
+        assert_eq!(hits[0].0, "a.md");
+        assert_eq!(hits[0].1, "lines 1-40");
+        assert!(hits[0].2.contains("rust"));
+
+        // Special characters must not be an FTS syntax error.
+        assert!(search_chunks(&db.conn, &space, "c++ \"quoted\" -dash", 8).is_ok());
+    }
+
+    #[test]
+    fn file_text_joins_chunks_in_order() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let id = db.upsert_file(&space, "doc.txt", "h", 1, "ok").unwrap();
+        db.set_file_chunks(&id, &[
+            ("lines 1-2".into(), "one\ntwo".into()),
+            ("lines 3-4".into(), "three\nfour".into()),
+        ]).unwrap();
+        let text = file_text(&db.conn, &space, "doc.txt").unwrap().unwrap();
+        assert_eq!(text, "one\ntwo\nthree\nfour");
+        assert!(file_text(&db.conn, &space, "missing.txt").unwrap().is_none());
+        assert_eq!(count_files(&db.conn, &space).unwrap(), 1);
     }
 }
