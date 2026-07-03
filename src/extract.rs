@@ -165,11 +165,13 @@ fn xml_tag_texts(xml: &str, tag: &str) -> Vec<String> {
 
 #[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 fn xml_unescape(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
+    // &amp; must be last: unescaping it earlier fabricates new entities out of
+    // compound escapes like &amp;lt; (the encoding of a literal "&lt;").
+    s.replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 /// Split extracted text into ~40-line chunks labeled with their line range.
@@ -244,12 +246,17 @@ mod tests {
         let p = office_fixture("s.pptx", &[
             ("ppt/slides/slide1.xml", r#"<p:sld><a:t>Title one</a:t><a:t>Bullet</a:t></p:sld>"#),
             ("ppt/slides/slide2.xml", r#"<p:sld><a:t>Second slide</a:t></p:sld>"#),
+            ("ppt/slides/slide10.xml", r#"<p:sld><a:t>Tenth slide</a:t></p:sld>"#),
         ]);
         let text = extract_text(&p).unwrap();
         assert!(text.contains("[slide 1]"));
         assert!(text.contains("Title one"));
         assert!(text.contains("[slide 2]"));
         assert!(text.contains("Second slide"));
+        // Verify numeric ordering (slide 2 before slide 10, not lexicographic)
+        let i2 = text.find("[slide 2]").unwrap();
+        let i10 = text.find("[slide 10]").unwrap();
+        assert!(i2 < i10);
     }
 
     #[test]
@@ -268,6 +275,12 @@ mod tests {
     fn xml_tag_texts_handles_attrs_self_closing_and_entities() {
         let xml = r#"<w:t a="b">one</w:t><w:t/><w:t>two &lt;3</w:t>"#;
         assert_eq!(xml_tag_texts(xml, "w:t"), vec!["one".to_string(), "two <3".to_string()]);
+    }
+
+    #[test]
+    fn xml_unescape_does_not_double_unescape_compound_entities() {
+        assert_eq!(xml_unescape("&amp;amp;lt;"), "&amp;lt;");
+        assert_eq!(xml_unescape("a &amp; b &lt;3"), "a & b <3");
     }
 
     #[test]
