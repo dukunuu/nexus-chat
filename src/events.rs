@@ -165,21 +165,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     match app.popup {
         Popup::Model => ui::popups::model::handle_key(app, key)?,
         Popup::Session => crate::ui::popups::session::handle_key(app, key)?,
-        Popup::Key => handle_key_popup(app, key),
+        Popup::Key => crate::ui::popups::key::handle_key(app, key),
         Popup::Settings => ui::popups::settings::handle_key(app, key)?,
         Popup::Copy => crate::ui::popups::copy::handle_key(app, key),
         Popup::Space => crate::ui::popups::space::handle_key(app, key)?,
-        Popup::Context => handle_context_popup(app, key),
+        Popup::Context => crate::ui::popups::context::handle_key(app, key),
         Popup::Skills => crate::ui::popups::skills::handle_key(app, key),
         Popup::None => handle_normal(app, key)?,
     }
     Ok(())
-}
-
-fn handle_context_popup(app: &mut App, key: KeyEvent) {
-    if key.code == KeyCode::Esc {
-        app.popup = Popup::None;
-    }
 }
 
 /// Suspend the TUI, open `path` in `$EDITOR` (falling back to `vi`), then
@@ -432,14 +426,3 @@ fn handle_mouse(app: &mut App, m: MouseEvent, screen: Rect) -> Result<()> {
     Ok(())
 }
 
-fn handle_key_popup(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc => app.popup = Popup::None,
-        KeyCode::Enter => app.confirm_key(),
-        KeyCode::Char(c) => app.key_input.push(c),
-        KeyCode::Backspace => {
-            app.key_input.pop();
-        }
-        _ => {}
-    }
-}

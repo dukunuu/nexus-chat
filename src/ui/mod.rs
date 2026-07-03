@@ -39,26 +39,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
         Popup::Model => popups::model::render(f, app),
         Popup::Session => popups::session::render(f, app),
         Popup::Copy => popups::copy::render(f, app),
-        Popup::Key => render_key_popup(f, app),
+        Popup::Key => popups::key::render(f, app),
         Popup::Settings => popups::settings::render(f, app),
         Popup::Space => popups::space::render(f, app),
-        Popup::Context => render_context_popup(f, app),
+        Popup::Context => popups::context::render(f, app),
         Popup::Skills => popups::skills::render(f, app),
         Popup::None => {}
     }
-}
-
-fn render_key_popup(f: &mut Frame, app: &App) {
-    let outer = centered(f.area(), 60, 20);
-    f.render_widget(Clear, outer);
-    // Mask the key so it isn't shown in the clear.
-    let masked = "*".repeat(app.key_input.chars().count());
-    let para = Paragraph::new(format!("{masked}▏")).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(hint_title(app, " OpenRouter key ", "OpenRouter key — Enter to save, Esc to cancel")),
-    );
-    f.render_widget(para, outer);
 }
 
 /// Plain text of a rendered line (span contents concatenated).
@@ -252,60 +239,6 @@ fn fmt_created(rfc3339: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
         .map(|dt| dt.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string())
         .unwrap_or_else(|_| rfc3339.to_string())
-}
-
-/// Context breakdown popup (Ctrl+I): estimated tokens spent on system
-/// instructions, memory, conversation, and (pending) skills.
-fn render_context_popup(f: &mut Frame, app: &App) {
-    let area = centered(f.area(), 56, 40);
-    f.render_widget(Clear, area);
-    let b = app.context_breakdown();
-    let dim = Style::default().fg(Color::DarkGray);
-
-    let pct_of = |tok: u64| -> String {
-        match b.limit.filter(|&l| l > 0) {
-            Some(l) => format!(" ({}%)", tok * 100 / l),
-            None => String::new(),
-        }
-    };
-    let row = |label: &'static str, tok: u64, color: Color| -> Line<'static> {
-        Line::from(vec![
-            Span::styled(format!("{label:<13}"), Style::default().fg(Color::White)),
-            Span::styled(humanize(tok), Style::default().fg(color)),
-            Span::styled(pct_of(tok), dim),
-        ])
-    };
-
-    let mut lines = vec![
-        row("System", b.system_tokens, Color::Cyan),
-        row("Memory", b.memory_tokens, Color::Magenta),
-        row("Skills", b.skills_tokens, Color::Yellow),
-        row("Conversation", b.conversation_tokens, Color::Green),
-    ];
-    if b.compacted {
-        lines.push(Line::from(Span::styled(
-            "  ⤷ this session has been auto-compacted — press v to view/edit the digest",
-            dim,
-        )));
-    }
-    lines.push(Line::from(""));
-    let total = b.system_tokens + b.memory_tokens + b.skills_tokens + b.conversation_tokens;
-    let limit_s = b.limit.map(humanize).unwrap_or_else(|| "?".to_string());
-    lines.push(Line::from(vec![
-        Span::styled("Total        ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{} / {}", humanize(total), limit_s), Style::default().fg(Color::Yellow)),
-    ]));
-
-    let hint = if b.compacted {
-        "context — v views digest, Ctrl+G toggles, Esc closes"
-    } else {
-        "context — Ctrl+G toggles, Esc closes"
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(hint_title(app, " context ", hint));
-    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// A popup title: `plain` when hints are hidden, otherwise `" {with_hint} "`.
