@@ -168,7 +168,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         Popup::Key => handle_key_popup(app, key),
         Popup::Settings => handle_settings_popup(app, key)?,
         Popup::Copy => handle_copy_popup(app, key),
-        Popup::Space => handle_space_popup(app, key)?,
+        Popup::Space => crate::ui::popups::space::handle_key(app, key)?,
         Popup::Context => handle_context_popup(app, key),
         Popup::Skills => handle_skills_popup(app, key),
         Popup::None => handle_normal(app, key)?,
@@ -471,49 +471,6 @@ fn handle_copy_popup(app: &mut App, key: KeyEvent) {
         KeyCode::Down => app.move_copy_selection(1),
         _ => {}
     }
-}
-
-fn handle_space_popup(app: &mut App, key: KeyEvent) -> Result<()> {
-    use crate::app::SpaceMode;
-    use crate::db::DEFAULT_SPACE;
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    match app.space_mode {
-        SpaceMode::Create | SpaceMode::Rename => match key.code {
-            KeyCode::Esc => app.space_mode = SpaceMode::Browse,
-            KeyCode::Enter => match app.space_mode {
-                SpaceMode::Create => app.confirm_space_create()?,
-                _ => app.confirm_space_rename()?,
-            },
-            KeyCode::Backspace => {
-                app.space_edit.pop();
-            }
-            KeyCode::Char(c) => app.space_edit.push(c),
-            _ => {}
-        },
-        SpaceMode::ConfirmDelete => match key.code {
-            KeyCode::Char('d') if ctrl => app.confirm_space_delete()?,
-            KeyCode::Esc => app.space_mode = SpaceMode::Browse,
-            _ => {}
-        },
-        SpaceMode::Browse => match key.code {
-            KeyCode::Esc => app.popup = Popup::None,
-            KeyCode::Enter => app.confirm_space()?,
-            KeyCode::Up => app.move_space_selection(-1),
-            KeyCode::Down => app.move_space_selection(1),
-            KeyCode::Char('n') if ctrl => app.start_space_create(),
-            KeyCode::Char('r') if ctrl => app.start_space_rename(),
-            // The default space is never deletable.
-            KeyCode::Char('d')
-                if ctrl && app.selected_space().is_some_and(|s| s.name != DEFAULT_SPACE) =>
-            {
-                app.space_mode = SpaceMode::ConfirmDelete;
-            }
-            KeyCode::Backspace => app.space_filter_pop(),
-            KeyCode::Char(c) if !ctrl => app.space_filter_push(c),
-            _ => {}
-        },
-    }
-    Ok(())
 }
 
 fn handle_skills_popup(app: &mut App, key: KeyEvent) {

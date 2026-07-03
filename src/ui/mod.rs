@@ -42,7 +42,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         Popup::Copy => render_copy_popup(f, app),
         Popup::Key => render_key_popup(f, app),
         Popup::Settings => render_settings_popup(f, app),
-        Popup::Space => render_space_popup(f, app),
+        Popup::Space => popups::space::render(f, app),
         Popup::Context => render_context_popup(f, app),
         Popup::Skills => render_skills_popup(f, app),
         Popup::None => {}
@@ -421,66 +421,6 @@ fn fmt_created(rfc3339: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
         .map(|dt| dt.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string())
         .unwrap_or_else(|_| rfc3339.to_string())
-}
-
-fn render_space_popup(f: &mut Frame, app: &App) {
-    use crate::app::SpaceMode;
-    use crate::db::DEFAULT_SPACE;
-    let area = centered(f.area(), 50, 60);
-    f.render_widget(Clear, area);
-
-    let dim = Style::default().fg(Color::DarkGray);
-    let spaces = app.filtered_spaces();
-    let items: Vec<ListItem> = spaces
-        .iter()
-        .map(|s| {
-            let n = app.db.count_sessions(&s.id).unwrap_or(0);
-            let mark = if s.name == app.active_space.name { "● " } else { "  " };
-            let name = if s.name == DEFAULT_SPACE {
-                format!("{mark}{} (default)", s.name)
-            } else {
-                format!("{mark}{}", s.name)
-            };
-            let line = Line::from(vec![
-                Span::styled(name, Style::default().fg(Color::White)),
-                Span::styled(format!("  {n} session{}", if n == 1 { "" } else { "s" }), dim),
-                Span::styled(format!("  · {}", fmt_created(&s.created_at)), dim),
-            ]);
-            ListItem::new(line)
-        })
-        .collect();
-
-    let title = match app.space_mode {
-        SpaceMode::Create => format!(" new space: {}▏  (Enter create · Esc cancel) ", app.space_edit),
-        SpaceMode::Rename => format!(" rename: {}▏  (Enter save · Esc cancel) ", app.space_edit),
-        SpaceMode::ConfirmDelete => {
-            let name = app.selected_space().map(|s| s.name).unwrap_or_default();
-            format!(" delete \"{name}\"? sessions move to default. (Ctrl+D confirm · Esc cancel) ")
-        }
-        SpaceMode::Browse => {
-            let keys = if app.settings.hide_hints {
-                ""
-            } else {
-                "  (Ctrl+N new · Ctrl+R rename · Ctrl+D delete · Ctrl+E instructions · Ctrl+K memory)"
-            };
-            format!(" space — search: {}▏{keys} ", app.space_filter)
-        }
-    };
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(title),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("▸ ");
-    let mut state = ListState::default();
-    if !spaces.is_empty() {
-        state.select(Some(app.space_selected.min(spaces.len() - 1)));
-    }
-    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_skills_popup(f: &mut Frame, app: &App) {
