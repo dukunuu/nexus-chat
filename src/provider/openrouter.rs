@@ -82,6 +82,11 @@ impl OpenRouter {
             "messages": messages,
             "stream": false,
         });
+        self.post_completion(body).await
+    }
+
+    /// POST a completions body and pull the first choice's message text.
+    async fn post_completion(&self, body: serde_json::Value) -> Result<String> {
         let v = self
             .client
             .post(format!("{BASE}/chat/completions"))
@@ -95,15 +100,19 @@ impl OpenRouter {
             .json::<serde_json::Value>()
             .await
             .context("parsing completion")?;
-        let text = v
-            .get("choices")
+        Ok(v.get("choices")
             .and_then(|c| c.get(0))
             .and_then(|c| c.get("message"))
             .and_then(|m| m.get("content"))
             .and_then(|c| c.as_str())
             .unwrap_or("")
-            .to_string();
-        Ok(text)
+            .to_string())
+    }
+
+    /// One-shot, non-streaming vision call: transcribe `image_data_url` with `model`.
+    #[allow(dead_code)] // used from Task 11 of the filesets plan; remove with first caller
+    pub async fn transcribe_image(&self, model: &str, image_data_url: &str) -> Result<String> {
+        self.post_completion(vision_body(model, image_data_url)).await
     }
 
     /// Start a streaming completion. Spawns a task that pushes tokens over the
@@ -336,9 +345,40 @@ fn parse_usage(data: &str) -> Option<Usage> {
     })
 }
 
+/// Request body for a one-shot image-transcription call: a text part with the
+/// instruction plus the image as a data-URL content part (OpenAI vision shape).
+fn vision_body(model: &str, image_data_url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "stream": false,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text",
+                  "text": "Transcribe this image faithfully. Reproduce all visible text verbatim \
+                           (preserve code, tables, and structure as markdown). If parts are not \
+                           text, describe them briefly in [brackets]. Output only the transcription." },
+                { "type": "image_url", "image_url": { "url": image_data_url } },
+            ],
+        }],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vision_body_has_image_url_content_part() {
+        let body = vision_body("google/gemini-2.5-flash-lite", "data:image/png;base64,AAAA");
+        assert_eq!(body["model"], "google/gemini-2.5-flash-lite");
+        assert_eq!(body["stream"], false);
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert!(content[0]["text"].as_str().unwrap().to_lowercase().contains("transcribe"));
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
 
     #[test]
     fn extracts_content_delta() {
