@@ -166,7 +166,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         Popup::Model => ui::popups::model::handle_key(app, key)?,
         Popup::Session => crate::ui::popups::session::handle_key(app, key)?,
         Popup::Key => handle_key_popup(app, key),
-        Popup::Settings => handle_settings_popup(app, key)?,
+        Popup::Settings => ui::popups::settings::handle_key(app, key)?,
         Popup::Copy => handle_copy_popup(app, key),
         Popup::Space => crate::ui::popups::space::handle_key(app, key)?,
         Popup::Context => handle_context_popup(app, key),
@@ -440,33 +440,6 @@ fn handle_copy_popup(app: &mut App, key: KeyEvent) {
         KeyCode::Down => app.move_copy_selection(1),
         _ => {}
     }
-}
-
-fn handle_settings_popup(app: &mut App, key: KeyEvent) -> Result<()> {
-    use crate::app::SettingsField;
-    // The memory-model row is picked, not typed: Enter opens the same model
-    // picker /model uses, Backspace clears it (disabling extraction).
-    if app.settings_field() == SettingsField::MemoryModel {
-        match key.code {
-            KeyCode::Esc => app.save_settings()?,
-            KeyCode::Enter => app.open_model_picker_for_memory(),
-            KeyCode::Backspace => app.clear_memory_model()?,
-            KeyCode::Up => app.move_settings_selection(-1),
-            KeyCode::Down | KeyCode::Tab => app.move_settings_selection(1),
-            _ => {}
-        }
-        return Ok(());
-    }
-    match key.code {
-        KeyCode::Esc | KeyCode::Enter => app.save_settings()?,
-        KeyCode::Up => app.move_settings_selection(-1),
-        KeyCode::Down | KeyCode::Tab => app.move_settings_selection(1),
-        KeyCode::Char(' ') => app.toggle_settings_field(),
-        KeyCode::Char(c) => app.settings_input_char(c),
-        KeyCode::Backspace => app.settings_input_backspace(),
-        _ => {}
-    }
-    Ok(())
 }
 
 fn handle_key_popup(app: &mut App, key: KeyEvent) {
