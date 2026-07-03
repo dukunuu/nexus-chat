@@ -167,7 +167,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         Popup::Session => crate::ui::popups::session::handle_key(app, key)?,
         Popup::Key => handle_key_popup(app, key),
         Popup::Settings => ui::popups::settings::handle_key(app, key)?,
-        Popup::Copy => handle_copy_popup(app, key),
+        Popup::Copy => crate::ui::popups::copy::handle_key(app, key),
         Popup::Space => crate::ui::popups::space::handle_key(app, key)?,
         Popup::Context => handle_context_popup(app, key),
         Popup::Skills => crate::ui::popups::skills::handle_key(app, key),
@@ -430,16 +430,6 @@ fn handle_mouse(app: &mut App, m: MouseEvent, screen: Rect) -> Result<()> {
         _ => {}
     }
     Ok(())
-}
-
-fn handle_copy_popup(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc => app.popup = Popup::None,
-        KeyCode::Enter => app.confirm_copy(),
-        KeyCode::Up => app.move_copy_selection(-1),
-        KeyCode::Down => app.move_copy_selection(1),
-        _ => {}
-    }
 }
 
 fn handle_key_popup(app: &mut App, key: KeyEvent) {

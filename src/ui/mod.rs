@@ -38,7 +38,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     match app.popup {
         Popup::Model => popups::model::render(f, app),
         Popup::Session => popups::session::render(f, app),
-        Popup::Copy => render_copy_popup(f, app),
+        Popup::Copy => popups::copy::render(f, app),
         Popup::Key => render_key_popup(f, app),
         Popup::Settings => popups::settings::render(f, app),
         Popup::Space => popups::space::render(f, app),
@@ -306,30 +306,6 @@ fn render_context_popup(f: &mut Frame, app: &App) {
         .border_style(Style::default().fg(Color::Cyan))
         .title(hint_title(app, " context ", hint));
     f.render_widget(Paragraph::new(lines).block(block), area);
-}
-
-fn render_copy_popup(f: &mut Frame, app: &App) {
-    let area = centered(f.area(), 50, 60);
-    f.render_widget(Clear, area);
-
-    let items: Vec<ListItem> = app
-        .copy_options
-        .iter()
-        .map(|o| ListItem::new(o.label.clone()))
-        .collect();
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(hint_title(app, " copy ", "copy — ↑/↓, Enter, Esc")),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .highlight_symbol("› ");
-    let mut state = ListState::default();
-    if !app.copy_options.is_empty() {
-        state.select(Some(app.copy_selected.min(app.copy_options.len() - 1)));
-    }
-    f.render_stateful_widget(list, area, &mut state);
 }
 
 /// A popup title: `plain` when hints are hidden, otherwise `" {with_hint} "`.

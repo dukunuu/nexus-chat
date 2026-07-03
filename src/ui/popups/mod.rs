@@ -1,3 +1,4 @@
+pub(crate) mod copy;
 pub(crate) mod model;
 pub(crate) mod session;
 pub(crate) mod settings;
