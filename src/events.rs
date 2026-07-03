@@ -163,7 +163,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     }
 
     match app.popup {
-        Popup::Model => handle_model_popup(app, key)?,
+        Popup::Model => ui::popups::model::handle_key(app, key)?,
         Popup::Session => crate::ui::popups::session::handle_key(app, key)?,
         Popup::Key => handle_key_popup(app, key),
         Popup::Settings => handle_settings_popup(app, key)?,
@@ -294,37 +294,6 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
-fn handle_model_popup(app: &mut App, key: KeyEvent) -> Result<()> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    match key.code {
-        // Ctrl+S favorites the focused model; Ctrl+T cycles reasoning effort.
-        KeyCode::Char('s') if ctrl => app.toggle_favorite_focused()?,
-        KeyCode::Char('t') if ctrl => app.cycle_reasoning_focused()?,
-        // Cancelling a memory-model pick returns to /config, same as picking one.
-        KeyCode::Esc => {
-            app.popup = match app.model_pick_target {
-                crate::app::ModelPickTarget::Memory => Popup::Settings,
-                crate::app::ModelPickTarget::Session => Popup::None,
-            };
-        }
-        KeyCode::Enter => app.confirm_model()?,
-        KeyCode::Tab | KeyCode::Left | KeyCode::Right => app.toggle_model_focus(),
-        KeyCode::Up => app.move_model_selection(-1),
-        KeyCode::Down => app.move_model_selection(1),
-        KeyCode::Backspace => {
-            app.model_filter.pop();
-            app.reset_model_selection();
-        }
-        // Plain characters build the search filter; modified ones are ignored.
-        KeyCode::Char(c) if !ctrl => {
-            app.model_filter.push(c);
-            app.reset_model_selection();
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 /// Mouse in the main view (no popup): composer click/drag places the cursor and
 /// selects; history click/drag/double/triple selects text; wheel scrolls.
 fn handle_input_mouse(app: &mut App, m: MouseEvent) {
@@ -425,9 +394,9 @@ fn handle_mouse(app: &mut App, m: MouseEvent, screen: Rect) -> Result<()> {
     if app.popup != Popup::Model {
         return Ok(());
     }
-    let (fav_outer, avail_outer) = ui::model_popup_areas(screen);
-    let fav_inner = ui::list_inner(fav_outer);
-    let avail_inner = ui::list_inner(avail_outer);
+    let (fav_outer, avail_outer) = ui::popups::model::model_popup_areas(screen);
+    let fav_inner = ui::popups::model::list_inner(fav_outer);
+    let avail_inner = ui::popups::model::list_inner(avail_outer);
     let pos = Position::new(m.column, m.row);
 
     // Which panel is the cursor over?

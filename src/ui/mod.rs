@@ -4,8 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::app::{App, ModelPanel, Popup};
-use crate::provider::Model;
+use crate::app::{App, Popup};
 
 mod history;
 pub(crate) mod popups;
@@ -37,7 +36,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
 
     match app.popup {
-        Popup::Model => render_model_popup(f, app),
+        Popup::Model => popups::model::render(f, app),
         Popup::Session => popups::session::render(f, app),
         Popup::Copy => render_copy_popup(f, app),
         Popup::Key => render_key_popup(f, app),
@@ -136,20 +135,6 @@ fn render_settings_popup(f: &mut Frame, app: &App) {
     let mut state = ListState::default();
     state.select(Some(app.settings_selected));
     f.render_stateful_widget(list, area, &mut state);
-}
-
-/// Outer rects of the model picker's two columns (Favorites, Available).
-/// Shared by the renderer and the mouse hit-tester so they always agree.
-pub fn model_popup_areas(screen: Rect) -> (Rect, Rect) {
-    let outer = centered(screen, 82, 74);
-    let cols = Layout::horizontal([Constraint::Percentage(36), Constraint::Percentage(64)])
-        .split(outer);
-    (cols[0], cols[1])
-}
-
-/// The clickable list area inside a bordered popup column.
-pub fn list_inner(outer: Rect) -> Rect {
-    Block::default().borders(Borders::ALL).inner(outer)
 }
 
 fn render_key_popup(f: &mut Frame, app: &App) {
@@ -349,71 +334,6 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
         None => format!("  |  {}", app.status),
     };
     f.render_widget(Paragraph::new(tail).style(style), cols[2]);
-}
-
-fn render_model_popup(f: &mut Frame, app: &mut App) {
-    let (fav_outer, avail_outer) = model_popup_areas(f.area());
-    f.render_widget(Clear, fav_outer);
-    f.render_widget(Clear, avail_outer);
-
-    let fav_focused = app.model_focus == ModelPanel::Favorites;
-    let fav_title = match app.model_pick_target {
-        crate::app::ModelPickTarget::Memory => " ★ Favorites — picking memory model ",
-        crate::app::ModelPickTarget::Session => " ★ Favorites ",
-    };
-
-    // Favorites column.
-    let fav_items = model_items(app, &app.favorite_models());
-    let fav_list = panel_list(fav_items, fav_title, fav_focused);
-    f.render_stateful_widget(fav_list, fav_outer, &mut app.fav_state);
-
-    // Available column (with the search box in the title).
-    let avail_items = model_items(app, &app.available_models());
-    let title = if app.settings.hide_hints {
-        format!(" Available — search: {}▏ ", app.model_filter)
-    } else {
-        format!(
-            " Available — search: {}▏  (Ctrl+S fav · Ctrl+T reason) ",
-            app.model_filter
-        )
-    };
-    let avail_list = panel_list(avail_items, &title, !fav_focused);
-    f.render_stateful_widget(avail_list, avail_outer, &mut app.avail_state);
-}
-
-fn model_items(app: &App, models: &[&Model]) -> Vec<ListItem<'static>> {
-    models
-        .iter()
-        .map(|m| {
-            let marker = if app.favorites.contains(&m.id) {
-                "★ "
-            } else if app.last_used.contains_key(&m.id) {
-                "• "
-            } else {
-                "  "
-            };
-            // Reasoning badge: [r:high] if set, [r] if supported but off.
-            let badge = match app.reasoning_of(&m.id) {
-                Some(effort) => format!("  [r:{effort}]"),
-                None if m.supports_reasoning => "  [r]".to_string(),
-                None => String::new(),
-            };
-            ListItem::new(format!("{marker}{}{badge}", m.id))
-        })
-        .collect()
-}
-
-fn panel_list<'a>(items: Vec<ListItem<'a>>, title: &str, focused: bool) -> List<'a> {
-    let border = if focused { Color::Cyan } else { Color::DarkGray };
-    List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border))
-                .title(title.to_string()),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .highlight_symbol("› ")
 }
 
 /// Short absolute timestamp from an rfc3339 string (falls back to the raw text).
