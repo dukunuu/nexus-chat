@@ -16,6 +16,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     let fav_focused = app.model_focus == ModelPanel::Favorites;
     let fav_title = match app.model_pick_target {
         crate::app::ModelPickTarget::Memory => " ★ Favorites — picking memory model ",
+        crate::app::ModelPickTarget::Transcriber => " ★ Favorites — picking transcriber model ",
         crate::app::ModelPickTarget::Session => " ★ Favorites ",
     };
 
@@ -96,7 +97,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         // Cancelling a memory-model pick returns to /config, same as picking one.
         KeyCode::Esc => {
             app.popup = match app.model_pick_target {
-                crate::app::ModelPickTarget::Memory => Popup::Settings,
+                crate::app::ModelPickTarget::Memory | crate::app::ModelPickTarget::Transcriber => Popup::Settings,
                 crate::app::ModelPickTarget::Session => Popup::None,
             };
         }

@@ -100,6 +100,8 @@ impl App {
         self.db.set_setting("compact_threshold", &self.settings.compact_threshold.to_string())?;
         self.memory_model = self.memory_model.trim().to_string();
         self.db.set_setting("memory_model", &self.memory_model)?;
+        self.transcriber_model = self.transcriber_model.trim().to_string();
+        self.db.set_setting("transcriber_model", &self.transcriber_model)?;
         self.searxng_url = self.settings_inputs[4].trim().trim_end_matches('/').to_string();
         self.db.set_setting("searxng_url", &self.searxng_url)?;
         self.db.set_setting("verbosity", &self.verbosity)?;

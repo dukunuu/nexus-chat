@@ -58,6 +58,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             SettingsField::SearchProvider => {
                 Span::styled(app.search_provider.clone(), Style::default().fg(Color::Cyan))
             }
+            SettingsField::TranscriberModel => numeric(&app.transcriber_model),
         }
     };
 
@@ -98,13 +99,20 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     use crate::app::SettingsField;
-    // The memory-model row is picked, not typed: Enter opens the same model
-    // picker /model uses, Backspace clears it (disabling extraction).
-    if app.settings_field() == SettingsField::MemoryModel {
+    // The memory-model and transcriber-model rows are picked, not typed:
+    // Enter opens the same model picker /model uses, Backspace clears it.
+    let picker = matches!(app.settings_field(), SettingsField::MemoryModel | SettingsField::TranscriberModel);
+    if picker {
         match key.code {
             KeyCode::Esc => app.save_settings()?,
-            KeyCode::Enter => app.open_model_picker_for_memory(),
-            KeyCode::Backspace => app.clear_memory_model()?,
+            KeyCode::Enter => match app.settings_field() {
+                SettingsField::MemoryModel => app.open_model_picker_for_memory(),
+                _ => app.open_model_picker_for_transcriber(),
+            },
+            KeyCode::Backspace => match app.settings_field() {
+                SettingsField::MemoryModel => app.clear_memory_model()?,
+                _ => app.clear_transcriber_model()?,
+            },
             KeyCode::Up => app.move_settings_selection(-1),
             KeyCode::Down | KeyCode::Tab => app.move_settings_selection(1),
             _ => {}

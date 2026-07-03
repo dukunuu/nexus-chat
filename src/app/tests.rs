@@ -485,6 +485,16 @@ fn clear_memory_model_disables_extraction() {
     );
 }
 
+#[test]
+fn transcriber_model_defaults_and_persists() {
+    let mut a = app_with_key();
+    assert_eq!(a.transcriber_model, "google/gemini-2.5-flash-lite");
+    a.transcriber_model = "some/vision-model".to_string();
+    a.save_settings().unwrap();
+    let kv = a.db.load_settings().unwrap();
+    assert!(kv.iter().any(|(k, v)| k == "transcriber_model" && v == "some/vision-model"));
+}
+
 #[tokio::test]
 async fn finish_stream_persists_assistant_message() {
     let mut a = app_with_key();

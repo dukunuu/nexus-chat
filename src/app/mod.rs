@@ -151,6 +151,7 @@ pub enum ModelPickTarget {
     #[default]
     Session,
     Memory,
+    Transcriber,
 }
 
 /// Editable rows in the nerd-config popup.
@@ -168,10 +169,11 @@ pub enum SettingsField {
     Verbosity,
     LangsearchKey,
     SearchProvider,
+    TranscriberModel,
 }
 
 impl SettingsField {
-    pub const ALL: [SettingsField; 12] = [
+    pub const ALL: [SettingsField; 13] = [
         SettingsField::ShowStats,
         SettingsField::ShowReasoning,
         SettingsField::HideHints,
@@ -184,6 +186,7 @@ impl SettingsField {
         SettingsField::Verbosity,
         SettingsField::LangsearchKey,
         SettingsField::SearchProvider,
+        SettingsField::TranscriberModel,
     ];
 
     pub fn label(self) -> &'static str {
@@ -200,6 +203,7 @@ impl SettingsField {
             SettingsField::Verbosity => "answer length (Space cycles normal/concise/caveman)",
             SettingsField::LangsearchKey => "LangSearch API key (langsearch.com/dashboard, free)",
             SettingsField::SearchProvider => "search provider (Space cycles auto/langsearch/searxng/duckduckgo)",
+            SettingsField::TranscriberModel => "transcriber model (Enter to pick, Backspace clears)",
         }
     }
 }
@@ -344,6 +348,8 @@ pub struct App {
     pub space_edit: String,
     /// Model used for background memory extraction (empty = disabled).
     pub memory_model: String,
+    /// Model used for image transcription (empty = disabled).
+    pub transcriber_model: String,
     /// Base URL of a SearXNG instance for the web-search skill, or empty to
     /// disable it. Configured in-app (Ctrl+O settings), not a config file.
     pub searxng_url: String,
@@ -529,6 +535,7 @@ impl App {
             space_mode: SpaceMode::Browse,
             space_edit: String::new(),
             memory_model: "google/gemini-2.5-flash-lite".to_string(),
+            transcriber_model: "google/gemini-2.5-flash-lite".to_string(),
             base_system_prompt: config::load_system_prompt().unwrap_or_default(),
             verbosity: "concise".to_string(),
             memory_rx: None,
@@ -637,6 +644,7 @@ impl App {
                 "top_p" => self.settings.top_p = v.parse().ok(),
                 "max_tokens" => self.settings.max_tokens = v.parse().ok(),
                 "memory_model" => self.memory_model = v,
+                "transcriber_model" => self.transcriber_model = v,
                 "compact_threshold" => {
                     if let Ok(t) = v.parse() {
                         self.settings.compact_threshold = t;
@@ -858,7 +866,8 @@ impl App {
             | SettingsField::HideHints
             | SettingsField::MemoryModel
             | SettingsField::Verbosity
-            | SettingsField::SearchProvider => None,
+            | SettingsField::SearchProvider
+            | SettingsField::TranscriberModel => None,
             SettingsField::Temperature => Some(0),
             SettingsField::TopP => Some(1),
             SettingsField::MaxTokens => Some(2),

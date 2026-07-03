@@ -20,6 +20,13 @@ impl App {
         self.open_model_picker_impl();
     }
 
+    /// Open the same model picker, but a confirmed pick sets the transcriber
+    /// model (in `/config`) instead of the active session's model.
+    pub(crate) fn open_model_picker_for_transcriber(&mut self) {
+        self.model_pick_target = ModelPickTarget::Transcriber;
+        self.open_model_picker_impl();
+    }
+
     fn open_model_picker_impl(&mut self) {
         if self.provider.is_none() {
             self.open_key_prompt();
@@ -297,6 +304,12 @@ impl App {
                 // Picked from inside /config — return there rather than closing.
                 self.popup = Popup::Settings;
             }
+            ModelPickTarget::Transcriber => {
+                self.transcriber_model = id.clone();
+                self.db.set_setting("transcriber_model", &id)?;
+                self.status = format!("transcriber model: {id}");
+                self.popup = Popup::Settings;
+            }
         }
         Ok(())
     }
@@ -307,6 +320,15 @@ impl App {
         self.memory_model.clear();
         self.db.set_setting("memory_model", "")?;
         self.status = "memory model cleared — extraction disabled".to_string();
+        Ok(())
+    }
+
+    /// Disable image transcription entirely (Backspace on the
+    /// transcriber-model row in `/config`).
+    pub(crate) fn clear_transcriber_model(&mut self) -> Result<()> {
+        self.transcriber_model.clear();
+        self.db.set_setting("transcriber_model", "")?;
+        self.status = "transcriber model cleared — image paste disabled".to_string();
         Ok(())
     }
 }
