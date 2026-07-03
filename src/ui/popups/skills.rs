@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -53,29 +53,33 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
+    use super::{ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key, classify_edit_key};
     use crate::app::SkillsMode;
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match app.skills_mode {
-        SkillsMode::Install => match key.code {
-            KeyCode::Esc => app.skills_mode = SkillsMode::Browse,
-            KeyCode::Enter => app.confirm_skill_install(),
-            KeyCode::Backspace => {
+        SkillsMode::Install => match classify_edit_key(key) {
+            Some(EditAction::Cancel) => app.skills_mode = SkillsMode::Browse,
+            Some(EditAction::Save) => app.confirm_skill_install(),
+            Some(EditAction::Backspace) => {
                 app.skills_edit.pop();
             }
-            KeyCode::Char(c) => app.skills_edit.push(c),
-            _ => {}
+            Some(EditAction::Push(c)) => app.skills_edit.push(c),
+            None => {}
         },
-        SkillsMode::ConfirmRemove => match key.code {
-            KeyCode::Char('d') if ctrl => app.confirm_skill_remove(),
-            KeyCode::Esc => app.skills_mode = SkillsMode::Browse,
-            _ => {}
+        SkillsMode::ConfirmRemove => match classify_confirm_delete_key(key) {
+            Some(ConfirmDeleteAction::Yes) => app.confirm_skill_remove(),
+            Some(ConfirmDeleteAction::No) => app.skills_mode = SkillsMode::Browse,
+            None => {}
         },
-        SkillsMode::Browse => match key.code {
-            KeyCode::Esc => app.popup = crate::app::Popup::None,
-            KeyCode::Up => app.move_skills_selection(-1),
-            KeyCode::Down => app.move_skills_selection(1),
-            KeyCode::Char('n') if ctrl => app.start_skill_install(),
-            KeyCode::Char('d') if ctrl => app.start_skill_remove(),
+        // skills' Browse mode has no Enter binding, and (unlike session/space)
+        // no text filter — Ctrl+R rename is unsupported and plain
+        // chars/Backspace are intentionally left as no-ops, matching the
+        // original match arm's fallthrough to `_ => {}`.
+        SkillsMode::Browse => match classify_browse_key(key, true, false) {
+            Some(super::BrowseAction::Close) => app.popup = crate::app::Popup::None,
+            Some(super::BrowseAction::MoveUp) => app.move_skills_selection(-1),
+            Some(super::BrowseAction::MoveDown) => app.move_skills_selection(1),
+            Some(super::BrowseAction::Create) => app.start_skill_install(),
+            Some(super::BrowseAction::ConfirmDelete) => app.start_skill_remove(),
             _ => {}
         },
     }

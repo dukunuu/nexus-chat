@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -68,44 +68,49 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    use super::{ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key, classify_edit_key};
     use crate::app::SpaceMode;
     use crate::db::DEFAULT_SPACE;
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match app.space_mode {
-        SpaceMode::Create | SpaceMode::Rename => match key.code {
-            KeyCode::Esc => app.space_mode = SpaceMode::Browse,
-            KeyCode::Enter => match app.space_mode {
+        SpaceMode::Create | SpaceMode::Rename => match classify_edit_key(key) {
+            Some(EditAction::Cancel) => app.space_mode = SpaceMode::Browse,
+            Some(EditAction::Save) => match app.space_mode {
                 SpaceMode::Create => app.confirm_space_create()?,
                 _ => app.confirm_space_rename()?,
             },
-            KeyCode::Backspace => {
+            Some(EditAction::Backspace) => {
                 app.space_edit.pop();
             }
-            KeyCode::Char(c) => app.space_edit.push(c),
-            _ => {}
+            Some(EditAction::Push(c)) => app.space_edit.push(c),
+            None => {}
         },
-        SpaceMode::ConfirmDelete => match key.code {
-            KeyCode::Char('d') if ctrl => app.confirm_space_delete()?,
-            KeyCode::Esc => app.space_mode = SpaceMode::Browse,
-            _ => {}
+        SpaceMode::ConfirmDelete => match classify_confirm_delete_key(key) {
+            Some(ConfirmDeleteAction::Yes) => app.confirm_space_delete()?,
+            Some(ConfirmDeleteAction::No) => app.space_mode = SpaceMode::Browse,
+            None => {}
         },
-        SpaceMode::Browse => match key.code {
-            KeyCode::Esc => app.popup = crate::app::Popup::None,
-            KeyCode::Enter => app.confirm_space()?,
-            KeyCode::Up => app.move_space_selection(-1),
-            KeyCode::Down => app.move_space_selection(1),
-            KeyCode::Char('n') if ctrl => app.start_space_create(),
-            KeyCode::Char('r') if ctrl => app.start_space_rename(),
-            // The default space is never deletable.
-            KeyCode::Char('d')
-                if ctrl && app.selected_space().is_some_and(|s| s.name != DEFAULT_SPACE) =>
-            {
-                app.space_mode = SpaceMode::ConfirmDelete;
+        SpaceMode::Browse => {
+            if key.code == KeyCode::Enter {
+                return app.confirm_space();
             }
-            KeyCode::Backspace => app.space_filter_pop(),
-            KeyCode::Char(c) if !ctrl => app.space_filter_push(c),
-            _ => {}
-        },
+            match classify_browse_key(key, true, true) {
+                Some(super::BrowseAction::Close) => app.popup = crate::app::Popup::None,
+                Some(super::BrowseAction::MoveUp) => app.move_space_selection(-1),
+                Some(super::BrowseAction::MoveDown) => app.move_space_selection(1),
+                Some(super::BrowseAction::Create) => app.start_space_create(),
+                Some(super::BrowseAction::Rename) => app.start_space_rename(),
+                // The default space is never deletable.
+                Some(super::BrowseAction::ConfirmDelete)
+                    if app.selected_space().is_some_and(|s| s.name != DEFAULT_SPACE) =>
+                {
+                    app.space_mode = SpaceMode::ConfirmDelete;
+                }
+                Some(super::BrowseAction::ConfirmDelete) => {}
+                Some(super::BrowseAction::Backspace) => app.space_filter_pop(),
+                Some(super::BrowseAction::Filter(c)) => app.space_filter_push(c),
+                None => {}
+            }
+        }
     }
     Ok(())
 }

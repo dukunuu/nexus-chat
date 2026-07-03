@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -79,37 +79,42 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    use super::{ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key, classify_edit_key};
     use crate::app::SessionMode;
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match app.session_mode {
         // Renaming: type into the edit buffer; Enter saves, Esc cancels.
-        SessionMode::Rename => match key.code {
-            KeyCode::Esc => app.session_mode = SessionMode::Browse,
-            KeyCode::Enter => app.confirm_rename()?,
-            KeyCode::Backspace => {
+        SessionMode::Rename => match classify_edit_key(key) {
+            Some(EditAction::Cancel) => app.session_mode = SessionMode::Browse,
+            Some(EditAction::Save) => app.confirm_rename()?,
+            Some(EditAction::Backspace) => {
                 app.session_edit.pop();
             }
-            KeyCode::Char(c) => app.session_edit.push(c),
-            _ => {}
+            Some(EditAction::Push(c)) => app.session_edit.push(c),
+            None => {}
         },
         // Delete confirm: Ctrl+D again deletes, Esc cancels, anything else ignored.
-        SessionMode::ConfirmDelete => match key.code {
-            KeyCode::Char('d') if ctrl => app.confirm_delete()?,
-            KeyCode::Esc => app.session_mode = SessionMode::Browse,
-            _ => {}
+        SessionMode::ConfirmDelete => match classify_confirm_delete_key(key) {
+            Some(ConfirmDeleteAction::Yes) => app.confirm_delete()?,
+            Some(ConfirmDeleteAction::No) => app.session_mode = SessionMode::Browse,
+            None => {}
         },
-        SessionMode::Browse => match key.code {
-            KeyCode::Esc => app.popup = crate::app::Popup::None,
-            KeyCode::Enter => app.confirm_session()?,
-            KeyCode::Up => app.move_session_selection(-1),
-            KeyCode::Down => app.move_session_selection(1),
-            // Ctrl+R rename, Ctrl+D delete — leave plain letters for the filter.
-            KeyCode::Char('r') if ctrl => app.start_rename(),
-            KeyCode::Char('d') if ctrl => app.session_mode = SessionMode::ConfirmDelete,
-            KeyCode::Backspace => app.session_filter_pop(),
-            KeyCode::Char(c) if !ctrl => app.session_filter_push(c),
-            _ => {}
-        },
+        SessionMode::Browse => {
+            if key.code == KeyCode::Enter {
+                return app.confirm_session();
+            }
+            // No create/rename-gating divergence here: session supports
+            // rename but not create.
+            match classify_browse_key(key, false, true) {
+                Some(super::BrowseAction::Close) => app.popup = crate::app::Popup::None,
+                Some(super::BrowseAction::MoveUp) => app.move_session_selection(-1),
+                Some(super::BrowseAction::MoveDown) => app.move_session_selection(1),
+                Some(super::BrowseAction::Rename) => app.start_rename(),
+                Some(super::BrowseAction::ConfirmDelete) => app.session_mode = SessionMode::ConfirmDelete,
+                Some(super::BrowseAction::Backspace) => app.session_filter_pop(),
+                Some(super::BrowseAction::Filter(c)) => app.session_filter_push(c),
+                Some(super::BrowseAction::Create) | None => {}
+            }
+        }
     }
     Ok(())
 }
