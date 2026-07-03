@@ -224,6 +224,7 @@ impl App {
                 self.space_edit.push_str(text);
             }
             Popup::Skills if self.skills_mode == SkillsMode::Install => self.skills_edit.push_str(text),
+            Popup::Files if self.files_mode == crate::app::FilesMode::Add => self.files_edit.push_str(text),
             Popup::Settings => {
                 if let Some(i) = self.text_index() {
                     use crate::app::SettingsField;
@@ -494,6 +495,15 @@ mod tests {
         a.popup = crate::app::Popup::Key;
         a.paste("sk-or-abc123");
         assert_eq!(a.key_input, "sk-or-abc123");
+    }
+
+    #[test]
+    fn paste_goes_into_files_add_field() {
+        let mut a = test_app();
+        a.popup = crate::app::Popup::Files;
+        a.files_mode = crate::app::FilesMode::Add;
+        a.paste("/tmp/report.pdf");
+        assert_eq!(a.files_edit, "/tmp/report.pdf");
     }
 
     #[test]

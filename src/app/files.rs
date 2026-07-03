@@ -53,7 +53,6 @@ impl App {
     /// Copy `path` into the active space's files dir and index it. Returns
     /// the imported file's name. An existing file with the same name is
     /// overwritten (the rescan re-extracts it).
-    #[allow(dead_code)] // called by confirm_files_add (Task 6 tests and 7's UI)
     pub fn import_file(&mut self, path: &Path) -> Result<String> {
         let name = path
             .file_name()
@@ -69,7 +68,6 @@ impl App {
     }
 
     /// Delete the highlighted file: disk copy and index rows both go.
-    #[allow(dead_code)] // called by Task 7's files popup UI
     pub fn confirm_files_delete(&mut self) -> Result<()> {
         if let Some(f) = self.files_cache.get(self.files_selected).cloned() {
             let disk = self.space.files_dir(&self.active_space.name).join(&f.name);
@@ -90,12 +88,10 @@ impl App {
         self.popup = super::Popup::Files;
     }
 
-    #[allow(dead_code)] // called by Task 7's files popup UI
     pub fn move_files_selection(&mut self, delta: i32) {
         self.files_selected = super::clamp_cursor(self.files_selected, self.files_cache.len(), delta);
     }
 
-    #[allow(dead_code)] // called by Task 6 tests and Task 7's files popup UI
     pub fn start_files_add(&mut self) {
         self.files_edit.clear();
         self.files_mode = super::FilesMode::Add;
@@ -103,7 +99,6 @@ impl App {
 
     /// Import the path typed/pasted in Add mode. Bad paths report in the status
     /// line and return to Browse (nothing to roll back).
-    #[allow(dead_code)] // called by Task 6 tests and Task 7's files popup UI
     pub fn confirm_files_add(&mut self) -> Result<()> {
         let raw = self.files_edit.trim().to_string();
         self.files_mode = super::FilesMode::Browse;
@@ -123,7 +118,6 @@ impl App {
     }
 
     /// Open the highlighted file in the system viewer (Enter in Browse).
-    #[allow(dead_code)] // called by Task 7's files popup UI
     pub fn open_selected_file(&mut self) {
         if let Some(f) = self.files_cache.get(self.files_selected) {
             let path = self.space.files_dir(&self.active_space.name).join(&f.name);

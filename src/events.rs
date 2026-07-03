@@ -171,12 +171,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         Popup::Space => crate::ui::popups::space::handle_key(app, key)?,
         Popup::Context => crate::ui::popups::context::handle_key(app, key),
         Popup::Skills => crate::ui::popups::skills::handle_key(app, key),
-        Popup::Files => {
-            // Stopgap until the files popup handler lands: Esc closes.
-            if key.code == KeyCode::Esc {
-                app.popup = Popup::None;
-            }
-        }
+        Popup::Files => ui::popups::files::handle_key(app, key)?,
         Popup::None => handle_normal(app, key)?,
     }
     Ok(())

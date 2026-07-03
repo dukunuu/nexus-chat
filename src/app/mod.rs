@@ -30,6 +30,7 @@ mod tests;
 #[cfg(test)]
 use chat::split_inline_reasoning;
 use chat::{code_blocks, pick_greeting};
+pub(crate) use chat::human_size;
 #[cfg(test)]
 use memory::{parse_fact_line, parse_memory_ops};
 use sessions::parse_topic;
@@ -89,7 +90,6 @@ pub enum SkillsMode {
 pub enum FilesMode {
     Browse,
     Add,
-    #[allow(dead_code)] // used by Task 7's files popup UI
     ConfirmDelete,
 }
 
@@ -378,7 +378,6 @@ pub struct App {
     pub files_selected: usize,
     pub files_mode: FilesMode,
     /// Path being typed/pasted in the files popup's Add mode.
-    #[allow(dead_code)] // written by Task 6 tests and Task 7's files popup UI
     pub files_edit: String,
 
     /// Live model catalog (fetched on demand, never hardcoded).

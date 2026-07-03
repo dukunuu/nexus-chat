@@ -1,5 +1,6 @@
 pub(crate) mod context;
 pub(crate) mod copy;
+pub(crate) mod files;
 pub(crate) mod key;
 pub(crate) mod model;
 pub(crate) mod session;

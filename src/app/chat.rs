@@ -386,7 +386,7 @@ pub(super) fn title_from(text: &str) -> String {
 }
 
 /// Compact byte counts: 940 B, 1.2 KB, 3.4 MB.
-pub(super) fn human_size(bytes: i64) -> String {
+pub(crate) fn human_size(bytes: i64) -> String {
     match bytes {
         b if b < 1024 => format!("{b} B"),
         b if b < 1024 * 1024 => format!("{:.1} KB", b as f64 / 1024.0),
