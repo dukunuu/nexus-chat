@@ -170,7 +170,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         Popup::Copy => handle_copy_popup(app, key),
         Popup::Space => crate::ui::popups::space::handle_key(app, key)?,
         Popup::Context => handle_context_popup(app, key),
-        Popup::Skills => handle_skills_popup(app, key),
+        Popup::Skills => crate::ui::popups::skills::handle_key(app, key),
         Popup::None => handle_normal(app, key)?,
     }
     Ok(())
@@ -470,35 +470,6 @@ fn handle_copy_popup(app: &mut App, key: KeyEvent) {
         KeyCode::Up => app.move_copy_selection(-1),
         KeyCode::Down => app.move_copy_selection(1),
         _ => {}
-    }
-}
-
-fn handle_skills_popup(app: &mut App, key: KeyEvent) {
-    use crate::app::SkillsMode;
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    match app.skills_mode {
-        SkillsMode::Install => match key.code {
-            KeyCode::Esc => app.skills_mode = SkillsMode::Browse,
-            KeyCode::Enter => app.confirm_skill_install(),
-            KeyCode::Backspace => {
-                app.skills_edit.pop();
-            }
-            KeyCode::Char(c) => app.skills_edit.push(c),
-            _ => {}
-        },
-        SkillsMode::ConfirmRemove => match key.code {
-            KeyCode::Char('d') if ctrl => app.confirm_skill_remove(),
-            KeyCode::Esc => app.skills_mode = SkillsMode::Browse,
-            _ => {}
-        },
-        SkillsMode::Browse => match key.code {
-            KeyCode::Esc => app.popup = Popup::None,
-            KeyCode::Up => app.move_skills_selection(-1),
-            KeyCode::Down => app.move_skills_selection(1),
-            KeyCode::Char('n') if ctrl => app.start_skill_install(),
-            KeyCode::Char('d') if ctrl => app.start_skill_remove(),
-            _ => {}
-        },
     }
 }
 

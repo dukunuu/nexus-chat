@@ -44,7 +44,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         Popup::Settings => render_settings_popup(f, app),
         Popup::Space => popups::space::render(f, app),
         Popup::Context => render_context_popup(f, app),
-        Popup::Skills => render_skills_popup(f, app),
+        Popup::Skills => popups::skills::render(f, app),
         Popup::None => {}
     }
 }
@@ -421,52 +421,6 @@ fn fmt_created(rfc3339: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
         .map(|dt| dt.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string())
         .unwrap_or_else(|_| rfc3339.to_string())
-}
-
-fn render_skills_popup(f: &mut Frame, app: &App) {
-    use crate::app::SkillsMode;
-    let area = centered(f.area(), 56, 50);
-    f.render_widget(Clear, area);
-
-    let dim = Style::default().fg(Color::DarkGray);
-    let items: Vec<ListItem> = app
-        .skills
-        .iter()
-        .map(|s| {
-            ListItem::new(Line::from(vec![
-                Span::styled(s.name.clone(), Style::default().fg(Color::White)),
-                Span::styled(format!("  {}", s.description), dim),
-            ]))
-        })
-        .collect();
-
-    let title = match app.skills_mode {
-        SkillsMode::Install => {
-            format!(" install: {}▏  owner/repo/path  (Enter install · Esc cancel) ", app.skills_edit)
-        }
-        SkillsMode::ConfirmRemove => {
-            let name = app.skills.get(app.skills_selected).map(|s| s.name.as_str()).unwrap_or("");
-            format!(" remove \"{name}\"? (Ctrl+D confirm · Esc cancel) ")
-        }
-        SkillsMode::Browse => {
-            let keys = if app.settings.hide_hints {
-                ""
-            } else {
-                "  (Ctrl+N install from GitHub · Ctrl+D remove · Ctrl+E edit)"
-            };
-            format!(" skills{keys} ")
-        }
-    };
-
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(title))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("▸ ");
-    let mut state = ListState::default();
-    if !app.skills.is_empty() {
-        state.select(Some(app.skills_selected.min(app.skills.len() - 1)));
-    }
-    f.render_stateful_widget(list, area, &mut state);
 }
 
 /// Context breakdown popup (Ctrl+I): estimated tokens spent on system
