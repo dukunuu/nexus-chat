@@ -526,7 +526,6 @@ impl Db {
 /// Quote a query for FTS5 MATCH: each whitespace token becomes a quoted
 /// phrase (inner quotes doubled), so model-supplied text can't be an FTS
 /// syntax error. Tokens are implicitly ANDed by FTS5.
-#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 pub fn fts_quote(query: &str) -> String {
     query
         .split_whitespace()
@@ -536,7 +535,6 @@ pub fn fts_quote(query: &str) -> String {
 }
 
 /// BM25-ranked chunk search within one space: `(file name, location, snippet)`.
-#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 pub fn search_chunks(
     conn: &Connection,
     space_id: &str,
@@ -561,7 +559,6 @@ pub fn search_chunks(
 }
 
 /// A file's full extracted text (chunks re-joined in order), by display name.
-#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 pub fn file_text(conn: &Connection, space_id: &str, name: &str) -> Result<Option<String>> {
     let mut stmt = conn.prepare(
         "SELECT file_chunks.text
@@ -574,7 +571,6 @@ pub fn file_text(conn: &Connection, space_id: &str, name: &str) -> Result<Option
     Ok((!parts.is_empty()).then(|| parts.join("\n")))
 }
 
-#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 pub fn count_files(conn: &Connection, space_id: &str) -> Result<u64> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM files WHERE space_id = ?1",

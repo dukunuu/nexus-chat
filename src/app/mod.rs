@@ -497,8 +497,13 @@ impl App {
         let skills = crate::skills::load_skills(&skills_dir);
         // Built with search disabled; `load_settings()` below reads the
         // persisted config (if any) and rebuilds this via `refresh_toolbox`.
-        let toolbox =
-            std::sync::Arc::new(crate::tools::ToolBox::new(skills_dir, None, None, "auto".to_string()));
+        let toolbox = std::sync::Arc::new(crate::tools::ToolBox::new(
+            skills_dir,
+            None,
+            None,
+            "auto".to_string(),
+            Some(crate::tools::FilesCtx { db_path: space.db_path(), space_id: active_space.id.clone() }),
+        ));
         let mut app = App {
             db,
             space,
@@ -661,6 +666,10 @@ impl App {
             url,
             key,
             self.search_provider.clone(),
+            Some(crate::tools::FilesCtx {
+                db_path: self.space.db_path(),
+                space_id: self.active_space.id.clone(),
+            }),
         ));
         self.reload_skills();
     }

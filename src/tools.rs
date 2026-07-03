@@ -20,6 +20,15 @@ pub struct ToolBox {
     /// then DuckDuckGo), or an explicit "langsearch"/"searxng"/"duckduckgo".
     pub search_provider: String,
     client: reqwest::Client,
+    files: Option<FilesCtx>,
+}
+
+/// Where the file tools read from: the shared db plus the space to scope to.
+/// The toolbox opens its own short-lived connection per call — the app's
+/// `Db` handle stays on the UI task and is never shared with the stream task.
+pub struct FilesCtx {
+    pub db_path: std::path::PathBuf,
+    pub space_id: String,
 }
 
 impl ToolBox {
@@ -28,8 +37,24 @@ impl ToolBox {
         searxng_url: Option<String>,
         langsearch_key: Option<String>,
         search_provider: String,
+        files: Option<FilesCtx>,
     ) -> Self {
-        ToolBox { skills_dir, searxng_url, langsearch_key, search_provider, client: reqwest::Client::new() }
+        ToolBox {
+            skills_dir,
+            searxng_url,
+            langsearch_key,
+            search_provider,
+            client: reqwest::Client::new(),
+            files,
+        }
+    }
+
+    fn files_count(&self) -> u64 {
+        let Some(ctx) = &self.files else { return 0 };
+        rusqlite::Connection::open(&ctx.db_path)
+            .ok()
+            .and_then(|conn| crate::db::count_files(&conn, &ctx.space_id).ok())
+            .unwrap_or(0)
     }
 
     /// Resolve which backend to actually use for this call. An explicit
@@ -89,6 +114,30 @@ impl ToolBox {
                 "required": ["query"],
             }),
         });
+        if self.files_count() > 0 {
+            defs.push(ToolDef {
+                name: "search_files".to_string(),
+                description: "Full-text search the space's imported files; returns ranked snippets with file name and line location.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "query": { "type": "string", "description": "keywords to search for" } },
+                    "required": ["query"],
+                }),
+            });
+            defs.push(ToolDef {
+                name: "read_file".to_string(),
+                description: "Read the extracted text of an imported file, up to 200 lines per call. Use offset to page through longer files.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "the file's name as listed in the system prompt" },
+                        "offset": { "type": "integer", "description": "1-based first line to read (default 1)" },
+                        "limit": { "type": "integer", "description": "lines to read, max 200 (default 200)" },
+                    },
+                    "required": ["name"],
+                }),
+            });
+        }
         defs
     }
 
@@ -119,6 +168,63 @@ impl ToolBox {
                     Ok(hits) if hits.is_empty() => "no results".to_string(),
                     Ok(hits) => format_results(&hits),
                     Err(e) => format!("search failed: {e}"),
+                };
+                (result, status)
+            }
+            "search_files" => {
+                let query = serde_json::from_str::<serde_json::Value>(args)
+                    .ok()
+                    .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(str::to_string))
+                    .unwrap_or_default();
+                let status = "Searching files…".to_string();
+                let result = match &self.files {
+                    None => "no files imported".to_string(),
+                    Some(ctx) => match rusqlite::Connection::open(&ctx.db_path)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|conn| crate::db::search_chunks(&conn, &ctx.space_id, &query, 8))
+                    {
+                        Ok(hits) if hits.is_empty() => "no matches".to_string(),
+                        Ok(hits) => hits
+                            .iter()
+                            .map(|(name, loc, snip)| format!("{name} ({loc}): {snip}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        Err(e) => format!("file search failed: {e}"),
+                    },
+                };
+                (result, status)
+            }
+            "read_file" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let name = v.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string();
+                let offset = v.get("offset").and_then(|o| o.as_u64()).unwrap_or(1).max(1) as usize;
+                let limit = v.get("limit").and_then(|l| l.as_u64()).unwrap_or(200).clamp(1, 200) as usize;
+                let status = format!("Reading {name}…");
+                let result = match &self.files {
+                    None => "no files imported".to_string(),
+                    Some(ctx) => match rusqlite::Connection::open(&ctx.db_path)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|conn| crate::db::file_text(&conn, &ctx.space_id, &name))
+                    {
+                        Ok(Some(text)) => {
+                            let lines: Vec<&str> = text.lines().collect();
+                            let total = lines.len();
+                            let start = (offset - 1).min(total);
+                            let slice = &lines[start..(start + limit).min(total)];
+                            if slice.is_empty() {
+                                format!("{name}: offset {offset} is past the end ({total} lines)")
+                            } else {
+                                format!(
+                                    "{name} (lines {}-{} of {total}):\n{}",
+                                    start + 1,
+                                    start + slice.len(),
+                                    slice.join("\n"),
+                                )
+                            }
+                        }
+                        Ok(None) => format!("unknown file: {name}"),
+                        Err(e) => format!("file read failed: {e}"),
+                    },
                 };
                 (result, status)
             }
@@ -383,11 +489,11 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_choice_errors_clearly_when_unconfigured_instead_of_swapping() {
-        let tb = ToolBox::new(PathBuf::new(), None, None, "langsearch".to_string());
+        let tb = ToolBox::new(PathBuf::new(), None, None, "langsearch".to_string(), None);
         let err = tb.search("test").await.unwrap_err();
         assert!(err.to_string().contains("LangSearch selected but no API key"));
 
-        let tb = ToolBox::new(PathBuf::new(), None, None, "searxng".to_string());
+        let tb = ToolBox::new(PathBuf::new(), None, None, "searxng".to_string(), None);
         let err = tb.search("test").await.unwrap_err();
         assert!(err.to_string().contains("SearXNG selected but no instance URL"));
     }
@@ -396,8 +502,13 @@ mod tests {
     async fn auto_reaches_searxng_when_configured_instead_of_bailing() {
         // "auto" with only a SearXNG URL set must attempt it (proven by a
         // connection-level error, not the langsearch-key or no-backend message).
-        let tb =
-            ToolBox::new(PathBuf::new(), Some("http://127.0.0.1:1".to_string()), None, "auto".to_string());
+        let tb = ToolBox::new(
+            PathBuf::new(),
+            Some("http://127.0.0.1:1".to_string()),
+            None,
+            "auto".to_string(),
+            None,
+        );
         let err = tb.search("test").await.unwrap_err();
         let msg = err.to_string();
         assert!(!msg.contains("no search backend configured"));
@@ -448,5 +559,60 @@ mod tests {
         assert_eq!(hits[0].url, "https://example.com/rust");
         assert_eq!(hits[0].snippet, "The Rust team announces version 1.90.");
         assert_eq!(hits[1].url, "https://example.com/blog");
+    }
+
+    fn files_toolbox() -> (ToolBox, crate::db::Db, String) {
+        // A real temp-file db (the toolbox opens its own connection by path).
+        let path = std::env::temp_dir().join(format!("nexus-tools-{}.db", uuid::Uuid::new_v4()));
+        let db = crate::db::Db::open(&path).unwrap();
+        let space = db.default_space_id().unwrap();
+        let id = db.upsert_file(&space, "report.md", "h", 1, "ok").unwrap();
+        let text: String = (1..=250).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        db.set_file_chunks(&id, &crate::extract::chunk_lines(&text)).unwrap();
+        let tb = ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "auto".to_string(),
+            Some(FilesCtx { db_path: path, space_id: space.clone() }),
+        );
+        (tb, db, space)
+    }
+
+    #[test]
+    fn defs_include_file_tools_only_when_files_exist() {
+        let (tb, ..) = files_toolbox();
+        let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
+        assert!(names.contains(&"search_files".to_string()));
+        assert!(names.contains(&"read_file".to_string()));
+
+        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), None);
+        let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
+        assert!(!names.contains(&"search_files".to_string()));
+    }
+
+    #[tokio::test]
+    async fn search_files_returns_ranked_snippets() {
+        let (tb, ..) = files_toolbox();
+        let (result, status) = tb.run("search_files", r#"{"query":"line 42"}"#).await;
+        assert!(status.contains("Searching files"));
+        assert!(result.contains("report.md"));
+        assert!(result.contains("lines 41-80"));
+    }
+
+    #[tokio::test]
+    async fn read_file_is_ranged_and_capped() {
+        let (tb, ..) = files_toolbox();
+        let (result, _) = tb.run("read_file", r#"{"name":"report.md"}"#).await;
+        assert!(result.contains("line 1"));
+        assert!(result.contains("line 200"));
+        assert!(!result.contains("line 201")); // 200-line cap
+
+        let (result, _) = tb.run("read_file", r#"{"name":"report.md","offset":201}"#).await;
+        assert!(result.contains("line 201"));
+        assert!(result.contains("line 250"));
+
+        let (result, _) = tb.run("read_file", r#"{"name":"nope.md"}"#).await;
+        assert!(result.contains("unknown file"));
     }
 }
