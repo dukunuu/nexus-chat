@@ -141,6 +141,19 @@ pub(crate) fn copy_to_clipboard(clipboard: &mut Option<arboard::Clipboard>, text
     }
 }
 
+/// If pasted text is a single absolute path to an existing regular file
+/// (optionally `file://`-prefixed or quoted, as file managers produce on
+/// drag/drop), return the cleaned path.
+fn pasted_file_path(text: &str) -> Option<std::path::PathBuf> {
+    let t = text.trim().trim_matches('"').trim_matches('\'');
+    let t = t.strip_prefix("file://").unwrap_or(t);
+    if t.contains('\n') || !t.starts_with('/') {
+        return None;
+    }
+    let path = std::path::PathBuf::from(t);
+    path.is_file().then_some(path)
+}
+
 impl App {
     /// Current composer text, newlines joined.
     pub fn input_text(&self) -> String {
@@ -216,6 +229,14 @@ impl App {
         use crate::app::{Popup, SessionMode, SkillsMode, SpaceMode};
         match self.popup {
             Popup::None => {
+                // A dropped/pasted file path becomes an import offer instead of text.
+                if let Some(path) = pasted_file_path(text) {
+                    self.open_files_popup();
+                    self.start_files_add();
+                    self.files_edit = path.to_string_lossy().to_string();
+                    self.status = "import this file? Enter to confirm · Esc to cancel".to_string();
+                    return;
+                }
                 self.input.insert_str(text);
             }
             Popup::Key => self.key_input.push_str(text),
@@ -522,5 +543,29 @@ mod tests {
         a.settings_selected = 8; // SearxngUrl (free text)
         a.paste("http://localhost:8080");
         assert_eq!(a.settings_inputs[4], "http://localhost:8080");
+    }
+
+    #[test]
+    fn pasting_a_file_path_offers_import() {
+        let mut a = test_app();
+        let src = std::env::temp_dir().join(format!("nexus-paste-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&src, "x").unwrap();
+
+        a.paste(&src.to_string_lossy());
+        assert!(a.popup == crate::app::Popup::Files);
+        assert!(a.files_mode == crate::app::FilesMode::Add);
+        assert_eq!(a.files_edit, src.to_string_lossy());
+        assert!(a.input_text().is_empty()); // path did not land in the composer
+
+        // file:// URIs and quoted paths (file-manager drag/drop) work too.
+        let mut a = test_app();
+        a.paste(&format!("file://{}", src.to_string_lossy()));
+        assert!(a.popup == crate::app::Popup::Files);
+
+        // Ordinary text is untouched.
+        let mut a = test_app();
+        a.paste("/not/a/real/path and some prose");
+        assert!(a.popup == crate::app::Popup::None);
+        assert_eq!(a.input_text(), "/not/a/real/path and some prose");
     }
 }
