@@ -43,6 +43,7 @@ pub struct Session {
 /// A file imported into a space's fileset. `status` is "ok", "no text
 /// (scanned?)", "unsupported", or "error: …"; extraction text lives in the
 /// `file_chunks` FTS table, not here.
+#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 #[derive(Debug, Clone)]
 pub struct FileRow {
     pub id: String,
@@ -460,6 +461,7 @@ impl Db {
 
     /// Insert or replace a file row (unique per space+name). Returns the row id;
     /// an existing row keeps its id, so its chunks can be replaced by file_id.
+    #[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
     pub fn upsert_file(&self, space_id: &str, name: &str, hash: &str, size: i64, status: &str) -> Result<String> {
         if let Ok(existing) = self.conn.query_row(
             "SELECT id FROM files WHERE space_id = ?1 AND name = ?2",
@@ -482,6 +484,7 @@ impl Db {
         Ok(id)
     }
 
+    #[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
     pub fn list_files(&self, space_id: &str) -> Result<Vec<FileRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, space_id, name, hash, size, status FROM files
@@ -496,6 +499,7 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    #[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
     pub fn delete_file(&self, file_id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
         self.conn.execute("DELETE FROM files WHERE id = ?1", [file_id])?;
@@ -503,6 +507,7 @@ impl Db {
     }
 
     /// Replace a file's indexed chunks. `chunks` are `(location, text)` in order.
+    #[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
     pub fn set_file_chunks(&self, file_id: &str, chunks: &[(String, String)]) -> Result<()> {
         self.conn.execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
         for (seq, (location, text)) in chunks.iter().enumerate() {
@@ -518,6 +523,7 @@ impl Db {
 /// Quote a query for FTS5 MATCH: each whitespace token becomes a quoted
 /// phrase (inner quotes doubled), so model-supplied text can't be an FTS
 /// syntax error. Tokens are implicitly ANDed by FTS5.
+#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 pub fn fts_quote(query: &str) -> String {
     query
         .split_whitespace()
@@ -527,6 +533,7 @@ pub fn fts_quote(query: &str) -> String {
 }
 
 /// BM25-ranked chunk search within one space: `(file name, location, snippet)`.
+#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 pub fn search_chunks(
     conn: &Connection,
     space_id: &str,
@@ -551,6 +558,7 @@ pub fn search_chunks(
 }
 
 /// A file's full extracted text (chunks re-joined in order), by display name.
+#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 pub fn file_text(conn: &Connection, space_id: &str, name: &str) -> Result<Option<String>> {
     let mut stmt = conn.prepare(
         "SELECT file_chunks.text
@@ -563,6 +571,7 @@ pub fn file_text(conn: &Connection, space_id: &str, name: &str) -> Result<Option
     Ok((!parts.is_empty()).then(|| parts.join("\n")))
 }
 
+#[allow(dead_code)] // used from Task 3+ of the filesets plan; remove with first caller
 pub fn count_files(conn: &Connection, space_id: &str) -> Result<u64> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM files WHERE space_id = ?1",
