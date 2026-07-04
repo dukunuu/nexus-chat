@@ -381,6 +381,8 @@ pub struct App {
     /// A skill armed by `/<skill-name>`, injected into the next message only.
     pub(crate) forced_skill: Option<String>,
     pub(crate) toolbox: std::sync::Arc<crate::tools::ToolBox>,
+    /// Local static server for model-created apps (None if it failed to bind).
+    pub app_server: Option<crate::appserver::AppServer>,
     pub skills_mode: SkillsMode,
     pub skills_selected: usize,
     /// GitHub `owner/repo/path` shorthand being typed in Install mode.
@@ -529,6 +531,9 @@ impl App {
             None,
             "auto".to_string(),
             Some(crate::tools::FilesCtx { db_path: space.db_path(), space_id: active_space.id.clone() }),
+            // No apps ctx yet — the app server starts after construction;
+            // main() calls refresh_toolbox() once it's up.
+            None,
         ));
         let mut app = App {
             db,
@@ -541,6 +546,7 @@ impl App {
             search_provider: "auto".to_string(),
             forced_skill: None,
             toolbox,
+            app_server: None,
             skills_mode: SkillsMode::Browse,
             skills_selected: 0,
             skills_edit: String::new(),
@@ -693,7 +699,7 @@ impl App {
     /// change takes effect immediately (no restart). Web search works either
     /// way (SearXNG if configured, DuckDuckGo scraping otherwise), so the
     /// built-in skill is always installed.
-    fn refresh_toolbox(&mut self) {
+    pub(crate) fn refresh_toolbox(&mut self) {
         let url = (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
         let key = (!self.langsearch_key.trim().is_empty()).then(|| self.langsearch_key.trim().to_string());
         crate::skills::install_builtin(&self.toolbox.skills_dir);
@@ -705,6 +711,12 @@ impl App {
             Some(crate::tools::FilesCtx {
                 db_path: self.space.db_path(),
                 space_id: self.active_space.id.clone(),
+            }),
+            // App tools only exist while the server runs — a write_file whose
+            // link can never load is worse than no tool.
+            self.app_server.as_ref().map(|s| crate::tools::AppsCtx {
+                dir: self.space.apps_dir(&self.active_space.name),
+                space_url: s.space_url(&self.active_space.name),
             }),
         ));
         self.reload_skills();

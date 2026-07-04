@@ -357,6 +357,9 @@ impl App {
         if let Some(files) = self.files_section() {
             parts.push(files);
         }
+        if let Some(apps) = self.apps_section() {
+            parts.push(apps);
+        }
         let memory = self.read_memory();
         if !memory.trim().is_empty() {
             parts.push(format!("## Memory\n{memory}"));
@@ -415,6 +418,42 @@ impl App {
             s.push_str(&format!("- {} ({kind}, {}, {})\n", f.name, human_size(f.size), f.status));
         }
         Some(s.trim_end().to_string())
+    }
+
+    /// How to build/edit locally served web apps, plus the space's existing
+    /// apps. Present whenever the app server is running.
+    fn apps_section(&self) -> Option<String> {
+        self.app_server.as_ref()?;
+        let mut s = "## Apps\nYou can build static web apps (HTML/CSS/JS) the user opens in a \
+                     browser. Use `write_file(app, path, content)` to create files (start with \
+                     `index.html`), `edit_file(app, path, old_string, new_string)` for exact-match \
+                     edits, and `read_app_file(app, path)` to see current content before editing. \
+                     Files are served immediately — after writing, give the user the live URL \
+                     from the tool result. No build steps or servers to manage; static files only.\n"
+            .to_string();
+        let apps = self.list_apps();
+        if apps.is_empty() {
+            s.push_str("No apps exist in this space yet.");
+        } else {
+            s.push_str("Existing apps in this space:\n");
+            for a in apps {
+                s.push_str(&format!("- {a}\n"));
+            }
+        }
+        Some(s.trim_end().to_string())
+    }
+
+    /// Names of the active space's existing apps (directory listing).
+    pub(crate) fn list_apps(&self) -> Vec<String> {
+        let dir = self.space.apps_dir(&self.active_space.name);
+        let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+        let mut apps: Vec<String> = rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        apps.sort();
+        apps
     }
 }
 

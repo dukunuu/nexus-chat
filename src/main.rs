@@ -1,4 +1,5 @@
 mod app;
+mod appserver;
 mod config;
 mod db;
 mod events;
@@ -18,9 +19,12 @@ use anyhow::Result;
 async fn main() -> Result<()> {
     let key = config::load_key()?;
     let space = space::Space::open()?;
+    let space_root = space.spaces_root();
     let db = db::Db::open(&space.db_path())?;
 
     let mut app = app::App::new(db, key, space);
+    app.app_server = appserver::AppServer::start(space_root).await;
+    app.refresh_toolbox();
 
     let mut terminal = ratatui::init();
     // Capture mouse so the model picker is clickable and the terminal doesn't do

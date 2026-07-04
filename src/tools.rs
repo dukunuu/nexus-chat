@@ -21,6 +21,7 @@ pub struct ToolBox {
     pub search_provider: String,
     client: reqwest::Client,
     files: Option<FilesCtx>,
+    apps: Option<AppsCtx>,
 }
 
 /// Where the file tools read from: the shared db plus the space to scope to.
@@ -31,6 +32,13 @@ pub struct FilesCtx {
     pub space_id: String,
 }
 
+/// Where the app tools write: the active space's apps dir, plus the URL
+/// prefix the app server serves it at. Only present while the server runs.
+pub struct AppsCtx {
+    pub dir: PathBuf,
+    pub space_url: String,
+}
+
 impl ToolBox {
     pub fn new(
         skills_dir: PathBuf,
@@ -38,6 +46,7 @@ impl ToolBox {
         langsearch_key: Option<String>,
         search_provider: String,
         files: Option<FilesCtx>,
+        apps: Option<AppsCtx>,
     ) -> Self {
         ToolBox {
             skills_dir,
@@ -46,6 +55,7 @@ impl ToolBox {
             search_provider,
             client: reqwest::Client::new(),
             files,
+            apps,
         }
     }
 
@@ -138,7 +148,80 @@ impl ToolBox {
                 }),
             });
         }
+        if self.apps.is_some() {
+            defs.push(ToolDef {
+                name: "write_file".to_string(),
+                description: "Create or overwrite a file in a named app (a static web app served locally). Use it to build HTML/CSS/JS the user can open in a browser; the result includes the live URL.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "app": { "type": "string", "description": "app name (directory), e.g. 'presentation'" },
+                        "path": { "type": "string", "description": "file path inside the app, e.g. 'index.html' or 'js/deck.js'" },
+                        "content": { "type": "string", "description": "full file content" },
+                    },
+                    "required": ["app", "path", "content"],
+                }),
+            });
+            defs.push(ToolDef {
+                name: "edit_file".to_string(),
+                description: "Replace an exact string in an app file with a new string. old_string must appear exactly once; read the file first if unsure of its current content.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "app": { "type": "string", "description": "app name" },
+                        "path": { "type": "string", "description": "file path inside the app" },
+                        "old_string": { "type": "string", "description": "exact text to replace (must be unique in the file)" },
+                        "new_string": { "type": "string", "description": "replacement text" },
+                    },
+                    "required": ["app", "path", "old_string", "new_string"],
+                }),
+            });
+            defs.push(ToolDef {
+                name: "read_app_file".to_string(),
+                description: "Read a file from an app, up to 200 lines per call. Use offset to page through longer files.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "app": { "type": "string", "description": "app name" },
+                        "path": { "type": "string", "description": "file path inside the app" },
+                        "offset": { "type": "integer", "description": "1-based first line to read (default 1)" },
+                        "limit": { "type": "integer", "description": "lines to read, max 200 (default 200)" },
+                    },
+                    "required": ["app", "path"],
+                }),
+            });
+        }
         defs
+    }
+
+    /// Resolve `<apps dir>/<app>/<rel>`, rejecting anything that could
+    /// escape the apps dir (absolute paths, `..`/`.` segments, backslashes).
+    fn app_path(&self, app: &str, rel: &str) -> Result<PathBuf, String> {
+        let Some(ctx) = &self.apps else { return Err("apps are not available".to_string()) };
+        if app.is_empty() || app.contains(['/', '\\']) || app == "." || app == ".." {
+            return Err(format!("invalid app name: {app:?}"));
+        }
+        if rel.is_empty() || rel.starts_with('/') {
+            return Err(format!("path must be relative and non-empty: {rel:?}"));
+        }
+        for seg in rel.split('/') {
+            if seg.is_empty() || seg == "." || seg == ".." || seg.contains('\\') {
+                return Err(format!("invalid path segment in {rel:?}"));
+            }
+        }
+        let mut p = ctx.dir.join(app);
+        for seg in rel.split('/') {
+            p.push(seg);
+        }
+        Ok(p)
+    }
+
+    /// The live URL for an app.
+    fn app_link(&self, app: &str) -> String {
+        match &self.apps {
+            Some(c) => format!("live at {}{}/", c.space_url, crate::appserver::encode(app)),
+            None => String::new(),
+        }
     }
 
     /// Run a tool by name. Returns `(result text sent back to the model,
@@ -224,6 +307,88 @@ impl ToolBox {
                         }
                         Ok(None) => format!("unknown file: {name}"),
                         Err(e) => format!("file read failed: {e}"),
+                    },
+                };
+                (result, status)
+            }
+            "write_file" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let (app, path, content) = (field("app"), field("path"), field("content"));
+                let status = format!("Writing {app}/{path}…");
+                let result = match self.app_path(&app, &path) {
+                    Err(e) => e,
+                    Ok(file) => {
+                        let write = file
+                            .parent()
+                            .map(std::fs::create_dir_all)
+                            .unwrap_or(Ok(()))
+                            .and_then(|()| std::fs::write(&file, &content));
+                        match write {
+                            Ok(()) => format!(
+                                "wrote {app}/{path} ({} bytes) — {}",
+                                content.len(),
+                                self.app_link(&app),
+                            ),
+                            Err(e) => format!("write failed: {e}"),
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "edit_file" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let (app, path) = (field("app"), field("path"));
+                let (old, new) = (field("old_string"), field("new_string"));
+                let status = format!("Editing {app}/{path}…");
+                let result = match self.app_path(&app, &path) {
+                    Err(e) => e,
+                    Ok(file) => match std::fs::read_to_string(&file) {
+                        Err(e) => format!("cannot read {app}/{path}: {e}"),
+                        Ok(text) if old.is_empty() => {
+                            let _ = text;
+                            "old_string must not be empty".to_string()
+                        }
+                        Ok(text) => match text.matches(&old).count() {
+                            0 => format!("old_string not found in {app}/{path}; read the file to see its current content"),
+                            1 => match std::fs::write(&file, text.replacen(&old, &new, 1)) {
+                                Ok(()) => format!("edited {app}/{path} — {}", self.app_link(&app)),
+                                Err(e) => format!("write failed: {e}"),
+                            },
+                            n => format!("old_string matches {n} places in {app}/{path} — include more surrounding text to make it unique"),
+                        },
+                    },
+                };
+                (result, status)
+            }
+            "read_app_file" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let (app, path) = (field("app"), field("path"));
+                let offset = v.get("offset").and_then(|o| o.as_u64()).unwrap_or(1).max(1) as usize;
+                let limit = v.get("limit").and_then(|l| l.as_u64()).unwrap_or(200).clamp(1, 200) as usize;
+                let status = format!("Reading {app}/{path}…");
+                let result = match self.app_path(&app, &path) {
+                    Err(e) => e,
+                    Ok(file) => match std::fs::read_to_string(&file) {
+                        Err(e) => format!("cannot read {app}/{path}: {e}"),
+                        Ok(text) => {
+                            let lines: Vec<&str> = text.lines().collect();
+                            let total = lines.len();
+                            let start = (offset - 1).min(total);
+                            let slice = &lines[start..(start + limit).min(total)];
+                            if slice.is_empty() {
+                                format!("{app}/{path}: offset {offset} is past the end ({total} lines)")
+                            } else {
+                                format!(
+                                    "{app}/{path} (lines {}-{} of {total}):\n{}",
+                                    start + 1,
+                                    start + slice.len(),
+                                    slice.join("\n"),
+                                )
+                            }
+                        }
                     },
                 };
                 (result, status)
@@ -489,11 +654,11 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_choice_errors_clearly_when_unconfigured_instead_of_swapping() {
-        let tb = ToolBox::new(PathBuf::new(), None, None, "langsearch".to_string(), None);
+        let tb = ToolBox::new(PathBuf::new(), None, None, "langsearch".to_string(), None, None);
         let err = tb.search("test").await.unwrap_err();
         assert!(err.to_string().contains("LangSearch selected but no API key"));
 
-        let tb = ToolBox::new(PathBuf::new(), None, None, "searxng".to_string(), None);
+        let tb = ToolBox::new(PathBuf::new(), None, None, "searxng".to_string(), None, None);
         let err = tb.search("test").await.unwrap_err();
         assert!(err.to_string().contains("SearXNG selected but no instance URL"));
     }
@@ -507,6 +672,7 @@ mod tests {
             Some("http://127.0.0.1:1".to_string()),
             None,
             "auto".to_string(),
+            None,
             None,
         );
         let err = tb.search("test").await.unwrap_err();
@@ -575,6 +741,7 @@ mod tests {
             None,
             "auto".to_string(),
             Some(FilesCtx { db_path: path, space_id: space.clone() }),
+            None,
         );
         (tb, db, space)
     }
@@ -586,7 +753,7 @@ mod tests {
         assert!(names.contains(&"search_files".to_string()));
         assert!(names.contains(&"read_file".to_string()));
 
-        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), None);
+        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), None, None);
         let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
         assert!(!names.contains(&"search_files".to_string()));
     }
@@ -614,5 +781,90 @@ mod tests {
 
         let (result, _) = tb.run("read_file", r#"{"name":"nope.md"}"#).await;
         assert!(result.contains("unknown file"));
+    }
+
+    fn apps_toolbox() -> (ToolBox, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("nexus-apps-{}", uuid::Uuid::new_v4()));
+        let tb = ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "auto".to_string(),
+            None,
+            Some(AppsCtx { dir: dir.clone(), space_url: "http://127.0.0.1:9999/default/".to_string() }),
+        );
+        (tb, dir)
+    }
+
+    #[test]
+    fn defs_include_app_tools_only_with_apps_ctx() {
+        let (tb, _) = apps_toolbox();
+        let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
+        for t in ["write_file", "edit_file", "read_app_file"] {
+            assert!(names.contains(&t.to_string()), "missing {t}");
+        }
+        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), None, None);
+        let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
+        assert!(!names.contains(&"write_file".to_string()));
+    }
+
+    #[tokio::test]
+    async fn write_edit_read_round_trip_with_live_url() {
+        let (tb, dir) = apps_toolbox();
+        let (result, _) = tb
+            .run("write_file", r#"{"app":"deck","path":"index.html","content":"<h1>Hello</h1>"}"#)
+            .await;
+        assert!(result.contains("wrote deck/index.html"), "{result}");
+        assert!(result.contains("http://127.0.0.1:9999/default/deck/"), "{result}");
+        assert_eq!(std::fs::read_to_string(dir.join("deck/index.html")).unwrap(), "<h1>Hello</h1>");
+
+        // nested path creates parent dirs
+        let (result, _) =
+            tb.run("write_file", r#"{"app":"deck","path":"js/a.js","content":"1"}"#).await;
+        assert!(result.contains("wrote deck/js/a.js"), "{result}");
+
+        let (result, _) = tb
+            .run("edit_file", r#"{"app":"deck","path":"index.html","old_string":"Hello","new_string":"Bye"}"#)
+            .await;
+        assert!(result.contains("edited deck/index.html"), "{result}");
+        assert_eq!(std::fs::read_to_string(dir.join("deck/index.html")).unwrap(), "<h1>Bye</h1>");
+
+        let (result, _) =
+            tb.run("read_app_file", r#"{"app":"deck","path":"index.html"}"#).await;
+        assert!(result.contains("<h1>Bye</h1>"), "{result}");
+        assert!(result.contains("lines 1-1 of 1"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_zero_and_multiple_matches() {
+        let (tb, _) = apps_toolbox();
+        let _ = tb
+            .run("write_file", r#"{"app":"a","path":"f.txt","content":"x y x"}"#)
+            .await;
+        let (result, _) = tb
+            .run("edit_file", r#"{"app":"a","path":"f.txt","old_string":"z","new_string":"w"}"#)
+            .await;
+        assert!(result.contains("not found"), "{result}");
+        let (result, _) = tb
+            .run("edit_file", r#"{"app":"a","path":"f.txt","old_string":"x","new_string":"w"}"#)
+            .await;
+        assert!(result.contains("matches 2 places"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn app_paths_are_confined() {
+        let (tb, dir) = apps_toolbox();
+        for args in [
+            r#"{"app":"..","path":"f.txt","content":"x"}"#,
+            r#"{"app":"a/b","path":"f.txt","content":"x"}"#,
+            r#"{"app":"a","path":"../f.txt","content":"x"}"#,
+            r#"{"app":"a","path":"/etc/f.txt","content":"x"}"#,
+            r#"{"app":"a","path":"b/../../f.txt","content":"x"}"#,
+            r#"{"app":"a","path":"","content":"x"}"#,
+        ] {
+            let (result, _) = tb.run("write_file", args).await;
+            assert!(result.contains("invalid") || result.contains("must be relative"), "{args} -> {result}");
+        }
+        assert!(!dir.join("../f.txt").exists());
     }
 }

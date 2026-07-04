@@ -76,6 +76,16 @@ impl Space {
         self.space_dir(name).join("images")
     }
 
+    /// Directory holding a space's model-created apps (created on demand).
+    pub fn apps_dir(&self, name: &str) -> PathBuf {
+        self.space_dir(name).join("apps")
+    }
+
+    /// Root of all spaces — what the app server serves from.
+    pub fn spaces_root(&self) -> PathBuf {
+        self.root.join("spaces")
+    }
+
     /// Rename a space's directory (its db row is renamed separately).
     pub fn rename_space_dir(&self, old: &str, new: &str) -> Result<()> {
         let from = self.space_dir(old);
