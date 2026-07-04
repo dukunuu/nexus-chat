@@ -19,8 +19,6 @@ mod chat;
 mod compaction;
 mod copy;
 mod files;
-#[allow(unused_imports)] // used from Task 2 of the file-picker plan; remove with first caller
-pub(crate) use files::PickerEntry;
 mod memory;
 mod models;
 mod sessions;
