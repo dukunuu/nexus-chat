@@ -15,6 +15,7 @@ impl App {
         self.messages.clear();
         self.context_total = None;
         self.scroll = 0;
+        self.clear_image_state();
         self.status = "new chat — send a message to start it".to_string();
         Ok(())
     }
@@ -97,6 +98,7 @@ impl App {
                 self.messages.clear();
                 self.context_total = None;
                 self.scroll = 0;
+                self.clear_image_state();
             }
             self.status = format!("deleted: {}", s.title);
         }
@@ -118,6 +120,7 @@ impl App {
             // Estimate from history until the next response reports exact usage.
             self.context_total = None;
             self.scroll = 0;
+            self.clear_image_state();
         }
         self.popup = Popup::None;
         Ok(())

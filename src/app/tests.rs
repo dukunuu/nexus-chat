@@ -829,3 +829,15 @@ async fn submit_during_deferred_send_is_rejected_and_preserved() {
     assert_eq!(a.input_text(), "second message"); // restored, not lost
     assert!(a.messages.is_empty()); // nothing was stored
 }
+
+#[test]
+fn switching_context_cancels_deferred_image_send() {
+    let mut a = app_with_key();
+    a.deferred_send = Some(String::new());
+    a.pending_images.push(crate::app::transcribe::PendingImage {
+        path: std::path::PathBuf::from("/tmp/x.png"),
+    });
+    a.new_session().unwrap();
+    assert!(a.deferred_send.is_none());
+    assert!(a.pending_images.is_empty());
+}

@@ -130,6 +130,15 @@ impl App {
             let _ = self.start_stream();
         }
     }
+
+    /// Drop all in-flight image work: staged attachments, a deferred send, and
+    /// the describe channel. Called when the conversation context changes
+    /// (new/switched session or space) so a resume can't fire into it.
+    pub(crate) fn clear_image_state(&mut self) {
+        self.pending_images.clear();
+        self.deferred_send = None;
+        self.describe_rx = None;
+    }
 }
 
 #[cfg(test)]
