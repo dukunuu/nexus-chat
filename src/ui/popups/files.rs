@@ -70,9 +70,9 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             " files ",
             "files — Enter open · Ctrl+N add · Ctrl+D remove (or drop files into the space dir)",
         ),
-        // Pick short-circuits with an early return above; this arm is
-        // unreachable and only keeps the match exhaustive.
-        FilesMode::Pick => unreachable!("Pick returns earlier in render()"),
+        // Pick short-circuits with an early return above; this arm only
+        // keeps the match exhaustive (a panic here would kill the whole TUI).
+        FilesMode::Pick => String::new(),
     };
 
     let list = List::new(items)
