@@ -112,6 +112,7 @@ impl App {
         let dir = self.space.files_dir(&self.active_space.name);
         let known = self.db.list_files(&self.active_space.id).unwrap_or_default();
         let mut seen: Vec<String> = Vec::new();
+        let mut ocr_jobs: Vec<(String, String, std::path::PathBuf)> = Vec::new();
 
         let entries = std::fs::read_dir(&dir).map(|rd| rd.flatten().collect::<Vec<_>>()).unwrap_or_default();
         for entry in entries {
@@ -123,12 +124,23 @@ impl App {
             seen.push(name.clone());
             let Ok(bytes) = std::fs::read(&path) else { continue };
             let hash = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>();
-            if known.iter().any(|f| f.name == name && f.hash == hash) {
-                continue; // unchanged
+            if let Some(f) = known.iter().find(|f| f.name == name && f.hash == hash) {
+                // Stale "ocr…" (app quit mid-OCR) re-queues once no batch is in flight.
+                if f.status == "ocr…" && self.ocr_rx.is_none() {
+                    ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
+                }
+                continue;
             }
             let size = bytes.len() as i64;
             let (status, chunks) = match crate::extract::extract_text(&path) {
-                Ok(text) if text.trim().is_empty() => ("no text (scanned?)".to_string(), Vec::new()),
+                Ok(text) if text.trim().is_empty() => {
+                    if name.to_lowercase().ends_with(".pdf") {
+                        ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
+                        ("ocr…".to_string(), Vec::new())
+                    } else {
+                        ("no text (scanned?)".to_string(), Vec::new())
+                    }
+                }
                 Ok(text) => ("ok".to_string(), crate::extract::chunk_lines(&text)),
                 Err(e) => (format!("error: {e}"), Vec::new()),
             };
@@ -139,8 +151,66 @@ impl App {
         for gone in known.iter().filter(|f| !seen.contains(&f.name)) {
             let _ = self.db.delete_file(&gone.id);
         }
+        self.start_ocr(ocr_jobs);
         self.files_cache = self.db.list_files(&self.active_space.id).unwrap_or_default();
         self.files_selected = self.files_selected.min(self.files_cache.len().saturating_sub(1));
+    }
+
+    /// OCR queued scanned PDFs sequentially off the UI thread. One batch at a
+    /// time: jobs arriving while a batch runs stay at "ocr…" and re-queue on a
+    /// later rescan.
+    pub(crate) fn start_ocr(&mut self, jobs: Vec<(String, String, std::path::PathBuf)>) {
+        if jobs.is_empty() || self.ocr_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.ocr_rx = Some(rx);
+        tokio::task::spawn_blocking(move || {
+            for (space_id, name, path) in jobs {
+                let result = match crate::extract::ocr_pdf(&path) {
+                    Ok(text) => Ok(text),
+                    Err(crate::extract::OcrError::MissingTools) => {
+                        Err("scanned pdf — install tesseract + poppler for ocr".to_string())
+                    }
+                    Err(crate::extract::OcrError::Failed(e)) => Err(format!("error: ocr: {e}")),
+                };
+                if tx.send((space_id, name, result)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
+    /// A finished OCR job: persist chunks/status, refresh the cache only if the
+    /// file's space is still active. `None` = batch done (channel closed).
+    pub fn on_ocr_done(
+        &mut self,
+        r: Option<(String, String, std::result::Result<String, String>)>,
+    ) {
+        let Some((space_id, name, result)) = r else {
+            self.ocr_rx = None;
+            return;
+        };
+        let Ok(files) = self.db.list_files(&space_id) else { return };
+        let Some(f) = files.iter().find(|f| f.name == name) else {
+            return; // deleted mid-OCR
+        };
+        match result {
+            Ok(text) if text.trim().is_empty() => {
+                let _ = self.db.set_file_status(&f.id, "no text (ocr found nothing)");
+            }
+            Ok(text) => {
+                let _ = self.db.set_file_chunks(&f.id, &crate::extract::chunk_lines(&text));
+                let _ = self.db.set_file_status(&f.id, "ok");
+            }
+            Err(msg) => {
+                let _ = self.db.set_file_status(&f.id, &msg);
+            }
+        }
+        if space_id == self.active_space.id {
+            self.files_cache = self.db.list_files(&space_id).unwrap_or_default();
+            self.files_selected = self.files_selected.min(self.files_cache.len().saturating_sub(1));
+        }
     }
 
     /// Copy `path` into the active space's files dir and index it. Returns
@@ -378,5 +448,96 @@ mod tests {
         a.picker_backspace();
         assert_eq!(a.picker_filter, "rp");
         assert_eq!(a.picker_dir, root);
+    }
+
+    #[tokio::test]
+    async fn rescan_marks_empty_pdf_ocr_and_spawns_batch() {
+        let mut a = test_app();
+        let dir = a.space.files_dir(&a.active_space.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("scan.pdf"), crate::extract::minimal_pdf(None)).unwrap();
+
+        a.rescan_files();
+        assert_eq!(a.files_cache[0].status, "ocr…");
+        assert!(a.ocr_rx.is_some(), "an ocr batch should be in flight");
+
+        // A second rescan while the batch is in flight does not re-queue.
+        a.rescan_files();
+        assert_eq!(a.files_cache[0].status, "ocr…");
+    }
+
+    #[tokio::test]
+    async fn rescan_requeues_stale_ocr_status_when_idle() {
+        let mut a = test_app();
+        let dir = a.space.files_dir(&a.active_space.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("scan.pdf"), crate::extract::minimal_pdf(None)).unwrap();
+        a.rescan_files();
+
+        // Simulate an app restart mid-OCR: status stuck at "ocr…", no batch in flight.
+        a.ocr_rx = None;
+        a.rescan_files();
+        assert!(a.ocr_rx.is_some(), "stale ocr… should re-queue");
+    }
+
+    #[test]
+    fn on_ocr_done_ok_indexes_and_marks_ok() {
+        let mut a = test_app();
+        let id = a.db.upsert_file(&a.active_space.id, "scan.pdf", "h", 9, "ocr…").unwrap();
+        let _ = id;
+        a.on_ocr_done(Some((
+            a.active_space.id.clone(),
+            "scan.pdf".to_string(),
+            Ok("[page 1]\nquarterly revenue table".to_string()),
+        )));
+        assert_eq!(a.files_cache[0].status, "ok");
+        let hits =
+            crate::db::search_chunks(a.db.conn_for_test(), &a.active_space.id, "revenue", 8).unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn on_ocr_done_empty_and_err_statuses() {
+        let mut a = test_app();
+        a.db.upsert_file(&a.active_space.id, "blank.pdf", "h1", 9, "ocr…").unwrap();
+        a.db.upsert_file(&a.active_space.id, "bad.pdf", "h2", 9, "ocr…").unwrap();
+
+        a.on_ocr_done(Some((a.active_space.id.clone(), "blank.pdf".to_string(), Ok(String::new()))));
+        a.on_ocr_done(Some((
+            a.active_space.id.clone(),
+            "bad.pdf".to_string(),
+            Err("scanned pdf — install tesseract + poppler for ocr".to_string()),
+        )));
+
+        let by_name = |a: &App, n: &str| {
+            a.files_cache.iter().find(|f| f.name == n).unwrap().status.clone()
+        };
+        assert_eq!(by_name(&a, "blank.pdf"), "no text (ocr found nothing)");
+        assert_eq!(by_name(&a, "bad.pdf"), "scanned pdf — install tesseract + poppler for ocr");
+    }
+
+    #[test]
+    fn on_ocr_done_for_inactive_space_writes_db_but_not_cache() {
+        let mut a = test_app();
+        let other = a.db.create_space("other").unwrap();
+        a.db.upsert_file(&other.id, "scan.pdf", "h", 9, "ocr…").unwrap();
+
+        a.on_ocr_done(Some((other.id.clone(), "scan.pdf".to_string(), Ok("found text".to_string()))));
+
+        assert!(a.files_cache.is_empty(), "active-space cache must not show other space's file");
+        let rows = a.db.list_files(&other.id).unwrap();
+        assert_eq!(rows[0].status, "ok");
+
+        // Deleted-mid-OCR: result for a row that no longer exists is a no-op.
+        a.on_ocr_done(Some((other.id.clone(), "gone.pdf".to_string(), Ok("x".to_string()))));
+    }
+
+    #[test]
+    fn on_ocr_done_none_clears_channel() {
+        let mut a = test_app();
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        a.ocr_rx = Some(rx);
+        a.on_ocr_done(None);
+        assert!(a.ocr_rx.is_none());
     }
 }

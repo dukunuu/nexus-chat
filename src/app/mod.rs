@@ -336,6 +336,8 @@ pub enum AppEvent {
     /// One image-description result (or the error), or `None` when the
     /// describe batch's channel closed (all images done).
     Described(Option<(String, std::result::Result<String, String>)>),
+    /// One OCR result per scanned PDF, or `None` when the batch's channel closed.
+    Ocr(Option<(String, String, std::result::Result<String, String>)>),
 }
 
 pub struct App {
@@ -385,6 +387,9 @@ pub struct App {
     pub(crate) skills_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
     /// Background image-description result channel: (message_images row id, description or error).
     pub(crate) describe_rx: Option<mpsc::UnboundedReceiver<(String, std::result::Result<String, String>)>>,
+    /// Background OCR results: (space_id, file name, extracted text or status message).
+    pub(crate) ocr_rx:
+        Option<mpsc::UnboundedReceiver<(String, String, std::result::Result<String, String>)>>,
     /// Images pasted from the clipboard, staged for the next message.
     pub pending_images: Vec<transcribe::PendingImage>,
     /// A message queued to send once its images finish being described.
@@ -541,6 +546,7 @@ impl App {
             skills_edit: String::new(),
             skills_rx: None,
             describe_rx: None,
+            ocr_rx: None,
             pending_images: Vec::new(),
             deferred_send: None,
             files_cache: Vec::new(),
@@ -796,6 +802,12 @@ impl App {
                     None => std::future::pending().await,
                 }
             } => AppEvent::Described(r),
+            r = async {
+                match self.ocr_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => AppEvent::Ocr(r),
         }
     }
 

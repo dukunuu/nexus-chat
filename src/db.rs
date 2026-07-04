@@ -584,6 +584,12 @@ impl Db {
         Ok(())
     }
 
+    /// Update a file's status column (e.g. "ok", "ocr…", or an error message).
+    pub fn set_file_status(&self, file_id: &str, status: &str) -> Result<()> {
+        self.conn.execute("UPDATE files SET status = ?2 WHERE id = ?1", (file_id, status))?;
+        Ok(())
+    }
+
     /// Replace a file's indexed chunks. `chunks` are `(location, text)` in order.
     pub fn set_file_chunks(&self, file_id: &str, chunks: &[(String, String)]) -> Result<()> {
         self.conn.execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;

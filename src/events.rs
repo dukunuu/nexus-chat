@@ -110,6 +110,7 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                 AppEvent::Compact(c) => app.on_compact_result(c),
                 AppEvent::SkillInstall(r) => app.on_skill_install_result(r),
                 AppEvent::Described(r) => app.on_described(r),
+                AppEvent::Ocr(r) => app.on_ocr_done(r),
             },
             _ = async {
                 if streaming {

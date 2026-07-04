@@ -188,7 +188,6 @@ pub(crate) fn chunk_lines(text: &str) -> Vec<(String, String)> {
 /// Why OCR failed: the tools aren't installed (user-fixable hint) vs a real
 /// failure (surfaced as an error status).
 #[derive(Debug)]
-#[allow(dead_code)] // used from Task 2 of the scanned-pdf-ocr plan; remove with first caller
 pub(crate) enum OcrError {
     MissingTools,
     Failed(String),
@@ -197,14 +196,12 @@ pub(crate) enum OcrError {
 /// OCR a (scanned) PDF with pdftoppm + tesseract. Pages join with `[page N]`
 /// marker lines — same inline-marker convention as pptx's `[slide N]`.
 /// `Ok("")` means the tools ran but found no text.
-#[allow(dead_code)] // used from Task 2 of the scanned-pdf-ocr plan; remove with first caller
 pub(crate) fn ocr_pdf(path: &Path) -> std::result::Result<String, OcrError> {
     ocr_pdf_with("pdftoppm", "tesseract", path)
 }
 
 /// Binary names are parameters so tests can exercise the missing-tools path
 /// without mutating the process-global PATH.
-#[allow(dead_code)] // used from Task 2 of the scanned-pdf-ocr plan; remove with first caller
 fn ocr_pdf_with(
     pdftoppm: &str,
     tesseract: &str,
@@ -217,7 +214,6 @@ fn ocr_pdf_with(
     result
 }
 
-#[allow(dead_code)] // used from Task 2 of the scanned-pdf-ocr plan; remove with first caller
 fn ocr_pdf_in(
     pdftoppm: &str,
     tesseract: &str,
