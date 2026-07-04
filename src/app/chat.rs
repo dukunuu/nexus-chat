@@ -31,6 +31,11 @@ impl App {
             self.set_input(&text);
             return Ok(());
         }
+        if self.deferred_send.is_some() || self.describe_rx.is_some() {
+            self.status = "wait — still understanding the attached image".to_string();
+            self.set_input(&text);
+            return Ok(());
+        }
         if self.provider.is_none() {
             self.status = "set your API key first with /key".to_string();
             self.set_input(&text);

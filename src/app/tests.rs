@@ -816,3 +816,16 @@ fn missing_descriptions_are_collected_for_non_vision_sends() {
     assert_eq!(missing.len(), 1);
     assert_eq!(missing[0].1, "/tmp/nope.png");
 }
+
+#[tokio::test]
+async fn submit_during_deferred_send_is_rejected_and_preserved() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    let space = a.active_space.id.clone();
+    a.session = Some(a.db.create_session("test", "a/one", &space).unwrap());
+    a.deferred_send = Some(String::new());
+    a.send_message("second message".into()).unwrap();
+    assert!(a.status.contains("understanding"));
+    assert_eq!(a.input_text(), "second message"); // restored, not lost
+    assert!(a.messages.is_empty()); // nothing was stored
+}
