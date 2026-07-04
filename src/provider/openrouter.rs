@@ -13,7 +13,7 @@ use crate::tools::ToolBox;
 const BASE: &str = "https://openrouter.ai/api/v1";
 /// Hard cap on tool round-trips per response, so a model that keeps calling
 /// tools can't loop forever.
-const MAX_TOOL_ITERS: usize = 5;
+const MAX_TOOL_ITERS: usize = 25;
 
 #[derive(Clone)]
 pub struct OpenRouter {
@@ -166,9 +166,16 @@ impl OpenRouter {
         tx: &mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<()> {
         for iter in 0..=MAX_TOOL_ITERS {
-            // On the final allowed iteration, omit tools so the model is
-            // forced to answer with whatever it has instead of looping.
+            // On the final allowed iteration, omit tools and tell the model
+            // why — otherwise it writes the tool call as plain text.
             let send_tools: &[ToolDef] = if iter < MAX_TOOL_ITERS { &tools } else { &[] };
+            if iter == MAX_TOOL_ITERS {
+                messages.push(ChatMessage::text(
+                    "system",
+                    "Tool budget exhausted for this turn. Do not attempt further tool calls; \
+                     answer now with the information you already have.",
+                ));
+            }
             match self.run_stream(&model, &messages, &params, send_tools, tx).await? {
                 Finish::Errored => return Ok(()),
                 Finish::Done => {
@@ -252,7 +259,6 @@ impl OpenRouter {
         let mut es = EventSource::new(request).context("opening SSE stream")?;
         let mut tool_calls: BTreeMap<usize, ToolCall> = BTreeMap::new();
         let mut content_acc = String::new();
-        let mut finish_reason: Option<String> = None;
         while let Some(event) = es.next().await {
             match event {
                 Ok(Event::Open) => {}
@@ -271,9 +277,6 @@ impl OpenRouter {
                             let _ = tx.send(StreamEvent::Token(token));
                         }
                     accumulate_tool_calls(&mut tool_calls, &msg.data);
-                    if let Some(fr) = parse_finish_reason(&msg.data) {
-                        finish_reason = Some(fr);
-                    }
                     if let Some(usage) = parse_usage(&msg.data) {
                         let _ = tx.send(StreamEvent::Usage(usage));
                     }
@@ -286,7 +289,10 @@ impl OpenRouter {
                 }
             }
         }
-        if finish_reason.as_deref() == Some("tool_calls") && !tool_calls.is_empty() {
+        // Trust accumulated tool calls, not finish_reason: some providers
+        // stream tool_calls but finish with "stop" (or no finish chunk at
+        // all); dropping the calls there kills the turn silently.
+        if !tool_calls.is_empty() {
             Ok(Finish::ToolCalls(tool_calls.into_values().collect(), content_acc))
         } else {
             Ok(Finish::Done)
@@ -345,12 +351,6 @@ fn accumulate_tool_calls(acc: &mut BTreeMap<usize, ToolCall>, data: &str) {
             }
         }
     }
-}
-
-/// Pull `choices[0].finish_reason` out of an SSE chunk, if present.
-fn parse_finish_reason(data: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(data).ok()?;
-    v.get("choices")?.get(0)?.get("finish_reason")?.as_str().map(str::to_string)
 }
 
 /// Pull the `usage` object from an SSE chunk, if present.
@@ -473,15 +473,6 @@ mod tests {
         assert_eq!(acc.len(), 2);
         assert_eq!(acc[&0].name, "skill");
         assert_eq!(acc[&1].name, "web_search");
-    }
-
-    #[test]
-    fn parses_finish_reason() {
-        assert_eq!(
-            parse_finish_reason(r#"{"choices":[{"finish_reason":"tool_calls"}]}"#),
-            Some("tool_calls".to_string())
-        );
-        assert_eq!(parse_finish_reason(r#"{"choices":[{"delta":{}}]}"#), None);
     }
 
     #[test]
