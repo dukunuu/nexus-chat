@@ -16,7 +16,6 @@ pub struct PickerEntry {
 
 impl App {
     /// Enter the picker at `picker_dir` (home on first open, remembered after).
-    #[allow(dead_code)] // used from Task 2 of the file-picker plan; remove with first caller
     pub(crate) fn open_file_picker(&mut self) {
         self.picker_filter.clear();
         self.picker_selected = 0;
@@ -46,7 +45,6 @@ impl App {
     }
 
     /// Entries matching the fuzzy filter (all of them, dirs first, when empty).
-    #[allow(dead_code)] // used from Task 2 of the file-picker plan; remove with first caller
     pub fn filtered_picker_entries(&self) -> Vec<&PickerEntry> {
         let needle = self.picker_filter.trim();
         if needle.is_empty() {
@@ -56,20 +54,17 @@ impl App {
         super::fuzzy_filter_sorted(&self.picker_entries, |e| fuzzy_score(&e.name, needle))
     }
 
-    #[allow(dead_code)] // used from Task 2 of the file-picker plan; remove with first caller
     pub fn move_picker_selection(&mut self, delta: i32) {
         self.picker_selected =
             super::clamp_cursor(self.picker_selected, self.filtered_picker_entries().len(), delta);
     }
 
-    #[allow(dead_code)] // used from Task 2 of the file-picker plan; remove with first caller
     pub fn picker_filter_push(&mut self, c: char) {
         self.picker_filter.push(c);
         self.picker_selected = 0;
     }
 
     /// Backspace erases the filter first; on an empty filter it goes up a level.
-    #[allow(dead_code)] // used from Task 2 of the file-picker plan; remove with first caller
     pub fn picker_backspace(&mut self) {
         if !self.picker_filter.is_empty() {
             self.picker_filter.pop();
@@ -84,7 +79,6 @@ impl App {
     }
 
     /// Enter descends into a directory, or imports the selected file.
-    #[allow(dead_code)] // used from Task 2 of the file-picker plan; remove with first caller
     pub fn picker_enter(&mut self) -> Result<()> {
         let filtered = self.filtered_picker_entries();
         let Some(entry) = filtered.get(self.picker_selected) else {

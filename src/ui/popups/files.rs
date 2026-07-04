@@ -12,6 +12,38 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 64, 60);
     f.render_widget(Clear, area);
 
+    if app.files_mode == FilesMode::Pick {
+        let entries = app.filtered_picker_entries();
+        let items: Vec<ListItem> = entries
+            .iter()
+            .map(|e| {
+                if e.is_dir {
+                    ListItem::new(Line::from(Span::styled(
+                        format!("{}/", e.name),
+                        Style::default().fg(Color::Cyan),
+                    )))
+                } else {
+                    ListItem::new(Line::from(Span::styled(e.name.clone(), Style::default().fg(Color::White))))
+                }
+            })
+            .collect();
+        let title = format!(
+            " {} — filter: {}▏  (Enter open/import · Backspace up · Esc cancel) ",
+            app.picker_dir.display(),
+            app.picker_filter,
+        );
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(title))
+            .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+            .highlight_symbol("▸ ");
+        let mut state = ListState::default();
+        if !entries.is_empty() {
+            state.select(Some(app.picker_selected.min(entries.len() - 1)));
+        }
+        f.render_stateful_widget(list, area, &mut state);
+        return;
+    }
+
     let dim = Style::default().fg(Color::DarkGray);
     let items: Vec<ListItem> = app
         .files_cache
@@ -38,9 +70,9 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             " files ",
             "files — Enter open · Ctrl+N add · Ctrl+D remove (or drop files into the space dir)",
         ),
-        // ponytail: picker browser UI lands in Task 2 of the file-picker plan;
-        // this arm only keeps the match exhaustive until then.
-        FilesMode::Pick => " pick a file ".to_string(),
+        // Pick short-circuits with an early return above; this arm is
+        // unreachable and only keeps the match exhaustive.
+        FilesMode::Pick => unreachable!("Pick returns earlier in render()"),
     };
 
     let list = List::new(items)
@@ -87,16 +119,24 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 Some(BrowseAction::Close) => app.popup = crate::app::Popup::None,
                 Some(BrowseAction::MoveUp) => app.move_files_selection(-1),
                 Some(BrowseAction::MoveDown) => app.move_files_selection(1),
-                Some(BrowseAction::Create) => app.start_files_add(),
+                Some(BrowseAction::Create) => app.open_file_picker(),
                 Some(BrowseAction::ConfirmDelete) if !app.files_cache.is_empty() => {
                     app.files_mode = FilesMode::ConfirmDelete;
                 }
                 _ => {}
             }
         }
-        // ponytail: picker key handling lands in Task 2 of the file-picker
-        // plan; this arm only keeps the match exhaustive until then.
-        FilesMode::Pick => {}
+        FilesMode::Pick => match key.code {
+            KeyCode::Esc => app.files_mode = FilesMode::Browse,
+            KeyCode::Enter => app.picker_enter()?,
+            KeyCode::Backspace => app.picker_backspace(),
+            KeyCode::Up => app.move_picker_selection(-1),
+            KeyCode::Down => app.move_picker_selection(1),
+            KeyCode::Char(c) if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                app.picker_filter_push(c)
+            }
+            _ => {}
+        },
     }
     Ok(())
 }

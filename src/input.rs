@@ -246,6 +246,11 @@ impl App {
             }
             Popup::Skills if self.skills_mode == SkillsMode::Install => self.skills_edit.push_str(text),
             Popup::Files if self.files_mode == crate::app::FilesMode::Add => self.files_edit.push_str(text),
+            Popup::Files if self.files_mode == crate::app::FilesMode::Pick => {
+                for c in text.chars().filter(|c| !c.is_control()) {
+                    self.picker_filter_push(c);
+                }
+            }
             Popup::Settings => {
                 if let Some(i) = self.text_index() {
                     use crate::app::SettingsField;
@@ -533,6 +538,15 @@ mod tests {
         a.files_mode = crate::app::FilesMode::Add;
         a.paste("/tmp/report.pdf");
         assert_eq!(a.files_edit, "/tmp/report.pdf");
+    }
+
+    #[test]
+    fn paste_in_picker_mode_feeds_the_filter() {
+        let mut a = test_app();
+        a.popup = crate::app::Popup::Files;
+        a.files_mode = crate::app::FilesMode::Pick;
+        a.paste("doc");
+        assert_eq!(a.picker_filter, "doc");
     }
 
     #[test]
