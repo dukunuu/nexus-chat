@@ -29,7 +29,9 @@ fileset file.
   scanned PDFs queues them in one spawned task, processed in order).
 - The stored content hash means a later rescan does not re-OCR an unchanged
   file: files already at a terminal status keep it; only hash changes
-  re-enter extraction.
+  re-enter extraction. Exception: a file still at `"ocr…"` with no in-flight
+  OCR task (e.g. the app quit mid-OCR) is re-queued on rescan — `"ocr…"` is
+  not a terminal status.
 
 ### OCR pipeline (`ocr_pdf` — new fn, `src/extract.rs` or small `src/ocr.rs`)
 Per PDF:
