@@ -8,6 +8,14 @@ use sha2::{Digest, Sha256};
 
 use super::App;
 
+/// A message from the background OCR batch about one file.
+pub(crate) enum OcrUpdate {
+    /// Pages done so far out of the total.
+    Progress(usize, usize),
+    /// Final outcome: extracted text, or a status message.
+    Done(std::result::Result<String, String>),
+}
+
 /// One row of the file-picker browser.
 pub struct PickerEntry {
     pub name: String,
@@ -125,8 +133,9 @@ impl App {
             let Ok(bytes) = std::fs::read(&path) else { continue };
             let hash = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>();
             if let Some(f) = known.iter().find(|f| f.name == name && f.hash == hash) {
-                // Stale "ocr…" (app quit mid-OCR) re-queues once no batch is in flight.
-                if f.status == "ocr…" && self.ocr_rx.is_none() {
+                // Stale "ocr…"/"ocr N/M" (app quit mid-OCR) re-queues once no
+                // batch is in flight.
+                if f.status.starts_with("ocr") && self.ocr_rx.is_none() {
                     ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
                 }
                 continue;
@@ -167,14 +176,19 @@ impl App {
         self.ocr_rx = Some(rx);
         tokio::task::spawn_blocking(move || {
             for (space_id, name, path) in jobs {
-                let result = match crate::extract::ocr_pdf(&path) {
+                let progress_tx = tx.clone();
+                let (sid, fname) = (space_id.clone(), name.clone());
+                let progress = move |done: usize, total: usize| {
+                    let _ = progress_tx.send((sid.clone(), fname.clone(), OcrUpdate::Progress(done, total)));
+                };
+                let result = match crate::extract::ocr_pdf(&path, &progress) {
                     Ok(text) => Ok(text),
                     Err(crate::extract::OcrError::MissingTools) => {
                         Err("scanned pdf — install tesseract + poppler for ocr".to_string())
                     }
                     Err(crate::extract::OcrError::Failed(e)) => Err(format!("error: ocr: {e}")),
                 };
-                if tx.send((space_id, name, result)).is_err() {
+                if tx.send((space_id, name, OcrUpdate::Done(result))).is_err() {
                     return;
                 }
             }
@@ -183,11 +197,8 @@ impl App {
 
     /// A finished OCR job: persist chunks/status, refresh the cache only if the
     /// file's space is still active. `None` = batch done (channel closed).
-    pub fn on_ocr_done(
-        &mut self,
-        r: Option<(String, String, std::result::Result<String, String>)>,
-    ) {
-        let Some((space_id, name, result)) = r else {
+    pub fn on_ocr_done(&mut self, r: Option<(String, String, OcrUpdate)>) {
+        let Some((space_id, name, update)) = r else {
             self.ocr_rx = None;
             return;
         };
@@ -195,18 +206,27 @@ impl App {
         let Some(f) = files.iter().find(|f| f.name == name) else {
             return; // deleted mid-OCR
         };
-        if f.status != "ocr…" {
+        if !f.status.starts_with("ocr") {
             return; // re-imported mid-OCR — this result is for stale content
         }
-        match result {
-            Ok(text) if text.trim().is_empty() => {
+        match update {
+            OcrUpdate::Progress(done, total) => {
+                let _ = self.db.set_file_status(&f.id, &format!("ocr {done}/{total}"));
+                if space_id == self.active_space.id {
+                    self.status = format!("ocr {name}: {done}/{total} pages");
+                }
+            }
+            OcrUpdate::Done(Ok(text)) if text.trim().is_empty() => {
                 let _ = self.db.set_file_status(&f.id, "no text (ocr found nothing)");
             }
-            Ok(text) => {
+            OcrUpdate::Done(Ok(text)) => {
                 let _ = self.db.set_file_chunks(&f.id, &crate::extract::chunk_lines(&text));
                 let _ = self.db.set_file_status(&f.id, "ok");
+                if space_id == self.active_space.id {
+                    self.status = format!("ocr done: {name}");
+                }
             }
-            Err(msg) => {
+            OcrUpdate::Done(Err(msg)) => {
                 let _ = self.db.set_file_status(&f.id, &msg);
             }
         }
@@ -491,7 +511,7 @@ mod tests {
         a.on_ocr_done(Some((
             a.active_space.id.clone(),
             "scan.pdf".to_string(),
-            Ok("[page 1]\nquarterly revenue table".to_string()),
+            OcrUpdate::Done(Ok("[page 1]\nquarterly revenue table".to_string())),
         )));
         assert_eq!(a.files_cache[0].status, "ok");
         let hits =
@@ -500,16 +520,37 @@ mod tests {
     }
 
     #[test]
+    fn on_ocr_progress_updates_status_and_status_line() {
+        let mut a = test_app();
+        a.db.upsert_file(&a.active_space.id, "scan.pdf", "h", 9, "ocr…").unwrap();
+        a.on_ocr_done(Some((
+            a.active_space.id.clone(),
+            "scan.pdf".to_string(),
+            OcrUpdate::Progress(3, 10),
+        )));
+        assert_eq!(a.files_cache[0].status, "ocr 3/10");
+        assert!(a.status.contains("3/10"), "{}", a.status);
+
+        // Progress for a file mid-way is still non-terminal: a Done after it applies.
+        a.on_ocr_done(Some((
+            a.active_space.id.clone(),
+            "scan.pdf".to_string(),
+            OcrUpdate::Done(Ok("[page 1]\nfound".to_string())),
+        )));
+        assert_eq!(a.files_cache[0].status, "ok");
+    }
+
+    #[test]
     fn on_ocr_done_empty_and_err_statuses() {
         let mut a = test_app();
         a.db.upsert_file(&a.active_space.id, "blank.pdf", "h1", 9, "ocr…").unwrap();
         a.db.upsert_file(&a.active_space.id, "bad.pdf", "h2", 9, "ocr…").unwrap();
 
-        a.on_ocr_done(Some((a.active_space.id.clone(), "blank.pdf".to_string(), Ok(String::new()))));
+        a.on_ocr_done(Some((a.active_space.id.clone(), "blank.pdf".to_string(), OcrUpdate::Done(Ok(String::new())))));
         a.on_ocr_done(Some((
             a.active_space.id.clone(),
             "bad.pdf".to_string(),
-            Err("scanned pdf — install tesseract + poppler for ocr".to_string()),
+            OcrUpdate::Done(Err("scanned pdf — install tesseract + poppler for ocr".to_string())),
         )));
 
         let by_name = |a: &App, n: &str| {
@@ -525,14 +566,14 @@ mod tests {
         let other = a.db.create_space("other").unwrap();
         a.db.upsert_file(&other.id, "scan.pdf", "h", 9, "ocr…").unwrap();
 
-        a.on_ocr_done(Some((other.id.clone(), "scan.pdf".to_string(), Ok("found text".to_string()))));
+        a.on_ocr_done(Some((other.id.clone(), "scan.pdf".to_string(), OcrUpdate::Done(Ok("found text".to_string())))));
 
         assert!(a.files_cache.is_empty(), "active-space cache must not show other space's file");
         let rows = a.db.list_files(&other.id).unwrap();
         assert_eq!(rows[0].status, "ok");
 
         // Deleted-mid-OCR: result for a row that no longer exists is a no-op.
-        a.on_ocr_done(Some((other.id.clone(), "gone.pdf".to_string(), Ok("x".to_string()))));
+        a.on_ocr_done(Some((other.id.clone(), "gone.pdf".to_string(), OcrUpdate::Done(Ok("x".to_string())))));
     }
 
     #[test]

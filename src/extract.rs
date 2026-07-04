@@ -195,9 +195,13 @@ pub(crate) enum OcrError {
 
 /// OCR a (scanned) PDF with pdftoppm + tesseract. Pages join with `[page N]`
 /// marker lines — same inline-marker convention as pptx's `[slide N]`.
-/// `Ok("")` means the tools ran but found no text.
-pub(crate) fn ocr_pdf(path: &Path) -> std::result::Result<String, OcrError> {
-    ocr_pdf_with("pdftoppm", "tesseract", path)
+/// `Ok("")` means the tools ran but found no text. `progress` is called after
+/// each finished page with (pages done, total pages).
+pub(crate) fn ocr_pdf(
+    path: &Path,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> std::result::Result<String, OcrError> {
+    ocr_pdf_with("pdftoppm", "tesseract", path, progress)
 }
 
 /// Binary names are parameters so tests can exercise the missing-tools path
@@ -206,10 +210,11 @@ fn ocr_pdf_with(
     pdftoppm: &str,
     tesseract: &str,
     path: &Path,
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> std::result::Result<String, OcrError> {
     let tmp = std::env::temp_dir().join(format!("nexus-ocr-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp).map_err(|e| OcrError::Failed(e.to_string()))?;
-    let result = ocr_pdf_in(pdftoppm, tesseract, path, &tmp);
+    let result = ocr_pdf_in(pdftoppm, tesseract, path, &tmp, progress);
     let _ = std::fs::remove_dir_all(&tmp);
     result
 }
@@ -219,6 +224,7 @@ fn ocr_pdf_in(
     tesseract: &str,
     path: &Path,
     tmp: &Path,
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> std::result::Result<String, OcrError> {
     fn run(cmd: &mut std::process::Command, name: &str) -> std::result::Result<Vec<u8>, OcrError> {
         let out = cmd.output().map_err(|e| {
@@ -270,7 +276,12 @@ fn ocr_pdf_in(
                     std::process::Command::new(tesseract).arg(png).arg("stdout"),
                     "tesseract",
                 );
-                results.lock().unwrap().push((i, r));
+                let done = {
+                    let mut res = results.lock().unwrap();
+                    res.push((i, r));
+                    res.len()
+                };
+                progress(done, pages.len());
             });
         }
     });
@@ -470,7 +481,7 @@ mod tests {
         let pdf = dir.join("scan.pdf");
         std::fs::write(&pdf, minimal_pdf(Some("HELLO NEXUS OCR"))).unwrap();
 
-        let text = ocr_pdf(&pdf).unwrap();
+        let text = ocr_pdf(&pdf, &|_, _| {}).unwrap();
         assert!(text.contains("HELLO"), "ocr text was: {text:?}");
         assert!(text.contains("[page 1]"), "ocr text was: {text:?}");
     }
@@ -485,7 +496,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pdf = dir.join("blank.pdf");
         std::fs::write(&pdf, minimal_pdf(None)).unwrap();
-        assert_eq!(ocr_pdf(&pdf).unwrap(), "");
+        assert_eq!(ocr_pdf(&pdf, &|_, _| {}).unwrap(), "");
     }
 
     #[test]
@@ -500,7 +511,7 @@ mod tests {
         std::fs::write(&pdf, pdf_with_pages(&["ALPHA BRAVO", "CHARLIE DELTA", "ECHO FOXTROT"]))
             .unwrap();
 
-        let text = ocr_pdf(&pdf).unwrap();
+        let text = ocr_pdf(&pdf, &|_, _| {}).unwrap();
         // Parallel OCR must still emit pages in document order.
         let a = text.find("ALPHA").expect(&text);
         let c = text.find("CHARLIE").expect(&text);
@@ -515,7 +526,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pdf = dir.join("x.pdf");
         std::fs::write(&pdf, minimal_pdf(None)).unwrap();
-        let err = ocr_pdf_with("nexus-definitely-not-a-binary", "tesseract", &pdf).unwrap_err();
+        let err = ocr_pdf_with("nexus-definitely-not-a-binary", "tesseract", &pdf, &|_, _| {}).unwrap_err();
         assert!(matches!(err, OcrError::MissingTools));
     }
 }
