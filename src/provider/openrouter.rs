@@ -201,6 +201,14 @@ impl OpenRouter {
                             images: Vec::new(),
                         });
                     }
+                    // Tell the model its remaining budget so it plans reads
+                    // instead of paging indefinitely and hitting the wall.
+                    let remaining = MAX_TOOL_ITERS - (iter + 1);
+                    if let Some(m) = messages.last_mut() {
+                        m.content.push_str(&format!(
+                            "\n\n[{remaining} tool round-trips left this turn — plan accordingly]"
+                        ));
+                    }
                 }
             }
         }
