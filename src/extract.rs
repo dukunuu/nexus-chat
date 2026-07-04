@@ -262,6 +262,12 @@ fn ocr_pdf_in(
         .collect();
     pages.sort();
 
+    // Recognize with every installed language pack (eng+jpn+…): tesseract
+    // then picks the right script per line itself, so installing a tessdata
+    // pack is all it takes to support a language. None = listing failed;
+    // fall back to tesseract's default (eng).
+    let langs = installed_langs(tesseract);
+
     // OCR pages in parallel — one tesseract process per core, pulling page
     // indices off a shared counter; results re-ordered by index afterwards.
     let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(pages.len().max(1));
@@ -272,10 +278,12 @@ fn ocr_pdf_in(
             s.spawn(|| loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(png) = pages.get(i) else { return };
-                let r = run(
-                    std::process::Command::new(tesseract).arg(png).arg("stdout"),
-                    "tesseract",
-                );
+                let mut cmd = std::process::Command::new(tesseract);
+                cmd.arg(png).arg("stdout");
+                if let Some(l) = &langs {
+                    cmd.args(["-l", l]);
+                }
+                let r = run(&mut cmd, "tesseract");
                 let done = {
                     let mut res = results.lock().unwrap();
                     res.push((i, r));
@@ -298,6 +306,25 @@ fn ocr_pdf_in(
         }
     }
     Ok(text.trim().to_string())
+}
+
+/// All installed tesseract language packs joined as "eng+jpn+…" (minus the
+/// osd script-detection pack), or None if listing fails. Older tesseracts
+/// print the list to stderr, newer to stdout — scan both; language codes
+/// never contain spaces, which filters the header line.
+fn installed_langs(tesseract: &str) -> Option<String> {
+    let out = std::process::Command::new(tesseract).arg("--list-langs").output().ok()?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let langs: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.contains(' ') && *l != "osd")
+        .collect();
+    (!langs.is_empty()).then(|| langs.join("+"))
 }
 
 /// Build a minimal valid PDF: one page, optionally with `text` drawn in
@@ -518,6 +545,22 @@ mod tests {
         let e = text.find("ECHO").expect(&text);
         assert!(a < c && c < e, "pages out of order: {text:?}");
         assert!(text.contains("[page 3]"), "{text:?}");
+    }
+
+    #[test]
+    fn installed_langs_lists_packs_without_osd() {
+        if !ocr_tools_present() {
+            eprintln!("skipping installed_langs_lists_packs_without_osd: tools not installed");
+            return;
+        }
+        let langs = installed_langs("tesseract").expect("langs should list");
+        assert!(langs.split('+').any(|l| l == "eng"), "{langs}");
+        assert!(!langs.split('+').any(|l| l == "osd"), "{langs}");
+    }
+
+    #[test]
+    fn installed_langs_missing_binary_is_none() {
+        assert!(installed_langs("nexus-definitely-not-a-binary").is_none());
     }
 
     #[test]
