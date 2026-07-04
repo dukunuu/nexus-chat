@@ -109,7 +109,7 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                 AppEvent::Memory(m) => app.on_memory_result(m),
                 AppEvent::Compact(c) => app.on_compact_result(c),
                 AppEvent::SkillInstall(r) => app.on_skill_install_result(r),
-                AppEvent::Transcript(r) => app.on_transcript_result(r),
+                AppEvent::Described(r) => app.on_described(r),
             },
             _ = async {
                 if streaming {
@@ -275,7 +275,10 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::PageUp => app.scroll = app.scroll.saturating_add(10).min(app.max_scroll),
         KeyCode::PageDown => app.scroll = app.scroll.saturating_sub(10),
-        KeyCode::Esc => app.set_input(""),
+        KeyCode::Esc => {
+            app.set_input("");
+            app.pending_images.clear();
+        }
         // Everything else (chars, word-jump, selection, cut/copy/paste, undo)
         // goes to the editor via its default keymap. A keyboard (Shift+arrow)
         // selection has no "release" event like a mouse drag does, so keep

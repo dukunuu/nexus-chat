@@ -278,7 +278,7 @@ impl App {
         if self.popup == crate::app::Popup::None
             && let Some(img) = self.clipboard.as_mut().and_then(|cb| cb.get_image().ok())
         {
-            self.transcribe_clipboard_image(img);
+            self.attach_clipboard_image(img);
             return;
         }
         let Some(cb) = self.clipboard.as_mut() else { return };

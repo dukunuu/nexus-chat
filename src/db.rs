@@ -72,11 +72,9 @@ pub struct Message {
 /// description used when the active model can't see images.
 #[derive(Debug, Clone)]
 pub struct MessageImage {
-    #[allow(dead_code)] // used from Task 5 of the image plan; remove with first caller
     pub id: String,
-    #[allow(dead_code)] // used from Task 4 of the image plan; remove with first caller
+    #[allow(dead_code)] // used from Task 5 of the image plan; remove with first caller
     pub path: String,
-    #[allow(dead_code)] // used from Task 4 of the image plan; remove with first caller
     pub description: Option<String>,
 }
 
@@ -509,7 +507,7 @@ impl Db {
     }
 
     /// Attach images to a message; returns them with `description: None`.
-    #[allow(dead_code)] // used from Task 4 of the image plan; remove with first caller
+    #[allow(dead_code)] // used from Task 5 of the image plan; remove with first caller
     pub fn add_message_images(&self, message_id: &str, paths: &[String]) -> Result<Vec<MessageImage>> {
         let now = Utc::now().to_rfc3339();
         let mut images = Vec::with_capacity(paths.len());
@@ -526,7 +524,6 @@ impl Db {
     }
 
     /// Backfill a generated description for an image once it's been analyzed.
-    #[allow(dead_code)] // used from Task 5 of the image plan; remove with first caller
     pub fn set_image_description(&self, image_id: &str, description: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE message_images SET description = ?2 WHERE id = ?1",

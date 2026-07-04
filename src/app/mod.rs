@@ -333,8 +333,9 @@ pub enum AppEvent {
     Compact(Option<(String, String, i64, u64)>),
     /// Result of `/skills` install: skill name on success, error message on failure.
     SkillInstall(Option<Result<String, String>>),
-    /// A clipboard-image transcript (or the error), headed for the composer.
-    Transcript(Option<std::result::Result<String, String>>),
+    /// One image-description result (or the error), or `None` when the
+    /// describe batch's channel closed (all images done).
+    Described(Option<(String, std::result::Result<String, String>)>),
 }
 
 pub struct App {
@@ -382,8 +383,12 @@ pub struct App {
     /// GitHub `owner/repo/path` shorthand being typed in Install mode.
     pub skills_edit: String,
     pub(crate) skills_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
-    /// Background image-transcription result channel.
-    pub(crate) transcript_rx: Option<mpsc::UnboundedReceiver<std::result::Result<String, String>>>,
+    /// Background image-description result channel: (message_images row id, description or error).
+    pub(crate) describe_rx: Option<mpsc::UnboundedReceiver<(String, std::result::Result<String, String>)>>,
+    /// Images pasted from the clipboard, staged for the next message.
+    pub pending_images: Vec<transcribe::PendingImage>,
+    /// A message queued to send once its images finish being described.
+    pub(crate) deferred_send: Option<String>,
 
     /// The active space's imported files (refreshed by `rescan_files`).
     pub files_cache: Vec<crate::db::FileRow>,
@@ -535,7 +540,9 @@ impl App {
             skills_selected: 0,
             skills_edit: String::new(),
             skills_rx: None,
-            transcript_rx: None,
+            describe_rx: None,
+            pending_images: Vec::new(),
+            deferred_send: None,
             files_cache: Vec::new(),
             files_selected: 0,
             files_mode: FilesMode::Browse,
@@ -784,11 +791,11 @@ impl App {
                 }
             } => AppEvent::SkillInstall(r),
             r = async {
-                match self.transcript_rx.as_mut() {
+                match self.describe_rx.as_mut() {
                     Some(rx) => rx.recv().await,
                     None => std::future::pending().await,
                 }
-            } => AppEvent::Transcript(r),
+            } => AppEvent::Described(r),
         }
     }
 

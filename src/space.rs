@@ -71,6 +71,11 @@ impl Space {
         self.space_dir(name).join("files")
     }
 
+    /// Directory holding a space's pasted conversation images.
+    pub fn images_dir(&self, name: &str) -> PathBuf {
+        self.space_dir(name).join("images")
+    }
+
     /// Rename a space's directory (its db row is renamed separately).
     pub fn rename_space_dir(&self, old: &str, new: &str) -> Result<()> {
         let from = self.space_dir(old);
