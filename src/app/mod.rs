@@ -942,6 +942,7 @@ pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String 
     let f = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
     match name {
         "skill" => format!("skill {}", f("name")),
+        "install_skill" => format!("install_skill {} → {}", f("source"), first_line(result)),
         "web_search" | "search_files" => {
             let failed = result.starts_with("no results")
                 || result.starts_with("no matches")

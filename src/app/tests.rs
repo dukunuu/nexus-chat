@@ -889,6 +889,10 @@ fn tool_call_summaries_name_the_interesting_argument() {
     );
     assert_eq!(tool_call_summary("edit_file", r#"{"app":"a","path":"b.js"}"#, "ok"), "edit_file a/b.js");
     assert_eq!(tool_call_summary("skill", r#"{"name":"commit"}"#, "…"), "skill commit");
+    assert_eq!(
+        tool_call_summary("install_skill", r#"{"source":"anthropics/skills/pdf"}"#, "installed skill 'pdf' — load it with the skill tool"),
+        "install_skill anthropics/skills/pdf → installed skill 'pdf' — load it with the skill tool"
+    );
     let long = format!(r#"{{"x":"{}"}}"#, "y".repeat(100));
     assert!(tool_call_summary("mystery", &long, "").ends_with('…'));
 }

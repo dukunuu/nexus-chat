@@ -116,6 +116,15 @@ impl ToolBox {
             });
         }
         defs.push(ToolDef {
+            name: "install_skill".to_string(),
+            description: "Install a skill from GitHub. source is owner/repo/path pointing at a directory that contains SKILL.md (bare owner/repo for a skill at the repo root).".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "source": { "type": "string", "description": "owner/repo/path of the skill directory" } },
+                "required": ["source"],
+            }),
+        });
+        defs.push(ToolDef {
             name: "web_search".to_string(),
             description: "Search the web and return numbered results with title, url, and snippet.".to_string(),
             parameters: serde_json::json!({
@@ -238,6 +247,25 @@ impl ToolBox {
                 let result = match std::fs::read_to_string(&path) {
                     Ok(md) => skill_body(&md).to_string(),
                     Err(_) => format!("unknown skill: {skill_name}"),
+                };
+                (result, status)
+            }
+            "install_skill" => {
+                let source = serde_json::from_str::<serde_json::Value>(args)
+                    .ok()
+                    .and_then(|v| v.get("source").and_then(|s| s.as_str()).map(str::to_string))
+                    .unwrap_or_default();
+                let status = format!("Installing skill {source}…");
+                let result = match crate::skills::parse_gh_shorthand(&source) {
+                    None => format!("invalid source {source:?} — expected owner/repo/path"),
+                    Some((owner, repo, path)) => {
+                        match crate::skills::install_from_github(&self.client, &owner, &repo, &path, &self.skills_dir)
+                            .await
+                        {
+                            Ok(name) => format!("installed skill '{name}' — load it with the skill tool"),
+                            Err(e) => format!("install failed: {e}"),
+                        }
+                    }
                 };
                 (result, status)
             }
@@ -744,6 +772,14 @@ mod tests {
             None,
         );
         (tb, db, space)
+    }
+
+    #[tokio::test]
+    async fn install_skill_rejects_bad_shorthand_without_network() {
+        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), None, None);
+        let (result, status) = tb.run("install_skill", r#"{"source":"nope"}"#).await;
+        assert!(status.contains("Installing skill"));
+        assert!(result.contains("invalid source"), "{result}");
     }
 
     #[test]

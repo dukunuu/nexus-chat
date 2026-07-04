@@ -16,18 +16,21 @@ pub fn skills_dir(data_dir: &Path) -> PathBuf {
 }
 
 const WEB_SEARCH_SKILL: &str = include_str!("../assets/web-search-SKILL.md");
+const FIND_SKILLS_SKILL: &str = include_str!("../assets/find-skills-SKILL.md");
 
-/// Write the built-in web-search skill on first run. Never overwrites — once
-/// installed it's a normal file the user can edit or delete like any other.
+/// Write the built-in skills on first run. Never overwrites — once installed
+/// they're normal files the user can edit or delete like any other.
 pub fn install_builtin(dir: &Path) {
-    let path = dir.join("web-search").join("SKILL.md");
-    if path.exists() {
-        return;
+    for (name, md) in [("web-search", WEB_SEARCH_SKILL), ("find-skills", FIND_SKILLS_SKILL)] {
+        let path = dir.join(name).join("SKILL.md");
+        if path.exists() {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, md);
     }
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(path, WEB_SEARCH_SKILL);
 }
 
 /// Load every `<dir>/*/SKILL.md` that parses. Missing dir → empty, not an error.
@@ -203,6 +206,19 @@ fn download_gh_entries<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_builtin_writes_both_skills_without_overwriting() {
+        let dir = std::env::temp_dir().join(format!("nexus-skills-{}", uuid::Uuid::new_v4()));
+        install_builtin(&dir);
+        let names: Vec<String> = load_skills(&dir).iter().map(|s| s.name.clone()).collect();
+        assert_eq!(names, vec!["find-skills", "web-search"]);
+        // never overwrites: user edits survive a re-run
+        std::fs::write(dir.join("find-skills/SKILL.md"), "---\nname: mine\ndescription: d\n---\nx").unwrap();
+        install_builtin(&dir);
+        assert!(std::fs::read_to_string(dir.join("find-skills/SKILL.md")).unwrap().contains("mine"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parses_frontmatter_and_body() {

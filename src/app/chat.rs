@@ -212,6 +212,9 @@ impl App {
             StreamEvent::Usage(u) => self.stream_usage = Some(u),
             StreamEvent::Status(s) => self.tool_status = Some(s),
             StreamEvent::ToolCall { name, arguments, result } => {
+                if name == "install_skill" && result.starts_with("installed") {
+                    self.reload_skills(); // new skill shows in the system prompt next turn
+                }
                 let content =
                     serde_json::json!({ "name": name, "arguments": arguments, "result": result })
                         .to_string();
