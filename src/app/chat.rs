@@ -50,8 +50,9 @@ impl App {
         }
         let session_id = self.session.as_ref().unwrap().id.clone();
 
-        self.db.add_user_message(&session_id, &text)?;
+        let message_id = self.db.add_user_message(&session_id, &text)?;
         self.messages.push(Message {
+            id: message_id,
             role: "user".to_string(),
             content: text,
             model: None,
@@ -59,6 +60,7 @@ impl App {
             tokens: None,
             secs: None,
             phrase: None,
+            images: Vec::new(),
         });
 
         let mut history: Vec<ChatMessage> = Vec::with_capacity(self.messages.len() + 3);
@@ -182,6 +184,7 @@ impl App {
             )?;
         }
         self.messages.push(Message {
+            id: String::new(),
             role: "assistant".to_string(),
             content: buf,
             model,
@@ -189,6 +192,7 @@ impl App {
             tokens,
             secs,
             phrase,
+            images: Vec::new(),
         });
         self.maybe_generate_title();
         self.maybe_extract_memory();

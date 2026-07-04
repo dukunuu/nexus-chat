@@ -46,8 +46,9 @@ fn delete_removes_session_and_clears_if_active() {
     a.sessions_cache = a.db.list_sessions(&space).unwrap();
     a.session = Some(s.clone());
     a.messages.push(Message {
-        role: "user".into(), content: "hi".into(),
+        id: String::new(), role: "user".into(), content: "hi".into(),
         model: None, reasoning: None, tokens: None, secs: None, phrase: None,
+        images: Vec::new(),
     });
     a.session_selected = 0;
     a.confirm_delete().unwrap();
@@ -285,6 +286,7 @@ fn context_used_and_limit() {
     a.current_model = Some("a/one".into());
     assert_eq!(a.context_limit(), Some(1000));
     a.messages.push(Message {
+        id: String::new(),
         role: "user".into(),
         content: "x".repeat(40), // ~10 tokens
         model: None,
@@ -292,6 +294,7 @@ fn context_used_and_limit() {
         tokens: None,
         secs: None,
         phrase: None,
+        images: Vec::new(),
     });
     assert_eq!(a.context_used(), 10);
 }
@@ -307,9 +310,11 @@ fn compaction_narrows_effective_messages_and_context_used() {
     let mut s = a.db.create_session("t", "a/one", &space).unwrap();
     for i in 0..4 {
         a.messages.push(Message {
+            id: String::new(),
             role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
             content: "x".repeat(40), // ~10 tokens each
             model: None, reasoning: None, tokens: None, secs: None, phrase: None,
+            images: Vec::new(),
         });
     }
     s.compact_summary = Some("y".repeat(80)); // ~20 tokens
@@ -380,8 +385,9 @@ async fn force_compact_reports_why_it_no_ops() {
 
     // Now there's an uncompacted message — should actually kick off a job.
     a.messages.push(Message {
-        role: "user".into(), content: "hi".into(),
+        id: String::new(), role: "user".into(), content: "hi".into(),
         model: None, reasoning: None, tokens: None, secs: None, phrase: None,
+        images: Vec::new(),
     });
     a.force_compact();
     assert!(a.compact_rx.is_some());
@@ -393,8 +399,9 @@ fn context_breakdown_reports_system_memory_conversation() {
     a.models[0].context_length = Some(1000);
     a.current_model = Some("a/one".into());
     a.messages.push(Message {
-        role: "user".into(), content: "x".repeat(40),
+        id: String::new(), role: "user".into(), content: "x".repeat(40),
         model: None, reasoning: None, tokens: None, secs: None, phrase: None,
+        images: Vec::new(),
     });
     let b = a.context_breakdown();
     assert_eq!(b.conversation_tokens, 10);
@@ -732,12 +739,14 @@ async fn switching_space_clears_open_conversation() {
 fn copy_message_uses_exact_original_content() {
     let mut a = app_with_key();
     a.messages.push(Message {
-        role: "user".into(), content: "raw *user* text".into(),
+        id: String::new(), role: "user".into(), content: "raw *user* text".into(),
         model: None, reasoning: None, tokens: None, secs: None, phrase: None,
+        images: Vec::new(),
     });
     a.messages.push(Message {
-        role: "assistant".into(), content: "**bold** reply".into(),
+        id: String::new(), role: "assistant".into(), content: "**bold** reply".into(),
         model: Some("a/one".into()), reasoning: None, tokens: None, secs: None, phrase: None,
+        images: Vec::new(),
     });
     // copy_message resolves *some* text at each index (clipboard availability
     // is environment-dependent in CI, so just assert it didn't silently no-op).
