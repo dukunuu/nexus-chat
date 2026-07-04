@@ -195,6 +195,9 @@ impl App {
         let Some(f) = files.iter().find(|f| f.name == name) else {
             return; // deleted mid-OCR
         };
+        if f.status != "ocr…" {
+            return; // re-imported mid-OCR — this result is for stale content
+        }
         match result {
             Ok(text) if text.trim().is_empty() => {
                 let _ = self.db.set_file_status(&f.id, "no text (ocr found nothing)");
