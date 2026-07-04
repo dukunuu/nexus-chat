@@ -91,6 +91,7 @@ impl App {
         let prior_summary = session.compact_summary.clone();
         let tail: String = self.messages[through..]
             .iter()
+            .filter(|m| m.role != "tool_call")
             .map(|m| format!("{}: {}", m.role, m.content))
             .collect::<Vec<_>>()
             .join("\n\n");
