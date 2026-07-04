@@ -78,10 +78,18 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
         Some(s) => s.title.clone(),
         None => "nexus-chat".to_string(),
     };
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
-        .title_top(Line::from(hint))
-        .title_top(Line::from(Span::styled(format!(" {name} "), Style::default().fg(Color::Cyan))).right_aligned());
+        .title_top(Line::from(hint));
+    // Attachment indicator (when pending images).
+    if !app.pending_images.is_empty() {
+        let n = app.pending_images.len();
+        block = block.title_top(Line::from(Span::styled(
+            format!(" 📎 {} image{} — Esc clears ", n, if n == 1 { "" } else { "s" }),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    block = block.title_top(Line::from(Span::styled(format!(" {name} "), Style::default().fg(Color::Cyan))).right_aligned());
     let inner = block.inner(area);
     app.input_inner = inner; // remembered for mouse click -> cursor mapping
     f.render_widget(block, area);

@@ -314,7 +314,7 @@ impl App {
             ModelPickTarget::Transcriber => {
                 self.transcriber_model = id.clone();
                 self.db.set_setting("transcriber_model", &id)?;
-                self.status = format!("transcriber model: {id}");
+                self.status = format!("image model: {id}");
                 self.popup = Popup::Settings;
             }
         }
@@ -335,7 +335,7 @@ impl App {
     pub(crate) fn clear_transcriber_model(&mut self) -> Result<()> {
         self.transcriber_model.clear();
         self.db.set_setting("transcriber_model", "")?;
-        self.status = "transcriber model cleared — image paste disabled".to_string();
+        self.status = "image model cleared — image descriptions disabled".to_string();
         Ok(())
     }
 }

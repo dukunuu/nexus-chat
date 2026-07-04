@@ -82,6 +82,9 @@ fn wrap_conversation(app: &App, width: usize) -> Wrapped {
     let mut blocks: Vec<String> = Vec::new();
     for (i, m) in app.messages.iter().enumerate() {
         if m.role == "user" {
+            if !m.images.is_empty() {
+                out.push(Line::from(dim(format!("🖼 {} image{}", m.images.len(), if m.images.len() == 1 { "" } else { "s" }))));
+            }
             push_user(&mut out, &m.content, width);
         } else {
             push_assistant_stored(&mut out, m, &app.settings, width, &mut code, &mut blocks);

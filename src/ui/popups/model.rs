@@ -3,6 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem};
 
 use crate::app::{App, ModelPanel, Popup};
@@ -56,7 +57,12 @@ fn model_items(app: &App, models: &[&Model]) -> Vec<ListItem<'static>> {
                 None if m.supports_reasoning => "  [r]".to_string(),
                 None => String::new(),
             };
-            ListItem::new(format!("{marker}{}{badge}", m.id))
+            let mut spans = vec![Span::raw(format!("{marker}{}{badge}", m.id))];
+            // Vision glyph (dim) for models with image support.
+            if m.supports_images {
+                spans.push(Span::styled(" ⊡", Style::default().fg(Color::DarkGray)));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect()
 }

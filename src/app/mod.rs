@@ -205,7 +205,7 @@ impl SettingsField {
             SettingsField::Verbosity => "answer length (Space cycles normal/concise/caveman)",
             SettingsField::LangsearchKey => "LangSearch API key (langsearch.com/dashboard, free)",
             SettingsField::SearchProvider => "search provider (Space cycles auto/langsearch/searxng/duckduckgo)",
-            SettingsField::TranscriberModel => "transcriber model (Enter to pick, Backspace clears)",
+            SettingsField::TranscriberModel => "image model (Enter to pick, Backspace clears)",
         }
     }
 }
