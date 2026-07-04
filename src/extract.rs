@@ -185,6 +185,129 @@ pub(crate) fn chunk_lines(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Why OCR failed: the tools aren't installed (user-fixable hint) vs a real
+/// failure (surfaced as an error status).
+#[derive(Debug)]
+#[allow(dead_code)] // used from Task 2 of the scanned-pdf-ocr plan; remove with first caller
+pub(crate) enum OcrError {
+    MissingTools,
+    Failed(String),
+}
+
+/// OCR a (scanned) PDF with pdftoppm + tesseract. Pages join with `[page N]`
+/// marker lines — same inline-marker convention as pptx's `[slide N]`.
+/// `Ok("")` means the tools ran but found no text.
+#[allow(dead_code)] // used from Task 2 of the scanned-pdf-ocr plan; remove with first caller
+pub(crate) fn ocr_pdf(path: &Path) -> std::result::Result<String, OcrError> {
+    ocr_pdf_with("pdftoppm", "tesseract", path)
+}
+
+/// Binary names are parameters so tests can exercise the missing-tools path
+/// without mutating the process-global PATH.
+#[allow(dead_code)] // used from Task 2 of the scanned-pdf-ocr plan; remove with first caller
+fn ocr_pdf_with(
+    pdftoppm: &str,
+    tesseract: &str,
+    path: &Path,
+) -> std::result::Result<String, OcrError> {
+    let tmp = std::env::temp_dir().join(format!("nexus-ocr-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).map_err(|e| OcrError::Failed(e.to_string()))?;
+    let result = ocr_pdf_in(pdftoppm, tesseract, path, &tmp);
+    let _ = std::fs::remove_dir_all(&tmp);
+    result
+}
+
+#[allow(dead_code)] // used from Task 2 of the scanned-pdf-ocr plan; remove with first caller
+fn ocr_pdf_in(
+    pdftoppm: &str,
+    tesseract: &str,
+    path: &Path,
+    tmp: &Path,
+) -> std::result::Result<String, OcrError> {
+    fn run(cmd: &mut std::process::Command, name: &str) -> std::result::Result<Vec<u8>, OcrError> {
+        let out = cmd.output().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                OcrError::MissingTools
+            } else {
+                OcrError::Failed(e.to_string())
+            }
+        })?;
+        if !out.status.success() {
+            return Err(OcrError::Failed(format!(
+                "{name}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(out.stdout)
+    }
+
+    run(
+        std::process::Command::new(pdftoppm)
+            .args(["-r", "300", "-gray", "-png"])
+            .arg(path)
+            .arg(tmp.join("page")),
+        "pdftoppm",
+    )?;
+
+    // pdftoppm zero-pads page numbers, so a lexical sort is page order.
+    let mut pages: Vec<std::path::PathBuf> = std::fs::read_dir(tmp)
+        .map_err(|e| OcrError::Failed(e.to_string()))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "png"))
+        .collect();
+    pages.sort();
+
+    let mut text = String::new();
+    for (i, png) in pages.iter().enumerate() {
+        let stdout = run(
+            std::process::Command::new(tesseract).arg(png).arg("stdout"),
+            "tesseract",
+        )?;
+        let page = String::from_utf8_lossy(&stdout);
+        let page = page.trim();
+        if !page.is_empty() {
+            text.push_str(&format!("[page {}]\n{page}\n", i + 1));
+        }
+    }
+    Ok(text.trim().to_string())
+}
+
+/// Build a minimal valid PDF: one page, optionally with `text` drawn in
+/// Helvetica. Offsets are computed at runtime so the xref is always correct.
+/// Test fixture shared with app::files tests.
+#[cfg(test)]
+pub(crate) fn minimal_pdf(text: Option<&str>) -> Vec<u8> {
+    let mut objs: Vec<String> = Vec::new();
+    objs.push("<< /Type /Catalog /Pages 2 0 R >>".into());
+    objs.push("<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into());
+    if let Some(t) = text {
+        objs.push("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 150] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".into());
+        let stream = format!("BT /F1 32 Tf 20 60 Td ({t}) Tj ET");
+        objs.push(format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()));
+        objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into());
+    } else {
+        objs.push("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 150] >>".into());
+    }
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets: Vec<usize> = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", i + 1, o).as_bytes());
+    }
+    let xref_pos = out.len();
+    let n = objs.len() + 1;
+    out.extend_from_slice(format!("xref\n0 {n}\n").as_bytes());
+    out.extend_from_slice(b"0000000000 65535 f \n");
+    for off in &offsets {
+        out.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {n} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +411,50 @@ mod tests {
         assert!(chunks[2].1.ends_with("\n90") || chunks[2].1 == "81\n82\n83\n84\n85\n86\n87\n88\n89\n90");
         assert!(chunk_lines("").is_empty());
         assert!(chunk_lines("   \n  ").is_empty());
+    }
+
+    /// True when tesseract + pdftoppm are runnable (real-OCR tests skip otherwise).
+    fn ocr_tools_present() -> bool {
+        std::process::Command::new("tesseract").arg("--version").output().is_ok()
+            && std::process::Command::new("pdftoppm").arg("-v").output().is_ok()
+    }
+
+    #[test]
+    fn ocr_pdf_reads_rendered_text() {
+        if !ocr_tools_present() {
+            eprintln!("skipping ocr_pdf_reads_rendered_text: tesseract/pdftoppm not installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("nexus-ocr-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("scan.pdf");
+        std::fs::write(&pdf, minimal_pdf(Some("HELLO NEXUS OCR"))).unwrap();
+
+        let text = ocr_pdf(&pdf).unwrap();
+        assert!(text.contains("HELLO"), "ocr text was: {text:?}");
+        assert!(text.contains("[page 1]"), "ocr text was: {text:?}");
+    }
+
+    #[test]
+    fn ocr_pdf_blank_page_yields_empty_text() {
+        if !ocr_tools_present() {
+            eprintln!("skipping ocr_pdf_blank_page_yields_empty_text: tools not installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("nexus-ocr-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("blank.pdf");
+        std::fs::write(&pdf, minimal_pdf(None)).unwrap();
+        assert_eq!(ocr_pdf(&pdf).unwrap(), "");
+    }
+
+    #[test]
+    fn ocr_pdf_missing_tools_is_distinguishable() {
+        let dir = std::env::temp_dir().join(format!("nexus-ocr-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("x.pdf");
+        std::fs::write(&pdf, minimal_pdf(None)).unwrap();
+        let err = ocr_pdf_with("nexus-definitely-not-a-binary", "tesseract", &pdf).unwrap_err();
+        assert!(matches!(err, OcrError::MissingTools));
     }
 }
