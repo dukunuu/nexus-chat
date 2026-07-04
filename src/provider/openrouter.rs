@@ -128,8 +128,8 @@ impl OpenRouter {
             .to_string())
     }
 
-    /// One-shot, non-streaming vision call: transcribe `image_data_url` with `model`.
-    pub async fn transcribe_image(&self, model: &str, image_data_url: &str) -> Result<String> {
+    /// One-shot, non-streaming vision call: describe `image_data_url` with `model`.
+    pub async fn describe_image(&self, model: &str, image_data_url: &str) -> Result<String> {
         self.post_completion(vision_body(model, image_data_url)).await
     }
 
@@ -181,6 +181,7 @@ impl OpenRouter {
                         content,
                         tool_calls: Some(calls.clone()),
                         tool_call_id: None,
+                        images: Vec::new(),
                     });
                     for call in &calls {
                         let (result, status) = toolbox.run(&call.name, &call.arguments).await;
@@ -190,6 +191,7 @@ impl OpenRouter {
                             content: result,
                             tool_calls: None,
                             tool_call_id: Some(call.id.clone()),
+                            images: Vec::new(),
                         });
                     }
                 }
@@ -363,7 +365,7 @@ fn parse_usage(data: &str) -> Option<Usage> {
     })
 }
 
-/// Request body for a one-shot image-transcription call: a text part with the
+/// Request body for a one-shot image-understanding call: a text part with the
 /// instruction plus the image as a data-URL content part (OpenAI vision shape).
 fn vision_body(model: &str, image_data_url: &str) -> serde_json::Value {
     serde_json::json!({
@@ -373,9 +375,11 @@ fn vision_body(model: &str, image_data_url: &str) -> serde_json::Value {
             "role": "user",
             "content": [
                 { "type": "text",
-                  "text": "Transcribe this image faithfully. Reproduce all visible text verbatim \
-                           (preserve code, tables, and structure as markdown). If parts are not \
-                           text, describe them briefly in [brackets]. Output only the transcription." },
+                  "text": "Describe this image so another AI model can reason about it without seeing it. \
+                           Cover: what it is (screenshot, chart, photo, diagram…), overall layout and structure, \
+                           the key entities and how they relate, ALL visible text verbatim (preserve code, \
+                           tables, and labels as markdown), and any notable visual details (colors, states, \
+                           highlights, errors). Be thorough but do not speculate beyond what is visible." },
                 { "type": "image_url", "image_url": { "url": image_data_url } },
             ],
         }],
@@ -393,7 +397,7 @@ mod tests {
         assert_eq!(body["stream"], false);
         let content = &body["messages"][0]["content"];
         assert_eq!(content[0]["type"], "text");
-        assert!(content[0]["text"].as_str().unwrap().to_lowercase().contains("transcribe"));
+        assert!(content[0]["text"].as_str().unwrap().to_lowercase().contains("describe this image"));
         assert_eq!(content[1]["type"], "image_url");
         assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
     }

@@ -49,7 +49,7 @@ impl App {
         self.transcript_rx = Some(rx);
         tokio::spawn(async move {
             let result = provider
-                .transcribe_image(&model, &url)
+                .describe_image(&model, &url)
                 .await
                 .map_err(|e| e.to_string());
             let _ = tx.send(result);

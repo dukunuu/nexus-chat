@@ -46,14 +46,16 @@ pub struct ChatParams {
 /// A message sent to the completions API. `tool_calls` (assistant requesting
 /// tools) and `tool_call_id` (a tool's result) are only set on those two
 /// message shapes; wire format follows the OpenAI function-calling schema.
-#[derive(Debug, Clone, Default, Serialize)]
+/// `images` (data URLs) are only written by tests until Task 5 wires up
+/// attachments; when non-empty, `content` serializes as an OpenAI vision
+/// parts array instead of a plain string.
+#[derive(Debug, Clone, Default)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
-    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_tool_calls")]
     pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    pub images: Vec<String>,
 }
 
 impl ChatMessage {
@@ -62,27 +64,49 @@ impl ChatMessage {
     }
 }
 
-fn serialize_tool_calls<S: serde::Serializer>(
-    calls: &Option<Vec<ToolCall>>,
-    s: S,
-) -> Result<S::Ok, S::Error> {
-    #[derive(Serialize)]
-    struct Function<'a> {
-        name: &'a str,
-        arguments: &'a str,
+#[derive(Serialize)]
+struct Function<'a> {
+    name: &'a str,
+    arguments: &'a str,
+}
+
+#[derive(Serialize)]
+struct Wire<'a> {
+    id: &'a str,
+    r#type: &'static str,
+    function: Function<'a>,
+}
+
+impl Serialize for ChatMessage {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = s.serialize_map(None)?;
+        map.serialize_entry("role", &self.role)?;
+        if self.images.is_empty() {
+            map.serialize_entry("content", &self.content)?;
+        } else {
+            // OpenAI vision shape: text part (if any) + one image_url part per image.
+            let mut parts: Vec<serde_json::Value> = Vec::new();
+            if !self.content.is_empty() {
+                parts.push(serde_json::json!({ "type": "text", "text": self.content }));
+            }
+            for url in &self.images {
+                parts.push(serde_json::json!({ "type": "image_url", "image_url": { "url": url } }));
+            }
+            map.serialize_entry("content", &parts)?;
+        }
+        if let Some(calls) = &self.tool_calls {
+            let wire: Vec<Wire> = calls
+                .iter()
+                .map(|c| Wire { id: &c.id, r#type: "function", function: Function { name: &c.name, arguments: &c.arguments } })
+                .collect();
+            map.serialize_entry("tool_calls", &wire)?;
+        }
+        if let Some(id) = &self.tool_call_id {
+            map.serialize_entry("tool_call_id", id)?;
+        }
+        map.end()
     }
-    #[derive(Serialize)]
-    struct Wire<'a> {
-        id: &'a str,
-        r#type: &'static str,
-        function: Function<'a>,
-    }
-    let calls = calls.as_ref().expect("skip_serializing_if guards this");
-    let wire: Vec<Wire> = calls
-        .iter()
-        .map(|c| Wire { id: &c.id, r#type: "function", function: Function { name: &c.name, arguments: &c.arguments } })
-        .collect();
-    wire.serialize(s)
 }
 
 /// Events emitted while a completion streams. Delivered over an mpsc channel so
@@ -108,4 +132,42 @@ pub enum StreamEvent {
     Status(String),
     Done,
     Error(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_message_serializes_string_content_when_no_images() {
+        let m = ChatMessage::text("user", "hi");
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["content"], "hi");
+        assert!(v.get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn chat_message_serializes_parts_when_images_present() {
+        let mut m = ChatMessage::text("user", "what is this?");
+        m.images = vec!["data:image/png;base64,AAAA".into()];
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["content"][0]["type"], "text");
+        assert_eq!(v["content"][0]["text"], "what is this?");
+        assert_eq!(v["content"][1]["type"], "image_url");
+        assert_eq!(v["content"][1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    #[test]
+    fn chat_message_with_tool_calls_still_serializes_them() {
+        let m = ChatMessage {
+            role: "assistant".into(),
+            content: "".into(),
+            tool_calls: Some(vec![ToolCall { id: "c1".into(), name: "web_search".into(), arguments: "{}".into() }]),
+            tool_call_id: None,
+            images: Vec::new(),
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["tool_calls"][0]["function"]["name"], "web_search");
+        assert_eq!(v["tool_calls"][0]["type"], "function");
+    }
 }
