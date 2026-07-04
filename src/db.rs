@@ -46,8 +46,6 @@ pub struct Session {
 #[derive(Debug, Clone)]
 pub struct FileRow {
     pub id: String,
-    #[allow(dead_code)] // read by the files popup (Task 6+); remove with first caller
-    pub space_id: String,
     pub name: String,
     pub hash: String,
     pub size: i64,
@@ -490,13 +488,13 @@ impl Db {
 
     pub fn list_files(&self, space_id: &str) -> Result<Vec<FileRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, space_id, name, hash, size, status FROM files
+            "SELECT id, name, hash, size, status FROM files
              WHERE space_id = ?1 ORDER BY name ASC",
         )?;
         let rows = stmt.query_map([space_id], |r| {
             Ok(FileRow {
-                id: r.get(0)?, space_id: r.get(1)?, name: r.get(2)?,
-                hash: r.get(3)?, size: r.get(4)?, status: r.get(5)?,
+                id: r.get(0)?, name: r.get(1)?,
+                hash: r.get(2)?, size: r.get(3)?, status: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
