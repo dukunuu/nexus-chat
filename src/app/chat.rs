@@ -31,11 +31,11 @@ impl App {
             self.set_input(&text);
             return Ok(());
         }
-        let Some(provider) = self.provider.clone() else {
+        if self.provider.is_none() {
             self.status = "set your API key first with /key".to_string();
             self.set_input(&text);
             return Ok(());
-        };
+        }
         let Some(model) = self.current_model.clone() else {
             self.status = "pick a model first with /model".to_string();
             self.set_input(&text);
@@ -51,6 +51,18 @@ impl App {
         let session_id = self.session.as_ref().unwrap().id.clone();
 
         let message_id = self.db.add_user_message(&session_id, &text)?;
+        let images = if self.pending_images.is_empty() {
+            Vec::new()
+        } else {
+            let paths: Vec<String> = self
+                .pending_images
+                .iter()
+                .map(|p| p.path.to_string_lossy().to_string())
+                .collect();
+            let images = self.db.add_message_images(&message_id, &paths)?;
+            self.pending_images.clear();
+            images
+        };
         self.messages.push(Message {
             id: message_id,
             role: "user".to_string(),
@@ -60,9 +72,35 @@ impl App {
             tokens: None,
             secs: None,
             phrase: None,
-            images: Vec::new(),
+            images,
         });
 
+        // Deferred-send gate: a non-vision model can't see the images just
+        // attached, so send a description request first and resume once every
+        // description lands (`resume_deferred_send`, driven by `on_described`).
+        if !self.current_model_supports_images() {
+            let missing = self.undescribed_images();
+            if !missing.is_empty() {
+                if self.transcriber_model.trim().is_empty() {
+                    self.status =
+                        "model can't see images — set an image model in /config or pick a vision model"
+                            .to_string();
+                    return Ok(());
+                }
+                self.deferred_send = Some(String::new()); // marker: resume streams the reply
+                self.start_describing(missing);
+                return Ok(());
+            }
+        }
+
+        self.start_stream()
+    }
+
+    /// The exact message list a completion request will carry: system prompt,
+    /// compaction digest, forced skill, then the effective conversation tail.
+    /// User messages with images become multimodal parts for vision models, or
+    /// get their stored descriptions appended as text for everything else.
+    pub(crate) fn build_history(&mut self) -> Vec<ChatMessage> {
         let mut history: Vec<ChatMessage> = Vec::with_capacity(self.messages.len() + 3);
         history.push(ChatMessage::text("system", self.system_prompt()));
         // If this session has been auto-compacted, send the digest instead of
@@ -84,10 +122,53 @@ impl App {
                 format!("The user invoked the skill '{name}'. Follow these instructions:\n{body}"),
             ));
         }
-        history.extend(
-            self.effective_messages().iter().map(|m| ChatMessage::text(m.role.clone(), m.content.clone())),
-        );
+        let vision = self.current_model_supports_images();
+        for m in self.effective_messages() {
+            let mut cm = ChatMessage::text(m.role.clone(), m.content.clone());
+            if m.role == "user" && !m.images.is_empty() {
+                if vision {
+                    // ponytail: PNGs re-read from disk every send; cache in RAM
+                    // if large sessions ever make this noticeable.
+                    cm.images = m
+                        .images
+                        .iter()
+                        .filter_map(|img| std::fs::read(&img.path).ok())
+                        .map(|bytes| crate::app::transcribe::png_bytes_data_url(&bytes))
+                        .collect();
+                } else {
+                    for img in &m.images {
+                        if let Some(d) = &img.description {
+                            cm.content.push_str(&format!("\n\n[Image: {d}]"));
+                        }
+                    }
+                }
+            }
+            history.push(cm);
+        }
+        history
+    }
 
+    /// (message_images row id, path) for every image in the effective range
+    /// that still has no description.
+    pub(crate) fn undescribed_images(&self) -> Vec<(String, String)> {
+        self.effective_messages()
+            .iter()
+            .flat_map(|m| m.images.iter())
+            .filter(|i| i.description.is_none())
+            .map(|i| (i.id.clone(), i.path.clone()))
+            .collect()
+    }
+
+    /// Build history and fire the streaming request — the shared tail of
+    /// `send_message` and `resume_deferred_send`.
+    pub(super) fn start_stream(&mut self) -> Result<()> {
+        let Some(provider) = self.provider.clone() else {
+            return Ok(());
+        };
+        let Some(model) = self.current_model.clone() else {
+            return Ok(());
+        };
+        let history = self.build_history();
         let params = ChatParams {
             reasoning_effort: self.reasoning.get(&model).cloned(),
             temperature: self.settings.temperature,

@@ -177,6 +177,13 @@ impl App {
             .any(|m| m.id == id && m.supports_reasoning)
     }
 
+    /// Whether the active model accepts image input (unknown model → false).
+    pub(crate) fn current_model_supports_images(&self) -> bool {
+        self.current_model
+            .as_deref()
+            .is_some_and(|id| self.models.iter().any(|m| m.id == id && m.supports_images))
+    }
+
     pub(crate) fn reasoning_of(&self, id: &str) -> Option<&str> {
         self.reasoning.get(id).map(String::as_str)
     }

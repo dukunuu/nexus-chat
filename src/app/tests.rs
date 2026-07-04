@@ -770,3 +770,49 @@ fn copy_message_uses_exact_original_content() {
     a.copy_message(2);
     assert_eq!(a.status, "sentinel");
 }
+
+#[test]
+fn history_carries_image_parts_for_vision_models_and_text_for_others() {
+    let mut a = app_with_key();
+    let s = a.db.create_session("t", "vis/model", &a.active_space.id).unwrap();
+    let mid = a.db.add_user_message(&s.id, "what is this?").unwrap();
+    // A real tiny png on disk so the vision path can read it back.
+    let dir = a.space.images_dir(&a.active_space.name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let png_path = dir.join("t.png");
+    std::fs::write(&png_path, crate::app::transcribe::encode_png(1, 1, &[0, 0, 0, 255]).unwrap()).unwrap();
+    let imgs = a.db.add_message_images(&mid, &[png_path.to_string_lossy().to_string()]).unwrap();
+    a.db.set_image_description(&imgs[0].id, "a black pixel").unwrap();
+    a.session = Some(s.clone());
+    a.messages = a.db.load_messages(&s.id).unwrap();
+    a.models = vec![
+        Model { id: "vis/model".into(), name: "v".into(), supports_reasoning: false, context_length: None, supports_images: true },
+        Model { id: "txt/model".into(), name: "t".into(), supports_reasoning: false, context_length: None, supports_images: false },
+    ];
+
+    a.current_model = Some("vis/model".into());
+    let h = a.build_history();
+    let user = h.iter().find(|m| m.role == "user").unwrap();
+    assert_eq!(user.images.len(), 1);
+    assert!(user.images[0].starts_with("data:image/png;base64,"));
+    assert_eq!(user.content, "what is this?");
+
+    a.current_model = Some("txt/model".into());
+    let h = a.build_history();
+    let user = h.iter().find(|m| m.role == "user").unwrap();
+    assert!(user.images.is_empty());
+    assert!(user.content.contains("[Image: a black pixel]"));
+}
+
+#[test]
+fn missing_descriptions_are_collected_for_non_vision_sends() {
+    let mut a = app_with_key();
+    let s = a.db.create_session("t", "txt/model", &a.active_space.id).unwrap();
+    let mid = a.db.add_user_message(&s.id, "see").unwrap();
+    a.db.add_message_images(&mid, &["/tmp/nope.png".into()]).unwrap();
+    a.session = Some(s.clone());
+    a.messages = a.db.load_messages(&s.id).unwrap();
+    let missing = a.undescribed_images();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].1, "/tmp/nope.png");
+}

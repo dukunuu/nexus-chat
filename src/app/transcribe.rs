@@ -40,10 +40,7 @@ pub(super) fn png_data_url(width: usize, height: usize, rgba: &[u8]) -> Result<S
 
 /// A pasted image waiting to be sent with the next message.
 pub struct PendingImage {
-    #[allow(dead_code)] // used from Task 5 of the image plan; remove with first caller
     pub path: std::path::PathBuf,
-    #[allow(dead_code)] // used from Task 5 of the image plan; remove with first caller
-    pub data_url: String,
 }
 
 impl App {
@@ -68,8 +65,7 @@ impl App {
             self.status = format!("could not write {}: {e}", path.display());
             return;
         }
-        let data_url = png_bytes_data_url(&bytes);
-        self.pending_images.push(PendingImage { path, data_url });
+        self.pending_images.push(PendingImage { path });
         let n = self.pending_images.len();
         self.status = format!(
             "{n} image{} attached (Esc clears)",
@@ -79,7 +75,6 @@ impl App {
 
     /// Describe `todo` images ((message_images row id, png path)) with the image
     /// model, one at a time; results arrive as AppEvent::Described.
-    #[allow(dead_code)] // used from Task 5 of the image plan; remove with first caller
     pub(crate) fn start_describing(&mut self, todo: Vec<(String, String)>) {
         let Some(provider) = self.provider.clone() else {
             return;
@@ -129,11 +124,11 @@ impl App {
         }
     }
 
-    /// Continue a send that waited on image descriptions (filled in by the send
-    /// flow; nothing to do until then).
-    #[allow(dead_code)] // used from Task 5 of the image plan; remove with first caller
+    /// All descriptions arrived: fire the request that was waiting on them.
     pub(crate) fn resume_deferred_send(&mut self) {
-        self.deferred_send = None;
+        if self.deferred_send.take().is_some() {
+            let _ = self.start_stream();
+        }
     }
 }
 
@@ -169,7 +164,6 @@ mod tests {
         a.attach_clipboard_image(img);
         assert_eq!(a.pending_images.len(), 1);
         assert!(a.pending_images[0].path.exists());
-        assert!(a.pending_images[0].data_url.starts_with("data:image/png;base64,"));
         assert!(a.status.contains("image attached"));
     }
 

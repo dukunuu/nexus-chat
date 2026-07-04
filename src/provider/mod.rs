@@ -29,7 +29,6 @@ pub struct Model {
     /// Context window size in tokens, if the provider reports it.
     pub context_length: Option<u64>,
     /// Whether the model accepts image input (`architecture.input_modalities`).
-    #[allow(dead_code)] // used from Task 5 of the image plan; remove with first caller
     pub supports_images: bool,
 }
 
@@ -46,9 +45,9 @@ pub struct ChatParams {
 /// A message sent to the completions API. `tool_calls` (assistant requesting
 /// tools) and `tool_call_id` (a tool's result) are only set on those two
 /// message shapes; wire format follows the OpenAI function-calling schema.
-/// `images` (data URLs) are only written by tests until Task 5 wires up
-/// attachments; when non-empty, `content` serializes as an OpenAI vision
-/// parts array instead of a plain string.
+/// `images` (data URLs) are set for user messages with attachments when the
+/// active model supports vision; when non-empty, `content` serializes as an
+/// OpenAI vision parts array instead of a plain string.
 #[derive(Debug, Clone, Default)]
 pub struct ChatMessage {
     pub role: String,
