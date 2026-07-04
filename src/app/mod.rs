@@ -19,6 +19,8 @@ mod chat;
 mod compaction;
 mod copy;
 mod files;
+#[allow(unused_imports)] // used from Task 2 of the file-picker plan; remove with first caller
+pub(crate) use files::PickerEntry;
 mod memory;
 mod models;
 mod sessions;
@@ -92,6 +94,7 @@ pub enum FilesMode {
     Browse,
     Add,
     ConfirmDelete,
+    Pick,
 }
 
 /// What the space picker is doing: browsing, naming a new space, renaming the
@@ -390,6 +393,11 @@ pub struct App {
     pub files_mode: FilesMode,
     /// Path being typed/pasted in the files popup's Add mode.
     pub files_edit: String,
+    /// Directory the file-picker browser is showing (remembered across opens).
+    pub picker_dir: std::path::PathBuf,
+    pub picker_entries: Vec<crate::app::files::PickerEntry>,
+    pub picker_filter: String,
+    pub picker_selected: usize,
 
     /// Live model catalog (fetched on demand, never hardcoded).
     pub models: Vec<Model>,
@@ -534,6 +542,10 @@ impl App {
             files_selected: 0,
             files_mode: FilesMode::Browse,
             files_edit: String::new(),
+            picker_dir: std::env::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")),
+            picker_entries: Vec::new(),
+            picker_filter: String::new(),
+            picker_selected: 0,
             active_space,
             spaces_cache: Vec::new(),
             space_selected: 0,

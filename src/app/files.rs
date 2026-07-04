@@ -8,7 +8,106 @@ use sha2::{Digest, Sha256};
 
 use super::App;
 
+/// One row of the file-picker browser.
+pub struct PickerEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
 impl App {
+    /// Enter the picker at `picker_dir` (home on first open, remembered after).
+    #[allow(dead_code)] // used from Task 2 of the file-picker plan; remove with first caller
+    pub(crate) fn open_file_picker(&mut self) {
+        self.picker_filter.clear();
+        self.picker_selected = 0;
+        self.reload_picker_entries();
+        self.files_mode = super::FilesMode::Pick;
+    }
+
+    /// Re-read the current directory: dirs first, then files, both alphabetical.
+    /// Unreadable dirs just yield an empty list (status explains).
+    fn reload_picker_entries(&mut self) {
+        let mut entries: Vec<PickerEntry> = match std::fs::read_dir(&self.picker_dir) {
+            Ok(rd) => rd
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    let is_dir = e.file_type().ok()?.is_dir();
+                    Some(PickerEntry { name, is_dir })
+                })
+                .collect(),
+            Err(e) => {
+                self.status = format!("cannot read {}: {e}", self.picker_dir.display());
+                Vec::new()
+            }
+        };
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+        self.picker_entries = entries;
+    }
+
+    /// Entries matching the fuzzy filter (all of them, dirs first, when empty).
+    #[allow(dead_code)] // used from Task 2 of the file-picker plan; remove with first caller
+    pub fn filtered_picker_entries(&self) -> Vec<&PickerEntry> {
+        let needle = self.picker_filter.trim();
+        if needle.is_empty() {
+            return self.picker_entries.iter().collect();
+        }
+        use crate::input::fuzzy_score;
+        super::fuzzy_filter_sorted(&self.picker_entries, |e| fuzzy_score(&e.name, needle))
+    }
+
+    #[allow(dead_code)] // used from Task 2 of the file-picker plan; remove with first caller
+    pub fn move_picker_selection(&mut self, delta: i32) {
+        self.picker_selected =
+            super::clamp_cursor(self.picker_selected, self.filtered_picker_entries().len(), delta);
+    }
+
+    #[allow(dead_code)] // used from Task 2 of the file-picker plan; remove with first caller
+    pub fn picker_filter_push(&mut self, c: char) {
+        self.picker_filter.push(c);
+        self.picker_selected = 0;
+    }
+
+    /// Backspace erases the filter first; on an empty filter it goes up a level.
+    #[allow(dead_code)] // used from Task 2 of the file-picker plan; remove with first caller
+    pub fn picker_backspace(&mut self) {
+        if !self.picker_filter.is_empty() {
+            self.picker_filter.pop();
+            self.picker_selected = 0;
+            return;
+        }
+        if let Some(parent) = self.picker_dir.parent().map(|p| p.to_path_buf()) {
+            self.picker_dir = parent;
+            self.picker_selected = 0;
+            self.reload_picker_entries();
+        }
+    }
+
+    /// Enter descends into a directory, or imports the selected file.
+    #[allow(dead_code)] // used from Task 2 of the file-picker plan; remove with first caller
+    pub fn picker_enter(&mut self) -> Result<()> {
+        let filtered = self.filtered_picker_entries();
+        let Some(entry) = filtered.get(self.picker_selected) else {
+            return Ok(());
+        };
+        let name = entry.name.clone();
+        let is_dir = entry.is_dir;
+        let path = self.picker_dir.join(&name);
+        if is_dir {
+            self.picker_dir = path;
+            self.picker_filter.clear();
+            self.picker_selected = 0;
+            self.reload_picker_entries();
+            return Ok(());
+        }
+        match self.import_file(&path) {
+            Ok(n) => self.status = format!("imported {n}"),
+            Err(e) => self.status = format!("import failed: {e}"),
+        }
+        self.files_mode = super::FilesMode::Browse;
+        Ok(())
+    }
+
     /// Sync the active space's files directory with the db: new or changed
     /// files (by sha256) are re-extracted and re-indexed, rows for deleted
     /// files are dropped, and `files_cache` is refreshed. Best-effort: a
@@ -231,5 +330,59 @@ mod tests {
         a.confirm_files_add().unwrap();
         assert!(a.status.contains("not a file"));
         assert_eq!(a.files_cache.len(), 1);
+    }
+
+    #[test]
+    fn picker_lists_dirs_first_descends_and_imports() {
+        let mut a = test_app();
+        let root = std::env::temp_dir().join(format!("nexus-pick-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("subdir")).unwrap();
+        std::fs::write(root.join("bbb.txt"), "file b").unwrap();
+        std::fs::write(root.join("aaa.txt"), "file a").unwrap();
+
+        a.picker_dir = root.clone();
+        a.open_file_picker();
+        assert!(a.files_mode == crate::app::FilesMode::Pick);
+        let names: Vec<&str> = a.filtered_picker_entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["subdir", "aaa.txt", "bbb.txt"]); // dirs first, then alpha
+
+        // Enter on a dir descends and reloads.
+        a.picker_selected = 0;
+        a.picker_enter().unwrap();
+        assert_eq!(a.picker_dir, root.join("subdir"));
+        assert!(a.filtered_picker_entries().is_empty());
+
+        // Backspace with empty filter ascends.
+        a.picker_backspace();
+        assert_eq!(a.picker_dir, root);
+
+        // Enter on a file imports it and returns to Browse.
+        let idx = a.filtered_picker_entries().iter().position(|e| e.name == "aaa.txt").unwrap();
+        a.picker_selected = idx;
+        a.picker_enter().unwrap();
+        assert!(a.files_mode == crate::app::FilesMode::Browse);
+        assert!(a.files_cache.iter().any(|f| f.name == "aaa.txt"));
+    }
+
+    #[test]
+    fn picker_filter_fuzzy_matches_and_backspace_edits_filter_first() {
+        let mut a = test_app();
+        let root = std::env::temp_dir().join(format!("nexus-pick-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("report-2026.pdf"), "x").unwrap();
+        std::fs::write(root.join("notes.md"), "y").unwrap();
+        a.picker_dir = root.clone();
+        a.open_file_picker();
+
+        a.picker_filter_push('r');
+        a.picker_filter_push('p');
+        a.picker_filter_push('t');
+        let names: Vec<&str> = a.filtered_picker_entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["report-2026.pdf"]); // fuzzy subsequence "rpt"
+
+        // Backspace edits the filter (does NOT ascend while filter non-empty).
+        a.picker_backspace();
+        assert_eq!(a.picker_filter, "rp");
+        assert_eq!(a.picker_dir, root);
     }
 }

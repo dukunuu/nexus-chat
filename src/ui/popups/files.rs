@@ -38,6 +38,9 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             " files ",
             "files — Enter open · Ctrl+N add · Ctrl+D remove (or drop files into the space dir)",
         ),
+        // ponytail: picker browser UI lands in Task 2 of the file-picker plan;
+        // this arm only keeps the match exhaustive until then.
+        FilesMode::Pick => " pick a file ".to_string(),
     };
 
     let list = List::new(items)
@@ -91,6 +94,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 _ => {}
             }
         }
+        // ponytail: picker key handling lands in Task 2 of the file-picker
+        // plan; this arm only keeps the match exhaustive until then.
+        FilesMode::Pick => {}
     }
     Ok(())
 }
