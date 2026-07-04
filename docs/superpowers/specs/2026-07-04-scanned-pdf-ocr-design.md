@@ -35,7 +35,7 @@ fileset file.
 
 ### OCR pipeline (`ocr_pdf` — new fn, `src/extract.rs` or small `src/ocr.rs`)
 Per PDF:
-1. `pdftoppm -r 300 -gray -png <file> <tmpdir>/page` renders page PNGs into a
+1. `pdftoppm -r 200 -gray -png <file> <tmpdir>/page` renders page PNGs into a
    temp dir (cleaned up after).
 2. For each page PNG in page order: `tesseract <png> stdout` → page text.
 3. Pages join with `[page N]` marker lines so chunk locations read
@@ -65,7 +65,7 @@ Per PDF:
   language setting can come later).
 - OCR of image files imported into the fileset (images remain unsupported
   there).
-- Manual re-OCR command; page caps; DPI configuration (300 dpi gray fixed).
+- Manual re-OCR command; page caps; DPI configuration (200 dpi gray fixed; pages OCR in parallel, one tesseract per core).
 
 ## Verification
 - Unit: page-marker location chunking; missing-binary → hint status (run with

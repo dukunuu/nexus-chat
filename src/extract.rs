@@ -237,9 +237,11 @@ fn ocr_pdf_in(
         Ok(out.stdout)
     }
 
+    // 200 dpi is ~2x faster to render and OCR than 300 with negligible
+    // accuracy loss on normal print.
     run(
         std::process::Command::new(pdftoppm)
-            .args(["-r", "300", "-gray", "-png"])
+            .args(["-r", "200", "-gray", "-png"])
             .arg(path)
             .arg(tmp.join("page")),
         "pdftoppm",
@@ -254,12 +256,30 @@ fn ocr_pdf_in(
         .collect();
     pages.sort();
 
+    // OCR pages in parallel — one tesseract process per core, pulling page
+    // indices off a shared counter; results re-ordered by index afterwards.
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(pages.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(Vec::with_capacity(pages.len()));
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(png) = pages.get(i) else { return };
+                let r = run(
+                    std::process::Command::new(tesseract).arg(png).arg("stdout"),
+                    "tesseract",
+                );
+                results.lock().unwrap().push((i, r));
+            });
+        }
+    });
+    let mut results = results.into_inner().unwrap();
+    results.sort_by_key(|(i, _)| *i);
+
     let mut text = String::new();
-    for (i, png) in pages.iter().enumerate() {
-        let stdout = run(
-            std::process::Command::new(tesseract).arg(png).arg("stdout"),
-            "tesseract",
-        )?;
+    for (i, r) in results {
+        let stdout = r?;
         let page = String::from_utf8_lossy(&stdout);
         let page = page.trim();
         if !page.is_empty() {
@@ -274,17 +294,41 @@ fn ocr_pdf_in(
 /// Test fixture shared with app::files tests.
 #[cfg(test)]
 pub(crate) fn minimal_pdf(text: Option<&str>) -> Vec<u8> {
+    match text {
+        Some(t) => pdf_with_pages(&[t]),
+        None => {
+            let objs = vec![
+                "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+                "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 150] >>".to_string(),
+            ];
+            serialize_pdf(objs)
+        }
+    }
+}
+
+/// A PDF with one page per entry in `texts`, each drawn in Helvetica.
+#[cfg(test)]
+pub(crate) fn pdf_with_pages(texts: &[&str]) -> Vec<u8> {
+    let font_obj = 2 + 2 * texts.len() + 1; // catalog, pages, (page, content)*, font
     let mut objs: Vec<String> = Vec::new();
     objs.push("<< /Type /Catalog /Pages 2 0 R >>".into());
-    objs.push("<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into());
-    if let Some(t) = text {
-        objs.push("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 150] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".into());
+    let kids: Vec<String> = (0..texts.len()).map(|i| format!("{} 0 R", 3 + 2 * i)).collect();
+    objs.push(format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), texts.len()));
+    for (i, t) in texts.iter().enumerate() {
+        objs.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 150] /Contents {} 0 R /Resources << /Font << /F1 {font_obj} 0 R >> >> >>",
+            4 + 2 * i
+        ));
         let stream = format!("BT /F1 32 Tf 20 60 Td ({t}) Tj ET");
         objs.push(format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()));
-        objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into());
-    } else {
-        objs.push("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 150] >>".into());
     }
+    objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into());
+    serialize_pdf(objs)
+}
+
+#[cfg(test)]
+fn serialize_pdf(objs: Vec<String>) -> Vec<u8> {
     let mut out = b"%PDF-1.4\n".to_vec();
     let mut offsets: Vec<usize> = Vec::new();
     for (i, o) in objs.iter().enumerate() {
@@ -442,6 +486,27 @@ mod tests {
         let pdf = dir.join("blank.pdf");
         std::fs::write(&pdf, minimal_pdf(None)).unwrap();
         assert_eq!(ocr_pdf(&pdf).unwrap(), "");
+    }
+
+    #[test]
+    fn ocr_pdf_multipage_keeps_page_order() {
+        if !ocr_tools_present() {
+            eprintln!("skipping ocr_pdf_multipage_keeps_page_order: tools not installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("nexus-ocr-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("multi.pdf");
+        std::fs::write(&pdf, pdf_with_pages(&["ALPHA BRAVO", "CHARLIE DELTA", "ECHO FOXTROT"]))
+            .unwrap();
+
+        let text = ocr_pdf(&pdf).unwrap();
+        // Parallel OCR must still emit pages in document order.
+        let a = text.find("ALPHA").expect(&text);
+        let c = text.find("CHARLIE").expect(&text);
+        let e = text.find("ECHO").expect(&text);
+        assert!(a < c && c < e, "pages out of order: {text:?}");
+        assert!(text.contains("[page 3]"), "{text:?}");
     }
 
     #[test]
