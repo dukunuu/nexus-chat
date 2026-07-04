@@ -17,7 +17,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     let fav_focused = app.model_focus == ModelPanel::Favorites;
     let fav_title = match app.model_pick_target {
         crate::app::ModelPickTarget::Memory => " ★ Favorites — picking memory model ",
-        crate::app::ModelPickTarget::Transcriber => " ★ Favorites — picking transcriber model ",
+        crate::app::ModelPickTarget::Transcriber => " ★ Favorites — picking image model ",
         crate::app::ModelPickTarget::Session => " ★ Favorites ",
     };
 
