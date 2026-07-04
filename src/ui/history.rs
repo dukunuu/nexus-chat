@@ -86,6 +86,8 @@ fn wrap_conversation(app: &App, width: usize) -> Wrapped {
                 out.push(Line::from(dim(format!("🖼 {} image{}", m.images.len(), if m.images.len() == 1 { "" } else { "s" }))));
             }
             push_user(&mut out, &m.content, width);
+        } else if m.role == "tool_call" {
+            push_tool_call(&mut out, &m.content, app.show_tool_detail, &app.settings, width);
         } else {
             push_assistant_stored(&mut out, m, &app.settings, width, &mut code, &mut blocks);
         }
@@ -117,6 +119,35 @@ fn push_user(out: &mut Vec<Line<'static>>, content: &str, width: usize) {
     }
     if first {
         out.push(Line::from(head));
+    }
+    out.push(Line::from(""));
+}
+
+/// A tool call block: a dim `⚒ name summary` one-liner; when tool detail is
+/// on (Ctrl+T), the full arguments and result follow, reasoning-style.
+fn push_tool_call(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    expanded: bool,
+    settings: &crate::app::Settings,
+    width: usize,
+) {
+    let v: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
+    let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let (name, args, result) = (field("name"), field("arguments"), field("result"));
+    let summary = crate::app::tool_call_summary(&name, &args, &result);
+    let hint = if expanded || settings.hide_hints { "" } else { " — Ctrl+T for detail" };
+    out.push(Line::from(vec![
+        Span::styled("⚒ ", Style::default().fg(Color::Yellow)),
+        dim(format!("{summary}{hint}")),
+    ]));
+    if expanded {
+        for line in wrap_plain(&args, width.saturating_sub(2)) {
+            out.push(Line::from(dim(format!("┆ {line}"))));
+        }
+        for line in wrap_plain(&result, width.saturating_sub(2)) {
+            out.push(Line::from(dim(format!("│ {line}"))));
+        }
     }
     out.push(Line::from(""));
 }

@@ -437,6 +437,8 @@ pub struct App {
     pub(crate) thinking_text: String,
     /// Label for a tool currently running mid-stream (e.g. "Searching the web…").
     pub tool_status: Option<String>,
+    /// Whether tool-call blocks show full arguments/results (Ctrl+T).
+    pub show_tool_detail: bool,
     pub(crate) stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
     /// Wall-clock start of the current stream, for TPS.
     pub(crate) stream_started: Option<std::time::Instant>,
@@ -589,6 +591,7 @@ impl App {
             streaming: None,
             thinking_text: String::new(),
             tool_status: None,
+            show_tool_detail: false,
             stream_rx: None,
             stream_started: None,
             stream_usage: None,
@@ -930,5 +933,41 @@ impl App {
         }
     }
 
+}
+
+/// The one-line transcript summary for a tool-call block: the tool's name
+/// plus the argument (and result shape) a reader actually cares about.
+pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
+    let f = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    match name {
+        "skill" => format!("skill {}", f("name")),
+        "web_search" | "search_files" => {
+            let failed = result.starts_with("no results")
+                || result.starts_with("no matches")
+                || result.contains("failed");
+            let hits =
+                if failed { "no hits".to_string() } else { format!("{} hits", result.lines().count()) };
+            format!("{name} \"{}\" → {hits}", f("query"))
+        }
+        "read_file" => format!("read_file {} → {}", f("name"), first_line(result)),
+        "read_app_file" => format!("read_app_file {}/{}", f("app"), f("path")),
+        "write_file" => {
+            format!("write_file {}/{} ({} bytes)", f("app"), f("path"), f("content").len())
+        }
+        "edit_file" => format!("edit_file {}/{}", f("app"), f("path")),
+        _ => {
+            let mut a: String = args.chars().take(60).collect();
+            if args.chars().count() > 60 {
+                a.push('…');
+            }
+            format!("{name} {a}")
+        }
+    }
+}
+
+/// First line of a tool result, e.g. `report.pdf (lines 1-200 of 831):`.
+fn first_line(result: &str) -> String {
+    result.lines().next().unwrap_or("").trim_end_matches(':').to_string()
 }
 

@@ -247,6 +247,8 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         // Ctrl+R expands/collapses stored reasoning traces (editor's redo is
         // shadowed here — the composer rarely needs it).
         KeyCode::Char('r') if ctrl => app.toggle_reasoning_view()?,
+        // Ctrl+T expands/collapses tool-call detail blocks in the transcript.
+        KeyCode::Char('t') if ctrl => app.show_tool_detail = !app.show_tool_detail,
         // Ctrl+G opens the context breakdown (system/memory/conversation/skills).
         // (Not Ctrl+I: that's the same byte as Tab on terminals without the
         // Kitty keyboard protocol, so it'd be unreachable on many of them.)

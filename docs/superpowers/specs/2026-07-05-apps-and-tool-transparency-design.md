@@ -69,7 +69,7 @@ confined to `spaces/<active-space>/apps/`.
   range; write_file: path + human size; edit_file: path; web_search: query;
   skill: skill name; fallback: truncated args). Expanded state shows the
   full arguments and result (wrapped, scrollable as normal transcript text).
-- Expand/collapse: one global toggle key, Ctrl+O, flips showing tool detail
+- Expand/collapse: one global toggle key, Ctrl+T, flips showing tool detail
   for the whole transcript (per-block cursor selection is out of scope v1).
 - Live behavior: when a `ToolCall` event arrives mid-stream it is persisted
   and appears in the transcript immediately, above the still-streaming
@@ -89,6 +89,6 @@ confined to `spaces/<active-space>/apps/`.
 - Tool tests: write→read→edit round trip on a temp space; confinement
   rejections; edit 0-match and N-match errors; result strings carry the URL.
 - Transparency tests: tool_call row round-trips through db and is skipped by
-  build_history; summary line per tool shape; Ctrl+O toggles expanded text.
+  build_history; summary line per tool shape; Ctrl+T toggles expanded text.
 - Manual: ask for a presentation → link opens in browser; edit request →
-  slide changes on refresh; transcript shows ⚒ blocks; Ctrl+O expands.
+  slide changes on refresh; transcript shows ⚒ blocks; Ctrl+T expands.

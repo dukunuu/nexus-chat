@@ -449,6 +449,12 @@ impl Db {
         self.insert_message(session_id, "user", content, None, None, None, None, None)
     }
 
+    /// Insert a tool-call transcript block: `content` is JSON
+    /// `{"name","arguments","result"}`. Never sent back to the model.
+    pub fn add_tool_call_message(&self, session_id: &str, content: &str) -> Result<String> {
+        self.insert_message(session_id, "tool_call", content, None, None, None, None, None)
+    }
+
     /// Insert an assistant reply with its model, reasoning trace, and stats.
     #[allow(clippy::too_many_arguments)]
     pub fn add_assistant_message(

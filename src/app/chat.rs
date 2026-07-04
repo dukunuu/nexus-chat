@@ -129,6 +129,11 @@ impl App {
         }
         let vision = self.current_model_supports_images();
         for m in self.effective_messages() {
+            // Tool-call blocks are transcript/audit only — the model already
+            // consumed the tool results in-turn.
+            if m.role == "tool_call" {
+                continue;
+            }
             let mut cm = ChatMessage::text(m.role.clone(), m.content.clone());
             if m.role == "user" && !m.images.is_empty() {
                 if vision {
@@ -206,6 +211,25 @@ impl App {
             StreamEvent::Reasoning(t) => self.thinking_text.push_str(&t),
             StreamEvent::Usage(u) => self.stream_usage = Some(u),
             StreamEvent::Status(s) => self.tool_status = Some(s),
+            StreamEvent::ToolCall { name, arguments, result } => {
+                let content =
+                    serde_json::json!({ "name": name, "arguments": arguments, "result": result })
+                        .to_string();
+                if let Some(session) = &self.session {
+                    let _ = self.db.add_tool_call_message(&session.id, &content);
+                }
+                self.messages.push(Message {
+                    id: String::new(),
+                    role: "tool_call".to_string(),
+                    content,
+                    model: None,
+                    reasoning: None,
+                    tokens: None,
+                    secs: None,
+                    phrase: None,
+                    images: Vec::new(),
+                });
+            }
             StreamEvent::Done => self.finish_stream()?,
             StreamEvent::Error(e) => {
                 self.status = format!("stream error: {e}");
@@ -301,6 +325,7 @@ impl App {
         let convo: String = self
             .messages
             .iter()
+            .filter(|m| m.role != "tool_call")
             .map(|m| format!("{}: {}", m.role, m.content.chars().take(500).collect::<String>()))
             .collect::<Vec<_>>()
             .join("\n");

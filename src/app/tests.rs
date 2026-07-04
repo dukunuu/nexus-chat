@@ -841,3 +841,54 @@ fn switching_context_cancels_deferred_image_send() {
     assert!(a.deferred_send.is_none());
     assert!(a.pending_images.is_empty());
 }
+
+#[test]
+fn tool_call_events_persist_and_stay_out_of_history() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    let space = a.active_space.id.clone();
+    let s = a.db.create_session("t", "a/one", &space).unwrap();
+    a.session = Some(s.clone());
+    a.streaming = Some(String::new());
+    a.on_stream_event(crate::provider::StreamEvent::ToolCall {
+        name: "search_files".into(),
+        arguments: r#"{"query":"q3 revenue"}"#.into(),
+        result: "report.pdf (page 3): revenue grew".into(),
+    })
+    .unwrap();
+
+    // Rendered + persisted as a tool_call row…
+    assert_eq!(a.messages.last().unwrap().role, "tool_call");
+    let stored = a.db.load_messages(&s.id).unwrap();
+    assert_eq!(stored.last().unwrap().role, "tool_call");
+    assert!(stored.last().unwrap().content.contains("q3 revenue"));
+
+    // …but never sent back to the model.
+    let h = a.build_history();
+    assert!(h.iter().all(|m| !m.content.contains("q3 revenue")));
+}
+
+#[test]
+fn tool_call_summaries_name_the_interesting_argument() {
+    use crate::app::tool_call_summary;
+    assert_eq!(
+        tool_call_summary("search_files", r#"{"query":"q3"}"#, "a\nb\nc"),
+        "search_files \"q3\" → 3 hits"
+    );
+    assert_eq!(
+        tool_call_summary("search_files", r#"{"query":"q3"}"#, "no matches"),
+        "search_files \"q3\" → no hits"
+    );
+    assert_eq!(
+        tool_call_summary("read_file", r#"{"name":"r.pdf"}"#, "r.pdf (lines 1-200 of 831):\n…"),
+        "read_file r.pdf → r.pdf (lines 1-200 of 831)"
+    );
+    assert_eq!(
+        tool_call_summary("write_file", r#"{"app":"deck","path":"index.html","content":"12345"}"#, "wrote"),
+        "write_file deck/index.html (5 bytes)"
+    );
+    assert_eq!(tool_call_summary("edit_file", r#"{"app":"a","path":"b.js"}"#, "ok"), "edit_file a/b.js");
+    assert_eq!(tool_call_summary("skill", r#"{"name":"commit"}"#, "…"), "skill commit");
+    let long = format!(r#"{{"x":"{}"}}"#, "y".repeat(100));
+    assert!(tool_call_summary("mystery", &long, "").ends_with('…'));
+}

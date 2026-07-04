@@ -193,6 +193,11 @@ impl OpenRouter {
                     for call in &calls {
                         let (result, status) = toolbox.run(&call.name, &call.arguments).await;
                         let _ = tx.send(StreamEvent::Status(status));
+                        let _ = tx.send(StreamEvent::ToolCall {
+                            name: call.name.clone(),
+                            arguments: call.arguments.clone(),
+                            result: result.clone(),
+                        });
                         messages.push(ChatMessage {
                             role: "tool".to_string(),
                             content: result,

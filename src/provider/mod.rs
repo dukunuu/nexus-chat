@@ -129,6 +129,8 @@ pub enum StreamEvent {
     /// A tool is about to run (e.g. "Searching the web…"), shown next to the
     /// thinking spinner while the model waits on the result.
     Status(String),
+    /// A tool finished: shown (and persisted) as its own transcript block.
+    ToolCall { name: String, arguments: String, result: String },
     Done,
     Error(String),
 }
