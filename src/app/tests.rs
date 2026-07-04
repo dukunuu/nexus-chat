@@ -72,8 +72,8 @@ pub(super) fn app_with_key() -> App {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("test-key".into()), test_space());
     a.models = vec![
-        Model { id: "a/one".into(), name: "One".into(), supports_reasoning: false, context_length: None },
-        Model { id: "b/two".into(), name: "Two".into(), supports_reasoning: false, context_length: None },
+        Model { id: "a/one".into(), name: "One".into(), supports_reasoning: false, context_length: None, supports_images: false },
+        Model { id: "b/two".into(), name: "Two".into(), supports_reasoning: false, context_length: None, supports_images: false },
     ];
     a
 }
@@ -115,9 +115,9 @@ fn panels_split_favorites_from_available_by_recency() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("k".into()), test_space());
     a.models = vec![
-        Model { id: "a/one".into(), name: "One".into(), supports_reasoning: false, context_length: None },
-        Model { id: "b/two".into(), name: "Two".into(), supports_reasoning: false, context_length: None },
-        Model { id: "c/three".into(), name: "Three".into(), supports_reasoning: false, context_length: None },
+        Model { id: "a/one".into(), name: "One".into(), supports_reasoning: false, context_length: None, supports_images: false },
+        Model { id: "b/two".into(), name: "Two".into(), supports_reasoning: false, context_length: None, supports_images: false },
+        Model { id: "c/three".into(), name: "Three".into(), supports_reasoning: false, context_length: None, supports_images: false },
     ];
     // three is favorite; two was used more recently than one.
     a.favorites.insert("c/three".into());
@@ -134,7 +134,7 @@ fn panels_split_favorites_from_available_by_recency() {
 fn toggle_favorite_persists_and_moves_panel() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("k".into()), test_space());
-    a.models = vec![Model { id: "a/one".into(), name: "One".into(), supports_reasoning: false, context_length: None }];
+    a.models = vec![Model { id: "a/one".into(), name: "One".into(), supports_reasoning: false, context_length: None, supports_images: false }];
     a.model_focus = ModelPanel::Available;
     a.avail_state.select(Some(0));
     a.toggle_favorite_focused().unwrap();
@@ -162,7 +162,7 @@ fn reasoning_cycles_only_for_supporting_models() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("k".into()), test_space());
     a.models = vec![
-        Model { id: "r/model".into(), name: "R".into(), supports_reasoning: true, context_length: Some(1000) },
+        Model { id: "r/model".into(), name: "R".into(), supports_reasoning: true, context_length: Some(1000), supports_images: false },
     ];
     a.model_focus = ModelPanel::Available;
     a.avail_state.select(Some(0));

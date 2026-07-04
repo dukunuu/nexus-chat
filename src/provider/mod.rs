@@ -28,6 +28,9 @@ pub struct Model {
     pub supports_reasoning: bool,
     /// Context window size in tokens, if the provider reports it.
     pub context_length: Option<u64>,
+    /// Whether the model accepts image input (`architecture.input_modalities`).
+    #[allow(dead_code)] // used from Task 5 of the image plan; remove with first caller
+    pub supports_images: bool,
 }
 
 /// Sampling + reasoning parameters for a completion request.

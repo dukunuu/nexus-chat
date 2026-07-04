@@ -35,6 +35,21 @@ struct ModelEntry {
     supported_parameters: Vec<String>,
     #[serde(default)]
     context_length: Option<u64>,
+    #[serde(default)]
+    architecture: Option<Architecture>,
+}
+
+#[derive(Deserialize)]
+struct Architecture {
+    #[serde(default)]
+    input_modalities: Vec<String>,
+}
+
+/// Whether the catalog entry accepts image input.
+fn entry_supports_images(e: &ModelEntry) -> bool {
+    e.architecture
+        .as_ref()
+        .is_some_and(|a| a.input_modalities.iter().any(|m| m == "image"))
 }
 
 impl OpenRouter {
@@ -63,11 +78,15 @@ impl OpenRouter {
         let mut models: Vec<Model> = resp
             .data
             .into_iter()
-            .map(|m| Model {
-                name: m.name.unwrap_or_else(|| m.id.clone()),
-                supports_reasoning: m.supported_parameters.iter().any(|p| p == "reasoning"),
-                context_length: m.context_length,
-                id: m.id,
+            .map(|m| {
+                let supports_images = entry_supports_images(&m);
+                Model {
+                    name: m.name.unwrap_or_else(|| m.id.clone()),
+                    supports_reasoning: m.supported_parameters.iter().any(|p| p == "reasoning"),
+                    context_length: m.context_length,
+                    id: m.id,
+                    supports_images,
+                }
             })
             .collect();
         models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -465,5 +484,17 @@ mod tests {
     fn request_body_omits_tools_key_when_empty() {
         let body = serde_json::json!({ "model": "m", "messages": Vec::<ChatMessage>::new(), "stream": true });
         assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn parses_input_modalities_into_supports_images() {
+        let json = r#"{"data":[
+            {"id":"a/vision","architecture":{"input_modalities":["text","image"]}},
+            {"id":"b/text","architecture":{"input_modalities":["text"]}},
+            {"id":"c/legacy"}
+        ]}"#;
+        let resp: ModelsResponse = serde_json::from_str(json).unwrap();
+        let flags: Vec<bool> = resp.data.iter().map(entry_supports_images).collect();
+        assert_eq!(flags, vec![true, false, false]);
     }
 }
