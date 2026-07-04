@@ -68,7 +68,7 @@ fn code_blocks_split_by_fence_with_lang() {
     assert_eq!(blocks[1].1, "plain\n");
 }
 
-fn app_with_key() -> App {
+pub(super) fn app_with_key() -> App {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("test-key".into()), test_space());
     a.models = vec![

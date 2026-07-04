@@ -110,7 +110,6 @@ impl OpenRouter {
     }
 
     /// One-shot, non-streaming vision call: transcribe `image_data_url` with `model`.
-    #[allow(dead_code)] // used from Task 11 of the filesets plan; remove with first caller
     pub async fn transcribe_image(&self, model: &str, image_data_url: &str) -> Result<String> {
         self.post_completion(vision_body(model, image_data_url)).await
     }

@@ -268,6 +268,14 @@ impl App {
     /// Read `text` from the OS clipboard and paste it into whatever's focused
     /// (Ctrl+V fallback for terminals that don't send bracketed paste).
     pub fn paste_from_clipboard(&mut self) {
+        // An image on the clipboard (screenshot, copied picture) beats text —
+        // but only for the composer; popup fields are text-only.
+        if self.popup == crate::app::Popup::None
+            && let Some(img) = self.clipboard.as_mut().and_then(|cb| cb.get_image().ok())
+        {
+            self.transcribe_clipboard_image(img);
+            return;
+        }
         let Some(cb) = self.clipboard.as_mut() else { return };
         let Ok(text) = cb.get_text() else { return };
         self.paste(&text);
