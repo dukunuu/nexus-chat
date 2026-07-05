@@ -92,6 +92,10 @@ impl App {
     pub(crate) fn confirm_delete(&mut self) -> Result<()> {
         if let Some(s) = self.selected_session() {
             self.db.delete_session(&s.id)?;
+            if self.stream_session.as_ref().is_some_and(|(id, _)| *id == s.id) {
+                self.discard_stream();
+            }
+            self.unread.remove(&s.id);
             self.sessions_cache.retain(|c| c.id != s.id);
             if self.session.as_ref().is_some_and(|c| c.id == s.id) {
                 self.session = None;
@@ -114,6 +118,7 @@ impl App {
     pub(crate) fn confirm_session(&mut self) -> Result<()> {
         if let Some(s) = self.selected_session() {
             self.messages = self.db.load_messages(&s.id)?;
+            self.unread.remove(&s.id);
             self.current_model = Some(s.model.clone());
             self.status = format!("switched to: {}", s.title);
             self.session = Some(s);

@@ -183,6 +183,41 @@ async fn send_while_streaming_names_the_busy_session() {
 }
 
 #[tokio::test]
+async fn opening_a_session_clears_its_unread_marker() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("hello");
+    a.submit().unwrap();
+    let origin = a.session.as_ref().unwrap().id.clone();
+    a.new_session().unwrap();
+    a.on_stream_event(crate::provider::StreamEvent::Token("done".into())).unwrap();
+    a.on_stream_event(crate::provider::StreamEvent::Done).unwrap();
+    assert!(a.unread.contains(&origin));
+
+    a.open_session_picker().unwrap();
+    a.confirm_session().unwrap(); // most recent = origin
+    assert_eq!(a.session.as_ref().unwrap().id, origin);
+    assert!(!a.unread.contains(&origin));
+    assert_eq!(a.messages.last().unwrap().content, "done"); // reloaded from db
+}
+
+#[tokio::test]
+async fn deleting_the_streaming_session_discards_the_stream() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("hello");
+    a.submit().unwrap();
+    let origin = a.session.as_ref().unwrap().id.clone();
+    a.on_stream_event(crate::provider::StreamEvent::Token("partial".into())).unwrap();
+
+    a.open_session_picker().unwrap();
+    a.confirm_delete().unwrap(); // deletes the only (streaming) session
+    assert!(!a.is_streaming());
+    assert!(a.stream_session.is_none());
+    assert!(!a.unread.contains(&origin));
+}
+
+#[tokio::test]
 async fn esc_stop_keeps_partial_response() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());

@@ -273,6 +273,21 @@ impl App {
         Ok(())
     }
 
+    /// Kill the in-flight stream and throw its partial text away — used when
+    /// the origin session is deleted (nothing left to save into).
+    pub(crate) fn discard_stream(&mut self) {
+        if let Some(h) = self.stream_abort.take() {
+            h.abort();
+        }
+        self.stream_rx = None;
+        self.streaming = None;
+        self.stream_session = None;
+        self.thinking_text.clear();
+        self.stream_usage = None;
+        self.stream_started = None;
+        self.tool_status = None;
+    }
+
     fn finish_stream(&mut self) -> Result<()> {
         self.stream_rx = None;
         self.stream_abort = None;
