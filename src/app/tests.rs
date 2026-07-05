@@ -124,7 +124,10 @@ fn ocr_settings_defaults_gate_and_cycle() {
     assert!(!a.vlm_ocr_enabled());
     a.cycle_ocr_engine().unwrap(); // tesseract → vlm
     assert!(a.vlm_ocr_enabled());
-    a.cycle_ocr_engine().unwrap(); // vlm → auto
+    a.cycle_ocr_engine().unwrap(); // vlm → local
+    assert_eq!(a.ocr_engine, "local");
+    assert!(!a.vlm_ocr_enabled()); // local routes to ollama, not OpenRouter
+    a.cycle_ocr_engine().unwrap(); // local → auto
     assert_eq!(a.ocr_engine, "auto");
     a.clear_ocr_model().unwrap();
     assert!(!a.vlm_ocr_enabled()); // no model, auto can't use vlm

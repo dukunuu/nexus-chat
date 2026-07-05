@@ -232,7 +232,7 @@ impl SettingsField {
 }
 
 const VERBOSITY_LEVELS: [&str; 3] = ["normal", "concise", "caveman"];
-pub(crate) const OCR_ENGINES: [&str; 3] = ["auto", "tesseract", "vlm"];
+pub(crate) const OCR_ENGINES: [&str; 4] = ["auto", "tesseract", "vlm", "local"];
 const SEARCH_PROVIDERS: [&str; 4] = ["auto", "langsearch", "searxng", "duckduckgo"];
 
 /// Nerd config: footer toggles + core sampling parameters.
@@ -366,6 +366,8 @@ pub enum AppEvent {
     Ocr(Option<(String, String, files::OcrUpdate)>),
     /// One file's chunk-embedding job finished (or the channel closed).
     Embed(Option<EmbedMsg>),
+    /// `/ocr-local` pull finished: model name or error.
+    OcrPull(Option<Result<String, String>>),
 }
 
 pub struct App {
@@ -387,8 +389,11 @@ pub struct App {
     pub transcriber_model: String,
     /// Vision model for scanned-PDF OCR (empty = tesseract only).
     pub ocr_model: String,
-    /// OCR engine choice: "auto" (vlm when ocr_model set), "tesseract", "vlm".
+    /// OCR engine choice: "auto" (vlm when ocr_model set), "tesseract",
+    /// "vlm", or "local" (Ollama on 127.0.0.1:11434, set up by /ocr-local).
     pub ocr_engine: String,
+    /// Ollama model name for the "local" OCR engine.
+    pub local_ocr_model: String,
     /// Embedding model for semantic file search (empty = keyword FTS only).
     pub embedding_model: String,
     /// Base URL of a SearXNG instance for the web-search skill, or empty to
@@ -427,6 +432,8 @@ pub struct App {
     pub(crate) ocr_rx: Option<mpsc::UnboundedReceiver<(String, String, files::OcrUpdate)>>,
     /// One in-flight chunk-embedding job: (space id, file id, vectors or error).
     pub(crate) embed_rx: Option<mpsc::UnboundedReceiver<EmbedMsg>>,
+    /// A running `/ocr-local` model pull: model name on success, error text on failure.
+    pub(crate) ocr_pull_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
     /// Images pasted from the clipboard, staged for the next message.
     pub pending_images: Vec<transcribe::PendingImage>,
     /// A message queued to send once its images finish being described.
@@ -614,6 +621,7 @@ impl App {
             describe_rx: None,
             ocr_rx: None,
             embed_rx: None,
+            ocr_pull_rx: None,
             pending_images: Vec::new(),
             deferred_send: None,
             files_cache: Vec::new(),
@@ -637,6 +645,7 @@ impl App {
             transcriber_model: "google/gemini-2.5-flash-lite".to_string(),
             ocr_model: "google/gemini-2.5-flash-lite".to_string(),
             ocr_engine: "auto".to_string(),
+            local_ocr_model: "glm-ocr".to_string(),
             embedding_model: "openai/text-embedding-3-small".to_string(),
             base_system_prompt: config::load_system_prompt().unwrap_or_default(),
             verbosity: "concise".to_string(),
@@ -748,6 +757,7 @@ impl App {
                 "transcriber_model" => self.transcriber_model = v,
                 "ocr_model" => self.ocr_model = v,
                 "ocr_engine" if OCR_ENGINES.contains(&v.as_str()) => self.ocr_engine = v,
+                "local_ocr_model" => self.local_ocr_model = v,
                 "embedding_model" => self.embedding_model = v,
                 "compact_threshold" => {
                     if let Ok(t) = v.parse() {
@@ -911,6 +921,12 @@ impl App {
                     None => std::future::pending().await,
                 }
             } => AppEvent::Embed(r),
+            r = async {
+                match self.ocr_pull_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => AppEvent::OcrPull(r),
         }
     }
 
@@ -981,6 +997,7 @@ impl App {
             "skills" => self.open_skills_popup(),
             "files" => self.open_files_popup(),
             "apps" => self.open_apps_popup(),
+            "ocr-local" => self.ocr_local_install(cmd[token.len()..].trim()),
             "edit" => self.request_app_file_edit(cmd[token.len()..].trim()),
             other => {
                 if self.skills.iter().any(|s| s.name == other) {
@@ -1045,10 +1062,12 @@ impl App {
         }
     }
 
-    /// Whether scanned PDFs should OCR through the vision model instead of
-    /// tesseract: explicit "vlm", or "auto" with an OCR model configured.
+    /// Whether scanned PDFs should OCR through the OpenRouter vision model:
+    /// explicit "vlm", or "auto" with an OCR model configured. ("local" and
+    /// "tesseract" route elsewhere.)
     pub(crate) fn vlm_ocr_enabled(&self) -> bool {
-        !self.ocr_model.trim().is_empty() && self.ocr_engine != "tesseract"
+        !self.ocr_model.trim().is_empty()
+            && matches!(self.ocr_engine.as_str(), "vlm" | "auto")
     }
 
 }

@@ -416,6 +416,16 @@ fn parse_usage(data: &str) -> Option<Usage> {
 
 /// Request body for a one-shot image-understanding call: a text part with the
 /// instruction plus the image as a data-URL content part (OpenAI vision shape).
+/// Shared page-transcription instructions (OpenRouter VLMs and local Ollama).
+pub(crate) const OCR_PROMPT: &str =
+    "Transcribe this scanned page to plain text, faithfully and completely. \
+     Output ONLY the transcription — no commentary, no markdown fences. \
+     Preserve the natural reading order; vertical Japanese text reads in \
+     columns from right to left. Transcribe the body text only: skip \
+     furigana/ruby annotations (the small kana printed above or beside \
+     kanji). Render tables as plain text rows. If the page contains no \
+     text, output nothing.";
+
 fn ocr_body(model: &str, image_data_url: &str) -> serde_json::Value {
     serde_json::json!({
         "model": model,
@@ -425,14 +435,7 @@ fn ocr_body(model: &str, image_data_url: &str) -> serde_json::Value {
         "messages": [{
             "role": "user",
             "content": [
-                { "type": "text",
-                  "text": "Transcribe this scanned page to plain text, faithfully and completely. \
-                           Output ONLY the transcription — no commentary, no markdown fences. \
-                           Preserve the natural reading order; vertical Japanese text reads in \
-                           columns from right to left. Transcribe the body text only: skip \
-                           furigana/ruby annotations (the small kana printed above or beside \
-                           kanji). Render tables as plain text rows. If the page contains no \
-                           text, output nothing." },
+                { "type": "text", "text": OCR_PROMPT },
                 { "type": "image_url", "image_url": { "url": image_data_url } },
             ],
         }],

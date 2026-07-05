@@ -117,6 +117,7 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                 AppEvent::Described(r) => app.on_described(r),
                 AppEvent::Ocr(r) => app.on_ocr_done(r),
                 AppEvent::Embed(r) => app.on_embed_done(r),
+                AppEvent::OcrPull(r) => app.on_ocr_pull(r),
             },
             _ = async {
                 if streaming {

@@ -22,13 +22,57 @@ pub struct PickerEntry {
     pub is_dir: bool,
 }
 
-/// OCR a scanned PDF through the vision model: render pages at 300 DPI color,
+/// Which service transcribes a rendered page image.
+#[derive(Clone)]
+pub(crate) enum OcrBackend {
+    /// OpenRouter vision model (`ocr_model`).
+    Router(crate::provider::openrouter::OpenRouter, String),
+    /// Local Ollama model via its native /api/generate endpoint — the
+    /// OpenAI-compatible route mishandles GLM-OCR's vision input.
+    Ollama(reqwest::Client, String),
+}
+
+impl OcrBackend {
+    async fn transcribe(&self, png: &[u8]) -> anyhow::Result<String> {
+        match self {
+            OcrBackend::Router(provider, model) => {
+                let url = crate::app::transcribe::png_bytes_data_url(png);
+                provider.ocr_page(model, &url).await
+            }
+            OcrBackend::Ollama(client, model) => {
+                use base64::Engine;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+                let v = client
+                    .post("http://127.0.0.1:11434/api/generate")
+                    .json(&ollama_ocr_body(model, &b64))
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<serde_json::Value>()
+                    .await?;
+                Ok(v.get("response").and_then(|r| r.as_str()).unwrap_or("").to_string())
+            }
+        }
+    }
+}
+
+/// Request body for Ollama's native generate endpoint: raw base64 in
+/// `images`, not an OpenAI-style content part.
+fn ollama_ocr_body(model: &str, png_b64: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "prompt": crate::provider::openrouter::OCR_PROMPT,
+        "images": [png_b64],
+        "stream": false,
+    })
+}
+
+/// OCR a scanned PDF through a vision backend: render pages at 300 DPI color,
 /// transcribe up to 4 pages concurrently (one retry each), and join with
 /// `[page N]` markers — a page that fails twice becomes a `[page N: ocr
 /// failed]` marker instead of sinking the document.
 async fn ocr_pdf_vlm(
-    provider: &crate::provider::openrouter::OpenRouter,
-    model: &str,
+    backend: &OcrBackend,
     path: &Path,
     tx: &tokio::sync::mpsc::UnboundedSender<(String, String, OcrUpdate)>,
     space_id: &str,
@@ -38,14 +82,13 @@ async fn ocr_pdf_vlm(
     if let Err(e) = std::fs::create_dir_all(&tmp) {
         return Err(format!("error: ocr: {e}"));
     }
-    let result = ocr_pdf_vlm_in(provider, model, path, &tmp, tx, space_id, name).await;
+    let result = ocr_pdf_vlm_in(backend, path, &tmp, tx, space_id, name).await;
     let _ = std::fs::remove_dir_all(&tmp);
     result
 }
 
 async fn ocr_pdf_vlm_in(
-    provider: &crate::provider::openrouter::OpenRouter,
-    model: &str,
+    backend: &OcrBackend,
     path: &Path,
     tmp: &Path,
     tx: &tokio::sync::mpsc::UnboundedSender<(String, String, OcrUpdate)>,
@@ -73,15 +116,14 @@ async fn ocr_pdf_vlm_in(
     let mut set = tokio::task::JoinSet::new();
     let spawn_page = |set: &mut tokio::task::JoinSet<(usize, std::result::Result<String, String>)>,
                       i: usize| {
-        let (provider, model, png) = (provider.clone(), model.to_string(), pages[i].clone());
+        let (backend, png) = (backend.clone(), pages[i].clone());
         set.spawn(async move {
             let Ok(bytes) = std::fs::read(&png) else {
                 return (i, Err("page image unreadable".to_string()));
             };
-            let url = crate::app::transcribe::png_bytes_data_url(&bytes);
             let mut last = String::new();
             for _ in 0..2 {
-                match provider.ocr_page(&model, &url).await {
+                match backend.transcribe(&bytes).await {
                     Ok(text) => return (i, Ok(text)),
                     Err(e) => last = e.to_string(),
                 }
@@ -294,19 +336,13 @@ impl App {
         if jobs.is_empty() || self.ocr_rx.is_some() {
             return;
         }
-        // VLM path needs a provider + model; otherwise fall back to tesseract.
-        let vlm = if self.vlm_ocr_enabled() {
-            self.provider.clone().map(|p| (p, self.ocr_model.trim().to_string()))
-        } else {
-            None
-        };
+        let backend = self.ocr_backend();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.ocr_rx = Some(rx);
-        if let Some((provider, model)) = vlm {
+        if let Some(backend) = backend {
             tokio::spawn(async move {
                 for (space_id, name, path) in jobs {
-                    let result =
-                        ocr_pdf_vlm(&provider, &model, &path, &tx, &space_id, &name).await;
+                    let result = ocr_pdf_vlm(&backend, &path, &tx, &space_id, &name).await;
                     if tx.send((space_id, name, OcrUpdate::Done(result))).is_err() {
                         return;
                     }
@@ -333,6 +369,80 @@ impl App {
                 }
             }
         });
+    }
+
+    /// The vision backend scanned PDFs OCR through, or None for tesseract:
+    /// "local" → Ollama; "vlm"/"auto" with an OCR model + provider → OpenRouter.
+    pub(crate) fn ocr_backend(&self) -> Option<OcrBackend> {
+        if self.ocr_engine == "local" {
+            let model = self.local_ocr_model.trim();
+            let model = if model.is_empty() { "glm-ocr" } else { model };
+            return Some(OcrBackend::Ollama(reqwest::Client::new(), model.to_string()));
+        }
+        if self.vlm_ocr_enabled() {
+            return self
+                .provider
+                .clone()
+                .map(|p| OcrBackend::Router(p, self.ocr_model.trim().to_string()));
+        }
+        None
+    }
+
+    /// `/ocr-local [model]`: pull a local OCR model through Ollama in the
+    /// background and switch the OCR engine to it when the pull succeeds.
+    /// Defaults to glm-ocr (0.9B — the current open OCR benchmark leader).
+    pub(crate) fn ocr_local_install(&mut self, arg: &str) {
+        if self.ocr_pull_rx.is_some() {
+            self.status = "an /ocr-local pull is already running".to_string();
+            return;
+        }
+        let model = if arg.is_empty() { "glm-ocr".to_string() } else { arg.to_string() };
+        self.local_ocr_model = model.clone();
+        let _ = self.db.set_setting("local_ocr_model", &model);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.ocr_pull_rx = Some(rx);
+        self.status = format!("pulling {model} via ollama… (keeps running in background)");
+        tokio::spawn(async move {
+            let result = match tokio::process::Command::new("ollama")
+                .args(["pull", &model])
+                .output()
+                .await
+            {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    Err("ollama not installed — get it from https://ollama.com (pacman -S ollama), then retry".to_string())
+                }
+                Err(e) => Err(format!("ollama pull failed: {e}")),
+                Ok(out) if !out.status.success() => {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    let hint = if err.contains("could not connect") || err.contains("connection refused") {
+                        " — is the ollama server running? (systemctl start ollama, or `ollama serve`)"
+                    } else {
+                        ""
+                    };
+                    Err(format!("ollama pull failed: {}{hint}", err.trim()))
+                }
+                Ok(_) => Ok(model),
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    /// `/ocr-local` pull finished: point the OCR engine at the local model.
+    pub fn on_ocr_pull(&mut self, r: Option<Result<String, String>>) {
+        let Some(result) = r else {
+            self.ocr_pull_rx = None;
+            return;
+        };
+        self.ocr_pull_rx = None;
+        match result {
+            Ok(model) => {
+                self.ocr_engine = "local".to_string();
+                let _ = self.db.set_setting("ocr_engine", "local");
+                self.status =
+                    format!("local OCR ready: {model} via ollama — Ctrl+O a file in /files to re-run it");
+            }
+            Err(e) => self.status = e,
+        }
     }
 
     /// Ctrl+O in /files: throw away the selected file's extracted text (and
@@ -650,6 +760,48 @@ mod tests {
         // Indexed: searchable.
         let hits = crate::db::search_chunks(a.db.conn_for_test(), &a.active_space.id, "revenue", 8).unwrap();
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn ollama_ocr_body_uses_native_generate_shape() {
+        let body = ollama_ocr_body("glm-ocr", "QUFB");
+        assert_eq!(body["model"], "glm-ocr");
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["images"][0], "QUFB"); // raw base64, not a data URL
+        assert!(body["prompt"].as_str().unwrap().contains("furigana"));
+        assert!(body.get("messages").is_none(), "must not be OpenAI chat shape");
+    }
+
+    #[test]
+    fn ocr_backend_routes_by_engine() {
+        let mut a = test_app();
+        // auto + model + provider → OpenRouter.
+        assert!(matches!(a.ocr_backend(), Some(OcrBackend::Router(..))));
+        // local → Ollama regardless of provider/ocr_model.
+        a.ocr_engine = "local".to_string();
+        a.local_ocr_model = String::new(); // blank falls back to glm-ocr
+        match a.ocr_backend() {
+            Some(OcrBackend::Ollama(_, model)) => assert_eq!(model, "glm-ocr"),
+            other => panic!("expected ollama backend, got {}", other.is_some()),
+        }
+        // tesseract → none.
+        a.ocr_engine = "tesseract".to_string();
+        assert!(a.ocr_backend().is_none());
+        // auto without provider → none (tesseract fallback).
+        a.ocr_engine = "auto".to_string();
+        a.provider = None;
+        assert!(a.ocr_backend().is_none());
+    }
+
+    #[tokio::test]
+    async fn ocr_pull_success_switches_engine_to_local() {
+        let mut a = test_app();
+        a.on_ocr_pull(Some(Ok("glm-ocr".to_string())));
+        assert_eq!(a.ocr_engine, "local");
+        assert!(a.status.contains("local OCR ready"));
+        a.on_ocr_pull(Some(Err("ollama not installed — get it".to_string())));
+        assert_eq!(a.ocr_engine, "local"); // engine untouched on failure
+        assert!(a.status.contains("ollama not installed"));
     }
 
     #[test]

@@ -55,6 +55,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "skills", desc: "manage skills", aliases: &["addskill"] },
     Command { name: "files", desc: "space files", aliases: &["file", "attach", "upload", "docs"] },
     Command { name: "apps", desc: "view space apps", aliases: &["app", "webapps"] },
+    Command { name: "ocr-local", desc: "pull a local OCR model via ollama (default glm-ocr)", aliases: &["ocrlocal"] },
     Command { name: "edit", desc: "open app file in $EDITOR", aliases: &["open"] },
     Command { name: "think", desc: "reasoning view", aliases: &["reasoning", "thinking"] },
     Command { name: "copy", desc: "copy last reply", aliases: &["yank", "clip"] },
