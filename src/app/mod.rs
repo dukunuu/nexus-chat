@@ -15,6 +15,7 @@ use crate::provider::openrouter::OpenRouter;
 use crate::provider::{Model, StreamEvent, Usage};
 use crate::space::Space;
 
+mod apps;
 mod chat;
 mod compaction;
 mod copy;
@@ -74,6 +75,15 @@ pub enum Popup {
     Context,
     Skills,
     Files,
+    Apps,
+}
+
+/// What the apps popup is doing: browsing the space's apps or confirming
+/// removal of the highlighted one.
+#[derive(PartialEq, Clone, Copy)]
+pub enum AppsMode {
+    Browse,
+    ConfirmDelete,
 }
 
 /// What the skills popup is doing: browsing, typing a GitHub `owner/repo/path`
@@ -86,11 +96,12 @@ pub enum SkillsMode {
 }
 
 /// What the files popup is doing: browsing the fileset, typing a path to
-/// import, or confirming removal of the highlighted file.
+/// import, renaming the highlighted file, or confirming its removal.
 #[derive(PartialEq, Clone, Copy)]
 pub enum FilesMode {
     Browse,
     Add,
+    Rename,
     ConfirmDelete,
     Pick,
 }
@@ -401,6 +412,10 @@ pub struct App {
     pub files_cache: Vec<crate::db::FileRow>,
     pub files_selected: usize,
     pub files_mode: FilesMode,
+    /// The space's apps (`/apps` popup): names, cursor, and mode.
+    pub apps_cache: Vec<String>,
+    pub apps_selected: usize,
+    pub apps_mode: AppsMode,
     /// Path being typed/pasted in the files popup's Add mode.
     pub files_edit: String,
     /// Directory the file-picker browser is showing (remembered across opens).
@@ -563,6 +578,9 @@ impl App {
             files_cache: Vec::new(),
             files_selected: 0,
             files_mode: FilesMode::Browse,
+            apps_cache: Vec::new(),
+            apps_selected: 0,
+            apps_mode: AppsMode::Browse,
             files_edit: String::new(),
             picker_dir: std::env::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")),
             picker_entries: Vec::new(),
@@ -896,6 +914,7 @@ impl App {
             }
             "skills" => self.open_skills_popup(),
             "files" => self.open_files_popup(),
+            "apps" => self.open_apps_popup(),
             "edit" => self.request_app_file_edit(cmd[token.len()..].trim()),
             other => {
                 if self.skills.iter().any(|s| s.name == other) {

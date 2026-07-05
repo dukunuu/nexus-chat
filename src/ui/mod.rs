@@ -45,6 +45,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         Popup::Context => popups::context::render(f, app),
         Popup::Skills => popups::skills::render(f, app),
         Popup::Files => popups::files::render(f, app),
+        Popup::Apps => popups::apps::render(f, app),
         Popup::None => {}
     }
 }

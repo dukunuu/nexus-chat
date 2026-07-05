@@ -303,6 +303,41 @@ impl App {
         Ok(())
     }
 
+    /// Ctrl+R in Browse: pre-fill the edit line with the current name.
+    pub fn start_files_rename(&mut self) {
+        if let Some(f) = self.files_cache.get(self.files_selected) {
+            self.files_edit = f.name.clone();
+            self.files_mode = super::FilesMode::Rename;
+        }
+    }
+
+    /// Rename the highlighted file on disk; the rescan swaps the index rows
+    /// (old name dropped, new name re-extracted).
+    pub fn confirm_files_rename(&mut self) -> Result<()> {
+        let new = self.files_edit.trim().to_string();
+        self.files_mode = super::FilesMode::Browse;
+        let Some(f) = self.files_cache.get(self.files_selected).cloned() else { return Ok(()) };
+        if new.is_empty() || new == f.name {
+            return Ok(());
+        }
+        if new.contains(['/', '\\']) || new == "." || new == ".." {
+            self.status = format!("invalid name: {new}");
+            return Ok(());
+        }
+        let dir = self.space.files_dir(&self.active_space.name);
+        if dir.join(&new).exists() {
+            self.status = format!("{new} already exists");
+            return Ok(());
+        }
+        std::fs::rename(dir.join(&f.name), dir.join(&new))
+            .with_context(|| format!("renaming {} to {new}", f.name))?;
+        self.rescan_files();
+        self.files_selected =
+            self.files_cache.iter().position(|f| f.name == new).unwrap_or(self.files_selected);
+        self.status = format!("renamed {} to {new}", f.name);
+        Ok(())
+    }
+
     /// Open the highlighted file in the system viewer (Enter in Browse).
     pub fn open_selected_file(&mut self) {
         if let Some(f) = self.files_cache.get(self.files_selected) {
@@ -372,6 +407,42 @@ mod tests {
         std::fs::write(dir.join("empty.txt"), "   ").unwrap();
         a.rescan_files();
         assert_eq!(a.files_cache[0].status, "no text (scanned?)");
+    }
+
+    #[test]
+    fn rename_moves_disk_file_and_reindexes() {
+        let mut a = test_app();
+        let dir = a.space.files_dir(&a.active_space.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("old.txt"), "searchable content").unwrap();
+        std::fs::write(dir.join("taken.txt"), "x").unwrap();
+        a.rescan_files();
+        a.files_selected = a.files_cache.iter().position(|f| f.name == "old.txt").unwrap();
+
+        // Collides with an existing name: rejected, nothing moves.
+        a.start_files_rename();
+        assert_eq!(a.files_edit, "old.txt");
+        a.files_edit = "taken.txt".to_string();
+        a.confirm_files_rename().unwrap();
+        assert!(a.status.contains("already exists"));
+        assert!(dir.join("old.txt").exists());
+
+        // Bad name rejected.
+        a.files_selected = a.files_cache.iter().position(|f| f.name == "old.txt").unwrap();
+        a.start_files_rename();
+        a.files_edit = "../evil.txt".to_string();
+        a.confirm_files_rename().unwrap();
+        assert!(a.status.contains("invalid name"));
+
+        // Valid rename: disk moves, index follows, cursor tracks the file.
+        a.files_selected = a.files_cache.iter().position(|f| f.name == "old.txt").unwrap();
+        a.start_files_rename();
+        a.files_edit = "new.txt".to_string();
+        a.confirm_files_rename().unwrap();
+        assert!(!dir.join("old.txt").exists());
+        assert!(dir.join("new.txt").exists());
+        assert!(a.files_cache.iter().any(|f| f.name == "new.txt"));
+        assert_eq!(a.files_cache[a.files_selected].name, "new.txt");
     }
 
     #[test]

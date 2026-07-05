@@ -61,6 +61,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 
     let title = match app.files_mode {
         FilesMode::Add => format!(" import path: {}▏  (Enter import · Esc cancel) ", app.files_edit),
+        FilesMode::Rename => format!(" rename to: {}▏  (Enter rename · Esc cancel) ", app.files_edit),
         FilesMode::ConfirmDelete => {
             let name = app.files_cache.get(app.files_selected).map(|f| f.name.clone()).unwrap_or_default();
             format!(" remove \"{name}\"? (Ctrl+D confirm · Esc cancel) ")
@@ -68,7 +69,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         FilesMode::Browse => crate::ui::hint_title(
             app,
             " files ",
-            "files — Enter open · Ctrl+N add · Ctrl+D remove (or drop files into the space dir)",
+            "files — Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+D remove (or drop files into the space dir)",
         ),
         // Pick short-circuits with an early return above; this arm only
         // keeps the match exhaustive (a panic here would kill the whole TUI).
@@ -95,9 +96,10 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     use super::{BrowseAction, ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key, classify_edit_key};
     use crate::app::FilesMode;
     match app.files_mode {
-        FilesMode::Add => match classify_edit_key(key) {
+        FilesMode::Add | FilesMode::Rename => match classify_edit_key(key) {
             Some(EditAction::Cancel) => app.files_mode = FilesMode::Browse,
-            Some(EditAction::Save) => app.confirm_files_add()?,
+            Some(EditAction::Save) if app.files_mode == FilesMode::Add => app.confirm_files_add()?,
+            Some(EditAction::Save) => app.confirm_files_rename()?,
             Some(EditAction::Backspace) => {
                 app.files_edit.pop();
             }
@@ -114,12 +116,13 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 app.open_selected_file();
                 return Ok(());
             }
-            // Create = Add (Ctrl+N); no rename; no browse text filter (small lists).
-            match classify_browse_key(key, true, false) {
+            // Create = Add (Ctrl+N); Rename = Ctrl+R; no browse text filter (small lists).
+            match classify_browse_key(key, true, true) {
                 Some(BrowseAction::Close) => app.popup = crate::app::Popup::None,
                 Some(BrowseAction::MoveUp) => app.move_files_selection(-1),
                 Some(BrowseAction::MoveDown) => app.move_files_selection(1),
                 Some(BrowseAction::Create) => app.open_file_picker(),
+                Some(BrowseAction::Rename) => app.start_files_rename(),
                 Some(BrowseAction::ConfirmDelete) if !app.files_cache.is_empty() => {
                     app.files_mode = FilesMode::ConfirmDelete;
                 }
