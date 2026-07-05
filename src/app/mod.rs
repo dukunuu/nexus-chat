@@ -343,6 +343,9 @@ pub(crate) enum MemoryOp {
 
 /// A background event surfaced to the event loop. `None` means that source's
 /// channel closed (task ended).
+/// One file's embedding result: (space id, file id, (seq, vector) pairs or error).
+pub type EmbedMsg = (String, String, std::result::Result<Vec<(i64, Vec<f32>)>, String>);
+
 pub enum AppEvent {
     Stream(Option<StreamEvent>),
     Models(Option<ModelsResult>),
@@ -361,6 +364,8 @@ pub enum AppEvent {
     /// A per-page progress or final OCR result for one scanned PDF, or `None`
     /// when the batch's channel closed.
     Ocr(Option<(String, String, files::OcrUpdate)>),
+    /// One file's chunk-embedding job finished (or the channel closed).
+    Embed(Option<EmbedMsg>),
 }
 
 pub struct App {
@@ -420,6 +425,8 @@ pub struct App {
     pub(crate) describe_rx: Option<mpsc::UnboundedReceiver<(String, std::result::Result<String, String>)>>,
     /// Background OCR updates: (space_id, file name, progress or final result).
     pub(crate) ocr_rx: Option<mpsc::UnboundedReceiver<(String, String, files::OcrUpdate)>>,
+    /// One in-flight chunk-embedding job: (space id, file id, vectors or error).
+    pub(crate) embed_rx: Option<mpsc::UnboundedReceiver<EmbedMsg>>,
     /// Images pasted from the clipboard, staged for the next message.
     pub pending_images: Vec<transcribe::PendingImage>,
     /// A message queued to send once its images finish being described.
@@ -600,6 +607,7 @@ impl App {
             skills_rx: None,
             describe_rx: None,
             ocr_rx: None,
+            embed_rx: None,
             pending_images: Vec::new(),
             deferred_send: None,
             files_cache: Vec::new(),
@@ -886,6 +894,12 @@ impl App {
                     None => std::future::pending().await,
                 }
             } => AppEvent::Ocr(r),
+            r = async {
+                match self.embed_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => AppEvent::Embed(r),
         }
     }
 

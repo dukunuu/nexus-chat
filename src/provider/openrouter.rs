@@ -138,6 +138,37 @@ impl OpenRouter {
         self.post_completion(ocr_body(model, image_data_url)).await
     }
 
+    /// Embed `inputs` with `model` (OpenAI-format /embeddings endpoint);
+    /// returns one vector per input, in order.
+    pub async fn embed(&self, model: &str, inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        let v = self
+            .client
+            .post(format!("{BASE}/embeddings"))
+            .bearer_auth(&self.key)
+            .json(&serde_json::json!({ "model": model, "input": inputs }))
+            .send()
+            .await
+            .context("embeddings request")?
+            .error_for_status()
+            .context("embeddings failed")?
+            .json::<serde_json::Value>()
+            .await
+            .context("parsing embeddings")?;
+        let data = v
+            .get("data")
+            .and_then(|d| d.as_array())
+            .context("embeddings response has no data")?;
+        let mut out = Vec::with_capacity(data.len());
+        for item in data {
+            let emb = item
+                .get("embedding")
+                .and_then(|e| e.as_array())
+                .context("embeddings item has no vector")?;
+            out.push(emb.iter().filter_map(|x| x.as_f64()).map(|f| f as f32).collect());
+        }
+        Ok(out)
+    }
+
     /// Start a streaming completion. Spawns a task that pushes tokens over the
     /// returned channel; the UI loop drains it alongside keypresses. If the
     /// model calls a tool, the task runs it via `toolbox` and continues the

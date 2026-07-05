@@ -628,6 +628,21 @@ impl Db {
         Ok(())
     }
 
+    /// A file's chunk texts as `(seq, text)`, in order — the embedder's input.
+    pub fn file_chunk_texts(&self, file_id: &str) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT CAST(seq AS INTEGER), text FROM file_chunks
+             WHERE file_id = ?1 ORDER BY CAST(seq AS INTEGER) ASC",
+        )?;
+        let rows = stmt.query_map([file_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// See the free function of the same name.
+    pub fn files_missing_embeddings(&self, space_id: &str) -> Result<Vec<String>> {
+        files_missing_embeddings(&self.conn, space_id)
+    }
+
     /// Store embedding vectors for a file's chunks as `(seq, vector)` pairs.
     pub fn set_chunk_embeddings(&self, file_id: &str, vecs: &[(i64, Vec<f32>)]) -> Result<()> {
         for (seq, v) in vecs {

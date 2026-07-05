@@ -280,6 +280,9 @@ impl App {
             let _ = self.db.delete_file(&gone.id);
         }
         self.start_ocr(ocr_jobs);
+        // Backfill vectors for anything whose chunks changed (or that predates
+        // semantic search entirely).
+        self.start_embedding();
         self.files_cache = self.db.list_files(&self.active_space.id).unwrap_or_default();
         self.files_selected = self.files_selected.min(self.files_cache.len().saturating_sub(1));
     }
@@ -330,6 +333,81 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Embed the next file whose chunks lack vectors, one file per job (the
+    /// done-handler chains the next). No-op without a provider, without an
+    /// embedding model, or while a job is already in flight.
+    pub(crate) fn start_embedding(&mut self) {
+        if self.embed_rx.is_some() {
+            return;
+        }
+        let Some(provider) = self.provider.clone() else { return };
+        let model = self.embedding_model.trim().to_string();
+        if model.is_empty() {
+            return;
+        }
+        let space_id = self.active_space.id.clone();
+        let Ok(missing) = self.db.files_missing_embeddings(&space_id) else { return };
+        let Some(file_id) = missing.first().cloned() else { return };
+        let chunks = self.db.file_chunk_texts(&file_id).unwrap_or_default();
+        if chunks.is_empty() {
+            return;
+        }
+        // Embedding is best-effort background work; outside a runtime (sync
+        // unit tests) there's nowhere to run it, so just skip.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else { return };
+        let _ = self.db.set_file_status(&file_id, "embedding…");
+        if space_id == self.active_space.id {
+            self.files_cache = self.db.list_files(&space_id).unwrap_or_default();
+        }
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.embed_rx = Some(rx);
+        handle.spawn(async move {
+            let mut out: Vec<(i64, Vec<f32>)> = Vec::with_capacity(chunks.len());
+            let mut err = None;
+            for batch in chunks.chunks(64) {
+                let inputs: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
+                match provider.embed(&model, inputs).await {
+                    Ok(vecs) => out.extend(batch.iter().zip(vecs).map(|((seq, _), v)| (*seq, v))),
+                    Err(e) => {
+                        err = Some(e.to_string());
+                        break;
+                    }
+                }
+            }
+            let result = match err {
+                Some(e) => Err(e),
+                None => Ok(out),
+            };
+            let _ = tx.send((space_id, file_id, result));
+        });
+    }
+
+    /// One embedding job finished: store vectors and chain the next file, or
+    /// surface the error and stop (a dead endpoint shouldn't be hammered —
+    /// the next rescan retries). Either way the file's status returns to "ok";
+    /// search falls back to keywords while vectors are missing.
+    pub fn on_embed_done(&mut self, r: Option<crate::app::EmbedMsg>) {
+        let Some((space_id, file_id, result)) = r else {
+            self.embed_rx = None;
+            return;
+        };
+        self.embed_rx = None;
+        match result {
+            Ok(vecs) => {
+                let _ = self.db.set_chunk_embeddings(&file_id, &vecs);
+                let _ = self.db.set_file_status(&file_id, "ok");
+                self.start_embedding();
+            }
+            Err(e) => {
+                let _ = self.db.set_file_status(&file_id, "ok");
+                self.status = format!("embedding failed: {e}");
+            }
+        }
+        if space_id == self.active_space.id {
+            self.files_cache = self.db.list_files(&space_id).unwrap_or_default();
+        }
     }
 
     /// A finished OCR job: persist chunks/status, refresh the cache only if the
@@ -501,6 +579,44 @@ mod tests {
         std::fs::create_dir_all(root.join("spaces")).unwrap();
         let space = Space { root };
         App::new(db, Some("k".into()), space)
+    }
+
+    #[tokio::test]
+    async fn embedder_queue_backfills_chains_and_stops_on_error() {
+        let mut a = test_app();
+        let space = a.active_space.id.clone();
+        let id = a.db.upsert_file(&space, "b.txt", "h", 1, "ok").unwrap();
+        a.db.set_file_chunks(&id, &[("l".into(), "text".into())]).unwrap();
+
+        // No provider → no-op.
+        let saved = a.provider.take();
+        a.start_embedding();
+        assert!(a.embed_rx.is_none());
+        a.provider = saved;
+
+        // Blank embedding model → no-op.
+        let m = std::mem::take(&mut a.embedding_model);
+        a.start_embedding();
+        assert!(a.embed_rx.is_none());
+        a.embedding_model = m;
+
+        // Missing vectors + provider → queued, status flips.
+        a.start_embedding();
+        assert!(a.embed_rx.is_some());
+        let files = a.db.list_files(&space).unwrap();
+        assert!(files[0].status.starts_with("embedding"), "{}", files[0].status);
+
+        // Success: vectors stored, status ok, file leaves the missing list.
+        a.on_embed_done(Some((space.clone(), id.clone(), Ok(vec![(0, vec![1.0f32, 0.0])]))));
+        assert!(a.db.files_missing_embeddings(&space).unwrap().is_empty());
+        assert_eq!(a.db.list_files(&space).unwrap()[0].status, "ok");
+
+        // Error: status restored, no re-queue (don't hammer a dead endpoint).
+        a.db.set_file_chunks(&id, &[("l".into(), "new".into())]).unwrap();
+        a.on_embed_done(Some((space.clone(), id.clone(), Err("offline".into()))));
+        assert!(a.embed_rx.is_none());
+        assert!(a.status.contains("embedding failed"));
+        assert_eq!(a.db.list_files(&space).unwrap()[0].status, "ok");
     }
 
     #[test]
