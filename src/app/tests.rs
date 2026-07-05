@@ -128,6 +128,61 @@ async fn stream_is_tagged_with_its_origin_session() {
 }
 
 #[tokio::test]
+async fn background_finish_lands_in_origin_session_and_notifies() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("hello");
+    a.submit().unwrap();
+    let origin = a.session.as_ref().unwrap().id.clone();
+
+    a.new_session().unwrap(); // switch away mid-stream
+    a.on_stream_event(crate::provider::StreamEvent::Token("late answer".into())).unwrap();
+    a.on_stream_event(crate::provider::StreamEvent::Done).unwrap();
+
+    // Landed in the origin session, not the (blank) active one.
+    assert!(a.messages.is_empty());
+    let stored = a.db.load_messages(&origin).unwrap();
+    assert_eq!(stored.last().unwrap().role, "assistant");
+    assert_eq!(stored.last().unwrap().content, "late answer");
+    assert!(a.unread.contains(&origin));
+    assert!(a.status.contains("response ready in"));
+    assert!(a.stream_session.is_none());
+}
+
+#[tokio::test]
+async fn background_tool_call_persists_to_origin_session_only() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("hello");
+    a.submit().unwrap();
+    let origin = a.session.as_ref().unwrap().id.clone();
+
+    a.new_session().unwrap();
+    a.on_stream_event(crate::provider::StreamEvent::ToolCall {
+        name: "web_search".into(),
+        arguments: "{}".into(),
+        result: "ok".into(),
+    })
+    .unwrap();
+
+    assert!(a.messages.is_empty()); // active transcript untouched
+    let stored = a.db.load_messages(&origin).unwrap();
+    assert_eq!(stored.last().unwrap().role, "tool_call");
+}
+
+#[tokio::test]
+async fn send_while_streaming_names_the_busy_session() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("hello");
+    a.submit().unwrap();
+    a.new_session().unwrap();
+    a.set_input("second message");
+    a.submit().unwrap();
+    assert!(a.status.contains("still streaming in"));
+}
+
+#[tokio::test]
 async fn esc_stop_keeps_partial_response() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());

@@ -27,7 +27,10 @@ impl App {
 
     pub(super) fn send_message(&mut self, text: String) -> Result<()> {
         if self.is_streaming() {
-            self.status = "wait for the current response to finish".to_string();
+            self.status = match &self.stream_session {
+                Some((_, title)) => format!("wait — response still streaming in: {title}"),
+                None => "wait for the current response to finish".to_string(),
+            };
             self.set_input(&text);
             return Ok(());
         }
@@ -221,24 +224,35 @@ impl App {
                 let content =
                     serde_json::json!({ "name": name, "arguments": arguments, "result": result })
                         .to_string();
-                if let Some(session) = &self.session {
-                    let _ = self.db.add_tool_call_message(&session.id, &content);
+                // Persist to the stream's origin session (may not be active).
+                let target = self
+                    .stream_session
+                    .as_ref()
+                    .map(|(id, _)| id.clone())
+                    .or_else(|| self.session.as_ref().map(|s| s.id.clone()));
+                if let Some(id) = &target {
+                    let _ = self.db.add_tool_call_message(id, &content);
                 }
-                self.messages.push(Message {
-                    id: String::new(),
-                    role: "tool_call".to_string(),
-                    content,
-                    model: None,
-                    reasoning: None,
-                    tokens: None,
-                    secs: None,
-                    phrase: None,
-                    images: Vec::new(),
-                });
+                if self.viewing_stream() {
+                    self.messages.push(Message {
+                        id: String::new(),
+                        role: "tool_call".to_string(),
+                        content,
+                        model: None,
+                        reasoning: None,
+                        tokens: None,
+                        secs: None,
+                        phrase: None,
+                        images: Vec::new(),
+                    });
+                }
             }
             StreamEvent::Done => self.finish_stream()?,
             StreamEvent::Error(e) => {
-                self.status = format!("stream error: {e}");
+                self.status = match (&self.stream_session, self.viewing_stream()) {
+                    (Some((_, title)), false) => format!("stream error in {title}: {e}"),
+                    _ => format!("stream error: {e}"),
+                };
                 self.finish_stream()?;
             }
         }
@@ -263,6 +277,7 @@ impl App {
         self.stream_rx = None;
         self.stream_abort = None;
         self.tool_status = None;
+        let origin = self.stream_session.take();
         let started = self.stream_started.take();
         let mut reasoning = std::mem::take(&mut self.thinking_text);
         let Some(buf) = self.streaming.take() else {
@@ -283,6 +298,12 @@ impl App {
             }
             reasoning.push_str(&inline);
         }
+        // Did the stream finish in the session the user is looking at?
+        let viewing = match (&origin, &self.session) {
+            (Some((id, _)), Some(s)) => *id == s.id,
+            (None, _) => true,
+            (Some(_), None) => false,
+        };
         let model = self.current_model.clone();
         // Prefer the provider's exact usage; fall back to a ~4-chars/token estimate.
         let usage = self.stream_usage.take();
@@ -290,7 +311,7 @@ impl App {
             Some(u) => u.completion_tokens as i64,
             None => buf.chars().count().div_ceil(4) as i64,
         });
-        if let Some(u) = usage {
+        if viewing && let Some(u) = usage {
             // Some providers omit total; derive it from prompt + completion.
             let total = if u.total_tokens > 0 {
                 u.total_tokens
@@ -303,9 +324,14 @@ impl App {
         let reasoning = (!reasoning.is_empty()).then_some(reasoning);
         let phrase = Some(THINKING[self.thinking_idx].1.to_string());
 
-        if let Some(session) = &self.session {
+        // The response always lands in its origin session.
+        let target = origin
+            .as_ref()
+            .map(|(id, _)| id.clone())
+            .or_else(|| self.session.as_ref().map(|s| s.id.clone()));
+        if let Some(id) = &target {
             self.db.add_assistant_message(
-                &session.id,
+                id,
                 &buf,
                 model.as_deref(),
                 reasoning.as_deref(),
@@ -314,20 +340,26 @@ impl App {
                 phrase.as_deref(),
             )?;
         }
-        self.messages.push(Message {
-            id: String::new(),
-            role: "assistant".to_string(),
-            content: buf,
-            model,
-            reasoning,
-            tokens,
-            secs,
-            phrase,
-            images: Vec::new(),
-        });
-        self.maybe_generate_title();
-        self.maybe_extract_memory();
-        self.maybe_compact();
+        if viewing {
+            self.messages.push(Message {
+                id: String::new(),
+                role: "assistant".to_string(),
+                content: buf,
+                model,
+                reasoning,
+                tokens,
+                secs,
+                phrase,
+                images: Vec::new(),
+            });
+            // These read the *active* conversation, so they only make sense here.
+            self.maybe_generate_title();
+            self.maybe_extract_memory();
+            self.maybe_compact();
+        } else if let Some((id, title)) = origin {
+            self.unread.insert(id);
+            self.status = format!("✓ response ready in: {title}");
+        }
         Ok(())
     }
 
