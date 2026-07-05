@@ -187,6 +187,7 @@ impl App {
         };
         let tools = self.toolbox.defs();
         let (rx, abort) = provider.stream_chat(model, history, params, tools, self.toolbox.clone());
+        self.stream_session = self.session.as_ref().map(|s| (s.id.clone(), s.title.clone()));
         self.stream_rx = Some(rx);
         self.stream_abort = Some(abort);
         self.streaming = Some(String::new());

@@ -112,6 +112,22 @@ async fn message_with_model_creates_session_and_streams() {
 }
 
 #[tokio::test]
+async fn stream_is_tagged_with_its_origin_session() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("hello");
+    a.submit().unwrap();
+    let sid = a.session.as_ref().unwrap().id.clone();
+    assert_eq!(a.stream_session.as_ref().map(|(id, _)| id.clone()), Some(sid));
+    assert!(a.viewing_stream());
+
+    // Switch to a blank chat: still streaming, but not viewing it.
+    a.new_session().unwrap();
+    assert!(a.is_streaming());
+    assert!(!a.viewing_stream());
+}
+
+#[tokio::test]
 async fn esc_stop_keeps_partial_response() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());

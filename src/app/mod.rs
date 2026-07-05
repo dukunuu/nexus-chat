@@ -463,6 +463,11 @@ pub struct App {
     pub(crate) stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
     /// Abort handle for the in-flight chat task (Esc stops the response).
     pub(crate) stream_abort: Option<tokio::task::AbortHandle>,
+    /// Origin of the in-flight stream as (session id, title) — the response
+    /// always lands there, even if the user switches away mid-stream.
+    pub(crate) stream_session: Option<(String, String)>,
+    /// Sessions holding a response that finished while the user was elsewhere.
+    pub(crate) unread: std::collections::HashSet<String>,
     /// Wall-clock start of the current stream, for TPS.
     pub(crate) stream_started: Option<std::time::Instant>,
     /// Exact usage reported for the in-flight stream, if any.
@@ -622,6 +627,8 @@ impl App {
             pending_editor: None,
             stream_rx: None,
             stream_abort: None,
+            stream_session: None,
+            unread: std::collections::HashSet::new(),
             stream_started: None,
             stream_usage: None,
             context_total: None,
@@ -765,6 +772,17 @@ impl App {
 
     pub fn is_streaming(&self) -> bool {
         self.streaming.is_some()
+    }
+
+    /// True when the active session is the one the in-flight stream belongs
+    /// to (untagged streams count as viewed — legacy/test paths).
+    pub fn viewing_stream(&self) -> bool {
+        self.is_streaming()
+            && match (&self.stream_session, &self.session) {
+                (Some((id, _)), Some(s)) => *id == s.id,
+                (None, _) => true,
+                (Some(_), None) => false,
+            }
     }
 
     /// The empty start screen (banner + greeting + clock) shows when there's no
