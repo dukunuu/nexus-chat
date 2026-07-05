@@ -120,7 +120,7 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                 AppEvent::OcrPull(r) => app.on_ocr_pull(r),
                 // Pipeline handling lands in a later task; for now just drop
                 // updates so the channel doesn't block shutdown.
-                AppEvent::Research(_) => {}
+                AppEvent::Research(r) => app.on_research_done(r),
             },
             _ = async {
                 if streaming {
