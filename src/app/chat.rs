@@ -136,6 +136,7 @@ impl App {
             // the model remembers what it already tried (and got back) in
             // prior turns — dropping these caused it to repeat the same
             // mistakes on file-writing tools with no memory of the failure.
+            // Skip research_stage rows — they're background job scratch work, never shown to the model.
             if m.role == "research_stage" {
                 continue;
             }
