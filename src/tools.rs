@@ -30,6 +30,8 @@ pub struct ToolBox {
 pub struct FilesCtx {
     pub db_path: std::path::PathBuf,
     pub space_id: String,
+    /// (provider, embedding model) for semantic search; None = keyword only.
+    pub embedder: Option<(crate::provider::openrouter::OpenRouter, String)>,
 }
 
 /// Where the app tools write: the active space's apps dir, plus the URL
@@ -174,10 +176,10 @@ impl ToolBox {
         if self.files_count() > 0 {
             defs.push(ToolDef {
                 name: "search_files".to_string(),
-                description: "Full-text search the space's imported files; returns ranked snippets with file name and line location.".to_string(),
+                description: "Search the space's imported files by meaning (semantic embedding search, any language); returns the most relevant passages with file name and location. Natural-language questions and keywords both work.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
-                    "properties": { "query": { "type": "string", "description": "keywords to search for" } },
+                    "properties": { "query": { "type": "string", "description": "what to look for — a question, phrase, or keywords" } },
                     "required": ["query"],
                 }),
             });
@@ -501,18 +503,7 @@ impl ToolBox {
                 let status = "Searching files…".to_string();
                 let result = match &self.files {
                     None => "no files imported".to_string(),
-                    Some(ctx) => match rusqlite::Connection::open(&ctx.db_path)
-                        .map_err(anyhow::Error::from)
-                        .and_then(|conn| crate::db::search_chunks(&conn, &ctx.space_id, &query, 8))
-                    {
-                        Ok(hits) if hits.is_empty() => "no matches".to_string(),
-                        Ok(hits) => hits
-                            .iter()
-                            .map(|(name, loc, snip)| format!("{name} ({loc}): {snip}"))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        Err(e) => format!("file search failed: {e}"),
-                    },
+                    Some(ctx) => search_files_impl(ctx, &query).await,
                 };
                 (result, status)
             }
@@ -675,6 +666,65 @@ impl ToolBox {
 
 /// `cat -n`-style numbering for ranged reads, matching what agent harnesses
 /// feed models so line references and edits anchor reliably.
+/// Search imported files: embed the query and rank chunks by cosine when an
+/// embedder is configured; otherwise (or when embedding fails / no vectors
+/// are stored yet) fall back to FTS keywords, tagged so the model knows the
+/// weaker path answered.
+async fn search_files_impl(ctx: &FilesCtx, query: &str) -> String {
+    let conn = match rusqlite::Connection::open(&ctx.db_path) {
+        Ok(c) => c,
+        Err(e) => return format!("file search failed: {e}"),
+    };
+    let mut fell_back = false;
+    if let Some((provider, model)) = &ctx.embedder {
+        match provider.embed(model, vec![query.to_string()]).await {
+            Ok(mut vecs) if !vecs.is_empty() => {
+                if let Some(out) = semantic_snippets(&conn, &ctx.space_id, &vecs.remove(0)) {
+                    return out;
+                }
+                fell_back = true; // nothing embedded yet — keywords still help
+            }
+            _ => fell_back = true, // endpoint down — degrade, don't die
+        }
+    }
+    match crate::db::search_chunks(&conn, &ctx.space_id, query, 8) {
+        Ok(hits) if hits.is_empty() => "no matches".to_string(),
+        Ok(hits) => {
+            let body = hits
+                .iter()
+                .map(|(name, loc, snip)| format!("{name} ({loc}): {snip}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if fell_back {
+                format!("(keyword fallback)\n{body}")
+            } else {
+                body
+            }
+        }
+        Err(e) => format!("file search failed: {e}"),
+    }
+}
+
+/// Top cosine-ranked chunks formatted as `name (location): text` (truncated),
+/// or None when the space has no usable vectors.
+fn semantic_snippets(conn: &rusqlite::Connection, space_id: &str, query: &[f32]) -> Option<String> {
+    let hits = crate::db::semantic_chunks(conn, space_id, query, 8).ok()?;
+    if hits.is_empty() {
+        return None;
+    }
+    Some(
+        hits.iter()
+            .map(|(name, loc, text, _)| {
+                let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let cut: String = flat.chars().take(300).collect();
+                let ellipsis = if cut.len() < flat.len() { "…" } else { "" };
+                format!("{name} ({loc}): {cut}{ellipsis}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
 fn number_lines(slice: &[&str], start: usize) -> String {
     slice
         .iter()
@@ -1168,7 +1218,7 @@ mod tests {
             None,
             None,
             "auto".to_string(),
-            Some(FilesCtx { db_path: path, space_id: space.clone() }),
+            Some(FilesCtx { db_path: path, space_id: space.clone(), embedder: None }),
             None,
         );
         (tb, db, space)
@@ -1283,6 +1333,32 @@ mod tests {
         assert!(status.contains("Searching files"));
         assert!(result.contains("report.md"));
         assert!(result.contains("lines 41-80"));
+        // No embedder configured → keyword search IS the primary, no fallback tag.
+        assert!(!result.contains("keyword fallback"), "{result}");
+    }
+
+    #[test]
+    fn semantic_snippets_rank_truncate_and_report_none_without_vectors() {
+        let (_, db, space) = files_toolbox();
+        let conn = db.raw();
+        // No vectors stored yet.
+        assert!(semantic_snippets(conn, &space, &[1.0, 0.0]).is_none());
+
+        let id = db.upsert_file(&space, "notes.md", "h2", 1, "ok").unwrap();
+        let long = "long ".repeat(200);
+        db.set_file_chunks(
+            &id,
+            &[("p1".into(), long.clone()), ("p2".into(), "short target".into())],
+        )
+        .unwrap();
+        db.set_chunk_embeddings(&id, &[(0, vec![1.0, 0.0]), (1, vec![0.0, 1.0])]).unwrap();
+
+        let out = semantic_snippets(conn, &space, &[0.0, 1.0]).unwrap();
+        let first = out.lines().next().unwrap();
+        assert!(first.contains("notes.md (p2)"), "{first}");
+        assert!(first.contains("short target"), "{first}");
+        // The long chunk is truncated, not dumped whole.
+        assert!(out.lines().nth(1).unwrap().len() < long.len(), "{out}");
     }
 
     #[tokio::test]

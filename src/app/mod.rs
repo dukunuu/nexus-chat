@@ -584,7 +584,13 @@ impl App {
             None,
             None,
             "auto".to_string(),
-            Some(crate::tools::FilesCtx { db_path: space.db_path(), space_id: active_space.id.clone() }),
+            Some(crate::tools::FilesCtx {
+                db_path: space.db_path(),
+                space_id: active_space.id.clone(),
+                embedder: provider
+                    .clone()
+                    .map(|p| (p, "openai/text-embedding-3-small".to_string())),
+            }),
             // No apps ctx yet — the app server starts after construction;
             // main() calls refresh_toolbox() once it's up.
             None,
@@ -774,6 +780,11 @@ impl App {
             Some(crate::tools::FilesCtx {
                 db_path: self.space.db_path(),
                 space_id: self.active_space.id.clone(),
+                embedder: self
+                    .provider
+                    .clone()
+                    .zip((!self.embedding_model.trim().is_empty())
+                        .then(|| self.embedding_model.trim().to_string())),
             }),
             // App tools only exist while the server runs — a write_file whose
             // link can never load is worse than no tool.

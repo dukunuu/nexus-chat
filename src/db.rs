@@ -628,6 +628,12 @@ impl Db {
         Ok(())
     }
 
+    /// The underlying connection, for free query functions shared with the
+    /// toolbox (which opens the db by path).
+    pub fn raw(&self) -> &Connection {
+        &self.conn
+    }
+
     /// A file's chunk texts as `(seq, text)`, in order — the embedder's input.
     pub fn file_chunk_texts(&self, file_id: &str) -> Result<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare(
