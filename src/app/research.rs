@@ -584,6 +584,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn on_research_done_saves_report_to_original_space_even_if_user_switched() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+
+        // Start research in the default space (space A)
+        a.start_research("rust async runtimes");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        let original_space_id = a.active_space.id.clone();
+        let original_space_name = a.active_space.name.clone();
+
+        // Create a second space (space B) and switch to it
+        let second_space = a.db.create_space("research-test-space-2").unwrap();
+        a.space.ensure_space_dir(&second_space.name).unwrap();
+        a.active_space = second_space.clone();
+        a.session = None;
+        a.messages.clear();
+        a.files_cache.clear();
+
+        // Verify we're now in space B
+        assert_eq!(a.active_space.id, second_space.id);
+        assert_ne!(a.active_space.id, original_space_id);
+
+        // Simulate the research job completing while we're in space B
+        a.on_research_done(Some((
+            session_id.clone(),
+            original_space_id.clone(),
+            original_space_name.clone(),
+            ResearchUpdate::Done(Ok("# Rust Async Runtimes\n\nBody text. [1]\n\n## Sources\n1. https://a".to_string())),
+        )));
+
+        // Assert: the report file lands in the ORIGINAL space's files_dir
+        let original_dir = a.space.files_dir(&original_space_name);
+        let original_files = std::fs::read_dir(&original_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .count();
+        assert_eq!(original_files, 1, "expected exactly one report file in original space {original_dir:?}");
+
+        // Assert: the report file did NOT land in the second (now-active) space's files_dir
+        let second_dir = a.space.files_dir(&second_space.name);
+        let second_files = std::fs::read_dir(&second_dir)
+            .map(|d| d.filter_map(|e| e.ok()).count())
+            .unwrap_or(0);
+        assert_eq!(second_files, 0, "expected no files in second (active) space {second_dir:?}");
+
+        // Assert: files_cache is still empty (rescan_files was NOT called for space B,
+        // because the report was saved to space A, not space B)
+        assert_eq!(a.files_cache.len(), 0, "files_cache should be empty since rescan was not triggered");
+    }
+
+    #[tokio::test]
     async fn on_research_done_failure_posts_error_message() {
         let mut a = test_app();
         a.research_model = "openai/gpt-5-mini".to_string();
