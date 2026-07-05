@@ -943,6 +943,16 @@ pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String 
     match name {
         "skill" => format!("skill {}", f("name")),
         "install_skill" => format!("install_skill {} → {}", f("source"), first_line(result)),
+        "run_script" => format!("run_script {}/{}", f("skill"), f("script")),
+        "install_packages" => {
+            let pkgs = v
+                .get("packages")
+                .and_then(|a| a.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" "))
+                .unwrap_or_default();
+            let target = [f("skill"), f("app")].into_iter().find(|t| !t.is_empty()).unwrap_or_default();
+            format!("install_packages {pkgs} → {target}")
+        }
         "web_search" | "search_files" => {
             let failed = result.starts_with("no results")
                 || result.starts_with("no matches")

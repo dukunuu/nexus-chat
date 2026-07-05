@@ -114,7 +114,33 @@ impl ToolBox {
                     "required": ["name"],
                 }),
             });
+            defs.push(ToolDef {
+                name: "run_script".to_string(),
+                description: "Run a script that ships inside an installed skill. Python scripts run in the skill's own virtualenv (created on first use; the skill's requirements.txt is installed into it automatically). Returns stdout/stderr.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "skill": { "type": "string", "description": "the skill's name" },
+                        "script": { "type": "string", "description": "script path inside the skill, e.g. 'scripts/convert.py'" },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments" },
+                    },
+                    "required": ["skill", "script"],
+                }),
+            });
         }
+        defs.push(ToolDef {
+            name: "install_packages".to_string(),
+            description: "Install packages into an isolated environment — pip packages into a skill's own virtualenv (pass skill), or npm packages into an app's node_modules (pass app; reference files as node_modules/<pkg>/… in the app's HTML). Never installs globally.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "packages": { "type": "array", "items": { "type": "string" }, "description": "package names" },
+                    "skill": { "type": "string", "description": "skill to pip-install into (mutually exclusive with app)" },
+                    "app": { "type": "string", "description": "app to npm-install into (mutually exclusive with skill)" },
+                },
+                "required": ["packages"],
+            }),
+        });
         defs.push(ToolDef {
             name: "install_skill".to_string(),
             description: "Install a skill from GitHub. source is owner/repo/path pointing at a directory that contains SKILL.md (bare owner/repo for a skill at the repo root).".to_string(),
@@ -207,22 +233,7 @@ impl ToolBox {
     /// escape the apps dir (absolute paths, `..`/`.` segments, backslashes).
     fn app_path(&self, app: &str, rel: &str) -> Result<PathBuf, String> {
         let Some(ctx) = &self.apps else { return Err("apps are not available".to_string()) };
-        if app.is_empty() || app.contains(['/', '\\']) || app == "." || app == ".." {
-            return Err(format!("invalid app name: {app:?}"));
-        }
-        if rel.is_empty() || rel.starts_with('/') {
-            return Err(format!("path must be relative and non-empty: {rel:?}"));
-        }
-        for seg in rel.split('/') {
-            if seg.is_empty() || seg == "." || seg == ".." || seg.contains('\\') {
-                return Err(format!("invalid path segment in {rel:?}"));
-            }
-        }
-        let mut p = ctx.dir.join(app);
-        for seg in rel.split('/') {
-            p.push(seg);
-        }
-        Ok(p)
+        resolve_confined(&ctx.dir, app, rel)
     }
 
     /// The live URL for an app.
@@ -266,6 +277,128 @@ impl ToolBox {
                             Err(e) => format!("install failed: {e}"),
                         }
                     }
+                };
+                (result, status)
+            }
+            "run_script" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let (skill, script) = (field("skill"), field("script"));
+                let extra: Vec<String> = v
+                    .get("args")
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                let status = format!("Running {skill}/{script}…");
+                let result = match resolve_confined(&self.skills_dir, &skill, &script) {
+                    Err(e) => e,
+                    Ok(file) if !file.is_file() => format!("no such script: {skill}/{script}"),
+                    Ok(file) => {
+                        let dir = self.skills_dir.join(&skill);
+                        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                        let run = async {
+                            let mut argv: Vec<std::ffi::OsString> = Vec::new();
+                            let program: std::ffi::OsString = match ext.as_str() {
+                                "py" => {
+                                    let py = ensure_venv(&dir).await?;
+                                    argv.push(file.clone().into());
+                                    py.into()
+                                }
+                                "sh" | "bash" => {
+                                    argv.push(file.clone().into());
+                                    "bash".into()
+                                }
+                                "js" | "mjs" => {
+                                    argv.push(file.clone().into());
+                                    "node".into()
+                                }
+                                _ => file.clone().into(),
+                            };
+                            argv.extend(extra.iter().map(std::ffi::OsString::from));
+                            let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
+                            run_cmd(&program, &refs, &dir, 120).await
+                        };
+                        match run.await {
+                            Ok(out) => format_output(&out),
+                            Err(e) => e,
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "install_packages" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let pkgs: Vec<String> = v
+                    .get("packages")
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                let (skill, app) = (field("skill"), field("app"));
+                let status = format!("Installing {}…", pkgs.join(" "));
+                let result = match validate_packages(&pkgs) {
+                    Err(e) => e,
+                    Ok(()) if !skill.is_empty() && !app.is_empty() => {
+                        "pass either skill or app, not both".to_string()
+                    }
+                    Ok(()) if !skill.is_empty() => {
+                        match resolve_confined(&self.skills_dir, &skill, "SKILL.md") {
+                            Err(e) => e,
+                            Ok(md) if !md.is_file() => format!("unknown skill: {skill}"),
+                            Ok(_) => {
+                                let dir = self.skills_dir.join(&skill);
+                                let run = async {
+                                    let py = ensure_venv(&dir).await?;
+                                    let mut argv: Vec<std::ffi::OsString> =
+                                        vec!["-m".into(), "pip".into(), "install".into()];
+                                    argv.extend(pkgs.iter().map(std::ffi::OsString::from));
+                                    let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
+                                    run_cmd(py.as_os_str(), &refs, &dir, 300).await
+                                };
+                                match run.await {
+                                    Ok(out) if out.status.success() => {
+                                        format!("installed {} into {skill}'s venv", pkgs.join(" "))
+                                    }
+                                    Ok(out) => format!("pip install failed:\n{}", format_output(&out)),
+                                    Err(e) => e,
+                                }
+                            }
+                        }
+                    }
+                    Ok(()) if !app.is_empty() => match self.app_path(&app, "package.json") {
+                        Err(e) => e,
+                        Ok(pkg_json) => {
+                            let dir = pkg_json.parent().unwrap().to_path_buf();
+                            let prep = std::fs::create_dir_all(&dir).and_then(|()| {
+                                if pkg_json.exists() {
+                                    Ok(())
+                                } else {
+                                    // npm walks up looking for a package.json — pin
+                                    // the install to this app dir with a minimal one.
+                                    std::fs::write(&pkg_json, format!("{{\"name\":{:?},\"private\":true}}", app))
+                                }
+                            });
+                            match prep {
+                                Err(e) => format!("cannot prepare {app}: {e}"),
+                                Ok(()) => {
+                                    let mut argv: Vec<std::ffi::OsString> =
+                                        vec!["install".into(), "--no-audit".into(), "--no-fund".into()];
+                                    argv.extend(pkgs.iter().map(std::ffi::OsString::from));
+                                    let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
+                                    match run_cmd("npm".as_ref(), &refs, &dir, 300).await {
+                                        Ok(out) if out.status.success() => format!(
+                                            "installed {} into {app}/node_modules — reference files as node_modules/<pkg>/… ; {}",
+                                            pkgs.join(" "),
+                                            self.app_link(&app),
+                                        ),
+                                        Ok(out) => format!("npm install failed:\n{}", format_output(&out)),
+                                        Err(e) => e,
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Ok(()) => "pass skill or app to pick where the packages go".to_string(),
                 };
                 (result, status)
             }
@@ -424,6 +557,124 @@ impl ToolBox {
             other => (format!("unknown tool: {other}"), "Running tool…".to_string()),
         }
     }
+}
+
+/// Resolve `<root>/<top>/<rel>`, rejecting anything that could escape `root`
+/// (absolute paths, `..`/`.` segments, backslashes). Shared by the app and
+/// skill-script tools.
+fn resolve_confined(root: &std::path::Path, top: &str, rel: &str) -> Result<PathBuf, String> {
+    if top.is_empty() || top.contains(['/', '\\']) || top == "." || top == ".." {
+        return Err(format!("invalid name: {top:?}"));
+    }
+    if rel.is_empty() || rel.starts_with('/') {
+        return Err(format!("path must be relative and non-empty: {rel:?}"));
+    }
+    for seg in rel.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." || seg.contains('\\') {
+            return Err(format!("invalid path segment in {rel:?}"));
+        }
+    }
+    let mut p = root.join(top);
+    for seg in rel.split('/') {
+        p.push(seg);
+    }
+    Ok(p)
+}
+
+/// Run a command with a timeout, kill-on-drop, and no shell. Returns the
+/// raw output; spawn failures name the missing program.
+async fn run_cmd(
+    program: &std::ffi::OsStr,
+    args: &[&std::ffi::OsStr],
+    dir: &std::path::Path,
+    secs: u64,
+) -> Result<std::process::Output, String> {
+    let fut = tokio::process::Command::new(program)
+        .args(args)
+        .current_dir(dir)
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+        Err(_) => Err(format!("{} timed out after {secs}s", program.to_string_lossy())),
+        Ok(Err(e)) => Err(format!("cannot run {}: {e}", program.to_string_lossy())),
+        Ok(Ok(out)) => Ok(out),
+    }
+}
+
+/// Command output as tool-result text: stdout, then stderr, then a non-zero
+/// exit code — truncated so a chatty script can't flood the context.
+fn format_output(out: &std::process::Output) -> String {
+    let mut s = String::from(String::from_utf8_lossy(&out.stdout).trim_end());
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !err.trim().is_empty() {
+        if !s.is_empty() {
+            s.push('\n');
+        }
+        s.push_str("stderr:\n");
+        s.push_str(err.trim_end());
+    }
+    let mut lines: Vec<&str> = s.lines().collect();
+    if lines.len() > 200 {
+        lines.truncate(200);
+        lines.push("… (output truncated)");
+    }
+    let mut s = lines.join("\n");
+    if s.chars().count() > 8000 {
+        s = s.chars().take(8000).collect();
+        s.push_str("\n… (output truncated)");
+    }
+    if !out.status.success() {
+        let code = out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "killed".to_string());
+        if !s.is_empty() {
+            s.push('\n');
+        }
+        s.push_str(&format!("exit code: {code}"));
+    }
+    if s.is_empty() {
+        s = "(no output)".to_string();
+    }
+    s
+}
+
+/// The python interpreter of a skill's own `.venv`, creating the venv (and
+/// installing `requirements.txt` if the skill ships one) on first use.
+/// Everything stays inside the skill's directory — nothing global.
+async fn ensure_venv(skill_dir: &std::path::Path) -> Result<PathBuf, String> {
+    let python = skill_dir.join(".venv/bin/python");
+    if python.exists() {
+        return Ok(python);
+    }
+    let out = run_cmd("python3".as_ref(), &["-m".as_ref(), "venv".as_ref(), ".venv".as_ref()], skill_dir, 120).await?;
+    if !out.status.success() {
+        return Err(format!("venv creation failed:\n{}", format_output(&out)));
+    }
+    if skill_dir.join("requirements.txt").exists() {
+        let out = run_cmd(
+            python.as_os_str(),
+            &["-m".as_ref(), "pip".as_ref(), "install".as_ref(), "-r".as_ref(), "requirements.txt".as_ref()],
+            skill_dir,
+            300,
+        )
+        .await?;
+        if !out.status.success() {
+            return Err(format!("pip install -r requirements.txt failed:\n{}", format_output(&out)));
+        }
+    }
+    Ok(python)
+}
+
+/// Package names an installer may see: no flags, no whitespace — they land
+/// in argv directly, so a leading `-` would become an option injection.
+fn validate_packages(pkgs: &[String]) -> Result<(), String> {
+    if pkgs.is_empty() {
+        return Err("no packages given".to_string());
+    }
+    for p in pkgs {
+        if p.is_empty() || p.starts_with('-') || p.chars().any(char::is_whitespace) {
+            return Err(format!("invalid package name: {p:?}"));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -772,6 +1023,48 @@ mod tests {
             None,
         );
         (tb, db, space)
+    }
+
+    fn skills_toolbox() -> (ToolBox, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("nexus-skills-tb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("t")).unwrap();
+        std::fs::write(dir.join("t/SKILL.md"), "---\nname: t\ndescription: d\n---\nx").unwrap();
+        let tb = ToolBox::new(dir.clone(), None, None, "auto".to_string(), None, None);
+        (tb, dir)
+    }
+
+    #[tokio::test]
+    async fn run_script_runs_sh_with_args_and_reports_exit_code() {
+        let (tb, dir) = skills_toolbox();
+        std::fs::write(dir.join("t/go.sh"), "echo \"hi $1\"\nexit 3\n").unwrap();
+        let (result, status) = tb.run("run_script", r#"{"skill":"t","script":"go.sh","args":["there"]}"#).await;
+        assert!(status.contains("Running t/go.sh"));
+        assert!(result.contains("hi there"), "{result}");
+        assert!(result.contains("exit code: 3"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn run_script_is_confined_and_names_missing_scripts() {
+        let (tb, _) = skills_toolbox();
+        let (result, _) = tb.run("run_script", r#"{"skill":"t","script":"../evil.sh"}"#).await;
+        assert!(result.contains("invalid"), "{result}");
+        let (result, _) = tb.run("run_script", r#"{"skill":"t","script":"nope.sh"}"#).await;
+        assert!(result.contains("no such script"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn install_packages_validates_names_and_target() {
+        let (tb, _) = skills_toolbox();
+        let (result, _) = tb.run("install_packages", r#"{"packages":[]}"#).await;
+        assert!(result.contains("no packages"), "{result}");
+        let (result, _) = tb.run("install_packages", r#"{"packages":["--upgrade"],"skill":"t"}"#).await;
+        assert!(result.contains("invalid package name"), "{result}");
+        let (result, _) = tb.run("install_packages", r#"{"packages":["requests"]}"#).await;
+        assert!(result.contains("pass skill or app"), "{result}");
+        let (result, _) = tb.run("install_packages", r#"{"packages":["x"],"skill":"a","app":"b"}"#).await;
+        assert!(result.contains("not both"), "{result}");
+        let (result, _) = tb.run("install_packages", r#"{"packages":["x"],"skill":"ghost"}"#).await;
+        assert!(result.contains("unknown skill"), "{result}");
     }
 
     #[tokio::test]

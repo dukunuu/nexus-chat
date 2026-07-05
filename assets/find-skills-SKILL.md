@@ -17,6 +17,10 @@ install them yourself.
    `install_skill` with that source.
 4. On success the skill is immediately usable: load it with the `skill` tool.
 
+Installed skills may ship scripts — run them with the `run_script` tool.
+Python scripts get the skill's own virtualenv (its `requirements.txt` installs
+automatically); add extra packages with `install_packages(skill, packages)`.
+
 If the user names a repo or source directly, skip the search and install it.
 If installation fails with "no SKILL.md", the path doesn't point at a skill
 directory — check the repo layout and try the correct subdirectory.

@@ -457,7 +457,9 @@ impl App {
                      `index.html`), `edit_file(app, path, old_string, new_string)` for exact-match \
                      edits, and `read_app_file(app, path)` to see current content before editing. \
                      Files are served immediately — after writing, give the user the live URL \
-                     from the tool result. No build steps or servers to manage; static files only.\n"
+                     from the tool result. No build steps or servers to manage; static files only. \
+                     Need a JS library? `install_packages(app, packages)` npm-installs it into the \
+                     app — reference it as `node_modules/<pkg>/…` in your HTML.\n"
             .to_string();
         let apps = self.list_apps();
         if apps.is_empty() {

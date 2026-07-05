@@ -893,6 +893,14 @@ fn tool_call_summaries_name_the_interesting_argument() {
         tool_call_summary("install_skill", r#"{"source":"anthropics/skills/pdf"}"#, "installed skill 'pdf' — load it with the skill tool"),
         "install_skill anthropics/skills/pdf → installed skill 'pdf' — load it with the skill tool"
     );
+    assert_eq!(
+        tool_call_summary("run_script", r#"{"skill":"pdf","script":"scripts/fill.py"}"#, "ok"),
+        "run_script pdf/scripts/fill.py"
+    );
+    assert_eq!(
+        tool_call_summary("install_packages", r#"{"packages":["pillow","requests"],"skill":"pdf"}"#, "ok"),
+        "install_packages pillow requests → pdf"
+    );
     let long = format!(r#"{{"x":"{}"}}"#, "y".repeat(100));
     assert!(tool_call_summary("mystery", &long, "").ends_with('…'));
 }
