@@ -111,6 +111,25 @@ async fn message_with_model_creates_session_and_streams() {
     assert_eq!(a.messages[0].role, "user");
 }
 
+#[test]
+fn ocr_settings_defaults_gate_and_cycle() {
+    let db = Db::open_in_memory().unwrap();
+    let mut a = App::new(db, Some("k".into()), test_space());
+    assert_eq!(a.ocr_model, "google/gemini-2.5-flash-lite");
+    assert_eq!(a.ocr_engine, "auto");
+    assert_eq!(a.embedding_model, "openai/text-embedding-3-small");
+    assert!(a.vlm_ocr_enabled()); // auto + model configured
+    a.cycle_ocr_engine().unwrap(); // auto → tesseract
+    assert_eq!(a.ocr_engine, "tesseract");
+    assert!(!a.vlm_ocr_enabled());
+    a.cycle_ocr_engine().unwrap(); // tesseract → vlm
+    assert!(a.vlm_ocr_enabled());
+    a.cycle_ocr_engine().unwrap(); // vlm → auto
+    assert_eq!(a.ocr_engine, "auto");
+    a.clear_ocr_model().unwrap();
+    assert!(!a.vlm_ocr_enabled()); // no model, auto can't use vlm
+}
+
 #[tokio::test]
 async fn stream_is_tagged_with_its_origin_session() {
     let mut a = app_with_key();

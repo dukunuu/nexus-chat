@@ -59,6 +59,11 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
                 Span::styled(app.search_provider.clone(), Style::default().fg(Color::Cyan))
             }
             SettingsField::TranscriberModel => numeric(&app.transcriber_model),
+            SettingsField::OcrModel => numeric(&app.ocr_model),
+            SettingsField::OcrEngine => {
+                Span::styled(app.ocr_engine.clone(), Style::default().fg(Color::Cyan))
+            }
+            SettingsField::EmbeddingModel => numeric(&app.settings_inputs[6]),
         }
     };
 
@@ -101,16 +106,21 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     use crate::app::SettingsField;
     // The memory-model and transcriber-model rows are picked, not typed:
     // Enter opens the same model picker /model uses, Backspace clears it.
-    let picker = matches!(app.settings_field(), SettingsField::MemoryModel | SettingsField::TranscriberModel);
+    let picker = matches!(
+        app.settings_field(),
+        SettingsField::MemoryModel | SettingsField::TranscriberModel | SettingsField::OcrModel
+    );
     if picker {
         match key.code {
             KeyCode::Esc => app.save_settings()?,
             KeyCode::Enter => match app.settings_field() {
                 SettingsField::MemoryModel => app.open_model_picker_for_memory(),
+                SettingsField::OcrModel => app.open_model_picker_for_ocr(),
                 _ => app.open_model_picker_for_transcriber(),
             },
             KeyCode::Backspace => match app.settings_field() {
                 SettingsField::MemoryModel => app.clear_memory_model()?,
+                SettingsField::OcrModel => app.clear_ocr_model()?,
                 _ => app.clear_transcriber_model()?,
             },
             KeyCode::Up => app.move_settings_selection(-1),

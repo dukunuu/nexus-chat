@@ -165,6 +165,7 @@ pub enum ModelPickTarget {
     Session,
     Memory,
     Transcriber,
+    Ocr,
 }
 
 /// Editable rows in the nerd-config popup.
@@ -183,10 +184,13 @@ pub enum SettingsField {
     LangsearchKey,
     SearchProvider,
     TranscriberModel,
+    OcrModel,
+    OcrEngine,
+    EmbeddingModel,
 }
 
 impl SettingsField {
-    pub const ALL: [SettingsField; 13] = [
+    pub const ALL: [SettingsField; 16] = [
         SettingsField::ShowStats,
         SettingsField::ShowReasoning,
         SettingsField::HideHints,
@@ -200,6 +204,9 @@ impl SettingsField {
         SettingsField::LangsearchKey,
         SettingsField::SearchProvider,
         SettingsField::TranscriberModel,
+        SettingsField::OcrModel,
+        SettingsField::OcrEngine,
+        SettingsField::EmbeddingModel,
     ];
 
     pub fn label(self) -> &'static str {
@@ -217,11 +224,15 @@ impl SettingsField {
             SettingsField::LangsearchKey => "LangSearch API key (langsearch.com/dashboard, free)",
             SettingsField::SearchProvider => "search provider (Space cycles auto/langsearch/searxng/duckduckgo)",
             SettingsField::TranscriberModel => "image model (Enter to pick, Backspace clears)",
+            SettingsField::OcrModel => "OCR model (Enter to pick, Backspace clears)",
+            SettingsField::OcrEngine => "OCR engine (Space cycles auto/tesseract/vlm)",
+            SettingsField::EmbeddingModel => "embedding model (file search, blank disables)",
         }
     }
 }
 
 const VERBOSITY_LEVELS: [&str; 3] = ["normal", "concise", "caveman"];
+pub(crate) const OCR_ENGINES: [&str; 3] = ["auto", "tesseract", "vlm"];
 const SEARCH_PROVIDERS: [&str; 4] = ["auto", "langsearch", "searxng", "duckduckgo"];
 
 /// Nerd config: footer toggles + core sampling parameters.
@@ -369,6 +380,12 @@ pub struct App {
     pub memory_model: String,
     /// Model used for image transcription (empty = disabled).
     pub transcriber_model: String,
+    /// Vision model for scanned-PDF OCR (empty = tesseract only).
+    pub ocr_model: String,
+    /// OCR engine choice: "auto" (vlm when ocr_model set), "tesseract", "vlm".
+    pub ocr_engine: String,
+    /// Embedding model for semantic file search (empty = keyword FTS only).
+    pub embedding_model: String,
     /// Base URL of a SearXNG instance for the web-search skill, or empty to
     /// disable it. Configured in-app (Ctrl+O settings), not a config file.
     pub searxng_url: String,
@@ -504,7 +521,7 @@ pub struct App {
     pub key_input: String,
     pub settings_selected: usize,
     /// Text edit buffers for the numeric settings (temperature, top_p, max_tokens).
-    pub settings_inputs: [String; 6],
+    pub settings_inputs: [String; 7],
 
     /// Highlighted row in the slash-command autocomplete popup.
     pub cmd_selected: usize,
@@ -604,6 +621,9 @@ impl App {
             space_edit: String::new(),
             memory_model: "google/gemini-2.5-flash-lite".to_string(),
             transcriber_model: "google/gemini-2.5-flash-lite".to_string(),
+            ocr_model: "google/gemini-2.5-flash-lite".to_string(),
+            ocr_engine: "auto".to_string(),
+            embedding_model: "openai/text-embedding-3-small".to_string(),
             base_system_prompt: config::load_system_prompt().unwrap_or_default(),
             verbosity: "concise".to_string(),
             memory_rx: None,
@@ -652,14 +672,7 @@ impl App {
             copy_selected: 0,
             key_input: String::new(),
             settings_selected: 0,
-            settings_inputs: [
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-            ],
+            settings_inputs: Default::default(),
             cmd_selected: 0,
             banner: config::load_banner().unwrap_or_else(|| BANNER.trim_matches('\n').to_string()),
             greeting: pick_greeting(),
@@ -719,6 +732,9 @@ impl App {
                 "max_tokens" => self.settings.max_tokens = v.parse().ok(),
                 "memory_model" => self.memory_model = v,
                 "transcriber_model" => self.transcriber_model = v,
+                "ocr_model" => self.ocr_model = v,
+                "ocr_engine" if OCR_ENGINES.contains(&v.as_str()) => self.ocr_engine = v,
+                "embedding_model" => self.embedding_model = v,
                 "compact_threshold" => {
                     if let Ok(t) = v.parse() {
                         self.settings.compact_threshold = t;
@@ -991,14 +1007,23 @@ impl App {
             | SettingsField::MemoryModel
             | SettingsField::Verbosity
             | SettingsField::SearchProvider
-            | SettingsField::TranscriberModel => None,
+            | SettingsField::TranscriberModel
+            | SettingsField::OcrModel
+            | SettingsField::OcrEngine => None,
             SettingsField::Temperature => Some(0),
             SettingsField::TopP => Some(1),
             SettingsField::MaxTokens => Some(2),
             SettingsField::CompactThreshold => Some(3),
             SettingsField::SearxngUrl => Some(4),
             SettingsField::LangsearchKey => Some(5),
+            SettingsField::EmbeddingModel => Some(6),
         }
+    }
+
+    /// Whether scanned PDFs should OCR through the vision model instead of
+    /// tesseract: explicit "vlm", or "auto" with an OCR model configured.
+    pub(crate) fn vlm_ocr_enabled(&self) -> bool {
+        !self.ocr_model.trim().is_empty() && self.ocr_engine != "tesseract"
     }
 
 }

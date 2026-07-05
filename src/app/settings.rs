@@ -12,6 +12,7 @@ impl App {
             self.settings.compact_threshold.to_string(),
             self.searxng_url.clone(),
             self.langsearch_key.clone(),
+            self.embedding_model.clone(),
         ];
         self.status = "↑/↓ field · type to edit · Space toggles · Ctrl+E system prompt · Esc saves".to_string();
         self.popup = Popup::Settings;
@@ -41,8 +42,19 @@ impl App {
                 let i = SEARCH_PROVIDERS.iter().position(|&p| p == self.search_provider).unwrap_or(0);
                 self.search_provider = SEARCH_PROVIDERS[(i + 1) % SEARCH_PROVIDERS.len()].to_string();
             }
+            SettingsField::OcrEngine => {
+                let _ = self.cycle_ocr_engine();
+            }
             _ => {}
         }
+    }
+
+    /// Advance the OCR engine auto → tesseract → vlm → auto, persisted.
+    pub(crate) fn cycle_ocr_engine(&mut self) -> Result<()> {
+        let i = super::OCR_ENGINES.iter().position(|&e| e == self.ocr_engine).unwrap_or(0);
+        self.ocr_engine = super::OCR_ENGINES[(i + 1) % super::OCR_ENGINES.len()].to_string();
+        self.db.set_setting("ocr_engine", &self.ocr_engine)?;
+        Ok(())
     }
 
     /// Expand/collapse stored reasoning traces (Ctrl+R), persisted.
@@ -64,7 +76,10 @@ impl App {
     /// printable char for the URL row.
     pub(crate) fn settings_input_char(&mut self, c: char) {
         let Some(i) = self.text_index() else { return };
-        let numeric = !matches!(self.settings_field(), SettingsField::SearxngUrl | SettingsField::LangsearchKey);
+        let numeric = !matches!(
+            self.settings_field(),
+            SettingsField::SearxngUrl | SettingsField::LangsearchKey | SettingsField::EmbeddingModel
+        );
         if numeric && !(c.is_ascii_digit() || c == '.') {
             return;
         }
@@ -108,6 +123,11 @@ impl App {
         self.langsearch_key = self.settings_inputs[5].trim().to_string();
         self.db.set_setting("langsearch_key", &self.langsearch_key)?;
         self.db.set_setting("search_provider", &self.search_provider)?;
+        self.ocr_model = self.ocr_model.trim().to_string();
+        self.db.set_setting("ocr_model", &self.ocr_model)?;
+        self.db.set_setting("ocr_engine", &self.ocr_engine)?;
+        self.embedding_model = self.settings_inputs[6].trim().to_string();
+        self.db.set_setting("embedding_model", &self.embedding_model)?;
         self.refresh_toolbox();
         self.popup = Popup::None;
         self.status = "settings saved".to_string();

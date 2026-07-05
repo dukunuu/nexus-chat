@@ -27,6 +27,13 @@ impl App {
         self.open_model_picker_impl();
     }
 
+    /// Open the same model picker, but a confirmed pick sets the OCR model
+    /// (in `/config`) instead of the active session's model.
+    pub(crate) fn open_model_picker_for_ocr(&mut self) {
+        self.model_pick_target = ModelPickTarget::Ocr;
+        self.open_model_picker_impl();
+    }
+
     fn open_model_picker_impl(&mut self) {
         if self.provider.is_none() {
             self.open_key_prompt();
@@ -317,6 +324,12 @@ impl App {
                 self.status = format!("image model: {id}");
                 self.popup = Popup::Settings;
             }
+            ModelPickTarget::Ocr => {
+                self.ocr_model = id.clone();
+                self.db.set_setting("ocr_model", &id)?;
+                self.status = format!("OCR model: {id}");
+                self.popup = Popup::Settings;
+            }
         }
         Ok(())
     }
@@ -336,6 +349,14 @@ impl App {
         self.transcriber_model.clear();
         self.db.set_setting("transcriber_model", "")?;
         self.status = "image model cleared — image descriptions disabled".to_string();
+        Ok(())
+    }
+
+    /// Disable VLM OCR (Backspace on the OCR-model row in `/config`).
+    pub(crate) fn clear_ocr_model(&mut self) -> Result<()> {
+        self.ocr_model.clear();
+        self.db.set_setting("ocr_model", "")?;
+        self.status = "OCR model cleared — scanned PDFs use tesseract".to_string();
         Ok(())
     }
 }
