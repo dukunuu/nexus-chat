@@ -22,6 +22,100 @@ pub struct PickerEntry {
     pub is_dir: bool,
 }
 
+/// OCR a scanned PDF through the vision model: render pages at 300 DPI color,
+/// transcribe up to 4 pages concurrently (one retry each), and join with
+/// `[page N]` markers — a page that fails twice becomes a `[page N: ocr
+/// failed]` marker instead of sinking the document.
+async fn ocr_pdf_vlm(
+    provider: &crate::provider::openrouter::OpenRouter,
+    model: &str,
+    path: &Path,
+    tx: &tokio::sync::mpsc::UnboundedSender<(String, String, OcrUpdate)>,
+    space_id: &str,
+    name: &str,
+) -> std::result::Result<String, String> {
+    let tmp = std::env::temp_dir().join(format!("nexus-vlm-ocr-{}", uuid::Uuid::new_v4()));
+    if let Err(e) = std::fs::create_dir_all(&tmp) {
+        return Err(format!("error: ocr: {e}"));
+    }
+    let result = ocr_pdf_vlm_in(provider, model, path, &tmp, tx, space_id, name).await;
+    let _ = std::fs::remove_dir_all(&tmp);
+    result
+}
+
+async fn ocr_pdf_vlm_in(
+    provider: &crate::provider::openrouter::OpenRouter,
+    model: &str,
+    path: &Path,
+    tmp: &Path,
+    tx: &tokio::sync::mpsc::UnboundedSender<(String, String, OcrUpdate)>,
+    space_id: &str,
+    name: &str,
+) -> std::result::Result<String, String> {
+    // Text glyphs (and furigana especially) need more resolution than the
+    // tesseract path's 200 DPI gray; VLMs also want the color signal.
+    let (pdf, dir) = (path.to_path_buf(), tmp.to_path_buf());
+    let pages = tokio::task::spawn_blocking(move || {
+        crate::extract::render_pdf_pages("pdftoppm", &pdf, &dir, 300, false)
+    })
+    .await
+    .map_err(|e| format!("error: ocr: {e}"))?
+    .map_err(|e| match e {
+        crate::extract::OcrError::MissingTools => {
+            "scanned pdf — install poppler (pdftoppm) for ocr".to_string()
+        }
+        crate::extract::OcrError::Failed(m) => format!("error: ocr: {m}"),
+    })?;
+
+    let total = pages.len();
+    let mut results: Vec<std::result::Result<String, String>> =
+        vec![Err("not transcribed".to_string()); total];
+    let mut set = tokio::task::JoinSet::new();
+    let spawn_page = |set: &mut tokio::task::JoinSet<(usize, std::result::Result<String, String>)>,
+                      i: usize| {
+        let (provider, model, png) = (provider.clone(), model.to_string(), pages[i].clone());
+        set.spawn(async move {
+            let Ok(bytes) = std::fs::read(&png) else {
+                return (i, Err("page image unreadable".to_string()));
+            };
+            let url = crate::app::transcribe::png_bytes_data_url(&bytes);
+            let mut last = String::new();
+            for _ in 0..2 {
+                match provider.ocr_page(&model, &url).await {
+                    Ok(text) => return (i, Ok(text)),
+                    Err(e) => last = e.to_string(),
+                }
+            }
+            (i, Err(last))
+        });
+    };
+
+    let window = 4.min(total);
+    let mut next = 0;
+    while next < window {
+        spawn_page(&mut set, next);
+        next += 1;
+    }
+    let mut done = 0;
+    while let Some(joined) = set.join_next().await {
+        let (i, r) = joined.unwrap_or((usize::MAX, Err("page task panicked".to_string())));
+        if let Some(slot) = results.get_mut(i) {
+            *slot = r;
+        }
+        done += 1;
+        let _ = tx.send((
+            space_id.to_string(),
+            name.to_string(),
+            OcrUpdate::Progress(done, total),
+        ));
+        if next < total {
+            spawn_page(&mut set, next);
+            next += 1;
+        }
+    }
+    Ok(crate::extract::join_pages(&results))
+}
+
 impl App {
     /// Enter the picker at `picker_dir` (home on first open, remembered after).
     pub(crate) fn open_file_picker(&mut self) {
@@ -197,8 +291,26 @@ impl App {
         if jobs.is_empty() || self.ocr_rx.is_some() {
             return;
         }
+        // VLM path needs a provider + model; otherwise fall back to tesseract.
+        let vlm = if self.vlm_ocr_enabled() {
+            self.provider.clone().map(|p| (p, self.ocr_model.trim().to_string()))
+        } else {
+            None
+        };
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.ocr_rx = Some(rx);
+        if let Some((provider, model)) = vlm {
+            tokio::spawn(async move {
+                for (space_id, name, path) in jobs {
+                    let result =
+                        ocr_pdf_vlm(&provider, &model, &path, &tx, &space_id, &name).await;
+                    if tx.send((space_id, name, OcrUpdate::Done(result))).is_err() {
+                        return;
+                    }
+                }
+            });
+            return;
+        }
         tokio::task::spawn_blocking(move || {
             for (space_id, name, path) in jobs {
                 let progress_tx = tx.clone();

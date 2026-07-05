@@ -219,41 +219,40 @@ fn ocr_pdf_with(
     result
 }
 
-fn ocr_pdf_in(
+/// Run a command, mapping a missing binary to `OcrError::MissingTools` and a
+/// non-zero exit to `Failed` with its stderr.
+fn run_ocr_cmd(cmd: &mut std::process::Command, name: &str) -> std::result::Result<Vec<u8>, OcrError> {
+    let out = cmd.output().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            OcrError::MissingTools
+        } else {
+            OcrError::Failed(e.to_string())
+        }
+    })?;
+    if !out.status.success() {
+        return Err(OcrError::Failed(format!(
+            "{name}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(out.stdout)
+}
+
+/// Render a PDF's pages to PNGs in `tmp` with pdftoppm, returned in document
+/// order (pdftoppm zero-pads page numbers, so a lexical sort is page order).
+pub(crate) fn render_pdf_pages(
     pdftoppm: &str,
-    tesseract: &str,
     path: &Path,
     tmp: &Path,
-    progress: &(dyn Fn(usize, usize) + Sync),
-) -> std::result::Result<String, OcrError> {
-    fn run(cmd: &mut std::process::Command, name: &str) -> std::result::Result<Vec<u8>, OcrError> {
-        let out = cmd.output().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                OcrError::MissingTools
-            } else {
-                OcrError::Failed(e.to_string())
-            }
-        })?;
-        if !out.status.success() {
-            return Err(OcrError::Failed(format!(
-                "{name}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        Ok(out.stdout)
+    dpi: u32,
+    gray: bool,
+) -> std::result::Result<Vec<std::path::PathBuf>, OcrError> {
+    let mut cmd = std::process::Command::new(pdftoppm);
+    cmd.args(["-r", &dpi.to_string()]);
+    if gray {
+        cmd.arg("-gray");
     }
-
-    // 200 dpi is ~2x faster to render and OCR than 300 with negligible
-    // accuracy loss on normal print.
-    run(
-        std::process::Command::new(pdftoppm)
-            .args(["-r", "200", "-gray", "-png"])
-            .arg(path)
-            .arg(tmp.join("page")),
-        "pdftoppm",
-    )?;
-
-    // pdftoppm zero-pads page numbers, so a lexical sort is page order.
+    run_ocr_cmd(cmd.arg("-png").arg(path).arg(tmp.join("page")), "pdftoppm")?;
     let mut pages: Vec<std::path::PathBuf> = std::fs::read_dir(tmp)
         .map_err(|e| OcrError::Failed(e.to_string()))?
         .flatten()
@@ -261,6 +260,36 @@ fn ocr_pdf_in(
         .filter(|p| p.extension().is_some_and(|e| e == "png"))
         .collect();
     pages.sort();
+    Ok(pages)
+}
+
+/// Join per-page OCR results with `[page N]` markers: blank pages are
+/// dropped, failed pages leave a `[page N: ocr failed]` marker so the rest
+/// of the document still lands.
+pub(crate) fn join_pages(results: &[std::result::Result<String, String>]) -> String {
+    let mut text = String::new();
+    for (i, r) in results.iter().enumerate() {
+        match r {
+            Ok(p) if p.trim().is_empty() => {}
+            Ok(p) => text.push_str(&format!("[page {}]\n{}\n", i + 1, p.trim())),
+            Err(_) => text.push_str(&format!("[page {}: ocr failed]\n", i + 1)),
+        }
+    }
+    text.trim().to_string()
+}
+
+fn ocr_pdf_in(
+    pdftoppm: &str,
+    tesseract: &str,
+    path: &Path,
+    tmp: &Path,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> std::result::Result<String, OcrError> {
+    let run = run_ocr_cmd;
+
+    // 200 dpi is ~2x faster to render and OCR than 300 with negligible
+    // accuracy loss on normal print.
+    let pages = render_pdf_pages(pdftoppm, path, tmp, 200, true)?;
 
     // Recognize with every installed language pack (eng+jpn+…): tesseract
     // then picks the right script per line itself, so installing a tessdata
@@ -524,6 +553,41 @@ mod tests {
         let pdf = dir.join("blank.pdf");
         std::fs::write(&pdf, minimal_pdf(None)).unwrap();
         assert_eq!(ocr_pdf(&pdf, &|_, _| {}).unwrap(), "");
+    }
+
+    #[test]
+    fn render_pdf_pages_renders_sorted_pages_at_dpi() {
+        if !ocr_tools_present() {
+            eprintln!("skipping render_pdf_pages_renders_sorted_pages_at_dpi: tools not installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("nexus-render-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("multi.pdf");
+        std::fs::write(&pdf, pdf_with_pages(&["ONE", "TWO", "THREE"])).unwrap();
+        let tmp = dir.join("pages");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let pages = render_pdf_pages("pdftoppm", &pdf, &tmp, 120, false).unwrap();
+        assert_eq!(pages.len(), 3);
+        let mut sorted = pages.clone();
+        sorted.sort();
+        assert_eq!(pages, sorted, "pages must come back in document order");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn join_pages_marks_failures_and_skips_blank_pages() {
+        let joined = join_pages(&[
+            Ok("first".to_string()),
+            Err("boom".to_string()),
+            Ok("   ".to_string()),
+            Ok("fourth".to_string()),
+        ]);
+        assert!(joined.contains("[page 1]\nfirst"), "{joined:?}");
+        assert!(joined.contains("[page 2: ocr failed]"), "{joined:?}");
+        assert!(!joined.contains("[page 3]"), "{joined:?}");
+        assert!(joined.contains("[page 4]\nfourth"), "{joined:?}");
     }
 
     #[test]

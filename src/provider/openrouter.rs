@@ -133,6 +133,11 @@ impl OpenRouter {
         self.post_completion(vision_body(model, image_data_url)).await
     }
 
+    /// One-shot, non-streaming vision call: transcribe a scanned page image.
+    pub async fn ocr_page(&self, model: &str, image_data_url: &str) -> Result<String> {
+        self.post_completion(ocr_body(model, image_data_url)).await
+    }
+
     /// Start a streaming completion. Spawns a task that pushes tokens over the
     /// returned channel; the UI loop drains it alongside keypresses. If the
     /// model calls a tool, the task runs it via `toolbox` and continues the
@@ -380,6 +385,29 @@ fn parse_usage(data: &str) -> Option<Usage> {
 
 /// Request body for a one-shot image-understanding call: a text part with the
 /// instruction plus the image as a data-URL content part (OpenAI vision shape).
+fn ocr_body(model: &str, image_data_url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "stream": false,
+        // Page transcriptions run long; don't let a provider default clip them.
+        "max_tokens": 8000,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text",
+                  "text": "Transcribe this scanned page to plain text, faithfully and completely. \
+                           Output ONLY the transcription — no commentary, no markdown fences. \
+                           Preserve the natural reading order; vertical Japanese text reads in \
+                           columns from right to left. Transcribe the body text only: skip \
+                           furigana/ruby annotations (the small kana printed above or beside \
+                           kanji). Render tables as plain text rows. If the page contains no \
+                           text, output nothing." },
+                { "type": "image_url", "image_url": { "url": image_data_url } },
+            ],
+        }],
+    })
+}
+
 fn vision_body(model: &str, image_data_url: &str) -> serde_json::Value {
     serde_json::json!({
         "model": model,
@@ -402,6 +430,20 @@ fn vision_body(model: &str, image_data_url: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ocr_body_has_prompt_image_and_token_budget() {
+        let body = ocr_body("google/gemini-2.5-flash-lite", "data:image/png;base64,AAAA");
+        assert_eq!(body["model"], "google/gemini-2.5-flash-lite");
+        assert_eq!(body["stream"], false);
+        // Generous output budget — page transcriptions are long.
+        assert!(body["max_tokens"].as_u64().unwrap() >= 8000);
+        let content = &body["messages"][0]["content"];
+        let prompt = content[0]["text"].as_str().unwrap();
+        assert!(prompt.contains("furigana"), "prompt must say to skip furigana");
+        assert!(prompt.contains("right to left"), "prompt must cover vertical text");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
 
     #[test]
     fn vision_body_has_image_url_content_part() {
