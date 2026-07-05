@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::app::{App, Popup};
 
-mod history;
+pub(crate) mod history;
 pub(crate) mod popups;
 use history::render_history;
 

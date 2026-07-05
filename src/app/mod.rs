@@ -454,6 +454,9 @@ pub struct App {
     pub tool_status: Option<String>,
     /// Whether tool-call blocks show full arguments/results (Ctrl+T).
     pub show_tool_detail: bool,
+    /// Wrapped-line cache for the transcript, so redraws don't re-render
+    /// markdown for the whole conversation every frame.
+    pub(crate) history_cache: crate::ui::history::HistoryCache,
     /// File `/edit` wants opened in `$EDITOR`; the event loop (which owns the
     /// terminal) takes it and suspends the TUI.
     pub pending_editor: Option<std::path::PathBuf>,
@@ -615,6 +618,7 @@ impl App {
             thinking_text: String::new(),
             tool_status: None,
             show_tool_detail: false,
+            history_cache: Default::default(),
             pending_editor: None,
             stream_rx: None,
             stream_abort: None,

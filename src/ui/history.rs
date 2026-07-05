@@ -8,6 +8,21 @@ use super::{dim, dot, line_text};
 use crate::app::App;
 use crate::db::Message;
 
+/// Wrapped render of the stored (immutable) message prefix, kept between
+/// frames so scrolling a long conversation doesn't re-run markdown + textwrap
+/// over every message. Invalidated when the width, display flags, or session
+/// change; new messages are appended incrementally.
+#[derive(Default)]
+pub(crate) struct HistoryCache {
+    key: (Option<String>, usize, bool, bool, bool, bool),
+    msg_count: usize,
+    lines: Vec<Line<'static>>,
+    owner: Vec<Option<usize>>,
+    code: Vec<Option<usize>>,
+    blocks: Vec<String>,
+    plain: Vec<String>,
+}
+
 pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
     // Borderless: the conversation fills the whole pane.
     let inner = area;
@@ -17,30 +32,93 @@ pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     let width = inner.width.max(1) as usize;
-    let (lines, line_msg, line_code, code_blocks) = wrap_conversation(app, width);
+    sync_cache(app, width);
+
+    // The in-progress reply changes every frame (spinner, tokens); render it
+    // fresh and splice it after the cached prefix.
+    let mut tail: Vec<Line<'static>> = Vec::new();
+    let mut tail_code: Vec<Option<usize>> = Vec::new();
+    let mut tail_blocks: Vec<String> = Vec::new();
+    if app.streaming.is_some() {
+        push_assistant_streaming(&mut tail, app, width, &mut tail_code, &mut tail_blocks);
+        tail_code.resize(tail.len(), None);
+    }
+
+    let cache = &app.history_cache;
+    let cached_lines = cache.lines.len();
+    let total = cached_lines + tail.len();
 
     // Scroll: app.scroll counts lines scrolled UP from the bottom (0 = follow bottom).
     let height = inner.height as usize;
-    let max_top = lines.len().saturating_sub(height);
+    let max_top = total.saturating_sub(height);
     app.max_scroll = max_top as u16; // let the event loop clamp scrolling
     app.scroll = app.scroll.min(app.max_scroll);
     let top = max_top.saturating_sub(app.scroll as usize);
 
     // Snapshot the layout + plain text + per-line message owner so mouse
     // selection can map screen cells and scope a selection to one message.
-    let plain: Vec<String> = lines.iter().map(line_text).collect();
-    app.sel.record_render(inner, top, plain, line_msg, line_code, code_blocks);
+    let cache = &app.history_cache;
+    let mut plain = cache.plain.clone();
+    plain.extend(tail.iter().map(line_text));
+    let mut owner = cache.owner.clone();
+    owner.resize(total, Some(app.messages.len()));
+    let base = cache.blocks.len();
+    let mut code = cache.code.clone();
+    code.extend(tail_code.iter().map(|c| c.map(|id| id + base)));
+    let mut blocks = cache.blocks.clone();
+    blocks.append(&mut tail_blocks);
+    app.sel.record_render(inner, top, plain, owner, code, blocks);
 
     // Paint the selection highlight over the visible slice.
-    let visible: Vec<Line> = lines
-        .iter()
-        .enumerate()
-        .skip(top)
-        .take(height)
-        .map(|(li, line)| app.sel.highlight(li, line).unwrap_or_else(|| line.clone()))
+    let cache = &app.history_cache;
+    let line_at = |i: usize| {
+        if i < cached_lines { &cache.lines[i] } else { &tail[i - cached_lines] }
+    };
+    let visible: Vec<Line> = (top..total.min(top + height))
+        .map(|li| app.sel.highlight(li, line_at(li)).unwrap_or_else(|| line_at(li).clone()))
         .collect();
 
     f.render_widget(Paragraph::new(visible), inner);
+}
+
+/// Bring the cached wrapped prefix up to date: reset on width/flag/session
+/// change, then wrap only messages not yet cached. Stored messages are
+/// append-only, so this is O(new messages) per frame instead of O(all).
+fn sync_cache(app: &mut App, width: usize) {
+    let key = (
+        app.session.as_ref().map(|s| s.id.clone()),
+        width,
+        app.show_tool_detail,
+        app.settings.show_reasoning,
+        app.settings.hide_hints,
+        app.settings.show_stats,
+    );
+    let c = &mut app.history_cache;
+    if c.key != key || app.messages.len() < c.msg_count {
+        *c = HistoryCache { key, ..Default::default() };
+    }
+    for (i, m) in app.messages.iter().enumerate().skip(c.msg_count) {
+        let start = c.lines.len();
+        if m.role == "user" {
+            if !m.images.is_empty() {
+                c.lines.push(Line::from(dim(format!(
+                    "🖼 {} image{}",
+                    m.images.len(),
+                    if m.images.len() == 1 { "" } else { "s" }
+                ))));
+            }
+            push_user(&mut c.lines, &m.content, width);
+        } else if m.role == "tool_call" {
+            push_tool_call(&mut c.lines, &m.content, app.show_tool_detail, &app.settings, width);
+        } else {
+            push_assistant_stored(&mut c.lines, m, &app.settings, width, &mut c.code, &mut c.blocks);
+        }
+        c.owner.resize(c.lines.len(), Some(i));
+        c.code.resize(c.lines.len(), None);
+        let new_plain: Vec<String> = c.lines[start..].iter().map(line_text).collect();
+        c.plain.extend(new_plain);
+    }
+    c.msg_count = app.messages.len();
 }
 
 /// The empty start screen: centered banner, a random greeting, and a live clock.
@@ -67,39 +145,6 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
     out.extend(lines);
 
     f.render_widget(Paragraph::new(out).alignment(Alignment::Center), area);
-}
-
-/// Wrap every message (and the in-progress stream) to `width`. Prefixes are
-/// glyphs, not words: `❯` for you, `⏺` for the AI. Returns the wrapped lines and
-/// a parallel vec of the message index each line belongs to (for message-scoped
-/// selection); the streaming reply gets index `messages.len()`.
-type Wrapped = (Vec<Line<'static>>, Vec<Option<usize>>, Vec<Option<usize>>, Vec<String>);
-
-fn wrap_conversation(app: &App, width: usize) -> Wrapped {
-    let mut out: Vec<Line> = Vec::new();
-    let mut owner: Vec<Option<usize>> = Vec::new();
-    let mut code: Vec<Option<usize>> = Vec::new();
-    let mut blocks: Vec<String> = Vec::new();
-    for (i, m) in app.messages.iter().enumerate() {
-        if m.role == "user" {
-            if !m.images.is_empty() {
-                out.push(Line::from(dim(format!("🖼 {} image{}", m.images.len(), if m.images.len() == 1 { "" } else { "s" }))));
-            }
-            push_user(&mut out, &m.content, width);
-        } else if m.role == "tool_call" {
-            push_tool_call(&mut out, &m.content, app.show_tool_detail, &app.settings, width);
-        } else {
-            push_assistant_stored(&mut out, m, &app.settings, width, &mut code, &mut blocks);
-        }
-        owner.resize(out.len(), Some(i));
-        code.resize(out.len(), None);
-    }
-    if app.streaming.is_some() {
-        push_assistant_streaming(&mut out, app, width, &mut code, &mut blocks);
-        owner.resize(out.len(), Some(app.messages.len()));
-        code.resize(out.len(), None);
-    }
-    (out, owner, code, blocks)
 }
 
 /// A user message: `❯ ` prefix, wrapped with a 2-col hanging indent.
@@ -256,4 +301,68 @@ fn wrap_plain(content: &str, width: usize) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{Db, Message};
+
+    fn msg(role: &str, content: &str) -> Message {
+        Message {
+            id: String::new(),
+            role: role.into(),
+            content: content.into(),
+            model: None,
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            phrase: None,
+            images: Vec::new(),
+        }
+    }
+
+    fn test_app() -> App {
+        let db = Db::open_in_memory().unwrap();
+        let space = crate::space::Space {
+            root: std::env::temp_dir().join(format!("nexus-hist-{}", uuid::Uuid::new_v4())),
+        };
+        App::new(db, Some("k".into()), space)
+    }
+
+    #[test]
+    fn cache_appends_new_messages_and_resets_on_width_or_flag_change() {
+        let mut a = test_app();
+        a.messages.push(msg("user", "hello"));
+        a.messages.push(msg("assistant", "**bold** answer"));
+        sync_cache(&mut a, 80);
+        let n = a.history_cache.lines.len();
+        assert!(n > 0);
+        assert_eq!(a.history_cache.msg_count, 2);
+        assert_eq!(a.history_cache.plain.len(), n);
+
+        // Same width: appending one message only grows the cache.
+        a.messages.push(msg("user", "again"));
+        sync_cache(&mut a, 80);
+        assert!(a.history_cache.lines.len() > n);
+        assert_eq!(a.history_cache.msg_count, 3);
+
+        // Width change: full re-wrap.
+        sync_cache(&mut a, 20);
+        assert_eq!(a.history_cache.msg_count, 3);
+        assert_eq!(a.history_cache.key.1, 20);
+
+        // Ctrl+T flag change: re-wrap so tool-call detail shows.
+        a.show_tool_detail = true;
+        let before = a.history_cache.lines.len();
+        a.messages.push(msg("tool_call", r#"{"name":"skill","arguments":"{}","result":"ok"}"#));
+        sync_cache(&mut a, 20);
+        assert!(a.history_cache.lines.len() > before);
+
+        // Fewer messages (session cleared): cache resets, no stale lines.
+        a.messages.clear();
+        sync_cache(&mut a, 20);
+        assert_eq!(a.history_cache.lines.len(), 0);
+        assert_eq!(a.history_cache.msg_count, 0);
+    }
 }
