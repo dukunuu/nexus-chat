@@ -173,6 +173,19 @@ impl ToolBox {
                 "required": ["query"],
             }),
         });
+        defs.push(ToolDef {
+            name: "fetch_url".to_string(),
+            description: "Fetch a web page and return its readable text (HTML stripped), up to 200 lines per call. Use offset to page through longer pages. Use after web_search to read a promising result in full.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "the page URL to fetch" },
+                    "offset": { "type": "integer", "description": "1-based first line to read (default 1)" },
+                    "limit": { "type": "integer", "description": "lines to read, max 200 (default 200)" },
+                },
+                "required": ["url"],
+            }),
+        });
         if self.files_count() > 0 {
             defs.push(ToolDef {
                 name: "search_files".to_string(),
@@ -492,6 +505,33 @@ impl ToolBox {
                     Ok(hits) if hits.is_empty() => "no results".to_string(),
                     Ok(hits) => format_results(&hits),
                     Err(e) => format!("search failed: {e}"),
+                };
+                (result, status)
+            }
+            "fetch_url" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let url = v.get("url").and_then(|u| u.as_str()).unwrap_or_default().to_string();
+                let offset = v.get("offset").and_then(|o| o.as_u64()).unwrap_or(1).max(1) as usize;
+                let limit = v.get("limit").and_then(|l| l.as_u64()).unwrap_or(200).clamp(1, 200) as usize;
+                let status = format!("Fetching {url}…");
+                let result = match fetch_url_text(&self.client, &url).await {
+                    Ok(text) => {
+                        let lines: Vec<&str> = text.lines().collect();
+                        let total = lines.len();
+                        let start = (offset - 1).min(total);
+                        let slice = &lines[start..(start + limit).min(total)];
+                        if slice.is_empty() {
+                            format!("{url}: offset {offset} is past the end ({total} lines)")
+                        } else {
+                            format!(
+                                "{url} (lines {}-{} of {total}):\n{}",
+                                start + 1,
+                                start + slice.len(),
+                                number_lines(slice, start),
+                            )
+                        }
+                    }
+                    Err(e) => format!("fetch failed: {e}"),
                 };
                 (result, status)
             }
@@ -981,6 +1021,23 @@ async fn duckduckgo_search(client: &reqwest::Client, query: &str) -> anyhow::Res
     Ok(parse_ddg_html(&html).into_iter().take(8).collect())
 }
 
+/// GET `url` and return its readable text. Capped at 2MB of raw body and a
+/// 30s timeout — a research searcher agent shouldn't be able to wedge on a
+/// pathological page.
+async fn fetch_url_text(client: &reqwest::Client, url: &str) -> anyhow::Result<String> {
+    let resp = client
+        .get(url)
+        .header("User-Agent", "Mozilla/5.0 (compatible; nexus-chat)")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await?
+        .error_for_status()?;
+    let bytes = resp.bytes().await?;
+    let capped = &bytes[..bytes.len().min(2_000_000)];
+    let html = String::from_utf8_lossy(capped);
+    Ok(strip_html_to_text(&html))
+}
+
 /// Pull `(title, url, snippet)` hits out of a DuckDuckGo HTML results page.
 /// Each result is `<a class="result__a" href="...uddg=<url>...">title</a>`
 /// followed by `<a class="result__snippet" ...>snippet</a>`.
@@ -1069,6 +1126,49 @@ fn html_unescape(s: &str) -> String {
         .replace("&quot;", "\"")
         .replace("&#x27;", "'")
         .replace("&#39;", "'")
+}
+
+/// Remove every `<tag>...</tag>` block (case-sensitive on the lowercase tag
+/// name callers pass, e.g. "script"/"style") including its content. An
+/// unterminated opening tag drops the remainder of the string rather than
+/// looping forever or panicking on a truncated/malformed fetch.
+fn drop_tag_blocks(html: &str, tag: &str) -> String {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    loop {
+        match rest.find(&open) {
+            None => {
+                out.push_str(rest);
+                break;
+            }
+            Some(start) => {
+                out.push_str(&rest[..start]);
+                match rest[start..].find(&close) {
+                    None => break,
+                    Some(end_rel) => {
+                        rest = &rest[start + end_rel + close.len()..];
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// HTML page body → plain readable text: drop script/style blocks, strip all
+/// remaining tags, unescape entities, and collapse blank/whitespace-only
+/// lines so paginated output isn't mostly empty lines.
+fn strip_html_to_text(html: &str) -> String {
+    let no_script = drop_tag_blocks(html, "script");
+    let no_style = drop_tag_blocks(&no_script, "style");
+    strip_tags(&no_style)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Perplexity-style numbered results the model cites inline as `[n]`.
@@ -1179,6 +1279,38 @@ mod tests {
     #[test]
     fn strip_tags_drops_markup_and_unescapes_entities() {
         assert_eq!(strip_tags("<b>Rust</b> &amp; friends"), "Rust & friends");
+    }
+
+    #[test]
+    fn drop_tag_blocks_removes_script_and_style_content() {
+        let html = "<p>keep</p><script>var x = 1;</script><style>.a{color:red}</style><p>also keep</p>";
+        let no_script = drop_tag_blocks(html, "script");
+        assert!(!no_script.contains("var x"));
+        assert!(no_script.contains("also keep"));
+        let no_style = drop_tag_blocks(&no_script, "style");
+        assert!(!no_style.contains("color:red"));
+        assert!(no_style.contains("keep"));
+    }
+
+    #[test]
+    fn drop_tag_blocks_handles_unterminated_tag_by_dropping_the_remainder() {
+        // A truncated fetch (or malformed page) shouldn't panic or infinite-loop.
+        let html = "<p>keep</p><script>var x = 1;";
+        let out = drop_tag_blocks(html, "script");
+        assert_eq!(out, "<p>keep</p>");
+    }
+
+    #[test]
+    fn strip_html_to_text_drops_tags_scripts_styles_and_blank_lines() {
+        let html = "<html><head><style>body{}</style><script>track();</script></head>\
+                     <body>\n\n<h1>Title</h1>\n<p>Some   text</p>\n\n\n<p>More</p></body></html>";
+        let text = strip_html_to_text(html);
+        assert!(!text.contains("track()"));
+        assert!(!text.contains("body{}"));
+        assert!(text.contains("Title"));
+        assert!(text.contains("More"));
+        // No blank lines left over from stripped block-level tags.
+        assert!(!text.contains("\n\n"));
     }
 
     #[test]
@@ -1324,6 +1456,14 @@ mod tests {
         let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), None, None);
         let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
         assert!(!names.contains(&"search_files".to_string()));
+    }
+
+    #[test]
+    fn fetch_url_is_always_available() {
+        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), None, None);
+        let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
+        assert!(names.contains(&"fetch_url".to_string()));
+        assert!(names.contains(&"web_search".to_string()));
     }
 
     #[tokio::test]
