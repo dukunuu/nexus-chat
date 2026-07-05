@@ -161,6 +161,163 @@ fn writer_messages(topic: &str, verified_draft: &str) -> Vec<ChatMessage> {
     ]
 }
 
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
+
+use crate::provider::openrouter::OpenRouter;
+use crate::provider::{ChatParams, StreamEvent};
+use crate::tools::ToolBox;
+
+use super::ResearchMsg;
+
+/// Send the `(session_id, space_id, space_name)` triple's stage update.
+fn send_stage(tx: &mpsc::UnboundedSender<ResearchMsg>, ids: &(String, String, String), s: impl Into<String>) {
+    let _ = tx.send((ids.0.clone(), ids.1.clone(), ids.2.clone(), ResearchUpdate::Stage(s.into())));
+}
+
+async fn complete_text(provider: &OpenRouter, model: &str, messages: Vec<ChatMessage>) -> Result<String, String> {
+    provider.complete(model, messages).await.map(|s| s.trim().to_string()).map_err(|e| e.to_string())
+}
+
+async fn plan(provider: &OpenRouter, model: &str, topic: &str) -> Result<Vec<String>, String> {
+    let text = complete_text(provider, model, planner_messages(topic)).await?;
+    let qs = parse_subquestions(&text);
+    if qs.is_empty() {
+        return Err(format!("planner returned no usable sub-questions (raw reply: {text:.200})"));
+    }
+    Ok(qs)
+}
+
+/// One Searcher agent: given a single sub-question, runs the normal
+/// tool-loop (restricted to web_search/fetch_url) and returns its final
+/// prose findings (including its own "Sources:" citation list). Never
+/// returns an `Err` — a dead search/fetch/model call becomes a placeholder
+/// finding string so one bad sub-question can't sink the whole pipeline.
+async fn run_searcher(provider: &OpenRouter, model: &str, sub_question: &str, toolbox: Arc<ToolBox>) -> String {
+    let messages = vec![
+        ChatMessage::text("system", SEARCHER_PROMPT),
+        ChatMessage::text("user", sub_question),
+    ];
+    let tools = toolbox.defs();
+    let (mut rx, _abort) = provider.stream_chat(
+        model.to_string(),
+        messages,
+        ChatParams::default(),
+        tools,
+        toolbox,
+        RESEARCH_SEARCHER_MAX_ITERS,
+    );
+    let mut buf = String::new();
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            StreamEvent::Token(t) => buf.push_str(&t),
+            StreamEvent::Error(e) => return format!("[search agent error on \"{sub_question}\": {e}]"),
+            StreamEvent::Done => break,
+            _ => {}
+        }
+    }
+    let text = buf.trim();
+    if text.is_empty() {
+        format!("[no findings for \"{sub_question}\"]")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Fan out one Searcher per question in parallel, sending a running
+/// `{done}/{total}` stage update as each finishes. Order of the returned
+/// findings doesn't matter (synthesis treats them as an unordered set).
+async fn run_searchers(
+    provider: &OpenRouter,
+    model: &str,
+    toolbox: &Arc<ToolBox>,
+    questions: &[String],
+    tx: &mpsc::UnboundedSender<ResearchMsg>,
+    ids: &(String, String, String),
+    round: usize,
+) -> Vec<String> {
+    let mut set = tokio::task::JoinSet::new();
+    for q in questions.iter().cloned() {
+        let provider = provider.clone();
+        let model = model.to_string();
+        let toolbox = toolbox.clone();
+        set.spawn(async move { run_searcher(&provider, &model, &q, toolbox).await });
+    }
+    let total = questions.len();
+    let mut done = 0usize;
+    let mut findings = Vec::with_capacity(total);
+    while let Some(res) = set.join_next().await {
+        done += 1;
+        send_stage(tx, ids, format!("searching (round {round}, {done}/{total})…"));
+        findings.push(res.unwrap_or_else(|e| format!("[search agent panicked: {e}]")));
+    }
+    findings
+}
+
+/// Run the full pipeline and send exactly one final `Done` on `tx` (the
+/// caller's channel then closes naturally when this function returns and
+/// `tx` is dropped).
+pub(crate) async fn run_research(
+    provider: OpenRouter,
+    research_model: String,
+    escalation_model: String,
+    topic: String,
+    toolbox: Arc<ToolBox>,
+    tx: mpsc::UnboundedSender<ResearchMsg>,
+    session_id: String,
+    space_id: String,
+    space_name: String,
+) {
+    let ids = (session_id, space_id, space_name);
+    let result = run_research_inner(&provider, &research_model, &escalation_model, &topic, &toolbox, &tx, &ids).await;
+    let _ = tx.send((ids.0, ids.1, ids.2, ResearchUpdate::Done(result)));
+}
+
+async fn run_research_inner(
+    provider: &OpenRouter,
+    research_model: &str,
+    escalation_model: &str,
+    topic: &str,
+    toolbox: &Arc<ToolBox>,
+    tx: &mpsc::UnboundedSender<ResearchMsg>,
+    ids: &(String, String, String),
+) -> Result<String, String> {
+    send_stage(tx, ids, "planning…");
+    let questions = plan(provider, research_model, topic).await?;
+
+    let mut findings = run_searchers(provider, research_model, toolbox, &questions, tx, ids, 1).await;
+
+    send_stage(tx, ids, "synthesizing…");
+    let mut draft = complete_text(provider, research_model, synthesizer_messages(topic, &findings)).await?;
+
+    send_stage(tx, ids, "critiquing…");
+    let mut critique = parse_critique(&complete_text(provider, research_model, critic_messages(topic, &draft)).await?);
+
+    if let Critique::Gaps(gaps) = &critique {
+        let more = run_searchers(provider, research_model, toolbox, gaps, tx, ids, 2).await;
+        findings.extend(more);
+        send_stage(tx, ids, "re-synthesizing…");
+        draft = complete_text(provider, research_model, synthesizer_messages(topic, &findings)).await?;
+        send_stage(tx, ids, "critiquing (round 2)…");
+        critique = parse_critique(&complete_text(provider, research_model, critic_messages(topic, &draft)).await?);
+    }
+
+    if let Critique::Contradiction(desc) = &critique {
+        send_stage(tx, ids, "resolving a contradiction…");
+        let resolution =
+            complete_text(provider, escalation_model, escalation_messages(topic, &draft, &findings, desc)).await?;
+        draft.push_str("\n\n");
+        draft.push_str(&resolution);
+    }
+
+    send_stage(tx, ids, "verifying…");
+    let verified = complete_text(provider, research_model, verifier_messages(topic, &draft, &findings)).await?;
+
+    send_stage(tx, ids, "writing final report…");
+    complete_text(provider, research_model, writer_messages(topic, &verified)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
