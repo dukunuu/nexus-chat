@@ -4,7 +4,7 @@ use ratatui::style::Color;
 use tokio::sync::mpsc;
 
 use crate::db::Message;
-use crate::provider::{ChatMessage, ChatParams, StreamEvent};
+use crate::provider::{ChatMessage, ChatParams, StreamEvent, ToolCall};
 
 use super::{parse_topic, verbosity_clause, App, SPINNER_COLORS, THINKING};
 
@@ -132,9 +132,27 @@ impl App {
         }
         let vision = self.current_model_supports_images();
         for m in self.effective_messages() {
-            // Tool-call blocks are transcript/audit only — the model already
-            // consumed the tool results in-turn.
+            // Replay past tool calls as real assistant/tool message pairs so
+            // the model remembers what it already tried (and got back) in
+            // prior turns — dropping these caused it to repeat the same
+            // mistakes on file-writing tools with no memory of the failure.
             if m.role == "tool_call" {
+                if let Some((call, result)) = parse_tool_call_row(&m.content) {
+                    history.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: String::new(),
+                        tool_calls: Some(vec![call.clone()]),
+                        tool_call_id: None,
+                        images: Vec::new(),
+                    });
+                    history.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: result,
+                        tool_calls: None,
+                        tool_call_id: Some(call.id),
+                        images: Vec::new(),
+                    });
+                }
                 continue;
             }
             let mut cm = ChatMessage::text(m.role.clone(), m.content.clone());
@@ -607,6 +625,18 @@ pub(super) fn title_from(text: &str) -> String {
     } else {
         t
     }
+}
+
+/// Recover a `(ToolCall, result)` pair from a stored `tool_call` row's JSON
+/// content (`{"name","arguments","result"}`), for replaying past tool use
+/// back into the request history. `id` is synthesized — it only needs to
+/// match between the assistant/tool pair built at the same call site.
+fn parse_tool_call_row(content: &str) -> Option<(ToolCall, String)> {
+    let v: serde_json::Value = serde_json::from_str(content).ok()?;
+    let name = v.get("name")?.as_str()?.to_string();
+    let arguments = v.get("arguments")?.as_str()?.to_string();
+    let result = v.get("result")?.as_str()?.to_string();
+    Some((ToolCall { id: "call_0".to_string(), name, arguments }, result))
 }
 
 /// Compact byte counts: 940 B, 1.2 KB, 3.4 MB.

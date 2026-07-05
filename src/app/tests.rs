@@ -998,7 +998,7 @@ fn switching_context_cancels_deferred_image_send() {
 }
 
 #[test]
-fn tool_call_events_persist_and_stay_out_of_history() {
+fn tool_call_events_persist_and_replay_into_history() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());
     let space = a.active_space.id.clone();
@@ -1018,9 +1018,23 @@ fn tool_call_events_persist_and_stay_out_of_history() {
     assert_eq!(stored.last().unwrap().role, "tool_call");
     assert!(stored.last().unwrap().content.contains("q3 revenue"));
 
-    // …but never sent back to the model.
+    // …and replayed into the next request as a real assistant/tool pair, so
+    // the model remembers what it already tried in a prior turn — no raw
+    // "tool_call" role ever reaches the wire.
     let h = a.build_history();
-    assert!(h.iter().all(|m| !m.content.contains("q3 revenue")));
+    assert!(h.iter().all(|m| m.role != "tool_call"));
+    let assistant = h
+        .iter()
+        .find(|m| m.role == "assistant" && m.tool_calls.is_some())
+        .expect("assistant tool_calls message");
+    let call = &assistant.tool_calls.as_ref().unwrap()[0];
+    assert_eq!(call.name, "search_files");
+    assert!(call.arguments.contains("q3 revenue"));
+    let tool_msg = h
+        .iter()
+        .find(|m| m.role == "tool" && m.tool_call_id == Some(call.id.clone()))
+        .expect("matching tool result message");
+    assert!(tool_msg.content.contains("revenue grew"));
 }
 
 #[test]
