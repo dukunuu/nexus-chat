@@ -19,6 +19,10 @@ pub struct ToolBox {
     /// Which backend `web_search` prefers: "auto" (LangSearch, then SearXNG,
     /// then DuckDuckGo), or an explicit "langsearch"/"searxng"/"duckduckgo".
     pub search_provider: String,
+    /// When true, `defs()`/`run()` restrict to `web_search`/`fetch_url` only —
+    /// used for deep-research searcher agents, which must never reach
+    /// run_python/install_packages/app tools even if hallucinated.
+    research_only: bool,
     client: reqwest::Client,
     files: Option<FilesCtx>,
     apps: Option<AppsCtx>,
@@ -55,10 +59,23 @@ impl ToolBox {
             searxng_url,
             langsearch_key,
             search_provider,
+            research_only: false,
             client: reqwest::Client::new(),
             files,
             apps,
         }
+    }
+
+    /// A toolbox restricted to `web_search`/`fetch_url` — for deep-research
+    /// searcher agents, which get no filesystem/app/script access.
+    pub fn research(
+        searxng_url: Option<String>,
+        langsearch_key: Option<String>,
+        search_provider: String,
+    ) -> Self {
+        let mut tb = ToolBox::new(PathBuf::new(), searxng_url, langsearch_key, search_provider, None, None);
+        tb.research_only = true;
+        tb
     }
 
     fn files_count(&self) -> u64 {
@@ -265,6 +282,9 @@ impl ToolBox {
                 }),
             });
         }
+        if self.research_only {
+            defs.retain(|d| d.name == "web_search" || d.name == "fetch_url");
+        }
         defs
     }
 
@@ -292,6 +312,12 @@ impl ToolBox {
     /// Run a tool by name. Returns `(result text sent back to the model,
     /// status label shown in the UI while it runs)`.
     pub async fn run(&self, name: &str, args: &str) -> (String, String) {
+        if self.research_only && !matches!(name, "web_search" | "fetch_url") {
+            return (
+                format!("tool '{name}' is not available in research mode"),
+                "blocked".to_string(),
+            );
+        }
         match name {
             "skill" => {
                 let skill_name = serde_json::from_str::<serde_json::Value>(args)
@@ -1600,5 +1626,21 @@ mod tests {
             assert!(result.contains("invalid") || result.contains("must be relative"), "{args} -> {result}");
         }
         assert!(!dir.join("../f.txt").exists());
+    }
+
+    #[test]
+    fn research_toolbox_only_offers_web_search_and_fetch_url() {
+        let tb = ToolBox::research(None, None, "auto".to_string());
+        let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names.contains(&"web_search".to_string()));
+        assert!(names.contains(&"fetch_url".to_string()));
+    }
+
+    #[tokio::test]
+    async fn research_toolbox_refuses_to_run_other_tools() {
+        let tb = ToolBox::research(None, None, "auto".to_string());
+        let (result, _) = tb.run("run_python", r#"{"code":"print(1)"}"#).await;
+        assert!(result.contains("not available in research mode"), "{result}");
     }
 }
