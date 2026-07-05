@@ -73,6 +73,11 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
         " …working (Esc to stop) ".to_string()
     } else if let Some((_, title)) = app.stream_session.as_ref().filter(|_| app.is_streaming()) {
         format!(" ⟳ streaming in: {title} ")
+    } else if let Some((id, topic)) = app.research_running.as_ref().filter(|(id, _)| {
+        app.session.as_ref().is_none_or(|s| &s.id != id)
+    }) {
+        let _ = id;
+        format!(" 🔎 researching: {topic} ")
     } else {
         " message (Enter to send, /help) ".to_string()
     };

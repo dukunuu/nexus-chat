@@ -23,11 +23,16 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             // created-at date right-aligned on the same row.
             let id = s.slug.clone().unwrap_or_else(|| format!("{}…", &s.id[..8.min(s.id.len())]));
             let when = crate::ui::fmt_created(&s.created_at);
-            // ⟳ = a response is streaming here; ● = finished while unviewed.
+            // ⟳ = a response is streaming here; 🔎 = a research job is running
+            // here; ● = finished while unviewed.
             let streaming_here =
                 app.stream_session.as_ref().is_some_and(|(id, _)| *id == s.id);
+            let researching_here =
+                app.research_running.as_ref().is_some_and(|(id, _)| *id == s.id);
             let marker = if streaming_here {
                 Some(Span::styled("⟳ ", Style::default().fg(Color::Cyan)))
+            } else if researching_here {
+                Some(Span::styled("🔎 ", Style::default().fg(Color::Magenta)))
             } else if app.unread.contains(&s.id) {
                 Some(Span::styled("● ", Style::default().fg(Color::Yellow)))
             } else {

@@ -108,6 +108,8 @@ fn sync_cache(app: &mut App, width: usize) {
                 ))));
             }
             push_user(&mut c.lines, &m.content, width);
+        } else if m.role == "research_stage" {
+            push_research_stage(&mut c.lines, &m.content, width);
         } else if m.role == "tool_call" {
             push_tool_call(&mut c.lines, &m.content, app.show_tool_detail, &app.settings, width);
         } else {
@@ -192,6 +194,25 @@ fn push_tool_call(
         }
         for line in wrap_plain(&result, width.saturating_sub(2)) {
             out.push(Line::from(dim(format!("│ {line}"))));
+        }
+    }
+    out.push(Line::from(""));
+}
+
+/// A background-research progress line: a dim one-liner with a 🔎 marker,
+/// no expand/collapse (unlike tool_call — there's no arguments/result pair,
+/// just a phase label).
+fn push_research_stage(out: &mut Vec<Line<'static>>, content: &str, width: usize) {
+    let mut first = true;
+    for line in wrap_plain(content, width.saturating_sub(2)) {
+        if first {
+            out.push(Line::from(vec![
+                Span::styled("🔎 ", Style::default().fg(Color::Magenta)),
+                dim(line),
+            ]));
+            first = false;
+        } else {
+            out.push(Line::from(dim(format!("  {line}"))));
         }
     }
     out.push(Line::from(""));
