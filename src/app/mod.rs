@@ -458,6 +458,8 @@ pub struct App {
     /// terminal) takes it and suspends the TUI.
     pub pending_editor: Option<std::path::PathBuf>,
     pub(crate) stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
+    /// Abort handle for the in-flight chat task (Esc stops the response).
+    pub(crate) stream_abort: Option<tokio::task::AbortHandle>,
     /// Wall-clock start of the current stream, for TPS.
     pub(crate) stream_started: Option<std::time::Instant>,
     /// Exact usage reported for the in-flight stream, if any.
@@ -615,6 +617,7 @@ impl App {
             show_tool_detail: false,
             pending_editor: None,
             stream_rx: None,
+            stream_abort: None,
             stream_started: None,
             stream_usage: None,
             context_total: None,

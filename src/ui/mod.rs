@@ -70,7 +70,7 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
     let hint = if app.settings.hide_hints {
         ""
     } else if app.is_streaming() {
-        " …working (spinner above) "
+        " …working (Esc to stop) "
     } else {
         " message (Enter to send, /help) "
     };

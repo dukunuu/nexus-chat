@@ -186,7 +186,9 @@ impl App {
             max_tokens: self.settings.max_tokens,
         };
         let tools = self.toolbox.defs();
-        self.stream_rx = Some(provider.stream_chat(model, history, params, tools, self.toolbox.clone()));
+        let (rx, abort) = provider.stream_chat(model, history, params, tools, self.toolbox.clone());
+        self.stream_rx = Some(rx);
+        self.stream_abort = Some(abort);
         self.streaming = Some(String::new());
         self.thinking_text.clear();
         self.tool_status = None;
@@ -242,8 +244,23 @@ impl App {
         Ok(())
     }
 
+    /// Esc while a response streams: abort the background chat task (kills any
+    /// in-flight request and tool loop) and keep whatever text already arrived.
+    pub fn stop_stream(&mut self) -> Result<()> {
+        if !self.is_streaming() {
+            return Ok(());
+        }
+        if let Some(h) = self.stream_abort.take() {
+            h.abort();
+        }
+        self.finish_stream()?;
+        self.status = "response stopped".to_string();
+        Ok(())
+    }
+
     fn finish_stream(&mut self) -> Result<()> {
         self.stream_rx = None;
+        self.stream_abort = None;
         self.tool_status = None;
         let started = self.stream_started.take();
         let mut reasoning = std::mem::take(&mut self.thinking_text);

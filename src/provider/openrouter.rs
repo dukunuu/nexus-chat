@@ -144,16 +144,16 @@ impl OpenRouter {
         params: ChatParams,
         tools: Vec<ToolDef>,
         toolbox: Arc<ToolBox>,
-    ) -> mpsc::UnboundedReceiver<StreamEvent> {
+    ) -> (mpsc::UnboundedReceiver<StreamEvent>, tokio::task::AbortHandle) {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = self.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             if let Err(e) = this.run_chat_loop(model, messages, params, tools, toolbox, &tx).await
             {
                 let _ = tx.send(StreamEvent::Error(e.to_string()));
             }
         });
-        rx
+        (rx, task.abort_handle())
     }
 
     async fn run_chat_loop(

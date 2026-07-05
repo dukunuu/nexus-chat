@@ -111,6 +111,22 @@ async fn message_with_model_creates_session_and_streams() {
     assert_eq!(a.messages[0].role, "user");
 }
 
+#[tokio::test]
+async fn esc_stop_keeps_partial_response() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("hello");
+    a.submit().unwrap();
+    a.on_stream_event(crate::provider::StreamEvent::Token("partial answer".into())).unwrap();
+    a.stop_stream().unwrap();
+    assert!(!a.is_streaming());
+    assert!(a.stream_abort.is_none());
+    assert_eq!(a.messages.last().unwrap().content, "partial answer");
+    assert_eq!(a.status, "response stopped");
+    // No-op when nothing streams.
+    a.stop_stream().unwrap();
+}
+
 #[test]
 fn panels_split_favorites_from_available_by_recency() {
     let db = Db::open_in_memory().unwrap();
