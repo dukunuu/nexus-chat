@@ -25,10 +25,15 @@ end. Old data migrates in place — no re-import.
 
 ## Design
 
-### 1. OCR engine selection
+### 1. OCR engine + model selection
 
-- New setting `ocr_engine`: `auto` (default) | `tesseract` | `vlm`, shown in `/config`.
-- `auto` = VLM when `transcriber_model` is configured, tesseract otherwise.
+- New setting `ocr_model` (default `google/gemini-2.5-flash-lite`) — its own `/config`
+  row with a dedicated model picker (`ModelPickTarget::Ocr`, same pattern as the
+  memory/transcriber rows: Enter opens the picker, Backspace clears/disables).
+- New setting `ocr_engine`: `auto` (default) | `tesseract` | `vlm`, shown in `/config`
+  (Enter cycles the value).
+- `auto` = VLM when `ocr_model` is configured, tesseract otherwise. VLM OCR always
+  uses `ocr_model`, never `transcriber_model`.
 - No per-file choice.
 
 ### 2. VLM OCR pipeline
@@ -36,7 +41,7 @@ end. Old data migrates in place — no re-import.
 Reuses the existing OCR queue (rescan → jobs → one batch at a time → `on_ocr_done`).
 
 - Render: `pdftoppm -r 300 -png` in color (tesseract path keeps 200 DPI gray).
-- Per page: one non-streaming OpenRouter chat call to `transcriber_model` with the
+- Per page: one non-streaming OpenRouter chat call to `ocr_model` with the
   page PNG as a data URL and generous `max_tokens`. Up to 4 pages in flight; one
   retry per page; a page that still fails becomes `[page N: ocr failed]` text
   instead of failing the document.
