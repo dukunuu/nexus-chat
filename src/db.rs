@@ -50,6 +50,9 @@ pub struct FileRow {
     pub hash: String,
     pub size: i64,
     pub status: String,
+    /// Unix mtime of the disk file when last indexed; lets rescans skip
+    /// reading/hashing files whose (size, mtime) haven't changed.
+    pub mtime: i64,
 }
 
 /// One message in a session. `model`/`reasoning`/`tokens`/`secs` are populated
@@ -179,6 +182,7 @@ impl Db {
             "ALTER TABLE sessions ADD COLUMN space_id TEXT",
             "ALTER TABLE sessions ADD COLUMN compact_summary TEXT",
             "ALTER TABLE sessions ADD COLUMN compact_through INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = self.conn.execute(stmt, []);
         }
@@ -572,13 +576,14 @@ impl Db {
 
     pub fn list_files(&self, space_id: &str) -> Result<Vec<FileRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, hash, size, status FROM files
+            "SELECT id, name, hash, size, status, mtime FROM files
              WHERE space_id = ?1 ORDER BY name ASC",
         )?;
         let rows = stmt.query_map([space_id], |r| {
             Ok(FileRow {
                 id: r.get(0)?, name: r.get(1)?,
                 hash: r.get(2)?, size: r.get(3)?, status: r.get(4)?,
+                mtime: r.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -587,6 +592,12 @@ impl Db {
     pub fn delete_file(&self, file_id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
         self.conn.execute("DELETE FROM files WHERE id = ?1", [file_id])?;
+        Ok(())
+    }
+
+    /// Record the disk mtime a file was indexed at (see `FileRow::mtime`).
+    pub fn set_file_mtime(&self, file_id: &str, mtime: i64) -> Result<()> {
+        self.conn.execute("UPDATE files SET mtime = ?2 WHERE id = ?1", (file_id, mtime))?;
         Ok(())
     }
 

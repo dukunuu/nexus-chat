@@ -130,11 +130,35 @@ impl App {
             }
             let name = entry.file_name().to_string_lossy().to_string();
             seen.push(name.clone());
-            let Ok(bytes) = std::fs::read(&path) else { continue };
-            let hash = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>();
-            if let Some(f) = known.iter().find(|f| f.name == name && f.hash == hash) {
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let disk_size = entry.metadata().map(|m| m.len() as i64).unwrap_or(0);
+            let existing = known.iter().find(|f| f.name == name);
+            // Unchanged by stat: skip entirely — no read, no hash. This is what
+            // keeps /files and space switches snappy with big filesets.
+            if let Some(f) = existing
+                && f.size == disk_size
+                && f.mtime == mtime
+                && mtime != 0
+            {
                 // Stale "ocr…"/"ocr N/M" (app quit mid-OCR) re-queues once no
                 // batch is in flight.
+                if f.status.starts_with("ocr") && self.ocr_rx.is_none() {
+                    ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
+                }
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let hash = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>();
+            if let Some(f) = existing.filter(|f| f.hash == hash) {
+                // Content unchanged (touched, or indexed before mtimes were
+                // tracked): just record the stat for next time.
+                let _ = self.db.set_file_mtime(&f.id, mtime);
                 if f.status.starts_with("ocr") && self.ocr_rx.is_none() {
                     ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
                 }
@@ -155,6 +179,7 @@ impl App {
             };
             if let Ok(id) = self.db.upsert_file(&self.active_space.id, &name, &hash, size, &status) {
                 let _ = self.db.set_file_chunks(&id, &chunks);
+                let _ = self.db.set_file_mtime(&id, mtime);
             }
         }
         for gone in known.iter().filter(|f| !seen.contains(&f.name)) {
@@ -411,6 +436,29 @@ mod tests {
         std::fs::write(dir.join("empty.txt"), "   ").unwrap();
         a.rescan_files();
         assert_eq!(a.files_cache[0].status, "no text (scanned?)");
+    }
+
+    #[test]
+    fn rescan_skips_stat_unchanged_files_without_rehashing() {
+        let mut a = test_app();
+        let dir = a.space.files_dir(&a.active_space.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("book.txt"), "big content").unwrap();
+        a.rescan_files();
+        let f = a.files_cache[0].clone();
+        assert!(f.mtime > 0, "mtime recorded on index");
+
+        // Plant a wrong hash; a stat-unchanged rescan must not correct it —
+        // proof the file wasn't re-read/re-hashed.
+        a.db.upsert_file(&a.active_space.id, "book.txt", "sentinel", f.size, "ok").unwrap();
+        a.rescan_files();
+        assert_eq!(a.files_cache[0].hash, "sentinel");
+
+        // A size change busts the stat check and re-hashes for real.
+        std::fs::write(dir.join("book.txt"), "big content grew").unwrap();
+        a.rescan_files();
+        assert_ne!(a.files_cache[0].hash, "sentinel");
+        assert_eq!(a.files_cache[0].status, "ok");
     }
 
     #[test]
