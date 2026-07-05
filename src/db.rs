@@ -161,6 +161,12 @@ impl Db {
                 location UNINDEXED,
                 text
             );
+            CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                file_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                vec BLOB NOT NULL,
+                PRIMARY KEY (file_id, seq)
+            );
             CREATE TABLE IF NOT EXISTS message_images (
                 id TEXT PRIMARY KEY,
                 message_id TEXT NOT NULL,
@@ -607,9 +613,12 @@ impl Db {
         Ok(())
     }
 
-    /// Replace a file's indexed chunks. `chunks` are `(location, text)` in order.
+    /// Replace a file's indexed chunks. `chunks` are `(location, text)` in
+    /// order. Any stored embeddings are dropped too — they described the old
+    /// chunk texts, and the embedder backfills the new ones.
     pub fn set_file_chunks(&self, file_id: &str, chunks: &[(String, String)]) -> Result<()> {
         self.conn.execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
+        self.conn.execute("DELETE FROM chunk_embeddings WHERE file_id = ?1", [file_id])?;
         for (seq, (location, text)) in chunks.iter().enumerate() {
             self.conn.execute(
                 "INSERT INTO file_chunks (file_id, seq, location, text) VALUES (?1, ?2, ?3, ?4)",
@@ -618,6 +627,92 @@ impl Db {
         }
         Ok(())
     }
+
+    /// Store embedding vectors for a file's chunks as `(seq, vector)` pairs.
+    pub fn set_chunk_embeddings(&self, file_id: &str, vecs: &[(i64, Vec<f32>)]) -> Result<()> {
+        for (seq, v) in vecs {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO chunk_embeddings (file_id, seq, vec) VALUES (?1, ?2, ?3)",
+                (file_id, seq, vec_to_blob(v)),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Encode an embedding as little-endian f32 bytes for a BLOB column.
+pub fn vec_to_blob(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+/// Decode a BLOB back into an embedding (inverse of `vec_to_blob`).
+pub fn blob_to_vec(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+}
+
+/// Ids of files (in one space) that have chunks but not a vector per chunk —
+/// the embedder's work queue, which doubles as the pre-upgrade backfill.
+pub fn files_missing_embeddings(conn: &Connection, space_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT files.id FROM files
+         WHERE files.space_id = ?1
+           AND (SELECT COUNT(*) FROM file_chunks WHERE file_chunks.file_id = files.id) >
+               (SELECT COUNT(*) FROM chunk_embeddings WHERE chunk_embeddings.file_id = files.id)",
+    )?;
+    let rows = stmt.query_map([space_id], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Cosine-ranked chunk search within one space: `(file name, location, text,
+/// score)`, best first. Vectors whose dimension doesn't match the query (a
+/// changed embedding model) are skipped. Brute force — thousands of chunks
+/// scan in milliseconds, no ANN index needed.
+pub fn semantic_chunks(
+    conn: &Connection,
+    space_id: &str,
+    query: &[f32],
+    limit: usize,
+) -> Result<Vec<(String, String, String, f32)>> {
+    let mut stmt = conn.prepare(
+        "SELECT files.name, file_chunks.location, file_chunks.text, chunk_embeddings.vec
+         FROM chunk_embeddings
+         JOIN files ON files.id = chunk_embeddings.file_id
+         JOIN file_chunks ON file_chunks.file_id = chunk_embeddings.file_id
+                         AND CAST(file_chunks.seq AS INTEGER) = chunk_embeddings.seq
+         WHERE files.space_id = ?1",
+    )?;
+    let rows = stmt.query_map([space_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, Vec<u8>>(3)?,
+        ))
+    })?;
+    let mut hits: Vec<(String, String, String, f32)> = Vec::new();
+    for row in rows {
+        let (name, loc, text, blob) = row?;
+        let v = blob_to_vec(&blob);
+        if v.len() != query.len() {
+            continue;
+        }
+        let score = cosine(query, &v);
+        hits.push((name, loc, text, score));
+    }
+    hits.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+    hits.truncate(limit);
+    Ok(hits)
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for (x, y) in a.iter().zip(b) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom == 0.0 { 0.0 } else { dot / denom }
 }
 
 /// Quote a query for FTS5 MATCH: each whitespace token becomes a quoted
@@ -801,6 +896,45 @@ mod tests {
         let default_id = db.default_space_id().unwrap();
         let moved = db.list_sessions(&default_id).unwrap();
         assert!(moved.iter().any(|c| c.id == s.id)); // session survived, moved to default
+    }
+
+    #[test]
+    fn chunk_embeddings_store_rank_and_invalidate() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let id = db.upsert_file(&space, "book.pdf", "h1", 10, "ok").unwrap();
+        db.set_file_chunks(
+            &id,
+            &[
+                ("page 1".into(), "cooking with fire".into()),
+                ("page 2".into(), "quantum entanglement".into()),
+            ],
+        )
+        .unwrap();
+
+        // Blob codec roundtrip.
+        let v = vec![0.25f32, -1.0, 3.5];
+        assert_eq!(blob_to_vec(&vec_to_blob(&v)), v);
+
+        // No vectors yet → file needs embedding.
+        assert_eq!(files_missing_embeddings(&db.conn, &space).unwrap(), vec![id.clone()]);
+
+        db.set_chunk_embeddings(&id, &[(0, vec![1.0, 0.0]), (1, vec![0.0, 1.0])]).unwrap();
+        assert!(files_missing_embeddings(&db.conn, &space).unwrap().is_empty());
+
+        // Query near the second chunk's vector ranks it first.
+        let hits = semantic_chunks(&db.conn, &space, &[0.1, 0.9], 5).unwrap();
+        assert_eq!(hits[0].1, "page 2");
+        assert!(hits[0].2.contains("quantum"));
+        assert!(hits[0].3 > hits[1].3, "scores must be descending");
+
+        // Dimension-mismatched vectors are skipped, not an error.
+        let hits = semantic_chunks(&db.conn, &space, &[1.0, 0.0, 0.0], 5).unwrap();
+        assert!(hits.is_empty());
+
+        // Rewriting chunks invalidates stale vectors.
+        db.set_file_chunks(&id, &[("page 1".into(), "new text".into())]).unwrap();
+        assert_eq!(files_missing_embeddings(&db.conn, &space).unwrap(), vec![id.clone()]);
     }
 
     #[test]
