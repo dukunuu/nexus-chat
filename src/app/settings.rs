@@ -126,6 +126,10 @@ impl App {
         self.ocr_model = self.ocr_model.trim().to_string();
         self.db.set_setting("ocr_model", &self.ocr_model)?;
         self.db.set_setting("ocr_engine", &self.ocr_engine)?;
+        self.research_model = self.research_model.trim().to_string();
+        self.db.set_setting("research_model", &self.research_model)?;
+        self.escalation_model = self.escalation_model.trim().to_string();
+        self.db.set_setting("escalation_model", &self.escalation_model)?;
         self.embedding_model = self.settings_inputs[6].trim().to_string();
         self.db.set_setting("embedding_model", &self.embedding_model)?;
         self.refresh_toolbox();

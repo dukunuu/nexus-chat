@@ -110,7 +110,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     // Enter opens the same model picker /model uses, Backspace clears it.
     let picker = matches!(
         app.settings_field(),
-        SettingsField::MemoryModel | SettingsField::TranscriberModel | SettingsField::OcrModel
+        SettingsField::MemoryModel
+            | SettingsField::TranscriberModel
+            | SettingsField::OcrModel
+            | SettingsField::ResearchModel
+            | SettingsField::EscalationModel
     );
     if picker {
         match key.code {
@@ -118,11 +122,15 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             KeyCode::Enter => match app.settings_field() {
                 SettingsField::MemoryModel => app.open_model_picker_for_memory(),
                 SettingsField::OcrModel => app.open_model_picker_for_ocr(),
+                SettingsField::ResearchModel => app.open_model_picker_for_research(),
+                SettingsField::EscalationModel => app.open_model_picker_for_escalation(),
                 _ => app.open_model_picker_for_transcriber(),
             },
             KeyCode::Backspace => match app.settings_field() {
                 SettingsField::MemoryModel => app.clear_memory_model()?,
                 SettingsField::OcrModel => app.clear_ocr_model()?,
+                SettingsField::ResearchModel => app.clear_research_model()?,
+                SettingsField::EscalationModel => app.clear_escalation_model()?,
                 _ => app.clear_transcriber_model()?,
             },
             KeyCode::Up => app.move_settings_selection(-1),

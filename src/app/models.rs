@@ -34,6 +34,20 @@ impl App {
         self.open_model_picker_impl();
     }
 
+    /// Open the same model picker, but a confirmed pick sets the research
+    /// model (in `/config`) instead of the active session's model.
+    pub(crate) fn open_model_picker_for_research(&mut self) {
+        self.model_pick_target = ModelPickTarget::Research;
+        self.open_model_picker_impl();
+    }
+
+    /// Open the same model picker, but a confirmed pick sets the escalation
+    /// model (in `/config`) instead of the active session's model.
+    pub(crate) fn open_model_picker_for_escalation(&mut self) {
+        self.model_pick_target = ModelPickTarget::Escalation;
+        self.open_model_picker_impl();
+    }
+
     fn open_model_picker_impl(&mut self) {
         if self.provider.is_none() {
             self.open_key_prompt();
@@ -369,6 +383,25 @@ impl App {
         self.ocr_model.clear();
         self.db.set_setting("ocr_model", "")?;
         self.status = "OCR model cleared — scanned PDFs use tesseract".to_string();
+        Ok(())
+    }
+
+    /// Reset the research model to blank (Backspace on its row in
+    /// `/config`) — disables `/research`.
+    pub(crate) fn clear_research_model(&mut self) -> Result<()> {
+        self.research_model.clear();
+        self.db.set_setting("research_model", "")?;
+        self.status = "research model cleared — /research disabled".to_string();
+        Ok(())
+    }
+
+    /// Reset the escalation model to blank (Backspace on its row in
+    /// `/config`) — /research falls back to the research model for its
+    /// contradiction-resolution stage.
+    pub(crate) fn clear_escalation_model(&mut self) -> Result<()> {
+        self.escalation_model.clear();
+        self.db.set_setting("escalation_model", "")?;
+        self.status = "escalation model cleared — falls back to research model".to_string();
         Ok(())
     }
 }
