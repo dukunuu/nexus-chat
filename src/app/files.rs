@@ -200,6 +200,10 @@ impl App {
     pub fn on_ocr_done(&mut self, r: Option<(String, String, OcrUpdate)>) {
         let Some((space_id, name, update)) = r else {
             self.ocr_rx = None;
+            // PDFs imported mid-batch sat at "ocr…" unqueued; this rescan
+            // chains them into a fresh batch instead of stalling until the
+            // user reopens /files.
+            self.rescan_files();
             return;
         };
         let Ok(files) = self.db.list_files(&space_id) else { return };
@@ -647,12 +651,17 @@ mod tests {
         a.on_ocr_done(Some((other.id.clone(), "gone.pdf".to_string(), OcrUpdate::Done(Ok("x".to_string())))));
     }
 
-    #[test]
-    fn on_ocr_done_none_clears_channel() {
+    #[tokio::test]
+    async fn on_ocr_done_none_clears_channel_and_requeues_stragglers() {
         let mut a = test_app();
-        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        a.ocr_rx = Some(rx);
+        let dir = a.space.files_dir(&a.active_space.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A scanned PDF stuck at "ocr…" (imported while a batch was running).
+        std::fs::write(dir.join("scan.pdf"), crate::extract::minimal_pdf(None)).unwrap();
+        a.rescan_files();
+        assert!(a.ocr_rx.is_some());
+        // Batch finishes: channel clears, and the straggler chains into a new batch.
         a.on_ocr_done(None);
-        assert!(a.ocr_rx.is_none());
+        assert!(a.ocr_rx.is_some(), "straggler should re-queue on batch end");
     }
 }
