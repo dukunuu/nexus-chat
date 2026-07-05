@@ -207,7 +207,14 @@ impl App {
             max_tokens: self.settings.max_tokens,
         };
         let tools = self.toolbox.defs();
-        let (rx, abort) = provider.stream_chat(model, history, params, tools, self.toolbox.clone());
+        let (rx, abort) = provider.stream_chat(
+            model,
+            history,
+            params,
+            tools,
+            self.toolbox.clone(),
+            crate::provider::openrouter::MAX_TOOL_ITERS,
+        );
         self.stream_session = self.session.as_ref().map(|s| (s.id.clone(), s.title.clone()));
         self.stream_rx = Some(rx);
         self.stream_abort = Some(abort);

@@ -12,8 +12,9 @@ use crate::tools::ToolBox;
 
 const BASE: &str = "https://openrouter.ai/api/v1";
 /// Hard cap on tool round-trips per response, so a model that keeps calling
-/// tools can't loop forever.
-const MAX_TOOL_ITERS: usize = 25;
+/// tools can't loop forever. The default for interactive chat; background
+/// jobs (e.g. deep-research searcher agents) pass their own smaller budget.
+pub(crate) const MAX_TOOL_ITERS: usize = 25;
 
 #[derive(Clone)]
 pub struct OpenRouter {
@@ -172,7 +173,7 @@ impl OpenRouter {
     /// Start a streaming completion. Spawns a task that pushes tokens over the
     /// returned channel; the UI loop drains it alongside keypresses. If the
     /// model calls a tool, the task runs it via `toolbox` and continues the
-    /// conversation, bounded by `MAX_TOOL_ITERS` round-trips.
+    /// conversation, bounded by `max_tool_iters` round-trips.
     pub fn stream_chat(
         &self,
         model: String,
@@ -180,11 +181,12 @@ impl OpenRouter {
         params: ChatParams,
         tools: Vec<ToolDef>,
         toolbox: Arc<ToolBox>,
+        max_tool_iters: usize,
     ) -> (mpsc::UnboundedReceiver<StreamEvent>, tokio::task::AbortHandle) {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = self.clone();
         let task = tokio::spawn(async move {
-            if let Err(e) = this.run_chat_loop(model, messages, params, tools, toolbox, &tx).await
+            if let Err(e) = this.run_chat_loop(model, messages, params, tools, toolbox, max_tool_iters, &tx).await
             {
                 let _ = tx.send(StreamEvent::Error(e.to_string()));
             }
@@ -199,13 +201,14 @@ impl OpenRouter {
         params: ChatParams,
         tools: Vec<ToolDef>,
         toolbox: Arc<ToolBox>,
+        max_tool_iters: usize,
         tx: &mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<()> {
-        for iter in 0..=MAX_TOOL_ITERS {
+        for iter in 0..=max_tool_iters {
             // On the final allowed iteration, omit tools and tell the model
             // why — otherwise it writes the tool call as plain text.
-            let send_tools: &[ToolDef] = if iter < MAX_TOOL_ITERS { &tools } else { &[] };
-            if iter == MAX_TOOL_ITERS {
+            let send_tools: &[ToolDef] = if iter < max_tool_iters { &tools } else { &[] };
+            if iter == max_tool_iters {
                 messages.push(ChatMessage::text(
                     "system",
                     "Tool budget exhausted for this turn. Do not attempt further tool calls; \
@@ -242,9 +245,7 @@ impl OpenRouter {
                             images: Vec::new(),
                         });
                     }
-                    // Tell the model its remaining budget so it plans reads
-                    // instead of paging indefinitely and hitting the wall.
-                    let remaining = MAX_TOOL_ITERS - (iter + 1);
+                    let remaining = max_tool_iters - (iter + 1);
                     if let Some(m) = messages.last_mut() {
                         m.content.push_str(&format!(
                             "\n\n[{remaining} tool round-trips left this turn — plan accordingly]"
