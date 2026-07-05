@@ -465,6 +465,14 @@ impl Db {
         self.insert_message(session_id, "tool_call", content, None, None, None, None, None)
     }
 
+    /// Insert a background-research stage/progress line: plain text, shown in
+    /// the transcript but never sent back to the model (unlike `tool_call`
+    /// rows, never replayed into build_history either — this is the job's
+    /// own scratch work, not something the chat model did).
+    pub fn add_research_stage_message(&self, session_id: &str, content: &str) -> Result<String> {
+        self.insert_message(session_id, "research_stage", content, None, None, None, None, None)
+    }
+
     /// Insert an assistant reply with its model, reasoning trace, and stats.
     #[allow(clippy::too_many_arguments)]
     pub fn add_assistant_message(
@@ -1016,5 +1024,16 @@ mod tests {
         assert_eq!(text, "one\ntwo\nthree\nfour");
         assert!(file_text(&db.conn, &space, "missing.txt").unwrap().is_none());
         assert_eq!(count_files(&db.conn, &space).unwrap(), 1);
+    }
+
+    #[test]
+    fn research_stage_messages_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let s = db.create_session("t", "a/b", &space).unwrap();
+        db.add_research_stage_message(&s.id, "planning…").unwrap();
+        let msgs = db.load_messages(&s.id).unwrap();
+        assert_eq!(msgs.last().unwrap().role, "research_stage");
+        assert_eq!(msgs.last().unwrap().content, "planning…");
     }
 }

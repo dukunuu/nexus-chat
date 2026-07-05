@@ -136,6 +136,9 @@ impl App {
             // the model remembers what it already tried (and got back) in
             // prior turns — dropping these caused it to repeat the same
             // mistakes on file-writing tools with no memory of the failure.
+            if m.role == "research_stage" {
+                continue;
+            }
             if m.role == "tool_call" {
                 if let Some((call, result)) = parse_tool_call_row(&m.content) {
                     history.push(ChatMessage {

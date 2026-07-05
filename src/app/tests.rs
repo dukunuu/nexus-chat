@@ -1038,6 +1038,21 @@ fn tool_call_events_persist_and_replay_into_history() {
 }
 
 #[test]
+fn research_stage_rows_are_never_replayed_into_history() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    let space = a.active_space.id.clone();
+    let s = a.db.create_session("t", "a/one", &space).unwrap();
+    a.session = Some(s.clone());
+    a.db.add_research_stage_message(&s.id, "planning…").unwrap();
+    a.messages = a.db.load_messages(&s.id).unwrap();
+
+    let h = a.build_history();
+    assert!(h.iter().all(|m| m.role != "research_stage"));
+    assert!(h.iter().all(|m| !m.content.contains("planning…")));
+}
+
+#[test]
 fn tool_call_summaries_name_the_interesting_argument() {
     use crate::app::tool_call_summary;
     assert_eq!(
