@@ -129,8 +129,20 @@ impl ToolBox {
             });
         }
         defs.push(ToolDef {
+            name: "run_python".to_string(),
+            description: "Run a Python script and return its output. Use this for any nontrivial calculation, data processing, or exact math instead of computing mentally. Runs in a persistent scratch virtualenv; print() what you need back. Add packages to the venv with install_packages (no skill/app target).".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "code": { "type": "string", "description": "the python source to run" },
+                    "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments" },
+                },
+                "required": ["code"],
+            }),
+        });
+        defs.push(ToolDef {
             name: "install_packages".to_string(),
-            description: "Install packages into an isolated environment — pip packages into a skill's own virtualenv (pass skill), or npm packages into an app's node_modules (pass app; reference files as node_modules/<pkg>/… in the app's HTML). Never installs globally.".to_string(),
+            description: "Install packages into an isolated environment — pip packages into a skill's own virtualenv (pass skill), npm packages into an app's node_modules (pass app; reference files as node_modules/<pkg>/… in the app's HTML), or pip packages into the run_python scratch venv (pass neither). Never installs globally.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -212,8 +224,20 @@ impl ToolBox {
                 }),
             });
             defs.push(ToolDef {
+                name: "grep_app".to_string(),
+                description: "Search an app's files for a substring (case-insensitive). Returns path:line: text matches — use it to find where something lives before editing.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "app": { "type": "string", "description": "app name" },
+                        "pattern": { "type": "string", "description": "text to search for" },
+                    },
+                    "required": ["app", "pattern"],
+                }),
+            });
+            defs.push(ToolDef {
                 name: "read_app_file".to_string(),
-                description: "Read a file from an app, up to 200 lines per call. Use offset to page through longer files.".to_string(),
+                description: "Read a file from an app, up to 200 lines per call. Use offset to page through longer files. Lines come back as `N\tcontent` — never include the number prefix in edit_file's old_string.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -234,6 +258,12 @@ impl ToolBox {
     fn app_path(&self, app: &str, rel: &str) -> Result<PathBuf, String> {
         let Some(ctx) = &self.apps else { return Err("apps are not available".to_string()) };
         resolve_confined(&ctx.dir, app, rel)
+    }
+
+    /// The `run_python` scratch dir (venv + script), a sibling of the skills
+    /// dir: `<data>/python`. Persistent so installed packages survive.
+    fn python_dir(&self) -> PathBuf {
+        self.skills_dir.parent().map(|p| p.join("python")).unwrap_or_else(|| PathBuf::from("python"))
     }
 
     /// The live URL for an app.
@@ -398,7 +428,55 @@ impl ToolBox {
                             }
                         }
                     },
-                    Ok(()) => "pass skill or app to pick where the packages go".to_string(),
+                    Ok(()) => {
+                        // No target: the run_python scratch venv.
+                        let dir = self.python_dir();
+                        let run = async {
+                            std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+                            let py = ensure_venv(&dir).await?;
+                            let mut argv: Vec<std::ffi::OsString> =
+                                vec!["-m".into(), "pip".into(), "install".into()];
+                            argv.extend(pkgs.iter().map(std::ffi::OsString::from));
+                            let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
+                            run_cmd(py.as_os_str(), &refs, &dir, 300).await
+                        };
+                        match run.await {
+                            Ok(out) if out.status.success() => {
+                                format!("installed {} into the python scratch venv", pkgs.join(" "))
+                            }
+                            Ok(out) => format!("pip install failed:\n{}", format_output(&out)),
+                            Err(e) => e,
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "run_python" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let code = v.get("code").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let extra: Vec<String> = v
+                    .get("args")
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                let status = "Running python…".to_string();
+                let dir = self.python_dir();
+                let run = async {
+                    if code.trim().is_empty() {
+                        return Err("code must not be empty".to_string());
+                    }
+                    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+                    let script = dir.join("script.py");
+                    std::fs::write(&script, &code).map_err(|e| format!("cannot write script: {e}"))?;
+                    let py = ensure_venv(&dir).await?;
+                    let mut argv: Vec<std::ffi::OsString> = vec![script.into()];
+                    argv.extend(extra.iter().map(std::ffi::OsString::from));
+                    let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
+                    run_cmd(py.as_os_str(), &refs, &dir, 120).await
+                };
+                let result = match run.await {
+                    Ok(out) => format_output(&out),
+                    Err(e) => e,
                 };
                 (result, status)
             }
@@ -462,7 +540,7 @@ impl ToolBox {
                                     "{name} (lines {}-{} of {total}):\n{}",
                                     start + 1,
                                     start + slice.len(),
-                                    slice.join("\n"),
+                                    number_lines(slice, start),
                                 )
                             }
                         }
@@ -514,12 +592,48 @@ impl ToolBox {
                         Ok(text) => match text.matches(&old).count() {
                             0 => format!("old_string not found in {app}/{path}; read the file to see its current content"),
                             1 => match std::fs::write(&file, text.replacen(&old, &new, 1)) {
-                                Ok(()) => format!("edited {app}/{path} — {}", self.app_link(&app)),
+                                Ok(()) => {
+                                    // Show the change as a diff, harness-style.
+                                    let mut s = format!("edited {app}/{path} — {}", self.app_link(&app));
+                                    for l in old.lines() {
+                                        s.push_str(&format!("\n- {l}"));
+                                    }
+                                    for l in new.lines() {
+                                        s.push_str(&format!("\n+ {l}"));
+                                    }
+                                    s
+                                }
                                 Err(e) => format!("write failed: {e}"),
                             },
                             n => format!("old_string matches {n} places in {app}/{path} — include more surrounding text to make it unique"),
                         },
                     },
+                };
+                (result, status)
+            }
+            "grep_app" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let (app, pattern) = (field("app"), field("pattern"));
+                let status = format!("Searching {app}…");
+                let result = match self.app_path(&app, "index.html").map(|p| p.parent().unwrap().to_path_buf()) {
+                    Err(e) => e,
+                    Ok(dir) if !dir.is_dir() => format!("unknown app: {app}"),
+                    Ok(_) if pattern.is_empty() => "pattern must not be empty".to_string(),
+                    Ok(dir) => {
+                        let mut hits = Vec::new();
+                        grep_dir(&dir, &dir, &pattern.to_lowercase(), &mut hits);
+                        if hits.is_empty() {
+                            format!("no matches for {pattern:?} in {app}")
+                        } else {
+                            let n = hits.len();
+                            hits.truncate(50);
+                            if n > 50 {
+                                hits.push(format!("… ({} more matches)", n - 50));
+                            }
+                            hits.join("\n")
+                        }
+                    }
                 };
                 (result, status)
             }
@@ -546,7 +660,7 @@ impl ToolBox {
                                     "{app}/{path} (lines {}-{} of {total}):\n{}",
                                     start + 1,
                                     start + slice.len(),
-                                    slice.join("\n"),
+                                    number_lines(slice, start),
                                 )
                             }
                         }
@@ -555,6 +669,41 @@ impl ToolBox {
                 (result, status)
             }
             other => (format!("unknown tool: {other}"), "Running tool…".to_string()),
+        }
+    }
+}
+
+/// `cat -n`-style numbering for ranged reads, matching what agent harnesses
+/// feed models so line references and edits anchor reliably.
+fn number_lines(slice: &[&str], start: usize) -> String {
+    slice
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("{:>5}\t{l}", start + i + 1))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Recursively collect `relpath:line: text` matches for a lowercase substring
+/// pattern, skipping dependency/venv dirs and unreadable (binary) files.
+fn grep_dir(root: &std::path::Path, dir: &std::path::Path, pattern: &str, out: &mut Vec<String>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let name = entry.file_name();
+        if path.is_dir() {
+            if name != "node_modules" && name != ".venv" && name != ".git" {
+                grep_dir(root, &path, pattern, out);
+            }
+        } else if let Ok(text) = std::fs::read_to_string(&path) {
+            let rel = path.strip_prefix(root).unwrap_or(&path).display();
+            for (i, line) in text.lines().enumerate() {
+                if line.to_lowercase().contains(pattern) {
+                    out.push(format!("{rel}:{}: {}", i + 1, line.trim()));
+                }
+            }
         }
     }
 }
@@ -1059,12 +1208,52 @@ mod tests {
         assert!(result.contains("no packages"), "{result}");
         let (result, _) = tb.run("install_packages", r#"{"packages":["--upgrade"],"skill":"t"}"#).await;
         assert!(result.contains("invalid package name"), "{result}");
-        let (result, _) = tb.run("install_packages", r#"{"packages":["requests"]}"#).await;
-        assert!(result.contains("pass skill or app"), "{result}");
+        let (result, _) = tb.run("install_packages", r#"{"packages":["--upgrade"]}"#).await;
+        assert!(result.contains("invalid package name"), "{result}");
         let (result, _) = tb.run("install_packages", r#"{"packages":["x"],"skill":"a","app":"b"}"#).await;
         assert!(result.contains("not both"), "{result}");
         let (result, _) = tb.run("install_packages", r#"{"packages":["x"],"skill":"ghost"}"#).await;
         assert!(result.contains("unknown skill"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn run_python_computes_in_scratch_venv() {
+        let dir = std::env::temp_dir().join(format!("nexus-py-{}", uuid::Uuid::new_v4()));
+        let tb = ToolBox::new(dir.join("skills"), None, None, "auto".to_string(), None, None);
+        let (result, status) = tb.run("run_python", r#"{"code":"print(2**32)"}"#).await;
+        assert!(status.contains("Running python"));
+        assert!(result.contains("4294967296"), "{result}");
+        assert!(dir.join("python/.venv/bin/python").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn grep_app_finds_lines_and_skips_node_modules() {
+        let (tb, dir) = apps_toolbox();
+        let _ = tb.run("write_file", r#"{"app":"deck","path":"index.html","content":"<h1>Title</h1>\n<p>slide two</p>"}"#).await;
+        let _ = tb.run("write_file", r#"{"app":"deck","path":"js/a.js","content":"// slide logic"}"#).await;
+        std::fs::create_dir_all(dir.join("deck/node_modules/x")).unwrap();
+        std::fs::write(dir.join("deck/node_modules/x/i.js"), "slide").unwrap();
+        let (result, _) = tb.run("grep_app", r#"{"app":"deck","pattern":"SLIDE"}"#).await;
+        assert!(result.contains("index.html:2: <p>slide two</p>"), "{result}");
+        assert!(result.contains("js/a.js:1: // slide logic"), "{result}");
+        assert!(!result.contains("node_modules"), "{result}");
+        let (result, _) = tb.run("grep_app", r#"{"app":"deck","pattern":"zzz"}"#).await;
+        assert!(result.contains("no matches"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn reads_are_line_numbered_and_edits_show_a_diff() {
+        let (tb, _) = apps_toolbox();
+        let _ = tb.run("write_file", r#"{"app":"d","path":"i.html","content":"alpha\nbeta"}"#).await;
+        let (result, _) = tb.run("read_app_file", r#"{"app":"d","path":"i.html"}"#).await;
+        assert!(result.contains("    1\talpha"), "{result}");
+        assert!(result.contains("    2\tbeta"), "{result}");
+        let (result, _) = tb
+            .run("edit_file", r#"{"app":"d","path":"i.html","old_string":"beta","new_string":"gamma"}"#)
+            .await;
+        assert!(result.contains("- beta"), "{result}");
+        assert!(result.contains("+ gamma"), "{result}");
     }
 
     #[tokio::test]

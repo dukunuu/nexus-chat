@@ -85,6 +85,11 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                         }
                     } else {
                         handle_key(&mut app, k)?;
+                        // /edit queued an app file — open it now (this loop
+                        // owns the terminal, run_command doesn't).
+                        if let Some(path) = app.pending_editor.take() {
+                            edit_in_external_editor(terminal, &path)?;
+                        }
                     }
                 }
                 Some(Ok(Event::Mouse(m))) => {

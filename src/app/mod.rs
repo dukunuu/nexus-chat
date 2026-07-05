@@ -439,6 +439,9 @@ pub struct App {
     pub tool_status: Option<String>,
     /// Whether tool-call blocks show full arguments/results (Ctrl+T).
     pub show_tool_detail: bool,
+    /// File `/edit` wants opened in `$EDITOR`; the event loop (which owns the
+    /// terminal) takes it and suspends the TUI.
+    pub pending_editor: Option<std::path::PathBuf>,
     pub(crate) stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
     /// Wall-clock start of the current stream, for TPS.
     pub(crate) stream_started: Option<std::time::Instant>,
@@ -592,6 +595,7 @@ impl App {
             thinking_text: String::new(),
             tool_status: None,
             show_tool_detail: false,
+            pending_editor: None,
             stream_rx: None,
             stream_started: None,
             stream_usage: None,
@@ -892,6 +896,7 @@ impl App {
             }
             "skills" => self.open_skills_popup(),
             "files" => self.open_files_popup(),
+            "edit" => self.request_app_file_edit(cmd[token.len()..].trim()),
             other => {
                 if self.skills.iter().any(|s| s.name == other) {
                     self.forced_skill = Some(other.to_string());
@@ -907,6 +912,25 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// `/edit <app>/<file>` — queue an app file for `$EDITOR` (the event loop
+    /// owns the terminal and does the actual suspend/open).
+    fn request_app_file_edit(&mut self, arg: &str) {
+        if arg.is_empty() || !arg.contains('/') {
+            self.status = "usage: /edit <app>/<file>  e.g. /edit deck/index.html".to_string();
+            return;
+        }
+        if arg.starts_with('/') || arg.split('/').any(|s| s.is_empty() || s == "." || s == "..") {
+            self.status = format!("invalid path: {arg}");
+            return;
+        }
+        let path = self.space.apps_dir(&self.active_space.name).join(arg);
+        if !path.is_file() {
+            self.status = format!("no such app file: {arg}");
+            return;
+        }
+        self.pending_editor = Some(path);
     }
 
     // --- commands ---
@@ -944,6 +968,11 @@ pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String 
         "skill" => format!("skill {}", f("name")),
         "install_skill" => format!("install_skill {} → {}", f("source"), first_line(result)),
         "run_script" => format!("run_script {}/{}", f("skill"), f("script")),
+        "run_python" => format!("run_python ({} lines)", f("code").lines().count().max(1)),
+        "grep_app" => {
+            let hits = if result.starts_with("no matches") { "no hits".to_string() } else { format!("{} hits", result.lines().count()) };
+            format!("grep_app {} \"{}\" → {hits}", f("app"), f("pattern"))
+        }
         "install_packages" => {
             let pkgs = v
                 .get("packages")
