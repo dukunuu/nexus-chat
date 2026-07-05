@@ -335,6 +335,22 @@ impl App {
         });
     }
 
+    /// Ctrl+O in /files: throw away the selected file's extracted text (and
+    /// vectors, via set_file_chunks) and re-index it from disk with the
+    /// current OCR engine — how a tesseract-mangled book gets redone after
+    /// configuring a VLM, without re-importing.
+    pub(crate) fn reextract_selected_file(&mut self) {
+        let Some(f) = self.files_cache.get(self.files_selected).cloned() else {
+            return;
+        };
+        let _ = self.db.set_file_chunks(&f.id, &[]);
+        // Zeroing hash + size guarantees the rescan takes the re-extract path
+        // (a real file is never 0 bytes with an empty hash).
+        let _ = self.db.upsert_file(&self.active_space.id, &f.name, "", 0, "re-extracting");
+        self.status = format!("re-extracting: {}", f.name);
+        self.rescan_files();
+    }
+
     /// Embed the next file whose chunks lack vectors, one file per job (the
     /// done-handler chains the next). No-op without a provider, without an
     /// embedding model, or while a job is already in flight.
@@ -634,6 +650,27 @@ mod tests {
         // Indexed: searchable.
         let hits = crate::db::search_chunks(a.db.conn_for_test(), &a.active_space.id, "revenue", 8).unwrap();
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn reextract_clears_stale_chunks_and_reindexes_from_disk() {
+        let mut a = test_app();
+        let dir = a.space.files_dir(&a.active_space.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("doc.txt"), "real content on disk").unwrap();
+        a.rescan_files();
+        let id = a.files_cache[0].id.clone();
+
+        // Simulate a bad old extraction (e.g. tesseract-mangled OCR).
+        a.db.set_file_chunks(&id, &[("p1".into(), "garbage".into())]).unwrap();
+
+        a.files_selected = 0;
+        a.reextract_selected_file();
+        assert!(a.status.contains("re-extracting"), "{}", a.status);
+        let texts = a.db.file_chunk_texts(&id).unwrap();
+        assert_eq!(texts.len(), 1);
+        assert!(texts[0].1.contains("real content"), "{texts:?}");
+        assert_eq!(a.files_cache[0].status, "ok");
     }
 
     #[test]

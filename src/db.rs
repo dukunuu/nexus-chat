@@ -628,8 +628,9 @@ impl Db {
         Ok(())
     }
 
-    /// The underlying connection, for free query functions shared with the
-    /// toolbox (which opens the db by path).
+    /// The underlying connection, for tests exercising the free query
+    /// functions the toolbox reaches by opening the db path itself.
+    #[cfg(test)]
     pub fn raw(&self) -> &Connection {
         &self.conn
     }

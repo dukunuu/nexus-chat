@@ -69,7 +69,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         FilesMode::Browse => crate::ui::hint_title(
             app,
             " files ",
-            "files — Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+D remove (or drop files into the space dir)",
+            "files — Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+O re-extract · Ctrl+D remove",
         ),
         // Pick short-circuits with an early return above; this arm only
         // keeps the match exhaustive (a panic here would kill the whole TUI).
@@ -114,6 +114,13 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         FilesMode::Browse => {
             if key.code == KeyCode::Enter {
                 app.open_selected_file();
+                return Ok(());
+            }
+            // Ctrl+O: re-extract with the current OCR engine (clears old text).
+            if key.code == KeyCode::Char('o')
+                && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+            {
+                app.reextract_selected_file();
                 return Ok(());
             }
             // Create = Add (Ctrl+N); Rename = Ctrl+R; no browse text filter (small lists).
