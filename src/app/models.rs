@@ -330,6 +330,18 @@ impl App {
                 self.status = format!("OCR model: {id}");
                 self.popup = Popup::Settings;
             }
+            ModelPickTarget::Research => {
+                self.research_model = id.clone();
+                self.db.set_setting("research_model", &id)?;
+                self.status = format!("research model: {id}");
+                self.popup = Popup::Settings;
+            }
+            ModelPickTarget::Escalation => {
+                self.escalation_model = id.clone();
+                self.db.set_setting("escalation_model", &id)?;
+                self.status = format!("escalation model: {id}");
+                self.popup = Popup::Settings;
+            }
         }
         Ok(())
     }

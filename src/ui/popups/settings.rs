@@ -60,6 +60,8 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             }
             SettingsField::TranscriberModel => numeric(&app.transcriber_model),
             SettingsField::OcrModel => numeric(&app.ocr_model),
+            SettingsField::ResearchModel => numeric(&app.research_model),
+            SettingsField::EscalationModel => numeric(&app.escalation_model),
             SettingsField::OcrEngine => {
                 Span::styled(app.ocr_engine.clone(), Style::default().fg(Color::Cyan))
             }

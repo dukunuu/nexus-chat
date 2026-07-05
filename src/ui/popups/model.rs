@@ -19,6 +19,8 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
         crate::app::ModelPickTarget::Memory => " ★ Favorites — picking memory model ",
         crate::app::ModelPickTarget::Transcriber => " ★ Favorites — picking image model ",
         crate::app::ModelPickTarget::Ocr => " ★ Favorites — picking OCR model ",
+        crate::app::ModelPickTarget::Research => " ★ Favorites — picking research model ",
+        crate::app::ModelPickTarget::Escalation => " ★ Favorites — picking escalation model ",
         crate::app::ModelPickTarget::Session => " ★ Favorites ",
     };
 
@@ -106,7 +108,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.popup = match app.model_pick_target {
                 crate::app::ModelPickTarget::Memory
                 | crate::app::ModelPickTarget::Transcriber
-                | crate::app::ModelPickTarget::Ocr => Popup::Settings,
+                | crate::app::ModelPickTarget::Ocr
+                | crate::app::ModelPickTarget::Research
+                | crate::app::ModelPickTarget::Escalation => Popup::Settings,
                 crate::app::ModelPickTarget::Session => Popup::None,
             };
         }

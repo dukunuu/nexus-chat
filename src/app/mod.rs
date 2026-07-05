@@ -22,6 +22,7 @@ mod copy;
 mod files;
 mod memory;
 mod models;
+mod research;
 mod sessions;
 mod settings;
 mod skills_popup;
@@ -166,6 +167,8 @@ pub enum ModelPickTarget {
     Memory,
     Transcriber,
     Ocr,
+    Research,
+    Escalation,
 }
 
 /// Editable rows in the nerd-config popup.
@@ -185,12 +188,14 @@ pub enum SettingsField {
     SearchProvider,
     TranscriberModel,
     OcrModel,
+    ResearchModel,
+    EscalationModel,
     OcrEngine,
     EmbeddingModel,
 }
 
 impl SettingsField {
-    pub const ALL: [SettingsField; 16] = [
+    pub const ALL: [SettingsField; 18] = [
         SettingsField::ShowStats,
         SettingsField::ShowReasoning,
         SettingsField::HideHints,
@@ -205,6 +210,8 @@ impl SettingsField {
         SettingsField::SearchProvider,
         SettingsField::TranscriberModel,
         SettingsField::OcrModel,
+        SettingsField::ResearchModel,
+        SettingsField::EscalationModel,
         SettingsField::OcrEngine,
         SettingsField::EmbeddingModel,
     ];
@@ -225,6 +232,8 @@ impl SettingsField {
             SettingsField::SearchProvider => "search provider (Space cycles auto/langsearch/searxng/duckduckgo)",
             SettingsField::TranscriberModel => "image model (Enter to pick, Backspace clears)",
             SettingsField::OcrModel => "OCR model (Enter to pick, Backspace clears)",
+            SettingsField::ResearchModel => "research model (Enter to pick, Backspace clears)",
+            SettingsField::EscalationModel => "escalation model (Enter to pick, Backspace clears; blank = same as research model)",
             SettingsField::OcrEngine => "OCR engine (Space cycles auto/tesseract/vlm)",
             SettingsField::EmbeddingModel => "embedding model (file search, blank disables)",
         }
@@ -346,6 +355,10 @@ pub(crate) enum MemoryOp {
 /// One file's embedding result: (space id, file id, (seq, vector) pairs or error).
 pub type EmbedMsg = (String, String, std::result::Result<Vec<(i64, Vec<f32>)>, String>);
 
+/// A background research pipeline update: (session id, space id, space name,
+/// stage update or final result).
+pub type ResearchMsg = (String, String, String, research::ResearchUpdate);
+
 pub enum AppEvent {
     Stream(Option<StreamEvent>),
     Models(Option<ModelsResult>),
@@ -368,6 +381,8 @@ pub enum AppEvent {
     Embed(Option<EmbedMsg>),
     /// `/ocr-local` pull finished: model name or error.
     OcrPull(Option<Result<String, String>>),
+    /// A deep-research pipeline update, or `None` when its channel closed.
+    Research(Option<ResearchMsg>),
 }
 
 pub struct App {
@@ -389,6 +404,12 @@ pub struct App {
     pub transcriber_model: String,
     /// Vision model for scanned-PDF OCR (empty = tesseract only).
     pub ocr_model: String,
+    /// Model used for every deep-research pipeline stage except escalation
+    /// (empty = /research disabled).
+    pub research_model: String,
+    /// Model used only for the deep-research escalation (contradiction
+    /// resolution) stage; empty = falls back to `research_model`.
+    pub escalation_model: String,
     /// OCR engine choice: "auto" (vlm when ocr_model set), "tesseract",
     /// "vlm", or "local" (Ollama on 127.0.0.1:11434, set up by /ocr-local).
     pub ocr_engine: String,
@@ -434,6 +455,11 @@ pub struct App {
     pub(crate) embed_rx: Option<mpsc::UnboundedReceiver<EmbedMsg>>,
     /// A running `/ocr-local` model pull: model name on success, error text on failure.
     pub(crate) ocr_pull_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
+    /// A running `/research` job's channel, or None when idle.
+    pub(crate) research_rx: Option<mpsc::UnboundedReceiver<ResearchMsg>>,
+    /// (session id, topic) of the `/research` job currently running, if any —
+    /// cleared when its channel closes.
+    pub(crate) research_running: Option<(String, String)>,
     /// Images pasted from the clipboard, staged for the next message.
     pub pending_images: Vec<transcribe::PendingImage>,
     /// A message queued to send once its images finish being described.
@@ -622,6 +648,8 @@ impl App {
             ocr_rx: None,
             embed_rx: None,
             ocr_pull_rx: None,
+            research_rx: None,
+            research_running: None,
             pending_images: Vec::new(),
             deferred_send: None,
             files_cache: Vec::new(),
@@ -644,6 +672,8 @@ impl App {
             memory_model: "google/gemini-2.5-flash-lite".to_string(),
             transcriber_model: "google/gemini-2.5-flash-lite".to_string(),
             ocr_model: "google/gemini-2.5-flash-lite".to_string(),
+            research_model: "google/gemini-2.5-flash".to_string(),
+            escalation_model: "anthropic/claude-sonnet-4.5".to_string(),
             ocr_engine: "auto".to_string(),
             local_ocr_model: "glm-ocr".to_string(),
             embedding_model: "openai/text-embedding-3-small".to_string(),
@@ -756,6 +786,8 @@ impl App {
                 "memory_model" => self.memory_model = v,
                 "transcriber_model" => self.transcriber_model = v,
                 "ocr_model" => self.ocr_model = v,
+                "research_model" => self.research_model = v,
+                "escalation_model" => self.escalation_model = v,
                 "ocr_engine" if OCR_ENGINES.contains(&v.as_str()) => self.ocr_engine = v,
                 "local_ocr_model" => self.local_ocr_model = v,
                 "embedding_model" => self.embedding_model = v,
@@ -927,6 +959,12 @@ impl App {
                     None => std::future::pending().await,
                 }
             } => AppEvent::OcrPull(r),
+            r = async {
+                match self.research_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => AppEvent::Research(r),
         }
     }
 
@@ -1051,6 +1089,8 @@ impl App {
             | SettingsField::SearchProvider
             | SettingsField::TranscriberModel
             | SettingsField::OcrModel
+            | SettingsField::ResearchModel
+            | SettingsField::EscalationModel
             | SettingsField::OcrEngine => None,
             SettingsField::Temperature => Some(0),
             SettingsField::TopP => Some(1),

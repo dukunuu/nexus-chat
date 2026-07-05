@@ -423,6 +423,25 @@ fn searxng_url_setting_persists_and_enables_web_search_tool() {
 }
 
 #[test]
+fn research_and_escalation_model_settings_persist() {
+    let db = Db::open_in_memory().unwrap();
+    let mut a = App::new(db, Some("k".into()), test_space());
+    a.research_model = "openai/gpt-5-mini".to_string();
+    a.db.set_setting("research_model", &a.research_model).unwrap();
+    a.escalation_model = "anthropic/claude-sonnet-4.5".to_string();
+    a.db.set_setting("escalation_model", &a.escalation_model).unwrap();
+
+    let reloaded = a.db.load_settings().unwrap();
+    assert!(reloaded.iter().any(|(k, v)| k == "research_model" && v == "openai/gpt-5-mini"));
+
+    // Reloading a fresh App from the same db picks it back up.
+    let mut b = App::new(a.db, Some("k".into()), test_space());
+    b.load_settings();
+    assert_eq!(b.research_model, "openai/gpt-5-mini");
+    assert_eq!(b.escalation_model, "anthropic/claude-sonnet-4.5");
+}
+
+#[test]
 fn last_used_model_restored_on_startup() {
     let db = Db::open_in_memory().unwrap();
     db.mark_model_used("a/one").unwrap();
