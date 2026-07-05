@@ -10,10 +10,14 @@ use super::App;
 
 /// A message from the background OCR batch about one file.
 pub(crate) enum OcrUpdate {
-    /// Pages done so far out of the total.
-    Progress(usize, usize),
-    /// Final outcome: extracted text, or a status message.
-    Done(std::result::Result<String, String>),
+    /// A human-readable phase ("rendering pages…") shown while nothing is
+    /// countable yet.
+    Stage(String),
+    /// (pages done, total pages, pages failed so far).
+    Progress(usize, usize, usize),
+    /// Final outcome: (extracted text, per-page errors as (index, reason)),
+    /// or a whole-document error message.
+    Done(std::result::Result<(String, Vec<(usize, String)>), String>),
 }
 
 /// One row of the file-picker browser.
@@ -42,18 +46,44 @@ impl OcrBackend {
             OcrBackend::Ollama(client, model) => {
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(png);
-                let v = client
+                let resp = client
                     .post("http://127.0.0.1:11434/api/generate")
+                    // CPU inference is legitimately minutes/page; anything past
+                    // this is a wedge and should fail into a page placeholder
+                    // rather than hanging the whole batch forever.
+                    .timeout(std::time::Duration::from_secs(600))
                     .json(&ollama_ocr_body(model, &b64))
                     .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<serde_json::Value>()
-                    .await?;
+                    .await
+                    .map_err(|e| {
+                        if e.is_timeout() {
+                            anyhow::anyhow!("timeout after 600s")
+                        } else if e.is_connect() {
+                            anyhow::anyhow!(
+                                "cannot reach ollama at 127.0.0.1:11434 — is it running? (systemctl start ollama)"
+                            )
+                        } else {
+                            e.into()
+                        }
+                    })?;
+                if resp.status().as_u16() == 404 {
+                    anyhow::bail!("model '{model}' not pulled — run /ocr-local");
+                }
+                let v = resp.error_for_status()?.json::<serde_json::Value>().await?;
                 Ok(v.get("response").and_then(|r| r.as_str()).unwrap_or("").to_string())
             }
         }
     }
+}
+
+/// First ~90 chars of an error, so a page failure fits in the status column
+/// without swallowing the reason.
+fn clip_err(e: &str) -> String {
+    let mut s: String = e.chars().take(90).collect();
+    if s.len() < e.len() {
+        s.push('…');
+    }
+    s
 }
 
 /// Request body for Ollama's native generate endpoint: raw base64 in
@@ -64,6 +94,9 @@ fn ollama_ocr_body(model: &str, png_b64: &str) -> serde_json::Value {
         "prompt": crate::provider::openrouter::OCR_PROMPT,
         "images": [png_b64],
         "stream": false,
+        // Ollama defaults to 4096 ctx — page image tokens plus a dense page's
+        // transcription overflow that and silently clip the output.
+        "options": { "num_ctx": 8192 },
     })
 }
 
@@ -77,7 +110,7 @@ async fn ocr_pdf_vlm(
     tx: &tokio::sync::mpsc::UnboundedSender<(String, String, OcrUpdate)>,
     space_id: &str,
     name: &str,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<(String, Vec<(usize, String)>), String> {
     let tmp = std::env::temp_dir().join(format!("nexus-vlm-ocr-{}", uuid::Uuid::new_v4()));
     if let Err(e) = std::fs::create_dir_all(&tmp) {
         return Err(format!("error: ocr: {e}"));
@@ -94,9 +127,14 @@ async fn ocr_pdf_vlm_in(
     tx: &tokio::sync::mpsc::UnboundedSender<(String, String, OcrUpdate)>,
     space_id: &str,
     name: &str,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<(String, Vec<(usize, String)>), String> {
     // Text glyphs (and furigana especially) need more resolution than the
     // tesseract path's 200 DPI gray; VLMs also want the color signal.
+    let _ = tx.send((
+        space_id.to_string(),
+        name.to_string(),
+        OcrUpdate::Stage("rendering pages (300 dpi)…".to_string()),
+    ));
     let (pdf, dir) = (path.to_path_buf(), tmp.to_path_buf());
     let pages = tokio::task::spawn_blocking(move || {
         crate::extract::render_pdf_pages("pdftoppm", &pdf, &dir, 300, false)
@@ -111,6 +149,9 @@ async fn ocr_pdf_vlm_in(
     })?;
 
     let total = pages.len();
+    // Show "0/N pages" immediately — on CPU the first page can take minutes,
+    // and a frozen "ocr…" reads as stuck.
+    let _ = tx.send((space_id.to_string(), name.to_string(), OcrUpdate::Progress(0, total, 0)));
     let mut results: Vec<std::result::Result<String, String>> =
         vec![Err("not transcribed".to_string()); total];
     let mut set = tokio::task::JoinSet::new();
@@ -139,8 +180,12 @@ async fn ocr_pdf_vlm_in(
         next += 1;
     }
     let mut done = 0;
+    let mut failed = 0;
     while let Some(joined) = set.join_next().await {
         let (i, r) = joined.unwrap_or((usize::MAX, Err("page task panicked".to_string())));
+        if r.is_err() {
+            failed += 1;
+        }
         if let Some(slot) = results.get_mut(i) {
             *slot = r;
         }
@@ -148,14 +193,19 @@ async fn ocr_pdf_vlm_in(
         let _ = tx.send((
             space_id.to_string(),
             name.to_string(),
-            OcrUpdate::Progress(done, total),
+            OcrUpdate::Progress(done, total, failed),
         ));
         if next < total {
             spawn_page(&mut set, next);
             next += 1;
         }
     }
-    Ok(crate::extract::join_pages(&results))
+    let errors: Vec<(usize, String)> = results
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.as_ref().err().map(|e| (i, e.clone())))
+        .collect();
+    Ok((crate::extract::join_pages(&results), errors))
 }
 
 impl App {
@@ -355,10 +405,10 @@ impl App {
                 let progress_tx = tx.clone();
                 let (sid, fname) = (space_id.clone(), name.clone());
                 let progress = move |done: usize, total: usize| {
-                    let _ = progress_tx.send((sid.clone(), fname.clone(), OcrUpdate::Progress(done, total)));
+                    let _ = progress_tx.send((sid.clone(), fname.clone(), OcrUpdate::Progress(done, total, 0)));
                 };
                 let result = match crate::extract::ocr_pdf(&path, &progress) {
-                    Ok(text) => Ok(text),
+                    Ok(text) => Ok((text, Vec::new())),
                     Err(crate::extract::OcrError::MissingTools) => {
                         Err("scanned pdf — install tesseract + poppler for ocr".to_string())
                     }
@@ -555,24 +605,55 @@ impl App {
             return; // re-imported mid-OCR — this result is for stale content
         }
         match update {
-            OcrUpdate::Progress(done, total) => {
-                let _ = self.db.set_file_status(&f.id, &format!("ocr {done}/{total}"));
+            OcrUpdate::Stage(s) => {
+                // Keep the "ocr" prefix — the stale-check above depends on it.
+                let _ = self.db.set_file_status(&f.id, &format!("ocr: {s}"));
                 if space_id == self.active_space.id {
-                    self.status = format!("ocr {name}: {done}/{total} pages");
+                    self.status = format!("ocr {name}: {s}");
                 }
             }
-            OcrUpdate::Done(Ok(text)) if text.trim().is_empty() => {
-                let _ = self.db.set_file_status(&f.id, "no text (ocr found nothing)");
+            OcrUpdate::Progress(done, total, failed) => {
+                let tail = if failed > 0 { format!(" ({failed} failed)") } else { String::new() };
+                let _ = self.db.set_file_status(&f.id, &format!("ocr {done}/{total}{tail}"));
+                if space_id == self.active_space.id {
+                    self.status = format!("ocr {name}: {done}/{total} pages{tail}");
+                }
             }
-            OcrUpdate::Done(Ok(text)) => {
+            OcrUpdate::Done(Ok((text, errors))) if text.trim().is_empty() => {
+                // Nothing usable came back; say exactly why if we know.
+                let status = match errors.first() {
+                    Some((i, e)) => {
+                        format!("all pages failed (p{}: {})", i + 1, clip_err(e))
+                    }
+                    None => "no text (ocr found nothing)".to_string(),
+                };
+                let _ = self.db.set_file_status(&f.id, &status);
+                if space_id == self.active_space.id {
+                    self.status = format!("ocr {name}: {status}");
+                }
+            }
+            OcrUpdate::Done(Ok((text, errors))) => {
                 let _ = self.db.set_file_chunks(&f.id, &crate::extract::chunk_lines(&text));
-                let _ = self.db.set_file_status(&f.id, "ok");
+                let status = match errors.first() {
+                    None => "ok".to_string(),
+                    Some((i, e)) => format!(
+                        "ok — {} page{} failed (p{}: {})",
+                        errors.len(),
+                        if errors.len() == 1 { "" } else { "s" },
+                        i + 1,
+                        clip_err(e),
+                    ),
+                };
+                let _ = self.db.set_file_status(&f.id, &status);
                 if space_id == self.active_space.id {
                     self.status = format!("ocr done: {name}");
                 }
             }
             OcrUpdate::Done(Err(msg)) => {
                 let _ = self.db.set_file_status(&f.id, &msg);
+                if space_id == self.active_space.id {
+                    self.status = format!("ocr {name}: {msg}");
+                }
             }
         }
         if space_id == self.active_space.id {
@@ -802,6 +883,50 @@ mod tests {
         a.on_ocr_pull(Some(Err("ollama not installed — get it".to_string())));
         assert_eq!(a.ocr_engine, "local"); // engine untouched on failure
         assert!(a.status.contains("ollama not installed"));
+    }
+
+    #[test]
+    fn ocr_statuses_surface_stages_failures_and_reasons() {
+        let mut a = test_app();
+        let space = a.active_space.id.clone();
+        let id = a.db.upsert_file(&space, "scan.pdf", "h", 1, "ocr…").unwrap();
+
+        // Stage → visible phase, still "ocr"-prefixed (stale-check depends on it).
+        a.on_ocr_done(Some((space.clone(), "scan.pdf".into(), OcrUpdate::Stage("rendering pages (300 dpi)…".into()))));
+        let status = a.db.list_files(&space).unwrap()[0].status.clone();
+        assert_eq!(status, "ocr: rendering pages (300 dpi)…");
+
+        // Progress with failures shows the count.
+        a.on_ocr_done(Some((space.clone(), "scan.pdf".into(), OcrUpdate::Progress(5, 10, 2))));
+        assert_eq!(a.db.list_files(&space).unwrap()[0].status, "ocr 5/10 (2 failed)");
+        assert!(a.status.contains("5/10 pages (2 failed)"));
+
+        // Partial success keeps the first failure's reason in the status.
+        a.on_ocr_done(Some((
+            space.clone(),
+            "scan.pdf".into(),
+            OcrUpdate::Done(Ok((
+                "[page 1]\ntext".to_string(),
+                vec![(2, "timeout after 600s".to_string()), (4, "boom".to_string())],
+            ))),
+        )));
+        let status = a.db.list_files(&space).unwrap()[0].status.clone();
+        assert_eq!(status, "ok — 2 pages failed (p3: timeout after 600s)");
+
+        // All pages failed → the reason, not a bland "no text".
+        let _ = a.db.set_file_status(&id, "ocr…");
+        a.on_ocr_done(Some((
+            space.clone(),
+            "scan.pdf".into(),
+            OcrUpdate::Done(Ok((
+                String::new(),
+                vec![(0, "cannot reach ollama at 127.0.0.1:11434 — is it running? (systemctl start ollama)".to_string())],
+            ))),
+        )));
+        let status = a.db.list_files(&space).unwrap()[0].status.clone();
+        assert!(status.starts_with("all pages failed (p1: cannot reach ollama"), "{status}");
+        // Must NOT start with "ocr" — that prefix means "queued" to the rescan.
+        assert!(!status.starts_with("ocr"), "{status}");
     }
 
     #[test]
@@ -1051,7 +1176,7 @@ mod tests {
         a.on_ocr_done(Some((
             a.active_space.id.clone(),
             "scan.pdf".to_string(),
-            OcrUpdate::Done(Ok("[page 1]\nquarterly revenue table".to_string())),
+            OcrUpdate::Done(Ok(("[page 1]\nquarterly revenue table".to_string(), Vec::new()))),
         )));
         assert_eq!(a.files_cache[0].status, "ok");
         let hits =
@@ -1066,7 +1191,7 @@ mod tests {
         a.on_ocr_done(Some((
             a.active_space.id.clone(),
             "scan.pdf".to_string(),
-            OcrUpdate::Progress(3, 10),
+            OcrUpdate::Progress(3, 10, 0),
         )));
         assert_eq!(a.files_cache[0].status, "ocr 3/10");
         assert!(a.status.contains("3/10"), "{}", a.status);
@@ -1075,7 +1200,7 @@ mod tests {
         a.on_ocr_done(Some((
             a.active_space.id.clone(),
             "scan.pdf".to_string(),
-            OcrUpdate::Done(Ok("[page 1]\nfound".to_string())),
+            OcrUpdate::Done(Ok(("[page 1]\nfound".to_string(), Vec::new()))),
         )));
         assert_eq!(a.files_cache[0].status, "ok");
     }
@@ -1086,7 +1211,7 @@ mod tests {
         a.db.upsert_file(&a.active_space.id, "blank.pdf", "h1", 9, "ocr…").unwrap();
         a.db.upsert_file(&a.active_space.id, "bad.pdf", "h2", 9, "ocr…").unwrap();
 
-        a.on_ocr_done(Some((a.active_space.id.clone(), "blank.pdf".to_string(), OcrUpdate::Done(Ok(String::new())))));
+        a.on_ocr_done(Some((a.active_space.id.clone(), "blank.pdf".to_string(), OcrUpdate::Done(Ok((String::new(), Vec::new()))))));
         a.on_ocr_done(Some((
             a.active_space.id.clone(),
             "bad.pdf".to_string(),
@@ -1106,14 +1231,14 @@ mod tests {
         let other = a.db.create_space("other").unwrap();
         a.db.upsert_file(&other.id, "scan.pdf", "h", 9, "ocr…").unwrap();
 
-        a.on_ocr_done(Some((other.id.clone(), "scan.pdf".to_string(), OcrUpdate::Done(Ok("found text".to_string())))));
+        a.on_ocr_done(Some((other.id.clone(), "scan.pdf".to_string(), OcrUpdate::Done(Ok(("found text".to_string(), Vec::new()))))));
 
         assert!(a.files_cache.is_empty(), "active-space cache must not show other space's file");
         let rows = a.db.list_files(&other.id).unwrap();
         assert_eq!(rows[0].status, "ok");
 
         // Deleted-mid-OCR: result for a row that no longer exists is a no-op.
-        a.on_ocr_done(Some((other.id.clone(), "gone.pdf".to_string(), OcrUpdate::Done(Ok("x".to_string())))));
+        a.on_ocr_done(Some((other.id.clone(), "gone.pdf".to_string(), OcrUpdate::Done(Ok(("x".to_string(), Vec::new()))))));
     }
 
     #[tokio::test]
