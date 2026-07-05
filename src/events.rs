@@ -284,9 +284,9 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::PageUp => app.scroll = app.scroll.saturating_add(10).min(app.max_scroll),
         KeyCode::PageDown => app.scroll = app.scroll.saturating_sub(10),
-        // Esc while streaming stops the response (partial text is kept);
-        // otherwise it clears the composer.
-        KeyCode::Esc if app.is_streaming() => app.stop_stream()?,
+        // Esc while viewing the streaming session stops the response (partial
+        // text is kept); otherwise it clears the composer.
+        KeyCode::Esc if app.viewing_stream() => app.stop_stream()?,
         KeyCode::Esc => {
             app.set_input("");
             app.pending_images.clear();

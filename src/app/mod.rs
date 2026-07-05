@@ -786,9 +786,9 @@ impl App {
     }
 
     /// The empty start screen (banner + greeting + clock) shows when there's no
-    /// conversation yet.
+    /// conversation yet — a stream running in another session doesn't hide it.
     pub fn is_welcome(&self) -> bool {
-        self.messages.is_empty() && self.streaming.is_none()
+        self.messages.is_empty() && !self.viewing_stream()
     }
 
     /// Advance the spinner one frame (called on the animation tick).

@@ -39,7 +39,7 @@ pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
     let mut tail: Vec<Line<'static>> = Vec::new();
     let mut tail_code: Vec<Option<usize>> = Vec::new();
     let mut tail_blocks: Vec<String> = Vec::new();
-    if app.streaming.is_some() {
+    if app.viewing_stream() {
         push_assistant_streaming(&mut tail, app, width, &mut tail_code, &mut tail_blocks);
         tail_code.resize(tail.len(), None);
     }

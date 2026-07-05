@@ -218,6 +218,17 @@ async fn deleting_the_streaming_session_discards_the_stream() {
 }
 
 #[tokio::test]
+async fn welcome_screen_shows_while_a_stream_runs_elsewhere() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("hello");
+    a.submit().unwrap();
+    assert!(!a.is_welcome()); // viewing the streaming session
+    a.new_session().unwrap();
+    assert!(a.is_welcome()); // blank chat, stream backgrounded
+}
+
+#[tokio::test]
 async fn esc_stop_keeps_partial_response() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());

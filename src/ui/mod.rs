@@ -68,11 +68,13 @@ pub(super) fn dot() -> Line<'static> {
 
 fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
     let hint = if app.settings.hide_hints {
-        ""
-    } else if app.is_streaming() {
-        " …working (Esc to stop) "
+        String::new()
+    } else if app.viewing_stream() {
+        " …working (Esc to stop) ".to_string()
+    } else if let Some((_, title)) = app.stream_session.as_ref().filter(|_| app.is_streaming()) {
+        format!(" ⟳ streaming in: {title} ")
     } else {
-        " message (Enter to send, /help) "
+        " message (Enter to send, /help) ".to_string()
     };
     // Session title sits in the top-right corner of the input box.
     let name = match &app.session {

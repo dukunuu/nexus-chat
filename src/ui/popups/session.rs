@@ -23,12 +23,29 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             // created-at date right-aligned on the same row.
             let id = s.slug.clone().unwrap_or_else(|| format!("{}…", &s.id[..8.min(s.id.len())]));
             let when = crate::ui::fmt_created(&s.created_at);
-            let gap = width.saturating_sub(id.chars().count() + 1 + when.chars().count() + 2);
-            let top = Line::from(vec![
+            // ⟳ = a response is streaming here; ● = finished while unviewed.
+            let streaming_here =
+                app.stream_session.as_ref().is_some_and(|(id, _)| *id == s.id);
+            let marker = if streaming_here {
+                Some(Span::styled("⟳ ", Style::default().fg(Color::Cyan)))
+            } else if app.unread.contains(&s.id) {
+                Some(Span::styled("● ", Style::default().fg(Color::Yellow)))
+            } else {
+                None
+            };
+            let mlen = if marker.is_some() { 2 } else { 0 };
+            let gap =
+                width.saturating_sub(mlen + id.chars().count() + 1 + when.chars().count() + 2);
+            let mut top_spans = Vec::new();
+            if let Some(m) = marker {
+                top_spans.push(m);
+            }
+            top_spans.extend([
                 Span::styled(format!("#{id}"), Style::default().fg(Color::Cyan)),
                 Span::raw(" ".repeat(gap)),
                 Span::styled(when, dim),
             ]);
+            let top = Line::from(top_spans);
             // title (truncated) with the model dimmed after it.
             let title = truncate(&s.title, width.saturating_sub(s.model.chars().count() + 5));
             let body = Line::from(vec![
