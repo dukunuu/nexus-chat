@@ -318,9 +318,297 @@ async fn run_research_inner(
     complete_text(provider, research_model, writer_messages(topic, &verified)).await
 }
 
+impl super::App {
+    /// `/research <topic>`: run the multi-agent research pipeline in a new
+    /// background session. One job at a time.
+    pub(crate) fn start_research(&mut self, topic: &str) {
+        let topic = topic.trim().to_string();
+        if topic.is_empty() {
+            self.status = "usage: /research <topic>".to_string();
+            return;
+        }
+        if self.research_model.trim().is_empty() {
+            self.status = "no research model configured — set one in /config".to_string();
+            return;
+        }
+        if self.research_rx.is_some() {
+            self.status = "a research job is already running".to_string();
+            return;
+        }
+        let Some(provider) = self.provider.clone() else {
+            self.open_key_prompt();
+            return;
+        };
+        let research_model = self.research_model.trim().to_string();
+        let escalation_model = if self.escalation_model.trim().is_empty() {
+            research_model.clone()
+        } else {
+            self.escalation_model.trim().to_string()
+        };
+        let title = super::chat::title_from(&topic);
+        let session = match self.db.create_session(&title, &research_model, &self.active_space.id) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = format!("could not start research session: {e}");
+                return;
+            }
+        };
+        let _ = self.db.add_user_message(&session.id, &format!("/research {topic}"));
+
+        let searxng_url = (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
+        let langsearch_key = (!self.langsearch_key.trim().is_empty()).then(|| self.langsearch_key.trim().to_string());
+        let toolbox = Arc::new(ToolBox::research(searxng_url, langsearch_key, self.search_provider.clone()));
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.research_rx = Some(rx);
+        self.research_running = Some((session.id.clone(), topic.clone()));
+        self.status = format!("researching: {topic}");
+
+        let space_id = self.active_space.id.clone();
+        let space_name = self.active_space.name.clone();
+        self.messages = self.db.load_messages(&session.id).unwrap_or_default();
+        self.session = Some(session.clone());
+        self.context_total = None;
+        self.scroll = 0;
+
+        tokio::spawn(run_research(
+            provider,
+            research_model,
+            escalation_model,
+            topic,
+            toolbox,
+            tx,
+            session.id,
+            space_id,
+            space_name,
+        ));
+    }
+
+    /// A research pipeline update: a stage label, or the final report/error.
+    /// `None` = the job's channel closed (fires once, right after `Done`).
+    pub fn on_research_done(&mut self, r: Option<ResearchMsg>) {
+        let Some((session_id, space_id, space_name, update)) = r else {
+            self.research_rx = None;
+            self.research_running = None;
+            return;
+        };
+        let viewing = self.session.as_ref().is_some_and(|s| s.id == session_id);
+        match update {
+            ResearchUpdate::Stage(s) => {
+                let _ = self.db.add_research_stage_message(&session_id, &s);
+                if viewing {
+                    self.messages.push(crate::db::Message {
+                        id: String::new(),
+                        role: "research_stage".to_string(),
+                        content: s.clone(),
+                        model: None,
+                        reasoning: None,
+                        tokens: None,
+                        secs: None,
+                        phrase: None,
+                        images: Vec::new(),
+                    });
+                    self.status = format!("research: {s}");
+                }
+            }
+            ResearchUpdate::Done(Ok(report)) => {
+                let _ = self.db.add_assistant_message(&session_id, &report, None, None, None, None, None);
+                let topic = self.research_running.as_ref().map(|(_, t)| t.clone()).unwrap_or_default();
+                self.save_research_report(&space_id, &space_name, &topic, &report);
+                if viewing {
+                    self.messages.push(crate::db::Message {
+                        id: String::new(),
+                        role: "assistant".to_string(),
+                        content: report,
+                        model: None,
+                        reasoning: None,
+                        tokens: None,
+                        secs: None,
+                        phrase: Some("Researched".to_string()),
+                        images: Vec::new(),
+                    });
+                    self.status = "research complete".to_string();
+                } else {
+                    self.unread.insert(session_id);
+                    if let Some((_, topic)) = &self.research_running {
+                        self.status = format!("✓ research ready: {topic}");
+                    }
+                }
+            }
+            ResearchUpdate::Done(Err(e)) => {
+                let msg = format!("research failed: {e}");
+                let _ = self.db.add_assistant_message(&session_id, &msg, None, None, None, None, None);
+                if viewing {
+                    self.messages.push(crate::db::Message {
+                        id: String::new(),
+                        role: "assistant".to_string(),
+                        content: msg.clone(),
+                        model: None,
+                        reasoning: None,
+                        tokens: None,
+                        secs: None,
+                        phrase: None,
+                        images: Vec::new(),
+                    });
+                }
+                self.status = msg;
+            }
+        }
+    }
+
+    /// Save the finished report into the job's own space (not necessarily
+    /// the currently active one — the user may have switched spaces while
+    /// the job ran), named `research-<slug>-<timestamp>.md`. Only refreshes
+    /// the files cache / triggers a rescan if that space is still active;
+    /// otherwise the file sits on disk and gets picked up next time that
+    /// space's /files is opened, same as any externally-dropped file.
+    fn save_research_report(&mut self, space_id: &str, space_name: &str, topic: &str, report: &str) {
+        let dir = self.space.files_dir(space_name);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let slug = super::sessions::slugify(topic);
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let name = format!("research-{slug}-{stamp}.md");
+        if std::fs::write(dir.join(&name), report).is_err() {
+            return;
+        }
+        if space_id == self.active_space.id {
+            self.rescan_files();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::App;
+    use crate::db::Db;
+    use crate::space::Space;
+
+    fn test_app() -> App {
+        let db = Db::open_in_memory().unwrap();
+        let root = std::env::temp_dir().join(format!("nexus-research-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("spaces")).unwrap();
+        let space = Space { root };
+        App::new(db, Some("k".into()), space)
+    }
+
+    #[test]
+    fn start_research_rejects_blank_topic_and_missing_model() {
+        let mut a = test_app();
+        a.start_research("  ");
+        assert!(a.status.contains("usage:"));
+        assert!(a.research_rx.is_none());
+
+        a.research_model.clear();
+        a.start_research("rust async runtimes");
+        assert!(a.status.contains("no research model configured"));
+        assert!(a.research_rx.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_research_creates_and_switches_into_a_new_session() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("rust async runtimes");
+        assert!(a.research_rx.is_some());
+        assert!(a.research_running.is_some());
+        let session = a.session.as_ref().expect("switched into the research session");
+        assert!(session.title.contains("rust async runtimes"));
+        assert!(a.messages.iter().any(|m| m.content.contains("/research rust async runtimes")));
+    }
+
+    #[tokio::test]
+    async fn start_research_refuses_a_second_concurrent_job() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("topic one");
+        assert!(a.research_rx.is_some());
+        a.start_research("topic two");
+        assert!(a.status.contains("already running"));
+        // Still the first job's session.
+        assert!(a.session.as_ref().unwrap().title.contains("topic one"));
+    }
+
+    #[tokio::test]
+    async fn on_research_done_stage_update_persists_and_shows_when_viewing() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("rust async runtimes");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        let space_id = a.active_space.id.clone();
+        let space_name = a.active_space.name.clone();
+
+        a.on_research_done(Some((
+            session_id.clone(),
+            space_id,
+            space_name,
+            ResearchUpdate::Stage("planning…".to_string()),
+        )));
+
+        assert!(a.messages.iter().any(|m| m.role == "research_stage" && m.content == "planning…"));
+        let stored = a.db.load_messages(&session_id).unwrap();
+        assert!(stored.iter().any(|m| m.role == "research_stage" && m.content == "planning…"));
+        assert!(a.status.contains("planning…"));
+    }
+
+    #[tokio::test]
+    async fn on_research_done_final_report_posts_message_saves_file_and_notifies_when_away() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("rust async runtimes");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        let space_id = a.active_space.id.clone();
+        let space_name = a.active_space.name.clone();
+
+        // Simulate the user navigating away before the job finishes.
+        a.session = None;
+        a.messages.clear();
+
+        a.on_research_done(Some((
+            session_id.clone(),
+            space_id,
+            space_name.clone(),
+            ResearchUpdate::Done(Ok("# Rust Async Runtimes\n\nBody text. [1]\n\n## Sources\n1. https://a".to_string())),
+        )));
+
+        assert!(a.unread.contains(&session_id));
+        let stored = a.db.load_messages(&session_id).unwrap();
+        assert!(stored.iter().any(|m| m.role == "assistant" && m.content.contains("Rust Async Runtimes")));
+
+        // Saved into the space's files dir and picked up by a rescan.
+        let dir = a.space.files_dir(&space_name);
+        let saved = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).count();
+        assert_eq!(saved, 1, "expected exactly one saved report file in {dir:?}");
+    }
+
+    #[tokio::test]
+    async fn on_research_done_failure_posts_error_message() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("rust async runtimes");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        let space_id = a.active_space.id.clone();
+        let space_name = a.active_space.name.clone();
+
+        a.on_research_done(Some((session_id.clone(), space_id, space_name, ResearchUpdate::Done(Err("planner: network down".to_string())))));
+
+        assert!(a.status.contains("network down"));
+        let stored = a.db.load_messages(&session_id).unwrap();
+        assert!(stored.iter().any(|m| m.role == "assistant" && m.content.contains("network down")));
+    }
+
+    #[tokio::test]
+    async fn on_research_done_none_clears_channel_and_running_state() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("t");
+        assert!(a.research_rx.is_some());
+        a.on_research_done(None);
+        assert!(a.research_rx.is_none());
+        assert!(a.research_running.is_none());
+    }
 
     #[test]
     fn parse_subquestions_reads_a_clean_json_array() {

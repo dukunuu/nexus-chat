@@ -1036,6 +1036,7 @@ impl App {
             "files" => self.open_files_popup(),
             "apps" => self.open_apps_popup(),
             "ocr-local" => self.ocr_local_install(cmd[token.len()..].trim()),
+            "research" => self.start_research(cmd[token.len()..].trim()),
             "edit" => self.request_app_file_edit(cmd[token.len()..].trim()),
             other => {
                 if self.skills.iter().any(|s| s.name == other) {

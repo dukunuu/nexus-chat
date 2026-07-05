@@ -164,7 +164,7 @@ pub(super) fn parse_topic(text: &str) -> Option<(String, String)> {
 }
 
 /// Normalise to a short kebab-case slug: lowercase, `[a-z0-9-]`, max 5 words.
-fn slugify(s: &str) -> String {
+pub(super) fn slugify(s: &str) -> String {
     let slug = s
         .to_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
