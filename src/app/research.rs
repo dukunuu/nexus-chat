@@ -22,7 +22,7 @@ pub(crate) const RESEARCH_SEARCHER_MAX_ITERS: usize = 6;
 
 const PLANNER_PROMPT: &str = "You are the planning stage of an automated research pipeline. Given a research topic, decompose it into 3 to 6 focused sub-questions that together cover the topic thoroughly (different angles: definitions, current state, evidence/data, controversies, practical implications — whichever apply). Respond with ONLY a JSON array of strings, no prose, no markdown fences. Example: [\"question one\", \"question two\"]";
 
-pub(crate) const SEARCHER_PROMPT: &str = "You are a research searcher agent. You will be given one focused sub-question. Use the web_search and fetch_url tools to investigate it thoroughly: search, then fetch and read the most promising pages, and search again with new terms you learn from them if needed. When you have enough to answer well, write a concise findings summary (a few paragraphs, prose, no headers) that directly answers the sub-question, citing sources inline as [n]. End your answer with a line starting exactly with 'Sources:' followed by the numbered list of URLs you used, one per line, matching your [n] citations.";
+pub(crate) const SEARCHER_PROMPT: &str = "You are a research searcher agent. You will be given one focused sub-question. Use the web_search and fetch_url tools to investigate it thoroughly: search, then fetch and read the most promising pages, and search again with new terms you learn from them if needed. When you have enough to answer well, write a concise findings summary (a few paragraphs, prose, no headers) that directly answers the sub-question, citing sources inline as [n]. End your answer with a line starting exactly with 'Sources:' followed by the numbered list of URLs you used, one per line, matching your [n] citations. Prefer sources from domains you have not already cited — diverse sources make a stronger report.";
 
 const SYNTHESIZER_PROMPT: &str = "You are the synthesis stage of a research pipeline. You'll be given the original topic and findings from several searcher agents, each already citing their own sources. Combine them into a single coherent draft report on the topic: organize by theme (not by sub-question), resolve obvious overlaps, keep every citation but you may renumber them consistently as you merge. Do not invent facts not present in the findings. Output the draft report in markdown, no preamble.";
 
@@ -289,7 +289,9 @@ async fn run_research_inner(
     let mut findings = run_searchers(provider, research_model, toolbox, &questions, tx, ids, 1).await;
 
     send_stage(tx, ids, "synthesizing…");
-    let mut draft = complete_text(provider, research_model, synthesizer_messages(topic, &findings)).await?;
+    let mut draft =
+        complete_text(provider, research_model, synthesizer_messages(topic, &crate::tools::dedup_source_lines(&findings)))
+            .await?;
 
     send_stage(tx, ids, "critiquing…");
     let mut critique = parse_critique(&complete_text(provider, research_model, critic_messages(topic, &draft)).await?);
@@ -298,7 +300,12 @@ async fn run_research_inner(
         let more = run_searchers(provider, research_model, toolbox, gaps, tx, ids, 2).await;
         findings.extend(more);
         send_stage(tx, ids, "re-synthesizing…");
-        draft = complete_text(provider, research_model, synthesizer_messages(topic, &findings)).await?;
+        draft = complete_text(
+            provider,
+            research_model,
+            synthesizer_messages(topic, &crate::tools::dedup_source_lines(&findings)),
+        )
+        .await?;
         send_stage(tx, ids, "critiquing (round 2)…");
         critique = parse_critique(&complete_text(provider, research_model, critic_messages(topic, &draft)).await?);
     }
@@ -357,7 +364,8 @@ impl super::App {
 
         let searxng_url = (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
         let langsearch_key = (!self.langsearch_key.trim().is_empty()).then(|| self.langsearch_key.trim().to_string());
-        let toolbox = Arc::new(ToolBox::research(searxng_url, langsearch_key, self.search_provider.clone()));
+        let toolbox =
+            Arc::new(ToolBox::research(searxng_url, langsearch_key, self.search_provider.clone(), self.blocked_domains()));
 
         let (tx, rx) = mpsc::unbounded_channel();
         self.research_rx = Some(rx);

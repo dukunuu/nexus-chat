@@ -260,7 +260,10 @@ impl App {
                     use crate::app::SettingsField;
                     let numeric = !matches!(
                         self.settings_field(),
-                        SettingsField::SearxngUrl | SettingsField::LangsearchKey
+                        Some(SettingsField::SearxngUrl)
+                            | Some(SettingsField::LangsearchKey)
+                            | Some(SettingsField::EmbeddingModel)
+                            | Some(SettingsField::BlockedDomains)
                     );
                     let filtered: String = if numeric {
                         text.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect()
@@ -557,7 +560,7 @@ mod tests {
     fn paste_into_numeric_settings_field_filters_non_numeric_chars() {
         let mut a = test_app();
         a.popup = crate::app::Popup::Settings;
-        a.settings_selected = 3; // Temperature (numeric)
+        a.settings_selected = 6; // Temperature (numeric)
         a.paste("0.7abc");
         assert_eq!(a.settings_inputs[0], "0.7");
     }
@@ -566,7 +569,7 @@ mod tests {
     fn paste_into_url_settings_field_keeps_full_text() {
         let mut a = test_app();
         a.popup = crate::app::Popup::Settings;
-        a.settings_selected = 8; // SearxngUrl (free text)
+        a.settings_selected = 18; // SearxngUrl (free text)
         a.paste("http://localhost:8080");
         assert_eq!(a.settings_inputs[4], "http://localhost:8080");
     }

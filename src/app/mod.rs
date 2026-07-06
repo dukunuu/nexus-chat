@@ -14,6 +14,8 @@ use crate::db::{Db, Message, Session, Space as SpaceRow, DEFAULT_SPACE};
 use crate::provider::openrouter::OpenRouter;
 use crate::provider::{Model, StreamEvent, Usage};
 use crate::space::Space;
+use crate::theme::Theme;
+use crate::ui::filter_input::FilterInput;
 
 mod apps;
 mod chat;
@@ -192,10 +194,11 @@ pub enum SettingsField {
     EscalationModel,
     OcrEngine,
     EmbeddingModel,
+    BlockedDomains,
 }
 
 impl SettingsField {
-    pub const ALL: [SettingsField; 18] = [
+    pub const ALL: [SettingsField; 19] = [
         SettingsField::ShowStats,
         SettingsField::ShowReasoning,
         SettingsField::HideHints,
@@ -214,6 +217,7 @@ impl SettingsField {
         SettingsField::EscalationModel,
         SettingsField::OcrEngine,
         SettingsField::EmbeddingModel,
+        SettingsField::BlockedDomains,
     ];
 
     pub fn label(self) -> &'static str {
@@ -236,8 +240,67 @@ impl SettingsField {
             SettingsField::EscalationModel => "escalation model (Enter to pick, Backspace clears; blank = same as research model)",
             SettingsField::OcrEngine => "OCR engine (Space cycles auto/tesseract/vlm)",
             SettingsField::EmbeddingModel => "embedding model (file search, blank disables)",
+            SettingsField::BlockedDomains => "blocked domains (comma-separated, always excluded; per-space)",
         }
     }
+}
+
+/// A functional group of settings fields, shown as a collapsible section in
+/// the nerd-config popup — grouped by what part of the pipeline the fields
+/// configure (chat display, sampling, memory, research, web search, or
+/// voice/vision input), not by widget type.
+pub struct SettingsGroup {
+    pub name: &'static str,
+    pub fields: &'static [SettingsField],
+}
+
+pub const SETTINGS_GROUPS: &[SettingsGroup] = &[
+    SettingsGroup {
+        name: "Interface",
+        fields: &[
+            SettingsField::ShowStats,
+            SettingsField::ShowReasoning,
+            SettingsField::HideHints,
+            SettingsField::Verbosity,
+        ],
+    },
+    SettingsGroup {
+        name: "Generation",
+        fields: &[SettingsField::Temperature, SettingsField::TopP, SettingsField::MaxTokens],
+    },
+    SettingsGroup {
+        name: "Memory & Context",
+        fields: &[
+            SettingsField::MemoryModel,
+            SettingsField::CompactThreshold,
+            SettingsField::EmbeddingModel,
+        ],
+    },
+    SettingsGroup {
+        name: "Research",
+        fields: &[SettingsField::ResearchModel, SettingsField::EscalationModel],
+    },
+    SettingsGroup {
+        name: "Web Search",
+        fields: &[
+            SettingsField::SearchProvider,
+            SettingsField::SearxngUrl,
+            SettingsField::LangsearchKey,
+            SettingsField::BlockedDomains,
+        ],
+    },
+    SettingsGroup {
+        name: "Voice & Vision",
+        fields: &[SettingsField::TranscriberModel, SettingsField::OcrModel, SettingsField::OcrEngine],
+    },
+];
+
+/// One visible row in the settings popup: a collapsible group header, or a
+/// field nested under one (only present when its group isn't collapsed).
+#[derive(Clone, Copy, PartialEq)]
+pub enum SettingsRow {
+    Group(usize),
+    Field(SettingsField),
 }
 
 const VERBOSITY_LEVELS: [&str; 3] = ["normal", "concise", "caveman"];
@@ -395,7 +458,7 @@ pub struct App {
     pub active_space: SpaceRow,
     pub spaces_cache: Vec<SpaceRow>,
     pub space_selected: usize,
-    pub space_filter: String,
+    pub space_filter: FilterInput,
     pub space_mode: SpaceMode,
     pub space_edit: String,
     /// Model used for background memory extraction (empty = disabled).
@@ -538,8 +601,17 @@ pub struct App {
     pub(crate) thinking_idx: usize,
     pub(crate) spinner_color: Color,
 
+    /// Color palette — the active omarchy theme when present, else the
+    /// built-in default. `theme_link` is the last-seen omarchy symlink
+    /// target, polled by the event loop to detect a theme switch.
+    pub theme: Theme,
+    pub(crate) theme_link: Option<std::path::PathBuf>,
+    /// Bumped every time `theme` changes, so the history render cache (which
+    /// bakes colors into cached `Line`s) knows to re-wrap on a theme switch.
+    pub(crate) theme_gen: usize,
+
     pub popup: Popup,
-    pub model_filter: String,
+    pub model_filter: FilterInput,
     pub model_focus: ModelPanel,
     /// What a confirmed selection in the model picker is currently for.
     pub model_pick_target: ModelPickTarget,
@@ -548,7 +620,7 @@ pub struct App {
     pub sessions_cache: Vec<Session>,
     pub session_selected: usize,
     /// Fuzzy filter typed in the session picker (matches title, slug, and id).
-    pub session_filter: String,
+    pub session_filter: FilterInput,
     /// Whether the picker is browsing, renaming, or confirming a delete.
     pub session_mode: SessionMode,
     /// Edit buffer while renaming a session.
@@ -561,7 +633,9 @@ pub struct App {
     pub key_input: String,
     pub settings_selected: usize,
     /// Text edit buffers for the numeric settings (temperature, top_p, max_tokens).
-    pub settings_inputs: [String; 7],
+    pub settings_inputs: [String; 8],
+    /// Indices into `SETTINGS_GROUPS` currently collapsed (hidden fields).
+    pub(crate) settings_collapsed: HashSet<usize>,
 
     /// Highlighted row in the slash-command autocomplete popup.
     pub cmd_selected: usize,
@@ -617,6 +691,7 @@ impl App {
             None,
             None,
             "auto".to_string(),
+            Vec::new(),
             Some(crate::tools::FilesCtx {
                 db_path: space.db_path(),
                 space_id: active_space.id.clone(),
@@ -666,7 +741,7 @@ impl App {
             active_space,
             spaces_cache: Vec::new(),
             space_selected: 0,
-            space_filter: String::new(),
+            space_filter: FilterInput::default(),
             space_mode: SpaceMode::Browse,
             space_edit: String::new(),
             memory_model: "google/gemini-2.5-flash-lite".to_string(),
@@ -709,15 +784,18 @@ impl App {
             spinner_frame: 0,
             thinking_idx: 0,
             spinner_color: Color::Green,
+            theme: crate::theme::load(),
+            theme_link: crate::theme::current_link_target(),
+            theme_gen: 0,
             popup: Popup::None,
-            model_filter: String::new(),
+            model_filter: FilterInput::default(),
             model_focus: ModelPanel::Available,
             model_pick_target: ModelPickTarget::Session,
             fav_state: ListState::default(),
             avail_state: ListState::default(),
             sessions_cache: Vec::new(),
             session_selected: 0,
-            session_filter: String::new(),
+            session_filter: FilterInput::default(),
             session_mode: SessionMode::Browse,
             session_edit: String::new(),
             title_rx: None,
@@ -726,6 +804,7 @@ impl App {
             key_input: String::new(),
             settings_selected: 0,
             settings_inputs: Default::default(),
+            settings_collapsed: HashSet::new(),
             cmd_selected: 0,
             banner: config::load_banner().unwrap_or_else(|| BANNER.trim_matches('\n').to_string()),
             greeting: pick_greeting(),
@@ -819,6 +898,7 @@ impl App {
             url,
             key,
             self.search_provider.clone(),
+            self.blocked_domains(),
             Some(crate::tools::FilesCtx {
                 db_path: self.space.db_path(),
                 space_id: self.active_space.id.clone(),
@@ -836,6 +916,17 @@ impl App {
             }),
         ));
         self.reload_skills();
+    }
+
+    /// The active space's always-excluded search domains, from its
+    /// `blocked_domains.txt` (comma-separated; missing file = none).
+    pub(crate) fn blocked_domains(&self) -> Vec<String> {
+        std::fs::read_to_string(self.space.blocked_domains_path(&self.active_space.name))
+            .unwrap_or_default()
+            .split(',')
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty())
+            .collect()
     }
 
     /// Kick off the initial model fetch if a key is already present. Call once
@@ -1080,8 +1171,9 @@ impl App {
     // --- nerd config (settings popup) ---
 
     /// Index into `settings_inputs` for any typed (non-toggle, non-picker) field.
+    /// `None` both for non-text fields and when a group header is selected.
     pub(crate) fn text_index(&self) -> Option<usize> {
-        match self.settings_field() {
+        match self.settings_field()? {
             SettingsField::ShowStats
             | SettingsField::ShowReasoning
             | SettingsField::HideHints
@@ -1099,6 +1191,7 @@ impl App {
             SettingsField::CompactThreshold => Some(3),
             SettingsField::SearxngUrl => Some(4),
             SettingsField::LangsearchKey => Some(5),
+            SettingsField::BlockedDomains => Some(7),
             SettingsField::EmbeddingModel => Some(6),
         }
     }

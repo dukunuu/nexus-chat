@@ -1,36 +1,33 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
+use ratatui::widgets::{Clear, List, ListItem, ListState};
 
-use crate::app::App;
+use crate::app::{App, SettingsRow};
+
+use super::chrome;
+
+/// Split "label (description)" into the two display columns.
+fn split_label(label: &'static str) -> (String, String) {
+    match label.split_once(" (") {
+        Some((name, rest)) => (name.to_string(), rest.trim_end_matches(')').to_string()),
+        None => (label.to_string(), String::new()),
+    }
+}
 
 pub(crate) fn render(f: &mut Frame, app: &App) {
-    use crate::app::SettingsField;
-    use ratatui::widgets::BorderType;
-    let area = crate::ui::centered(f.area(), 60, 46);
+    use crate::app::{SettingsField, SETTINGS_GROUPS};
+    let area = crate::ui::centered(f.area(), 64, 60);
     f.render_widget(Clear, area);
 
-    let dim = Style::default().fg(Color::DarkGray);
-    // Split "label (description)" into the two display columns.
-    let split = |label: &'static str| -> (String, String) {
-        match label.split_once(" (") {
-            Some((name, rest)) => (name.to_string(), rest.trim_end_matches(')').to_string()),
-            None => (label.to_string(), String::new()),
-        }
-    };
-    let name_w = SettingsField::ALL
-        .iter()
-        .map(|f| split(f.label()).0.chars().count())
-        .max()
-        .unwrap_or(0);
+    let dim = Style::default().fg(app.theme.fg_dim);
+    let name_w = SettingsField::ALL.iter().map(|f| split_label(f.label()).0.chars().count()).max().unwrap_or(0);
 
-    // The value cell: a pill for toggles, the typed number (or "default") otherwise.
     let toggle = |b: bool| -> Span<'static> {
         if b {
-            Span::styled("● on ", Style::default().fg(Color::Green))
+            Span::styled("● on ", Style::default().fg(app.theme.success))
         } else {
             Span::styled("○ off", dim)
         }
@@ -39,7 +36,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         if s.trim().is_empty() {
             Span::styled("default", dim.add_modifier(Modifier::ITALIC))
         } else {
-            Span::styled(s.to_string(), Style::default().fg(Color::Cyan))
+            Span::styled(s.to_string(), Style::default().fg(app.theme.accent))
         }
     };
     let value = |field: SettingsField| -> Span<'static> {
@@ -53,55 +50,68 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             SettingsField::MemoryModel => numeric(&app.memory_model),
             SettingsField::CompactThreshold => numeric(&app.settings_inputs[3]),
             SettingsField::SearxngUrl => numeric(&app.settings_inputs[4]),
-            SettingsField::Verbosity => Span::styled(app.verbosity.clone(), Style::default().fg(Color::Cyan)),
+            SettingsField::Verbosity => Span::styled(app.verbosity.clone(), Style::default().fg(app.theme.accent)),
             SettingsField::LangsearchKey => numeric(&app.settings_inputs[5]),
             SettingsField::SearchProvider => {
-                Span::styled(app.search_provider.clone(), Style::default().fg(Color::Cyan))
+                Span::styled(app.search_provider.clone(), Style::default().fg(app.theme.accent))
             }
             SettingsField::TranscriberModel => numeric(&app.transcriber_model),
             SettingsField::OcrModel => numeric(&app.ocr_model),
             SettingsField::ResearchModel => numeric(&app.research_model),
             SettingsField::EscalationModel => numeric(&app.escalation_model),
-            SettingsField::OcrEngine => {
-                Span::styled(app.ocr_engine.clone(), Style::default().fg(Color::Cyan))
-            }
+            SettingsField::OcrEngine => Span::styled(app.ocr_engine.clone(), Style::default().fg(app.theme.accent)),
             SettingsField::EmbeddingModel => numeric(&app.settings_inputs[6]),
+            SettingsField::BlockedDomains => numeric(&app.settings_inputs[7]),
         }
     };
 
-    let items: Vec<ListItem> = SettingsField::ALL
+    let rows = app.settings_rows();
+    let items: Vec<ListItem> = rows
         .iter()
-        .map(|f| {
-            let (name, desc) = split(f.label());
-            let mut spans = vec![
-                Span::styled(format!("{name:<name_w$}"), Style::default().fg(Color::White)),
-                Span::raw("   "),
-                value(*f),
-            ];
-            if !desc.is_empty() {
-                spans.push(Span::styled(format!("   {desc}"), dim));
+        .map(|row| match row {
+            SettingsRow::Group(i) => {
+                let g = &SETTINGS_GROUPS[*i];
+                let arrow = if app.settings_collapsed.contains(i) { "▸" } else { "▾" };
+                ListItem::new(Line::from(Span::styled(
+                    format!("{arrow} {}", g.name),
+                    Style::default().fg(app.theme.accent2).add_modifier(Modifier::BOLD),
+                )))
             }
-            ListItem::new(Line::from(spans))
+            SettingsRow::Field(field) => {
+                let (name, _) = split_label(field.label());
+                ListItem::new(Line::from(vec![
+                    Span::raw(format!("  {name:<name_w$}")),
+                    Span::raw("   "),
+                    value(*field),
+                ]))
+            }
         })
         .collect();
 
+    let desc = match app.settings_row() {
+        SettingsRow::Field(f) => split_label(f.label()).1,
+        SettingsRow::Group(_) => String::new(),
+    };
+
+    let title = crate::ui::hint_title(
+        app,
+        " nerd config ",
+        "nerd config — Space toggles/collapses · type numbers · Esc saves",
+    );
+    let block = chrome::popup_block(title, &app.theme);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let (list_area, detail_area) = chrome::split_with_detail(inner, &desc);
+
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(Span::styled(
-                    crate::ui::hint_title(app, " nerd config ", "nerd config — Space toggles · type numbers · Esc saves"),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                )),
-        )
-        // No inverse bar — a cyan arrow + bold row keeps the value colors readable.
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol("▸ ");
     let mut state = ListState::default();
-    state.select(Some(app.settings_selected));
-    f.render_stateful_widget(list, area, &mut state);
+    if !rows.is_empty() {
+        state.select(Some(app.settings_selected.min(rows.len() - 1)));
+    }
+    f.render_stateful_widget(list, list_area, &mut state);
+    chrome::render_detail(f, detail_area, &desc, &app.theme);
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -110,27 +120,27 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     // Enter opens the same model picker /model uses, Backspace clears it.
     let picker = matches!(
         app.settings_field(),
-        SettingsField::MemoryModel
-            | SettingsField::TranscriberModel
-            | SettingsField::OcrModel
-            | SettingsField::ResearchModel
-            | SettingsField::EscalationModel
+        Some(SettingsField::MemoryModel)
+            | Some(SettingsField::TranscriberModel)
+            | Some(SettingsField::OcrModel)
+            | Some(SettingsField::ResearchModel)
+            | Some(SettingsField::EscalationModel)
     );
     if picker {
         match key.code {
             KeyCode::Esc => app.save_settings()?,
             KeyCode::Enter => match app.settings_field() {
-                SettingsField::MemoryModel => app.open_model_picker_for_memory(),
-                SettingsField::OcrModel => app.open_model_picker_for_ocr(),
-                SettingsField::ResearchModel => app.open_model_picker_for_research(),
-                SettingsField::EscalationModel => app.open_model_picker_for_escalation(),
+                Some(SettingsField::MemoryModel) => app.open_model_picker_for_memory(),
+                Some(SettingsField::OcrModel) => app.open_model_picker_for_ocr(),
+                Some(SettingsField::ResearchModel) => app.open_model_picker_for_research(),
+                Some(SettingsField::EscalationModel) => app.open_model_picker_for_escalation(),
                 _ => app.open_model_picker_for_transcriber(),
             },
             KeyCode::Backspace => match app.settings_field() {
-                SettingsField::MemoryModel => app.clear_memory_model()?,
-                SettingsField::OcrModel => app.clear_ocr_model()?,
-                SettingsField::ResearchModel => app.clear_research_model()?,
-                SettingsField::EscalationModel => app.clear_escalation_model()?,
+                Some(SettingsField::MemoryModel) => app.clear_memory_model()?,
+                Some(SettingsField::OcrModel) => app.clear_ocr_model()?,
+                Some(SettingsField::ResearchModel) => app.clear_research_model()?,
+                Some(SettingsField::EscalationModel) => app.clear_escalation_model()?,
                 _ => app.clear_transcriber_model()?,
             },
             KeyCode::Up => app.move_settings_selection(-1),
@@ -140,7 +150,13 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
     match key.code {
-        KeyCode::Esc | KeyCode::Enter => app.save_settings()?,
+        KeyCode::Esc => app.save_settings()?,
+        // Enter on a group header toggles it; on a field it's a no-op here
+        // (fields with an Enter action are handled by the `picker` branch above).
+        KeyCode::Enter if matches!(app.settings_row(), SettingsRow::Group(_)) => {
+            app.toggle_settings_field()
+        }
+        KeyCode::Enter => app.save_settings()?,
         KeyCode::Up => app.move_settings_selection(-1),
         KeyCode::Down | KeyCode::Tab => app.move_settings_selection(1),
         KeyCode::Char(' ') => app.toggle_settings_field(),

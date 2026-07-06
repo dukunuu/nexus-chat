@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use super::{App, Popup, SettingsField, SEARCH_PROVIDERS, VERBOSITY_LEVELS};
+use super::{App, Popup, SettingsField, SettingsRow, SEARCH_PROVIDERS, SETTINGS_GROUPS, VERBOSITY_LEVELS};
 
 impl App {
     pub(super) fn open_settings(&mut self) {
@@ -13,39 +13,77 @@ impl App {
             self.searxng_url.clone(),
             self.langsearch_key.clone(),
             self.embedding_model.clone(),
+            std::fs::read_to_string(self.space.blocked_domains_path(&self.active_space.name)).unwrap_or_default(),
         ];
         self.status = "↑/↓ field · type to edit · Space toggles · Ctrl+E system prompt · Esc saves".to_string();
         self.popup = Popup::Settings;
     }
 
-    pub(crate) fn settings_field(&self) -> SettingsField {
-        SettingsField::ALL[self.settings_selected]
+    /// All currently-visible rows: every group header, plus each group's
+    /// fields when that group isn't collapsed.
+    pub(crate) fn settings_rows(&self) -> Vec<SettingsRow> {
+        let mut rows = Vec::new();
+        for (i, g) in SETTINGS_GROUPS.iter().enumerate() {
+            rows.push(SettingsRow::Group(i));
+            if !self.settings_collapsed.contains(&i) {
+                rows.extend(g.fields.iter().map(|f| SettingsRow::Field(*f)));
+            }
+        }
+        rows
+    }
+
+    pub(crate) fn settings_row(&self) -> SettingsRow {
+        let rows = self.settings_rows();
+        rows.get(self.settings_selected.min(rows.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(SettingsRow::Group(0))
+    }
+
+    /// The field under the cursor, or `None` when a (possibly collapsed)
+    /// group header is selected.
+    pub(crate) fn settings_field(&self) -> Option<SettingsField> {
+        match self.settings_row() {
+            SettingsRow::Field(f) => Some(f),
+            SettingsRow::Group(_) => None,
+        }
     }
 
     pub(crate) fn move_settings_selection(&mut self, delta: i32) {
-        let n = SettingsField::ALL.len() as i32;
+        let n = self.settings_rows().len() as i32;
+        if n == 0 {
+            return;
+        }
         self.settings_selected = (self.settings_selected as i32 + delta).rem_euclid(n) as usize;
     }
 
+    /// Space (or Enter) on a group header collapses/expands it; on a field it
+    /// runs that field's own toggle/cycle behavior, same as before.
     pub(crate) fn toggle_settings_field(&mut self) {
-        match self.settings_field() {
-            SettingsField::ShowStats => self.settings.show_stats = !self.settings.show_stats,
-            SettingsField::ShowReasoning => {
-                self.settings.show_reasoning = !self.settings.show_reasoning
+        match self.settings_row() {
+            SettingsRow::Group(i) => {
+                if !self.settings_collapsed.remove(&i) {
+                    self.settings_collapsed.insert(i);
+                }
             }
-            SettingsField::HideHints => self.settings.hide_hints = !self.settings.hide_hints,
-            SettingsField::Verbosity => {
-                let i = VERBOSITY_LEVELS.iter().position(|&l| l == self.verbosity).unwrap_or(1);
-                self.verbosity = VERBOSITY_LEVELS[(i + 1) % VERBOSITY_LEVELS.len()].to_string();
-            }
-            SettingsField::SearchProvider => {
-                let i = SEARCH_PROVIDERS.iter().position(|&p| p == self.search_provider).unwrap_or(0);
-                self.search_provider = SEARCH_PROVIDERS[(i + 1) % SEARCH_PROVIDERS.len()].to_string();
-            }
-            SettingsField::OcrEngine => {
-                let _ = self.cycle_ocr_engine();
-            }
-            _ => {}
+            SettingsRow::Field(field) => match field {
+                SettingsField::ShowStats => self.settings.show_stats = !self.settings.show_stats,
+                SettingsField::ShowReasoning => {
+                    self.settings.show_reasoning = !self.settings.show_reasoning
+                }
+                SettingsField::HideHints => self.settings.hide_hints = !self.settings.hide_hints,
+                SettingsField::Verbosity => {
+                    let i = VERBOSITY_LEVELS.iter().position(|&l| l == self.verbosity).unwrap_or(1);
+                    self.verbosity = VERBOSITY_LEVELS[(i + 1) % VERBOSITY_LEVELS.len()].to_string();
+                }
+                SettingsField::SearchProvider => {
+                    let i = SEARCH_PROVIDERS.iter().position(|&p| p == self.search_provider).unwrap_or(0);
+                    self.search_provider = SEARCH_PROVIDERS[(i + 1) % SEARCH_PROVIDERS.len()].to_string();
+                }
+                SettingsField::OcrEngine => {
+                    let _ = self.cycle_ocr_engine();
+                }
+                _ => {}
+            },
         }
     }
 
@@ -78,7 +116,10 @@ impl App {
         let Some(i) = self.text_index() else { return };
         let numeric = !matches!(
             self.settings_field(),
-            SettingsField::SearxngUrl | SettingsField::LangsearchKey | SettingsField::EmbeddingModel
+            Some(SettingsField::SearxngUrl)
+                | Some(SettingsField::LangsearchKey)
+                | Some(SettingsField::EmbeddingModel)
+                | Some(SettingsField::BlockedDomains)
         );
         if numeric && !(c.is_ascii_digit() || c == '.') {
             return;
@@ -132,6 +173,12 @@ impl App {
         self.db.set_setting("escalation_model", &self.escalation_model)?;
         self.embedding_model = self.settings_inputs[6].trim().to_string();
         self.db.set_setting("embedding_model", &self.embedding_model)?;
+        // Per-space (not a db setting): lives next to the space's other
+        // config files so it travels with the space.
+        let _ = std::fs::write(
+            self.space.blocked_domains_path(&self.active_space.name),
+            self.settings_inputs[7].trim(),
+        );
         self.refresh_toolbox();
         self.popup = Popup::None;
         self.status = "settings saved".to_string();

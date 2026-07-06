@@ -23,6 +23,9 @@ pub struct ToolBox {
     /// used for deep-research searcher agents, which must never reach
     /// run_python/install_packages/app tools even if hallucinated.
     research_only: bool,
+    /// Domains a per-space setting always excludes from `web_search` results
+    /// (appended to any exclude_domains the model passes).
+    pub blocked_domains: Vec<String>,
     client: reqwest::Client,
     files: Option<FilesCtx>,
     apps: Option<AppsCtx>,
@@ -51,6 +54,7 @@ impl ToolBox {
         searxng_url: Option<String>,
         langsearch_key: Option<String>,
         search_provider: String,
+        blocked_domains: Vec<String>,
         files: Option<FilesCtx>,
         apps: Option<AppsCtx>,
     ) -> Self {
@@ -60,6 +64,7 @@ impl ToolBox {
             langsearch_key,
             search_provider,
             research_only: false,
+            blocked_domains,
             client: reqwest::Client::new(),
             files,
             apps,
@@ -72,8 +77,10 @@ impl ToolBox {
         searxng_url: Option<String>,
         langsearch_key: Option<String>,
         search_provider: String,
+        blocked_domains: Vec<String>,
     ) -> Self {
-        let mut tb = ToolBox::new(PathBuf::new(), searxng_url, langsearch_key, search_provider, None, None);
+        let mut tb =
+            ToolBox::new(PathBuf::new(), searxng_url, langsearch_key, search_provider, blocked_domains, None, None);
         tb.research_only = true;
         tb
     }
@@ -93,24 +100,31 @@ impl ToolBox {
     /// best configured option: LangSearch, then SearXNG, then DuckDuckGo
     /// scraping last — DuckDuckGo now routinely serves a CAPTCHA to automated
     /// requests, so it's unreliable, not just unofficial.
-    async fn search(&self, query: &str) -> anyhow::Result<Vec<SearchHit>> {
+    async fn search(
+        &self,
+        query: &str,
+        recency: Option<&str>,
+        include_domains: &[String],
+        exclude_domains: &[String],
+    ) -> anyhow::Result<Vec<SearchHit>> {
+        let query = rewrite_query_with_domains(query, include_domains, exclude_domains);
         match self.search_provider.as_str() {
             "langsearch" => match &self.langsearch_key {
-                Some(key) => langsearch_search(&self.client, key, query).await,
+                Some(key) => langsearch_search(&self.client, key, &query, recency).await,
                 None => anyhow::bail!("LangSearch selected but no API key is configured"),
             },
             "searxng" => match &self.searxng_url {
-                Some(url) => searxng_search(&self.client, url, query).await,
+                Some(url) => searxng_search(&self.client, url, &query, recency).await,
                 None => anyhow::bail!("SearXNG selected but no instance URL is configured"),
             },
-            "duckduckgo" => duckduckgo_search(&self.client, query).await,
+            "duckduckgo" => duckduckgo_search(&self.client, &query).await,
             _ => {
                 if let Some(key) = &self.langsearch_key {
-                    langsearch_search(&self.client, key, query).await
+                    langsearch_search(&self.client, key, &query, recency).await
                 } else if let Some(url) = &self.searxng_url {
-                    searxng_search(&self.client, url, query).await
+                    searxng_search(&self.client, url, &query, recency).await
                 } else {
-                    duckduckgo_search(&self.client, query).await
+                    duckduckgo_search(&self.client, &query).await
                 }
             }
         }
@@ -183,10 +197,15 @@ impl ToolBox {
         });
         defs.push(ToolDef {
             name: "web_search".to_string(),
-            description: "Search the web and return numbered results with title, url, and snippet.".to_string(),
+            description: "Search the web and return numbered results with title, url, and snippet. recency restricts to recent results (ignored by the DuckDuckGo fallback backend). include_domains/exclude_domains restrict or exclude specific sites.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": { "query": { "type": "string", "description": "the search query" } },
+                "properties": {
+                    "query": { "type": "string", "description": "the search query" },
+                    "recency": { "type": "string", "enum": ["day", "week", "month", "year"], "description": "restrict to results from this recent window" },
+                    "include_domains": { "type": "array", "items": { "type": "string" }, "description": "only these domains" },
+                    "exclude_domains": { "type": "array", "items": { "type": "string" }, "description": "never these domains" },
+                },
                 "required": ["query"],
             }),
         });
@@ -522,12 +541,20 @@ impl ToolBox {
                 (result, status)
             }
             "web_search" => {
-                let query = serde_json::from_str::<serde_json::Value>(args)
-                    .ok()
-                    .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(str::to_string))
-                    .unwrap_or_default();
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let query = v.get("query").and_then(|q| q.as_str()).unwrap_or_default().to_string();
+                let recency = v.get("recency").and_then(|r| r.as_str()).map(str::to_string);
+                let str_list = |k: &str| {
+                    v.get(k)
+                        .and_then(|a| a.as_array())
+                        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>())
+                        .unwrap_or_default()
+                };
+                let include = str_list("include_domains");
+                let mut exclude = str_list("exclude_domains");
+                exclude.extend(self.blocked_domains.iter().cloned());
                 let status = "Searching the web…".to_string();
-                let result = match self.search(&query).await {
+                let result = match self.search(&query, recency.as_deref(), &include, &exclude).await {
                     Ok(hits) if hits.is_empty() => "no results".to_string(),
                     Ok(hits) => format_results(&hits),
                     Err(e) => format!("search failed: {e}"),
@@ -974,8 +1001,16 @@ async fn send_and_parse<T: serde::de::DeserializeOwned>(req: reqwest::RequestBui
 /// instance's `settings.yml` — off by default. A misconfigured instance
 /// surfaces as an HTML/error response here, which `error_for_status`/`json`
 /// turns into a readable error for the model rather than a silent empty result.
-async fn searxng_search(client: &reqwest::Client, base_url: &str, query: &str) -> anyhow::Result<Vec<SearchHit>> {
-    let req = client.get(format!("{base_url}/search")).query(&[("q", query), ("format", "json")]);
+async fn searxng_search(
+    client: &reqwest::Client,
+    base_url: &str,
+    query: &str,
+    recency: Option<&str>,
+) -> anyhow::Result<Vec<SearchHit>> {
+    let mut req = client.get(format!("{base_url}/search")).query(&[("q", query), ("format", "json")]);
+    if let Some(r) = recency {
+        req = req.query(&[("time_range", r)]);
+    }
     let resp = send_and_parse::<SearxngResponse>(req).await?;
     Ok(resp
         .results
@@ -1013,11 +1048,24 @@ struct LangsearchResult {
 /// LangSearch (https://langsearch.com): free-tier hosted search API, no card
 /// required. More reliable than scraping DuckDuckGo — recommended default
 /// once you have a key.
-async fn langsearch_search(client: &reqwest::Client, key: &str, query: &str) -> anyhow::Result<Vec<SearchHit>> {
-    let req = client
-        .post("https://api.langsearch.com/v1/web-search")
-        .bearer_auth(key)
-        .json(&serde_json::json!({ "query": query, "count": 8 }));
+async fn langsearch_search(
+    client: &reqwest::Client,
+    key: &str,
+    query: &str,
+    recency: Option<&str>,
+) -> anyhow::Result<Vec<SearchHit>> {
+    let mut body = serde_json::json!({ "query": query, "count": 8 });
+    if let Some(r) = recency {
+        // LangSearch's freshness values are Bing-style camelCase.
+        let freshness = match r {
+            "day" => "oneDay",
+            "week" => "oneWeek",
+            "month" => "oneMonth",
+            _ => "oneYear",
+        };
+        body["freshness"] = serde_json::json!(freshness);
+    }
+    let req = client.post("https://api.langsearch.com/v1/web-search").bearer_auth(key).json(&body);
     let resp = send_and_parse::<LangsearchResponse>(req).await?;
     Ok(resp
         .data
@@ -1197,6 +1245,86 @@ fn strip_html_to_text(html: &str) -> String {
         .join("\n")
 }
 
+/// Normalize a source URL for dedup: lowercase the host only (path/query
+/// case is preserved — some servers are case-sensitive there), strip
+/// `utm_*`/`fbclid` query params, and drop a trailing `/` and any fragment.
+/// Unparseable input (not actually a URL) is returned unchanged so it still
+/// participates in a plain string-equality dedup.
+pub(crate) fn normalize_url(url: &str) -> String {
+    let Ok(mut u) = reqwest::Url::parse(url) else { return url.to_string() };
+    u.set_fragment(None);
+    let kept: Vec<(String, String)> = u
+        .query_pairs()
+        .filter(|(k, _)| k != "fbclid" && !k.starts_with("utm_"))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    if kept.is_empty() {
+        u.set_query(None);
+    } else {
+        let q = kept.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
+        u.set_query(Some(&q));
+    }
+    if let Some(h) = u.host_str().map(str::to_lowercase) {
+        let _ = u.set_host(Some(&h));
+    }
+    if u.path().ends_with('/') && u.path() != "/" {
+        let trimmed = u.path().trim_end_matches('/').to_string();
+        u.set_path(&trimmed);
+    }
+    let mut s = u.to_string();
+    if let Some(stripped) = s.strip_suffix('/') {
+        s = stripped.to_string();
+    }
+    s
+}
+
+/// Collapse duplicate cited sources across a set of Searcher findings.
+/// Each finding may end with a `Sources:` block of `N. url` lines (see
+/// `SEARCHER_PROMPT` in research.rs); a source line whose normalized URL
+/// already appeared in an earlier finding is dropped from later ones so
+/// the Synthesizer doesn't see the same source cited from every angle.
+/// Non-source lines are untouched.
+pub(crate) fn dedup_source_lines(findings: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    findings
+        .iter()
+        .map(|f| {
+            let mut out_lines = Vec::new();
+            let mut in_sources = false;
+            for line in f.lines() {
+                if line.trim().eq_ignore_ascii_case("Sources:") {
+                    in_sources = true;
+                    out_lines.push(line.to_string());
+                    continue;
+                }
+                if in_sources
+                    && let Some((_, url)) = line.trim().split_once(['.', ')'])
+                    && !seen.insert(normalize_url(url.trim()))
+                {
+                    continue; // dup — drop this line
+                }
+                out_lines.push(line.to_string());
+            }
+            out_lines.join("\n")
+        })
+        .collect()
+}
+
+/// Rewrite `query` with `site:`/`-site:` terms — backend-agnostic (every
+/// engine this app talks to honors Google-style site filters), so
+/// `include_domains`/`exclude_domains`/`blocked_domains` need no per-backend
+/// plumbing beyond this string rewrite.
+pub(crate) fn rewrite_query_with_domains(query: &str, include: &[String], exclude: &[String]) -> String {
+    let mut q = query.to_string();
+    for d in include {
+        q.push_str(&format!(" site:{d}"));
+    }
+    for d in exclude {
+        q.push_str(&format!(" -site:{d}"));
+    }
+    q
+}
+
 /// Perplexity-style numbered results the model cites inline as `[n]`.
 fn format_results(hits: &[SearchHit]) -> String {
     hits.iter()
@@ -1209,6 +1337,40 @@ fn format_results(hits: &[SearchHit]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_url_lowercases_host_strips_tracking_params_and_trailing_slash() {
+        assert_eq!(
+            normalize_url("HTTPS://Example.COM/Page/?utm_source=x&utm_medium=y&id=1&fbclid=abc#frag"),
+            "https://example.com/Page?id=1"
+        );
+        assert_eq!(normalize_url("https://example.com/"), "https://example.com");
+        assert_eq!(normalize_url("https://example.com"), "https://example.com");
+        assert_eq!(normalize_url("not a url"), "not a url");
+    }
+
+    #[test]
+    fn dedup_source_lines_keeps_first_occurrence_of_each_normalized_url() {
+        let a = "Finding A body. [1]\nSources:\n1. https://example.com/a\n2. https://example.com/b?utm_source=x";
+        let b = "Finding B body. [1]\nSources:\n1. https://EXAMPLE.com/a/\n2. https://other.com/c";
+        let out = dedup_source_lines(&[a.to_string(), b.to_string()]);
+        assert!(out[0].contains("https://example.com/a"));
+        assert!(out[0].contains("https://example.com/b"));
+        // b's first line (a dup of a's [1]) is dropped; its second (new) survives.
+        assert!(!out[1].contains("example.com/a"));
+        assert!(out[1].contains("other.com/c"));
+    }
+
+    #[test]
+    fn rewrite_query_with_domains_appends_site_and_negated_site_terms() {
+        let out = rewrite_query_with_domains(
+            "rust async runtimes",
+            &["docs.rs".into()],
+            &["reddit.com".into(), "quora.com".into()],
+        );
+        assert_eq!(out, "rust async runtimes site:docs.rs -site:reddit.com -site:quora.com");
+        assert_eq!(rewrite_query_with_domains("q", &[], &[]), "q");
+    }
 
     #[test]
     fn formats_results_as_numbered_list() {
@@ -1258,12 +1420,12 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_choice_errors_clearly_when_unconfigured_instead_of_swapping() {
-        let tb = ToolBox::new(PathBuf::new(), None, None, "langsearch".to_string(), None, None);
-        let err = tb.search("test").await.unwrap_err();
+        let tb = ToolBox::new(PathBuf::new(), None, None, "langsearch".to_string(), Vec::new(), None, None);
+        let err = tb.search("test", None, &[], &[]).await.unwrap_err();
         assert!(err.to_string().contains("LangSearch selected but no API key"));
 
-        let tb = ToolBox::new(PathBuf::new(), None, None, "searxng".to_string(), None, None);
-        let err = tb.search("test").await.unwrap_err();
+        let tb = ToolBox::new(PathBuf::new(), None, None, "searxng".to_string(), Vec::new(), None, None);
+        let err = tb.search("test", None, &[], &[]).await.unwrap_err();
         assert!(err.to_string().contains("SearXNG selected but no instance URL"));
     }
 
@@ -1276,10 +1438,11 @@ mod tests {
             Some("http://127.0.0.1:1".to_string()),
             None,
             "auto".to_string(),
+            Vec::new(),
             None,
             None,
         );
-        let err = tb.search("test").await.unwrap_err();
+        let err = tb.search("test", None, &[], &[]).await.unwrap_err();
         let msg = err.to_string();
         assert!(!msg.contains("no search backend configured"));
         assert!(!msg.contains("API key"));
@@ -1376,6 +1539,7 @@ mod tests {
             None,
             None,
             "auto".to_string(),
+            Vec::new(),
             Some(FilesCtx { db_path: path, space_id: space.clone(), embedder: None }),
             None,
         );
@@ -1386,7 +1550,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nexus-skills-tb-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("t")).unwrap();
         std::fs::write(dir.join("t/SKILL.md"), "---\nname: t\ndescription: d\n---\nx").unwrap();
-        let tb = ToolBox::new(dir.clone(), None, None, "auto".to_string(), None, None);
+        let tb = ToolBox::new(dir.clone(), None, None, "auto".to_string(), Vec::new(), None, None);
         (tb, dir)
     }
 
@@ -1427,7 +1591,7 @@ mod tests {
     #[tokio::test]
     async fn run_python_computes_in_scratch_venv() {
         let dir = std::env::temp_dir().join(format!("nexus-py-{}", uuid::Uuid::new_v4()));
-        let tb = ToolBox::new(dir.join("skills"), None, None, "auto".to_string(), None, None);
+        let tb = ToolBox::new(dir.join("skills"), None, None, "auto".to_string(), Vec::new(), None, None);
         let (result, status) = tb.run("run_python", r#"{"code":"print(2**32)"}"#).await;
         assert!(status.contains("Running python"));
         assert!(result.contains("4294967296"), "{result}");
@@ -1466,7 +1630,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_skill_rejects_bad_shorthand_without_network() {
-        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), None, None);
+        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None);
         let (result, status) = tb.run("install_skill", r#"{"source":"nope"}"#).await;
         assert!(status.contains("Installing skill"));
         assert!(result.contains("invalid source"), "{result}");
@@ -1479,14 +1643,14 @@ mod tests {
         assert!(names.contains(&"search_files".to_string()));
         assert!(names.contains(&"read_file".to_string()));
 
-        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), None, None);
+        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None);
         let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
         assert!(!names.contains(&"search_files".to_string()));
     }
 
     #[test]
     fn fetch_url_is_always_available() {
-        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), None, None);
+        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None);
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
         assert!(names.contains(&"fetch_url".to_string()));
         assert!(names.contains(&"web_search".to_string()));
@@ -1550,6 +1714,7 @@ mod tests {
             None,
             None,
             "auto".to_string(),
+            Vec::new(),
             None,
             Some(AppsCtx { dir: dir.clone(), space_url: "http://127.0.0.1:9999/default/".to_string() }),
         );
@@ -1563,7 +1728,7 @@ mod tests {
         for t in ["write_file", "edit_file", "read_app_file"] {
             assert!(names.contains(&t.to_string()), "missing {t}");
         }
-        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), None, None);
+        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None);
         let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
         assert!(!names.contains(&"write_file".to_string()));
     }
@@ -1630,7 +1795,7 @@ mod tests {
 
     #[test]
     fn research_toolbox_only_offers_web_search_and_fetch_url() {
-        let tb = ToolBox::research(None, None, "auto".to_string());
+        let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new());
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
         assert_eq!(names.len(), 2, "{names:?}");
         assert!(names.contains(&"web_search".to_string()));
@@ -1639,7 +1804,7 @@ mod tests {
 
     #[tokio::test]
     async fn research_toolbox_refuses_to_run_other_tools() {
-        let tb = ToolBox::research(None, None, "auto".to_string());
+        let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new());
         let (result, _) = tb.run("run_python", r#"{"code":"print(1)"}"#).await;
         assert!(result.contains("not available in research mode"), "{result}");
     }
