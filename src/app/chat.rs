@@ -141,8 +141,9 @@ impl App {
             // the model remembers what it already tried (and got back) in
             // prior turns — dropping these caused it to repeat the same
             // mistakes on file-writing tools with no memory of the failure.
-            // Skip research_stage rows — they're background job scratch work, never shown to the model.
-            if m.role == "research_stage" {
+            // Skip research_stage/research_plan rows — background job scratch
+            // work and UI-only prompts, never shown to the model.
+            if m.role == "research_stage" || m.role == "research_plan" {
                 continue;
             }
             if m.role == "tool_call" {
@@ -494,6 +495,13 @@ impl App {
         if self.web_mode {
             let today = Utc::now().format("%Y-%m-%d").to_string();
             parts.push(web_mode_clause(&today));
+        }
+        if self.is_research_session() {
+            parts.push(
+                "This session came from /research — prefer search_sources over web_search for \
+                 follow-ups; only use web_search on a miss."
+                    .to_string(),
+            );
         }
         parts.join("\n\n")
     }

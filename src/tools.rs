@@ -29,6 +29,9 @@ pub struct ToolBox {
     /// Db path for the (space-agnostic) fetched-page cache; None disables
     /// caching (some tests).
     web_cache_db: Option<PathBuf>,
+    /// Set for follow-up turns inside a `/research` session: enables the
+    /// `search_sources` tool over that session's gathered source bundle.
+    research_session_id: Option<String>,
     client: reqwest::Client,
     files: Option<FilesCtx>,
     apps: Option<AppsCtx>,
@@ -70,6 +73,7 @@ impl ToolBox {
             research_only: false,
             blocked_domains,
             web_cache_db,
+            research_session_id: None,
             client: reqwest::Client::new(),
             files,
             apps,
@@ -97,6 +101,13 @@ impl ToolBox {
         );
         tb.research_only = true;
         tb
+    }
+
+    /// Attach a research session id, enabling `search_sources` for follow-up
+    /// turns in that session's chat.
+    pub fn with_research_session(mut self, session_id: String) -> Self {
+        self.research_session_id = Some(session_id);
+        self
     }
 
     fn files_count(&self) -> u64 {
@@ -272,6 +283,17 @@ impl ToolBox {
                 "required": ["query"],
             }),
         });
+        if self.research_session_id.is_some() {
+            defs.push(ToolDef {
+                name: "search_sources".to_string(),
+                description: "Keyword-search this research session's already-gathered sources (fetched pages from its /research run). Prefer this over web_search for follow-up questions — only reach for web_search on a miss.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "query": { "type": "string", "description": "keywords to search the session's cached sources for" } },
+                    "required": ["query"],
+                }),
+            });
+        }
         if self.files.is_some() {
             defs.push(ToolDef {
                 name: "list_citations".to_string(),
@@ -658,6 +680,32 @@ impl ToolBox {
                     Ok(papers) if papers.is_empty() => "no results".to_string(),
                     Ok(papers) => format_papers(&papers),
                     Err(e) => format!("academic search failed: {e}"),
+                };
+                (result, status)
+            }
+            "search_sources" => {
+                let query = serde_json::from_str::<serde_json::Value>(args)
+                    .ok()
+                    .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(str::to_string))
+                    .unwrap_or_default();
+                let status = "Searching session sources…".to_string();
+                let result = match (&self.research_session_id, &self.web_cache_db) {
+                    (Some(session_id), Some(db_path)) => match rusqlite::Connection::open(db_path) {
+                        Err(e) => format!("source search failed: {e}"),
+                        Ok(conn) => match crate::db::search_session_sources(&conn, session_id, &query) {
+                            Ok(hits) if hits.is_empty() => "no matches in this session's sources".to_string(),
+                            Ok(hits) => hits
+                                .iter()
+                                .map(|(url, text)| {
+                                    let cut: String = text.chars().take(500).collect();
+                                    format!("{url}:\n{cut}")
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n\n"),
+                            Err(e) => format!("source search failed: {e}"),
+                        },
+                    },
+                    _ => "no session source bundle available".to_string(),
                 };
                 (result, status)
             }
@@ -1499,6 +1547,28 @@ pub(crate) fn dedup_source_lines(findings: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Every normalized URL cited in a set of findings' `Sources:` blocks —
+/// what gets linked into a research session's source bundle.
+pub(crate) fn cited_url_norms(findings: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for f in findings {
+        let mut in_sources = false;
+        for line in f.lines() {
+            if line.trim().eq_ignore_ascii_case("Sources:") {
+                in_sources = true;
+                continue;
+            }
+            if in_sources && let Some((_, url)) = line.trim().split_once(['.', ')']) {
+                let url = url.trim();
+                if !url.is_empty() {
+                    out.push(normalize_url(url));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Rewrite `query` with `site:`/`-site:` terms — backend-agnostic (every
 /// engine this app talks to honors Google-style site filters), so
 /// `include_domains`/`exclude_domains`/`blocked_domains` need no per-backend
@@ -1526,6 +1596,28 @@ fn format_results(hits: &[SearchHit]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn search_sources_tool_only_appears_and_works_for_a_research_session_toolbox() {
+        let path = std::env::temp_dir().join(format!("nexus-searchsrc-{}.db", uuid::Uuid::new_v4()));
+        let db = crate::db::Db::open(&path).unwrap();
+        let space = db.default_space_id().unwrap();
+        let s = db.create_session("t", "a/b", &space).unwrap();
+        crate::db::cache_put(db.raw(), "https://example.com/a", "https://example.com/a", None, "rust borrow checker notes")
+            .unwrap();
+        db.add_session_sources(&s.id, &["https://example.com/a".to_string()]).unwrap();
+
+        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), Some(path.clone()), None, None);
+        assert!(!tb.defs().iter().any(|d| d.name == "search_sources"));
+
+        let tb = tb.with_research_session(s.id.clone());
+        assert!(tb.defs().iter().any(|d| d.name == "search_sources"));
+        let (result, _) = tb.run("search_sources", r#"{"query":"borrow checker"}"#).await;
+        assert!(result.contains("borrow checker"), "{result}");
+
+        let (result, _) = tb.run("search_sources", r#"{"query":"quantum"}"#).await;
+        assert!(result.contains("no matches"), "{result}");
+    }
 
     #[tokio::test]
     async fn list_citations_reports_recorded_sources_and_filters_by_query() {
@@ -1561,6 +1653,12 @@ mod tests {
         assert_eq!(normalize_url("https://example.com/"), "https://example.com");
         assert_eq!(normalize_url("https://example.com"), "https://example.com");
         assert_eq!(normalize_url("not a url"), "not a url");
+    }
+
+    #[test]
+    fn cited_url_norms_extracts_every_sources_url() {
+        let f = "text [1]\nSources:\n1. https://a.example/\n2. https://b.example?utm_source=x";
+        assert_eq!(cited_url_norms(&[f.to_string()]), vec!["https://a.example", "https://b.example"]);
     }
 
     #[test]

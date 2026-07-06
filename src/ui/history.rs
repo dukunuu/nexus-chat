@@ -112,6 +112,8 @@ fn sync_cache(app: &mut App, width: usize) {
             push_user(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_stage" {
             push_research_stage(&mut c.lines, &m.content, width, &theme);
+        } else if m.role == "research_plan" {
+            push_research_plan(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "tool_call" {
             push_tool_call(&mut c.lines, &m.content, app.show_tool_detail, &app.settings, width, &theme);
         } else {
@@ -217,6 +219,25 @@ fn push_research_stage(out: &mut Vec<Line<'static>>, content: &str, width: usize
             first = false;
         } else {
             out.push(Line::from(dim(format!("  {line}"), theme)));
+        }
+    }
+    out.push(Line::from(""));
+}
+
+/// A pending plan-approval message: like `push_research_stage` but with a
+/// distinct marker and full (non-dim) styling, since it's actionable —
+/// [e]dit / Enter to continue — not passive progress.
+fn push_research_plan(out: &mut Vec<Line<'static>>, content: &str, width: usize, theme: &crate::theme::Theme) {
+    let mut first = true;
+    for line in wrap_plain(content, width.saturating_sub(2)) {
+        if first {
+            out.push(Line::from(vec![
+                Span::styled("📋 ", Style::default().fg(theme.accent)),
+                Span::styled(line, Style::default().fg(theme.accent)),
+            ]));
+            first = false;
+        } else {
+            out.push(Line::from(format!("  {line}")));
         }
     }
     out.push(Line::from(""));

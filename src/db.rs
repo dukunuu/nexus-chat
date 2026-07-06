@@ -191,7 +191,12 @@ impl Db {
                 url         TEXT NOT NULL,
                 title       TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_citations_space ON citations(space_id);",
+            CREATE INDEX IF NOT EXISTS idx_citations_space ON citations(space_id);
+            CREATE TABLE IF NOT EXISTS session_sources (
+                session_id TEXT NOT NULL,
+                url_norm   TEXT NOT NULL,
+                PRIMARY KEY (session_id, url_norm)
+            );",
         )?;
         // Columns added after v1; ignore "duplicate column" on existing dbs.
         for stmt in [
@@ -499,6 +504,57 @@ impl Db {
         self.insert_message(session_id, "research_stage", content, None, None, None, None, None)
     }
 
+    /// A research pipeline's plan-approval prompt: rendered like a stage row
+    /// but actionable, and (like `research_stage`) never replayed to the model.
+    pub fn add_research_plan_message(&self, session_id: &str, content: &str) -> Result<String> {
+        self.insert_message(session_id, "research_plan", content, None, None, None, None, None)
+    }
+
+    /// Update the most recent `research_stage` row for `session_id` whose
+    /// content starts with `label`, or insert one on the stage's first
+    /// occurrence — keeps one transcript row per named stage instead of
+    /// appending on every progress tick (e.g. every searcher finishing).
+    pub fn upsert_research_stage_message(&self, session_id: &str, label: &str, detail: &str) -> Result<()> {
+        let content = stage_content(label, detail);
+        let existing: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM messages WHERE session_id = ?1 AND role = 'research_stage'
+                   AND (content = ?2 OR content LIKE ?3)
+                 ORDER BY created_at DESC LIMIT 1",
+                (session_id, label, format!("{label}:%")),
+                |r| r.get(0),
+            )
+            .ok();
+        match existing {
+            Some(id) => {
+                let now = Utc::now().to_rfc3339();
+                self.conn.execute(
+                    "UPDATE messages SET content = ?2, created_at = ?3 WHERE id = ?1",
+                    (&id, &content, &now),
+                )?;
+            }
+            None => {
+                self.add_research_stage_message(session_id, &content)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// See the free function of the same name. Production code (the
+    /// research pipeline task) writes through its own connection; this
+    /// handle exists for tests.
+    #[cfg(test)]
+    pub fn add_session_sources(&self, session_id: &str, url_norms: &[String]) -> Result<()> {
+        add_session_sources(&self.conn, session_id, url_norms)
+    }
+
+    /// See the free function of the same name.
+    #[cfg(test)]
+    pub fn search_session_sources(&self, session_id: &str, query: &str) -> Result<Vec<(String, String)>> {
+        search_session_sources(&self.conn, session_id, query)
+    }
+
     /// Insert an assistant reply with its model, reasoning trace, and stats.
     #[allow(clippy::too_many_arguments)]
     pub fn add_assistant_message(
@@ -741,6 +797,42 @@ pub fn search_citations(conn: &Connection, space_id: &str, query: Option<&str>) 
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// One transcript line for a research stage: bare label, or `label: detail`.
+pub fn stage_content(label: &str, detail: &str) -> String {
+    if detail.is_empty() { label.to_string() } else { format!("{label}: {detail}") }
+}
+
+/// See `Db::add_session_sources`; free so the research pipeline task can
+/// call it over its own short-lived connection.
+pub fn add_session_sources(conn: &Connection, session_id: &str, url_norms: &[String]) -> Result<()> {
+    for u in url_norms {
+        conn.execute(
+            "INSERT OR IGNORE INTO session_sources (session_id, url_norm) VALUES (?1, ?2)",
+            (session_id, u),
+        )?;
+    }
+    Ok(())
+}
+
+/// Keyword-search (plain substring, case-insensitive) a session's cached
+/// source bundle: `(url, text)` for every cached page whose text contains
+/// `query`. Ponytail: substring, not FTS — a bundle is a handful of pages,
+/// not a corpus.
+pub fn search_session_sources(conn: &Connection, session_id: &str, query: &str) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT web_cache.url, web_cache.text FROM session_sources
+         JOIN web_cache ON web_cache.url_norm = session_sources.url_norm
+         WHERE session_sources.session_id = ?1",
+    )?;
+    let rows = stmt.query_map([session_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let needle = query.to_lowercase();
+    Ok(rows
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(_, text)| text.to_lowercase().contains(&needle))
+        .collect())
+}
+
 /// Whether a cached fetch (`fetched_at`, rfc3339) is still usable — under
 /// 24h old. An unparseable timestamp is treated as stale, not an error:
 /// the caller just re-fetches live.
@@ -938,6 +1030,39 @@ mod tests {
         assert!(!s.web_mode);
         db.set_session_web_mode(&s.id, true).unwrap();
         assert!(db.list_sessions(&space).unwrap()[0].web_mode);
+    }
+
+    #[test]
+    fn session_sources_link_to_the_web_cache_and_are_keyword_searchable() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let s = db.create_session("t", "a/b", &space).unwrap();
+        cache_put(db.raw(), "https://example.com/a", "https://example.com/a", Some("A"), "rust borrow checker deep dive").unwrap();
+        cache_put(db.raw(), "https://example.com/b", "https://example.com/b", Some("B"), "cooking pasta recipes").unwrap();
+        db.add_session_sources(&s.id, &["https://example.com/a".to_string(), "https://example.com/b".to_string()])
+            .unwrap();
+
+        let hits = db.search_session_sources(&s.id, "borrow checker").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].1.contains("borrow checker"));
+
+        assert!(db.search_session_sources(&s.id, "quantum").unwrap().is_empty());
+    }
+
+    #[test]
+    fn upsert_research_stage_message_replaces_the_same_labels_row() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let s = db.create_session("t", "a/b", &space).unwrap();
+        db.upsert_research_stage_message(&s.id, "searching", "round 1, 1/3").unwrap();
+        db.upsert_research_stage_message(&s.id, "searching", "round 1, 2/3").unwrap();
+        db.upsert_research_stage_message(&s.id, "planning", "").unwrap();
+
+        let msgs = db.load_messages(&s.id).unwrap();
+        let searching: Vec<_> = msgs.iter().filter(|m| m.content.starts_with("searching:")).collect();
+        assert_eq!(searching.len(), 1, "expected one row, updated in place");
+        assert!(searching[0].content.contains("2/3"));
+        assert_eq!(msgs.iter().filter(|m| m.content == "planning").count(), 1);
     }
 
     #[test]

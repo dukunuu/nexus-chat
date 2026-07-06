@@ -7,10 +7,15 @@
 
 use crate::provider::ChatMessage;
 
-/// A background research pipeline update: a phase label, or the final
-/// report/error.
+/// A background research pipeline update: a phase label (+ progress detail),
+/// the Planner's sub-questions awaiting approval, or the final report/error.
 pub(crate) enum ResearchUpdate {
-    Stage(String),
+    /// Successive updates within one stage share a `label` so the UI/db
+    /// replace one row in place instead of appending per tick.
+    Stage { label: String, detail: String },
+    /// The Planner finished; the pipeline is paused awaiting approve/edit
+    /// (or its 60s auto-continue timeout).
+    PlanReady { questions: Vec<String> },
     Done(std::result::Result<String, String>),
 }
 
@@ -79,6 +84,12 @@ fn strip_list_prefix(line: &str) -> String {
         }
     }
     s.to_string()
+}
+
+/// Parse the user-edited plan (one sub-question per line, same bullet/number
+/// tolerance as the Planner's own fallback parser) back into a list.
+pub(crate) fn parse_plan_edit(text: &str) -> Vec<String> {
+    text.lines().map(strip_list_prefix).filter(|l| !l.is_empty()).take(MAX_SUBQUESTIONS).collect()
 }
 
 /// Parse the Critic's raw reply into a `Critique`. Anything that doesn't
@@ -184,8 +195,18 @@ use crate::tools::ToolBox;
 use super::ResearchMsg;
 
 /// Send the `(session_id, space_id, space_name)` triple's stage update.
-fn send_stage(tx: &mpsc::UnboundedSender<ResearchMsg>, ids: &(String, String, String), s: impl Into<String>) {
-    let _ = tx.send((ids.0.clone(), ids.1.clone(), ids.2.clone(), ResearchUpdate::Stage(s.into())));
+fn send_stage(
+    tx: &mpsc::UnboundedSender<ResearchMsg>,
+    ids: &(String, String, String),
+    label: impl Into<String>,
+    detail: impl Into<String>,
+) {
+    let _ = tx.send((
+        ids.0.clone(),
+        ids.1.clone(),
+        ids.2.clone(),
+        ResearchUpdate::Stage { label: label.into(), detail: detail.into() },
+    ));
 }
 
 async fn complete_text(provider: &OpenRouter, model: &str, messages: Vec<ChatMessage>) -> Result<String, String> {
@@ -261,7 +282,7 @@ async fn run_searchers(
     let mut findings = Vec::with_capacity(total);
     while let Some(res) = set.join_next().await {
         done += 1;
-        send_stage(tx, ids, format!("searching (round {round}, {done}/{total})…"));
+        send_stage(tx, ids, "searching", format!("round {round}, {done}/{total}"));
         findings.push(res.unwrap_or_else(|e| format!("[search agent panicked: {e}]")));
     }
     findings
@@ -277,6 +298,7 @@ pub(crate) async fn run_research(
     embedding_model: String,
     db_path: std::path::PathBuf,
     topic: String,
+    gate_rx: Option<tokio::sync::oneshot::Receiver<Vec<String>>>,
     toolbox: Arc<ToolBox>,
     tx: mpsc::UnboundedSender<ResearchMsg>,
     session_id: String,
@@ -285,8 +307,19 @@ pub(crate) async fn run_research(
 ) {
     let known = local_known_chunks(&provider, &embedding_model, &db_path, &space_id, &topic).await;
     let ids = (session_id, space_id, space_name);
-    let result =
-        run_research_inner(&provider, &research_model, &escalation_model, &topic, &known, &toolbox, &tx, &ids).await;
+    let result = run_research_inner(
+        &provider,
+        &research_model,
+        &escalation_model,
+        &topic,
+        &known,
+        gate_rx,
+        &db_path,
+        &toolbox,
+        &tx,
+        &ids,
+    )
+    .await;
     let _ = tx.send((ids.0, ids.1, ids.2, ResearchUpdate::Done(result)));
 }
 
@@ -317,62 +350,101 @@ async fn local_known_chunks(
         .unwrap_or_default()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_research_inner(
     provider: &OpenRouter,
     research_model: &str,
     escalation_model: &str,
     topic: &str,
     known: &[String],
+    gate_rx: Option<tokio::sync::oneshot::Receiver<Vec<String>>>,
+    db_path: &std::path::Path,
     toolbox: &Arc<ToolBox>,
     tx: &mpsc::UnboundedSender<ResearchMsg>,
     ids: &(String, String, String),
 ) -> Result<String, String> {
-    send_stage(tx, ids, "planning…");
-    let questions = plan(provider, research_model, topic, known).await?;
+    send_stage(tx, ids, "planning", "");
+    let mut questions = plan(provider, research_model, topic, known).await?;
+
+    // Plan-approval gate: show the sub-questions and wait for approve/edit,
+    // auto-continuing after 60s so a backgrounded session never hangs.
+    if let Some(gate_rx) = gate_rx {
+        let _ = tx.send((
+            ids.0.clone(),
+            ids.1.clone(),
+            ids.2.clone(),
+            ResearchUpdate::PlanReady { questions: questions.clone() },
+        ));
+        questions = match tokio::time::timeout(std::time::Duration::from_secs(60), gate_rx).await {
+            Ok(Ok(edited)) if !edited.is_empty() => edited,
+            // Timeout, dropped sender, or an empty edit — continue as planned.
+            _ => questions,
+        };
+    }
 
     let mut findings = run_searchers(provider, research_model, toolbox, &questions, tx, ids, 1).await;
+    persist_session_sources(db_path, &ids.0, &findings);
 
-    send_stage(tx, ids, "synthesizing…");
+    send_stage(tx, ids, "synthesizing", "");
     let mut draft =
         complete_text(provider, research_model, synthesizer_messages(topic, &crate::tools::dedup_source_lines(&findings)))
             .await?;
 
-    send_stage(tx, ids, "critiquing…");
+    send_stage(tx, ids, "critiquing", "");
     let mut critique = parse_critique(&complete_text(provider, research_model, critic_messages(topic, &draft)).await?);
 
     if let Critique::Gaps(gaps) = &critique {
         let more = run_searchers(provider, research_model, toolbox, gaps, tx, ids, 2).await;
+        persist_session_sources(db_path, &ids.0, &more);
         findings.extend(more);
-        send_stage(tx, ids, "re-synthesizing…");
+        send_stage(tx, ids, "re-synthesizing", "");
         draft = complete_text(
             provider,
             research_model,
             synthesizer_messages(topic, &crate::tools::dedup_source_lines(&findings)),
         )
         .await?;
-        send_stage(tx, ids, "critiquing (round 2)…");
+        send_stage(tx, ids, "critiquing", "round 2");
         critique = parse_critique(&complete_text(provider, research_model, critic_messages(topic, &draft)).await?);
     }
 
     if let Critique::Contradiction(desc) = &critique {
-        send_stage(tx, ids, "resolving a contradiction…");
+        send_stage(tx, ids, "resolving a contradiction", "");
         let resolution =
             complete_text(provider, escalation_model, escalation_messages(topic, &draft, &findings, desc)).await?;
         draft.push_str("\n\n");
         draft.push_str(&resolution);
     }
 
-    send_stage(tx, ids, "verifying…");
+    send_stage(tx, ids, "verifying", "");
     let verified = complete_text(provider, research_model, verifier_messages(topic, &draft, &findings)).await?;
 
-    send_stage(tx, ids, "writing final report…");
+    send_stage(tx, ids, "writing final report", "");
     complete_text(provider, research_model, writer_messages(topic, &verified)).await
+}
+
+/// Link every URL cited in `findings` into the session's source bundle
+/// (they're already in `web_cache` from `fetch_url`'s write-through). Best
+/// effort — a failed write never disturbs the pipeline.
+fn persist_session_sources(db_path: &std::path::Path, session_id: &str, findings: &[String]) {
+    let url_norms = crate::tools::cited_url_norms(findings);
+    if url_norms.is_empty() {
+        return;
+    }
+    if let Ok(conn) = rusqlite::Connection::open(db_path) {
+        let _ = crate::db::add_session_sources(&conn, session_id, &url_norms);
+    }
 }
 
 impl super::App {
     /// `/research <topic>`: run the multi-agent research pipeline in a new
-    /// background session. One job at a time.
+    /// background session. One job at a time. `/research! <topic>` skips the
+    /// plan-approval gate.
     pub(crate) fn start_research(&mut self, topic: &str) {
+        self.start_research_with_gate(topic, true)
+    }
+
+    pub(crate) fn start_research_with_gate(&mut self, topic: &str, gated: bool) {
         let topic = topic.trim().to_string();
         if topic.is_empty() {
             self.status = "usage: /research <topic>".to_string();
@@ -421,12 +493,21 @@ impl super::App {
         self.research_running = Some((session.id.clone(), topic.clone()));
         self.status = format!("researching: {topic}");
 
+        let gate_rx = if gated {
+            let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+            self.research_plan_gate = Some((session.id.clone(), gate_tx, Vec::new()));
+            Some(gate_rx)
+        } else {
+            None
+        };
+
         let space_id = self.active_space.id.clone();
         let space_name = self.active_space.name.clone();
         self.messages = self.db.load_messages(&session.id).unwrap_or_default();
         self.session = Some(session.clone());
         self.context_total = None;
         self.scroll = 0;
+        self.refresh_toolbox();
 
         tokio::spawn(run_research(
             provider,
@@ -435,6 +516,7 @@ impl super::App {
             self.embedding_model.trim().to_string(),
             self.space.db_path(),
             topic,
+            gate_rx,
             toolbox,
             tx,
             session.id,
@@ -443,23 +525,95 @@ impl super::App {
         ));
     }
 
+    /// Enter on a pending plan gate: continue with the (possibly edited)
+    /// cached questions as-is.
+    pub(crate) fn approve_research_plan(&mut self) {
+        if let Some((_, tx, cached)) = self.research_plan_gate.take() {
+            let _ = tx.send(cached);
+            self.status = "continuing research…".to_string();
+        }
+    }
+
+    /// `e` on a pending plan gate: prefill the composer with one question
+    /// per line so the user can edit it like any other message.
+    pub(crate) fn edit_research_plan(&mut self) {
+        if let Some((_, _, cached)) = &self.research_plan_gate {
+            let text = cached.join("\n");
+            self.set_input(&text);
+            self.status = "edit the plan, one question per line — Enter to submit".to_string();
+        }
+    }
+
+    /// Submit an edited plan (composer contents). A no-op with a status
+    /// message if the gate already timed out and auto-continued.
+    pub(crate) fn submit_research_plan_edit(&mut self, text: &str) {
+        let Some((_, tx, _)) = self.research_plan_gate.take() else {
+            self.status = "plan gate already closed (timed out) — edit ignored".to_string();
+            return;
+        };
+        let _ = tx.send(parse_plan_edit(text));
+        self.status = "plan updated — continuing research…".to_string();
+    }
+
     /// A research pipeline update: a stage label, or the final report/error.
     /// `None` = the job's channel closed (fires once, right after `Done`).
     pub fn on_research_done(&mut self, r: Option<ResearchMsg>) {
         let Some((session_id, space_id, space_name, update)) = r else {
             self.research_rx = None;
             self.research_running = None;
+            self.research_plan_gate = None;
             return;
         };
         let viewing = self.session.as_ref().is_some_and(|s| s.id == session_id);
         match update {
-            ResearchUpdate::Stage(s) => {
-                let _ = self.db.add_research_stage_message(&session_id, &s);
+            ResearchUpdate::Stage { label, detail } => {
+                let _ = self.db.upsert_research_stage_message(&session_id, &label, &detail);
+                if viewing {
+                    let text = crate::db::stage_content(&label, &detail);
+                    let prefix = format!("{label}:");
+                    // Mirror the db upsert in the in-memory transcript: one
+                    // row per label, updated in place.
+                    if let Some(row) = self.messages.iter_mut().rev().find(|m| {
+                        m.role == "research_stage" && (m.content == label || m.content.starts_with(&prefix))
+                    }) {
+                        row.content = text.clone();
+                    } else {
+                        self.messages.push(crate::db::Message {
+                            id: String::new(),
+                            role: "research_stage".to_string(),
+                            content: text.clone(),
+                            model: None,
+                            reasoning: None,
+                            tokens: None,
+                            secs: None,
+                            phrase: None,
+                            images: Vec::new(),
+                        });
+                    }
+                    self.status = format!("research: {text}");
+                }
+            }
+            ResearchUpdate::PlanReady { questions } => {
+                if let Some((gate_session, _, cached)) = self.research_plan_gate.as_mut()
+                    && *gate_session == session_id
+                {
+                    *cached = questions.clone();
+                }
+                let plan_text = questions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, q)| format!("{}. {q}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let content = format!(
+                    "Research plan ready — [e]dit / Enter to continue (auto-continues in 60s):\n{plan_text}"
+                );
+                let _ = self.db.add_research_plan_message(&session_id, &content);
                 if viewing {
                     self.messages.push(crate::db::Message {
                         id: String::new(),
-                        role: "research_stage".to_string(),
-                        content: s.clone(),
+                        role: "research_plan".to_string(),
+                        content,
                         model: None,
                         reasoning: None,
                         tokens: None,
@@ -467,7 +621,7 @@ impl super::App {
                         phrase: None,
                         images: Vec::new(),
                     });
-                    self.status = format!("research: {s}");
+                    self.status = "research plan ready — [e]dit / Enter to continue".to_string();
                 }
             }
             ResearchUpdate::Done(Ok(report)) => {
@@ -605,6 +759,84 @@ mod tests {
     }
 
     #[test]
+    fn parse_plan_edit_reads_one_question_per_line() {
+        let qs = parse_plan_edit("what is X\nhow does Y work\n\nis Z true");
+        assert_eq!(qs, vec!["what is X".to_string(), "how does Y work".to_string(), "is Z true".to_string()]);
+    }
+
+    #[test]
+    fn parse_plan_edit_strips_bullet_and_number_prefixes_like_the_planner_parser() {
+        let qs = parse_plan_edit("- what is X\n2. how does Y work");
+        assert_eq!(qs, vec!["what is X".to_string(), "how does Y work".to_string()]);
+    }
+
+    #[test]
+    fn parse_plan_edit_caps_at_max_subquestions() {
+        let lines: Vec<String> = (0..10).map(|i| format!("q{i}")).collect();
+        assert_eq!(parse_plan_edit(&lines.join("\n")).len(), MAX_SUBQUESTIONS);
+    }
+
+    #[tokio::test]
+    async fn plan_gate_pauses_then_approve_lets_the_cached_questions_through() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("rust async runtimes");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        let space_id = a.active_space.id.clone();
+        let space_name = a.active_space.name.clone();
+
+        a.on_research_done(Some((
+            session_id.clone(),
+            space_id,
+            space_name,
+            ResearchUpdate::PlanReady { questions: vec!["q1".to_string(), "q2".to_string()] },
+        )));
+        assert!(a.research_plan_gate.is_some());
+        assert!(a.messages.iter().any(|m| m.role == "research_plan"));
+        let stored = a.db.load_messages(&session_id).unwrap();
+        assert!(stored.iter().any(|m| m.role == "research_plan"));
+
+        a.approve_research_plan();
+        assert!(a.research_plan_gate.is_none());
+    }
+
+    #[tokio::test]
+    async fn plan_gate_edit_prefills_composer_and_submit_sends_parsed_questions() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("rust async runtimes");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        let space_id = a.active_space.id.clone();
+        let space_name = a.active_space.name.clone();
+        a.on_research_done(Some((
+            session_id,
+            space_id,
+            space_name,
+            ResearchUpdate::PlanReady { questions: vec!["q1".to_string()] },
+        )));
+
+        a.edit_research_plan();
+        assert_eq!(a.input_text(), "q1");
+        let text = "edited one\nedited two".to_string();
+        a.submit_research_plan_edit(&text);
+        assert!(a.research_plan_gate.is_none());
+        assert!(a.status.contains("plan updated"));
+    }
+
+    #[tokio::test]
+    async fn plan_gate_edit_after_timeout_is_a_noop_with_status() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("rust async runtimes");
+        // Simulate the gate already having closed (approved, or the
+        // pipeline's own 60s timeout fired) — either way, `research_plan_gate`
+        // is `None` by the time a stray edit submission arrives.
+        a.research_plan_gate = None;
+        a.submit_research_plan_edit("whatever");
+        assert!(a.status.contains("timed out") || a.status.contains("ignored"));
+    }
+
+    #[test]
     fn start_research_rejects_blank_topic_and_missing_model() {
         let mut a = test_app();
         a.start_research("  ");
@@ -654,13 +886,27 @@ mod tests {
             session_id.clone(),
             space_id,
             space_name,
-            ResearchUpdate::Stage("planning…".to_string()),
+            ResearchUpdate::Stage { label: "planning".to_string(), detail: String::new() },
         )));
 
-        assert!(a.messages.iter().any(|m| m.role == "research_stage" && m.content == "planning…"));
+        assert!(a.messages.iter().any(|m| m.role == "research_stage" && m.content == "planning"));
         let stored = a.db.load_messages(&session_id).unwrap();
-        assert!(stored.iter().any(|m| m.role == "research_stage" && m.content == "planning…"));
-        assert!(a.status.contains("planning…"));
+        assert!(stored.iter().any(|m| m.role == "research_stage" && m.content == "planning"));
+        assert!(a.status.contains("planning"));
+
+        // A second tick with the same label replaces the row, not appends.
+        let space_id = a.active_space.id.clone();
+        let space_name = a.active_space.name.clone();
+        a.on_research_done(Some((
+            session_id.clone(),
+            space_id,
+            space_name,
+            ResearchUpdate::Stage { label: "planning".to_string(), detail: "revised".to_string() },
+        )));
+        let stored = a.db.load_messages(&session_id).unwrap();
+        let rows: Vec<_> = stored.iter().filter(|m| m.role == "research_stage").collect();
+        assert_eq!(rows.len(), 1, "one row per label, updated in place");
+        assert_eq!(rows[0].content, "planning: revised");
     }
 
     #[tokio::test]

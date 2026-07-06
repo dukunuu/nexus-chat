@@ -123,6 +123,7 @@ impl App {
             self.status = format!("switched to: {}", s.title);
             self.web_mode = s.web_mode;
             self.session = Some(s);
+            self.refresh_toolbox();
             // Estimate from history until the next response reports exact usage.
             self.context_total = None;
             self.scroll = 0;

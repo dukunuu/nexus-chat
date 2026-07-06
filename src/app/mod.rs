@@ -504,6 +504,11 @@ pub struct App {
     pub(crate) forced_skill: Option<String>,
     /// `/web` answer mode for the active session (or the next one created).
     pub web_mode: bool,
+    /// A running `/research` job's plan-approval gate: the sender its
+    /// pipeline awaits, keyed by session id, plus the sub-questions shown
+    /// while the gate is open.
+    pub(crate) research_plan_gate:
+        Option<(String, tokio::sync::oneshot::Sender<Vec<String>>, Vec<String>)>,
     pub(crate) toolbox: std::sync::Arc<crate::tools::ToolBox>,
     /// Local static server for model-created apps (None if it failed to bind).
     pub app_server: Option<crate::appserver::AppServer>,
@@ -717,6 +722,7 @@ impl App {
             search_provider: "auto".to_string(),
             forced_skill: None,
             web_mode: false,
+            research_plan_gate: None,
             toolbox,
             app_server: None,
             skills_mode: SkillsMode::Browse,
@@ -897,7 +903,7 @@ impl App {
         let url = (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
         let key = (!self.langsearch_key.trim().is_empty()).then(|| self.langsearch_key.trim().to_string());
         crate::skills::install_builtin(&self.toolbox.skills_dir);
-        self.toolbox = std::sync::Arc::new(crate::tools::ToolBox::new(
+        let mut toolbox = crate::tools::ToolBox::new(
             self.toolbox.skills_dir.clone(),
             url,
             key,
@@ -919,8 +925,26 @@ impl App {
                 dir: self.space.apps_dir(&self.active_space.name),
                 space_url: s.space_url(&self.active_space.name),
             }),
-        ));
+        );
+        if self.is_research_session() {
+            toolbox = toolbox.with_research_session(self.session.as_ref().unwrap().id.clone());
+        }
+        self.toolbox = std::sync::Arc::new(toolbox);
         self.reload_skills();
+    }
+
+    /// Whether the active session originated from `/research` — its
+    /// transcript contains a `/research <topic>` user message. Drives both
+    /// `search_sources` tool availability and the system-prompt nudge to
+    /// prefer it over `web_search` for follow-ups.
+    pub(crate) fn is_research_session(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| {
+            self.db
+                .load_messages(&s.id)
+                .unwrap_or_default()
+                .iter()
+                .any(|m| m.content.starts_with("/research "))
+        })
     }
 
     /// The active space's always-excluded search domains, from its
@@ -1102,6 +1126,12 @@ impl App {
     // --- input handling ---
 
     pub(crate) fn run_command(&mut self, cmd: &str) -> Result<()> {
+        // `/research! <topic>` = research without the plan-approval gate.
+        // Handled before command lookup: the `!` makes the token miss COMMANDS.
+        if let Some(rest) = cmd.strip_prefix("research!") {
+            self.start_research_with_gate(rest.trim(), false);
+            return Ok(());
+        }
         let token = cmd.split_whitespace().next().unwrap_or("");
         // Resolve aliases (e.g. "history" -> "session") to a canonical name.
         let canonical = COMMANDS

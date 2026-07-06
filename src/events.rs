@@ -256,6 +256,21 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         // Shift+Enter and Ctrl+Enter insert a newline; plain Enter sends.
         KeyCode::Enter if shift || ctrl => app.input.insert_newline(),
+        // A pending research plan gate intercepts: 'e' (empty composer)
+        // prefills the plan for editing, Enter approves (empty composer) or
+        // submits the edit (composer text). Normal typing is untouched.
+        KeyCode::Char('e') if app.research_plan_gate.is_some() && app.input_text().trim().is_empty() => {
+            app.edit_research_plan();
+        }
+        KeyCode::Enter if app.research_plan_gate.is_some() => {
+            let text = app.input_text();
+            app.set_input("");
+            if text.trim().is_empty() {
+                app.approve_research_plan();
+            } else {
+                app.submit_research_plan_edit(&text);
+            }
+        }
         KeyCode::Enter => app.submit()?,
         // Paste is handled by the terminal's bracketed paste (Event::Paste).
         // Ctrl+Shift+C copies the composer's selection to the OS clipboard for
