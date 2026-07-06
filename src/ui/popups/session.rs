@@ -1,11 +1,13 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
+use ratatui::widgets::{Clear, List, ListItem, ListState};
 
 use crate::app::App;
+
+use super::chrome;
 
 pub(crate) fn render(f: &mut Frame, app: &App) {
     use crate::app::SessionMode;
@@ -14,7 +16,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 
     let sessions = app.filtered_sessions();
     let width = area.width.saturating_sub(4) as usize; // inside border + highlight symbol
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(app.theme.fg_dim);
 
     let items: Vec<ListItem> = sessions
         .iter()
@@ -30,11 +32,11 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             let researching_here =
                 app.research_running.as_ref().is_some_and(|(id, _)| *id == s.id);
             let marker = if streaming_here {
-                Some(Span::styled("⟳ ", Style::default().fg(Color::Cyan)))
+                Some(Span::styled("⟳ ", Style::default().fg(app.theme.accent)))
             } else if researching_here {
-                Some(Span::styled("🔎 ", Style::default().fg(Color::Magenta)))
+                Some(Span::styled("🔎 ", Style::default().fg(app.theme.accent2)))
             } else if app.unread.contains(&s.id) {
-                Some(Span::styled("● ", Style::default().fg(Color::Yellow)))
+                Some(Span::styled("● ", Style::default().fg(app.theme.warning)))
             } else {
                 None
             };
@@ -46,7 +48,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
                 top_spans.push(m);
             }
             top_spans.extend([
-                Span::styled(format!("#{id}"), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("#{id}"), Style::default().fg(app.theme.accent)),
                 Span::raw(" ".repeat(gap)),
                 Span::styled(when, dim),
             ]);
@@ -54,7 +56,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             // title (truncated) with the model dimmed after it.
             let title = truncate(&s.title, width.saturating_sub(s.model.chars().count() + 5));
             let body = Line::from(vec![
-                Span::styled(title, Style::default().fg(Color::White)),
+                Span::styled(title, Style::default().fg(app.theme.fg)),
                 Span::styled(format!("  {}", s.model), dim),
             ]);
             ListItem::new(vec![top, body, Line::from("")])
@@ -62,25 +64,23 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         .collect();
 
     // Title bar doubles as the search box / rename field / delete prompt.
-    let title = match app.session_mode {
-        SessionMode::Rename => format!(" rename: {}▏  (Enter save · Esc cancel) ", app.session_edit),
+    let title: Line = match app.session_mode {
+        SessionMode::Rename => Line::from(format!(" rename: {}▏  (Enter save · Esc cancel) ", app.session_edit)),
         SessionMode::ConfirmDelete => {
             let name = app.selected_session().map(|s| s.title).unwrap_or_default();
-            format!(" delete \"{}\"? (Ctrl+D confirm · Esc cancel) ", truncate(&name, 30))
+            Line::from(format!(" delete \"{}\"? (Ctrl+D confirm · Esc cancel) ", truncate(&name, 30)))
         }
         SessionMode::Browse => {
             let keys = if app.settings.hide_hints { "" } else { "  (Ctrl+R rename · Ctrl+D delete)" };
-            format!(" session — search: {}▏{keys} ", app.session_filter)
+            let mut spans = vec![Span::raw(" session — search: ")];
+            spans.extend(app.session_filter.spans(&app.theme));
+            spans.push(Span::raw(format!("{keys} ")));
+            Line::from(spans)
         }
     };
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(title),
-        )
+        .block(chrome::popup_block(title, &app.theme))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol("▸ ");
     let mut state = ListState::default();
@@ -123,6 +123,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         SessionMode::Browse => {
             if key.code == KeyCode::Enter {
                 return app.confirm_session();
+            }
+            // Cursor move/select/clipboard on the search filter takes priority
+            // over the rest of Browse mode's bindings.
+            if app.session_filter.key(key, &mut app.clipboard) {
+                return Ok(());
             }
             // No create/rename-gating divergence here: session supports
             // rename but not create.

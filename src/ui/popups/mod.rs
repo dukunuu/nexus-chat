@@ -1,4 +1,5 @@
 pub(crate) mod apps;
+pub(crate) mod chrome;
 pub(crate) mod context;
 pub(crate) mod copy;
 pub(crate) mod files;

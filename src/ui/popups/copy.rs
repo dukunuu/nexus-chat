@@ -1,9 +1,11 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
+use ratatui::widgets::{Clear, List, ListItem, ListState};
 
 use crate::app::App;
+
+use super::chrome;
 
 pub(crate) fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 50, 60);
@@ -14,12 +16,9 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         .iter()
         .map(|o| ListItem::new(o.label.clone()))
         .collect();
+    let block = chrome::popup_block(crate::ui::hint_title(app, " copy ", "copy — ↑/↓, Enter, Esc"), &app.theme);
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(crate::ui::hint_title(app, " copy ", "copy — ↑/↓, Enter, Esc")),
-        )
+        .block(block)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("› ");
     let mut state = ListState::default();

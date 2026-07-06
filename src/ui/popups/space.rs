@@ -1,11 +1,13 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
+use ratatui::widgets::{Clear, List, ListItem, ListState};
 
 use crate::app::App;
+
+use super::chrome;
 
 pub(crate) fn render(f: &mut Frame, app: &App) {
     use crate::app::SpaceMode;
@@ -13,7 +15,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 50, 60);
     f.render_widget(Clear, area);
 
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(app.theme.fg_dim);
     let spaces = app.filtered_spaces();
     let items: Vec<ListItem> = spaces
         .iter()
@@ -26,7 +28,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
                 format!("{mark}{}", s.name)
             };
             let line = Line::from(vec![
-                Span::styled(name, Style::default().fg(Color::White)),
+                Span::styled(name, Style::default().fg(app.theme.fg)),
                 Span::styled(format!("  {n} session{}", if n == 1 { "" } else { "s" }), dim),
                 Span::styled(format!("  · {}", crate::ui::fmt_created(&s.created_at)), dim),
             ]);
@@ -34,12 +36,12 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         })
         .collect();
 
-    let title = match app.space_mode {
-        SpaceMode::Create => format!(" new space: {}▏  (Enter create · Esc cancel) ", app.space_edit),
-        SpaceMode::Rename => format!(" rename: {}▏  (Enter save · Esc cancel) ", app.space_edit),
+    let title: Line = match app.space_mode {
+        SpaceMode::Create => Line::from(format!(" new space: {}▏  (Enter create · Esc cancel) ", app.space_edit)),
+        SpaceMode::Rename => Line::from(format!(" rename: {}▏  (Enter save · Esc cancel) ", app.space_edit)),
         SpaceMode::ConfirmDelete => {
             let name = app.selected_space().map(|s| s.name).unwrap_or_default();
-            format!(" delete \"{name}\"? sessions move to default. (Ctrl+D confirm · Esc cancel) ")
+            Line::from(format!(" delete \"{name}\"? sessions move to default. (Ctrl+D confirm · Esc cancel) "))
         }
         SpaceMode::Browse => {
             let keys = if app.settings.hide_hints {
@@ -47,17 +49,15 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             } else {
                 "  (Ctrl+N new · Ctrl+R rename · Ctrl+D delete · Ctrl+E instructions · Ctrl+K memory)"
             };
-            format!(" space — search: {}▏{keys} ", app.space_filter)
+            let mut spans = vec![Span::raw(" space — search: ")];
+            spans.extend(app.space_filter.spans(&app.theme));
+            spans.push(Span::raw(format!("{keys} ")));
+            Line::from(spans)
         }
     };
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(title),
-        )
+        .block(chrome::popup_block(title, &app.theme))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol("▸ ");
     let mut state = ListState::default();
@@ -92,6 +92,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         SpaceMode::Browse => {
             if key.code == KeyCode::Enter {
                 return app.confirm_space();
+            }
+            if app.space_filter.key(key, &mut app.clipboard) {
+                return Ok(());
             }
             match classify_browse_key(key, true, true) {
                 Some(super::BrowseAction::Close) => app.popup = crate::app::Popup::None,

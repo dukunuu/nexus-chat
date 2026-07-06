@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem};
 
@@ -26,20 +26,16 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
 
     // Favorites column.
     let fav_items = model_items(app, &app.favorite_models());
-    let fav_list = panel_list(fav_items, fav_title, fav_focused);
+    let fav_list = panel_list(fav_items, Line::from(fav_title), fav_focused, &app.theme);
     f.render_stateful_widget(fav_list, fav_outer, &mut app.fav_state);
 
     // Available column (with the search box in the title).
     let avail_items = model_items(app, &app.available_models());
-    let title = if app.settings.hide_hints {
-        format!(" Available — search: {}▏ ", app.model_filter)
-    } else {
-        format!(
-            " Available — search: {}▏  (Ctrl+S fav · Ctrl+T reason) ",
-            app.model_filter
-        )
-    };
-    let avail_list = panel_list(avail_items, &title, !fav_focused);
+    let hint = if app.settings.hide_hints { "" } else { "  (Ctrl+S fav · Ctrl+T reason)" };
+    let mut title_spans = vec![Span::raw(" Available — search: ")];
+    title_spans.extend(app.model_filter.spans(&app.theme));
+    title_spans.push(Span::raw(format!("{hint} ")));
+    let avail_list = panel_list(avail_items, Line::from(title_spans), !fav_focused, &app.theme);
     f.render_stateful_widget(avail_list, avail_outer, &mut app.avail_state);
 }
 
@@ -63,21 +59,21 @@ fn model_items(app: &App, models: &[&Model]) -> Vec<ListItem<'static>> {
             let mut spans = vec![Span::raw(format!("{marker}{}{badge}", m.id))];
             // Vision glyph (dim) for models with image support.
             if m.supports_images {
-                spans.push(Span::styled(" ⊡", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(" ⊡", Style::default().fg(app.theme.fg_dim)));
             }
             ListItem::new(Line::from(spans))
         })
         .collect()
 }
 
-fn panel_list<'a>(items: Vec<ListItem<'a>>, title: &str, focused: bool) -> List<'a> {
-    let border = if focused { Color::Cyan } else { Color::DarkGray };
+fn panel_list<'a>(items: Vec<ListItem<'a>>, title: Line<'a>, focused: bool, theme: &crate::theme::Theme) -> List<'a> {
+    let border = if focused { theme.border } else { theme.border_dim };
     List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border))
-                .title(title.to_string()),
+                .title(title),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("› ")
@@ -115,18 +111,20 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             };
         }
         KeyCode::Enter => app.confirm_model()?,
-        KeyCode::Tab | KeyCode::Left | KeyCode::Right => app.toggle_model_focus(),
+        // Tab now owns panel-switching — Left/Right/Home/End/Delete/Ctrl+A/C/X/V
+        // are claimed by the filter box below (cursor move, select, clipboard).
+        KeyCode::Tab => app.toggle_model_focus(),
         KeyCode::Up => app.move_model_selection(-1),
         KeyCode::Down => app.move_model_selection(1),
         KeyCode::Backspace => {
-            app.model_filter.pop();
+            app.model_filter.backspace();
             app.reset_model_selection();
         }
-        // Plain characters build the search filter; modified ones are ignored.
         KeyCode::Char(c) if !ctrl => {
-            app.model_filter.push(c);
+            app.model_filter.insert_char(c);
             app.reset_model_selection();
         }
+        _ if app.model_filter.key(key, &mut app.clipboard) => {}
         _ => {}
     }
     Ok(())

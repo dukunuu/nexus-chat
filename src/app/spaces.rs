@@ -38,12 +38,12 @@ impl App {
     }
 
     pub fn space_filter_push(&mut self, c: char) {
-        self.space_filter.push(c);
+        self.space_filter.insert_char(c);
         self.space_selected = 0;
     }
 
     pub fn space_filter_pop(&mut self) {
-        self.space_filter.pop();
+        self.space_filter.backspace();
         self.space_selected = 0;
     }
 

@@ -1,11 +1,13 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
+use ratatui::widgets::{Clear, List, ListItem, ListState};
 
 use crate::app::App;
+
+use super::chrome;
 
 pub(crate) fn render(f: &mut Frame, app: &App) {
     use crate::app::FilesMode;
@@ -20,10 +22,10 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
                 if e.is_dir {
                     ListItem::new(Line::from(Span::styled(
                         format!("{}/", e.name),
-                        Style::default().fg(Color::Cyan),
+                        Style::default().fg(app.theme.accent),
                     )))
                 } else {
-                    ListItem::new(Line::from(Span::styled(e.name.clone(), Style::default().fg(Color::White))))
+                    ListItem::new(Line::from(Span::styled(e.name.clone(), Style::default().fg(app.theme.fg))))
                 }
             })
             .collect();
@@ -32,8 +34,9 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             app.picker_dir.display(),
             app.picker_filter,
         );
+        let block = chrome::popup_block(title, &app.theme);
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(title))
+            .block(block)
             .highlight_style(Style::default().add_modifier(Modifier::BOLD))
             .highlight_symbol("▸ ");
         let mut state = ListState::default();
@@ -44,15 +47,15 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         return;
     }
 
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(app.theme.fg_dim);
     let items: Vec<ListItem> = app
         .files_cache
         .iter()
         .map(|file| {
             let ok = file.status == "ok";
-            let status_style = if ok { dim } else { Style::default().fg(Color::Yellow) };
+            let status_style = if ok { dim } else { Style::default().fg(app.theme.warning) };
             ListItem::new(Line::from(vec![
-                Span::styled(file.name.clone(), Style::default().fg(Color::White)),
+                Span::styled(file.name.clone(), Style::default().fg(app.theme.fg)),
                 Span::styled(format!("  {}", crate::app::human_size(file.size)), dim),
                 Span::styled(format!("  {}", file.status), status_style),
             ]))
@@ -77,12 +80,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     };
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(title),
-        )
+        .block(chrome::popup_block(title, &app.theme))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol("▸ ");
     let mut state = ListState::default();
