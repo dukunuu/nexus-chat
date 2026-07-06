@@ -526,6 +526,8 @@ impl App {
         let citations = crate::citations::parse_citations(&msg.content);
         match citations.iter().find(|(num, _)| *num == n) {
             Some((_, url)) => {
+                // Don't actually launch a browser under `cargo test`.
+                #[cfg(not(test))]
                 let _ = open::that_detached(url);
                 self.status = format!("opened [{n}]: {url}");
             }
