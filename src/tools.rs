@@ -260,6 +260,18 @@ impl ToolBox {
                 "required": ["url"],
             }),
         });
+        defs.push(ToolDef {
+            name: "academic_search".to_string(),
+            description: "Search scholarly literature (Semantic Scholar): title, authors, year, venue, abstract, citation count, and URL per paper. Use for research topics needing peer-reviewed sources.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "the search query" },
+                    "limit": { "type": "integer", "description": "max papers to return (default 10, max 20)" },
+                },
+                "required": ["query"],
+            }),
+        });
         if self.files_count() > 0 {
             defs.push(ToolDef {
                 name: "search_files".to_string(),
@@ -340,7 +352,7 @@ impl ToolBox {
             });
         }
         if self.research_only {
-            defs.retain(|d| d.name == "web_search" || d.name == "fetch_url");
+            defs.retain(|d| matches!(d.name.as_str(), "web_search" | "fetch_url" | "academic_search"));
         }
         defs
     }
@@ -369,7 +381,7 @@ impl ToolBox {
     /// Run a tool by name. Returns `(result text sent back to the model,
     /// status label shown in the UI while it runs)`.
     pub async fn run(&self, name: &str, args: &str) -> (String, String) {
-        if self.research_only && !matches!(name, "web_search" | "fetch_url") {
+        if self.research_only && !matches!(name, "web_search" | "fetch_url" | "academic_search") {
             return (
                 format!("tool '{name}' is not available in research mode"),
                 "blocked".to_string(),
@@ -624,6 +636,18 @@ impl ToolBox {
                         }
                     }
                     Err(e) => format!("fetch failed: {e}"),
+                };
+                (result, status)
+            }
+            "academic_search" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let query = v.get("query").and_then(|q| q.as_str()).unwrap_or_default().to_string();
+                let limit = v.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
+                let status = "Searching academic literature…".to_string();
+                let result = match academic_search(&self.client, &query, limit).await {
+                    Ok(papers) if papers.is_empty() => "no results".to_string(),
+                    Ok(papers) => format_papers(&papers),
+                    Err(e) => format!("academic search failed: {e}"),
                 };
                 (result, status)
             }
@@ -1284,6 +1308,94 @@ fn strip_html_to_text(html: &str) -> String {
         .join("\n")
 }
 
+/// One scholarly-paper hit, flattened from the Semantic Scholar response.
+struct Paper {
+    title: String,
+    authors: Vec<String>,
+    year: Option<i64>,
+    venue: Option<String>,
+    abstract_snippet: Option<String>,
+    citation_count: Option<i64>,
+    url: String,
+}
+
+#[derive(Deserialize)]
+struct SemanticScholarResponse {
+    #[serde(default)]
+    data: Vec<SemanticScholarPaper>,
+}
+
+#[derive(Deserialize)]
+struct SemanticScholarPaper {
+    title: String,
+    #[serde(default)]
+    authors: Vec<SemanticScholarAuthor>,
+    year: Option<i64>,
+    venue: Option<String>,
+    #[serde(rename = "abstract")]
+    abstract_snippet: Option<String>,
+    #[serde(rename = "citationCount")]
+    citation_count: Option<i64>,
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SemanticScholarAuthor {
+    name: String,
+}
+
+/// Semantic Scholar Graph API (api.semanticscholar.org): free, keyless.
+/// A 429 (rate limited) surfaces as an error the caller turns into
+/// tool-result text — the model falls back to web_search.
+async fn academic_search(client: &reqwest::Client, query: &str, limit: usize) -> anyhow::Result<Vec<Paper>> {
+    let req = client.get("https://api.semanticscholar.org/graph/v1/paper/search").query(&[
+        ("query", query),
+        ("limit", &limit.min(20).to_string()),
+        ("fields", "title,authors,year,venue,abstract,citationCount,url"),
+    ]);
+    let resp = send_and_parse::<SemanticScholarResponse>(req).await?;
+    Ok(resp
+        .data
+        .into_iter()
+        .map(|p| Paper {
+            title: p.title,
+            authors: p.authors.into_iter().map(|a| a.name).collect(),
+            year: p.year,
+            venue: p.venue,
+            abstract_snippet: p.abstract_snippet,
+            citation_count: p.citation_count,
+            url: p.url.unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// Numbered scholarly-paper results the model cites the same way as
+/// `format_results`' web hits: `[n]` inline, matched against this list.
+fn format_papers(papers: &[Paper]) -> String {
+    papers
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let mut meta = Vec::new();
+            if !p.authors.is_empty() {
+                meta.push(p.authors.join(", "));
+            }
+            if let Some(y) = p.year {
+                meta.push(y.to_string());
+            }
+            if let Some(v) = &p.venue {
+                meta.push(v.clone());
+            }
+            if let Some(c) = p.citation_count {
+                meta.push(format!("{c} citations"));
+            }
+            let abs = p.abstract_snippet.as_deref().unwrap_or("");
+            format!("[{}] {}\n    {}\n    {abs}\n    {}", i + 1, p.title, meta.join(" · "), p.url)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// Normalize a source URL for dedup: lowercase the host only (path/query
 /// case is preserved — some servers are case-sensitive there), strip
 /// `utm_*`/`fbclid` query params, and drop a trailing `/` and any fragment.
@@ -1422,6 +1534,53 @@ mod tests {
         );
         assert_eq!(out, "rust async runtimes site:docs.rs -site:reddit.com -site:quora.com");
         assert_eq!(rewrite_query_with_domains("q", &[], &[]), "q");
+    }
+
+    #[test]
+    fn formats_papers_as_numbered_list_with_metadata() {
+        let papers = vec![Paper {
+            title: "Attention Is All You Need".into(),
+            authors: vec!["A. Vaswani".into(), "N. Shazeer".into()],
+            year: Some(2017),
+            venue: Some("NeurIPS".into()),
+            abstract_snippet: Some("We propose a new architecture...".into()),
+            citation_count: Some(90000),
+            url: "https://www.semanticscholar.org/paper/abc".into(),
+        }];
+        let out = format_papers(&papers);
+        assert!(out.contains("[1] Attention Is All You Need"));
+        assert!(out.contains("A. Vaswani, N. Shazeer"));
+        assert!(out.contains("2017"));
+        assert!(out.contains("NeurIPS"));
+        assert!(out.contains("90000 citations"));
+        assert!(out.contains("https://www.semanticscholar.org/paper/abc"));
+    }
+
+    #[test]
+    fn format_papers_handles_missing_optional_fields() {
+        let papers = vec![Paper {
+            title: "Untitled Preprint".into(),
+            authors: vec![],
+            year: None,
+            venue: None,
+            abstract_snippet: None,
+            citation_count: None,
+            url: "https://x".into(),
+        }];
+        let out = format_papers(&papers);
+        assert!(out.contains("[1] Untitled Preprint"));
+        assert!(out.contains("https://x"));
+    }
+
+    #[test]
+    fn parses_semantic_scholar_response_json() {
+        let json = r#"{"data":[
+            {"title":"A","authors":[{"name":"X"}],"year":2020,"venue":"V","abstract":"abs","citationCount":5,"url":"https://s2/a"}
+        ]}"#;
+        let resp: SemanticScholarResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.data.len(), 1);
+        assert_eq!(resp.data[0].title, "A");
+        assert_eq!(resp.data[0].authors[0].name, "X");
     }
 
     #[test]
@@ -1849,12 +2008,13 @@ mod tests {
     }
 
     #[test]
-    fn research_toolbox_only_offers_web_search_and_fetch_url() {
+    fn research_toolbox_offers_web_search_fetch_url_and_academic_search() {
         let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new(), None);
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
-        assert_eq!(names.len(), 2, "{names:?}");
+        assert_eq!(names.len(), 3, "{names:?}");
         assert!(names.contains(&"web_search".to_string()));
         assert!(names.contains(&"fetch_url".to_string()));
+        assert!(names.contains(&"academic_search".to_string()));
     }
 
     #[tokio::test]
