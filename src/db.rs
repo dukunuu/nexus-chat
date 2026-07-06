@@ -174,7 +174,14 @@ impl Db {
                 description TEXT,
                 created_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_message_images_message ON message_images(message_id);",
+            CREATE INDEX IF NOT EXISTS idx_message_images_message ON message_images(message_id);
+            CREATE TABLE IF NOT EXISTS web_cache (
+                url_norm   TEXT PRIMARY KEY,
+                url        TEXT NOT NULL,
+                title      TEXT,
+                text       TEXT NOT NULL,
+                fetched_at TEXT NOT NULL
+            );",
         )?;
         // Columns added after v1; ignore "duplicate column" on existing dbs.
         for stmt in [
@@ -680,6 +687,42 @@ pub fn blob_to_vec(b: &[u8]) -> Vec<f32> {
     b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
+/// Whether a cached fetch (`fetched_at`, rfc3339) is still usable — under
+/// 24h old. An unparseable timestamp is treated as stale, not an error:
+/// the caller just re-fetches live.
+pub fn is_fresh(fetched_at: &str, now: chrono::DateTime<Utc>) -> bool {
+    chrono::DateTime::parse_from_rfc3339(fetched_at)
+        .map(|dt| now.signed_duration_since(dt) < chrono::Duration::hours(24))
+        .unwrap_or(false)
+}
+
+/// A cached fetched page: (title, text, fetched_at rfc3339), or None on a
+/// cache miss. Free function — the toolbox opens its own short-lived
+/// connection by path, same as the file-search queries.
+pub fn cache_get(conn: &Connection, url_norm: &str) -> Result<Option<(String, String, String)>> {
+    let row = conn.query_row(
+        "SELECT COALESCE(title, ''), text, fetched_at FROM web_cache WHERE url_norm = ?1",
+        [url_norm],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    );
+    match row {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Write (or overwrite) a fetched page into the cache, stamped now.
+pub fn cache_put(conn: &Connection, url_norm: &str, url: &str, title: Option<&str>, text: &str) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO web_cache (url_norm, url, title, text, fetched_at) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(url_norm) DO UPDATE SET url = ?2, title = ?3, text = ?4, fetched_at = ?5",
+        (url_norm, url, title, text, &now),
+    )?;
+    Ok(())
+}
+
 /// Ids of files (in one space) that have chunks but not a vector per chunk —
 /// the embedder's work queue, which doubles as the pre-upgrade backfill.
 pub fn files_missing_embeddings(conn: &Connection, space_id: &str) -> Result<Vec<String>> {
@@ -805,6 +848,33 @@ pub fn count_files(conn: &Connection, space_id: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_fresh_true_under_24h_false_over() {
+        let now = Utc::now();
+        let recent = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let stale = (now - chrono::Duration::hours(25)).to_rfc3339();
+        assert!(is_fresh(&recent, now));
+        assert!(!is_fresh(&stale, now));
+        assert!(!is_fresh("not a timestamp", now)); // unparseable = not fresh
+    }
+
+    #[test]
+    fn web_cache_roundtrips_and_updates_on_rewrite() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(cache_get(db.raw(), "example.com/a").unwrap().is_none());
+        cache_put(db.raw(), "example.com/a", "https://example.com/a", Some("Title"), "body text").unwrap();
+        let (title, text, fetched_at) = cache_get(db.raw(), "example.com/a").unwrap().unwrap();
+        assert_eq!(title, "Title");
+        assert_eq!(text, "body text");
+        assert!(!fetched_at.is_empty());
+
+        // Re-fetching overwrites the row, not duplicates it.
+        cache_put(db.raw(), "example.com/a", "https://example.com/a", None, "new body").unwrap();
+        let (title, text, _) = cache_get(db.raw(), "example.com/a").unwrap().unwrap();
+        assert_eq!(title, "");
+        assert_eq!(text, "new body");
+    }
 
     #[test]
     fn session_and_message_roundtrip() {

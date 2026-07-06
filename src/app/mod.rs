@@ -692,6 +692,7 @@ impl App {
             None,
             "auto".to_string(),
             Vec::new(),
+            Some(space.db_path()),
             Some(crate::tools::FilesCtx {
                 db_path: space.db_path(),
                 space_id: active_space.id.clone(),
@@ -899,6 +900,7 @@ impl App {
             key,
             self.search_provider.clone(),
             self.blocked_domains(),
+            Some(self.space.db_path()),
             Some(crate::tools::FilesCtx {
                 db_path: self.space.db_path(),
                 space_id: self.active_space.id.clone(),

@@ -364,8 +364,13 @@ impl super::App {
 
         let searxng_url = (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
         let langsearch_key = (!self.langsearch_key.trim().is_empty()).then(|| self.langsearch_key.trim().to_string());
-        let toolbox =
-            Arc::new(ToolBox::research(searxng_url, langsearch_key, self.search_provider.clone(), self.blocked_domains()));
+        let toolbox = Arc::new(ToolBox::research(
+            searxng_url,
+            langsearch_key,
+            self.search_provider.clone(),
+            self.blocked_domains(),
+            Some(self.space.db_path()),
+        ));
 
         let (tx, rx) = mpsc::unbounded_channel();
         self.research_rx = Some(rx);

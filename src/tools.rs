@@ -26,6 +26,9 @@ pub struct ToolBox {
     /// Domains a per-space setting always excludes from `web_search` results
     /// (appended to any exclude_domains the model passes).
     pub blocked_domains: Vec<String>,
+    /// Db path for the (space-agnostic) fetched-page cache; None disables
+    /// caching (some tests).
+    web_cache_db: Option<PathBuf>,
     client: reqwest::Client,
     files: Option<FilesCtx>,
     apps: Option<AppsCtx>,
@@ -55,6 +58,7 @@ impl ToolBox {
         langsearch_key: Option<String>,
         search_provider: String,
         blocked_domains: Vec<String>,
+        web_cache_db: Option<PathBuf>,
         files: Option<FilesCtx>,
         apps: Option<AppsCtx>,
     ) -> Self {
@@ -65,6 +69,7 @@ impl ToolBox {
             search_provider,
             research_only: false,
             blocked_domains,
+            web_cache_db,
             client: reqwest::Client::new(),
             files,
             apps,
@@ -78,9 +83,18 @@ impl ToolBox {
         langsearch_key: Option<String>,
         search_provider: String,
         blocked_domains: Vec<String>,
+        web_cache_db: Option<PathBuf>,
     ) -> Self {
-        let mut tb =
-            ToolBox::new(PathBuf::new(), searxng_url, langsearch_key, search_provider, blocked_domains, None, None);
+        let mut tb = ToolBox::new(
+            PathBuf::new(),
+            searxng_url,
+            langsearch_key,
+            search_provider,
+            blocked_domains,
+            web_cache_db,
+            None,
+            None,
+        );
         tb.research_only = true;
         tb
     }
@@ -128,6 +142,29 @@ impl ToolBox {
                 }
             }
         }
+    }
+
+    /// Fetch through the cache: serve a fresh (<24h) cached copy unless
+    /// `force_fresh`, else live-fetch and write through. Cache read/write
+    /// failures degrade to a live fetch — a broken db must never block a
+    /// tool call.
+    async fn fetch_cached(&self, url: &str, force_fresh: bool) -> anyhow::Result<String> {
+        let url_norm = normalize_url(url);
+        if !force_fresh
+            && let Some(db_path) = &self.web_cache_db
+            && let Ok(conn) = rusqlite::Connection::open(db_path)
+            && let Ok(Some((_, text, fetched_at))) = crate::db::cache_get(&conn, &url_norm)
+            && crate::db::is_fresh(&fetched_at, chrono::Utc::now())
+        {
+            return Ok(text);
+        }
+        let text = fetch_url_text(&self.client, url).await?;
+        if let Some(db_path) = &self.web_cache_db
+            && let Ok(conn) = rusqlite::Connection::open(db_path)
+        {
+            let _ = crate::db::cache_put(&conn, &url_norm, url, None, &text);
+        }
+        Ok(text)
     }
 
     /// Tool definitions to attach to the request, or empty to send a request
@@ -218,6 +255,7 @@ impl ToolBox {
                     "url": { "type": "string", "description": "the page URL to fetch" },
                     "offset": { "type": "integer", "description": "1-based first line to read (default 1)" },
                     "limit": { "type": "integer", "description": "lines to read, max 200 (default 200)" },
+                    "fresh": { "type": "boolean", "description": "bypass the 24h page cache and re-fetch live" },
                 },
                 "required": ["url"],
             }),
@@ -566,8 +604,9 @@ impl ToolBox {
                 let url = v.get("url").and_then(|u| u.as_str()).unwrap_or_default().to_string();
                 let offset = v.get("offset").and_then(|o| o.as_u64()).unwrap_or(1).max(1) as usize;
                 let limit = v.get("limit").and_then(|l| l.as_u64()).unwrap_or(200).clamp(1, 200) as usize;
+                let fresh = v.get("fresh").and_then(|f| f.as_bool()).unwrap_or(false);
                 let status = format!("Fetching {url}…");
-                let result = match fetch_url_text(&self.client, &url).await {
+                let result = match self.fetch_cached(&url, fresh).await {
                     Ok(text) => {
                         let lines: Vec<&str> = text.lines().collect();
                         let total = lines.len();
@@ -1338,6 +1377,19 @@ fn format_results(hits: &[SearchHit]) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn fetch_url_serves_from_cache_when_fresh() {
+        let path = std::env::temp_dir().join(format!("nexus-webcache-{}.db", uuid::Uuid::new_v4()));
+        let db = crate::db::Db::open(&path).unwrap();
+        crate::db::cache_put(db.raw(), "https://example.com/a", "https://example.com/a", None, "cached body")
+            .unwrap();
+        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), Some(path), None, None);
+        // A cache hit must not attempt the network — the result is the cached
+        // text, not a "fetch failed" error.
+        let (result, _) = tb.run("fetch_url", r#"{"url":"https://example.com/a"}"#).await;
+        assert!(result.contains("cached body"), "{result}");
+    }
+
     #[test]
     fn normalize_url_lowercases_host_strips_tracking_params_and_trailing_slash() {
         assert_eq!(
@@ -1420,11 +1472,11 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_choice_errors_clearly_when_unconfigured_instead_of_swapping() {
-        let tb = ToolBox::new(PathBuf::new(), None, None, "langsearch".to_string(), Vec::new(), None, None);
+        let tb = ToolBox::new(PathBuf::new(), None, None, "langsearch".to_string(), Vec::new(), None, None, None);
         let err = tb.search("test", None, &[], &[]).await.unwrap_err();
         assert!(err.to_string().contains("LangSearch selected but no API key"));
 
-        let tb = ToolBox::new(PathBuf::new(), None, None, "searxng".to_string(), Vec::new(), None, None);
+        let tb = ToolBox::new(PathBuf::new(), None, None, "searxng".to_string(), Vec::new(), None, None, None);
         let err = tb.search("test", None, &[], &[]).await.unwrap_err();
         assert!(err.to_string().contains("SearXNG selected but no instance URL"));
     }
@@ -1439,6 +1491,7 @@ mod tests {
             None,
             "auto".to_string(),
             Vec::new(),
+            None,
             None,
             None,
         );
@@ -1540,6 +1593,7 @@ mod tests {
             None,
             "auto".to_string(),
             Vec::new(),
+            None,
             Some(FilesCtx { db_path: path, space_id: space.clone(), embedder: None }),
             None,
         );
@@ -1550,7 +1604,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nexus-skills-tb-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("t")).unwrap();
         std::fs::write(dir.join("t/SKILL.md"), "---\nname: t\ndescription: d\n---\nx").unwrap();
-        let tb = ToolBox::new(dir.clone(), None, None, "auto".to_string(), Vec::new(), None, None);
+        let tb = ToolBox::new(dir.clone(), None, None, "auto".to_string(), Vec::new(), None, None, None);
         (tb, dir)
     }
 
@@ -1591,7 +1645,7 @@ mod tests {
     #[tokio::test]
     async fn run_python_computes_in_scratch_venv() {
         let dir = std::env::temp_dir().join(format!("nexus-py-{}", uuid::Uuid::new_v4()));
-        let tb = ToolBox::new(dir.join("skills"), None, None, "auto".to_string(), Vec::new(), None, None);
+        let tb = ToolBox::new(dir.join("skills"), None, None, "auto".to_string(), Vec::new(), None, None, None);
         let (result, status) = tb.run("run_python", r#"{"code":"print(2**32)"}"#).await;
         assert!(status.contains("Running python"));
         assert!(result.contains("4294967296"), "{result}");
@@ -1630,7 +1684,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_skill_rejects_bad_shorthand_without_network() {
-        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None);
+        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None, None);
         let (result, status) = tb.run("install_skill", r#"{"source":"nope"}"#).await;
         assert!(status.contains("Installing skill"));
         assert!(result.contains("invalid source"), "{result}");
@@ -1643,14 +1697,14 @@ mod tests {
         assert!(names.contains(&"search_files".to_string()));
         assert!(names.contains(&"read_file".to_string()));
 
-        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None);
+        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None, None);
         let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
         assert!(!names.contains(&"search_files".to_string()));
     }
 
     #[test]
     fn fetch_url_is_always_available() {
-        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None);
+        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None, None);
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
         assert!(names.contains(&"fetch_url".to_string()));
         assert!(names.contains(&"web_search".to_string()));
@@ -1716,6 +1770,7 @@ mod tests {
             "auto".to_string(),
             Vec::new(),
             None,
+            None,
             Some(AppsCtx { dir: dir.clone(), space_url: "http://127.0.0.1:9999/default/".to_string() }),
         );
         (tb, dir)
@@ -1728,7 +1783,7 @@ mod tests {
         for t in ["write_file", "edit_file", "read_app_file"] {
             assert!(names.contains(&t.to_string()), "missing {t}");
         }
-        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None);
+        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None, None);
         let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
         assert!(!names.contains(&"write_file".to_string()));
     }
@@ -1795,7 +1850,7 @@ mod tests {
 
     #[test]
     fn research_toolbox_only_offers_web_search_and_fetch_url() {
-        let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new());
+        let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new(), None);
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
         assert_eq!(names.len(), 2, "{names:?}");
         assert!(names.contains(&"web_search".to_string()));
@@ -1804,7 +1859,7 @@ mod tests {
 
     #[tokio::test]
     async fn research_toolbox_refuses_to_run_other_tools() {
-        let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new());
+        let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new(), None);
         let (result, _) = tb.run("run_python", r#"{"code":"print(1)"}"#).await;
         assert!(result.contains("not available in research mode"), "{result}");
     }
