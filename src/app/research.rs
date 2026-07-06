@@ -111,8 +111,20 @@ pub(crate) fn parse_critique(text: &str) -> Critique {
     Critique::Satisfied
 }
 
-fn planner_messages(topic: &str) -> Vec<ChatMessage> {
-    vec![ChatMessage::text("system", PLANNER_PROMPT), ChatMessage::text("user", topic)]
+/// The Planner's request, with any locally-known context (chunks from the
+/// space's own files, semantically matched to the topic) framed as "already
+/// known — plan sub-questions for the gaps".
+fn planner_messages_with_context(topic: &str, known: &[String]) -> Vec<ChatMessage> {
+    let user = if known.is_empty() {
+        topic.to_string()
+    } else {
+        format!(
+            "Topic: {topic}\n\nAlready known (from the user's own files) — plan sub-questions \
+             for the gaps, not what's already covered:\n{}",
+            known.join("\n\n")
+        )
+    };
+    vec![ChatMessage::text("system", PLANNER_PROMPT), ChatMessage::text("user", user)]
 }
 
 fn synthesizer_messages(topic: &str, findings: &[String]) -> Vec<ChatMessage> {
@@ -180,8 +192,8 @@ async fn complete_text(provider: &OpenRouter, model: &str, messages: Vec<ChatMes
     provider.complete(model, messages).await.map(|s| s.trim().to_string()).map_err(|e| e.to_string())
 }
 
-async fn plan(provider: &OpenRouter, model: &str, topic: &str) -> Result<Vec<String>, String> {
-    let text = complete_text(provider, model, planner_messages(topic)).await?;
+async fn plan(provider: &OpenRouter, model: &str, topic: &str, known: &[String]) -> Result<Vec<String>, String> {
+    let text = complete_text(provider, model, planner_messages_with_context(topic, known)).await?;
     let qs = parse_subquestions(&text);
     if qs.is_empty() {
         return Err(format!("planner returned no usable sub-questions (raw reply: {text:.200})"));
@@ -262,6 +274,8 @@ pub(crate) async fn run_research(
     provider: OpenRouter,
     research_model: String,
     escalation_model: String,
+    embedding_model: String,
+    db_path: std::path::PathBuf,
     topic: String,
     toolbox: Arc<ToolBox>,
     tx: mpsc::UnboundedSender<ResearchMsg>,
@@ -269,9 +283,38 @@ pub(crate) async fn run_research(
     space_id: String,
     space_name: String,
 ) {
+    let known = local_known_chunks(&provider, &embedding_model, &db_path, &space_id, &topic).await;
     let ids = (session_id, space_id, space_name);
-    let result = run_research_inner(&provider, &research_model, &escalation_model, &topic, &toolbox, &tx, &ids).await;
+    let result =
+        run_research_inner(&provider, &research_model, &escalation_model, &topic, &known, &toolbox, &tx, &ids).await;
     let _ = tx.send((ids.0, ids.1, ids.2, ResearchUpdate::Done(result)));
+}
+
+/// Top-k chunks from the space's files already relevant to `topic`, for the
+/// Planner's "already known" context — silently empty when embeddings are
+/// unconfigured, embedding fails, or the space has no files (never blocks
+/// `/research` on any of those).
+async fn local_known_chunks(
+    provider: &OpenRouter,
+    embedding_model: &str,
+    db_path: &std::path::Path,
+    space_id: &str,
+    topic: &str,
+) -> Vec<String> {
+    if embedding_model.trim().is_empty() {
+        return Vec::new();
+    }
+    let Ok(mut vecs) = provider.embed(embedding_model, vec![topic.to_string()]).await else {
+        return Vec::new();
+    };
+    if vecs.is_empty() {
+        return Vec::new();
+    }
+    let query = vecs.remove(0);
+    let Ok(conn) = rusqlite::Connection::open(db_path) else { return Vec::new() };
+    crate::db::semantic_chunks(&conn, space_id, &query, 5)
+        .map(|hits| hits.into_iter().map(|(name, loc, text, _)| format!("{name} ({loc}): {text}")).collect())
+        .unwrap_or_default()
 }
 
 async fn run_research_inner(
@@ -279,12 +322,13 @@ async fn run_research_inner(
     research_model: &str,
     escalation_model: &str,
     topic: &str,
+    known: &[String],
     toolbox: &Arc<ToolBox>,
     tx: &mpsc::UnboundedSender<ResearchMsg>,
     ids: &(String, String, String),
 ) -> Result<String, String> {
     send_stage(tx, ids, "planning…");
-    let questions = plan(provider, research_model, topic).await?;
+    let questions = plan(provider, research_model, topic, known).await?;
 
     let mut findings = run_searchers(provider, research_model, toolbox, &questions, tx, ids, 1).await;
 
@@ -388,6 +432,8 @@ impl super::App {
             provider,
             research_model,
             escalation_model,
+            self.embedding_model.trim().to_string(),
+            self.space.db_path(),
             topic,
             toolbox,
             tx,
@@ -486,6 +532,13 @@ impl super::App {
         if std::fs::write(dir.join(&name), report).is_err() {
             return;
         }
+        // Index the report's cited sources for list_citations.
+        let citations = crate::citations::parse_citations(report);
+        if !citations.is_empty() {
+            // Titles aren't in the Sources-list format; index url only.
+            let rows: Vec<(String, Option<String>)> = citations.into_iter().map(|(_, url)| (url, None)).collect();
+            let _ = self.db.add_citations(space_id, &name, &rows);
+        }
         if space_id == self.active_space.id {
             self.rescan_files();
         }
@@ -505,6 +558,50 @@ mod tests {
         std::fs::create_dir_all(root.join("spaces")).unwrap();
         let space = Space { root };
         App::new(db, Some("k".into()), space)
+    }
+
+    #[test]
+    fn planner_messages_with_context_includes_known_chunks_as_gap_guidance() {
+        let msgs = planner_messages_with_context(
+            "rust async runtimes",
+            &["Rust's async model uses a Future trait.".to_string()],
+        );
+        assert_eq!(msgs[0].role, "system");
+        assert!(msgs[1].content.contains("rust async runtimes"));
+        assert!(msgs[1].content.contains("Already known"));
+        assert!(msgs[1].content.contains("Future trait"));
+    }
+
+    #[test]
+    fn planner_messages_with_context_falls_back_to_plain_prompt_when_empty() {
+        let msgs = planner_messages_with_context("topic", &[]);
+        assert!(!msgs[1].content.contains("Already known"));
+        assert_eq!(msgs[1].content, "topic");
+    }
+
+    #[tokio::test]
+    async fn on_research_done_final_report_populates_citation_index() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("rust async runtimes");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        let space_id = a.active_space.id.clone();
+        let space_name = a.active_space.name.clone();
+
+        a.on_research_done(Some((
+            session_id,
+            space_id.clone(),
+            space_name,
+            ResearchUpdate::Done(Ok(
+                "# Report\n\nBody [1].\n\n## Sources\n1. https://example.com/a\n".to_string()
+            )),
+        )));
+
+        let hits = a.db.search_citations(&space_id, Some("example.com")).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1, "https://example.com/a");
+        // And a miss filter returns nothing.
+        assert!(a.db.search_citations(&space_id, Some("nope.example")).unwrap().is_empty());
     }
 
     #[test]

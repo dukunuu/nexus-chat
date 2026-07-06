@@ -183,7 +183,15 @@ impl Db {
                 title      TEXT,
                 text       TEXT NOT NULL,
                 fetched_at TEXT NOT NULL
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS citations (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                space_id    TEXT NOT NULL,
+                report_file TEXT NOT NULL,
+                url         TEXT NOT NULL,
+                title       TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_citations_space ON citations(space_id);",
         )?;
         // Columns added after v1; ignore "duplicate column" on existing dbs.
         for stmt in [
@@ -676,6 +684,25 @@ impl Db {
         files_missing_embeddings(&self.conn, space_id)
     }
 
+    /// Record a research report's cited sources for the citation index.
+    pub fn add_citations(&self, space_id: &str, report_file: &str, citations: &[(String, Option<String>)]) -> Result<()> {
+        for (url, title) in citations {
+            self.conn.execute(
+                "INSERT INTO citations (space_id, report_file, url, title) VALUES (?1, ?2, ?3, ?4)",
+                (space_id, report_file, url, title),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// See the free function of the same name. Production code reads
+    /// citations through the toolbox's own connection; this handle exists
+    /// for tests.
+    #[cfg(test)]
+    pub fn search_citations(&self, space_id: &str, query: Option<&str>) -> Result<Vec<(String, String, String)>> {
+        search_citations(&self.conn, space_id, query)
+    }
+
     /// Store embedding vectors for a file's chunks as `(seq, vector)` pairs.
     pub fn set_chunk_embeddings(&self, file_id: &str, vecs: &[(i64, Vec<f32>)]) -> Result<()> {
         for (seq, v) in vecs {
@@ -696,6 +723,22 @@ pub fn vec_to_blob(v: &[f32]) -> Vec<u8> {
 /// Decode a BLOB back into an embedding (inverse of `vec_to_blob`).
 pub fn blob_to_vec(b: &[u8]) -> Vec<f32> {
     b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+}
+
+/// Citations in `space_id` whose url/title/report_file contains `query`
+/// (case-insensitive substring), or every row when `query` is None — as
+/// `(report_file, url, title)`, newest first. Free function so the toolbox
+/// can call it over its own short-lived connection.
+pub fn search_citations(conn: &Connection, space_id: &str, query: Option<&str>) -> Result<Vec<(String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT report_file, url, COALESCE(title, '') FROM citations
+         WHERE space_id = ?1
+           AND (?2 IS NULL OR url LIKE ?2 OR title LIKE ?2 OR report_file LIKE ?2)
+         ORDER BY id DESC",
+    )?;
+    let pattern = query.map(|q| format!("%{q}%"));
+    let rows = stmt.query_map((space_id, pattern), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// Whether a cached fetch (`fetched_at`, rfc3339) is still usable — under

@@ -272,6 +272,16 @@ impl ToolBox {
                 "required": ["query"],
             }),
         });
+        if self.files.is_some() {
+            defs.push(ToolDef {
+                name: "list_citations".to_string(),
+                description: "List sources cited in past research reports in this space, optionally filtered by a substring match against url/title/report name. Use to answer 'what have we researched about X' or 'which reports cite <site>'.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "query": { "type": "string", "description": "substring to match (omit to list everything)" } },
+                }),
+            });
+        }
         if self.files_count() > 0 {
             defs.push(ToolDef {
                 name: "search_files".to_string(),
@@ -648,6 +658,34 @@ impl ToolBox {
                     Ok(papers) if papers.is_empty() => "no results".to_string(),
                     Ok(papers) => format_papers(&papers),
                     Err(e) => format!("academic search failed: {e}"),
+                };
+                (result, status)
+            }
+            "list_citations" => {
+                let query = serde_json::from_str::<serde_json::Value>(args)
+                    .ok()
+                    .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(str::to_string));
+                let status = "Listing citations…".to_string();
+                let result = match &self.files {
+                    None => "no space context available".to_string(),
+                    Some(ctx) => match rusqlite::Connection::open(&ctx.db_path) {
+                        Err(e) => format!("citation lookup failed: {e}"),
+                        Ok(conn) => match crate::db::search_citations(&conn, &ctx.space_id, query.as_deref()) {
+                            Ok(rows) if rows.is_empty() => "no citations recorded yet".to_string(),
+                            Ok(rows) => rows
+                                .iter()
+                                .map(|(report, url, title)| {
+                                    if title.is_empty() {
+                                        format!("{report}: {url}")
+                                    } else {
+                                        format!("{report}: {url} ({title})")
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            Err(e) => format!("citation lookup failed: {e}"),
+                        },
+                    },
                 };
                 (result, status)
             }
@@ -1488,6 +1526,18 @@ fn format_results(hits: &[SearchHit]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn list_citations_reports_recorded_sources_and_filters_by_query() {
+        let (tb, db, space) = files_toolbox();
+        db.add_citations(&space, "research-a.md", &[("https://nature.com/x".to_string(), None)]).unwrap();
+        let (result, _) = tb.run("list_citations", r#"{}"#).await;
+        assert!(result.contains("research-a.md"), "{result}");
+        assert!(result.contains("nature.com"), "{result}");
+
+        let (result, _) = tb.run("list_citations", r#"{"query":"nope"}"#).await;
+        assert!(result.contains("no citations"), "{result}");
+    }
 
     #[tokio::test]
     async fn fetch_url_serves_from_cache_when_fresh() {
