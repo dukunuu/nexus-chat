@@ -502,6 +502,8 @@ pub struct App {
     pub skills: Vec<crate::skills::Skill>,
     /// A skill armed by `/<skill-name>`, injected into the next message only.
     pub(crate) forced_skill: Option<String>,
+    /// `/web` answer mode for the active session (or the next one created).
+    pub web_mode: bool,
     pub(crate) toolbox: std::sync::Arc<crate::tools::ToolBox>,
     /// Local static server for model-created apps (None if it failed to bind).
     pub app_server: Option<crate::appserver::AppServer>,
@@ -714,6 +716,7 @@ impl App {
             langsearch_key: String::new(),
             search_provider: "auto".to_string(),
             forced_skill: None,
+            web_mode: false,
             toolbox,
             app_server: None,
             skills_mode: SkillsMode::Browse,
@@ -1130,6 +1133,7 @@ impl App {
             "apps" => self.open_apps_popup(),
             "ocr-local" => self.ocr_local_install(cmd[token.len()..].trim()),
             "research" => self.start_research(cmd[token.len()..].trim()),
+            "web" => self.toggle_web_mode(),
             "edit" => self.request_app_file_edit(cmd[token.len()..].trim()),
             other => {
                 if self.skills.iter().any(|s| s.name == other) {

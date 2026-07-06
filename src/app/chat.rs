@@ -53,7 +53,12 @@ impl App {
         // Auto-create a session on the first message.
         if self.session.is_none() {
             let title = title_from(&text);
-            let s = self.db.create_session(&title, &model, &self.active_space.id)?;
+            let mut s = self.db.create_session(&title, &model, &self.active_space.id)?;
+            // Carry a pre-session `/web` toggle onto the session it creates.
+            if self.web_mode {
+                s.web_mode = true;
+                let _ = self.db.set_session_web_mode(&s.id, true);
+            }
             self.session = Some(s);
         }
         let session_id = self.session.as_ref().unwrap().id.clone();
@@ -486,7 +491,24 @@ impl App {
         if !memory.trim().is_empty() {
             parts.push(format!("## Memory\n{memory}"));
         }
+        if self.web_mode {
+            let today = Utc::now().format("%Y-%m-%d").to_string();
+            parts.push(web_mode_clause(&today));
+        }
         parts.join("\n\n")
+    }
+
+    /// `/web`: flip web answer mode for the active (or about-to-be-created)
+    /// session. Persisted immediately if a session already exists; otherwise
+    /// applied to the session created by the next message.
+    pub(crate) fn toggle_web_mode(&mut self) {
+        self.web_mode = !self.web_mode;
+        if let Some(session) = self.session.as_mut() {
+            session.web_mode = self.web_mode;
+            let _ = self.db.set_session_web_mode(&session.id, self.web_mode);
+        }
+        self.status =
+            if self.web_mode { "🌐 web mode on".to_string() } else { "web mode off".to_string() };
     }
 
     /// `base_system_prompt` (raw, as read from `system_prompt.md`) with the
@@ -629,6 +651,19 @@ pub(super) fn pick_flavor() -> (usize, Color) {
 }
 
 /// Short session title from the first user message.
+/// The instruction block appended to the system prompt when web mode is on:
+/// forces search-first, inline `[n]` citations, and a trailing Sources list.
+/// `today` keeps the model from hedging with stale training-data dates.
+pub(super) fn web_mode_clause(today: &str) -> String {
+    format!(
+        "Web answer mode is ON for this session. Today's date is {today}. Before answering, you \
+         MUST call web_search (and fetch_url on the most promising results) — never answer from \
+         memory alone. Cite every claim inline as [n], and end your reply with a line starting \
+         exactly with 'Sources:' followed by the numbered list of URLs you used, one per line, \
+         matching your [n] citations."
+    )
+}
+
 pub(super) fn title_from(text: &str) -> String {
     let t: String = text.chars().take(40).collect();
     if t.trim().is_empty() {

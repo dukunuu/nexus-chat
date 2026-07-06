@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::app::{App, Popup};
 
+pub(crate) mod filter_input;
 pub(crate) mod history;
 pub(crate) mod popups;
 use history::render_history;
@@ -55,14 +56,14 @@ pub(crate) fn line_text(line: &Line) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
-pub(super) fn dim(s: impl Into<String>) -> Span<'static> {
-    Span::styled(s.into(), Style::default().fg(Color::DarkGray))
+pub(super) fn dim(s: impl Into<String>, theme: &crate::theme::Theme) -> Span<'static> {
+    Span::styled(s.into(), Style::default().fg(theme.fg_dim))
 }
 
-pub(super) fn dot() -> Line<'static> {
+pub(super) fn dot(theme: &crate::theme::Theme) -> Line<'static> {
     Line::from(Span::styled(
         "⏺",
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -87,16 +88,17 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
     };
     let mut block = Block::default()
         .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border))
         .title_top(Line::from(hint));
     // Attachment indicator (when pending images).
     if !app.pending_images.is_empty() {
         let n = app.pending_images.len();
         block = block.title_top(Line::from(Span::styled(
             format!(" 📎 {} image{} — Esc clears ", n, if n == 1 { "" } else { "s" }),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(app.theme.warning),
         )));
     }
-    block = block.title_top(Line::from(Span::styled(format!(" {name} "), Style::default().fg(Color::Cyan))).right_aligned());
+    block = block.title_top(Line::from(Span::styled(format!(" {name} "), Style::default().fg(app.theme.accent))).right_aligned());
     let inner = block.inner(area);
     app.input_inner = inner; // remembered for mouse click -> cursor mapping
     f.render_widget(block, area);
@@ -126,9 +128,9 @@ fn render_command_popup(f: &mut Frame, app: &App, input_area: Rect) {
         .map(|c| {
             let name = format!("/{}", c.name());
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{name:<name_w$}"), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{name:<name_w$}"), Style::default().fg(app.theme.accent)),
                 Span::raw("   "),
-                Span::styled(c.desc().to_string(), Style::default().fg(Color::DarkGray)),
+                Span::styled(c.desc().to_string(), Style::default().fg(app.theme.fg_dim)),
             ]))
         })
         .collect();
@@ -137,7 +139,7 @@ fn render_command_popup(f: &mut Frame, app: &App, input_area: Rect) {
     if hints {
         block = block.title(Line::from(Span::styled(
             "commands (Tab fill · Enter run)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(app.theme.fg_dim),
         )));
     }
     let mut state = ListState::default();
@@ -177,7 +179,7 @@ fn render_context_bar(f: &mut Frame, app: &App, area: Rect) {
             let t = if width > 1 { x as f64 / (width - 1) as f64 } else { 0.0 };
             spans.push(Span::styled("█", Style::default().fg(gradient(t))));
         } else {
-            spans.push(Span::styled("░", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled("░", Style::default().fg(app.theme.border_dim)));
         }
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -221,16 +223,18 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
     } else {
         String::new()
     };
+    let web_tag = if app.web_mode { "🌐 web " } else { "" };
     let show_bar = app.settings.show_stats && app.context_limit().is_some();
 
     if !show_bar {
-        let text = format!("{space_tag}{model}  |  {}", app.status);
-        let para = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
+        let text = format!("{space_tag}{web_tag}{model}  |  {}", app.status);
+        let para = Paragraph::new(text).style(Style::default().fg(app.theme.fg_dim));
         f.render_widget(para, area);
         return;
     }
 
     // Model, then the gradient context bar beside it, then numbers + status.
+    let model = format!("{web_tag}{model}");
     let model_w = model.chars().count() as u16 + 2;
     let gauge_w = 18u16.min(area.width.saturating_sub(model_w + 4));
     let cols = Layout::horizontal([
@@ -240,7 +244,7 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
     ])
     .split(area);
 
-    let style = Style::default().fg(Color::DarkGray);
+    let style = Style::default().fg(app.theme.fg_dim);
     f.render_widget(Paragraph::new(format!("{model} ")).style(style), cols[0]);
     render_context_bar(f, app, cols[1]);
     let tail = match context_label(app) {

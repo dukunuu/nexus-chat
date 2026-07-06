@@ -38,6 +38,8 @@ pub struct Session {
     /// folded into `compact_summary`. Messages after this point are still
     /// sent verbatim; 0 means nothing has been compacted yet.
     pub compact_through: i64,
+    /// `/web` answer mode: force search-first, inline-cited replies.
+    pub web_mode: bool,
 }
 
 /// A file imported into a space's fileset. `status` is "ok", "no text
@@ -196,6 +198,7 @@ impl Db {
             "ALTER TABLE sessions ADD COLUMN compact_summary TEXT",
             "ALTER TABLE sessions ADD COLUMN compact_through INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE sessions ADD COLUMN web_mode INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = self.conn.execute(stmt, []);
         }
@@ -361,13 +364,14 @@ impl Db {
             created_at: now,
             compact_summary: None,
             compact_through: 0,
+            web_mode: false,
         })
     }
 
     /// Sessions in `space_id`, most-recently-updated first.
     pub fn list_sessions(&self, space_id: &str) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, model, slug, created_at, compact_summary, compact_through
+            "SELECT id, title, model, slug, created_at, compact_summary, compact_through, web_mode
              FROM sessions WHERE space_id = ?1 ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([space_id], |r| {
@@ -379,6 +383,7 @@ impl Db {
                 created_at: r.get(4)?,
                 compact_summary: r.get(5)?,
                 compact_through: r.get(6)?,
+                web_mode: r.get::<_, i64>(7)? != 0,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -391,6 +396,12 @@ impl Db {
             "UPDATE sessions SET compact_summary = ?2, compact_through = ?3 WHERE id = ?1",
             (session_id, summary, through),
         )?;
+        Ok(())
+    }
+
+    /// Persist a session's `/web` answer-mode toggle.
+    pub fn set_session_web_mode(&self, session_id: &str, on: bool) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET web_mode = ?2 WHERE id = ?1", (session_id, on as i64))?;
         Ok(())
     }
 
@@ -874,6 +885,16 @@ mod tests {
         let (title, text, _) = cache_get(db.raw(), "example.com/a").unwrap().unwrap();
         assert_eq!(title, "");
         assert_eq!(text, "new body");
+    }
+
+    #[test]
+    fn web_mode_defaults_off_and_toggles() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let s = db.create_session("t", "a/b", &space).unwrap();
+        assert!(!s.web_mode);
+        db.set_session_web_mode(&s.id, true).unwrap();
+        assert!(db.list_sessions(&space).unwrap()[0].web_mode);
     }
 
     #[test]

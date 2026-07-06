@@ -55,12 +55,12 @@ impl App {
 
     /// A filter keystroke re-runs the fuzzy match and resets the cursor to the top.
     pub(crate) fn session_filter_push(&mut self, c: char) {
-        self.session_filter.push(c);
+        self.session_filter.insert_char(c);
         self.session_selected = 0;
     }
 
     pub(crate) fn session_filter_pop(&mut self) {
-        self.session_filter.pop();
+        self.session_filter.backspace();
         self.session_selected = 0;
     }
 
@@ -121,6 +121,7 @@ impl App {
             self.unread.remove(&s.id);
             self.current_model = Some(s.model.clone());
             self.status = format!("switched to: {}", s.title);
+            self.web_mode = s.web_mode;
             self.session = Some(s);
             // Estimate from history until the next response reports exact usage.
             self.context_total = None;

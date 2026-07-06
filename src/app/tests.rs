@@ -80,6 +80,37 @@ pub(super) fn app_with_key() -> App {
 }
 
 #[test]
+fn web_mode_clause_instructs_search_first_and_cites_inline() {
+    let c = chat::web_mode_clause("2026-07-06");
+    assert!(c.contains("2026-07-06"));
+    assert!(c.contains("web_search"));
+    assert!(c.contains("[n]"));
+    assert!(c.contains("Sources:"));
+}
+
+#[tokio::test]
+async fn web_mode_toggles_persists_and_shows_in_system_prompt() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    assert!(!a.web_mode);
+    a.toggle_web_mode();
+    assert!(a.web_mode);
+    assert!(a.status.contains("web mode on"));
+
+    a.set_input("hi");
+    a.submit().unwrap();
+    let sid = a.session.as_ref().unwrap().id.clone();
+    let sessions = a.db.list_sessions(&a.active_space.id).unwrap();
+    assert!(sessions.iter().find(|s| s.id == sid).unwrap().web_mode);
+    assert!(a.system_prompt().contains("Web answer mode is ON"));
+
+    a.toggle_web_mode(); // off, same session
+    assert!(!a.system_prompt().contains("Web answer mode is ON"));
+    let sessions = a.db.list_sessions(&a.active_space.id).unwrap();
+    assert!(!sessions.iter().find(|s| s.id == sid).unwrap().web_mode);
+}
+
+#[test]
 fn no_key_rejects_message_and_points_to_key_cmd() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, None, test_space());
@@ -334,14 +365,40 @@ fn reasoning_cycles_only_for_supporting_models() {
 }
 
 #[test]
+fn settings_groups_cover_every_field_exactly_once() {
+    let grouped: Vec<&str> = SETTINGS_GROUPS.iter().flat_map(|g| g.fields.iter().map(|f| f.label())).collect();
+    let unique: std::collections::HashSet<&str> = grouped.iter().copied().collect();
+    assert_eq!(grouped.len(), unique.len(), "a field appears in more than one group");
+    for f in SettingsField::ALL {
+        assert!(grouped.contains(&f.label()), "field missing from SETTINGS_GROUPS: {}", f.label());
+    }
+    assert_eq!(grouped.len(), SettingsField::ALL.len());
+}
+
+#[test]
+fn collapsing_a_group_hides_its_fields_and_toggling_header_again_restores_them() {
+    let db = Db::open_in_memory().unwrap();
+    let mut a = App::new(db, Some("k".into()), test_space());
+    a.popup = Popup::Settings;
+    let rows_expanded = a.settings_rows().len();
+    a.settings_selected = 0; // first group header ("Interface")
+    assert!(matches!(a.settings_row(), SettingsRow::Group(0)));
+    a.toggle_settings_field(); // collapse it
+    let rows_collapsed = a.settings_rows().len();
+    assert!(rows_collapsed < rows_expanded);
+    a.toggle_settings_field(); // expand it again
+    assert_eq!(a.settings_rows().len(), rows_expanded);
+}
+
+#[test]
 fn settings_edit_and_save_persists() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("k".into()), test_space());
     a.popup = Popup::Settings;
-    a.settings_selected = 0; // ShowStats
+    a.settings_selected = 1; // ShowStats (row 0 is the "Interface" group header)
     a.toggle_settings_field();
     assert!(a.settings.show_stats);
-    a.settings_selected = 3; // Temperature
+    a.settings_selected = 6; // Temperature (row 5 is the "Generation" group header)
     for c in "0.7".chars() {
         a.settings_input_char(c);
     }
@@ -370,7 +427,7 @@ fn base_system_prompt_is_always_present_and_resolves_verbosity() {
 fn verbosity_cycles_through_all_three_levels() {
     let mut a = app_with_key();
     a.popup = Popup::Settings;
-    a.settings_selected = 9; // Verbosity
+    a.settings_selected = 4; // Verbosity
     assert_eq!(a.verbosity, "concise");
     a.toggle_settings_field();
     assert_eq!(a.verbosity, "caveman");
@@ -384,7 +441,7 @@ fn verbosity_cycles_through_all_three_levels() {
 fn verbosity_setting_persists_and_changes_the_prompt() {
     let mut a = app_with_key();
     a.popup = Popup::Settings;
-    a.settings_selected = 9; // Verbosity
+    a.settings_selected = 4; // Verbosity
     a.toggle_settings_field(); // -> caveman
     a.save_settings().unwrap();
     assert!(a.system_prompt().contains(verbosity_clause("caveman")));
@@ -403,7 +460,7 @@ fn searxng_url_setting_persists_and_enables_web_search_tool() {
     assert!(a.toolbox.searxng_url.is_none());
 
     a.popup = Popup::Settings;
-    a.settings_selected = 8; // SearxngUrl
+    a.settings_selected = 18; // SearxngUrl
     for c in "http://localhost:8080/".chars() {
         a.settings_input_char(c);
     }
