@@ -223,11 +223,30 @@ async fn plan(provider: &OpenRouter, model: &str, topic: &str, known: &[String])
 }
 
 /// One Searcher agent: given a single sub-question, runs the normal
-/// tool-loop (restricted to web_search/fetch_url) and returns its final
-/// prose findings (including its own "Sources:" citation list). Never
-/// returns an `Err` — a dead search/fetch/model call becomes a placeholder
-/// finding string so one bad sub-question can't sink the whole pipeline.
-async fn run_searcher(provider: &OpenRouter, model: &str, sub_question: &str, toolbox: Arc<ToolBox>) -> String {
+/// tool-loop (restricted to web_search/fetch_url/academic_search) and
+/// returns its final prose findings (including its own "Sources:" citation
+/// list). Never returns an `Err` — a dead search/fetch/model call becomes a
+/// placeholder finding string so one bad sub-question can't sink the whole
+/// pipeline.
+///
+/// Every `Status`/`ToolCall` event along the way is forwarded as a live
+/// stage update under this searcher's own label (`searcher N/total`), so the
+/// UI shows what it's actually doing (searching, fetching a URL, etc.) in
+/// real time instead of going silent until it finishes.
+#[allow(clippy::too_many_arguments)]
+async fn run_searcher(
+    provider: &OpenRouter,
+    model: &str,
+    sub_question: &str,
+    toolbox: Arc<ToolBox>,
+    tx: &mpsc::UnboundedSender<ResearchMsg>,
+    ids: &(String, String, String),
+    round: usize,
+    idx: usize,
+    total: usize,
+) -> String {
+    let label = format!("searcher {}/{total}", idx + 1);
+    send_stage(tx, ids, &label, format!("round {round}: \"{sub_question}\" — starting…"));
     let messages = vec![
         ChatMessage::text("system", SEARCHER_PROMPT),
         ChatMessage::text("user", sub_question),
@@ -245,6 +264,18 @@ async fn run_searcher(provider: &OpenRouter, model: &str, sub_question: &str, to
     while let Some(ev) = rx.recv().await {
         match ev {
             StreamEvent::Token(t) => buf.push_str(&t),
+            StreamEvent::Status(s) => {
+                send_stage(tx, ids, &label, format!("round {round}: \"{sub_question}\" — {s}"));
+            }
+            StreamEvent::ToolCall { name, arguments, .. } => {
+                let arg_summary: String = arguments.chars().take(80).collect();
+                send_stage(
+                    tx,
+                    ids,
+                    &label,
+                    format!("round {round}: \"{sub_question}\" — used {name}({arg_summary})"),
+                );
+            }
             StreamEvent::Error(e) => return format!("[search agent error on \"{sub_question}\": {e}]"),
             StreamEvent::Done => break,
             _ => {}
@@ -259,8 +290,9 @@ async fn run_searcher(provider: &OpenRouter, model: &str, sub_question: &str, to
 }
 
 /// Fan out one Searcher per question in parallel, sending a running
-/// `{done}/{total}` stage update as each finishes. Order of the returned
-/// findings doesn't matter (synthesis treats them as an unordered set).
+/// `{done}/{total}` stage update as each finishes (in addition to each
+/// searcher's own live per-tool-call feed). Order of the returned findings
+/// doesn't matter (synthesis treats them as an unordered set).
 async fn run_searchers(
     provider: &OpenRouter,
     model: &str,
@@ -270,19 +302,21 @@ async fn run_searchers(
     ids: &(String, String, String),
     round: usize,
 ) -> Vec<String> {
+    let total = questions.len();
     let mut set = tokio::task::JoinSet::new();
-    for q in questions.iter().cloned() {
+    for (idx, q) in questions.iter().cloned().enumerate() {
         let provider = provider.clone();
         let model = model.to_string();
         let toolbox = toolbox.clone();
-        set.spawn(async move { run_searcher(&provider, &model, &q, toolbox).await });
+        let tx = tx.clone();
+        let ids = ids.clone();
+        set.spawn(async move { run_searcher(&provider, &model, &q, toolbox, &tx, &ids, round, idx, total).await });
     }
-    let total = questions.len();
     let mut done = 0usize;
     let mut findings = Vec::with_capacity(total);
     while let Some(res) = set.join_next().await {
         done += 1;
-        send_stage(tx, ids, "searching", format!("round {round}, {done}/{total}"));
+        send_stage(tx, ids, "searching", format!("round {round}, {done}/{total} done"));
         findings.push(res.unwrap_or_else(|e| format!("[search agent panicked: {e}]")));
     }
     findings
