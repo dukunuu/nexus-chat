@@ -97,6 +97,14 @@ impl HistorySel {
         Some((li, ((col - self.inner.x) as usize).min(max)))
     }
 
+    /// The message index the active selection's anchor line belongs to, if
+    /// any — used to resolve "the citation under the current selection" back
+    /// to the message whose content holds the Sources list.
+    pub fn owner_at_selection_start(&self) -> Option<usize> {
+        let (anchor, _) = self.sel?;
+        self.owner.get(anchor.0).copied().flatten()
+    }
+
     pub fn on_down(&mut self, pos: Pos) {
         // Count this press against the *previous* click's time+place, so a
         // drag that follows immediately already knows it's part of a
@@ -387,6 +395,16 @@ mod tests {
 
     fn with_owner(lines: &[&str], owner: &[Option<usize>]) -> HistorySel {
         build(lines, owner, &vec![None; lines.len()], &[])
+    }
+
+    #[test]
+    fn owner_at_selection_start_resolves_the_anchor_lines_message() {
+        let mut s = with_owner(&["line a", "line b"], &[Some(0), Some(1)]);
+        s.on_down((1, 0));
+        s.on_drag((1, 3));
+        assert_eq!(s.owner_at_selection_start(), Some(1));
+        s.sel = None;
+        assert_eq!(s.owner_at_selection_start(), None);
     }
 
     #[test]

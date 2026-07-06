@@ -54,6 +54,9 @@ fn system_prompt_edit_target(app: &App, key: &KeyEvent) -> Option<std::path::Pat
 
 pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
     let mut reader = EventStream::new();
+    // Cheap poll for an omarchy theme switch (symlink target change) so a
+    // `omarchy theme set` while nexus-chat is running takes effect live.
+    let mut theme_poll = tokio::time::interval(std::time::Duration::from_secs(2));
     loop {
         terminal.draw(|f| ui::render(f, &mut app))?;
         if app.should_quit {
@@ -149,6 +152,14 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                     std::future::pending::<()>().await
                 }
             } => {}
+            _ = theme_poll.tick() => {
+                let target = crate::theme::current_link_target();
+                if target != app.theme_link {
+                    app.theme = crate::theme::load();
+                    app.theme_link = target;
+                    app.theme_gen = app.theme_gen.wrapping_add(1);
+                }
+            }
         }
     }
     Ok(())
@@ -258,6 +269,11 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('r') if ctrl => app.toggle_reasoning_view()?,
         // Ctrl+T expands/collapses tool-call detail blocks in the transcript.
         KeyCode::Char('t') if ctrl => app.show_tool_detail = !app.show_tool_detail,
+        // 'o' opens the [n] citation under the current history selection;
+        // with no active selection it falls through and just types.
+        KeyCode::Char('o') if !ctrl && !shift && app.sel.selected_text().is_some() => {
+            app.open_citation_under_selection();
+        }
         // Ctrl+G opens the context breakdown (system/memory/conversation/skills).
         // (Not Ctrl+I: that's the same byte as Tab on terminals without the
         // Kitty keyboard protocol, so it'd be unreachable on many of them.)

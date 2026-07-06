@@ -498,6 +498,33 @@ impl App {
         parts.join("\n\n")
     }
 
+    /// `o` in the history pane: open the `[n]` citation under the current
+    /// text selection (via the `open` crate), resolved against the Sources
+    /// list of the message the selection belongs to. Every miss surfaces as
+    /// a status message rather than doing nothing silently.
+    pub(crate) fn open_citation_under_selection(&mut self) {
+        let Some(selected) = self.sel.selected_text() else {
+            self.status = "select a [n] citation, then press o".to_string();
+            return;
+        };
+        let Some(n) = crate::citations::citation_number_in(&selected) else {
+            self.status = "no [n] citation in the current selection".to_string();
+            return;
+        };
+        let Some(msg) = self.sel.owner_at_selection_start().and_then(|i| self.messages.get(i)) else {
+            self.status = "no [n] citation in the current selection".to_string();
+            return;
+        };
+        let citations = crate::citations::parse_citations(&msg.content);
+        match citations.iter().find(|(num, _)| *num == n) {
+            Some((_, url)) => {
+                let _ = open::that_detached(url);
+                self.status = format!("opened [{n}]: {url}");
+            }
+            None => self.status = format!("no source [{n}] in this message"),
+        }
+    }
+
     /// `/web`: flip web answer mode for the active (or about-to-be-created)
     /// session. Persisted immediately if a session already exists; otherwise
     /// applied to the session created by the next message.

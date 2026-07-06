@@ -1,5 +1,5 @@
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -14,7 +14,7 @@ use crate::db::Message;
 /// change; new messages are appended incrementally.
 #[derive(Default)]
 pub(crate) struct HistoryCache {
-    key: (Option<String>, usize, bool, bool, bool, bool),
+    key: (Option<String>, usize, bool, bool, bool, bool, usize),
     msg_count: usize,
     lines: Vec<Line<'static>>,
     owner: Vec<Option<usize>>,
@@ -92,11 +92,13 @@ fn sync_cache(app: &mut App, width: usize) {
         app.settings.show_reasoning,
         app.settings.hide_hints,
         app.settings.show_stats,
+        app.theme_gen,
     );
     let c = &mut app.history_cache;
     if c.key != key || app.messages.len() < c.msg_count {
         *c = HistoryCache { key, ..Default::default() };
     }
+    let theme = app.theme;
     for (i, m) in app.messages.iter().enumerate().skip(c.msg_count) {
         let start = c.lines.len();
         if m.role == "user" {
@@ -105,15 +107,15 @@ fn sync_cache(app: &mut App, width: usize) {
                     "🖼 {} image{}",
                     m.images.len(),
                     if m.images.len() == 1 { "" } else { "s" }
-                ))));
+                ), &theme)));
             }
-            push_user(&mut c.lines, &m.content, width);
+            push_user(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_stage" {
-            push_research_stage(&mut c.lines, &m.content, width);
+            push_research_stage(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "tool_call" {
-            push_tool_call(&mut c.lines, &m.content, app.show_tool_detail, &app.settings, width);
+            push_tool_call(&mut c.lines, &m.content, app.show_tool_detail, &app.settings, width, &theme);
         } else {
-            push_assistant_stored(&mut c.lines, m, &app.settings, width, &mut c.code, &mut c.blocks);
+            push_assistant_stored(&mut c.lines, m, &app.settings, width, &mut c.code, &mut c.blocks, &theme);
         }
         c.owner.resize(c.lines.len(), Some(i));
         c.code.resize(c.lines.len(), None);
@@ -129,7 +131,7 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
     for l in app.banner.lines() {
         lines.push(Line::from(Span::styled(
             l.to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
         )));
     }
     lines.push(Line::from(""));
@@ -139,6 +141,7 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
     )));
     lines.push(Line::from(dim(
         chrono::Local::now().format("%A, %B %-d %Y · %H:%M:%S").to_string(),
+        &app.theme,
     )));
 
     // Center vertically.
@@ -150,10 +153,10 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// A user message: `❯ ` prefix, wrapped with a 2-col hanging indent.
-fn push_user(out: &mut Vec<Line<'static>>, content: &str, width: usize) {
+fn push_user(out: &mut Vec<Line<'static>>, content: &str, width: usize, theme: &crate::theme::Theme) {
     let head = Span::styled(
         "❯ ",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default().fg(theme.user_msg).add_modifier(Modifier::BOLD),
     );
     let mut first = true;
     for line in wrap_plain(content, width.saturating_sub(2)) {
@@ -178,6 +181,7 @@ fn push_tool_call(
     expanded: bool,
     settings: &crate::app::Settings,
     width: usize,
+    theme: &crate::theme::Theme,
 ) {
     let v: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
     let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
@@ -185,15 +189,15 @@ fn push_tool_call(
     let summary = crate::app::tool_call_summary(&name, &args, &result);
     let hint = if expanded || settings.hide_hints { "" } else { " — Ctrl+T for detail" };
     out.push(Line::from(vec![
-        Span::styled("⚒ ", Style::default().fg(Color::Yellow)),
-        dim(format!("{summary}{hint}")),
+        Span::styled("⚒ ", Style::default().fg(theme.tool_msg)),
+        dim(format!("{summary}{hint}"), theme),
     ]));
     if expanded {
         for line in wrap_plain(&args, width.saturating_sub(2)) {
-            out.push(Line::from(dim(format!("┆ {line}"))));
+            out.push(Line::from(dim(format!("┆ {line}"), theme)));
         }
         for line in wrap_plain(&result, width.saturating_sub(2)) {
-            out.push(Line::from(dim(format!("│ {line}"))));
+            out.push(Line::from(dim(format!("│ {line}"), theme)));
         }
     }
     out.push(Line::from(""));
@@ -202,17 +206,17 @@ fn push_tool_call(
 /// A background-research progress line: a dim one-liner with a 🔎 marker,
 /// no expand/collapse (unlike tool_call — there's no arguments/result pair,
 /// just a phase label).
-fn push_research_stage(out: &mut Vec<Line<'static>>, content: &str, width: usize) {
+fn push_research_stage(out: &mut Vec<Line<'static>>, content: &str, width: usize, theme: &crate::theme::Theme) {
     let mut first = true;
     for line in wrap_plain(content, width.saturating_sub(2)) {
         if first {
             out.push(Line::from(vec![
-                Span::styled("🔎 ", Style::default().fg(Color::Magenta)),
-                dim(line),
+                Span::styled("🔎 ", Style::default().fg(theme.research_msg)),
+                dim(line, theme),
             ]));
             first = false;
         } else {
-            out.push(Line::from(dim(format!("  {line}"))));
+            out.push(Line::from(dim(format!("  {line}"), theme)));
         }
     }
     out.push(Line::from(""));
@@ -227,33 +231,36 @@ fn push_assistant_stored(
     width: usize,
     code: &mut Vec<Option<usize>>,
     blocks: &mut Vec<String>,
+    theme: &crate::theme::Theme,
 ) {
     // Completion line: "⏺ Vibed for 13.3 seconds" (dot green, text dim).
     match (&msg.phrase, msg.secs) {
         (Some(p), Some(secs)) => out.push(Line::from(vec![
             Span::styled(
                 "⏺ ",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
             ),
-            dim(format!("{p} for {secs:.1} seconds")),
+            dim(format!("{p} for {secs:.1} seconds"), theme),
         ])),
-        _ => out.push(dot()),
+        _ => out.push(dot(theme)),
     }
 
     if let Some(r) = &msg.reasoning {
         if settings.show_reasoning {
-            out.push(Line::from(dim("▾ reasoning")));
+            out.push(Line::from(dim("▾ reasoning", theme)));
             for line in wrap_plain(r, width.saturating_sub(2)) {
-                out.push(Line::from(dim(format!("┆ {line}"))));
+                out.push(Line::from(dim(format!("┆ {line}"), theme)));
             }
         } else {
             let n = r.chars().count();
             let hint = if settings.hide_hints { "" } else { " — Ctrl+R to expand" };
-            out.push(Line::from(dim(format!("▸ reasoning ({n} chars){hint}"))));
+            out.push(Line::from(dim(format!("▸ reasoning ({n} chars){hint}"), theme)));
         }
     }
 
-    push_rendered(out, code, blocks, crate::markdown::render(&msg.content, width));
+    let mut rendered = crate::markdown::render(&msg.content, width);
+    rendered.lines = crate::citations::style_citations(rendered.lines, theme.accent);
+    push_rendered(out, code, blocks, rendered);
 
     // Footer below the response.
     if let Some(m) = &msg.model {
@@ -263,7 +270,7 @@ fn push_assistant_stored(
                 let tps = if secs > 0.0 { tok as f64 / secs } else { 0.0 };
                 footer.push_str(&format!("  ·  {tps:.1} tok/s · ~{tok} tok · {secs:.2}s"));
             }
-        out.push(Line::from(dim(footer)));
+        out.push(Line::from(dim(footer, theme)));
     }
     out.push(Line::from(""));
 }
@@ -288,12 +295,14 @@ fn push_assistant_streaming(
 
     if let Some(t) = app.thinking_text() {
         for line in wrap_plain(t, width.saturating_sub(2)) {
-            out.push(Line::from(dim(format!("┆ {line}"))));
+            out.push(Line::from(dim(format!("┆ {line}"), &app.theme)));
         }
     }
 
     let buf = app.streaming.as_deref().unwrap_or("");
-    push_rendered(out, code, blocks, crate::markdown::render(buf, width));
+    let mut rendered = crate::markdown::render(buf, width);
+    rendered.lines = crate::citations::style_citations(rendered.lines, app.theme.accent);
+    push_rendered(out, code, blocks, rendered);
     out.push(Line::from(""));
 }
 

@@ -1,5 +1,6 @@
 mod app;
 mod appserver;
+mod citations;
 mod config;
 mod db;
 mod events;
@@ -10,6 +11,7 @@ mod provider;
 mod selection;
 mod skills;
 mod space;
+mod theme;
 mod tools;
 mod ui;
 
