@@ -535,6 +535,42 @@ impl App {
         }
     }
 
+    /// Pin or discard the `[n]` source under the current history selection
+    /// (same selection→citation resolution as `open_citation_under_selection`).
+    /// Flags are keyed by the message's normalized URL, session-scoped.
+    pub(crate) fn flag_source_under_selection(&mut self, flag: Option<&str>) {
+        let Some(selected) = self.sel.selected_text() else {
+            self.status = "select a [n] citation, then press p/x".to_string();
+            return;
+        };
+        let Some(n) = crate::citations::citation_number_in(&selected) else {
+            self.status = "no [n] citation in the current selection".to_string();
+            return;
+        };
+        let Some(msg) = self.sel.owner_at_selection_start().and_then(|i| self.messages.get(i)) else {
+            self.status = "no [n] citation in the current selection".to_string();
+            return;
+        };
+        let citations = crate::citations::parse_citations(&msg.content);
+        let Some((_, url)) = citations.iter().find(|(num, _)| *num == n) else {
+            self.status = format!("no source [{n}] in this message");
+            return;
+        };
+        let Some(session) = &self.session else {
+            self.status = "no active session".to_string();
+            return;
+        };
+        let url_norm = crate::tools::normalize_url(url);
+        let verb = if flag.is_some() { "pinned" } else { "cleared" };
+        match self.db.set_source_flag(&session.id, &url_norm, flag) {
+            Ok(()) => {
+                self.status = format!("{verb} [{n}]: {url}");
+                self.refresh_toolbox();
+            }
+            Err(e) => self.status = format!("flag failed: {e}"),
+        }
+    }
+
     /// `/web`: flip web answer mode for the active (or about-to-be-created)
     /// session. Persisted immediately if a session already exists; otherwise
     /// applied to the session created by the next message.

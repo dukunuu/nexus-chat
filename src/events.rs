@@ -289,6 +289,14 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('o') if !ctrl && !shift && app.sel.selected_text().is_some() => {
             app.open_citation_under_selection();
         }
+        // 'p' pins, 'x' discards the [n] source under the current selection —
+        // same selection→citation resolution as 'o'.
+        KeyCode::Char('p') if !ctrl && !shift && app.sel.selected_text().is_some() => {
+            app.flag_source_under_selection(Some("pinned"));
+        }
+        KeyCode::Char('x') if !ctrl && !shift && app.sel.selected_text().is_some() => {
+            app.flag_source_under_selection(Some("discarded"));
+        }
         // Ctrl+G opens the context breakdown (system/memory/conversation/skills).
         // (Not Ctrl+I: that's the same byte as Tab on terminals without the
         // Kitty keyboard protocol, so it'd be unreachable on many of them.)

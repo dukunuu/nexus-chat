@@ -104,8 +104,17 @@ impl ToolBox {
     }
 
     /// Attach a research session id, enabling `search_sources` for follow-up
-    /// turns in that session's chat.
+    /// turns in that session's chat. Also merges any domains the user has
+    /// discarded in this session into `blocked_domains`, so a later
+    /// `web_search`/`fetch_url` call excludes them the same way the global
+    /// setting does.
     pub fn with_research_session(mut self, session_id: String) -> Self {
+        if let Some(db_path) = &self.web_cache_db
+            && let Ok(conn) = rusqlite::Connection::open(db_path)
+            && let Ok(hosts) = crate::db::discarded_domains(&conn, &session_id)
+        {
+            self.blocked_domains.extend(hosts);
+        }
         self.research_session_id = Some(session_id);
         self
     }

@@ -212,6 +212,7 @@ impl Db {
             "ALTER TABLE sessions ADD COLUMN compact_through INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE sessions ADD COLUMN web_mode INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE session_sources ADD COLUMN flag TEXT",
         ] {
             let _ = self.conn.execute(stmt, []);
         }
@@ -555,6 +556,19 @@ impl Db {
         search_session_sources(&self.conn, session_id, query)
     }
 
+    /// Pin (`Some("pinned")`), discard (`Some("discarded")`), or clear
+    /// (`None`) a session source's flag. `url_norm` must already exist in
+    /// `session_sources` for this session (a no-op UPDATE otherwise — the
+    /// row is created by `add_session_sources` when a source is first
+    /// cited, not here).
+    pub fn set_source_flag(&self, session_id: &str, url_norm: &str, flag: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE session_sources SET flag = ?3 WHERE session_id = ?1 AND url_norm = ?2",
+            (session_id, url_norm, flag),
+        )?;
+        Ok(())
+    }
+
     /// Insert an assistant reply with its model, reasoning trace, and stats.
     #[allow(clippy::too_many_arguments)]
     pub fn add_assistant_message(
@@ -833,6 +847,36 @@ pub fn search_session_sources(conn: &Connection, session_id: &str, query: &str) 
         .collect())
 }
 
+/// URLs pinned in a session's source bundle — the Synthesizer/Writer
+/// prompts list these as "prioritize these sources". Not yet called from
+/// production code; wired into the synthesis/writer prompts in a later task.
+#[allow(dead_code)]
+pub fn pinned_urls(conn: &Connection, session_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT url_norm FROM session_sources WHERE session_id = ?1 AND flag = 'pinned'",
+    )?;
+    let rows = stmt.query_map([session_id], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Distinct hostnames discarded in a session — excluded from later searcher
+/// rounds the same way the global `blocked_domains` setting is.
+pub fn discarded_domains(conn: &Connection, session_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT url_norm FROM session_sources WHERE session_id = ?1 AND flag = 'discarded'",
+    )?;
+    let rows: Vec<String> = stmt
+        .query_map([session_id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut hosts: Vec<String> = rows
+        .iter()
+        .filter_map(|u| reqwest::Url::parse(u).ok().and_then(|p| p.host_str().map(str::to_string)))
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    Ok(hosts)
+}
+
 /// Whether a cached fetch (`fetched_at`, rfc3339) is still usable — under
 /// 24h old. An unparseable timestamp is treated as stale, not an error:
 /// the caller just re-fetches live.
@@ -1047,6 +1091,23 @@ mod tests {
         assert!(hits[0].1.contains("borrow checker"));
 
         assert!(db.search_session_sources(&s.id, "quantum").unwrap().is_empty());
+    }
+
+    #[test]
+    fn set_source_flag_pins_and_discards_then_clears() {
+        let db = Db::open_in_memory().unwrap();
+        let session_id = "sess-1";
+        add_session_sources(&db.conn, session_id, &["https://a.example/x".to_string()]).unwrap();
+        db.set_source_flag(session_id, "https://a.example/x", Some("pinned")).unwrap();
+        assert_eq!(pinned_urls(&db.conn, session_id).unwrap(), vec!["https://a.example/x".to_string()]);
+        assert!(discarded_domains(&db.conn, session_id).unwrap().is_empty());
+
+        db.set_source_flag(session_id, "https://a.example/x", Some("discarded")).unwrap();
+        assert!(pinned_urls(&db.conn, session_id).unwrap().is_empty());
+        assert_eq!(discarded_domains(&db.conn, session_id).unwrap(), vec!["a.example".to_string()]);
+
+        db.set_source_flag(session_id, "https://a.example/x", None).unwrap();
+        assert!(discarded_domains(&db.conn, session_id).unwrap().is_empty());
     }
 
     #[test]
