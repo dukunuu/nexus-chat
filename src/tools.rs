@@ -287,6 +287,17 @@ impl ToolBox {
                 "required": ["query"],
             }),
         });
+        defs.push(ToolDef {
+            name: "discussion_search".to_string(),
+            description: "Search Hacker News and Reddit discussions for a query: title, URL, and engagement metadata (points/comments or subreddit/upvotes) per hit. Use for community sentiment/opinion on a topic, not authoritative facts.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "the search query" },
+                },
+                "required": ["query"],
+            }),
+        });
         if self.research_session_id.is_some() {
             defs.push(ToolDef {
                 name: "search_sources".to_string(),
@@ -388,7 +399,7 @@ impl ToolBox {
             });
         }
         if self.research_only {
-            defs.retain(|d| matches!(d.name.as_str(), "web_search" | "fetch_url" | "academic_search"));
+            defs.retain(|d| matches!(d.name.as_str(), "web_search" | "fetch_url" | "academic_search" | "discussion_search"));
         }
         defs
     }
@@ -417,7 +428,7 @@ impl ToolBox {
     /// Run a tool by name. Returns `(result text sent back to the model,
     /// status label shown in the UI while it runs)`.
     pub async fn run(&self, name: &str, args: &str) -> (String, String) {
-        if self.research_only && !matches!(name, "web_search" | "fetch_url" | "academic_search") {
+        if self.research_only && !matches!(name, "web_search" | "fetch_url" | "academic_search" | "discussion_search") {
             return (
                 format!("tool '{name}' is not available in research mode"),
                 "blocked".to_string(),
@@ -685,6 +696,13 @@ impl ToolBox {
                     Ok(papers) => format_papers(&papers),
                     Err(e) => format!("academic search failed: {e}"),
                 };
+                (result, status)
+            }
+            "discussion_search" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let query = v.get("query").and_then(|q| q.as_str()).unwrap_or_default().to_string();
+                let status = "Searching HN and Reddit…".to_string();
+                let result = discussion_search(&self.client, &query).await;
                 (result, status)
             }
             "search_sources" => {
@@ -1655,6 +1673,120 @@ fn format_papers(papers: &[Paper]) -> String {
         .join("\n\n")
 }
 
+/// One discussion-forum hit (Hacker News story or Reddit post), flattened
+/// to what the model needs to decide whether to fetch_url it.
+struct DiscussionHit {
+    title: String,
+    url: String,
+    meta: String,
+}
+
+#[derive(Deserialize)]
+struct HnSearchResponse {
+    #[serde(default)]
+    hits: Vec<HnHit>,
+}
+
+#[derive(Deserialize)]
+struct HnHit {
+    title: Option<String>,
+    url: Option<String>,
+    #[serde(rename = "objectID")]
+    object_id: String,
+    #[serde(default)]
+    points: i64,
+    #[serde(default, rename = "num_comments")]
+    num_comments: i64,
+}
+
+async fn hn_search(client: &reqwest::Client, query: &str) -> anyhow::Result<Vec<DiscussionHit>> {
+    let req = client
+        .get("https://hn.algolia.com/api/v1/search")
+        .query(&[("query", query), ("tags", "story")]);
+    let resp = send_and_parse::<HnSearchResponse>(req).await?;
+    Ok(resp
+        .hits
+        .into_iter()
+        .take(8)
+        .map(|h| {
+            let url = h.url.unwrap_or_else(|| format!("https://news.ycombinator.com/item?id={}", h.object_id));
+            DiscussionHit {
+                title: h.title.unwrap_or_else(|| "(untitled)".to_string()),
+                url,
+                meta: format!("{} points, {} comments", h.points, h.num_comments),
+            }
+        })
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct RedditSearchResponse {
+    data: RedditListing,
+}
+
+#[derive(Deserialize)]
+struct RedditListing {
+    #[serde(default)]
+    children: Vec<RedditChild>,
+}
+
+#[derive(Deserialize)]
+struct RedditChild {
+    data: RedditPost,
+}
+
+#[derive(Deserialize)]
+struct RedditPost {
+    title: String,
+    permalink: String,
+    subreddit: String,
+    #[serde(default)]
+    score: i64,
+}
+
+async fn reddit_search(client: &reqwest::Client, query: &str) -> anyhow::Result<Vec<DiscussionHit>> {
+    let req = client
+        .get("https://www.reddit.com/search.json")
+        .header("User-Agent", "Mozilla/5.0 (compatible; nexus-chat)")
+        .query(&[("q", query), ("sort", "relevance"), ("limit", "8")]);
+    let resp = send_and_parse::<RedditSearchResponse>(req).await?;
+    Ok(resp
+        .data
+        .children
+        .into_iter()
+        .map(|c| DiscussionHit {
+            title: c.data.title,
+            url: format!("https://reddit.com{}", c.data.permalink),
+            meta: format!("r/{}, {} upvotes", c.data.subreddit, c.data.score),
+        })
+        .collect())
+}
+
+/// Numbered discussion results, HN first then Reddit — same `[n]` citation
+/// convention as `format_results`/`format_papers`.
+fn format_discussion_hits(hn: &[DiscussionHit], reddit: &[DiscussionHit]) -> String {
+    hn.iter()
+        .chain(reddit.iter())
+        .enumerate()
+        .map(|(i, h)| format!("[{}] {}\n    {}\n    {}", i + 1, h.title, h.meta, h.url))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// HN (Algolia) + Reddit search run concurrently; either backend failing
+/// independently still returns the other's hits (never fails the whole
+/// tool call over one down API).
+async fn discussion_search(client: &reqwest::Client, query: &str) -> String {
+    let (hn, reddit) = tokio::join!(hn_search(client, query), reddit_search(client, query));
+    let hn = hn.unwrap_or_default();
+    let reddit = reddit.unwrap_or_default();
+    if hn.is_empty() && reddit.is_empty() {
+        "no results".to_string()
+    } else {
+        format_discussion_hits(&hn, &reddit)
+    }
+}
+
 /// Normalize a source URL for dedup: lowercase the host only (path/query
 /// case is preserved — some servers are case-sensitive there), strip
 /// `utm_*`/`fbclid` query params, and drop a trailing `/` and any fragment.
@@ -1891,6 +2023,30 @@ mod tests {
         let out = format_papers(&papers);
         assert!(out.contains("[1] Untitled Preprint"));
         assert!(out.contains("https://x"));
+    }
+
+    #[test]
+    fn format_discussion_hits_numbers_hn_then_reddit_with_metadata() {
+        let hn = vec![DiscussionHit {
+            title: "Rust 1.90 released".to_string(),
+            url: "https://example.com/rust-190".to_string(),
+            meta: "312 points, 88 comments".to_string(),
+        }];
+        let reddit = vec![DiscussionHit {
+            title: "What do you think of Rust 1.90?".to_string(),
+            url: "https://reddit.com/r/rust/abc".to_string(),
+            meta: "r/rust, 245 upvotes".to_string(),
+        }];
+        let text = format_discussion_hits(&hn, &reddit);
+        assert!(text.contains("[1] Rust 1.90 released"), "{text:?}");
+        assert!(text.contains("312 points, 88 comments"), "{text:?}");
+        assert!(text.contains("[2] What do you think of Rust 1.90?"), "{text:?}");
+        assert!(text.contains("r/rust, 245 upvotes"), "{text:?}");
+    }
+
+    #[test]
+    fn format_discussion_hits_empty_both_yields_empty_string() {
+        assert_eq!(format_discussion_hits(&[], &[]), "");
     }
 
     #[test]
@@ -2404,13 +2560,14 @@ mod tests {
     }
 
     #[test]
-    fn research_toolbox_offers_web_search_fetch_url_and_academic_search() {
+    fn research_toolbox_offers_web_search_fetch_url_academic_search_and_discussion_search() {
         let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new(), None);
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
-        assert_eq!(names.len(), 3, "{names:?}");
+        assert_eq!(names.len(), 4, "{names:?}");
         assert!(names.contains(&"web_search".to_string()));
         assert!(names.contains(&"fetch_url".to_string()));
         assert!(names.contains(&"academic_search".to_string()));
+        assert!(names.contains(&"discussion_search".to_string()));
     }
 
     #[tokio::test]
