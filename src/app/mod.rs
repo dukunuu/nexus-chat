@@ -21,6 +21,7 @@ mod apps;
 mod chat;
 mod compaction;
 mod copy;
+mod export;
 mod files;
 mod memory;
 mod models;
@@ -1174,6 +1175,7 @@ impl App {
             "apps" => self.open_apps_popup(),
             "ocr-local" => self.ocr_local_install(cmd[token.len()..].trim()),
             "research" => self.start_research(cmd[token.len()..].trim()),
+            "export" => self.export_report()?,
             "web" => self.toggle_web_mode(),
             "steer" => self.steer_research(cmd[token.len()..].trim()),
             "edit" => self.request_app_file_edit(cmd[token.len()..].trim()),

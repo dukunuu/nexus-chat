@@ -57,6 +57,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "apps", desc: "view space apps", aliases: &["app", "webapps"] },
     Command { name: "ocr-local", desc: "pull a local OCR model via ollama (default glm-ocr)", aliases: &["ocrlocal"] },
     Command { name: "research", desc: "deep multi-agent research on a topic (background)", aliases: &["deep-research"] },
+    Command { name: "export", desc: "write session's report + sources to a file", aliases: &["save-report"] },
     Command { name: "watch", desc: "standing research, re-runs every 24h", aliases: &["watches"] },
     Command { name: "web", desc: "toggle web answer mode (search-first, cited)", aliases: &["websearch"] },
     Command { name: "steer", desc: "inject a research instruction mid-flight", aliases: &["nudge"] },
