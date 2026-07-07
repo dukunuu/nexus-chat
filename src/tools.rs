@@ -702,7 +702,36 @@ impl ToolBox {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
                 let query = v.get("query").and_then(|q| q.as_str()).unwrap_or_default().to_string();
                 let status = "Searching HN and Reddit…".to_string();
-                let result = discussion_search(&self.client, &query).await;
+                let cache_key = format!("discussion://{query}");
+
+                // Check cache first if enabled
+                let cached = if let Some(db_path) = &self.web_cache_db {
+                    rusqlite::Connection::open(db_path)
+                        .ok()
+                        .and_then(|conn| crate::db::cache_get(&conn, &cache_key).ok().flatten())
+                        .and_then(|(_, text, fetched_at)| {
+                            if crate::db::is_fresh(&fetched_at, chrono::Utc::now()) {
+                                Some(text)
+                            } else {
+                                None
+                            }
+                        })
+                } else {
+                    None
+                };
+
+                let result = if let Some(cached_text) = cached {
+                    cached_text
+                } else {
+                    let text = discussion_search(&self.client, &query).await;
+                    // Write through to cache if enabled
+                    if let Some(db_path) = &self.web_cache_db {
+                        if let Ok(conn) = rusqlite::Connection::open(db_path) {
+                            let _ = crate::db::cache_put(&conn, &cache_key, &cache_key, None, &text);
+                        }
+                    }
+                    text
+                };
                 (result, status)
             }
             "search_sources" => {
@@ -2047,6 +2076,21 @@ mod tests {
     #[test]
     fn format_discussion_hits_empty_both_yields_empty_string() {
         assert_eq!(format_discussion_hits(&[], &[]), "");
+    }
+
+    #[tokio::test]
+    async fn discussion_search_serves_from_cache_when_fresh() {
+        let path = std::env::temp_dir().join(format!("nexus-discache-{}.db", uuid::Uuid::new_v4()));
+        let db = crate::db::Db::open(&path).unwrap();
+        let cache_key = "discussion://rust performance";
+        let cached_response = "[1] Rust is fast\n    HN · 100 points\n    https://news.ycombinator.com/rust";
+        crate::db::cache_put(db.raw(), cache_key, cache_key, None, cached_response).unwrap();
+        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), Some(path), None, None);
+        // A cache hit must not attempt the network — the result is the cached
+        // text, not a "no results" or "search failed" error.
+        let (result, _) = tb.run("discussion_search", r#"{"query":"rust performance"}"#).await;
+        assert!(result.contains("Rust is fast"), "{result}");
+        assert!(result.contains("https://news.ycombinator.com/rust"), "{result}");
     }
 
     #[test]
