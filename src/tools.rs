@@ -1244,6 +1244,23 @@ async fn duckduckgo_search(client: &reqwest::Client, query: &str) -> anyhow::Res
     Ok(parse_ddg_html(&html).into_iter().take(8).collect())
 }
 
+/// Extract readable text from a fetched body: PDF (by content-type or
+/// `%PDF` magic bytes) via `pdf-extract`, otherwise treated as HTML.
+/// PDF extraction failures degrade to an explanatory string rather than
+/// erroring the whole fetch — a scanned/malformed PDF shouldn't kill the
+/// searcher's tool call.
+fn extract_pdf_or_html(bytes: &[u8], content_type: &str) -> String {
+    let looks_like_pdf = content_type.to_lowercase().contains("application/pdf") || bytes.starts_with(b"%PDF");
+    if looks_like_pdf {
+        return match pdf_extract::extract_text_from_mem(bytes) {
+            Ok(text) => text.trim().to_string(),
+            Err(e) => format!("[could not extract PDF text: {e}]"),
+        };
+    }
+    let html = String::from_utf8_lossy(bytes);
+    strip_html_to_text(&html)
+}
+
 /// GET `url` and return its readable text. Capped at 2MB of raw body and a
 /// 30s timeout — a research searcher agent shouldn't be able to wedge on a
 /// pathological page.
@@ -1255,10 +1272,15 @@ async fn fetch_url_text(client: &reqwest::Client, url: &str) -> anyhow::Result<S
         .send()
         .await?
         .error_for_status()?;
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let bytes = resp.bytes().await?;
     let capped = &bytes[..bytes.len().min(2_000_000)];
-    let html = String::from_utf8_lossy(capped);
-    Ok(strip_html_to_text(&html))
+    Ok(extract_pdf_or_html(capped, &content_type))
 }
 
 /// Pull `(title, url, snippet)` hits out of a DuckDuckGo HTML results page.
@@ -1860,6 +1882,27 @@ mod tests {
         assert!(text.contains("More"));
         // No blank lines left over from stripped block-level tags.
         assert!(!text.contains("\n\n"));
+    }
+
+    #[test]
+    fn fetch_url_text_extracts_pdf_when_content_type_is_pdf() {
+        let bytes = crate::extract::pdf_with_pages(&["HELLO FROM PDF"]);
+        let text = extract_pdf_or_html(&bytes, "application/pdf");
+        assert!(text.contains("HELLO FROM PDF"), "{text:?}");
+    }
+
+    #[test]
+    fn extract_pdf_or_html_falls_back_to_html_for_non_pdf_content_type() {
+        let html = b"<html><body><p>hi there</p></body></html>";
+        let text = extract_pdf_or_html(html, "text/html; charset=utf-8");
+        assert_eq!(text, "hi there");
+    }
+
+    #[test]
+    fn extract_pdf_or_html_detects_pdf_by_magic_bytes_even_without_content_type() {
+        let bytes = crate::extract::pdf_with_pages(&["MAGIC BYTES PDF"]);
+        let text = extract_pdf_or_html(&bytes, "");
+        assert!(text.contains("MAGIC BYTES PDF"), "{text:?}");
     }
 
     #[test]
