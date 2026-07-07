@@ -35,6 +35,10 @@ pub struct ToolBox {
     client: reqwest::Client,
     files: Option<FilesCtx>,
     apps: Option<AppsCtx>,
+    /// When true, `fetch_cached` never hits the network on a cache miss —
+    /// used for the Verifier stage's quote-checking pass, which must only
+    /// ever see pages the searchers actually gathered, never fresh fetches.
+    cache_only: bool,
 }
 
 /// Where the file tools read from: the shared db plus the space to scope to.
@@ -77,6 +81,7 @@ impl ToolBox {
             client: reqwest::Client::new(),
             files,
             apps,
+            cache_only: false,
         }
     }
 
@@ -116,6 +121,14 @@ impl ToolBox {
             self.blocked_domains.extend(hosts);
         }
         self.research_session_id = Some(session_id);
+        self
+    }
+
+    /// Restrict `fetch_url` to serving from `web_cache` only — a cache miss
+    /// returns `[not cached]` instead of fetching. Used for the Verifier's
+    /// quote-checking pass (Task 8).
+    pub fn cache_only(mut self) -> Self {
+        self.cache_only = true;
         self
     }
 
@@ -177,6 +190,9 @@ impl ToolBox {
             && crate::db::is_fresh(&fetched_at, chrono::Utc::now())
         {
             return Ok(text);
+        }
+        if self.cache_only {
+            return Ok("[not cached]".to_string());
         }
         let text = if is_youtube_url(url) {
             fetch_youtube_transcript(&self.client, url).await?
@@ -2628,5 +2644,24 @@ mod tests {
         let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new(), None);
         let (result, _) = tb.run("run_python", r#"{"code":"print(1)"}"#).await;
         assert!(result.contains("not available in research mode"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn cache_only_toolbox_returns_not_cached_marker_on_miss_without_network() {
+        let dir = std::env::temp_dir().join(format!("nexus-cacheonly-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("db.sqlite3");
+        // Any valid sqlite file works — fetch_cached only needs cache_get/cache_put's
+        // table, migrated on open elsewhere in real use; here confirm the miss path
+        // never reaches the network.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE web_cache (url_norm TEXT PRIMARY KEY, url TEXT NOT NULL, title TEXT, text TEXT NOT NULL, fetched_at TEXT NOT NULL);",
+        ).unwrap();
+        drop(conn);
+
+        let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new(), Some(db_path)).cache_only();
+        let (result, _status) = tb.run("fetch_url", r#"{"url":"https://never-fetched.example/page"}"#).await;
+        assert!(result.contains("not cached"), "{result}");
     }
 }
