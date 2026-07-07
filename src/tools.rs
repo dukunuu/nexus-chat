@@ -169,7 +169,11 @@ impl ToolBox {
         {
             return Ok(text);
         }
-        let text = fetch_url_text(&self.client, url).await?;
+        let text = if is_youtube_url(url) {
+            fetch_youtube_transcript(&self.client, url).await?
+        } else {
+            fetch_url_text(&self.client, url).await?
+        };
         if let Some(db_path) = &self.web_cache_db
             && let Ok(conn) = rusqlite::Connection::open(db_path)
         {
@@ -1283,6 +1287,70 @@ async fn fetch_url_text(client: &reqwest::Client, url: &str) -> anyhow::Result<S
     Ok(extract_pdf_or_html(capped, &content_type))
 }
 
+/// Whether `url` points at a YouTube watch page (long or short form).
+fn is_youtube_url(url: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(url) else { return false };
+    matches!(u.host_str(), Some(h) if h.ends_with("youtube.com") || h == "youtu.be")
+}
+
+/// Pull the first caption track's `baseUrl` out of a YouTube watch page's
+/// embedded JSON (`ytInitialData`/`ytInitialPlayerResponse`). The value is
+/// JSON-string-escaped (`\/` and `\uXXXX`); unescape just enough to get a
+/// usable URL — a full JSON parse isn't needed for one field.
+fn parse_caption_track_url(watch_page_html: &str) -> Option<String> {
+    let marker = "\"baseUrl\":\"";
+    let idx = watch_page_html.find(marker)? + marker.len();
+    let end = watch_page_html[idx..].find('"')? + idx;
+    let raw = &watch_page_html[idx..end];
+    Some(raw.replace("\\/", "/").replace("\\u0026", "&"))
+}
+
+/// Join a YouTube timedtext XML transcript's `<text>` cue contents with
+/// spaces into one plain-text string (no timing/markup kept — this is fed
+/// to a research searcher, not rendered as captions).
+fn strip_timedtext_xml(xml: &str) -> String {
+    split_tag_blocks(xml, "text")
+        .iter()
+        .map(|inner| html_unescape_entities(inner))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Minimal HTML entity unescaping for cue text (`&amp;` last, so it doesn't
+/// double-unescape compound entities — same ordering as `src/extract.rs`'s
+/// `xml_unescape`).
+fn html_unescape_entities(s: &str) -> String {
+    s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&")
+}
+
+/// Fetch a YouTube video's transcript via the keyless timedtext endpoint:
+/// scrape the watch page for a caption track URL, fetch it, and join the
+/// cue text. Falls back to the normal page scrape when no caption track is
+/// found (private/no-captions videos still return something searchable).
+async fn fetch_youtube_transcript(client: &reqwest::Client, url: &str) -> anyhow::Result<String> {
+    let watch_html = client
+        .get(url)
+        .header("User-Agent", "Mozilla/5.0 (compatible; nexus-chat)")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    let Some(track_url) = parse_caption_track_url(&watch_html) else {
+        return Ok(strip_html_to_text(&watch_html));
+    };
+    let xml = client
+        .get(&track_url)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    Ok(strip_timedtext_xml(&xml))
+}
+
 /// Pull `(title, url, snippet)` hits out of a DuckDuckGo HTML results page.
 /// Each result is `<a class="result__a" href="...uddg=<url>...">title</a>`
 /// followed by `<a class="result__snippet" ...>snippet</a>`.
@@ -1990,6 +2058,32 @@ mod tests {
         let text = strip_html_to_text(html);
         assert!(text.contains("outer"));
         assert!(text.contains("inner"));
+    }
+
+    #[test]
+    fn is_youtube_url_matches_watch_and_short_links() {
+        assert!(is_youtube_url("https://www.youtube.com/watch?v=abc123"));
+        assert!(is_youtube_url("https://youtu.be/abc123"));
+        assert!(!is_youtube_url("https://example.com/watch?v=abc123"));
+    }
+
+    #[test]
+    fn parse_caption_track_url_finds_the_first_baseurl_in_captiontracks() {
+        let page = r#"var ytInitialData = {"captions":{"playerCaptionsTracklistRenderer":
+            {"captionTracks":[{"baseUrl":"https:\/\/www.youtube.com\/api\/timedtext?v=abc&lang=en","name":{}}]}}};"#;
+        let url = parse_caption_track_url(page).expect("should find a track");
+        assert_eq!(url, "https://www.youtube.com/api/timedtext?v=abc&lang=en");
+    }
+
+    #[test]
+    fn parse_caption_track_url_none_when_no_captions_present() {
+        assert!(parse_caption_track_url("var ytInitialData = {};").is_none());
+    }
+
+    #[test]
+    fn strip_timedtext_xml_joins_cue_text_with_spaces() {
+        let xml = r#"<transcript><text start="0" dur="2">Hello there</text><text start="2" dur="3">world &amp; friends</text></transcript>"#;
+        assert_eq!(strip_timedtext_xml(xml), "Hello there world & friends");
     }
 
     #[test]
