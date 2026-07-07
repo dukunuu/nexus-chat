@@ -32,6 +32,7 @@ mod spaces;
 #[cfg(test)]
 mod tests;
 mod transcribe;
+mod watches;
 #[cfg(test)]
 use chat::split_inline_reasoning;
 use chat::{code_blocks, pick_greeting};

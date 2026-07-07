@@ -42,6 +42,18 @@ pub struct Session {
     pub web_mode: bool,
 }
 
+/// A standing research watch: runs a topic's research on an interval.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]  // Task 11 will wire up the watch command and consume these fields.
+pub struct Watch {
+    pub id: String,
+    pub space_id: String,
+    pub topic: String,
+    pub interval_hours: i64,
+    pub session_id: String,
+    pub last_run_at: Option<String>,
+}
+
 /// A file imported into a space's fileset. `status` is "ok", "no text
 /// (scanned?)", "unsupported", or "error: …"; extraction text lives in the
 /// `file_chunks` FTS table, not here.
@@ -196,6 +208,14 @@ impl Db {
                 session_id TEXT NOT NULL,
                 url_norm   TEXT NOT NULL,
                 PRIMARY KEY (session_id, url_norm)
+            );
+            CREATE TABLE IF NOT EXISTS watches (
+                id             TEXT PRIMARY KEY,
+                space_id       TEXT NOT NULL,
+                topic          TEXT NOT NULL,
+                interval_hours INTEGER NOT NULL,
+                session_id     TEXT NOT NULL,
+                last_run_at    TEXT
             );",
         )?;
         // Columns added after v1; ignore "duplicate column" on existing dbs.
@@ -783,6 +803,68 @@ impl Db {
         }
         Ok(())
     }
+
+    #[allow(dead_code)]  // Task 11 will use this to create watches.
+    pub fn create_watch(&self, space_id: &str, topic: &str, interval_hours: i64, session_id: &str) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO watches (id, space_id, topic, interval_hours, session_id, last_run_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+            (&id, space_id, topic, interval_hours, session_id),
+        )?;
+        Ok(id)
+    }
+
+    #[allow(dead_code)]  // Task 11 will use this to list watches.
+    pub fn list_watches(&self, space_id: &str) -> Result<Vec<Watch>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, space_id, topic, interval_hours, session_id, last_run_at
+             FROM watches WHERE space_id = ?1 ORDER BY topic",
+        )?;
+        let rows = stmt.query_map([space_id], |r| {
+            Ok(Watch {
+                id: r.get(0)?,
+                space_id: r.get(1)?,
+                topic: r.get(2)?,
+                interval_hours: r.get(3)?,
+                session_id: r.get(4)?,
+                last_run_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Every watch across all spaces — used by the startup due-check, which
+    /// runs before any space is necessarily "active".
+    #[allow(dead_code)]  // Task 11 will call this from the startup hook.
+    pub fn list_all_watches(&self) -> Result<Vec<Watch>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, space_id, topic, interval_hours, session_id, last_run_at FROM watches",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Watch {
+                id: r.get(0)?,
+                space_id: r.get(1)?,
+                topic: r.get(2)?,
+                interval_hours: r.get(3)?,
+                session_id: r.get(4)?,
+                last_run_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    #[allow(dead_code)]  // Task 11 will use this to update watch timestamps.
+    pub fn touch_watch(&self, id: &str, now_rfc3339: &str) -> Result<()> {
+        self.conn.execute("UPDATE watches SET last_run_at = ?2 WHERE id = ?1", (id, now_rfc3339))?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]  // Task 11 will use this to delete watches.
+    pub fn delete_watch(&self, id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM watches WHERE id = ?1", [id])?;
+        Ok(())
+    }
 }
 
 /// Encode an embedding as little-endian f32 bytes for a BLOB column.
@@ -1353,5 +1435,23 @@ mod tests {
         let msgs = db.load_messages(&s.id).unwrap();
         assert_eq!(msgs.last().unwrap().role, "research_stage");
         assert_eq!(msgs.last().unwrap().content, "planning…");
+    }
+
+    #[test]
+    fn create_list_touch_delete_watch_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        let id = db.create_watch("space-1", "rust async runtimes", 24, "sess-1").unwrap();
+        let watches = db.list_watches("space-1").unwrap();
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].topic, "rust async runtimes");
+        assert_eq!(watches[0].interval_hours, 24);
+        assert!(watches[0].last_run_at.is_none());
+
+        db.touch_watch(&id, "2026-07-07T00:00:00+00:00").unwrap();
+        let watches = db.list_watches("space-1").unwrap();
+        assert_eq!(watches[0].last_run_at.as_deref(), Some("2026-07-07T00:00:00+00:00"));
+
+        db.delete_watch(&id).unwrap();
+        assert!(db.list_watches("space-1").unwrap().is_empty());
     }
 }
