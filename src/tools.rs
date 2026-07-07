@@ -1290,7 +1290,7 @@ async fn fetch_url_text(client: &reqwest::Client, url: &str) -> anyhow::Result<S
 /// Whether `url` points at a YouTube watch page (long or short form).
 fn is_youtube_url(url: &str) -> bool {
     let Ok(u) = reqwest::Url::parse(url) else { return false };
-    matches!(u.host_str(), Some(h) if h.ends_with("youtube.com") || h == "youtu.be")
+    matches!(u.host_str(), Some(h) if h == "youtube.com" || h.ends_with(".youtube.com") || h == "youtu.be")
 }
 
 /// Pull the first caption track's `baseUrl` out of a YouTube watch page's
@@ -2065,6 +2065,9 @@ mod tests {
         assert!(is_youtube_url("https://www.youtube.com/watch?v=abc123"));
         assert!(is_youtube_url("https://youtu.be/abc123"));
         assert!(!is_youtube_url("https://example.com/watch?v=abc123"));
+        assert!(!is_youtube_url("https://notyoutube.com/watch?v=abc123"));
+        assert!(!is_youtube_url("https://evilyoutube.com/watch?v=abc123"));
+        assert!(is_youtube_url("https://m.youtube.com/watch?v=abc123"));
     }
 
     #[test]
