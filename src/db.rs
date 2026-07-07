@@ -1454,4 +1454,31 @@ mod tests {
         db.delete_watch(&id).unwrap();
         assert!(db.list_watches("space-1").unwrap().is_empty());
     }
+
+    #[test]
+    fn list_all_watches_returns_watches_from_all_spaces() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Create watches in different spaces
+        let id1 = db.create_watch("space-a", "topic-1", 24, "sess-1").unwrap();
+        let id2 = db.create_watch("space-b", "topic-2", 48, "sess-2").unwrap();
+        let id3 = db.create_watch("space-a", "topic-3", 12, "sess-3").unwrap();
+
+        // list_all_watches should return watches from all spaces
+        let all_watches = db.list_all_watches().unwrap();
+        assert_eq!(all_watches.len(), 3);
+        assert!(all_watches.iter().any(|w| w.id == id1 && w.space_id == "space-a"));
+        assert!(all_watches.iter().any(|w| w.id == id2 && w.space_id == "space-b"));
+        assert!(all_watches.iter().any(|w| w.id == id3 && w.space_id == "space-a"));
+
+        // list_watches for one space should only return that space's watches,
+        // confirming list_all_watches is not space-scoped
+        let space_a_watches = db.list_watches("space-a").unwrap();
+        assert_eq!(space_a_watches.len(), 2);
+        assert!(space_a_watches.iter().all(|w| w.space_id == "space-a"));
+
+        let space_b_watches = db.list_watches("space-b").unwrap();
+        assert_eq!(space_b_watches.len(), 1);
+        assert!(space_b_watches.iter().all(|w| w.space_id == "space-b"));
+    }
 }
