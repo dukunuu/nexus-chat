@@ -186,7 +186,10 @@ impl super::App {
         let slug = super::sessions::slugify(&w.topic);
         let prefix = format!("research-{slug}-");
         let rows = self.db.search_citations(space_id, Some(&prefix))?;
-        let rows: Vec<_> = rows.into_iter().filter(|(report_file, _, _)| report_file.starts_with(&prefix)).collect();
+        let rows: Vec<_> = rows.into_iter().filter(|(report_file, _, _)| {
+            report_file.starts_with(&prefix) &&
+            report_file.chars().nth(prefix.len()).map_or(false, |c| c.is_ascii_digit())
+        }).collect();
         if rows.is_empty() {
             return Ok(None);
         }
@@ -374,5 +377,42 @@ mod tests {
         let new_report = "Body [1].\n\n## Sources\n1. https://Old.example/a/\n";
         let previous = vec!["https://old.example/a".to_string()];
         assert!(new_sources_since(new_report, &previous).is_empty());
+    }
+
+    #[test]
+    fn previous_citations_for_watch_session_prefix_collision_doesnt_match_longer_slugs() {
+        let a = test_app();
+        let space_id = a.active_space.id.clone();
+
+        // Two watches: one with topic "rust", another with "rust async".
+        // Their slugs are "rust" and "rust-async" respectively.
+        let session_rust = a.db.create_session("rust", "openai/gpt-5-mini", &space_id).unwrap();
+        let _watch_rust = a.db.create_watch(&space_id, "rust", 24, &session_rust.id).unwrap();
+
+        let session_rust_async = a.db.create_session("rust async", "openai/gpt-5-mini", &space_id).unwrap();
+        let _watch_rust_async = a.db.create_watch(&space_id, "rust async", 24, &session_rust_async.id).unwrap();
+
+        // Add citations to the "rust async" watch (the one with the longer slug).
+        // Its report file starts with "research-rust-async-" then the timestamp.
+        let slug_rust_async = super::super::sessions::slugify("rust async");
+        a.db
+            .add_citations(
+                &space_id,
+                &format!("research-{slug_rust_async}-20260101-000000.md"),
+                &[("https://rust-async-report.example".to_string(), None)],
+            )
+            .unwrap();
+
+        // The "rust" watch should NOT see the "rust async" watch's citations,
+        // even though "research-rust-async-..." starts with "research-rust-".
+        // With the bug unfixed, the "rust" watch would incorrectly pull in the
+        // "rust-async" watch's citations since "research-rust-async-20260101-000000.md"
+        // starts with the prefix "research-rust-".
+        let prev_rust = a.previous_citations_for_watch_session(&session_rust.id, &space_id).unwrap();
+        assert!(
+            prev_rust.is_none(),
+            "rust watch should return None (no prior citations for itself), \
+             not see rust-async watch's citations (would show prefix collision bug): {prev_rust:?}"
+        );
     }
 }
