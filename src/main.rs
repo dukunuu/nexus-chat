@@ -48,6 +48,7 @@ async fn main() -> Result<()> {
         );
     }
     app.init(); // fetch models if a key is already present
+    app.run_due_watches(); // re-run any standing research watches that are due
     let result = events::run(app, &mut terminal).await;
     if enhanced {
         let _ = crossterm::execute!(

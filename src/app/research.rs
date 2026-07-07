@@ -772,6 +772,20 @@ impl super::App {
                 }
             }
             ResearchUpdate::Done(Ok(report)) => {
+                // A watch session with a prior run gets a "what changed"
+                // section prepended, listing sources not cited last time.
+                let report = if let Ok(Some(prev_citations)) =
+                    self.previous_citations_for_watch_session(&session_id, &space_id)
+                {
+                    let new_sources = crate::app::watches::new_sources_since(&report, &prev_citations);
+                    format!(
+                        "{}\n\n{}",
+                        crate::app::watches::diff_section("", &report, &new_sources),
+                        report
+                    )
+                } else {
+                    report
+                };
                 let _ = self.db.add_assistant_message(&session_id, &report, None, None, None, None, None);
                 let topic = self.research_running.as_ref().map(|(_, t)| t.clone()).unwrap_or_default();
                 self.save_research_report(&space_id, &space_name, &topic, &report);

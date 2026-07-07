@@ -80,6 +80,7 @@ pub enum Popup {
     Skills,
     Files,
     Apps,
+    Watch,
 }
 
 /// What the apps popup is doing: browsing the space's apps or confirming
@@ -547,6 +548,9 @@ pub struct App {
     pub apps_cache: Vec<String>,
     pub apps_selected: usize,
     pub apps_mode: AppsMode,
+    /// The space's standing research watches (`/watch` picker): cache + cursor.
+    pub watches_cache: Vec<crate::db::Watch>,
+    pub watch_selected: usize,
     /// Path being typed/pasted in the files popup's Add mode.
     pub files_edit: String,
     /// Directory the file-picker browser is showing (remembered across opens).
@@ -748,6 +752,8 @@ impl App {
             apps_cache: Vec::new(),
             apps_selected: 0,
             apps_mode: AppsMode::Browse,
+            watches_cache: Vec::new(),
+            watch_selected: 0,
             files_edit: String::new(),
             picker_dir: std::env::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")),
             picker_entries: Vec::new(),
@@ -1171,6 +1177,14 @@ impl App {
             "web" => self.toggle_web_mode(),
             "steer" => self.steer_research(cmd[token.len()..].trim()),
             "edit" => self.request_app_file_edit(cmd[token.len()..].trim()),
+            "watch" => {
+                let arg = cmd[token.len()..].trim();
+                if arg.is_empty() {
+                    self.open_watch_picker()?;
+                } else {
+                    self.create_watch(arg);
+                }
+            }
             other => {
                 if self.skills.iter().any(|s| s.name == other) {
                     self.forced_skill = Some(other.to_string());

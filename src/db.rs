@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
 /// Stored per-model preferences.
@@ -44,7 +44,6 @@ pub struct Session {
 
 /// A standing research watch: runs a topic's research on an interval.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]  // Task 11 will wire up the watch command and consume these fields.
 pub struct Watch {
     pub id: String,
     pub space_id: String,
@@ -400,6 +399,31 @@ impl Db {
             compact_through: 0,
             web_mode: false,
         })
+    }
+
+    /// A single session by id, or `None` if it doesn't exist (e.g. deleted
+    /// out from under a watch).
+    pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
+        self.conn
+            .query_row(
+                "SELECT id, title, model, slug, created_at, compact_summary, compact_through, web_mode
+                 FROM sessions WHERE id = ?1",
+                [id],
+                |r| {
+                    Ok(Session {
+                        id: r.get(0)?,
+                        title: r.get(1)?,
+                        model: r.get(2)?,
+                        slug: r.get(3)?,
+                        created_at: r.get(4)?,
+                        compact_summary: r.get(5)?,
+                        compact_through: r.get(6)?,
+                        web_mode: r.get::<_, i64>(7)? != 0,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     /// Sessions in `space_id`, most-recently-updated first.
@@ -785,10 +809,10 @@ impl Db {
         Ok(())
     }
 
-    /// See the free function of the same name. Production code reads
-    /// citations through the toolbox's own connection; this handle exists
-    /// for tests.
-    #[cfg(test)]
+    /// See the free function of the same name. Most production code reads
+    /// citations through the toolbox's own connection (the free function),
+    /// but this handle is also used directly by the watch diff-section
+    /// lookup (`previous_citations_for_watch_session`), plus tests.
     pub fn search_citations(&self, space_id: &str, query: Option<&str>) -> Result<Vec<(String, String, String)>> {
         search_citations(&self.conn, space_id, query)
     }
@@ -804,7 +828,6 @@ impl Db {
         Ok(())
     }
 
-    #[allow(dead_code)]  // Task 11 will use this to create watches.
     pub fn create_watch(&self, space_id: &str, topic: &str, interval_hours: i64, session_id: &str) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         self.conn.execute(
@@ -815,7 +838,6 @@ impl Db {
         Ok(id)
     }
 
-    #[allow(dead_code)]  // Task 11 will use this to list watches.
     pub fn list_watches(&self, space_id: &str) -> Result<Vec<Watch>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, space_id, topic, interval_hours, session_id, last_run_at
@@ -836,7 +858,6 @@ impl Db {
 
     /// Every watch across all spaces — used by the startup due-check, which
     /// runs before any space is necessarily "active".
-    #[allow(dead_code)]  // Task 11 will call this from the startup hook.
     pub fn list_all_watches(&self) -> Result<Vec<Watch>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, space_id, topic, interval_hours, session_id, last_run_at FROM watches",
@@ -854,13 +875,11 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    #[allow(dead_code)]  // Task 11 will use this to update watch timestamps.
     pub fn touch_watch(&self, id: &str, now_rfc3339: &str) -> Result<()> {
         self.conn.execute("UPDATE watches SET last_run_at = ?2 WHERE id = ?1", (id, now_rfc3339))?;
         Ok(())
     }
 
-    #[allow(dead_code)]  // Task 11 will use this to delete watches.
     pub fn delete_watch(&self, id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM watches WHERE id = ?1", [id])?;
         Ok(())
