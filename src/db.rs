@@ -848,9 +848,7 @@ pub fn search_session_sources(conn: &Connection, session_id: &str, query: &str) 
 }
 
 /// URLs pinned in a session's source bundle — the Synthesizer/Writer
-/// prompts list these as "prioritize these sources". Not yet called from
-/// production code; wired into the synthesis/writer prompts in a later task.
-#[allow(dead_code)]
+/// prompts list these as "prioritize these sources".
 pub fn pinned_urls(conn: &Connection, session_id: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT url_norm FROM session_sources WHERE session_id = ?1 AND flag = 'pinned'",

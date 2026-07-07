@@ -138,17 +138,22 @@ fn planner_messages_with_context(topic: &str, known: &[String]) -> Vec<ChatMessa
     vec![ChatMessage::text("system", PLANNER_PROMPT), ChatMessage::text("user", user)]
 }
 
-fn synthesizer_messages(topic: &str, findings: &[String]) -> Vec<ChatMessage> {
+fn synthesizer_messages(topic: &str, findings: &[String], pinned: &[String]) -> Vec<ChatMessage> {
     let body = findings
         .iter()
         .enumerate()
         .map(|(i, f)| format!("--- Searcher {} findings ---\n{f}", i + 1))
         .collect::<Vec<_>>()
         .join("\n\n");
-    vec![
-        ChatMessage::text("system", SYNTHESIZER_PROMPT),
-        ChatMessage::text("user", format!("Topic: {topic}\n\n{body}")),
-    ]
+    let mut user = format!("Topic: {topic}\n\n");
+    if !pinned.is_empty() {
+        user.push_str(&format!(
+            "Prioritize these pinned sources in the synthesis if their content is present in the findings below:\n{}\n\n",
+            pinned.join("\n")
+        ));
+    }
+    user.push_str(&body);
+    vec![ChatMessage::text("system", SYNTHESIZER_PROMPT), ChatMessage::text("user", user)]
 }
 
 fn critic_messages(topic: &str, draft: &str) -> Vec<ChatMessage> {
@@ -177,11 +182,16 @@ fn verifier_messages(topic: &str, draft: &str, findings: &[String]) -> Vec<ChatM
     ]
 }
 
-fn writer_messages(topic: &str, verified_draft: &str) -> Vec<ChatMessage> {
-    vec![
-        ChatMessage::text("system", WRITER_PROMPT),
-        ChatMessage::text("user", format!("Topic: {topic}\n\nVerified draft:\n{verified_draft}")),
-    ]
+fn writer_messages(topic: &str, verified_draft: &str, pinned: &[String]) -> Vec<ChatMessage> {
+    let mut user = format!("Topic: {topic}\n\n");
+    if !pinned.is_empty() {
+        user.push_str(&format!(
+            "Prioritize these pinned sources in the final report if their content is present in the verified draft below:\n{}\n\n",
+            pinned.join("\n")
+        ));
+    }
+    user.push_str(&format!("Verified draft:\n{verified_draft}"));
+    vec![ChatMessage::text("system", WRITER_PROMPT), ChatMessage::text("user", user)]
 }
 
 use std::sync::Arc;
@@ -416,13 +426,21 @@ async fn run_research_inner(
         };
     }
 
+    let pinned = rusqlite::Connection::open(db_path)
+        .ok()
+        .and_then(|conn| crate::db::pinned_urls(&conn, &ids.0).ok())
+        .unwrap_or_default();
+
     let mut findings = run_searchers(provider, research_model, toolbox, &questions, tx, ids, 1).await;
     persist_session_sources(db_path, &ids.0, &findings);
 
     send_stage(tx, ids, "synthesizing", "");
-    let mut draft =
-        complete_text(provider, research_model, synthesizer_messages(topic, &crate::tools::dedup_source_lines(&findings)))
-            .await?;
+    let mut draft = complete_text(
+        provider,
+        research_model,
+        synthesizer_messages(topic, &crate::tools::dedup_source_lines(&findings), &pinned),
+    )
+    .await?;
 
     send_stage(tx, ids, "critiquing", "");
     let mut critique = parse_critique(&complete_text(provider, research_model, critic_messages(topic, &draft)).await?);
@@ -435,7 +453,7 @@ async fn run_research_inner(
         draft = complete_text(
             provider,
             research_model,
-            synthesizer_messages(topic, &crate::tools::dedup_source_lines(&findings)),
+            synthesizer_messages(topic, &crate::tools::dedup_source_lines(&findings), &pinned),
         )
         .await?;
         send_stage(tx, ids, "critiquing", "round 2");
@@ -454,7 +472,7 @@ async fn run_research_inner(
     let verified = complete_text(provider, research_model, verifier_messages(topic, &draft, &findings)).await?;
 
     send_stage(tx, ids, "writing final report", "");
-    complete_text(provider, research_model, writer_messages(topic, &verified)).await
+    complete_text(provider, research_model, writer_messages(topic, &verified, &pinned)).await
 }
 
 /// Link every URL cited in `findings` into the session's source bundle
@@ -1111,11 +1129,30 @@ mod tests {
 
     #[test]
     fn synthesizer_messages_includes_topic_and_all_findings() {
-        let msgs = synthesizer_messages("rust async runtimes", &["finding one".to_string(), "finding two".to_string()]);
+        let msgs = synthesizer_messages(
+            "rust async runtimes",
+            &["finding one".to_string(), "finding two".to_string()],
+            &[],
+        );
         assert_eq!(msgs[0].role, "system");
         assert!(msgs[1].content.contains("rust async runtimes"));
         assert!(msgs[1].content.contains("finding one"));
         assert!(msgs[1].content.contains("finding two"));
+    }
+
+    #[test]
+    fn synthesizer_messages_lists_pinned_sources_when_present() {
+        let msgs = synthesizer_messages("topic", &["finding one".to_string()], &["https://a.example".to_string()]);
+        let user = msgs.iter().find(|m| m.role == "user").unwrap();
+        assert!(user.content.contains("https://a.example"), "{}", user.content);
+        assert!(user.content.to_lowercase().contains("prioritize"), "{}", user.content);
+    }
+
+    #[test]
+    fn synthesizer_messages_omits_pinned_section_when_empty() {
+        let msgs = synthesizer_messages("topic", &["finding one".to_string()], &[]);
+        let user = msgs.iter().find(|m| m.role == "user").unwrap();
+        assert!(!user.content.to_lowercase().contains("prioritize"), "{}", user.content);
     }
 
     #[test]
@@ -1134,7 +1171,7 @@ mod tests {
 
     #[test]
     fn writer_messages_includes_verified_draft() {
-        let msgs = writer_messages("t", "verified content");
+        let msgs = writer_messages("t", "verified content", &[]);
         assert!(msgs[1].content.contains("verified content"));
     }
 }
