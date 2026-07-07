@@ -16,15 +16,27 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     let items: Vec<ListItem> = app
         .skills
         .iter()
-        .map(|s| ListItem::new(Line::from(Span::styled(s.name.clone(), Style::default().fg(app.theme.fg)))))
+        .map(|s| {
+            ListItem::new(Line::from(Span::styled(
+                s.name.clone(),
+                Style::default().fg(app.theme.fg),
+            )))
+        })
         .collect();
 
     let title = match app.skills_mode {
         SkillsMode::Install => {
-            format!(" install: {}▏  owner/repo/path  (Enter install · Esc cancel) ", app.skills_edit)
+            format!(
+                " install: {}▏  owner/repo/path  (Enter install · Esc cancel) ",
+                app.skills_edit
+            )
         }
         SkillsMode::ConfirmRemove => {
-            let name = app.skills.get(app.skills_selected).map(|s| s.name.as_str()).unwrap_or("");
+            let name = app
+                .skills
+                .get(app.skills_selected)
+                .map(|s| s.name.as_str())
+                .unwrap_or("");
             format!(" remove \"{name}\"? (Ctrl+D confirm · Esc cancel) ")
         }
         SkillsMode::Browse => {
@@ -41,7 +53,11 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let desc = app.skills.get(app.skills_selected).map(|s| s.description.as_str()).unwrap_or("");
+    let desc = app
+        .skills
+        .get(app.skills_selected)
+        .map(|s| s.description.as_str())
+        .unwrap_or("");
     let (list_area, detail_area) = chrome::split_with_detail(inner, desc);
 
     let list = List::new(items)
@@ -56,7 +72,10 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
-    use super::{ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key, classify_edit_key};
+    use super::{
+        ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key,
+        classify_edit_key,
+    };
     use crate::app::SkillsMode;
     match app.skills_mode {
         SkillsMode::Install => match classify_edit_key(key) {

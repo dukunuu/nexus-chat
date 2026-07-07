@@ -35,21 +35,33 @@ impl super::App {
             self.status = "no active session".to_string();
             return Ok(());
         };
-        let Some(report) = self.messages.iter().rev().find(|m| m.role == "assistant").map(|m| m.content.clone())
+        let Some(report) = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .map(|m| m.content.clone())
         else {
             self.status = "nothing to export — no assistant reply yet".to_string();
             return Ok(());
         };
         let citations = self.db.search_citations(&self.active_space.id, None)?;
         let cited_here: Vec<(String, String, String)> = {
-            let urls_in_report: std::collections::HashSet<String> = crate::citations::parse_citations(&report)
+            let urls_in_report: std::collections::HashSet<String> =
+                crate::citations::parse_citations(&report)
+                    .into_iter()
+                    .map(|(_, url)| url)
+                    .collect();
+            citations
                 .into_iter()
-                .map(|(_, url)| url)
-                .collect();
-            citations.into_iter().filter(|(_, url, _)| urls_in_report.contains(url)).collect()
+                .filter(|(_, url, _)| urls_in_report.contains(url))
+                .collect()
         };
         let assembled = assemble_report(&report, &cited_here);
-        let dir = self.space.files_dir(&self.active_space.name).join("reports");
+        let dir = self
+            .space
+            .files_dir(&self.active_space.name)
+            .join("reports");
         std::fs::create_dir_all(&dir)?;
         let slug = super::sessions::slugify(&session.title);
         let path = dir.join(format!("{slug}.md"));
@@ -66,8 +78,16 @@ mod tests {
     #[test]
     fn assemble_report_appends_numbered_bibliography() {
         let citations = vec![
-            ("report-a.md".to_string(), "https://a.example".to_string(), "Title A".to_string()),
-            ("report-a.md".to_string(), "https://b.example".to_string(), "".to_string()),
+            (
+                "report-a.md".to_string(),
+                "https://a.example".to_string(),
+                "Title A".to_string(),
+            ),
+            (
+                "report-a.md".to_string(),
+                "https://b.example".to_string(),
+                "".to_string(),
+            ),
         ];
         let out = assemble_report("# Report\nBody [1] [2].", &citations);
         assert!(out.contains("## Sources"));

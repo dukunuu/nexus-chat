@@ -59,7 +59,11 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
-        ChatMessage { role: role.into(), content: content.into(), ..Default::default() }
+        ChatMessage {
+            role: role.into(),
+            content: content.into(),
+            ..Default::default()
+        }
     }
 }
 
@@ -97,7 +101,14 @@ impl Serialize for ChatMessage {
         if let Some(calls) = &self.tool_calls {
             let wire: Vec<Wire> = calls
                 .iter()
-                .map(|c| Wire { id: &c.id, r#type: "function", function: Function { name: &c.name, arguments: &c.arguments } })
+                .map(|c| Wire {
+                    id: &c.id,
+                    r#type: "function",
+                    function: Function {
+                        name: &c.name,
+                        arguments: &c.arguments,
+                    },
+                })
                 .collect();
             map.serialize_entry("tool_calls", &wire)?;
         }
@@ -130,7 +141,11 @@ pub enum StreamEvent {
     /// thinking spinner while the model waits on the result.
     Status(String),
     /// A tool finished: shown (and persisted) as its own transcript block.
-    ToolCall { name: String, arguments: String, result: String },
+    ToolCall {
+        name: String,
+        arguments: String,
+        result: String,
+    },
     Done,
     Error(String),
 }
@@ -155,7 +170,10 @@ mod tests {
         assert_eq!(v["content"][0]["type"], "text");
         assert_eq!(v["content"][0]["text"], "what is this?");
         assert_eq!(v["content"][1]["type"], "image_url");
-        assert_eq!(v["content"][1]["image_url"]["url"], "data:image/png;base64,AAAA");
+        assert_eq!(
+            v["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
     }
 
     #[test]
@@ -163,7 +181,11 @@ mod tests {
         let m = ChatMessage {
             role: "assistant".into(),
             content: "".into(),
-            tool_calls: Some(vec![ToolCall { id: "c1".into(), name: "web_search".into(), arguments: "{}".into() }]),
+            tool_calls: Some(vec![ToolCall {
+                id: "c1".into(),
+                name: "web_search".into(),
+                arguments: "{}".into(),
+            }]),
             tool_call_id: None,
             images: Vec::new(),
         };

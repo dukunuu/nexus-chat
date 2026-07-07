@@ -67,10 +67,15 @@ impl OcrBackend {
                         }
                     })?;
                 if resp.status().as_u16() == 404 {
-                    anyhow::bail!("model '{model}' not pulled — run /ocr-local");
+                    anyhow::bail!(
+                        "model '{model}' not pulled — cycle OCR engine to 'local' in /config"
+                    );
                 }
                 let v = resp.error_for_status()?.json::<serde_json::Value>().await?;
-                Ok(v.get("response").and_then(|r| r.as_str()).unwrap_or("").to_string())
+                Ok(v.get("response")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("")
+                    .to_string())
             }
         }
     }
@@ -151,27 +156,31 @@ async fn ocr_pdf_vlm_in(
     let total = pages.len();
     // Show "0/N pages" immediately — on CPU the first page can take minutes,
     // and a frozen "ocr…" reads as stuck.
-    let _ = tx.send((space_id.to_string(), name.to_string(), OcrUpdate::Progress(0, total, 0)));
+    let _ = tx.send((
+        space_id.to_string(),
+        name.to_string(),
+        OcrUpdate::Progress(0, total, 0),
+    ));
     let mut results: Vec<std::result::Result<String, String>> =
         vec![Err("not transcribed".to_string()); total];
     let mut set = tokio::task::JoinSet::new();
-    let spawn_page = |set: &mut tokio::task::JoinSet<(usize, std::result::Result<String, String>)>,
-                      i: usize| {
-        let (backend, png) = (backend.clone(), pages[i].clone());
-        set.spawn(async move {
-            let Ok(bytes) = std::fs::read(&png) else {
-                return (i, Err("page image unreadable".to_string()));
-            };
-            let mut last = String::new();
-            for _ in 0..2 {
-                match backend.transcribe(&bytes).await {
-                    Ok(text) => return (i, Ok(text)),
-                    Err(e) => last = e.to_string(),
+    let spawn_page =
+        |set: &mut tokio::task::JoinSet<(usize, std::result::Result<String, String>)>, i: usize| {
+            let (backend, png) = (backend.clone(), pages[i].clone());
+            set.spawn(async move {
+                let Ok(bytes) = std::fs::read(&png) else {
+                    return (i, Err("page image unreadable".to_string()));
+                };
+                let mut last = String::new();
+                for _ in 0..2 {
+                    match backend.transcribe(&bytes).await {
+                        Ok(text) => return (i, Ok(text)),
+                        Err(e) => last = e.to_string(),
+                    }
                 }
-            }
-            (i, Err(last))
-        });
-    };
+                (i, Err(last))
+            });
+        };
 
     let window = 4.min(total);
     let mut next = 0;
@@ -249,8 +258,11 @@ impl App {
     }
 
     pub fn move_picker_selection(&mut self, delta: i32) {
-        self.picker_selected =
-            super::clamp_cursor(self.picker_selected, self.filtered_picker_entries().len(), delta);
+        self.picker_selected = super::clamp_cursor(
+            self.picker_selected,
+            self.filtered_picker_entries().len(),
+            delta,
+        );
     }
 
     pub fn picker_filter_push(&mut self, c: char) {
@@ -304,11 +316,16 @@ impl App {
     /// blocks a beat; move to a blocking task if that ever hurts.
     pub fn rescan_files(&mut self) {
         let dir = self.space.files_dir(&self.active_space.name);
-        let known = self.db.list_files(&self.active_space.id).unwrap_or_default();
+        let known = self
+            .db
+            .list_files(&self.active_space.id)
+            .unwrap_or_default();
         let mut seen: Vec<String> = Vec::new();
         let mut ocr_jobs: Vec<(String, String, std::path::PathBuf)> = Vec::new();
 
-        let entries = std::fs::read_dir(&dir).map(|rd| rd.flatten().collect::<Vec<_>>()).unwrap_or_default();
+        let entries = std::fs::read_dir(&dir)
+            .map(|rd| rd.flatten().collect::<Vec<_>>())
+            .unwrap_or_default();
         for entry in entries {
             let path = entry.path();
             if !path.is_file() {
@@ -339,8 +356,13 @@ impl App {
                 }
                 continue;
             }
-            let Ok(bytes) = std::fs::read(&path) else { continue };
-            let hash = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>();
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let hash = Sha256::digest(&bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
             if let Some(f) = existing.filter(|f| f.hash == hash) {
                 // Content unchanged (touched, or indexed before mtimes were
                 // tracked): just record the stat for next time.
@@ -363,7 +385,10 @@ impl App {
                 Ok(text) => ("ok".to_string(), crate::extract::chunk_lines(&text)),
                 Err(e) => (format!("error: {e}"), Vec::new()),
             };
-            if let Ok(id) = self.db.upsert_file(&self.active_space.id, &name, &hash, size, &status) {
+            if let Ok(id) = self
+                .db
+                .upsert_file(&self.active_space.id, &name, &hash, size, &status)
+            {
                 let _ = self.db.set_file_chunks(&id, &chunks);
                 let _ = self.db.set_file_mtime(&id, mtime);
             }
@@ -375,8 +400,13 @@ impl App {
         // Backfill vectors for anything whose chunks changed (or that predates
         // semantic search entirely).
         self.start_embedding();
-        self.files_cache = self.db.list_files(&self.active_space.id).unwrap_or_default();
-        self.files_selected = self.files_selected.min(self.files_cache.len().saturating_sub(1));
+        self.files_cache = self
+            .db
+            .list_files(&self.active_space.id)
+            .unwrap_or_default();
+        self.files_selected = self
+            .files_selected
+            .min(self.files_cache.len().saturating_sub(1));
     }
 
     /// OCR queued scanned PDFs sequentially off the UI thread. One batch at a
@@ -405,7 +435,11 @@ impl App {
                 let progress_tx = tx.clone();
                 let (sid, fname) = (space_id.clone(), name.clone());
                 let progress = move |done: usize, total: usize| {
-                    let _ = progress_tx.send((sid.clone(), fname.clone(), OcrUpdate::Progress(done, total, 0)));
+                    let _ = progress_tx.send((
+                        sid.clone(),
+                        fname.clone(),
+                        OcrUpdate::Progress(done, total, 0),
+                    ));
                 };
                 let result = match crate::extract::ocr_pdf(&path, &progress) {
                     Ok(text) => Ok((text, Vec::new())),
@@ -427,7 +461,10 @@ impl App {
         if self.ocr_engine == "local" {
             let model = self.local_ocr_model.trim();
             let model = if model.is_empty() { "glm-ocr" } else { model };
-            return Some(OcrBackend::Ollama(reqwest::Client::new(), model.to_string()));
+            return Some(OcrBackend::Ollama(
+                reqwest::Client::new(),
+                model.to_string(),
+            ));
         }
         if self.vlm_ocr_enabled() {
             return self
@@ -438,22 +475,38 @@ impl App {
         None
     }
 
-    /// `/ocr-local [model]`: pull a local OCR model through Ollama in the
-    /// background and switch the OCR engine to it when the pull succeeds.
-    /// Defaults to glm-ocr (0.9B — the current open OCR benchmark leader).
+    /// Cycling the OCR engine to "local" (in /config) pulls a local OCR model
+    /// through Ollama in the background and switches the engine to it when
+    /// the pull succeeds. Defaults to glm-ocr (0.9B — the current open OCR
+    /// benchmark leader).
     pub(crate) fn ocr_local_install(&mut self, arg: &str) {
         if self.ocr_pull_rx.is_some() {
-            self.status = "an /ocr-local pull is already running".to_string();
+            self.status = "an OCR model pull is already running".to_string();
             return;
         }
-        let model = if arg.is_empty() { "glm-ocr".to_string() } else { arg.to_string() };
+        let model = if arg.is_empty() {
+            "glm-ocr".to_string()
+        } else {
+            arg.to_string()
+        };
         self.local_ocr_model = model.clone();
         let _ = self.db.set_setting("local_ocr_model", &model);
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        self.ocr_pull_rx = Some(rx);
-        self.status = format!("pulling {model} via ollama… (keeps running in background)");
-        tokio::spawn(async move {
-            let result = match tokio::process::Command::new("ollama")
+        // Under `cargo test` there's no reactor to spawn onto and no real
+        // ollama to pull from — just take the switch synchronously so the
+        // settings-cycle test doesn't need a Tokio runtime.
+        #[cfg(test)]
+        {
+            self.ocr_engine = "local".to_string();
+            let _ = self.db.set_setting("ocr_engine", "local");
+            self.status = format!("(test) local OCR: {model}");
+        }
+        #[cfg(not(test))]
+        {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            self.ocr_pull_rx = Some(rx);
+            self.status = format!("pulling {model} via ollama… (keeps running in background)");
+            tokio::spawn(async move {
+                let result = match tokio::process::Command::new("ollama")
                 .args(["pull", &model])
                 .output()
                 .await
@@ -473,11 +526,12 @@ impl App {
                 }
                 Ok(_) => Ok(model),
             };
-            let _ = tx.send(result);
-        });
+                let _ = tx.send(result);
+            });
+        }
     }
 
-    /// `/ocr-local` pull finished: point the OCR engine at the local model.
+    /// The local-OCR-model pull finished: point the OCR engine at the local model.
     pub fn on_ocr_pull(&mut self, r: Option<Result<String, String>>) {
         let Some(result) = r else {
             self.ocr_pull_rx = None;
@@ -488,8 +542,9 @@ impl App {
             Ok(model) => {
                 self.ocr_engine = "local".to_string();
                 let _ = self.db.set_setting("ocr_engine", "local");
-                self.status =
-                    format!("local OCR ready: {model} via ollama — Ctrl+O a file in /files to re-run it");
+                self.status = format!(
+                    "local OCR ready: {model} via ollama — Ctrl+O a file in /files to re-run it"
+                );
             }
             Err(e) => self.status = e,
         }
@@ -506,7 +561,9 @@ impl App {
         let _ = self.db.set_file_chunks(&f.id, &[]);
         // Zeroing hash + size guarantees the rescan takes the re-extract path
         // (a real file is never 0 bytes with an empty hash).
-        let _ = self.db.upsert_file(&self.active_space.id, &f.name, "", 0, "re-extracting");
+        let _ = self
+            .db
+            .upsert_file(&self.active_space.id, &f.name, "", 0, "re-extracting");
         self.status = format!("re-extracting: {}", f.name);
         self.rescan_files();
     }
@@ -518,21 +575,29 @@ impl App {
         if self.embed_rx.is_some() {
             return;
         }
-        let Some(provider) = self.provider.clone() else { return };
+        let Some(provider) = self.provider.clone() else {
+            return;
+        };
         let model = self.embedding_model.trim().to_string();
         if model.is_empty() {
             return;
         }
         let space_id = self.active_space.id.clone();
-        let Ok(missing) = self.db.files_missing_embeddings(&space_id) else { return };
-        let Some(file_id) = missing.first().cloned() else { return };
+        let Ok(missing) = self.db.files_missing_embeddings(&space_id) else {
+            return;
+        };
+        let Some(file_id) = missing.first().cloned() else {
+            return;
+        };
         let chunks = self.db.file_chunk_texts(&file_id).unwrap_or_default();
         if chunks.is_empty() {
             return;
         }
         // Embedding is best-effort background work; outside a runtime (sync
         // unit tests) there's nowhere to run it, so just skip.
-        let Ok(handle) = tokio::runtime::Handle::try_current() else { return };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
         let _ = self.db.set_file_status(&file_id, "embedding…");
         if space_id == self.active_space.id {
             self.files_cache = self.db.list_files(&space_id).unwrap_or_default();
@@ -597,7 +662,9 @@ impl App {
             self.rescan_files();
             return;
         };
-        let Ok(files) = self.db.list_files(&space_id) else { return };
+        let Ok(files) = self.db.list_files(&space_id) else {
+            return;
+        };
         let Some(f) = files.iter().find(|f| f.name == name) else {
             return; // deleted mid-OCR
         };
@@ -613,8 +680,14 @@ impl App {
                 }
             }
             OcrUpdate::Progress(done, total, failed) => {
-                let tail = if failed > 0 { format!(" ({failed} failed)") } else { String::new() };
-                let _ = self.db.set_file_status(&f.id, &format!("ocr {done}/{total}{tail}"));
+                let tail = if failed > 0 {
+                    format!(" ({failed} failed)")
+                } else {
+                    String::new()
+                };
+                let _ = self
+                    .db
+                    .set_file_status(&f.id, &format!("ocr {done}/{total}{tail}"));
                 if space_id == self.active_space.id {
                     self.status = format!("ocr {name}: {done}/{total} pages{tail}");
                 }
@@ -633,7 +706,9 @@ impl App {
                 }
             }
             OcrUpdate::Done(Ok((text, errors))) => {
-                let _ = self.db.set_file_chunks(&f.id, &crate::extract::chunk_lines(&text));
+                let _ = self
+                    .db
+                    .set_file_chunks(&f.id, &crate::extract::chunk_lines(&text));
                 let status = match errors.first() {
                     None => "ok".to_string(),
                     Some((i, e)) => format!(
@@ -658,7 +733,9 @@ impl App {
         }
         if space_id == self.active_space.id {
             self.files_cache = self.db.list_files(&space_id).unwrap_or_default();
-            self.files_selected = self.files_selected.min(self.files_cache.len().saturating_sub(1));
+            self.files_selected = self
+                .files_selected
+                .min(self.files_cache.len().saturating_sub(1));
         }
     }
 
@@ -684,7 +761,8 @@ impl App {
         if let Some(f) = self.files_cache.get(self.files_selected).cloned() {
             let disk = self.space.files_dir(&self.active_space.name).join(&f.name);
             if disk.exists() {
-                std::fs::remove_file(&disk).with_context(|| format!("removing {}", disk.display()))?;
+                std::fs::remove_file(&disk)
+                    .with_context(|| format!("removing {}", disk.display()))?;
             }
             self.db.delete_file(&f.id)?;
             self.status = format!("removed {}", f.name);
@@ -701,7 +779,8 @@ impl App {
     }
 
     pub fn move_files_selection(&mut self, delta: i32) {
-        self.files_selected = super::clamp_cursor(self.files_selected, self.files_cache.len(), delta);
+        self.files_selected =
+            super::clamp_cursor(self.files_selected, self.files_cache.len(), delta);
     }
 
     pub fn start_files_add(&mut self) {
@@ -742,7 +821,9 @@ impl App {
     pub fn confirm_files_rename(&mut self) -> Result<()> {
         let new = self.files_edit.trim().to_string();
         self.files_mode = super::FilesMode::Browse;
-        let Some(f) = self.files_cache.get(self.files_selected).cloned() else { return Ok(()) };
+        let Some(f) = self.files_cache.get(self.files_selected).cloned() else {
+            return Ok(());
+        };
         if new.is_empty() || new == f.name {
             return Ok(());
         }
@@ -758,8 +839,11 @@ impl App {
         std::fs::rename(dir.join(&f.name), dir.join(&new))
             .with_context(|| format!("renaming {} to {new}", f.name))?;
         self.rescan_files();
-        self.files_selected =
-            self.files_cache.iter().position(|f| f.name == new).unwrap_or(self.files_selected);
+        self.files_selected = self
+            .files_cache
+            .iter()
+            .position(|f| f.name == new)
+            .unwrap_or(self.files_selected);
         self.status = format!("renamed {} to {new}", f.name);
         Ok(())
     }
@@ -793,7 +877,8 @@ mod tests {
         let mut a = test_app();
         let space = a.active_space.id.clone();
         let id = a.db.upsert_file(&space, "b.txt", "h", 1, "ok").unwrap();
-        a.db.set_file_chunks(&id, &[("l".into(), "text".into())]).unwrap();
+        a.db.set_file_chunks(&id, &[("l".into(), "text".into())])
+            .unwrap();
 
         // No provider → no-op.
         let saved = a.provider.take();
@@ -811,15 +896,24 @@ mod tests {
         a.start_embedding();
         assert!(a.embed_rx.is_some());
         let files = a.db.list_files(&space).unwrap();
-        assert!(files[0].status.starts_with("embedding"), "{}", files[0].status);
+        assert!(
+            files[0].status.starts_with("embedding"),
+            "{}",
+            files[0].status
+        );
 
         // Success: vectors stored, status ok, file leaves the missing list.
-        a.on_embed_done(Some((space.clone(), id.clone(), Ok(vec![(0, vec![1.0f32, 0.0])]))));
+        a.on_embed_done(Some((
+            space.clone(),
+            id.clone(),
+            Ok(vec![(0, vec![1.0f32, 0.0])]),
+        )));
         assert!(a.db.files_missing_embeddings(&space).unwrap().is_empty());
         assert_eq!(a.db.list_files(&space).unwrap()[0].status, "ok");
 
         // Error: status restored, no re-queue (don't hammer a dead endpoint).
-        a.db.set_file_chunks(&id, &[("l".into(), "new".into())]).unwrap();
+        a.db.set_file_chunks(&id, &[("l".into(), "new".into())])
+            .unwrap();
         a.on_embed_done(Some((space.clone(), id.clone(), Err("offline".into()))));
         assert!(a.embed_rx.is_none());
         assert!(a.status.contains("embedding failed"));
@@ -839,7 +933,8 @@ mod tests {
         // Copied into the space's files dir.
         assert!(a.space.files_dir(&a.active_space.name).join(&name).exists());
         // Indexed: searchable.
-        let hits = crate::db::search_chunks(a.db.conn_for_test(), &a.active_space.id, "revenue", 8).unwrap();
+        let hits = crate::db::search_chunks(a.db.conn_for_test(), &a.active_space.id, "revenue", 8)
+            .unwrap();
         assert_eq!(hits.len(), 1);
     }
 
@@ -850,7 +945,10 @@ mod tests {
         assert_eq!(body["stream"], false);
         assert_eq!(body["images"][0], "QUFB"); // raw base64, not a data URL
         assert!(body["prompt"].as_str().unwrap().contains("furigana"));
-        assert!(body.get("messages").is_none(), "must not be OpenAI chat shape");
+        assert!(
+            body.get("messages").is_none(),
+            "must not be OpenAI chat shape"
+        );
     }
 
     #[test]
@@ -889,16 +987,29 @@ mod tests {
     fn ocr_statuses_surface_stages_failures_and_reasons() {
         let mut a = test_app();
         let space = a.active_space.id.clone();
-        let id = a.db.upsert_file(&space, "scan.pdf", "h", 1, "ocr…").unwrap();
+        let id =
+            a.db.upsert_file(&space, "scan.pdf", "h", 1, "ocr…")
+                .unwrap();
 
         // Stage → visible phase, still "ocr"-prefixed (stale-check depends on it).
-        a.on_ocr_done(Some((space.clone(), "scan.pdf".into(), OcrUpdate::Stage("rendering pages (300 dpi)…".into()))));
+        a.on_ocr_done(Some((
+            space.clone(),
+            "scan.pdf".into(),
+            OcrUpdate::Stage("rendering pages (300 dpi)…".into()),
+        )));
         let status = a.db.list_files(&space).unwrap()[0].status.clone();
         assert_eq!(status, "ocr: rendering pages (300 dpi)…");
 
         // Progress with failures shows the count.
-        a.on_ocr_done(Some((space.clone(), "scan.pdf".into(), OcrUpdate::Progress(5, 10, 2))));
-        assert_eq!(a.db.list_files(&space).unwrap()[0].status, "ocr 5/10 (2 failed)");
+        a.on_ocr_done(Some((
+            space.clone(),
+            "scan.pdf".into(),
+            OcrUpdate::Progress(5, 10, 2),
+        )));
+        assert_eq!(
+            a.db.list_files(&space).unwrap()[0].status,
+            "ocr 5/10 (2 failed)"
+        );
         assert!(a.status.contains("5/10 pages (2 failed)"));
 
         // Partial success keeps the first failure's reason in the status.
@@ -907,7 +1018,10 @@ mod tests {
             "scan.pdf".into(),
             OcrUpdate::Done(Ok((
                 "[page 1]\ntext".to_string(),
-                vec![(2, "timeout after 600s".to_string()), (4, "boom".to_string())],
+                vec![
+                    (2, "timeout after 600s".to_string()),
+                    (4, "boom".to_string()),
+                ],
             ))),
         )));
         let status = a.db.list_files(&space).unwrap()[0].status.clone();
@@ -924,7 +1038,10 @@ mod tests {
             ))),
         )));
         let status = a.db.list_files(&space).unwrap()[0].status.clone();
-        assert!(status.starts_with("all pages failed (p1: cannot reach ollama"), "{status}");
+        assert!(
+            status.starts_with("all pages failed (p1: cannot reach ollama"),
+            "{status}"
+        );
         // Must NOT start with "ocr" — that prefix means "queued" to the rescan.
         assert!(!status.starts_with("ocr"), "{status}");
     }
@@ -939,7 +1056,8 @@ mod tests {
         let id = a.files_cache[0].id.clone();
 
         // Simulate a bad old extraction (e.g. tesseract-mangled OCR).
-        a.db.set_file_chunks(&id, &[("p1".into(), "garbage".into())]).unwrap();
+        a.db.set_file_chunks(&id, &[("p1".into(), "garbage".into())])
+            .unwrap();
 
         a.files_selected = 0;
         a.reextract_selected_file();
@@ -992,7 +1110,8 @@ mod tests {
 
         // Plant a wrong hash; a stat-unchanged rescan must not correct it —
         // proof the file wasn't re-read/re-hashed.
-        a.db.upsert_file(&a.active_space.id, "book.txt", "sentinel", f.size, "ok").unwrap();
+        a.db.upsert_file(&a.active_space.id, "book.txt", "sentinel", f.size, "ok")
+            .unwrap();
         a.rescan_files();
         assert_eq!(a.files_cache[0].hash, "sentinel");
 
@@ -1011,7 +1130,11 @@ mod tests {
         std::fs::write(dir.join("old.txt"), "searchable content").unwrap();
         std::fs::write(dir.join("taken.txt"), "x").unwrap();
         a.rescan_files();
-        a.files_selected = a.files_cache.iter().position(|f| f.name == "old.txt").unwrap();
+        a.files_selected = a
+            .files_cache
+            .iter()
+            .position(|f| f.name == "old.txt")
+            .unwrap();
 
         // Collides with an existing name: rejected, nothing moves.
         a.start_files_rename();
@@ -1022,14 +1145,22 @@ mod tests {
         assert!(dir.join("old.txt").exists());
 
         // Bad name rejected.
-        a.files_selected = a.files_cache.iter().position(|f| f.name == "old.txt").unwrap();
+        a.files_selected = a
+            .files_cache
+            .iter()
+            .position(|f| f.name == "old.txt")
+            .unwrap();
         a.start_files_rename();
         a.files_edit = "../evil.txt".to_string();
         a.confirm_files_rename().unwrap();
         assert!(a.status.contains("invalid name"));
 
         // Valid rename: disk moves, index follows, cursor tracks the file.
-        a.files_selected = a.files_cache.iter().position(|f| f.name == "old.txt").unwrap();
+        a.files_selected = a
+            .files_cache
+            .iter()
+            .position(|f| f.name == "old.txt")
+            .unwrap();
         a.start_files_rename();
         a.files_edit = "new.txt".to_string();
         a.confirm_files_rename().unwrap();
@@ -1095,7 +1226,11 @@ mod tests {
         a.picker_dir = root.clone();
         a.open_file_picker();
         assert!(a.files_mode == crate::app::FilesMode::Pick);
-        let names: Vec<&str> = a.filtered_picker_entries().iter().map(|e| e.name.as_str()).collect();
+        let names: Vec<&str> = a
+            .filtered_picker_entries()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
         assert_eq!(names, vec!["subdir", "aaa.txt", "bbb.txt"]); // dirs first, then alpha
 
         // Enter on a dir descends and reloads.
@@ -1109,7 +1244,11 @@ mod tests {
         assert_eq!(a.picker_dir, root);
 
         // Enter on a file imports it and returns to Browse.
-        let idx = a.filtered_picker_entries().iter().position(|e| e.name == "aaa.txt").unwrap();
+        let idx = a
+            .filtered_picker_entries()
+            .iter()
+            .position(|e| e.name == "aaa.txt")
+            .unwrap();
         a.picker_selected = idx;
         a.picker_enter().unwrap();
         assert!(a.files_mode == crate::app::FilesMode::Browse);
@@ -1129,7 +1268,11 @@ mod tests {
         a.picker_filter_push('r');
         a.picker_filter_push('p');
         a.picker_filter_push('t');
-        let names: Vec<&str> = a.filtered_picker_entries().iter().map(|e| e.name.as_str()).collect();
+        let names: Vec<&str> = a
+            .filtered_picker_entries()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
         assert_eq!(names, vec!["report-2026.pdf"]); // fuzzy subsequence "rpt"
 
         // Backspace edits the filter (does NOT ascend while filter non-empty).
@@ -1171,23 +1314,29 @@ mod tests {
     #[test]
     fn on_ocr_done_ok_indexes_and_marks_ok() {
         let mut a = test_app();
-        let id = a.db.upsert_file(&a.active_space.id, "scan.pdf", "h", 9, "ocr…").unwrap();
+        let id =
+            a.db.upsert_file(&a.active_space.id, "scan.pdf", "h", 9, "ocr…")
+                .unwrap();
         let _ = id;
         a.on_ocr_done(Some((
             a.active_space.id.clone(),
             "scan.pdf".to_string(),
-            OcrUpdate::Done(Ok(("[page 1]\nquarterly revenue table".to_string(), Vec::new()))),
+            OcrUpdate::Done(Ok((
+                "[page 1]\nquarterly revenue table".to_string(),
+                Vec::new(),
+            ))),
         )));
         assert_eq!(a.files_cache[0].status, "ok");
-        let hits =
-            crate::db::search_chunks(a.db.conn_for_test(), &a.active_space.id, "revenue", 8).unwrap();
+        let hits = crate::db::search_chunks(a.db.conn_for_test(), &a.active_space.id, "revenue", 8)
+            .unwrap();
         assert_eq!(hits.len(), 1);
     }
 
     #[test]
     fn on_ocr_progress_updates_status_and_status_line() {
         let mut a = test_app();
-        a.db.upsert_file(&a.active_space.id, "scan.pdf", "h", 9, "ocr…").unwrap();
+        a.db.upsert_file(&a.active_space.id, "scan.pdf", "h", 9, "ocr…")
+            .unwrap();
         a.on_ocr_done(Some((
             a.active_space.id.clone(),
             "scan.pdf".to_string(),
@@ -1208,37 +1357,65 @@ mod tests {
     #[test]
     fn on_ocr_done_empty_and_err_statuses() {
         let mut a = test_app();
-        a.db.upsert_file(&a.active_space.id, "blank.pdf", "h1", 9, "ocr…").unwrap();
-        a.db.upsert_file(&a.active_space.id, "bad.pdf", "h2", 9, "ocr…").unwrap();
+        a.db.upsert_file(&a.active_space.id, "blank.pdf", "h1", 9, "ocr…")
+            .unwrap();
+        a.db.upsert_file(&a.active_space.id, "bad.pdf", "h2", 9, "ocr…")
+            .unwrap();
 
-        a.on_ocr_done(Some((a.active_space.id.clone(), "blank.pdf".to_string(), OcrUpdate::Done(Ok((String::new(), Vec::new()))))));
+        a.on_ocr_done(Some((
+            a.active_space.id.clone(),
+            "blank.pdf".to_string(),
+            OcrUpdate::Done(Ok((String::new(), Vec::new()))),
+        )));
         a.on_ocr_done(Some((
             a.active_space.id.clone(),
             "bad.pdf".to_string(),
-            OcrUpdate::Done(Err("scanned pdf — install tesseract + poppler for ocr".to_string())),
+            OcrUpdate::Done(Err(
+                "scanned pdf — install tesseract + poppler for ocr".to_string()
+            )),
         )));
 
         let by_name = |a: &App, n: &str| {
-            a.files_cache.iter().find(|f| f.name == n).unwrap().status.clone()
+            a.files_cache
+                .iter()
+                .find(|f| f.name == n)
+                .unwrap()
+                .status
+                .clone()
         };
         assert_eq!(by_name(&a, "blank.pdf"), "no text (ocr found nothing)");
-        assert_eq!(by_name(&a, "bad.pdf"), "scanned pdf — install tesseract + poppler for ocr");
+        assert_eq!(
+            by_name(&a, "bad.pdf"),
+            "scanned pdf — install tesseract + poppler for ocr"
+        );
     }
 
     #[test]
     fn on_ocr_done_for_inactive_space_writes_db_but_not_cache() {
         let mut a = test_app();
         let other = a.db.create_space("other").unwrap();
-        a.db.upsert_file(&other.id, "scan.pdf", "h", 9, "ocr…").unwrap();
+        a.db.upsert_file(&other.id, "scan.pdf", "h", 9, "ocr…")
+            .unwrap();
 
-        a.on_ocr_done(Some((other.id.clone(), "scan.pdf".to_string(), OcrUpdate::Done(Ok(("found text".to_string(), Vec::new()))))));
+        a.on_ocr_done(Some((
+            other.id.clone(),
+            "scan.pdf".to_string(),
+            OcrUpdate::Done(Ok(("found text".to_string(), Vec::new()))),
+        )));
 
-        assert!(a.files_cache.is_empty(), "active-space cache must not show other space's file");
+        assert!(
+            a.files_cache.is_empty(),
+            "active-space cache must not show other space's file"
+        );
         let rows = a.db.list_files(&other.id).unwrap();
         assert_eq!(rows[0].status, "ok");
 
         // Deleted-mid-OCR: result for a row that no longer exists is a no-op.
-        a.on_ocr_done(Some((other.id.clone(), "gone.pdf".to_string(), OcrUpdate::Done(Ok(("x".to_string(), Vec::new()))))));
+        a.on_ocr_done(Some((
+            other.id.clone(),
+            "gone.pdf".to_string(),
+            OcrUpdate::Done(Ok(("x".to_string(), Vec::new()))),
+        )));
     }
 
     #[tokio::test]

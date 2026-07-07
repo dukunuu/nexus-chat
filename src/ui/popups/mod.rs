@@ -5,6 +5,7 @@ pub(crate) mod copy;
 pub(crate) mod files;
 pub(crate) mod key;
 pub(crate) mod model;
+pub(crate) mod research_live;
 pub(crate) mod session;
 pub(crate) mod settings;
 pub(crate) mod skills;

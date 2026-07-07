@@ -12,10 +12,15 @@ use crate::provider::ChatMessage;
 pub(crate) enum ResearchUpdate {
     /// Successive updates within one stage share a `label` so the UI/db
     /// replace one row in place instead of appending per tick.
-    Stage { label: String, detail: String },
+    Stage {
+        label: String,
+        detail: String,
+    },
     /// The Planner finished; the pipeline is paused awaiting approve/edit
     /// (or its 60s auto-continue timeout).
-    PlanReady { questions: Vec<String> },
+    PlanReady {
+        questions: Vec<String>,
+    },
     Done(std::result::Result<String, String>),
 }
 
@@ -89,7 +94,11 @@ fn strip_list_prefix(line: &str) -> String {
 /// Parse the user-edited plan (one sub-question per line, same bullet/number
 /// tolerance as the Planner's own fallback parser) back into a list.
 pub(crate) fn parse_plan_edit(text: &str) -> Vec<String> {
-    text.lines().map(strip_list_prefix).filter(|l| !l.is_empty()).take(MAX_SUBQUESTIONS).collect()
+    text.lines()
+        .map(strip_list_prefix)
+        .filter(|l| !l.is_empty())
+        .take(MAX_SUBQUESTIONS)
+        .collect()
 }
 
 /// Parse the Critic's raw reply into a `Critique`. Anything that doesn't
@@ -135,7 +144,10 @@ fn planner_messages_with_context(topic: &str, known: &[String]) -> Vec<ChatMessa
             known.join("\n\n")
         )
     };
-    vec![ChatMessage::text("system", PLANNER_PROMPT), ChatMessage::text("user", user)]
+    vec![
+        ChatMessage::text("system", PLANNER_PROMPT),
+        ChatMessage::text("user", user),
+    ]
 }
 
 fn synthesizer_messages(topic: &str, findings: &[String], pinned: &[String]) -> Vec<ChatMessage> {
@@ -153,7 +165,10 @@ fn synthesizer_messages(topic: &str, findings: &[String], pinned: &[String]) -> 
         ));
     }
     user.push_str(&body);
-    vec![ChatMessage::text("system", SYNTHESIZER_PROMPT), ChatMessage::text("user", user)]
+    vec![
+        ChatMessage::text("system", SYNTHESIZER_PROMPT),
+        ChatMessage::text("user", user),
+    ]
 }
 
 fn critic_messages(topic: &str, draft: &str) -> Vec<ChatMessage> {
@@ -163,13 +178,20 @@ fn critic_messages(topic: &str, draft: &str) -> Vec<ChatMessage> {
     ]
 }
 
-fn escalation_messages(topic: &str, draft: &str, findings: &[String], contradiction: &str) -> Vec<ChatMessage> {
+fn escalation_messages(
+    topic: &str,
+    draft: &str,
+    findings: &[String],
+    contradiction: &str,
+) -> Vec<ChatMessage> {
     let body = findings.join("\n\n");
     vec![
         ChatMessage::text("system", ESCALATION_PROMPT),
         ChatMessage::text(
             "user",
-            format!("Topic: {topic}\n\nContradiction: {contradiction}\n\nDraft:\n{draft}\n\nSource findings:\n{body}"),
+            format!(
+                "Topic: {topic}\n\nContradiction: {contradiction}\n\nDraft:\n{draft}\n\nSource findings:\n{body}"
+            ),
         ),
     ]
 }
@@ -178,7 +200,10 @@ fn verifier_messages(topic: &str, draft: &str, findings: &[String]) -> Vec<ChatM
     let body = findings.join("\n\n");
     vec![
         ChatMessage::text("system", VERIFIER_PROMPT),
-        ChatMessage::text("user", format!("Topic: {topic}\n\nSource findings:\n{body}\n\nDraft:\n{draft}")),
+        ChatMessage::text(
+            "user",
+            format!("Topic: {topic}\n\nSource findings:\n{body}\n\nDraft:\n{draft}"),
+        ),
     ]
 }
 
@@ -191,7 +216,10 @@ fn writer_messages(topic: &str, verified_draft: &str, pinned: &[String]) -> Vec<
         ));
     }
     user.push_str(&format!("Verified draft:\n{verified_draft}"));
-    vec![ChatMessage::text("system", WRITER_PROMPT), ChatMessage::text("user", user)]
+    vec![
+        ChatMessage::text("system", WRITER_PROMPT),
+        ChatMessage::text("user", user),
+    ]
 }
 
 use std::sync::Arc;
@@ -215,7 +243,10 @@ fn send_stage(
         ids.0.clone(),
         ids.1.clone(),
         ids.2.clone(),
-        ResearchUpdate::Stage { label: label.into(), detail: detail.into() },
+        ResearchUpdate::Stage {
+            label: label.into(),
+            detail: detail.into(),
+        },
     ));
 }
 
@@ -230,15 +261,30 @@ pub(crate) async fn drain_steers(rx: &mut mpsc::UnboundedReceiver<String>) -> Ve
     out
 }
 
-async fn complete_text(provider: &OpenRouter, model: &str, messages: Vec<ChatMessage>) -> Result<String, String> {
-    provider.complete(model, messages).await.map(|s| s.trim().to_string()).map_err(|e| e.to_string())
+async fn complete_text(
+    provider: &OpenRouter,
+    model: &str,
+    messages: Vec<ChatMessage>,
+) -> Result<String, String> {
+    provider
+        .complete(model, messages)
+        .await
+        .map(|s| s.trim().to_string())
+        .map_err(|e| e.to_string())
 }
 
-async fn plan(provider: &OpenRouter, model: &str, topic: &str, known: &[String]) -> Result<Vec<String>, String> {
+async fn plan(
+    provider: &OpenRouter,
+    model: &str,
+    topic: &str,
+    known: &[String],
+) -> Result<Vec<String>, String> {
     let text = complete_text(provider, model, planner_messages_with_context(topic, known)).await?;
     let qs = parse_subquestions(&text);
     if qs.is_empty() {
-        return Err(format!("planner returned no usable sub-questions (raw reply: {text:.200})"));
+        return Err(format!(
+            "planner returned no usable sub-questions (raw reply: {text:.200})"
+        ));
     }
     Ok(qs)
 }
@@ -267,7 +313,12 @@ async fn run_searcher(
     total: usize,
 ) -> String {
     let label = format!("searcher {}/{total}", idx + 1);
-    send_stage(tx, ids, &label, format!("round {round}: \"{sub_question}\" — starting…"));
+    send_stage(
+        tx,
+        ids,
+        &label,
+        format!("round {round}: \"{sub_question}\" — starting…"),
+    );
     let messages = vec![
         ChatMessage::text("system", SEARCHER_PROMPT),
         ChatMessage::text("user", sub_question),
@@ -286,9 +337,16 @@ async fn run_searcher(
         match ev {
             StreamEvent::Token(t) => buf.push_str(&t),
             StreamEvent::Status(s) => {
-                send_stage(tx, ids, &label, format!("round {round}: \"{sub_question}\" — {s}"));
+                send_stage(
+                    tx,
+                    ids,
+                    &label,
+                    format!("round {round}: \"{sub_question}\" — {s}"),
+                );
             }
-            StreamEvent::ToolCall { name, arguments, .. } => {
+            StreamEvent::ToolCall {
+                name, arguments, ..
+            } => {
                 let arg_summary: String = arguments.chars().take(80).collect();
                 send_stage(
                     tx,
@@ -297,7 +355,9 @@ async fn run_searcher(
                     format!("round {round}: \"{sub_question}\" — used {name}({arg_summary})"),
                 );
             }
-            StreamEvent::Error(e) => return format!("[search agent error on \"{sub_question}\": {e}]"),
+            StreamEvent::Error(e) => {
+                return format!("[search agent error on \"{sub_question}\": {e}]");
+            }
             StreamEvent::Done => break,
             _ => {}
         }
@@ -364,13 +424,20 @@ async fn run_searchers(
         let toolbox = toolbox.clone();
         let tx = tx.clone();
         let ids = ids.clone();
-        set.spawn(async move { run_searcher(&provider, &model, &q, toolbox, &tx, &ids, round, idx, total).await });
+        set.spawn(async move {
+            run_searcher(&provider, &model, &q, toolbox, &tx, &ids, round, idx, total).await
+        });
     }
     let mut done = 0usize;
     let mut findings = Vec::with_capacity(total);
     while let Some(res) = set.join_next().await {
         done += 1;
-        send_stage(tx, ids, "searching", format!("round {round}, {done}/{total} done"));
+        send_stage(
+            tx,
+            ids,
+            "searching",
+            format!("round {round}, {done}/{total} done"),
+        );
         findings.push(res.unwrap_or_else(|e| format!("[search agent panicked: {e}]")));
     }
     findings
@@ -427,16 +494,25 @@ async fn local_known_chunks(
     if embedding_model.trim().is_empty() {
         return Vec::new();
     }
-    let Ok(mut vecs) = provider.embed(embedding_model, vec![topic.to_string()]).await else {
+    let Ok(mut vecs) = provider
+        .embed(embedding_model, vec![topic.to_string()])
+        .await
+    else {
         return Vec::new();
     };
     if vecs.is_empty() {
         return Vec::new();
     }
     let query = vecs.remove(0);
-    let Ok(conn) = rusqlite::Connection::open(db_path) else { return Vec::new() };
+    let Ok(conn) = rusqlite::Connection::open(db_path) else {
+        return Vec::new();
+    };
     crate::db::semantic_chunks(&conn, space_id, &query, 5)
-        .map(|hits| hits.into_iter().map(|(name, loc, text, _)| format!("{name} ({loc}): {text}")).collect())
+        .map(|hits| {
+            hits.into_iter()
+                .map(|(name, loc, text, _)| format!("{name} ({loc}): {text}"))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -464,7 +540,9 @@ async fn run_research_inner(
             ids.0.clone(),
             ids.1.clone(),
             ids.2.clone(),
-            ResearchUpdate::PlanReady { questions: questions.clone() },
+            ResearchUpdate::PlanReady {
+                questions: questions.clone(),
+            },
         ));
         questions = match tokio::time::timeout(std::time::Duration::from_secs(60), gate_rx).await {
             Ok(Ok(edited)) if !edited.is_empty() => edited,
@@ -478,7 +556,8 @@ async fn run_research_inner(
         .and_then(|conn| crate::db::pinned_urls(&conn, &ids.0).ok())
         .unwrap_or_default();
 
-    let mut findings = run_searchers(provider, research_model, toolbox, &questions, tx, ids, 1).await;
+    let mut findings =
+        run_searchers(provider, research_model, toolbox, &questions, tx, ids, 1).await;
     persist_session_sources(db_path, &ids.0, &findings);
 
     let steers = drain_steers(&mut steer_rx).await;
@@ -500,7 +579,9 @@ async fn run_research_inner(
     .await?;
 
     send_stage(tx, ids, "critiquing", "");
-    let mut critique = parse_critique(&complete_text(provider, research_model, critic_messages(topic, &draft)).await?);
+    let mut critique = parse_critique(
+        &complete_text(provider, research_model, critic_messages(topic, &draft)).await?,
+    );
 
     if let Critique::Gaps(gaps) = &critique {
         let more = run_searchers(provider, research_model, toolbox, gaps, tx, ids, 2).await;
@@ -512,7 +593,8 @@ async fn run_research_inner(
             for s in &steers {
                 send_stage(tx, ids, "steer", s.clone());
             }
-            let steered = run_searchers(provider, research_model, toolbox, &steers, tx, ids, 2).await;
+            let steered =
+                run_searchers(provider, research_model, toolbox, &steers, tx, ids, 2).await;
             persist_session_sources(db_path, &ids.0, &steered);
             findings.extend(steered);
         }
@@ -525,28 +607,54 @@ async fn run_research_inner(
         )
         .await?;
         send_stage(tx, ids, "critiquing", "round 2");
-        critique = parse_critique(&complete_text(provider, research_model, critic_messages(topic, &draft)).await?);
+        critique = parse_critique(
+            &complete_text(provider, research_model, critic_messages(topic, &draft)).await?,
+        );
     }
 
     if let Critique::Contradiction(desc) = &critique {
         send_stage(tx, ids, "resolving a contradiction", "");
-        let resolution =
-            complete_text(provider, escalation_model, escalation_messages(topic, &draft, &findings, desc)).await?;
+        let resolution = complete_text(
+            provider,
+            escalation_model,
+            escalation_messages(topic, &draft, &findings, desc),
+        )
+        .await?;
         draft.push_str("\n\n");
         draft.push_str(&resolution);
     }
 
     send_stage(tx, ids, "verifying", "");
     let verify_toolbox = Arc::new(
-        ToolBox::research(None, None, "auto".to_string(), Vec::new(), Some(db_path.to_path_buf())).cache_only(),
+        ToolBox::research(
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            Some(db_path.to_path_buf()),
+        )
+        .cache_only(),
     );
-    let verified_raw =
-        verify_with_quote_check(provider, research_model, verifier_messages(topic, &draft, &findings), verify_toolbox)
-            .await;
-    let verified = if verified_raw.trim().is_empty() { draft.clone() } else { verified_raw };
+    let verified_raw = verify_with_quote_check(
+        provider,
+        research_model,
+        verifier_messages(topic, &draft, &findings),
+        verify_toolbox,
+    )
+    .await;
+    let verified = if verified_raw.trim().is_empty() {
+        draft.clone()
+    } else {
+        verified_raw
+    };
 
     send_stage(tx, ids, "writing final report", "");
-    complete_text(provider, research_model, writer_messages(topic, &verified, &pinned)).await
+    complete_text(
+        provider,
+        research_model,
+        writer_messages(topic, &verified, &pinned),
+    )
+    .await
 }
 
 /// Link every URL cited in `findings` into the session's source bundle
@@ -586,6 +694,85 @@ impl super::App {
         }
     }
 
+    /// `/research` with no topic: distill one from the last ~20 chat turns
+    /// (one cheap completion, same background-channel shape as
+    /// `maybe_generate_title`) then hand it to `start_research_with_gate`
+    /// exactly as if it had been typed — the existing plan-approval gate
+    /// still lets you bail or edit before searchers run.
+    pub(crate) fn start_research_from_chat(&mut self) {
+        if self.research_topic_rx.is_some() {
+            self.status = "already scoping a topic from this chat…".to_string();
+            return;
+        }
+        if self.research_rx.is_some() {
+            self.status = "a research job is already running".to_string();
+            return;
+        }
+        let (Some(provider), Some(model)) = (self.provider.clone(), self.current_model.clone())
+        else {
+            self.status = "no model configured — set one in /key or /model".to_string();
+            return;
+        };
+        let convo: String = self
+            .messages
+            .iter()
+            .filter(|m| m.role == "user" || m.role == "assistant")
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|m| {
+                format!(
+                    "{}: {}",
+                    m.role,
+                    m.content.chars().take(500).collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if convo.trim().is_empty() {
+            self.status = "nothing to scope yet — chat first, or use /research <topic>".to_string();
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.research_topic_rx = Some(rx);
+        self.status = "scoping a research topic from this chat…".to_string();
+        tokio::spawn(async move {
+            let prompt = format!(
+                "Based on this conversation, reply with ONLY a single-line research topic \
+                 or question suitable for a multi-source research task. No preamble, no \
+                 quotes, no markdown.\n\n{convo}"
+            );
+            let msgs = vec![ChatMessage::text("user", prompt)];
+            let result = provider
+                .complete(&model, msgs)
+                .await
+                .map(|s| s.trim().to_string())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+    }
+
+    /// The topic-distillation job finished: start research with it, or
+    /// report the failure. `None` = channel closed without a result.
+    pub fn on_research_topic_derived(&mut self, r: Option<Result<String, String>>) {
+        self.research_topic_rx = None;
+        let Some(result) = r else { return };
+        match result {
+            Ok(topic) if !topic.is_empty() => self.start_research_with_gate(&topic, true),
+            Ok(_) => self.status = "couldn't derive a topic — try /research <topic>".to_string(),
+            Err(e) => self.status = format!("topic scoping failed: {e}"),
+        }
+    }
+
+    /// Ctrl+Space: open the live per-searcher activity view. Caller already
+    /// gates this on a research job running.
+    pub(crate) fn open_research_live(&mut self) {
+        self.research_live_input.clear();
+        self.popup = super::Popup::ResearchLive;
+    }
+
     pub(crate) fn start_research_with_gate(&mut self, topic: &str, gated: bool) {
         let topic = topic.trim().to_string();
         if topic.is_empty() {
@@ -611,17 +798,24 @@ impl super::App {
             self.escalation_model.trim().to_string()
         };
         let title = super::chat::title_from(&topic);
-        let session = match self.db.create_session(&title, &research_model, &self.active_space.id) {
+        let session = match self
+            .db
+            .create_session(&title, &research_model, &self.active_space.id)
+        {
             Ok(s) => s,
             Err(e) => {
                 self.status = format!("could not start research session: {e}");
                 return;
             }
         };
-        let _ = self.db.add_user_message(&session.id, &format!("/research {topic}"));
+        let _ = self
+            .db
+            .add_user_message(&session.id, &format!("/research {topic}"));
 
-        let searxng_url = (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
-        let langsearch_key = (!self.langsearch_key.trim().is_empty()).then(|| self.langsearch_key.trim().to_string());
+        let searxng_url =
+            (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
+        let langsearch_key = (!self.langsearch_key.trim().is_empty())
+            .then(|| self.langsearch_key.trim().to_string());
         let toolbox = Arc::new(ToolBox::research(
             searxng_url,
             langsearch_key,
@@ -714,14 +908,17 @@ impl super::App {
         let viewing = self.session.as_ref().is_some_and(|s| s.id == session_id);
         match update {
             ResearchUpdate::Stage { label, detail } => {
-                let _ = self.db.upsert_research_stage_message(&session_id, &label, &detail);
+                let _ = self
+                    .db
+                    .upsert_research_stage_message(&session_id, &label, &detail);
                 if viewing {
                     let text = crate::db::stage_content(&label, &detail);
                     let prefix = format!("{label}:");
                     // Mirror the db upsert in the in-memory transcript: one
                     // row per label, updated in place.
                     if let Some(row) = self.messages.iter_mut().rev().find(|m| {
-                        m.role == "research_stage" && (m.content == label || m.content.starts_with(&prefix))
+                        m.role == "research_stage"
+                            && (m.content == label || m.content.starts_with(&prefix))
                     }) {
                         row.content = text.clone();
                     } else {
@@ -777,7 +974,8 @@ impl super::App {
                 let report = if let Ok(Some(prev_citations)) =
                     self.previous_citations_for_watch_session(&session_id, &space_id)
                 {
-                    let new_sources = crate::app::watches::new_sources_since(&report, &prev_citations);
+                    let new_sources =
+                        crate::app::watches::new_sources_since(&report, &prev_citations);
                     format!(
                         "{}\n\n{}",
                         crate::app::watches::diff_section("", &report, &new_sources),
@@ -786,8 +984,20 @@ impl super::App {
                 } else {
                     report
                 };
-                let _ = self.db.add_assistant_message(&session_id, &report, None, None, None, None, None);
-                let topic = self.research_running.as_ref().map(|(_, t)| t.clone()).unwrap_or_default();
+                let _ = self.db.add_assistant_message(
+                    &session_id,
+                    &report,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+                let topic = self
+                    .research_running
+                    .as_ref()
+                    .map(|(_, t)| t.clone())
+                    .unwrap_or_default();
                 self.save_research_report(&space_id, &space_name, &topic, &report);
                 if viewing {
                     self.messages.push(crate::db::Message {
@@ -811,7 +1021,9 @@ impl super::App {
             }
             ResearchUpdate::Done(Err(e)) => {
                 let msg = format!("research failed: {e}");
-                let _ = self.db.add_assistant_message(&session_id, &msg, None, None, None, None, None);
+                let _ =
+                    self.db
+                        .add_assistant_message(&session_id, &msg, None, None, None, None, None);
                 if viewing {
                     self.messages.push(crate::db::Message {
                         id: String::new(),
@@ -836,7 +1048,13 @@ impl super::App {
     /// the files cache / triggers a rescan if that space is still active;
     /// otherwise the file sits on disk and gets picked up next time that
     /// space's /files is opened, same as any externally-dropped file.
-    fn save_research_report(&mut self, space_id: &str, space_name: &str, topic: &str, report: &str) {
+    fn save_research_report(
+        &mut self,
+        space_id: &str,
+        space_name: &str,
+        topic: &str,
+        report: &str,
+    ) {
         let dir = self.space.files_dir(space_name);
         if std::fs::create_dir_all(&dir).is_err() {
             return;
@@ -851,7 +1069,8 @@ impl super::App {
         let citations = crate::citations::parse_citations(report);
         if !citations.is_empty() {
             // Titles aren't in the Sources-list format; index url only.
-            let rows: Vec<(String, Option<String>)> = citations.into_iter().map(|(_, url)| (url, None)).collect();
+            let rows: Vec<(String, Option<String>)> =
+                citations.into_iter().map(|(_, url)| (url, None)).collect();
             let _ = self.db.add_citations(space_id, &name, &rows);
         }
         if space_id == self.active_space.id {
@@ -869,7 +1088,8 @@ mod tests {
 
     fn test_app() -> App {
         let db = Db::open_in_memory().unwrap();
-        let root = std::env::temp_dir().join(format!("nexus-research-test-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("nexus-research-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("spaces")).unwrap();
         let space = Space { root };
         App::new(db, Some("k".into()), space)
@@ -881,7 +1101,10 @@ mod tests {
         tx.send("look into X".to_string()).unwrap();
         tx.send("also Y".to_string()).unwrap();
         let drained = drain_steers(&mut rx).await;
-        assert_eq!(drained, vec!["look into X".to_string(), "also Y".to_string()]);
+        assert_eq!(
+            drained,
+            vec!["look into X".to_string(), "also Y".to_string()]
+        );
         // Second call with nothing queued returns empty immediately (no hang).
         let empty = drain_steers(&mut rx).await;
         assert!(empty.is_empty());
@@ -925,27 +1148,43 @@ mod tests {
             space_id.clone(),
             space_name,
             ResearchUpdate::Done(Ok(
-                "# Report\n\nBody [1].\n\n## Sources\n1. https://example.com/a\n".to_string()
+                "# Report\n\nBody [1].\n\n## Sources\n1. https://example.com/a\n".to_string(),
             )),
         )));
 
-        let hits = a.db.search_citations(&space_id, Some("example.com")).unwrap();
+        let hits =
+            a.db.search_citations(&space_id, Some("example.com"))
+                .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].1, "https://example.com/a");
         // And a miss filter returns nothing.
-        assert!(a.db.search_citations(&space_id, Some("nope.example")).unwrap().is_empty());
+        assert!(
+            a.db.search_citations(&space_id, Some("nope.example"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn parse_plan_edit_reads_one_question_per_line() {
         let qs = parse_plan_edit("what is X\nhow does Y work\n\nis Z true");
-        assert_eq!(qs, vec!["what is X".to_string(), "how does Y work".to_string(), "is Z true".to_string()]);
+        assert_eq!(
+            qs,
+            vec![
+                "what is X".to_string(),
+                "how does Y work".to_string(),
+                "is Z true".to_string()
+            ]
+        );
     }
 
     #[test]
     fn parse_plan_edit_strips_bullet_and_number_prefixes_like_the_planner_parser() {
         let qs = parse_plan_edit("- what is X\n2. how does Y work");
-        assert_eq!(qs, vec!["what is X".to_string(), "how does Y work".to_string()]);
+        assert_eq!(
+            qs,
+            vec!["what is X".to_string(), "how does Y work".to_string()]
+        );
     }
 
     #[test]
@@ -967,7 +1206,9 @@ mod tests {
             session_id.clone(),
             space_id,
             space_name,
-            ResearchUpdate::PlanReady { questions: vec!["q1".to_string(), "q2".to_string()] },
+            ResearchUpdate::PlanReady {
+                questions: vec!["q1".to_string(), "q2".to_string()],
+            },
         )));
         assert!(a.research_plan_gate.is_some());
         assert!(a.messages.iter().any(|m| m.role == "research_plan"));
@@ -990,7 +1231,9 @@ mod tests {
             session_id,
             space_id,
             space_name,
-            ResearchUpdate::PlanReady { questions: vec!["q1".to_string()] },
+            ResearchUpdate::PlanReady {
+                questions: vec!["q1".to_string()],
+            },
         )));
 
         a.edit_research_plan();
@@ -1034,9 +1277,16 @@ mod tests {
         a.start_research("rust async runtimes");
         assert!(a.research_rx.is_some());
         assert!(a.research_running.is_some());
-        let session = a.session.as_ref().expect("switched into the research session");
+        let session = a
+            .session
+            .as_ref()
+            .expect("switched into the research session");
         assert!(session.title.contains("rust async runtimes"));
-        assert!(a.messages.iter().any(|m| m.content.contains("/research rust async runtimes")));
+        assert!(
+            a.messages
+                .iter()
+                .any(|m| m.content.contains("/research rust async runtimes"))
+        );
     }
 
     #[tokio::test]
@@ -1064,12 +1314,23 @@ mod tests {
             session_id.clone(),
             space_id,
             space_name,
-            ResearchUpdate::Stage { label: "planning".to_string(), detail: String::new() },
+            ResearchUpdate::Stage {
+                label: "planning".to_string(),
+                detail: String::new(),
+            },
         )));
 
-        assert!(a.messages.iter().any(|m| m.role == "research_stage" && m.content == "planning"));
+        assert!(
+            a.messages
+                .iter()
+                .any(|m| m.role == "research_stage" && m.content == "planning")
+        );
         let stored = a.db.load_messages(&session_id).unwrap();
-        assert!(stored.iter().any(|m| m.role == "research_stage" && m.content == "planning"));
+        assert!(
+            stored
+                .iter()
+                .any(|m| m.role == "research_stage" && m.content == "planning")
+        );
         assert!(a.status.contains("planning"));
 
         // A second tick with the same label replaces the row, not appends.
@@ -1079,10 +1340,16 @@ mod tests {
             session_id.clone(),
             space_id,
             space_name,
-            ResearchUpdate::Stage { label: "planning".to_string(), detail: "revised".to_string() },
+            ResearchUpdate::Stage {
+                label: "planning".to_string(),
+                detail: "revised".to_string(),
+            },
         )));
         let stored = a.db.load_messages(&session_id).unwrap();
-        let rows: Vec<_> = stored.iter().filter(|m| m.role == "research_stage").collect();
+        let rows: Vec<_> = stored
+            .iter()
+            .filter(|m| m.role == "research_stage")
+            .collect();
         assert_eq!(rows.len(), 1, "one row per label, updated in place");
         assert_eq!(rows[0].content, "planning: revised");
     }
@@ -1104,17 +1371,29 @@ mod tests {
             session_id.clone(),
             space_id,
             space_name.clone(),
-            ResearchUpdate::Done(Ok("# Rust Async Runtimes\n\nBody text. [1]\n\n## Sources\n1. https://a".to_string())),
+            ResearchUpdate::Done(Ok(
+                "# Rust Async Runtimes\n\nBody text. [1]\n\n## Sources\n1. https://a".to_string(),
+            )),
         )));
 
         assert!(a.unread.contains(&session_id));
         let stored = a.db.load_messages(&session_id).unwrap();
-        assert!(stored.iter().any(|m| m.role == "assistant" && m.content.contains("Rust Async Runtimes")));
+        assert!(
+            stored
+                .iter()
+                .any(|m| m.role == "assistant" && m.content.contains("Rust Async Runtimes"))
+        );
 
         // Saved into the space's files dir and picked up by a rescan.
         let dir = a.space.files_dir(&space_name);
-        let saved = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).count();
-        assert_eq!(saved, 1, "expected exactly one saved report file in {dir:?}");
+        let saved = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .count();
+        assert_eq!(
+            saved, 1,
+            "expected exactly one saved report file in {dir:?}"
+        );
     }
 
     #[tokio::test]
@@ -1145,7 +1424,9 @@ mod tests {
             session_id.clone(),
             original_space_id.clone(),
             original_space_name.clone(),
-            ResearchUpdate::Done(Ok("# Rust Async Runtimes\n\nBody text. [1]\n\n## Sources\n1. https://a".to_string())),
+            ResearchUpdate::Done(Ok(
+                "# Rust Async Runtimes\n\nBody text. [1]\n\n## Sources\n1. https://a".to_string(),
+            )),
         )));
 
         // Assert: the report file lands in the ORIGINAL space's files_dir
@@ -1154,18 +1435,28 @@ mod tests {
             .unwrap()
             .filter_map(|e| e.ok())
             .count();
-        assert_eq!(original_files, 1, "expected exactly one report file in original space {original_dir:?}");
+        assert_eq!(
+            original_files, 1,
+            "expected exactly one report file in original space {original_dir:?}"
+        );
 
         // Assert: the report file did NOT land in the second (now-active) space's files_dir
         let second_dir = a.space.files_dir(&second_space.name);
         let second_files = std::fs::read_dir(&second_dir)
             .map(|d| d.filter_map(|e| e.ok()).count())
             .unwrap_or(0);
-        assert_eq!(second_files, 0, "expected no files in second (active) space {second_dir:?}");
+        assert_eq!(
+            second_files, 0,
+            "expected no files in second (active) space {second_dir:?}"
+        );
 
         // Assert: files_cache is still empty (rescan_files was NOT called for space B,
         // because the report was saved to space A, not space B)
-        assert_eq!(a.files_cache.len(), 0, "files_cache should be empty since rescan was not triggered");
+        assert_eq!(
+            a.files_cache.len(),
+            0,
+            "files_cache should be empty since rescan was not triggered"
+        );
     }
 
     #[tokio::test]
@@ -1177,11 +1468,20 @@ mod tests {
         let space_id = a.active_space.id.clone();
         let space_name = a.active_space.name.clone();
 
-        a.on_research_done(Some((session_id.clone(), space_id, space_name, ResearchUpdate::Done(Err("planner: network down".to_string())))));
+        a.on_research_done(Some((
+            session_id.clone(),
+            space_id,
+            space_name,
+            ResearchUpdate::Done(Err("planner: network down".to_string())),
+        )));
 
         assert!(a.status.contains("network down"));
         let stored = a.db.load_messages(&session_id).unwrap();
-        assert!(stored.iter().any(|m| m.role == "assistant" && m.content.contains("network down")));
+        assert!(
+            stored
+                .iter()
+                .any(|m| m.role == "assistant" && m.content.contains("network down"))
+        );
     }
 
     #[tokio::test]
@@ -1198,7 +1498,10 @@ mod tests {
     #[test]
     fn parse_subquestions_reads_a_clean_json_array() {
         let qs = parse_subquestions(r#"["what is X", "how does Y work"]"#);
-        assert_eq!(qs, vec!["what is X".to_string(), "how does Y work".to_string()]);
+        assert_eq!(
+            qs,
+            vec!["what is X".to_string(), "how does Y work".to_string()]
+        );
     }
 
     #[test]
@@ -1210,13 +1513,23 @@ mod tests {
     #[test]
     fn parse_subquestions_falls_back_to_bullet_lines() {
         let qs = parse_subquestions("- what is X\n- how does Y work\n* a third one");
-        assert_eq!(qs, vec!["what is X".to_string(), "how does Y work".to_string(), "a third one".to_string()]);
+        assert_eq!(
+            qs,
+            vec![
+                "what is X".to_string(),
+                "how does Y work".to_string(),
+                "a third one".to_string()
+            ]
+        );
     }
 
     #[test]
     fn parse_subquestions_falls_back_to_numbered_lines() {
         let qs = parse_subquestions("1. what is X\n2) how does Y work");
-        assert_eq!(qs, vec!["what is X".to_string(), "how does Y work".to_string()]);
+        assert_eq!(
+            qs,
+            vec!["what is X".to_string(), "how does Y work".to_string()]
+        );
     }
 
     #[test]
@@ -1237,19 +1550,28 @@ mod tests {
         let c = parse_critique("GAPS:\n- what about pricing?\n- any recent incidents?");
         assert_eq!(
             c,
-            Critique::Gaps(vec!["what about pricing?".to_string(), "any recent incidents?".to_string()])
+            Critique::Gaps(vec![
+                "what about pricing?".to_string(),
+                "any recent incidents?".to_string()
+            ])
         );
     }
 
     #[test]
     fn parse_critique_recognizes_contradiction() {
         let c = parse_critique("CONTRADICTION: source A says X, source B says not-X");
-        assert_eq!(c, Critique::Contradiction("source A says X, source B says not-X".to_string()));
+        assert_eq!(
+            c,
+            Critique::Contradiction("source A says X, source B says not-X".to_string())
+        );
     }
 
     #[test]
     fn parse_critique_falls_back_to_satisfied_on_garbage() {
-        assert_eq!(parse_critique("uh, looks fine I guess?"), Critique::Satisfied);
+        assert_eq!(
+            parse_critique("uh, looks fine I guess?"),
+            Critique::Satisfied
+        );
         assert_eq!(parse_critique("GAPS:\n"), Critique::Satisfied);
     }
 
@@ -1268,17 +1590,33 @@ mod tests {
 
     #[test]
     fn synthesizer_messages_lists_pinned_sources_when_present() {
-        let msgs = synthesizer_messages("topic", &["finding one".to_string()], &["https://a.example".to_string()]);
+        let msgs = synthesizer_messages(
+            "topic",
+            &["finding one".to_string()],
+            &["https://a.example".to_string()],
+        );
         let user = msgs.iter().find(|m| m.role == "user").unwrap();
-        assert!(user.content.contains("https://a.example"), "{}", user.content);
-        assert!(user.content.to_lowercase().contains("prioritize"), "{}", user.content);
+        assert!(
+            user.content.contains("https://a.example"),
+            "{}",
+            user.content
+        );
+        assert!(
+            user.content.to_lowercase().contains("prioritize"),
+            "{}",
+            user.content
+        );
     }
 
     #[test]
     fn synthesizer_messages_omits_pinned_section_when_empty() {
         let msgs = synthesizer_messages("topic", &["finding one".to_string()], &[]);
         let user = msgs.iter().find(|m| m.role == "user").unwrap();
-        assert!(!user.content.to_lowercase().contains("prioritize"), "{}", user.content);
+        assert!(
+            !user.content.to_lowercase().contains("prioritize"),
+            "{}",
+            user.content
+        );
     }
 
     #[test]

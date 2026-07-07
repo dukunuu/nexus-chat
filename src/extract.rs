@@ -221,7 +221,10 @@ fn ocr_pdf_with(
 
 /// Run a command, mapping a missing binary to `OcrError::MissingTools` and a
 /// non-zero exit to `Failed` with its stderr.
-fn run_ocr_cmd(cmd: &mut std::process::Command, name: &str) -> std::result::Result<Vec<u8>, OcrError> {
+fn run_ocr_cmd(
+    cmd: &mut std::process::Command,
+    name: &str,
+) -> std::result::Result<Vec<u8>, OcrError> {
     let out = cmd.output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             OcrError::MissingTools
@@ -299,26 +302,31 @@ fn ocr_pdf_in(
 
     // OCR pages in parallel — one tesseract process per core, pulling page
     // indices off a shared counter; results re-ordered by index afterwards.
-    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(pages.len().max(1));
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(pages.len().max(1));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results = std::sync::Mutex::new(Vec::with_capacity(pages.len()));
     std::thread::scope(|s| {
         for _ in 0..workers {
-            s.spawn(|| loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(png) = pages.get(i) else { return };
-                let mut cmd = std::process::Command::new(tesseract);
-                cmd.arg(png).arg("stdout");
-                if let Some(l) = &langs {
-                    cmd.args(["-l", l]);
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(png) = pages.get(i) else { return };
+                    let mut cmd = std::process::Command::new(tesseract);
+                    cmd.arg(png).arg("stdout");
+                    if let Some(l) = &langs {
+                        cmd.args(["-l", l]);
+                    }
+                    let r = run(&mut cmd, "tesseract");
+                    let done = {
+                        let mut res = results.lock().unwrap();
+                        res.push((i, r));
+                        res.len()
+                    };
+                    progress(done, pages.len());
                 }
-                let r = run(&mut cmd, "tesseract");
-                let done = {
-                    let mut res = results.lock().unwrap();
-                    res.push((i, r));
-                    res.len()
-                };
-                progress(done, pages.len());
             });
         }
     });
@@ -342,7 +350,10 @@ fn ocr_pdf_in(
 /// print the list to stderr, newer to stdout — scan both; language codes
 /// never contain spaces, which filters the header line.
 fn installed_langs(tesseract: &str) -> Option<String> {
-    let out = std::process::Command::new(tesseract).arg("--list-langs").output().ok()?;
+    let out = std::process::Command::new(tesseract)
+        .arg("--list-langs")
+        .output()
+        .ok()?;
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -380,15 +391,24 @@ pub(crate) fn pdf_with_pages(texts: &[&str]) -> Vec<u8> {
     let font_obj = 2 + 2 * texts.len() + 1; // catalog, pages, (page, content)*, font
     let mut objs: Vec<String> = Vec::new();
     objs.push("<< /Type /Catalog /Pages 2 0 R >>".into());
-    let kids: Vec<String> = (0..texts.len()).map(|i| format!("{} 0 R", 3 + 2 * i)).collect();
-    objs.push(format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), texts.len()));
+    let kids: Vec<String> = (0..texts.len())
+        .map(|i| format!("{} 0 R", 3 + 2 * i))
+        .collect();
+    objs.push(format!(
+        "<< /Type /Pages /Kids [{}] /Count {} >>",
+        kids.join(" "),
+        texts.len()
+    ));
     for (i, t) in texts.iter().enumerate() {
         objs.push(format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 150] /Contents {} 0 R /Resources << /Font << /F1 {font_obj} 0 R >> >> >>",
             4 + 2 * i
         ));
         let stream = format!("BT /F1 32 Tf 20 60 Td ({t}) Tj ET");
-        objs.push(format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()));
+        objs.push(format!(
+            "<< /Length {} >>\nstream\n{stream}\nendstream",
+            stream.len()
+        ));
     }
     objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into());
     serialize_pdf(objs)
@@ -456,21 +476,36 @@ mod tests {
 
     #[test]
     fn docx_pulls_paragraph_text() {
-        let p = office_fixture("d.docx", &[(
-            "word/document.xml",
-            r#"<w:document><w:p><w:r><w:t>Hello</w:t></w:r><w:r><w:t xml:space="preserve"> world</w:t></w:r></w:p><w:p><w:r><w:t>Second &amp; last</w:t></w:r></w:p></w:document>"#,
-        )]);
+        let p = office_fixture(
+            "d.docx",
+            &[(
+                "word/document.xml",
+                r#"<w:document><w:p><w:r><w:t>Hello</w:t></w:r><w:r><w:t xml:space="preserve"> world</w:t></w:r></w:p><w:p><w:r><w:t>Second &amp; last</w:t></w:r></w:p></w:document>"#,
+            )],
+        );
         let text = extract_text(&p).unwrap();
         assert_eq!(text, "Hello world\nSecond & last");
     }
 
     #[test]
     fn pptx_pulls_slide_text_with_slide_markers() {
-        let p = office_fixture("s.pptx", &[
-            ("ppt/slides/slide1.xml", r#"<p:sld><a:t>Title one</a:t><a:t>Bullet</a:t></p:sld>"#),
-            ("ppt/slides/slide2.xml", r#"<p:sld><a:t>Second slide</a:t></p:sld>"#),
-            ("ppt/slides/slide10.xml", r#"<p:sld><a:t>Tenth slide</a:t></p:sld>"#),
-        ]);
+        let p = office_fixture(
+            "s.pptx",
+            &[
+                (
+                    "ppt/slides/slide1.xml",
+                    r#"<p:sld><a:t>Title one</a:t><a:t>Bullet</a:t></p:sld>"#,
+                ),
+                (
+                    "ppt/slides/slide2.xml",
+                    r#"<p:sld><a:t>Second slide</a:t></p:sld>"#,
+                ),
+                (
+                    "ppt/slides/slide10.xml",
+                    r#"<p:sld><a:t>Tenth slide</a:t></p:sld>"#,
+                ),
+            ],
+        );
         let text = extract_text(&p).unwrap();
         assert!(text.contains("[slide 1]"));
         assert!(text.contains("Title one"));
@@ -484,10 +519,19 @@ mod tests {
 
     #[test]
     fn xlsx_pulls_shared_strings_and_cell_values() {
-        let p = office_fixture("x.xlsx", &[
-            ("xl/sharedStrings.xml", r#"<sst><si><t>revenue</t></si><si><t>cost</t></si></sst>"#),
-            ("xl/worksheets/sheet1.xml", r#"<worksheet><c><v>42</v></c><c><v>7</v></c></worksheet>"#),
-        ]);
+        let p = office_fixture(
+            "x.xlsx",
+            &[
+                (
+                    "xl/sharedStrings.xml",
+                    r#"<sst><si><t>revenue</t></si><si><t>cost</t></si></sst>"#,
+                ),
+                (
+                    "xl/worksheets/sheet1.xml",
+                    r#"<worksheet><c><v>42</v></c><c><v>7</v></c></worksheet>"#,
+                ),
+            ],
+        );
         let text = extract_text(&p).unwrap();
         assert!(text.contains("revenue"));
         assert!(text.contains("cost"));
@@ -497,7 +541,10 @@ mod tests {
     #[test]
     fn xml_tag_texts_handles_attrs_self_closing_and_entities() {
         let xml = r#"<w:t a="b">one</w:t><w:t/><w:t>two &lt;3</w:t>"#;
-        assert_eq!(xml_tag_texts(xml, "w:t"), vec!["one".to_string(), "two <3".to_string()]);
+        assert_eq!(
+            xml_tag_texts(xml, "w:t"),
+            vec!["one".to_string(), "two <3".to_string()]
+        );
     }
 
     #[test]
@@ -508,22 +555,34 @@ mod tests {
 
     #[test]
     fn chunks_are_40_lines_with_locations() {
-        let text = (1..=90).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        let text = (1..=90)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let chunks = chunk_lines(&text);
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].0, "lines 1-40");
         assert!(chunks[0].1.starts_with("1\n"));
         assert_eq!(chunks[1].0, "lines 41-80");
         assert_eq!(chunks[2].0, "lines 81-90");
-        assert!(chunks[2].1.ends_with("\n90") || chunks[2].1 == "81\n82\n83\n84\n85\n86\n87\n88\n89\n90");
+        assert!(
+            chunks[2].1.ends_with("\n90")
+                || chunks[2].1 == "81\n82\n83\n84\n85\n86\n87\n88\n89\n90"
+        );
         assert!(chunk_lines("").is_empty());
         assert!(chunk_lines("   \n  ").is_empty());
     }
 
     /// True when tesseract + pdftoppm are runnable (real-OCR tests skip otherwise).
     fn ocr_tools_present() -> bool {
-        std::process::Command::new("tesseract").arg("--version").output().is_ok()
-            && std::process::Command::new("pdftoppm").arg("-v").output().is_ok()
+        std::process::Command::new("tesseract")
+            .arg("--version")
+            .output()
+            .is_ok()
+            && std::process::Command::new("pdftoppm")
+                .arg("-v")
+                .output()
+                .is_ok()
     }
 
     #[test]
@@ -599,8 +658,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nexus-ocr-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let pdf = dir.join("multi.pdf");
-        std::fs::write(&pdf, pdf_with_pages(&["ALPHA BRAVO", "CHARLIE DELTA", "ECHO FOXTROT"]))
-            .unwrap();
+        std::fs::write(
+            &pdf,
+            pdf_with_pages(&["ALPHA BRAVO", "CHARLIE DELTA", "ECHO FOXTROT"]),
+        )
+        .unwrap();
 
         let text = ocr_pdf(&pdf, &|_, _| {}).unwrap();
         // Parallel OCR must still emit pages in document order.
@@ -633,7 +695,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pdf = dir.join("x.pdf");
         std::fs::write(&pdf, minimal_pdf(None)).unwrap();
-        let err = ocr_pdf_with("nexus-definitely-not-a-binary", "tesseract", &pdf, &|_, _| {}).unwrap_err();
+        let err = ocr_pdf_with(
+            "nexus-definitely-not-a-binary",
+            "tesseract",
+            &pdf,
+            &|_, _| {},
+        )
+        .unwrap_err();
         assert!(matches!(err, OcrError::MissingTools));
     }
 }

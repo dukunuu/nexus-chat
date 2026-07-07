@@ -101,7 +101,8 @@ impl Theme {
             warning: hex_to_color(&n.yellow).unwrap_or(fallback.warning),
             error: hex_to_color(&n.red).unwrap_or(fallback.error),
             user_msg: hex_to_color(&n.cyan).unwrap_or(fallback.user_msg),
-            assistant_msg: hex_to_color(&a.colors.primary.foreground).unwrap_or(fallback.assistant_msg),
+            assistant_msg: hex_to_color(&a.colors.primary.foreground)
+                .unwrap_or(fallback.assistant_msg),
             tool_msg: hex_to_color(&n.yellow).unwrap_or(fallback.tool_msg),
             research_msg: hex_to_color(&n.magenta).unwrap_or(fallback.research_msg),
         }

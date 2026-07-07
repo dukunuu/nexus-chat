@@ -12,7 +12,11 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     // Mask the key so it isn't shown in the clear.
     let masked = "*".repeat(app.key_input.chars().count());
     let block = chrome::popup_block(
-        crate::ui::hint_title(app, " OpenRouter key ", "OpenRouter key — Enter to save, Esc to cancel"),
+        crate::ui::hint_title(
+            app,
+            " API key ",
+            "OpenRouter/OpenAI key — Enter to save, Esc to cancel",
+        ),
         &app.theme,
     );
     let para = Paragraph::new(format!("{masked}▏")).block(block);

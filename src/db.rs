@@ -105,8 +105,8 @@ pub struct Db {
 
 impl Db {
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        let conn = Connection::open(path)
-            .with_context(|| format!("opening db {}", path.display()))?;
+        let conn =
+            Connection::open(path).with_context(|| format!("opening db {}", path.display()))?;
         let db = Db { conn };
         db.migrate()?;
         Ok(db)
@@ -270,7 +270,11 @@ impl Db {
             "INSERT INTO spaces (id, name, created_at) VALUES (?1, ?2, ?3)",
             (&id, name, &now),
         )?;
-        Ok(Space { id, name: name.to_string(), created_at: now })
+        Ok(Space {
+            id,
+            name: name.to_string(),
+            created_at: now,
+        })
     }
 
     /// Spaces oldest-first (`default` was inserted first, so it naturally leads).
@@ -279,7 +283,11 @@ impl Db {
             .conn
             .prepare("SELECT id, name, created_at FROM spaces ORDER BY created_at ASC")?;
         let rows = stmt.query_map([], |r| {
-            Ok(Space { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)? })
+            Ok(Space {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                created_at: r.get(2)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -298,7 +306,8 @@ impl Db {
             "UPDATE sessions SET space_id = ?1 WHERE space_id = ?2",
             (&default_id, id),
         )?;
-        self.conn.execute("DELETE FROM spaces WHERE id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM spaces WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -459,7 +468,10 @@ impl Db {
 
     /// Persist a session's `/web` answer-mode toggle.
     pub fn set_session_web_mode(&self, session_id: &str, on: bool) -> Result<()> {
-        self.conn.execute("UPDATE sessions SET web_mode = ?2 WHERE id = ?1", (session_id, on as i64))?;
+        self.conn.execute(
+            "UPDATE sessions SET web_mode = ?2 WHERE id = ?1",
+            (session_id, on as i64),
+        )?;
         Ok(())
     }
 
@@ -478,8 +490,10 @@ impl Db {
             "DELETE FROM message_images WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?1)",
             [id],
         )?;
-        self.conn.execute("DELETE FROM messages WHERE session_id = ?1", [id])?;
-        self.conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM messages WHERE session_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM sessions WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -514,7 +528,11 @@ impl Db {
         let rows = stmt.query_map([session_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                MessageImage { id: r.get(1)?, path: r.get(2)?, description: r.get(3)? },
+                MessageImage {
+                    id: r.get(1)?,
+                    path: r.get(2)?,
+                    description: r.get(3)?,
+                },
             ))
         })?;
         for row in rows {
@@ -538,7 +556,16 @@ impl Db {
     /// Insert a tool-call transcript block: `content` is JSON
     /// `{"name","arguments","result"}`. Never sent back to the model.
     pub fn add_tool_call_message(&self, session_id: &str, content: &str) -> Result<String> {
-        self.insert_message(session_id, "tool_call", content, None, None, None, None, None)
+        self.insert_message(
+            session_id,
+            "tool_call",
+            content,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Insert a background-research stage/progress line: plain text, shown in
@@ -546,20 +573,43 @@ impl Db {
     /// rows, never replayed into build_history either — this is the job's
     /// own scratch work, not something the chat model did).
     pub fn add_research_stage_message(&self, session_id: &str, content: &str) -> Result<String> {
-        self.insert_message(session_id, "research_stage", content, None, None, None, None, None)
+        self.insert_message(
+            session_id,
+            "research_stage",
+            content,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     /// A research pipeline's plan-approval prompt: rendered like a stage row
     /// but actionable, and (like `research_stage`) never replayed to the model.
     pub fn add_research_plan_message(&self, session_id: &str, content: &str) -> Result<String> {
-        self.insert_message(session_id, "research_plan", content, None, None, None, None, None)
+        self.insert_message(
+            session_id,
+            "research_plan",
+            content,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Update the most recent `research_stage` row for `session_id` whose
     /// content starts with `label`, or insert one on the stage's first
     /// occurrence — keeps one transcript row per named stage instead of
     /// appending on every progress tick (e.g. every searcher finishing).
-    pub fn upsert_research_stage_message(&self, session_id: &str, label: &str, detail: &str) -> Result<()> {
+    pub fn upsert_research_stage_message(
+        &self,
+        session_id: &str,
+        label: &str,
+        detail: &str,
+    ) -> Result<()> {
         let content = stage_content(label, detail);
         let existing: Option<String> = self
             .conn
@@ -596,7 +646,11 @@ impl Db {
 
     /// See the free function of the same name.
     #[cfg(test)]
-    pub fn search_session_sources(&self, session_id: &str, query: &str) -> Result<Vec<(String, String)>> {
+    pub fn search_session_sources(
+        &self,
+        session_id: &str,
+        query: &str,
+    ) -> Result<Vec<(String, String)>> {
         search_session_sources(&self.conn, session_id, query)
     }
 
@@ -605,7 +659,12 @@ impl Db {
     /// `session_sources` for this session (a no-op UPDATE otherwise — the
     /// row is created by `add_session_sources` when a source is first
     /// cited, not here).
-    pub fn set_source_flag(&self, session_id: &str, url_norm: &str, flag: Option<&str>) -> Result<()> {
+    pub fn set_source_flag(
+        &self,
+        session_id: &str,
+        url_norm: &str,
+        flag: Option<&str>,
+    ) -> Result<()> {
         self.conn.execute(
             "UPDATE session_sources SET flag = ?3 WHERE session_id = ?1 AND url_norm = ?2",
             (session_id, url_norm, flag),
@@ -626,7 +685,14 @@ impl Db {
         phrase: Option<&str>,
     ) -> Result<()> {
         self.insert_message(
-            session_id, "assistant", content, model, reasoning, tokens, secs, phrase,
+            session_id,
+            "assistant",
+            content,
+            model,
+            reasoning,
+            tokens,
+            secs,
+            phrase,
         )?;
         Ok(())
     }
@@ -650,16 +716,7 @@ impl Db {
                 (id, session_id, role, content, model, reasoning, tokens, secs, phrase, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             (
-                &id,
-                session_id,
-                role,
-                content,
-                model,
-                reasoning,
-                tokens,
-                secs,
-                phrase,
-                &now,
+                &id, session_id, role, content, model, reasoning, tokens, secs, phrase, &now,
             ),
         )?;
         self.conn.execute(
@@ -670,7 +727,11 @@ impl Db {
     }
 
     /// Attach images to a message; returns them with `description: None`.
-    pub fn add_message_images(&self, message_id: &str, paths: &[String]) -> Result<Vec<MessageImage>> {
+    pub fn add_message_images(
+        &self,
+        message_id: &str,
+        paths: &[String],
+    ) -> Result<Vec<MessageImage>> {
         let now = Utc::now().to_rfc3339();
         let mut images = Vec::with_capacity(paths.len());
         for path in paths {
@@ -680,7 +741,11 @@ impl Db {
                  VALUES (?1, ?2, ?3, NULL, ?4)",
                 (&id, message_id, path, &now),
             )?;
-            images.push(MessageImage { id, path: path.clone(), description: None });
+            images.push(MessageImage {
+                id,
+                path: path.clone(),
+                description: None,
+            });
         }
         Ok(images)
     }
@@ -706,7 +771,14 @@ impl Db {
 
     /// Insert or replace a file row (unique per space+name). Returns the row id;
     /// an existing row keeps its id, so its chunks can be replaced by file_id.
-    pub fn upsert_file(&self, space_id: &str, name: &str, hash: &str, size: i64, status: &str) -> Result<String> {
+    pub fn upsert_file(
+        &self,
+        space_id: &str,
+        name: &str,
+        hash: &str,
+        size: i64,
+        status: &str,
+    ) -> Result<String> {
         if let Ok(existing) = self.conn.query_row(
             "SELECT id FROM files WHERE space_id = ?1 AND name = ?2",
             (space_id, name),
@@ -735,8 +807,11 @@ impl Db {
         )?;
         let rows = stmt.query_map([space_id], |r| {
             Ok(FileRow {
-                id: r.get(0)?, name: r.get(1)?,
-                hash: r.get(2)?, size: r.get(3)?, status: r.get(4)?,
+                id: r.get(0)?,
+                name: r.get(1)?,
+                hash: r.get(2)?,
+                size: r.get(3)?,
+                status: r.get(4)?,
                 mtime: r.get(5)?,
             })
         })?;
@@ -744,20 +819,28 @@ impl Db {
     }
 
     pub fn delete_file(&self, file_id: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
-        self.conn.execute("DELETE FROM files WHERE id = ?1", [file_id])?;
+        self.conn
+            .execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
+        self.conn
+            .execute("DELETE FROM files WHERE id = ?1", [file_id])?;
         Ok(())
     }
 
     /// Record the disk mtime a file was indexed at (see `FileRow::mtime`).
     pub fn set_file_mtime(&self, file_id: &str, mtime: i64) -> Result<()> {
-        self.conn.execute("UPDATE files SET mtime = ?2 WHERE id = ?1", (file_id, mtime))?;
+        self.conn.execute(
+            "UPDATE files SET mtime = ?2 WHERE id = ?1",
+            (file_id, mtime),
+        )?;
         Ok(())
     }
 
     /// Update a file's status column (e.g. "ok", "ocr…", or an error message).
     pub fn set_file_status(&self, file_id: &str, status: &str) -> Result<()> {
-        self.conn.execute("UPDATE files SET status = ?2 WHERE id = ?1", (file_id, status))?;
+        self.conn.execute(
+            "UPDATE files SET status = ?2 WHERE id = ?1",
+            (file_id, status),
+        )?;
         Ok(())
     }
 
@@ -765,8 +848,10 @@ impl Db {
     /// order. Any stored embeddings are dropped too — they described the old
     /// chunk texts, and the embedder backfills the new ones.
     pub fn set_file_chunks(&self, file_id: &str, chunks: &[(String, String)]) -> Result<()> {
-        self.conn.execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
-        self.conn.execute("DELETE FROM chunk_embeddings WHERE file_id = ?1", [file_id])?;
+        self.conn
+            .execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
+        self.conn
+            .execute("DELETE FROM chunk_embeddings WHERE file_id = ?1", [file_id])?;
         for (seq, (location, text)) in chunks.iter().enumerate() {
             self.conn.execute(
                 "INSERT INTO file_chunks (file_id, seq, location, text) VALUES (?1, ?2, ?3, ?4)",
@@ -799,7 +884,12 @@ impl Db {
     }
 
     /// Record a research report's cited sources for the citation index.
-    pub fn add_citations(&self, space_id: &str, report_file: &str, citations: &[(String, Option<String>)]) -> Result<()> {
+    pub fn add_citations(
+        &self,
+        space_id: &str,
+        report_file: &str,
+        citations: &[(String, Option<String>)],
+    ) -> Result<()> {
         for (url, title) in citations {
             self.conn.execute(
                 "INSERT INTO citations (space_id, report_file, url, title) VALUES (?1, ?2, ?3, ?4)",
@@ -813,7 +903,11 @@ impl Db {
     /// citations through the toolbox's own connection (the free function),
     /// but this handle is also used directly by the watch diff-section
     /// lookup (`previous_citations_for_watch_session`), plus tests.
-    pub fn search_citations(&self, space_id: &str, query: Option<&str>) -> Result<Vec<(String, String, String)>> {
+    pub fn search_citations(
+        &self,
+        space_id: &str,
+        query: Option<&str>,
+    ) -> Result<Vec<(String, String, String)>> {
         search_citations(&self.conn, space_id, query)
     }
 
@@ -828,7 +922,13 @@ impl Db {
         Ok(())
     }
 
-    pub fn create_watch(&self, space_id: &str, topic: &str, interval_hours: i64, session_id: &str) -> Result<String> {
+    pub fn create_watch(
+        &self,
+        space_id: &str,
+        topic: &str,
+        interval_hours: i64,
+        session_id: &str,
+    ) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         self.conn.execute(
             "INSERT INTO watches (id, space_id, topic, interval_hours, session_id, last_run_at)
@@ -876,7 +976,10 @@ impl Db {
     }
 
     pub fn touch_watch(&self, id: &str, now_rfc3339: &str) -> Result<()> {
-        self.conn.execute("UPDATE watches SET last_run_at = ?2 WHERE id = ?1", (id, now_rfc3339))?;
+        self.conn.execute(
+            "UPDATE watches SET last_run_at = ?2 WHERE id = ?1",
+            (id, now_rfc3339),
+        )?;
         Ok(())
     }
 
@@ -884,12 +987,16 @@ impl Db {
     /// so the next due-check's diff-section lookup
     /// (`previous_citations_for_watch_session`) can match against it.
     pub fn set_watch_session(&self, id: &str, session_id: &str) -> Result<()> {
-        self.conn.execute("UPDATE watches SET session_id = ?2 WHERE id = ?1", (id, session_id))?;
+        self.conn.execute(
+            "UPDATE watches SET session_id = ?2 WHERE id = ?1",
+            (id, session_id),
+        )?;
         Ok(())
     }
 
     pub fn delete_watch(&self, id: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM watches WHERE id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM watches WHERE id = ?1", [id])?;
         Ok(())
     }
 }
@@ -901,14 +1008,20 @@ pub fn vec_to_blob(v: &[f32]) -> Vec<u8> {
 
 /// Decode a BLOB back into an embedding (inverse of `vec_to_blob`).
 pub fn blob_to_vec(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    b.chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
 /// Citations in `space_id` whose url/title/report_file contains `query`
 /// (case-insensitive substring), or every row when `query` is None — as
 /// `(report_file, url, title)`, newest first. Free function so the toolbox
 /// can call it over its own short-lived connection.
-pub fn search_citations(conn: &Connection, space_id: &str, query: Option<&str>) -> Result<Vec<(String, String, String)>> {
+pub fn search_citations(
+    conn: &Connection,
+    space_id: &str,
+    query: Option<&str>,
+) -> Result<Vec<(String, String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT report_file, url, COALESCE(title, '') FROM citations
          WHERE space_id = ?1
@@ -916,18 +1029,28 @@ pub fn search_citations(conn: &Connection, space_id: &str, query: Option<&str>) 
          ORDER BY id DESC",
     )?;
     let pattern = query.map(|q| format!("%{q}%"));
-    let rows = stmt.query_map((space_id, pattern), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    let rows = stmt.query_map((space_id, pattern), |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// One transcript line for a research stage: bare label, or `label: detail`.
 pub fn stage_content(label: &str, detail: &str) -> String {
-    if detail.is_empty() { label.to_string() } else { format!("{label}: {detail}") }
+    if detail.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label}: {detail}")
+    }
 }
 
 /// See `Db::add_session_sources`; free so the research pipeline task can
 /// call it over its own short-lived connection.
-pub fn add_session_sources(conn: &Connection, session_id: &str, url_norms: &[String]) -> Result<()> {
+pub fn add_session_sources(
+    conn: &Connection,
+    session_id: &str,
+    url_norms: &[String],
+) -> Result<()> {
     for u in url_norms {
         conn.execute(
             "INSERT OR IGNORE INTO session_sources (session_id, url_norm) VALUES (?1, ?2)",
@@ -941,13 +1064,19 @@ pub fn add_session_sources(conn: &Connection, session_id: &str, url_norms: &[Str
 /// source bundle: `(url, text)` for every cached page whose text contains
 /// `query`. Ponytail: substring, not FTS — a bundle is a handful of pages,
 /// not a corpus.
-pub fn search_session_sources(conn: &Connection, session_id: &str, query: &str) -> Result<Vec<(String, String)>> {
+pub fn search_session_sources(
+    conn: &Connection,
+    session_id: &str,
+    query: &str,
+) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT web_cache.url, web_cache.text FROM session_sources
          JOIN web_cache ON web_cache.url_norm = session_sources.url_norm
          WHERE session_sources.session_id = ?1",
     )?;
-    let rows = stmt.query_map([session_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let rows = stmt.query_map([session_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
     let needle = query.to_lowercase();
     Ok(rows
         .collect::<rusqlite::Result<Vec<_>>>()?
@@ -977,7 +1106,11 @@ pub fn discarded_domains(conn: &Connection, session_id: &str) -> Result<Vec<Stri
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut hosts: Vec<String> = rows
         .iter()
-        .filter_map(|u| reqwest::Url::parse(u).ok().and_then(|p| p.host_str().map(str::to_string)))
+        .filter_map(|u| {
+            reqwest::Url::parse(u)
+                .ok()
+                .and_then(|p| p.host_str().map(str::to_string))
+        })
         .collect();
     hosts.sort();
     hosts.dedup();
@@ -1010,7 +1143,13 @@ pub fn cache_get(conn: &Connection, url_norm: &str) -> Result<Option<(String, St
 }
 
 /// Write (or overwrite) a fetched page into the cache, stamped now.
-pub fn cache_put(conn: &Connection, url_norm: &str, url: &str, title: Option<&str>, text: &str) -> Result<()> {
+pub fn cache_put(
+    conn: &Connection,
+    url_norm: &str,
+    url: &str,
+    title: Option<&str>,
+    text: &str,
+) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO web_cache (url_norm, url, title, text, fetched_at) VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1160,14 +1299,28 @@ mod tests {
     fn web_cache_roundtrips_and_updates_on_rewrite() {
         let db = Db::open_in_memory().unwrap();
         assert!(cache_get(db.raw(), "example.com/a").unwrap().is_none());
-        cache_put(db.raw(), "example.com/a", "https://example.com/a", Some("Title"), "body text").unwrap();
+        cache_put(
+            db.raw(),
+            "example.com/a",
+            "https://example.com/a",
+            Some("Title"),
+            "body text",
+        )
+        .unwrap();
         let (title, text, fetched_at) = cache_get(db.raw(), "example.com/a").unwrap().unwrap();
         assert_eq!(title, "Title");
         assert_eq!(text, "body text");
         assert!(!fetched_at.is_empty());
 
         // Re-fetching overwrites the row, not duplicates it.
-        cache_put(db.raw(), "example.com/a", "https://example.com/a", None, "new body").unwrap();
+        cache_put(
+            db.raw(),
+            "example.com/a",
+            "https://example.com/a",
+            None,
+            "new body",
+        )
+        .unwrap();
         let (title, text, _) = cache_get(db.raw(), "example.com/a").unwrap().unwrap();
         assert_eq!(title, "");
         assert_eq!(text, "new body");
@@ -1188,16 +1341,40 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
         let s = db.create_session("t", "a/b", &space).unwrap();
-        cache_put(db.raw(), "https://example.com/a", "https://example.com/a", Some("A"), "rust borrow checker deep dive").unwrap();
-        cache_put(db.raw(), "https://example.com/b", "https://example.com/b", Some("B"), "cooking pasta recipes").unwrap();
-        db.add_session_sources(&s.id, &["https://example.com/a".to_string(), "https://example.com/b".to_string()])
-            .unwrap();
+        cache_put(
+            db.raw(),
+            "https://example.com/a",
+            "https://example.com/a",
+            Some("A"),
+            "rust borrow checker deep dive",
+        )
+        .unwrap();
+        cache_put(
+            db.raw(),
+            "https://example.com/b",
+            "https://example.com/b",
+            Some("B"),
+            "cooking pasta recipes",
+        )
+        .unwrap();
+        db.add_session_sources(
+            &s.id,
+            &[
+                "https://example.com/a".to_string(),
+                "https://example.com/b".to_string(),
+            ],
+        )
+        .unwrap();
 
         let hits = db.search_session_sources(&s.id, "borrow checker").unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].1.contains("borrow checker"));
 
-        assert!(db.search_session_sources(&s.id, "quantum").unwrap().is_empty());
+        assert!(
+            db.search_session_sources(&s.id, "quantum")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1205,15 +1382,24 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let session_id = "sess-1";
         add_session_sources(&db.conn, session_id, &["https://a.example/x".to_string()]).unwrap();
-        db.set_source_flag(session_id, "https://a.example/x", Some("pinned")).unwrap();
-        assert_eq!(pinned_urls(&db.conn, session_id).unwrap(), vec!["https://a.example/x".to_string()]);
+        db.set_source_flag(session_id, "https://a.example/x", Some("pinned"))
+            .unwrap();
+        assert_eq!(
+            pinned_urls(&db.conn, session_id).unwrap(),
+            vec!["https://a.example/x".to_string()]
+        );
         assert!(discarded_domains(&db.conn, session_id).unwrap().is_empty());
 
-        db.set_source_flag(session_id, "https://a.example/x", Some("discarded")).unwrap();
+        db.set_source_flag(session_id, "https://a.example/x", Some("discarded"))
+            .unwrap();
         assert!(pinned_urls(&db.conn, session_id).unwrap().is_empty());
-        assert_eq!(discarded_domains(&db.conn, session_id).unwrap(), vec!["a.example".to_string()]);
+        assert_eq!(
+            discarded_domains(&db.conn, session_id).unwrap(),
+            vec!["a.example".to_string()]
+        );
 
-        db.set_source_flag(session_id, "https://a.example/x", None).unwrap();
+        db.set_source_flag(session_id, "https://a.example/x", None)
+            .unwrap();
         assert!(discarded_domains(&db.conn, session_id).unwrap().is_empty());
     }
 
@@ -1222,12 +1408,18 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
         let s = db.create_session("t", "a/b", &space).unwrap();
-        db.upsert_research_stage_message(&s.id, "searching", "round 1, 1/3").unwrap();
-        db.upsert_research_stage_message(&s.id, "searching", "round 1, 2/3").unwrap();
-        db.upsert_research_stage_message(&s.id, "planning", "").unwrap();
+        db.upsert_research_stage_message(&s.id, "searching", "round 1, 1/3")
+            .unwrap();
+        db.upsert_research_stage_message(&s.id, "searching", "round 1, 2/3")
+            .unwrap();
+        db.upsert_research_stage_message(&s.id, "planning", "")
+            .unwrap();
 
         let msgs = db.load_messages(&s.id).unwrap();
-        let searching: Vec<_> = msgs.iter().filter(|m| m.content.starts_with("searching:")).collect();
+        let searching: Vec<_> = msgs
+            .iter()
+            .filter(|m| m.content.starts_with("searching:"))
+            .collect();
         assert_eq!(searching.len(), 1, "expected one row, updated in place");
         assert!(searching[0].content.contains("2/3"));
         assert_eq!(msgs.iter().filter(|m| m.content == "planning").count(), 1);
@@ -1270,15 +1462,21 @@ mod tests {
         let space = db.default_space_id().unwrap();
         let s = db.create_session("t", "a/b", &space).unwrap();
         let mid = db.add_user_message(&s.id, "look at this").unwrap();
-        let imgs = db.add_message_images(&mid, &["/tmp/a.png".into(), "/tmp/b.png".into()]).unwrap();
+        let imgs = db
+            .add_message_images(&mid, &["/tmp/a.png".into(), "/tmp/b.png".into()])
+            .unwrap();
         assert_eq!(imgs.len(), 2);
         assert!(imgs[0].description.is_none());
 
-        db.set_image_description(&imgs[0].id, "a red square").unwrap();
+        db.set_image_description(&imgs[0].id, "a red square")
+            .unwrap();
         let msgs = db.load_messages(&s.id).unwrap();
         assert_eq!(msgs[0].id, mid);
         assert_eq!(msgs[0].images.len(), 2);
-        assert_eq!(msgs[0].images[0].description.as_deref(), Some("a red square"));
+        assert_eq!(
+            msgs[0].images[0].description.as_deref(),
+            Some("a red square")
+        );
         assert!(msgs[0].images[1].description.is_none());
         // Non-image messages stay empty.
         db.add_user_message(&s.id, "plain").unwrap();
@@ -1328,9 +1526,13 @@ mod tests {
         assert_eq!(s.compact_summary, None);
         assert_eq!(s.compact_through, 0);
 
-        db.set_compaction(&s.id, "digest of earlier turns", 6).unwrap();
+        db.set_compaction(&s.id, "digest of earlier turns", 6)
+            .unwrap();
         let reloaded = &db.list_sessions(&space).unwrap()[0];
-        assert_eq!(reloaded.compact_summary.as_deref(), Some("digest of earlier turns"));
+        assert_eq!(
+            reloaded.compact_summary.as_deref(),
+            Some("digest of earlier turns")
+        );
         assert_eq!(reloaded.compact_through, 6);
     }
 
@@ -1346,7 +1548,12 @@ mod tests {
         assert_eq!(db.count_sessions(&work.id).unwrap(), 1);
 
         db.rename_space(&work.id, "work-renamed").unwrap();
-        assert!(db.list_spaces().unwrap().iter().any(|s| s.name == "work-renamed"));
+        assert!(
+            db.list_spaces()
+                .unwrap()
+                .iter()
+                .any(|s| s.name == "work-renamed")
+        );
 
         db.delete_space(&work.id).unwrap();
         assert_eq!(db.list_spaces().unwrap().len(), 1); // work is gone
@@ -1374,10 +1581,18 @@ mod tests {
         assert_eq!(blob_to_vec(&vec_to_blob(&v)), v);
 
         // No vectors yet → file needs embedding.
-        assert_eq!(files_missing_embeddings(&db.conn, &space).unwrap(), vec![id.clone()]);
+        assert_eq!(
+            files_missing_embeddings(&db.conn, &space).unwrap(),
+            vec![id.clone()]
+        );
 
-        db.set_chunk_embeddings(&id, &[(0, vec![1.0, 0.0]), (1, vec![0.0, 1.0])]).unwrap();
-        assert!(files_missing_embeddings(&db.conn, &space).unwrap().is_empty());
+        db.set_chunk_embeddings(&id, &[(0, vec![1.0, 0.0]), (1, vec![0.0, 1.0])])
+            .unwrap();
+        assert!(
+            files_missing_embeddings(&db.conn, &space)
+                .unwrap()
+                .is_empty()
+        );
 
         // Query near the second chunk's vector ranks it first.
         let hits = semantic_chunks(&db.conn, &space, &[0.1, 0.9], 5).unwrap();
@@ -1390,8 +1605,12 @@ mod tests {
         assert!(hits.is_empty());
 
         // Rewriting chunks invalidates stale vectors.
-        db.set_file_chunks(&id, &[("page 1".into(), "new text".into())]).unwrap();
-        assert_eq!(files_missing_embeddings(&db.conn, &space).unwrap(), vec![id.clone()]);
+        db.set_file_chunks(&id, &[("page 1".into(), "new text".into())])
+            .unwrap();
+        assert_eq!(
+            files_missing_embeddings(&db.conn, &space).unwrap(),
+            vec![id.clone()]
+        );
     }
 
     #[test]
@@ -1399,7 +1618,8 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
         let id = db.upsert_file(&space, "notes.md", "h1", 10, "ok").unwrap();
-        db.set_file_chunks(&id, &[("lines 1-40".into(), "hello fts world".into())]).unwrap();
+        db.set_file_chunks(&id, &[("lines 1-40".into(), "hello fts world".into())])
+            .unwrap();
 
         let files = db.list_files(&space).unwrap();
         assert_eq!(files.len(), 1);
@@ -1409,7 +1629,8 @@ mod tests {
 
         // Re-import with a new hash keeps one row (same id or replaced) and replaces chunks.
         let id2 = db.upsert_file(&space, "notes.md", "h2", 12, "ok").unwrap();
-        db.set_file_chunks(&id2, &[("lines 1-40".into(), "goodbye".into())]).unwrap();
+        db.set_file_chunks(&id2, &[("lines 1-40".into(), "goodbye".into())])
+            .unwrap();
         let files = db.list_files(&space).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].hash, "h2");
@@ -1425,8 +1646,10 @@ mod tests {
         let other = db.create_space("other").unwrap();
         let a = db.upsert_file(&space, "a.md", "h", 1, "ok").unwrap();
         let b = db.upsert_file(&other.id, "b.md", "h", 1, "ok").unwrap();
-        db.set_file_chunks(&a, &[("lines 1-40".into(), "rust borrow checker".into())]).unwrap();
-        db.set_file_chunks(&b, &[("lines 1-40".into(), "rust in other space".into())]).unwrap();
+        db.set_file_chunks(&a, &[("lines 1-40".into(), "rust borrow checker".into())])
+            .unwrap();
+        db.set_file_chunks(&b, &[("lines 1-40".into(), "rust in other space".into())])
+            .unwrap();
 
         let hits = search_chunks(&db.conn, &space, "rust", 8).unwrap();
         assert_eq!(hits.len(), 1); // other space's chunk is excluded
@@ -1443,13 +1666,21 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
         let id = db.upsert_file(&space, "doc.txt", "h", 1, "ok").unwrap();
-        db.set_file_chunks(&id, &[
-            ("lines 1-2".into(), "one\ntwo".into()),
-            ("lines 3-4".into(), "three\nfour".into()),
-        ]).unwrap();
+        db.set_file_chunks(
+            &id,
+            &[
+                ("lines 1-2".into(), "one\ntwo".into()),
+                ("lines 3-4".into(), "three\nfour".into()),
+            ],
+        )
+        .unwrap();
         let text = file_text(&db.conn, &space, "doc.txt").unwrap().unwrap();
         assert_eq!(text, "one\ntwo\nthree\nfour");
-        assert!(file_text(&db.conn, &space, "missing.txt").unwrap().is_none());
+        assert!(
+            file_text(&db.conn, &space, "missing.txt")
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(count_files(&db.conn, &space).unwrap(), 1);
     }
 
@@ -1467,7 +1698,9 @@ mod tests {
     #[test]
     fn create_list_touch_delete_watch_roundtrip() {
         let db = Db::open_in_memory().unwrap();
-        let id = db.create_watch("space-1", "rust async runtimes", 24, "sess-1").unwrap();
+        let id = db
+            .create_watch("space-1", "rust async runtimes", 24, "sess-1")
+            .unwrap();
         let watches = db.list_watches("space-1").unwrap();
         assert_eq!(watches.len(), 1);
         assert_eq!(watches[0].topic, "rust async runtimes");
@@ -1476,7 +1709,10 @@ mod tests {
 
         db.touch_watch(&id, "2026-07-07T00:00:00+00:00").unwrap();
         let watches = db.list_watches("space-1").unwrap();
-        assert_eq!(watches[0].last_run_at.as_deref(), Some("2026-07-07T00:00:00+00:00"));
+        assert_eq!(
+            watches[0].last_run_at.as_deref(),
+            Some("2026-07-07T00:00:00+00:00")
+        );
 
         db.delete_watch(&id).unwrap();
         assert!(db.list_watches("space-1").unwrap().is_empty());
@@ -1494,9 +1730,21 @@ mod tests {
         // list_all_watches should return watches from all spaces
         let all_watches = db.list_all_watches().unwrap();
         assert_eq!(all_watches.len(), 3);
-        assert!(all_watches.iter().any(|w| w.id == id1 && w.space_id == "space-a"));
-        assert!(all_watches.iter().any(|w| w.id == id2 && w.space_id == "space-b"));
-        assert!(all_watches.iter().any(|w| w.id == id3 && w.space_id == "space-a"));
+        assert!(
+            all_watches
+                .iter()
+                .any(|w| w.id == id1 && w.space_id == "space-a")
+        );
+        assert!(
+            all_watches
+                .iter()
+                .any(|w| w.id == id2 && w.space_id == "space-b")
+        );
+        assert!(
+            all_watches
+                .iter()
+                .any(|w| w.id == id3 && w.space_id == "space-a")
+        );
 
         // list_watches for one space should only return that space's watches,
         // confirming list_all_watches is not space-scoped

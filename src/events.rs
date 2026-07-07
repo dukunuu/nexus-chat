@@ -122,6 +122,8 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                 AppEvent::Embed(r) => app.on_embed_done(r),
                 AppEvent::OcrPull(r) => app.on_ocr_pull(r),
                 AppEvent::Research(r) => app.on_research_done(r),
+                AppEvent::ResearchTopic(r) => app.on_research_topic_derived(r),
+                AppEvent::Login(r) => app.on_login_result(r),
             },
             _ = async {
                 if streaming {
@@ -195,6 +197,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         Popup::Files => ui::popups::files::handle_key(app, key)?,
         Popup::Apps => ui::popups::apps::handle_key(app, key)?,
         Popup::Watch => ui::popups::watches::handle_key(app, key)?,
+        Popup::ResearchLive => ui::popups::research_live::handle_key(app, key)?,
         Popup::None => handle_normal(app, key)?,
     }
     Ok(())
@@ -260,7 +263,9 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         // A pending research plan gate intercepts: 'e' (empty composer)
         // prefills the plan for editing, Enter approves (empty composer) or
         // submits the edit (composer text). Normal typing is untouched.
-        KeyCode::Char('e') if app.research_plan_gate.is_some() && app.input_text().trim().is_empty() => {
+        KeyCode::Char('e')
+            if app.research_plan_gate.is_some() && app.input_text().trim().is_empty() =>
+        {
             app.edit_research_plan();
         }
         KeyCode::Enter if app.research_plan_gate.is_some() => {
@@ -298,6 +303,9 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('x') if !ctrl && !shift && app.sel.selected_text().is_some() => {
             app.flag_source_under_selection(Some("discarded"));
         }
+        // Ctrl+Space opens the live research-activity view (per-searcher
+        // reasoning/tool calls) — only while a research job is running.
+        KeyCode::Char(' ') if ctrl && app.research_rx.is_some() => app.open_research_live(),
         // Ctrl+G opens the context breakdown (system/memory/conversation/skills).
         // (Not Ctrl+I: that's the same byte as Tab on terminals without the
         // Kitty keyboard protocol, so it'd be unreachable on many of them.)
@@ -485,4 +493,3 @@ fn handle_mouse(app: &mut App, m: MouseEvent, screen: Rect) -> Result<()> {
     }
     Ok(())
 }
-

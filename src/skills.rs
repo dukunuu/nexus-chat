@@ -21,7 +21,10 @@ const FIND_SKILLS_SKILL: &str = include_str!("../assets/find-skills-SKILL.md");
 /// Write the built-in skills on first run. Never overwrites — once installed
 /// they're normal files the user can edit or delete like any other.
 pub fn install_builtin(dir: &Path) {
-    for (name, md) in [("web-search", WEB_SEARCH_SKILL), ("find-skills", FIND_SKILLS_SKILL)] {
+    for (name, md) in [
+        ("web-search", WEB_SEARCH_SKILL),
+        ("find-skills", FIND_SKILLS_SKILL),
+    ] {
         let path = dir.join(name).join("SKILL.md");
         if path.exists() {
             continue;
@@ -35,14 +38,20 @@ pub fn install_builtin(dir: &Path) {
 
 /// Load every `<dir>/*/SKILL.md` that parses. Missing dir → empty, not an error.
 pub fn load_skills(dir: &Path) -> Vec<Skill> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut skills: Vec<Skill> = entries
         .flatten()
         .filter(|e| e.path().is_dir())
         .filter_map(|e| {
             let md = std::fs::read_to_string(e.path().join("SKILL.md")).ok()?;
             let (name, description) = parse_frontmatter(&md)?;
-            Some(Skill { name, description, dir: e.path() })
+            Some(Skill {
+                name,
+                description,
+                dir: e.path(),
+            })
         })
         .collect();
     skills.sort_by(|a, b| a.name.cmp(&b.name));
@@ -122,10 +131,17 @@ pub async fn install_from_github(
 ) -> anyhow::Result<String> {
     let entries = fetch_gh_contents(client, owner, repo, path).await?;
     anyhow::ensure!(
-        entries.iter().any(|e| e.name == "SKILL.md" && e.kind == "file"),
+        entries
+            .iter()
+            .any(|e| e.name == "SKILL.md" && e.kind == "file"),
         "no SKILL.md at {owner}/{repo}/{path}"
     );
-    let name = path.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(repo).to_string();
+    let name = path
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(repo)
+        .to_string();
     let dest = dest_root.join(&name);
     let result = download_gh_entries(client, &entries, &dest, owner, repo, path, 1).await;
     if let Err(e) = result {
@@ -177,13 +193,24 @@ fn download_gh_entries<'a>(
         for entry in entries {
             match entry.kind.as_str() {
                 "file" => {
-                    let Some(url) = &entry.download_url else { continue };
-                    let bytes = client.get(url).header("User-Agent", "nexus-chat").send().await?.bytes().await?;
+                    let Some(url) = &entry.download_url else {
+                        continue;
+                    };
+                    let bytes = client
+                        .get(url)
+                        .header("User-Agent", "nexus-chat")
+                        .send()
+                        .await?
+                        .bytes()
+                        .await?;
                     std::fs::write(dest.join(&entry.name), bytes)?;
                 }
                 "dir" if depth_left > 0 => {
-                    let sub_repo_path =
-                        if repo_path.is_empty() { entry.name.clone() } else { format!("{repo_path}/{}", entry.name) };
+                    let sub_repo_path = if repo_path.is_empty() {
+                        entry.name.clone()
+                    } else {
+                        format!("{repo_path}/{}", entry.name)
+                    };
                     let subentries = fetch_gh_contents(client, owner, repo, &sub_repo_path).await?;
                     download_gh_entries(
                         client,
@@ -214,9 +241,17 @@ mod tests {
         let names: Vec<String> = load_skills(&dir).iter().map(|s| s.name.clone()).collect();
         assert_eq!(names, vec!["find-skills", "web-search"]);
         // never overwrites: user edits survive a re-run
-        std::fs::write(dir.join("find-skills/SKILL.md"), "---\nname: mine\ndescription: d\n---\nx").unwrap();
+        std::fs::write(
+            dir.join("find-skills/SKILL.md"),
+            "---\nname: mine\ndescription: d\n---\nx",
+        )
+        .unwrap();
         install_builtin(&dir);
-        assert!(std::fs::read_to_string(dir.join("find-skills/SKILL.md")).unwrap().contains("mine"));
+        assert!(
+            std::fs::read_to_string(dir.join("find-skills/SKILL.md"))
+                .unwrap()
+                .contains("mine")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -232,7 +267,10 @@ mod tests {
     #[test]
     fn quoted_values_are_unquoted() {
         let md = "---\nname: \"a\"\ndescription: 'b'\n---\nx";
-        assert_eq!(parse_frontmatter(md), Some(("a".to_string(), "b".to_string())));
+        assert_eq!(
+            parse_frontmatter(md),
+            Some(("a".to_string(), "b".to_string()))
+        );
     }
 
     #[test]
@@ -251,14 +289,21 @@ mod tests {
     #[test]
     fn crlf_line_endings_still_parse() {
         let md = "---\r\nname: x\r\ndescription: y\r\n---\r\nbody\r\n";
-        assert_eq!(parse_frontmatter(md), Some(("x".to_string(), "y".to_string())));
+        assert_eq!(
+            parse_frontmatter(md),
+            Some(("x".to_string(), "y".to_string()))
+        );
     }
 
     #[test]
     fn parses_owner_repo_path_shorthand() {
         assert_eq!(
             parse_gh_shorthand("anthropics/skills/pdf"),
-            Some(("anthropics".to_string(), "skills".to_string(), "pdf".to_string()))
+            Some((
+                "anthropics".to_string(),
+                "skills".to_string(),
+                "pdf".to_string()
+            ))
         );
     }
 
@@ -266,7 +311,11 @@ mod tests {
     fn parses_bare_owner_repo_as_root_path() {
         assert_eq!(
             parse_gh_shorthand("anthropics/skills"),
-            Some(("anthropics".to_string(), "skills".to_string(), String::new()))
+            Some((
+                "anthropics".to_string(),
+                "skills".to_string(),
+                String::new()
+            ))
         );
     }
 
@@ -280,7 +329,11 @@ mod tests {
     fn multi_segment_path_survives_splitn() {
         assert_eq!(
             parse_gh_shorthand("a/b/nested/path/skill"),
-            Some(("a".to_string(), "b".to_string(), "nested/path/skill".to_string()))
+            Some((
+                "a".to_string(),
+                "b".to_string(),
+                "nested/path/skill".to_string()
+            ))
         );
     }
 

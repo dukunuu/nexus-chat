@@ -182,11 +182,16 @@ mod tests {
         // Seed one message with an image via the db layer.
         let s = a.db.create_session("t", "a/b", &a.active_space.id).unwrap();
         let mid = a.db.add_user_message(&s.id, "see").unwrap();
-        let imgs = a.db.add_message_images(&mid, &["/tmp/x.png".into()]).unwrap();
+        let imgs =
+            a.db.add_message_images(&mid, &["/tmp/x.png".into()])
+                .unwrap();
         a.session = Some(s.clone());
         a.messages = a.db.load_messages(&s.id).unwrap();
 
-        a.on_described(Some((imgs[0].id.clone(), Ok("a diagram of the login flow".into()))));
+        a.on_described(Some((
+            imgs[0].id.clone(),
+            Ok("a diagram of the login flow".into()),
+        )));
         assert_eq!(
             a.messages[0].images[0].description.as_deref(),
             Some("a diagram of the login flow")

@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use super::{dim, dot, line_text};
 use crate::app::App;
@@ -67,15 +67,24 @@ pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
     code.extend(tail_code.iter().map(|c| c.map(|id| id + base)));
     let mut blocks = cache.blocks.clone();
     blocks.append(&mut tail_blocks);
-    app.sel.record_render(inner, top, plain, owner, code, blocks);
+    app.sel
+        .record_render(inner, top, plain, owner, code, blocks);
 
     // Paint the selection highlight over the visible slice.
     let cache = &app.history_cache;
     let line_at = |i: usize| {
-        if i < cached_lines { &cache.lines[i] } else { &tail[i - cached_lines] }
+        if i < cached_lines {
+            &cache.lines[i]
+        } else {
+            &tail[i - cached_lines]
+        }
     };
     let visible: Vec<Line> = (top..total.min(top + height))
-        .map(|li| app.sel.highlight(li, line_at(li)).unwrap_or_else(|| line_at(li).clone()))
+        .map(|li| {
+            app.sel
+                .highlight(li, line_at(li))
+                .unwrap_or_else(|| line_at(li).clone())
+        })
         .collect();
 
     f.render_widget(Paragraph::new(visible), inner);
@@ -96,18 +105,24 @@ fn sync_cache(app: &mut App, width: usize) {
     );
     let c = &mut app.history_cache;
     if c.key != key || app.messages.len() < c.msg_count {
-        *c = HistoryCache { key, ..Default::default() };
+        *c = HistoryCache {
+            key,
+            ..Default::default()
+        };
     }
     let theme = app.theme;
     for (i, m) in app.messages.iter().enumerate().skip(c.msg_count) {
         let start = c.lines.len();
         if m.role == "user" {
             if !m.images.is_empty() {
-                c.lines.push(Line::from(dim(format!(
-                    "🖼 {} image{}",
-                    m.images.len(),
-                    if m.images.len() == 1 { "" } else { "s" }
-                ), &theme)));
+                c.lines.push(Line::from(dim(
+                    format!(
+                        "🖼 {} image{}",
+                        m.images.len(),
+                        if m.images.len() == 1 { "" } else { "s" }
+                    ),
+                    &theme,
+                )));
             }
             push_user(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_stage" {
@@ -115,9 +130,24 @@ fn sync_cache(app: &mut App, width: usize) {
         } else if m.role == "research_plan" {
             push_research_plan(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "tool_call" {
-            push_tool_call(&mut c.lines, &m.content, app.show_tool_detail, &app.settings, width, &theme);
+            push_tool_call(
+                &mut c.lines,
+                &m.content,
+                app.show_tool_detail,
+                &app.settings,
+                width,
+                &theme,
+            );
         } else {
-            push_assistant_stored(&mut c.lines, m, &app.settings, width, &mut c.code, &mut c.blocks, &theme);
+            push_assistant_stored(
+                &mut c.lines,
+                m,
+                &app.settings,
+                width,
+                &mut c.code,
+                &mut c.blocks,
+                &theme,
+            );
         }
         c.owner.resize(c.lines.len(), Some(i));
         c.code.resize(c.lines.len(), None);
@@ -133,7 +163,9 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
     for l in app.banner.lines() {
         lines.push(Line::from(Span::styled(
             l.to_string(),
-            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
         )));
     }
     lines.push(Line::from(""));
@@ -142,7 +174,9 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
         Style::default().add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(dim(
-        chrono::Local::now().format("%A, %B %-d %Y · %H:%M:%S").to_string(),
+        chrono::Local::now()
+            .format("%A, %B %-d %Y · %H:%M:%S")
+            .to_string(),
         &app.theme,
     )));
 
@@ -155,10 +189,17 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// A user message: `❯ ` prefix, wrapped with a 2-col hanging indent.
-fn push_user(out: &mut Vec<Line<'static>>, content: &str, width: usize, theme: &crate::theme::Theme) {
+fn push_user(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) {
     let head = Span::styled(
         "❯ ",
-        Style::default().fg(theme.user_msg).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.user_msg)
+            .add_modifier(Modifier::BOLD),
     );
     let mut first = true;
     for line in wrap_plain(content, width.saturating_sub(2)) {
@@ -186,10 +227,19 @@ fn push_tool_call(
     theme: &crate::theme::Theme,
 ) {
     let v: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
-    let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
     let (name, args, result) = (field("name"), field("arguments"), field("result"));
     let summary = crate::app::tool_call_summary(&name, &args, &result);
-    let hint = if expanded || settings.hide_hints { "" } else { " — Ctrl+T for detail" };
+    let hint = if expanded || settings.hide_hints {
+        ""
+    } else {
+        " — Ctrl+T for detail"
+    };
     out.push(Line::from(vec![
         Span::styled("⚒ ", Style::default().fg(theme.tool_msg)),
         dim(format!("{summary}{hint}"), theme),
@@ -208,7 +258,12 @@ fn push_tool_call(
 /// A background-research progress line: a dim one-liner with a 🔎 marker,
 /// no expand/collapse (unlike tool_call — there's no arguments/result pair,
 /// just a phase label).
-fn push_research_stage(out: &mut Vec<Line<'static>>, content: &str, width: usize, theme: &crate::theme::Theme) {
+fn push_research_stage(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) {
     let mut first = true;
     for line in wrap_plain(content, width.saturating_sub(2)) {
         if first {
@@ -227,7 +282,12 @@ fn push_research_stage(out: &mut Vec<Line<'static>>, content: &str, width: usize
 /// A pending plan-approval message: like `push_research_stage` but with a
 /// distinct marker and full (non-dim) styling, since it's actionable —
 /// [e]dit / Enter to continue — not passive progress.
-fn push_research_plan(out: &mut Vec<Line<'static>>, content: &str, width: usize, theme: &crate::theme::Theme) {
+fn push_research_plan(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) {
     let mut first = true;
     for line in wrap_plain(content, width.saturating_sub(2)) {
         if first {
@@ -259,7 +319,9 @@ fn push_assistant_stored(
         (Some(p), Some(secs)) => out.push(Line::from(vec![
             Span::styled(
                 "⏺ ",
-                Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD),
             ),
             dim(format!("{p} for {secs:.1} seconds"), theme),
         ])),
@@ -274,8 +336,15 @@ fn push_assistant_stored(
             }
         } else {
             let n = r.chars().count();
-            let hint = if settings.hide_hints { "" } else { " — Ctrl+R to expand" };
-            out.push(Line::from(dim(format!("▸ reasoning ({n} chars){hint}"), theme)));
+            let hint = if settings.hide_hints {
+                ""
+            } else {
+                " — Ctrl+R to expand"
+            };
+            out.push(Line::from(dim(
+                format!("▸ reasoning ({n} chars){hint}"),
+                theme,
+            )));
         }
     }
 
@@ -288,10 +357,11 @@ fn push_assistant_stored(
     if let Some(m) = &msg.model {
         let mut footer = format!("· {m}");
         if settings.show_stats
-            && let (Some(tok), Some(secs)) = (msg.tokens, msg.secs) {
-                let tps = if secs > 0.0 { tok as f64 / secs } else { 0.0 };
-                footer.push_str(&format!("  ·  {tps:.1} tok/s · ~{tok} tok · {secs:.2}s"));
-            }
+            && let (Some(tok), Some(secs)) = (msg.tokens, msg.secs)
+        {
+            let tps = if secs > 0.0 { tok as f64 / secs } else { 0.0 };
+            footer.push_str(&format!("  ·  {tps:.1} tok/s · ~{tok} tok · {secs:.2}s"));
+        }
         out.push(Line::from(dim(footer, theme)));
     }
     out.push(Line::from(""));
@@ -312,7 +382,10 @@ fn push_assistant_streaming(
             format!("{} ", app.spinner_char()),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(app.thinking_phrase().to_string(), Style::default().fg(color)),
+        Span::styled(
+            app.thinking_phrase().to_string(),
+            Style::default().fg(color),
+        ),
     ]));
 
     if let Some(t) = app.thinking_text() {
@@ -408,7 +481,10 @@ mod tests {
         // Ctrl+T flag change: re-wrap so tool-call detail shows.
         a.show_tool_detail = true;
         let before = a.history_cache.lines.len();
-        a.messages.push(msg("tool_call", r#"{"name":"skill","arguments":"{}","result":"ok"}"#));
+        a.messages.push(msg(
+            "tool_call",
+            r#"{"name":"skill","arguments":"{}","result":"ok"}"#,
+        ));
         sync_cache(&mut a, 20);
         assert!(a.history_cache.lines.len() > before);
 

@@ -32,13 +32,18 @@ impl Space {
         if legacy_db.exists() && !new_db.exists() {
             std::fs::create_dir_all(&self.root)
                 .with_context(|| format!("creating {}", self.root.display()))?;
-            std::fs::rename(&legacy_db, &new_db)
-                .with_context(|| format!("moving {} to {}", legacy_db.display(), new_db.display()))?;
+            std::fs::rename(&legacy_db, &new_db).with_context(|| {
+                format!("moving {} to {}", legacy_db.display(), new_db.display())
+            })?;
         }
         let default_dir = self.root.join("spaces").join(DEFAULT_SPACE);
         if legacy_dir.exists() && !default_dir.exists() {
             std::fs::rename(&legacy_dir, &default_dir).with_context(|| {
-                format!("moving {} to {}", legacy_dir.display(), default_dir.display())
+                format!(
+                    "moving {} to {}",
+                    legacy_dir.display(),
+                    default_dir.display()
+                )
             })?;
         }
         Ok(())
@@ -106,8 +111,7 @@ impl Space {
     pub fn remove_space_dir(&self, name: &str) -> Result<()> {
         let dir = self.space_dir(name);
         if dir.exists() {
-            std::fs::remove_dir_all(&dir)
-                .with_context(|| format!("removing {}", dir.display()))?;
+            std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
         }
         Ok(())
     }

@@ -44,10 +44,21 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     }
     lines.push(Line::from(""));
     let total = b.system_tokens + b.memory_tokens + b.skills_tokens + b.conversation_tokens;
-    let limit_s = b.limit.map(crate::ui::humanize).unwrap_or_else(|| "?".to_string());
+    let limit_s = b
+        .limit
+        .map(crate::ui::humanize)
+        .unwrap_or_else(|| "?".to_string());
     lines.push(Line::from(vec![
-        Span::styled("Total        ", Style::default().fg(app.theme.fg).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{} / {}", crate::ui::humanize(total), limit_s), Style::default().fg(app.theme.warning)),
+        Span::styled(
+            "Total        ",
+            Style::default()
+                .fg(app.theme.fg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{} / {}", crate::ui::humanize(total), limit_s),
+            Style::default().fg(app.theme.warning),
+        ),
     ]));
 
     let hint = if b.compacted {

@@ -28,9 +28,14 @@ impl App {
         if self.settings.compact_threshold == 0 || self.compact_rx.is_some() {
             return;
         }
-        let Some(limit) = self.context_limit() else { return };
+        let Some(limit) = self.context_limit() else {
+            return;
+        };
         let used = self.context_used();
-        let pct = used.checked_mul(100).and_then(|v| v.checked_div(limit)).unwrap_or(0);
+        let pct = used
+            .checked_mul(100)
+            .and_then(|v| v.checked_div(limit))
+            .unwrap_or(0);
         if pct < self.settings.compact_threshold as u64 {
             return;
         }
@@ -59,7 +64,12 @@ impl App {
         let pct = self
             .context_limit()
             .filter(|&l| l > 0)
-            .map(|l| self.context_used().checked_mul(100).and_then(|v| v.checked_div(l)).unwrap_or(0))
+            .map(|l| {
+                self.context_used()
+                    .checked_mul(100)
+                    .and_then(|v| v.checked_div(l))
+                    .unwrap_or(0)
+            })
             .unwrap_or(0);
         self.start_compaction(pct);
     }
@@ -83,7 +93,9 @@ impl App {
                 }
             }
         };
-        let Some(session) = self.session.as_ref() else { return };
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
         let through = session.compact_through as usize;
         if through >= self.messages.len() {
             return; // nothing new since the last compaction to fold in
@@ -132,7 +144,9 @@ impl App {
     /// until the next real response reports fresh usage.
     pub fn on_compact_result(&mut self, result: Option<(String, String, i64, u64)>) {
         self.compact_rx = None;
-        let Some((id, summary, through, before_pct)) = result else { return };
+        let Some((id, summary, through, before_pct)) = result else {
+            return;
+        };
         let _ = self.db.set_compaction(&id, &summary, through);
         if let Some(s) = self.session.as_mut().filter(|s| s.id == id) {
             s.compact_summary = Some(summary.clone());
@@ -154,12 +168,16 @@ impl App {
     /// `context_used` falls back to, so the parts add up to (roughly) the whole.
     pub fn context_breakdown(&self) -> ContextBreakdown {
         let mut instructions_chars = self.resolved_base_system_prompt().chars().count();
-        instructions_chars += std::fs::read_to_string(self.space.instructions_path(&self.active_space.name))
-            .map(|s| s.trim().chars().count())
-            .unwrap_or(0);
+        instructions_chars +=
+            std::fs::read_to_string(self.space.instructions_path(&self.active_space.name))
+                .map(|s| s.trim().chars().count())
+                .unwrap_or(0);
         let memory_chars = self.read_memory().chars().count();
-        let mut skills_chars: usize =
-            self.skills.iter().map(|s| s.name.chars().count() + s.description.chars().count()).sum();
+        let mut skills_chars: usize = self
+            .skills
+            .iter()
+            .map(|s| s.name.chars().count() + s.description.chars().count())
+            .sum();
         if let Some(name) = &self.forced_skill
             && let Some(skill) = self.skills.iter().find(|s| &s.name == name)
         {
@@ -167,9 +185,16 @@ impl App {
                 .map(|md| crate::skills::skill_body(&md).chars().count())
                 .unwrap_or(0);
         }
-        let mut conversation_chars: usize =
-            self.effective_messages().iter().map(|m| m.content.chars().count()).sum();
-        if let Some(s) = self.session.as_ref().and_then(|s| s.compact_summary.as_deref()) {
+        let mut conversation_chars: usize = self
+            .effective_messages()
+            .iter()
+            .map(|m| m.content.chars().count())
+            .sum();
+        if let Some(s) = self
+            .session
+            .as_ref()
+            .and_then(|s| s.compact_summary.as_deref())
+        {
             conversation_chars += s.chars().count();
         }
         if let Some(buf) = &self.streaming {
@@ -181,7 +206,10 @@ impl App {
             skills_tokens: (skills_chars / 4) as u64,
             conversation_tokens: (conversation_chars / 4) as u64,
             limit: self.context_limit(),
-            compacted: self.session.as_ref().is_some_and(|s| s.compact_summary.is_some()),
+            compacted: self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.compact_summary.is_some()),
         }
     }
 
@@ -200,8 +228,12 @@ impl App {
     /// hand-edits to the digest persist (db + in-memory), same as any other
     /// file-backed edit in the app.
     pub fn reload_compact_summary(&mut self, path: &std::path::Path) -> Result<()> {
-        let Some(session) = self.session.as_ref() else { return Ok(()) };
-        let Ok(text) = std::fs::read_to_string(path) else { return Ok(()) };
+        let Some(session) = self.session.as_ref() else {
+            return Ok(());
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Ok(());
+        };
         let text = text.trim().to_string();
         if text.is_empty() || Some(&text) == session.compact_summary.as_ref() {
             return Ok(());

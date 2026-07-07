@@ -1,11 +1,17 @@
 use anyhow::Result;
 use ratatui::widgets::ListState;
 
-use super::{App, ModelPanel, ModelPickTarget, Popup};
+use super::{App, LoginMsg, ModelPanel, ModelPickTarget, Popup};
 use crate::config;
 use crate::provider::Model;
-use crate::provider::openrouter::OpenRouter;
 use chrono::Utc;
+
+fn model_provider_key(m: &Model) -> String {
+    m.id.split_once('/')
+        .map(|(provider, _)| provider)
+        .unwrap_or("openai")
+        .to_string()
+}
 
 impl App {
     pub(super) fn open_model_picker(&mut self) {
@@ -78,8 +84,54 @@ impl App {
 
     pub(super) fn open_key_prompt(&mut self) {
         self.key_input.clear();
-        self.status = "paste your OpenRouter key, then Enter".to_string();
+        self.status = "paste your OpenRouter or OpenAI key, then Enter".to_string();
         self.popup = Popup::Key;
+    }
+
+    pub(crate) fn start_codex_login(&mut self) {
+        // A previous login task can be left around after cancellation/timeout while
+        // the UI has no useful way to resume it. Starting again should replace the
+        // receiver instead of trapping the user behind a stale "already running" gate.
+        self.login_rx = None;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.login_rx = Some(rx);
+        self.status = "starting OpenAI Codex login…".to_string();
+        tokio::spawn(async move {
+            let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let forward = tx.clone();
+            tokio::spawn(async move {
+                while let Some(s) = status_rx.recv().await {
+                    let _ = forward.send(LoginMsg::Status(s));
+                }
+            });
+            let result = crate::config::login_openai_codex_device(status_tx)
+                .await
+                .map(|c| c.access)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(LoginMsg::Done(result));
+        });
+    }
+
+    pub(crate) fn on_login_result(&mut self, msg: Option<LoginMsg>) {
+        match msg {
+            Some(LoginMsg::Status(s)) => self.status = s,
+            Some(LoginMsg::Done(Ok(access))) => {
+                self.login_rx = None;
+                self.provider = Some(crate::provider::openrouter::OpenRouter::openai_codex(
+                    access.clone(),
+                ));
+                self.key = Some(access);
+                self.models.clear();
+                self.status = "OpenAI Codex login saved, loading models…".to_string();
+                self.fetch_models();
+                self.refresh_toolbox();
+            }
+            Some(LoginMsg::Done(Err(e))) => {
+                self.login_rx = None;
+                self.status = format!("OpenAI Codex login failed: {e}");
+            }
+            None => self.login_rx = None,
+        }
     }
 
     /// Save the entered key: persist it, build the provider, fetch models.
@@ -94,7 +146,9 @@ impl App {
         if let Err(e) = config::save_key(&key) {
             self.status = format!("could not save key: {e}");
         }
-        self.provider = Some(OpenRouter::new(key.clone()));
+        self.provider = Some(crate::provider::openrouter::OpenRouter::from_key_auto(
+            key.clone(),
+        ));
         self.key = Some(key);
         self.status = "key saved, loading models…".to_string();
         self.fetch_models();
@@ -112,10 +166,12 @@ impl App {
 
     fn filtered_panel(&self, want_fav: bool) -> Vec<&Model> {
         let f = self.model_filter.to_lowercase();
+        let provider_filter = self.model_provider_filter.as_deref();
         let mut out: Vec<&Model> = self
             .models
             .iter()
             .filter(|m| self.favorites.contains(&m.id) == want_fav)
+            .filter(|m| provider_filter.is_none_or(|p| model_provider_key(m) == p))
             .filter(|m| {
                 f.is_empty()
                     || m.id.to_lowercase().contains(&f)
@@ -129,6 +185,30 @@ impl App {
             rb.cmp(&ra).then_with(|| a.id.cmp(&b.id))
         });
         out
+    }
+
+    pub(crate) fn model_provider_options(&self) -> Vec<String> {
+        let mut providers: Vec<String> = self.models.iter().map(model_provider_key).collect();
+        providers.sort();
+        providers.dedup();
+        providers
+    }
+
+    pub(crate) fn cycle_model_provider_filter(&mut self) {
+        let providers = self.model_provider_options();
+        if providers.is_empty() {
+            self.model_provider_filter = None;
+            return;
+        }
+        let next = match self.model_provider_filter.as_deref() {
+            None => providers.first().cloned(),
+            Some(cur) => providers
+                .iter()
+                .position(|p| p == cur)
+                .and_then(|i| providers.get(i + 1).cloned()),
+        };
+        self.model_provider_filter = next;
+        self.reset_model_selection();
     }
 
     fn panel_len(&self, panel: ModelPanel) -> usize {
@@ -175,7 +255,11 @@ impl App {
             return total;
         }
         let mut chars = self.system_prompt().chars().count();
-        if let Some(s) = self.session.as_ref().and_then(|s| s.compact_summary.as_deref()) {
+        if let Some(s) = self
+            .session
+            .as_ref()
+            .and_then(|s| s.compact_summary.as_deref())
+        {
             chars += s.chars().count();
         }
         if let Some(name) = &self.forced_skill
@@ -185,7 +269,11 @@ impl App {
                 .map(|md| crate::skills::skill_body(&md).chars().count())
                 .unwrap_or(0);
         }
-        chars += self.effective_messages().iter().map(|m| m.content.chars().count()).sum::<usize>();
+        chars += self
+            .effective_messages()
+            .iter()
+            .map(|m| m.content.chars().count())
+            .sum::<usize>();
         if let Some(buf) = &self.streaming {
             chars += buf.chars().count();
         }

@@ -24,7 +24,9 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             .iter()
             .map(|name| {
                 let n = app.app_file_count(name);
-                let url = app.app_url(name).unwrap_or_else(|| "server not running".to_string());
+                let url = app
+                    .app_url(name)
+                    .unwrap_or_else(|| "server not running".to_string());
                 ListItem::new(Line::from(vec![
                     Span::styled(name.clone(), Style::default().fg(app.theme.fg)),
                     Span::styled(format!("  {n} file{}", if n == 1 { "" } else { "s" }), dim),
@@ -36,7 +38,11 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 
     let title = match app.apps_mode {
         AppsMode::ConfirmDelete => {
-            let name = app.apps_cache.get(app.apps_selected).cloned().unwrap_or_default();
+            let name = app
+                .apps_cache
+                .get(app.apps_selected)
+                .cloned()
+                .unwrap_or_default();
             format!(" remove app \"{name}\" and all its files? (Ctrl+D confirm · Esc cancel) ")
         }
         AppsMode::Browse => crate::ui::hint_title(
@@ -58,7 +64,9 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    use super::{BrowseAction, ConfirmDeleteAction, classify_browse_key, classify_confirm_delete_key};
+    use super::{
+        BrowseAction, ConfirmDeleteAction, classify_browse_key, classify_confirm_delete_key,
+    };
     match app.apps_mode {
         AppsMode::ConfirmDelete => match classify_confirm_delete_key(key) {
             Some(ConfirmDeleteAction::Yes) => app.confirm_app_delete()?,

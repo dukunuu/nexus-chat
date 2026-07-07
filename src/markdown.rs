@@ -111,7 +111,12 @@ fn render_text(r: &mut Rendered, content: &str, width: usize) {
         match classify(line, &plain) {
             Block::Drop => {}
             Block::Header(txt) => {
-                let styled = Span::styled(txt, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+                let styled = Span::styled(
+                    txt,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                );
                 for l in wrap_styled_line(&Line::from(styled), width) {
                     r.push(l, id);
                 }
@@ -161,7 +166,10 @@ fn push_code_content(r: &mut Rendered, line: &Line, width: usize) {
         let pad = interior.saturating_sub(used);
         let mut spans: Vec<Span<'static>> = vec![Span::styled("│ ", border_style())];
         spans.extend(row.spans);
-        spans.push(Span::styled(format!("{} │", " ".repeat(pad)), border_style()));
+        spans.push(Span::styled(
+            format!("{} │", " ".repeat(pad)),
+            border_style(),
+        ));
         r.push(Line::from(spans), id);
     }
 }
@@ -299,7 +307,9 @@ fn split_cells(line: &str) -> Vec<String> {
 /// Reconstruct a clean, standard GFM table from parsed cells — nicer to paste
 /// elsewhere than whatever mangled text `tui_markdown` would have produced.
 fn plain_table(rows: &[Vec<String>], aligns: &[Align]) -> String {
-    let Some(header) = rows.first() else { return String::new() };
+    let Some(header) = rows.first() else {
+        return String::new();
+    };
     let mut out = vec![format!("| {} |", header.join(" | "))];
     let delim: Vec<&str> = aligns
         .iter()
@@ -361,7 +371,13 @@ fn render_table(r: &mut Rendered, rows: &[Vec<String>], aligns: &[Align], width:
 
 /// One logical table row, possibly wrapping to several physical lines if a
 /// cell doesn't fit its column.
-fn push_table_row(r: &mut Rendered, row: &[String], aligns: &[Align], colw: &[usize], is_header: bool) {
+fn push_table_row(
+    r: &mut Rendered,
+    row: &[String],
+    aligns: &[Align],
+    colw: &[usize],
+    is_header: bool,
+) {
     let wrapped: Vec<Vec<Line<'static>>> = (0..colw.len())
         .map(|i| {
             let mut spans = styled_cell(row.get(i).map(String::as_str).unwrap_or(""));
@@ -379,7 +395,9 @@ fn push_table_row(r: &mut Rendered, row: &[String], aligns: &[Align], colw: &[us
         let mut spans: Vec<Span<'static>> = vec![Span::styled("│", border_style())];
         for (i, w) in colw.iter().enumerate() {
             let cell = wrapped[i].get(li);
-            let used: usize = cell.map(|l| l.spans.iter().map(|s| s.content.width()).sum()).unwrap_or(0);
+            let used: usize = cell
+                .map(|l| l.spans.iter().map(|s| s.content.width()).sum())
+                .unwrap_or(0);
             let pad = w.saturating_sub(used);
             let (lpad, rpad) = match aligns.get(i).copied().unwrap_or(Align::Left) {
                 Align::Left => (0, pad),
@@ -463,7 +481,6 @@ fn list_rest(plain: &str) -> Option<String> {
     }
     None
 }
-
 
 /// Word-wrap a styled `Line` to `width` terminal columns, preserving per-span
 /// styling. Wraps by display width (CJK/emoji are 2 columns), not char count,
@@ -576,10 +593,16 @@ mod inline_code_tests {
     #[test]
     fn inline_code_is_visible_on_a_black_background_terminal() {
         let r = render("run `cargo test` now", 80);
-        let code_span = r.lines[0].spans.iter().find(|s| s.content.as_ref() == "cargo test");
+        let code_span = r.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "cargo test");
         let span = code_span.expect("inline code span not found");
         // Not the library default (white-on-black — invisible on a black bg).
-        assert_ne!(span.style, Style::default().fg(Color::White).bg(Color::Black));
+        assert_ne!(
+            span.style,
+            Style::default().fg(Color::White).bg(Color::Black)
+        );
         assert_eq!(span.style.bg, Some(Color::DarkGray));
     }
 }
@@ -596,9 +619,15 @@ mod table_tests {
         // every row's rendered display width has to match the border's.
         let table = "| 単語 | 読み |\n| --- | --- |\n| 会う | あう |\n| 会社 | かいしゃ |";
         let r = render(table, 40);
-        let widths: Vec<usize> =
-            r.lines.iter().map(|l| l.spans.iter().map(|s| s.content.width()).sum()).collect();
-        assert!(widths.windows(2).all(|w| w[0] == w[1]), "row widths: {widths:?}");
+        let widths: Vec<usize> = r
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.width()).sum())
+            .collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "row widths: {widths:?}"
+        );
     }
 
     #[test]
@@ -609,11 +638,14 @@ mod table_tests {
         assert!(matches!(&segs[0], Segment::Text(t) if t.trim() == "before"));
         match &segs[1] {
             Segment::Table(rows, aligns) => {
-                assert_eq!(rows, &[
-                    vec!["Name".to_string(), "Age".to_string()],
-                    vec!["Alice".to_string(), "30".to_string()],
-                    vec!["Bob".to_string(), "7".to_string()],
-                ]);
+                assert_eq!(
+                    rows,
+                    &[
+                        vec!["Name".to_string(), "Age".to_string()],
+                        vec!["Alice".to_string(), "30".to_string()],
+                        vec!["Bob".to_string(), "7".to_string()],
+                    ]
+                );
                 assert!(matches!(aligns[0], Align::Left));
                 assert!(matches!(aligns[1], Align::Right));
             }
@@ -645,6 +677,9 @@ mod table_tests {
     #[test]
     fn to_plain_reconstructs_clean_markdown_table() {
         let plain = to_plain(TABLE);
-        assert_eq!(plain, "| Name | Age |\n| --- | ---: |\n| Alice | 30 |\n| Bob | 7 |");
+        assert_eq!(
+            plain,
+            "| Name | Age |\n| --- | ---: |\n| Alice | 30 |\n| Bob | 7 |"
+        );
     }
 }

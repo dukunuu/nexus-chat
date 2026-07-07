@@ -155,3 +155,22 @@ result formatting, steer-queue drain logic, confidence-tag parsing/styling,
 watch due-ness computation, diff-section assembly, export file assembly);
 network paths (real PDF fetch, YouTube, Algolia/Reddit, background watch
 runs) are exercised manually.
+
+## Addendum (same day): flow + command cleanup
+
+Implemented directly (no separate spec/plan — small, YOLO'd per user request):
+
+- `/research` with no topic distills one from the last ~20 chat turns (one
+  cheap completion, same background-channel shape as session-title
+  generation) then proceeds through the existing plan-approval gate as
+  normal. `/research <topic>` is unchanged.
+- New Ctrl+Space opens a live per-searcher activity view (`Popup::ResearchLive`),
+  gated on a research job running — the same `research_stage` rows already
+  shown inline in the transcript, isolated into their own view with a steer
+  input line (Enter sends via the existing `/steer` mechanism, still one
+  global instruction per round, not per-searcher). Esc closes.
+- Dropped `/think` (pure duplicate of Ctrl+R) and `/ocr-local` (folded into
+  the OCR-engine cycle in `/config`: cycling to "local" now triggers the
+  ollama pull itself, instead of a separate command).
+- Memory caps raised for 1M-context models: per-space memory file read cap
+  16k → 120k chars; extraction prompt's fact-count ceiling 50 → 500.

@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::db::Message;
 use crate::provider::{ChatMessage, ChatParams, StreamEvent, ToolCall};
 
-use super::{parse_topic, verbosity_clause, App, SPINNER_COLORS, THINKING};
+use super::{App, SPINNER_COLORS, THINKING, parse_topic, verbosity_clause};
 
 impl App {
     pub fn submit(&mut self) -> Result<()> {
@@ -53,7 +53,9 @@ impl App {
         // Auto-create a session on the first message.
         if self.session.is_none() {
             let title = title_from(&text);
-            let mut s = self.db.create_session(&title, &model, &self.active_space.id)?;
+            let mut s = self
+                .db
+                .create_session(&title, &model, &self.active_space.id)?;
             // Carry a pre-session `/web` toggle onto the session it creates.
             if self.web_mode {
                 s.web_mode = true;
@@ -118,7 +120,11 @@ impl App {
         history.push(ChatMessage::text("system", self.system_prompt()));
         // If this session has been auto-compacted, send the digest instead of
         // the raw messages it covers — only the tail after it goes verbatim.
-        if let Some(summary) = self.session.as_ref().and_then(|s| s.compact_summary.clone()) {
+        if let Some(summary) = self
+            .session
+            .as_ref()
+            .and_then(|s| s.compact_summary.clone())
+        {
             history.push(ChatMessage::text(
                 "system",
                 format!("Summary of earlier conversation (auto-compacted for length):\n{summary}"),
@@ -225,7 +231,10 @@ impl App {
             self.toolbox.clone(),
             crate::provider::openrouter::MAX_TOOL_ITERS,
         );
-        self.stream_session = self.session.as_ref().map(|s| (s.id.clone(), s.title.clone()));
+        self.stream_session = self
+            .session
+            .as_ref()
+            .map(|s| (s.id.clone(), s.title.clone()));
         self.stream_rx = Some(rx);
         self.stream_abort = Some(abort);
         self.streaming = Some(String::new());
@@ -252,7 +261,11 @@ impl App {
             StreamEvent::Reasoning(t) => self.thinking_text.push_str(&t),
             StreamEvent::Usage(u) => self.stream_usage = Some(u),
             StreamEvent::Status(s) => self.tool_status = Some(s),
-            StreamEvent::ToolCall { name, arguments, result } => {
+            StreamEvent::ToolCall {
+                name,
+                arguments,
+                result,
+            } => {
                 if name == "install_skill" && result.starts_with("installed") {
                     self.reload_skills(); // new skill shows in the system prompt next turn
                 }
@@ -416,9 +429,11 @@ impl App {
     /// After the first exchange of a session, ask the model for a short topic and
     /// slug in the background. Runs once per session (guarded by `slug.is_none()`).
     fn maybe_generate_title(&mut self) {
-        let (Some(session), Some(provider), Some(model)) =
-            (self.session.as_ref(), self.provider.clone(), self.current_model.clone())
-        else {
+        let (Some(session), Some(provider), Some(model)) = (
+            self.session.as_ref(),
+            self.provider.clone(),
+            self.current_model.clone(),
+        ) else {
             return;
         };
         if session.slug.is_some() {
@@ -429,7 +444,13 @@ impl App {
             .messages
             .iter()
             .filter(|m| m.role != "tool_call")
-            .map(|m| format!("{}: {}", m.role, m.content.chars().take(500).collect::<String>()))
+            .map(|m| {
+                format!(
+                    "{}: {}",
+                    m.role,
+                    m.content.chars().take(500).collect::<String>()
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let session_id = session.id.clone();
@@ -452,7 +473,9 @@ impl App {
     /// Apply a generated topic/slug to the matching session (in memory + db).
     pub fn on_title_result(&mut self, result: Option<(String, String, String)>) {
         self.title_rx = None;
-        let Some((id, topic, slug)) = result else { return };
+        let Some((id, topic, slug)) = result else {
+            return;
+        };
         let _ = self.db.set_session_title(&id, &topic, Some(&slug));
         if let Some(s) = self.session.as_mut().filter(|s| s.id == id) {
             s.title = topic.clone();
@@ -472,10 +495,11 @@ impl App {
     /// empty — it's the app speaking, not per-space configuration.
     pub(super) fn system_prompt(&self) -> String {
         let mut parts: Vec<String> = vec![self.resolved_base_system_prompt()];
-        let instructions = std::fs::read_to_string(self.space.instructions_path(&self.active_space.name))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        let instructions =
+            std::fs::read_to_string(self.space.instructions_path(&self.active_space.name))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
         if let Some(i) = instructions {
             parts.push(i);
         }
@@ -519,7 +543,11 @@ impl App {
             self.status = "no [n] citation in the current selection".to_string();
             return;
         };
-        let Some(msg) = self.sel.owner_at_selection_start().and_then(|i| self.messages.get(i)) else {
+        let Some(msg) = self
+            .sel
+            .owner_at_selection_start()
+            .and_then(|i| self.messages.get(i))
+        else {
             self.status = "no [n] citation in the current selection".to_string();
             return;
         };
@@ -547,7 +575,11 @@ impl App {
             self.status = "no [n] citation in the current selection".to_string();
             return;
         };
-        let Some(msg) = self.sel.owner_at_selection_start().and_then(|i| self.messages.get(i)) else {
+        let Some(msg) = self
+            .sel
+            .owner_at_selection_start()
+            .and_then(|i| self.messages.get(i))
+        else {
             self.status = "no [n] citation in the current selection".to_string();
             return;
         };
@@ -584,8 +616,11 @@ impl App {
             session.web_mode = self.web_mode;
             let _ = self.db.set_session_web_mode(&session.id, self.web_mode);
         }
-        self.status =
-            if self.web_mode { "🌐 web mode on".to_string() } else { "web mode off".to_string() };
+        self.status = if self.web_mode {
+            "🌐 web mode on".to_string()
+        } else {
+            "web mode off".to_string()
+        };
     }
 
     /// `base_system_prompt` (raw, as read from `system_prompt.md`) with the
@@ -636,7 +671,12 @@ impl App {
                 .and_then(|e| e.to_str())
                 .unwrap_or("file")
                 .to_lowercase();
-            s.push_str(&format!("- {} ({kind}, {}, {})\n", f.name, human_size(f.size), f.status));
+            s.push_str(&format!(
+                "- {} ({kind}, {}, {})\n",
+                f.name,
+                human_size(f.size),
+                f.status
+            ));
         }
         Some(s.trim_end().to_string())
     }
@@ -647,8 +687,10 @@ impl App {
         self.app_server.as_ref()?;
         let mut s = "## Apps\nYou can build static web apps (HTML/CSS/JS) the user opens in a \
                      browser. Use `write_file(app, path, content)` to create files (start with \
-                     `index.html`), `edit_file(app, path, old_string, new_string)` for exact-match \
-                     edits, and `read_app_file(app, path)` to see current content before editing. \
+                     `index.html`), `read_app_file(app, path)` to see current content (lines come \
+                     back as `N:HASH<tab>content`), and `edit_file(app, path, edits)` to change \
+                     specific lines by hash — no string matching, and a stale hash (file changed \
+                     since you read it) is rejected instead of silently editing the wrong line. \
                      Files are served immediately — after writing, give the user the live URL \
                      from the tool result. No build steps or servers to manage; static files only. \
                      Need a JS library? `install_packages(app, packages)` npm-installs it into the \
@@ -669,7 +711,9 @@ impl App {
     /// Names of the active space's existing apps (directory listing).
     pub(crate) fn list_apps(&self) -> Vec<String> {
         let dir = self.space.apps_dir(&self.active_space.name);
-        let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
         let mut apps: Vec<String> = rd
             .filter_map(|e| e.ok())
             .filter(|e| e.path().is_dir())
@@ -759,7 +803,14 @@ fn parse_tool_call_row(content: &str) -> Option<(ToolCall, String)> {
     let name = v.get("name")?.as_str()?.to_string();
     let arguments = v.get("arguments")?.as_str()?.to_string();
     let result = v.get("result")?.as_str()?.to_string();
-    Some((ToolCall { id: "call_0".to_string(), name, arguments }, result))
+    Some((
+        ToolCall {
+            id: "call_0".to_string(),
+            name,
+            arguments,
+        },
+        result,
+    ))
 }
 
 /// Compact byte counts: 940 B, 1.2 KB, 3.4 MB.

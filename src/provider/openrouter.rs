@@ -10,16 +10,110 @@ use tokio::sync::mpsc;
 use super::{ChatMessage, ChatParams, Model, StreamEvent, ToolCall, ToolDef, Usage};
 use crate::tools::ToolBox;
 
-const BASE: &str = "https://openrouter.ai/api/v1";
+const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
+const OPENAI_BASE: &str = "https://api.openai.com/v1";
+const CODEX_BASE: &str = "https://chatgpt.com/backend-api";
 /// Hard cap on tool round-trips per response, so a model that keeps calling
 /// tools can't loop forever. The default for interactive chat; background
 /// jobs (e.g. deep-research searcher agents) pass their own smaller budget.
 pub(crate) const MAX_TOOL_ITERS: usize = 25;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderFlavor {
+    OpenRouter,
+    OpenAi,
+    OpenAiCodex,
+}
+
 #[derive(Clone)]
 pub struct OpenRouter {
     client: reqwest::Client,
     key: String,
+    flavor: ProviderFlavor,
+}
+
+impl ProviderFlavor {
+    fn base(self) -> &'static str {
+        match self {
+            ProviderFlavor::OpenRouter => OPENROUTER_BASE,
+            ProviderFlavor::OpenAi => OPENAI_BASE,
+            ProviderFlavor::OpenAiCodex => CODEX_BASE,
+        }
+    }
+
+    fn supports_reasoning(self, m: &ModelEntry) -> bool {
+        match self {
+            ProviderFlavor::OpenRouter => m.supported_parameters.iter().any(|p| p == "reasoning"),
+            ProviderFlavor::OpenAi => {
+                let id = m.id.as_str();
+                id.starts_with("o") || id.starts_with("gpt-5")
+            }
+            ProviderFlavor::OpenAiCodex => true,
+        }
+    }
+
+    fn supports_images(self, m: &ModelEntry) -> Option<bool> {
+        match self {
+            ProviderFlavor::OpenRouter => None,
+            ProviderFlavor::OpenAi => {
+                let id = m.id.as_str();
+                Some(
+                    id.contains("gpt-4o")
+                        || id.contains("gpt-4.1")
+                        || id.starts_with("gpt-5")
+                        || id.starts_with("o3")
+                        || id.starts_with("o4"),
+                )
+            }
+            ProviderFlavor::OpenAiCodex => Some(true),
+        }
+    }
+
+    fn add_stream_usage(self, obj: &mut serde_json::Map<String, serde_json::Value>) {
+        match self {
+            // Ask OpenRouter for exact token accounting in the final chunk.
+            ProviderFlavor::OpenRouter => {
+                obj.insert("usage".into(), serde_json::json!({ "include": true }));
+            }
+            // OpenAI's equivalent switch lives under stream_options.
+            ProviderFlavor::OpenAi => {
+                obj.insert(
+                    "stream_options".into(),
+                    serde_json::json!({ "include_usage": true }),
+                );
+            }
+            ProviderFlavor::OpenAiCodex => {}
+        }
+    }
+
+    fn add_reasoning_effort(
+        self,
+        obj: &mut serde_json::Map<String, serde_json::Value>,
+        effort: &str,
+    ) {
+        match self {
+            ProviderFlavor::OpenRouter => {
+                obj.insert("reasoning".into(), serde_json::json!({ "effort": effort }));
+            }
+            ProviderFlavor::OpenAi => {
+                obj.insert("reasoning_effort".into(), serde_json::json!(effort));
+            }
+            ProviderFlavor::OpenAiCodex => {
+                obj.insert(
+                    "reasoning".into(),
+                    serde_json::json!({ "effort": effort, "summary": "auto" }),
+                );
+            }
+        }
+    }
+}
+
+fn looks_like_openrouter_key(key: &str) -> bool {
+    key.trim_start().starts_with("sk-or-")
+}
+
+fn looks_like_codex_token(key: &str) -> bool {
+    crate::config::codex_account_id(key).is_ok()
 }
 
 #[derive(Deserialize)]
@@ -54,18 +148,117 @@ fn entry_supports_images(e: &ModelEntry) -> bool {
 }
 
 impl OpenRouter {
-    pub fn new(key: String) -> Self {
-        OpenRouter {
-            client: reqwest::Client::new(),
-            key,
+    pub fn from_key_auto(key: String) -> Self {
+        if looks_like_openrouter_key(&key) {
+            Self::openrouter(key)
+        } else if looks_like_codex_token(&key) {
+            Self::openai_codex(key)
+        } else {
+            Self::openai(key)
         }
     }
 
-    /// Fetch the live model catalog. No hardcoded list.
+    pub fn openrouter(key: String) -> Self {
+        OpenRouter {
+            client: reqwest::Client::new(),
+            key,
+            flavor: ProviderFlavor::OpenRouter,
+        }
+    }
+
+    pub fn openai(key: String) -> Self {
+        OpenRouter {
+            client: reqwest::Client::new(),
+            key,
+            flavor: ProviderFlavor::OpenAi,
+        }
+    }
+
+    pub fn openai_codex(key: String) -> Self {
+        OpenRouter {
+            client: reqwest::Client::new(),
+            key,
+            flavor: ProviderFlavor::OpenAiCodex,
+        }
+    }
+
+    pub fn default_utility_model(&self) -> &'static str {
+        match self.flavor {
+            ProviderFlavor::OpenRouter => "google/gemini-2.5-flash-lite",
+            ProviderFlavor::OpenAi => "gpt-4.1-mini",
+            ProviderFlavor::OpenAiCodex => "gpt-5.4-mini",
+        }
+    }
+
+    pub fn default_research_model(&self) -> &'static str {
+        match self.flavor {
+            ProviderFlavor::OpenRouter => "google/gemini-2.5-flash",
+            ProviderFlavor::OpenAi => "gpt-4.1",
+            ProviderFlavor::OpenAiCodex => "gpt-5.5",
+        }
+    }
+
+    pub fn default_escalation_model(&self) -> &'static str {
+        match self.flavor {
+            ProviderFlavor::OpenRouter => "anthropic/claude-sonnet-4.5",
+            ProviderFlavor::OpenAi => "gpt-4.1",
+            ProviderFlavor::OpenAiCodex => "gpt-5.5",
+        }
+    }
+
+    pub fn default_embedding_model(&self) -> &'static str {
+        match self.flavor {
+            ProviderFlavor::OpenRouter => "openai/text-embedding-3-small",
+            ProviderFlavor::OpenAi => "text-embedding-3-small",
+            ProviderFlavor::OpenAiCodex => "",
+        }
+    }
+
+    /// Fetch the live model catalog. No hardcoded list except Codex, whose
+    /// subscription endpoint does not expose the normal OpenAI models catalog.
     pub async fn list_models(&self) -> Result<Vec<Model>> {
+        if self.flavor == ProviderFlavor::OpenAiCodex {
+            let mut models = vec![
+                Model {
+                    id: "gpt-5.3-codex-spark".into(),
+                    name: "GPT-5.3 Codex Spark".into(),
+                    supports_reasoning: true,
+                    context_length: Some(128_000),
+                    supports_images: false,
+                },
+                Model {
+                    id: "gpt-5.4".into(),
+                    name: "GPT-5.4".into(),
+                    supports_reasoning: true,
+                    context_length: Some(272_000),
+                    supports_images: true,
+                },
+                Model {
+                    id: "gpt-5.4-mini".into(),
+                    name: "GPT-5.4 mini".into(),
+                    supports_reasoning: true,
+                    context_length: Some(272_000),
+                    supports_images: true,
+                },
+                Model {
+                    id: "gpt-5.5".into(),
+                    name: "GPT-5.5".into(),
+                    supports_reasoning: true,
+                    context_length: Some(272_000),
+                    supports_images: true,
+                },
+            ];
+            if let Some(key) = crate::config::load_openrouter_key_only()
+                && let Ok(mut router_models) = Box::pin(OpenRouter::openrouter(key).list_models()).await
+            {
+                models.append(&mut router_models);
+            }
+            models.sort_by(|a, b| a.id.cmp(&b.id));
+            return Ok(models);
+        }
         let resp = self
             .client
-            .get(format!("{BASE}/models"))
+            .get(format!("{}/models", self.flavor.base()))
             .bearer_auth(&self.key)
             .send()
             .await
@@ -80,10 +273,14 @@ impl OpenRouter {
             .data
             .into_iter()
             .map(|m| {
-                let supports_images = entry_supports_images(&m);
+                let supports_reasoning = self.flavor.supports_reasoning(&m);
+                let supports_images = self
+                    .flavor
+                    .supports_images(&m)
+                    .unwrap_or_else(|| entry_supports_images(&m));
                 Model {
                     name: m.name.unwrap_or_else(|| m.id.clone()),
-                    supports_reasoning: m.supported_parameters.iter().any(|p| p == "reasoning"),
+                    supports_reasoning,
                     context_length: m.context_length,
                     id: m.id,
                     supports_images,
@@ -107,9 +304,29 @@ impl OpenRouter {
 
     /// POST a completions body and pull the first choice's message text.
     async fn post_completion(&self, body: serde_json::Value) -> Result<String> {
+        if let Some(delegate) = self.openrouter_delegate_for_body(&body) {
+            return Box::pin(delegate.post_completion(body)).await;
+        }
+        if self.flavor == ProviderFlavor::OpenAiCodex {
+            let body = chat_body_to_codex_body(&body, false, &[]);
+            let v = self
+                .client
+                .post(format!("{}/codex/responses", self.flavor.base()))
+                .headers(self.codex_headers(false)?)
+                .json(&body)
+                .send()
+                .await
+                .context("Codex completion request")?
+                .error_for_status()
+                .context("Codex completion failed")?
+                .json::<serde_json::Value>()
+                .await
+                .context("parsing Codex completion")?;
+            return Ok(codex_response_text(&v));
+        }
         let v = self
             .client
-            .post(format!("{BASE}/chat/completions"))
+            .post(format!("{}/chat/completions", self.flavor.base()))
             .bearer_auth(&self.key)
             .json(&body)
             .send()
@@ -131,7 +348,8 @@ impl OpenRouter {
 
     /// One-shot, non-streaming vision call: describe `image_data_url` with `model`.
     pub async fn describe_image(&self, model: &str, image_data_url: &str) -> Result<String> {
-        self.post_completion(vision_body(model, image_data_url)).await
+        self.post_completion(vision_body(model, image_data_url))
+            .await
     }
 
     /// One-shot, non-streaming vision call: transcribe a scanned page image.
@@ -142,9 +360,12 @@ impl OpenRouter {
     /// Embed `inputs` with `model` (OpenAI-format /embeddings endpoint);
     /// returns one vector per input, in order.
     pub async fn embed(&self, model: &str, inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        if let Some(delegate) = self.openrouter_delegate_for_model(model) {
+            return Box::pin(delegate.embed(model, inputs)).await;
+        }
         let v = self
             .client
-            .post(format!("{BASE}/embeddings"))
+            .post(format!("{}/embeddings", self.flavor.base()))
             .bearer_auth(&self.key)
             .json(&serde_json::json!({ "model": model, "input": inputs }))
             .send()
@@ -165,7 +386,12 @@ impl OpenRouter {
                 .get("embedding")
                 .and_then(|e| e.as_array())
                 .context("embeddings item has no vector")?;
-            out.push(emb.iter().filter_map(|x| x.as_f64()).map(|f| f as f32).collect());
+            out.push(
+                emb.iter()
+                    .filter_map(|x| x.as_f64())
+                    .map(|f| f as f32)
+                    .collect(),
+            );
         }
         Ok(out)
     }
@@ -182,11 +408,16 @@ impl OpenRouter {
         tools: Vec<ToolDef>,
         toolbox: Arc<ToolBox>,
         max_tool_iters: usize,
-    ) -> (mpsc::UnboundedReceiver<StreamEvent>, tokio::task::AbortHandle) {
+    ) -> (
+        mpsc::UnboundedReceiver<StreamEvent>,
+        tokio::task::AbortHandle,
+    ) {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = self.clone();
         let task = tokio::spawn(async move {
-            if let Err(e) = this.run_chat_loop(model, messages, params, tools, toolbox, max_tool_iters, &tx).await
+            if let Err(e) = this
+                .run_chat_loop(model, messages, params, tools, toolbox, max_tool_iters, &tx)
+                .await
             {
                 let _ = tx.send(StreamEvent::Error(e.to_string()));
             }
@@ -215,7 +446,10 @@ impl OpenRouter {
                      answer now with the information you already have.",
                 ));
             }
-            match self.run_stream(&model, &messages, &params, send_tools, tx).await? {
+            match self
+                .run_stream(&model, &messages, &params, send_tools, tx)
+                .await?
+            {
                 Finish::Errored => return Ok(()),
                 Finish::Done => {
                     let _ = tx.send(StreamEvent::Done);
@@ -268,16 +502,23 @@ impl OpenRouter {
         tools: &[ToolDef],
         tx: &mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<Finish> {
+        if let Some(delegate) = self.openrouter_delegate_for_model(model) {
+            return Box::pin(delegate.run_stream(model, messages, params, tools, tx)).await;
+        }
+        if self.flavor == ProviderFlavor::OpenAiCodex {
+            return self
+                .run_codex_stream(model, messages, params, tools, tx)
+                .await;
+        }
         let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
             "stream": true,
-            // Ask OpenRouter for exact token accounting in the final chunk.
-            "usage": { "include": true },
         });
         let obj = body.as_object_mut().expect("body is a json object");
+        self.flavor.add_stream_usage(obj);
         if let Some(effort) = &params.reasoning_effort {
-            obj.insert("reasoning".into(), serde_json::json!({ "effort": effort }));
+            self.flavor.add_reasoning_effort(obj, effort);
         }
         if let Some(t) = params.temperature {
             obj.insert("temperature".into(), serde_json::json!(t));
@@ -302,7 +543,7 @@ impl OpenRouter {
         }
         let request = self
             .client
-            .post(format!("{BASE}/chat/completions"))
+            .post(format!("{}/chat/completions", self.flavor.base()))
             .bearer_auth(&self.key)
             .json(&body);
 
@@ -318,14 +559,16 @@ impl OpenRouter {
                     }
                     let (content, reasoning) = parse_delta(&msg.data);
                     if let Some(r) = reasoning
-                        && !r.is_empty() {
-                            let _ = tx.send(StreamEvent::Reasoning(r));
-                        }
+                        && !r.is_empty()
+                    {
+                        let _ = tx.send(StreamEvent::Reasoning(r));
+                    }
                     if let Some(token) = content
-                        && !token.is_empty() {
-                            content_acc.push_str(&token);
-                            let _ = tx.send(StreamEvent::Token(token));
-                        }
+                        && !token.is_empty()
+                    {
+                        content_acc.push_str(&token);
+                        let _ = tx.send(StreamEvent::Token(token));
+                    }
                     accumulate_tool_calls(&mut tool_calls, &msg.data);
                     if let Some(usage) = parse_usage(&msg.data) {
                         let _ = tx.send(StreamEvent::Usage(usage));
@@ -343,7 +586,122 @@ impl OpenRouter {
         // stream tool_calls but finish with "stop" (or no finish chunk at
         // all); dropping the calls there kills the turn silently.
         if !tool_calls.is_empty() {
-            Ok(Finish::ToolCalls(tool_calls.into_values().collect(), content_acc))
+            Ok(Finish::ToolCalls(
+                tool_calls.into_values().collect(),
+                content_acc,
+            ))
+        } else {
+            Ok(Finish::Done)
+        }
+    }
+
+    fn openrouter_delegate_for_model(&self, model: &str) -> Option<OpenRouter> {
+        if self.flavor == ProviderFlavor::OpenAiCodex && model.contains('/') {
+            crate::config::load_openrouter_key_only().map(OpenRouter::openrouter)
+        } else {
+            None
+        }
+    }
+
+    fn openrouter_delegate_for_body(&self, body: &serde_json::Value) -> Option<OpenRouter> {
+        let model = body.get("model").and_then(|m| m.as_str())?;
+        self.openrouter_delegate_for_model(model)
+    }
+
+    fn codex_headers(&self, sse: bool) -> Result<reqwest::header::HeaderMap> {
+        let account_id = crate::config::codex_account_id(&self.key)?;
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", self.key).parse()?,
+        );
+        h.insert("chatgpt-account-id", account_id.parse()?);
+        h.insert("originator", "nexus-chat".parse()?);
+        h.insert(reqwest::header::USER_AGENT, "nexus-chat".parse()?);
+        h.insert("OpenAI-Beta", "responses=experimental".parse()?);
+        h.insert(reqwest::header::CONTENT_TYPE, "application/json".parse()?);
+        if sse {
+            h.insert(reqwest::header::ACCEPT, "text/event-stream".parse()?);
+        }
+        Ok(h)
+    }
+
+    async fn run_codex_stream(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        params: &ChatParams,
+        tools: &[ToolDef],
+        tx: &mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<Finish> {
+        let mut body = serde_json::json!({
+            "model": model,
+            "store": false,
+            "stream": true,
+            "instructions": codex_instructions(messages),
+            "input": codex_input(messages),
+            "text": { "verbosity": "low" },
+            "include": ["reasoning.encrypted_content"],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+        });
+        let obj = body.as_object_mut().unwrap();
+        if let Some(t) = params.temperature {
+            obj.insert("temperature".into(), serde_json::json!(t));
+        }
+        if let Some(effort) = &params.reasoning_effort {
+            obj.insert(
+                "reasoning".into(),
+                serde_json::json!({ "effort": effort, "summary": "auto" }),
+            );
+        }
+        if !tools.is_empty() {
+            obj.insert("tools".into(), serde_json::json!(codex_tools(tools)));
+        }
+        let request = self
+            .client
+            .post(format!("{}/codex/responses", self.flavor.base()))
+            .headers(self.codex_headers(true)?)
+            .json(&body);
+        let mut es = EventSource::new(request).context("opening Codex SSE stream")?;
+        let mut tool_calls: BTreeMap<usize, ToolCall> = BTreeMap::new();
+        let mut content_acc = String::new();
+        while let Some(event) = es.next().await {
+            match event {
+                Ok(Event::Open) => {}
+                Ok(Event::Message(msg)) => {
+                    if msg.data == "[DONE]" {
+                        break;
+                    }
+                    if let Some(token) = codex_text_delta(&msg.data)
+                        && !token.is_empty()
+                    {
+                        content_acc.push_str(&token);
+                        let _ = tx.send(StreamEvent::Token(token));
+                    }
+                    if let Some(r) = codex_reasoning_delta(&msg.data)
+                        && !r.is_empty()
+                    {
+                        let _ = tx.send(StreamEvent::Reasoning(r));
+                    }
+                    accumulate_codex_tool_calls(&mut tool_calls, &msg.data);
+                    if let Some(usage) = codex_usage(&msg.data) {
+                        let _ = tx.send(StreamEvent::Usage(usage));
+                    }
+                }
+                Err(reqwest_eventsource::Error::StreamEnded) => break,
+                Err(e) => {
+                    let _ = tx.send(StreamEvent::Error(e.to_string()));
+                    es.close();
+                    return Ok(Finish::Errored);
+                }
+            }
+        }
+        if !tool_calls.is_empty() {
+            Ok(Finish::ToolCalls(
+                tool_calls.into_values().collect(),
+                content_acc,
+            ))
         } else {
             Ok(Finish::Done)
         }
@@ -362,7 +720,10 @@ fn parse_delta(data: &str) -> (Option<String>, Option<String>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
         return (None, None);
     };
-    let Some(delta) = v.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("delta"))
+    let Some(delta) = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"))
     else {
         return (None, None);
     };
@@ -374,7 +735,9 @@ fn parse_delta(data: &str) -> (Option<String>, Option<String>) {
 /// per-call accumulator, keyed by the call's `index` (ids/names arrive once,
 /// `arguments` streams in pieces that must be concatenated in order).
 fn accumulate_tool_calls(acc: &mut BTreeMap<usize, ToolCall>, data: &str) {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { return };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+        return;
+    };
     let Some(calls) = v
         .get("choices")
         .and_then(|c| c.get(0))
@@ -388,14 +751,16 @@ fn accumulate_tool_calls(acc: &mut BTreeMap<usize, ToolCall>, data: &str) {
         let idx = call.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
         let entry = acc.entry(idx).or_default();
         if let Some(id) = call.get("id").and_then(|i| i.as_str())
-            && !id.is_empty() {
-                entry.id = id.to_string();
-            }
+            && !id.is_empty()
+        {
+            entry.id = id.to_string();
+        }
         if let Some(func) = call.get("function") {
             if let Some(name) = func.get("name").and_then(|n| n.as_str())
-                && !name.is_empty() {
-                    entry.name = name.to_string();
-                }
+                && !name.is_empty()
+            {
+                entry.name = name.to_string();
+            }
             if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
                 entry.arguments.push_str(args);
             }
@@ -415,11 +780,278 @@ fn parse_usage(data: &str) -> Option<Usage> {
     })
 }
 
+fn codex_instructions(messages: &[ChatMessage]) -> String {
+    let s = messages
+        .iter()
+        .filter(|m| m.role == "system")
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if s.is_empty() {
+        "You are a helpful assistant.".to_string()
+    } else {
+        s
+    }
+}
+
+fn codex_input(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .filter(|m| m.role != "system")
+        .map(|m| match m.role.as_str() {
+            "assistant" if m.tool_calls.is_some() => serde_json::json!({
+                "type": "function_call",
+                "call_id": m.tool_calls.as_ref().unwrap()[0].id,
+                "name": m.tool_calls.as_ref().unwrap()[0].name,
+                "arguments": m.tool_calls.as_ref().unwrap()[0].arguments,
+            }),
+            "assistant" => serde_json::json!({
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": m.content, "annotations": [] }],
+            }),
+            "tool" => serde_json::json!({
+                "type": "function_call_output",
+                "call_id": m.tool_call_id.as_deref().unwrap_or_default(),
+                "output": m.content,
+            }),
+            _ => {
+                let mut content = Vec::new();
+                if !m.content.is_empty() {
+                    content.push(serde_json::json!({ "type": "input_text", "text": m.content }));
+                }
+                for image_url in &m.images {
+                    content.push(serde_json::json!({ "type": "input_image", "detail": "auto", "image_url": image_url }));
+                }
+                serde_json::json!({ "role": "user", "content": content })
+            }
+        })
+        .collect()
+}
+
+fn codex_tools(tools: &[ToolDef]) -> Vec<serde_json::Value> {
+    tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "type": "function",
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters,
+                "strict": false,
+            })
+        })
+        .collect()
+}
+
+fn chat_body_to_codex_body(
+    body: &serde_json::Value,
+    stream: bool,
+    tools: &[ToolDef],
+) -> serde_json::Value {
+    let model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("gpt-5.1-codex-mini");
+    let messages = body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let instructions = messages
+        .iter()
+        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+        .filter_map(|m| wire_text(m.get("content")?))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let input = messages
+        .iter()
+        .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+        .map(|m| {
+            let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+            if role == "assistant" {
+                return serde_json::json!({
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": wire_text(m.get("content").unwrap_or(&serde_json::Value::Null)).unwrap_or_default(), "annotations": [] }],
+                });
+            }
+            let mut content = Vec::new();
+            match m.get("content") {
+                Some(serde_json::Value::String(s)) => content.push(serde_json::json!({ "type": "input_text", "text": s })),
+                Some(serde_json::Value::Array(parts)) => {
+                    for p in parts {
+                        match p.get("type").and_then(|t| t.as_str()) {
+                            Some("text") => content.push(serde_json::json!({ "type": "input_text", "text": p.get("text").and_then(|t| t.as_str()).unwrap_or_default() })),
+                            Some("image_url") => content.push(serde_json::json!({ "type": "input_image", "detail": "auto", "image_url": p.get("image_url").and_then(|i| i.get("url")).and_then(|u| u.as_str()).unwrap_or_default() })),
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+            serde_json::json!({ "role": "user", "content": content })
+        })
+        .collect::<Vec<_>>();
+    let mut out = serde_json::json!({
+        "model": model,
+        "store": false,
+        "stream": stream,
+        "instructions": if instructions.is_empty() { "You are a helpful assistant." } else { &instructions },
+        "input": input,
+        "text": { "verbosity": "low" },
+    });
+    if !tools.is_empty() {
+        out.as_object_mut()
+            .unwrap()
+            .insert("tools".into(), serde_json::json!(codex_tools(tools)));
+    }
+    out
+}
+
+fn wire_text(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(parts) => Some(
+            parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        _ => None,
+    }
+}
+
+fn codex_response_text(v: &serde_json::Value) -> String {
+    if let Some(s) = v.get("output_text").and_then(|v| v.as_str()) {
+        return s.to_string();
+    }
+    v.get("output")
+        .and_then(|o| o.as_array())
+        .into_iter()
+        .flatten()
+        .flat_map(|item| {
+            item.get("content")
+                .and_then(|c| c.as_array())
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|c| {
+            c.get("text")
+                .or_else(|| c.get("refusal"))
+                .and_then(|t| t.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn codex_text_delta(data: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+    match v.get("type")?.as_str()? {
+        "response.output_text.delta" | "response.refusal.delta" => {
+            v.get("delta")?.as_str().map(str::to_string)
+        }
+        _ => None,
+    }
+}
+
+fn codex_reasoning_delta(data: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+    match v.get("type")?.as_str()? {
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            v.get("delta")?.as_str().map(str::to_string)
+        }
+        _ => None,
+    }
+}
+
+fn accumulate_codex_tool_calls(acc: &mut BTreeMap<usize, ToolCall>, data: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+        return;
+    };
+    match v.get("type").and_then(|t| t.as_str()) {
+        Some("response.output_item.added") => {
+            let Some(item) = v.get("item") else { return };
+            if item.get("type").and_then(|t| t.as_str()) != Some("function_call") {
+                return;
+            }
+            let idx = v.get("output_index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+            let entry = acc.entry(idx).or_default();
+            entry.id = item
+                .get("call_id")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string();
+            entry.name = item
+                .get("name")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string();
+            entry.arguments.push_str(
+                item.get("arguments")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default(),
+            );
+        }
+        Some("response.function_call_arguments.delta") => {
+            let idx = v.get("output_index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+            acc.entry(idx)
+                .or_default()
+                .arguments
+                .push_str(v.get("delta").and_then(|s| s.as_str()).unwrap_or_default());
+        }
+        Some("response.function_call_arguments.done") => {
+            let idx = v.get("output_index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+            if let Some(args) = v.get("arguments").and_then(|s| s.as_str()) {
+                acc.entry(idx).or_default().arguments = args.to_string();
+            }
+        }
+        Some("response.output_item.done") => {
+            let Some(item) = v.get("item") else { return };
+            if item.get("type").and_then(|t| t.as_str()) != Some("function_call") {
+                return;
+            }
+            let idx = v.get("output_index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+            let entry = acc.entry(idx).or_default();
+            entry.id = item
+                .get("call_id")
+                .and_then(|s| s.as_str())
+                .unwrap_or(&entry.id)
+                .to_string();
+            entry.name = item
+                .get("name")
+                .and_then(|s| s.as_str())
+                .unwrap_or(&entry.name)
+                .to_string();
+            entry.arguments = item
+                .get("arguments")
+                .and_then(|s| s.as_str())
+                .unwrap_or(&entry.arguments)
+                .to_string();
+        }
+        _ => {}
+    }
+}
+
+fn codex_usage(data: &str) -> Option<Usage> {
+    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+    let response = v.get("response")?;
+    let u = response.get("usage")?;
+    let prompt_tokens = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let completion_tokens = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    Some(Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: u
+            .get("total_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(prompt_tokens + completion_tokens),
+    })
+}
+
 /// Request body for a one-shot image-understanding call: a text part with the
 /// instruction plus the image as a data-URL content part (OpenAI vision shape).
 /// Shared page-transcription instructions (OpenRouter VLMs and local Ollama).
-pub(crate) const OCR_PROMPT: &str =
-    "Transcribe this scanned page to plain text, faithfully and completely. \
+pub(crate) const OCR_PROMPT: &str = "Transcribe this scanned page to plain text, faithfully and completely. \
      Output ONLY the transcription — no commentary, no markdown fences. \
      Preserve the natural reading order; vertical Japanese text reads in \
      columns from right to left. Transcribe the body text only: skip \
@@ -475,8 +1107,14 @@ mod tests {
         assert!(body["max_tokens"].as_u64().unwrap() >= 8000);
         let content = &body["messages"][0]["content"];
         let prompt = content[0]["text"].as_str().unwrap();
-        assert!(prompt.contains("furigana"), "prompt must say to skip furigana");
-        assert!(prompt.contains("right to left"), "prompt must cover vertical text");
+        assert!(
+            prompt.contains("furigana"),
+            "prompt must say to skip furigana"
+        );
+        assert!(
+            prompt.contains("right to left"),
+            "prompt must cover vertical text"
+        );
         assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
     }
 
@@ -487,7 +1125,13 @@ mod tests {
         assert_eq!(body["stream"], false);
         let content = &body["messages"][0]["content"];
         assert_eq!(content[0]["type"], "text");
-        assert!(content[0]["text"].as_str().unwrap().to_lowercase().contains("describe this image"));
+        assert!(
+            content[0]["text"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("describe this image")
+        );
         assert_eq!(content[1]["type"], "image_url");
         assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
     }

@@ -13,7 +13,9 @@ pub(crate) fn due_watches(watches: &[Watch], now: DateTime<Utc>) -> Vec<Watch> {
         .filter(|w| match &w.last_run_at {
             None => true,
             Some(t) => DateTime::parse_from_rfc3339(t)
-                .map(|last| now.signed_duration_since(last) >= chrono::Duration::hours(w.interval_hours))
+                .map(|last| {
+                    now.signed_duration_since(last) >= chrono::Duration::hours(w.interval_hours)
+                })
                 .unwrap_or(true),
         })
         .cloned()
@@ -25,7 +27,11 @@ pub(crate) fn due_watches(watches: &[Watch], now: DateTime<Utc>) -> Vec<Watch> {
 /// report. Does not diff prose — an LLM-generated summary of what changed
 /// is out of scope for this pass (YAGNI: a source-level diff is what a
 /// user actually scans for first).
-pub(crate) fn diff_section(previous_report: &str, new_report: &str, new_sources: &[String]) -> String {
+pub(crate) fn diff_section(
+    previous_report: &str,
+    new_report: &str,
+    new_sources: &[String],
+) -> String {
     let _ = (previous_report, new_report); // reserved for a future prose diff; unused today
     let mut out = String::from("## What changed since last run\n\n");
     if new_sources.is_empty() {
@@ -42,8 +48,10 @@ pub(crate) fn diff_section(previous_report: &str, new_report: &str, new_sources:
 /// New (not-previously-cited) sources in `new_report` vs `previous_citations`
 /// — a plain set difference over normalized URLs.
 pub(crate) fn new_sources_since(new_report: &str, previous_citations: &[String]) -> Vec<String> {
-    let previous: std::collections::HashSet<String> =
-        previous_citations.iter().map(|u| crate::tools::normalize_url(u)).collect();
+    let previous: std::collections::HashSet<String> = previous_citations
+        .iter()
+        .map(|u| crate::tools::normalize_url(u))
+        .collect();
     crate::citations::parse_citations(new_report)
         .into_iter()
         .map(|(_, url)| url)
@@ -60,7 +68,8 @@ impl super::App {
     }
 
     pub(crate) fn move_watch_selection(&mut self, delta: i32) {
-        self.watch_selected = super::clamp_cursor(self.watch_selected, self.watches_cache.len(), delta);
+        self.watch_selected =
+            super::clamp_cursor(self.watch_selected, self.watches_cache.len(), delta);
     }
 
     /// `/watch <topic>` with no existing watch of that exact topic in this
@@ -76,7 +85,10 @@ impl super::App {
             self.status = "could not start watch: no session created".to_string();
             return;
         };
-        match self.db.create_watch(&self.active_space.id, topic, 24, &session.id) {
+        match self
+            .db
+            .create_watch(&self.active_space.id, topic, 24, &session.id)
+        {
             Ok(_) => self.status = format!("watching: {topic} (every 24h)"),
             Err(e) => self.status = format!("watch creation failed: {e}"),
         }
@@ -108,7 +120,9 @@ impl super::App {
         if let Some(w) = self.watches_cache.get(self.watch_selected).cloned() {
             let _ = self.db.delete_watch(&w.id);
             self.watches_cache.retain(|x| x.id != w.id);
-            self.watch_selected = self.watch_selected.min(self.watches_cache.len().saturating_sub(1));
+            self.watch_selected = self
+                .watch_selected
+                .min(self.watches_cache.len().saturating_sub(1));
             self.status = format!("deleted watch: {}", w.topic);
         }
     }
@@ -118,7 +132,9 @@ impl super::App {
     /// start (e.g. no model configured) is silently skipped; it'll be
     /// retried on the next app open since `last_run_at` isn't touched.
     pub(crate) fn run_due_watches(&mut self) {
-        let Ok(all) = self.db.list_all_watches() else { return };
+        let Ok(all) = self.db.list_all_watches() else {
+            return;
+        };
         let due = due_watches(&all, chrono::Utc::now());
         for w in due {
             // A watch may belong to a space other than whatever's currently
@@ -126,8 +142,12 @@ impl super::App {
             // reads `self.active_space` for the toolbox/file paths and
             // `save_research_report`'s destination, so it must be switched to
             // the watch's own space for the run, same as its session.
-            let Ok(spaces) = self.db.list_spaces() else { continue };
-            let Some(space_row) = spaces.into_iter().find(|s| s.id == w.space_id) else { continue };
+            let Ok(spaces) = self.db.list_spaces() else {
+                continue;
+            };
+            let Some(space_row) = spaces.into_iter().find(|s| s.id == w.space_id) else {
+                continue;
+            };
             let restore_space = self.active_space.clone();
             let restore_session = self.session.clone();
             let restore_messages = std::mem::take(&mut self.messages);
@@ -174,7 +194,12 @@ impl super::App {
         session_id: &str,
         space_id: &str,
     ) -> anyhow::Result<Option<Vec<String>>> {
-        let Some(w) = self.db.list_all_watches()?.into_iter().find(|w| w.session_id == session_id) else {
+        let Some(w) = self
+            .db
+            .list_all_watches()?
+            .into_iter()
+            .find(|w| w.session_id == session_id)
+        else {
             return Ok(None);
         };
         // Scope to this watch's own prior report(s): `save_research_report`
@@ -186,10 +211,16 @@ impl super::App {
         let slug = super::sessions::slugify(&w.topic);
         let prefix = format!("research-{slug}-");
         let rows = self.db.search_citations(space_id, Some(&prefix))?;
-        let rows: Vec<_> = rows.into_iter().filter(|(report_file, _, _)| {
-            report_file.starts_with(&prefix) &&
-            report_file.chars().nth(prefix.len()).map_or(false, |c| c.is_ascii_digit())
-        }).collect();
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|(report_file, _, _)| {
+                report_file.starts_with(&prefix)
+                    && report_file
+                        .chars()
+                        .nth(prefix.len())
+                        .map_or(false, |c| c.is_ascii_digit())
+            })
+            .collect();
         if rows.is_empty() {
             return Ok(None);
         }
@@ -206,7 +237,8 @@ mod tests {
 
     fn test_app() -> App {
         let db = Db::open_in_memory().unwrap();
-        let root = std::env::temp_dir().join(format!("nexus-watches-test-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("nexus-watches-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("spaces")).unwrap();
         let space = Space { root };
         App::new(db, Some("k".into()), space)
@@ -219,12 +251,21 @@ mod tests {
         let space_id = a.active_space.id.clone();
 
         // The watch's original session, from some earlier run.
-        let first_session = a.db.create_session("first run", "openai/gpt-5-mini", &space_id).unwrap();
-        let watch_id = a.db.create_watch(&space_id, "rust async runtimes", 24, &first_session.id).unwrap();
+        let first_session =
+            a.db.create_session("first run", "openai/gpt-5-mini", &space_id)
+                .unwrap();
+        let watch_id =
+            a.db.create_watch(&space_id, "rust async runtimes", 24, &first_session.id)
+                .unwrap();
 
         a.run_due_watches();
 
-        let updated = a.db.list_all_watches().unwrap().into_iter().find(|w| w.id == watch_id).unwrap();
+        let updated =
+            a.db.list_all_watches()
+                .unwrap()
+                .into_iter()
+                .find(|w| w.id == watch_id)
+                .unwrap();
         assert_ne!(
             updated.session_id, first_session.id,
             "run_due_watches should repoint the watch at the session its re-run actually used, \
@@ -239,10 +280,18 @@ mod tests {
         a.research_model = "openai/gpt-5-mini".to_string();
         let space_id = a.active_space.id.clone();
 
-        let first_session = a.db.create_session("first run", "openai/gpt-5-mini", &space_id).unwrap();
-        let second_session = a.db.create_session("second run", "openai/gpt-5-mini", &space_id).unwrap();
-        let watch_a = a.db.create_watch(&space_id, "rust async runtimes", 24, &first_session.id).unwrap();
-        let watch_b = a.db.create_watch(&space_id, "wasm gc proposal", 24, &second_session.id).unwrap();
+        let first_session =
+            a.db.create_session("first run", "openai/gpt-5-mini", &space_id)
+                .unwrap();
+        let second_session =
+            a.db.create_session("second run", "openai/gpt-5-mini", &space_id)
+                .unwrap();
+        let watch_a =
+            a.db.create_watch(&space_id, "rust async runtimes", 24, &first_session.id)
+                .unwrap();
+        let watch_b =
+            a.db.create_watch(&space_id, "wasm gc proposal", 24, &second_session.id)
+                .unwrap();
 
         // Only one research job can run at a time — the pipeline's guard
         // (`research_rx.is_some()`) fires for the 2nd+ watch in this
@@ -253,14 +302,27 @@ mod tests {
         // — for the next startup.
         a.run_due_watches();
 
-        let updated_a = a.db.list_all_watches().unwrap().into_iter().find(|w| w.id == watch_a).unwrap();
-        let updated_b = a.db.list_all_watches().unwrap().into_iter().find(|w| w.id == watch_b).unwrap();
+        let updated_a =
+            a.db.list_all_watches()
+                .unwrap()
+                .into_iter()
+                .find(|w| w.id == watch_a)
+                .unwrap();
+        let updated_b =
+            a.db.list_all_watches()
+                .unwrap()
+                .into_iter()
+                .find(|w| w.id == watch_b)
+                .unwrap();
 
         assert_ne!(
             updated_a.session_id, first_session.id,
             "watch_a's job actually started, so it should be repointed at its new session"
         );
-        assert!(updated_a.last_run_at.is_some(), "watch_a's job actually started, so it should be touched");
+        assert!(
+            updated_a.last_run_at.is_some(),
+            "watch_a's job actually started, so it should be touched"
+        );
 
         assert_eq!(
             updated_b.session_id, second_session.id,
@@ -287,21 +349,27 @@ mod tests {
     #[test]
     fn never_run_watch_is_always_due() {
         let w = watch("topic", 24, None);
-        let now = chrono::DateTime::parse_from_rfc3339("2026-07-07T00:00:00+00:00").unwrap().to_utc();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-07T00:00:00+00:00")
+            .unwrap()
+            .to_utc();
         assert_eq!(due_watches(&[w], now).len(), 1);
     }
 
     #[test]
     fn watch_run_recently_is_not_due() {
         let w = watch("topic", 24, Some("2026-07-07T00:00:00+00:00"));
-        let now = chrono::DateTime::parse_from_rfc3339("2026-07-07T05:00:00+00:00").unwrap().to_utc();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-07T05:00:00+00:00")
+            .unwrap()
+            .to_utc();
         assert!(due_watches(&[w], now).is_empty());
     }
 
     #[test]
     fn watch_past_its_interval_is_due() {
         let w = watch("topic", 24, Some("2026-07-06T00:00:00+00:00"));
-        let now = chrono::DateTime::parse_from_rfc3339("2026-07-07T01:00:00+00:00").unwrap().to_utc();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-07T01:00:00+00:00")
+            .unwrap()
+            .to_utc();
         assert_eq!(due_watches(&[w], now).len(), 1);
     }
 
@@ -312,8 +380,14 @@ mod tests {
             "# New Report\nNew body.",
             &["https://new-source.example".to_string()],
         );
-        assert!(section.contains("What changed since last run"), "{section:?}");
-        assert!(section.contains("https://new-source.example"), "{section:?}");
+        assert!(
+            section.contains("What changed since last run"),
+            "{section:?}"
+        );
+        assert!(
+            section.contains("https://new-source.example"),
+            "{section:?}"
+        );
     }
 
     #[test]
@@ -325,7 +399,8 @@ mod tests {
 
     #[test]
     fn new_sources_since_filters_out_previously_cited_urls() {
-        let new_report = "Body [1][2].\n\n## Sources\n1. https://old.example/a\n2. https://fresh.example/b\n";
+        let new_report =
+            "Body [1][2].\n\n## Sources\n1. https://old.example/a\n2. https://fresh.example/b\n";
         let previous = vec!["https://old.example/a".to_string()];
         let new_sources = new_sources_since(new_report, &previous);
         assert_eq!(new_sources, vec!["https://fresh.example/b".to_string()]);
@@ -335,33 +410,37 @@ mod tests {
     fn previous_citations_for_watch_session_is_scoped_to_the_watchs_own_reports() {
         let a = test_app();
         let space_id = a.active_space.id.clone();
-        let session = a.db.create_session("rust async runtimes", "openai/gpt-5-mini", &space_id).unwrap();
-        let watch_id = a.db.create_watch(&space_id, "rust async runtimes", 24, &session.id).unwrap();
+        let session =
+            a.db.create_session("rust async runtimes", "openai/gpt-5-mini", &space_id)
+                .unwrap();
+        let watch_id =
+            a.db.create_watch(&space_id, "rust async runtimes", 24, &session.id)
+                .unwrap();
         let _ = watch_id;
 
         // This watch's own prior report (named per `save_research_report`'s
         // `research-<slug>-<timestamp>.md` scheme, slug derived from its topic).
         let slug = super::super::sessions::slugify("rust async runtimes");
-        a.db
-            .add_citations(
-                &space_id,
-                &format!("research-{slug}-20260101-000000.md"),
-                &[("https://own-report.example".to_string(), None)],
-            )
-            .unwrap();
+        a.db.add_citations(
+            &space_id,
+            &format!("research-{slug}-20260101-000000.md"),
+            &[("https://own-report.example".to_string(), None)],
+        )
+        .unwrap();
 
         // An unrelated report elsewhere in the *same space* (a plain
         // `/research` session, or another watch's topic) must not pollute
         // this watch's diff.
-        a.db
-            .add_citations(
-                &space_id,
-                "research-some-other-topic-20260101-000000.md",
-                &[("https://unrelated.example".to_string(), None)],
-            )
-            .unwrap();
+        a.db.add_citations(
+            &space_id,
+            "research-some-other-topic-20260101-000000.md",
+            &[("https://unrelated.example".to_string(), None)],
+        )
+        .unwrap();
 
-        let prev = a.previous_citations_for_watch_session(&session.id, &space_id).unwrap();
+        let prev = a
+            .previous_citations_for_watch_session(&session.id, &space_id)
+            .unwrap();
         let prev = prev.expect("watch session with prior citations should yield Some");
         assert_eq!(prev, vec!["https://own-report.example".to_string()]);
         assert!(
@@ -386,29 +465,38 @@ mod tests {
 
         // Two watches: one with topic "rust", another with "rust async".
         // Their slugs are "rust" and "rust-async" respectively.
-        let session_rust = a.db.create_session("rust", "openai/gpt-5-mini", &space_id).unwrap();
-        let _watch_rust = a.db.create_watch(&space_id, "rust", 24, &session_rust.id).unwrap();
+        let session_rust =
+            a.db.create_session("rust", "openai/gpt-5-mini", &space_id)
+                .unwrap();
+        let _watch_rust =
+            a.db.create_watch(&space_id, "rust", 24, &session_rust.id)
+                .unwrap();
 
-        let session_rust_async = a.db.create_session("rust async", "openai/gpt-5-mini", &space_id).unwrap();
-        let _watch_rust_async = a.db.create_watch(&space_id, "rust async", 24, &session_rust_async.id).unwrap();
+        let session_rust_async =
+            a.db.create_session("rust async", "openai/gpt-5-mini", &space_id)
+                .unwrap();
+        let _watch_rust_async =
+            a.db.create_watch(&space_id, "rust async", 24, &session_rust_async.id)
+                .unwrap();
 
         // Add citations to the "rust async" watch (the one with the longer slug).
         // Its report file starts with "research-rust-async-" then the timestamp.
         let slug_rust_async = super::super::sessions::slugify("rust async");
-        a.db
-            .add_citations(
-                &space_id,
-                &format!("research-{slug_rust_async}-20260101-000000.md"),
-                &[("https://rust-async-report.example".to_string(), None)],
-            )
-            .unwrap();
+        a.db.add_citations(
+            &space_id,
+            &format!("research-{slug_rust_async}-20260101-000000.md"),
+            &[("https://rust-async-report.example".to_string(), None)],
+        )
+        .unwrap();
 
         // The "rust" watch should NOT see the "rust async" watch's citations,
         // even though "research-rust-async-..." starts with "research-rust-".
         // With the bug unfixed, the "rust" watch would incorrectly pull in the
         // "rust-async" watch's citations since "research-rust-async-20260101-000000.md"
         // starts with the prefix "research-rust-".
-        let prev_rust = a.previous_citations_for_watch_session(&session_rust.id, &space_id).unwrap();
+        let prev_rust = a
+            .previous_citations_for_watch_session(&session_rust.id, &space_id)
+            .unwrap();
         assert!(
             prev_rust.is_none(),
             "rust watch should return None (no prior citations for itself), \

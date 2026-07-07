@@ -5,11 +5,13 @@ use tokio::sync::mpsc;
 impl App {
     // --- memory (per-space, extracted after every assistant reply) ---
 
-    /// Raw contents of the active space's memory file, capped to ~16k chars.
+    /// Raw contents of the active space's memory file, capped to ~120k chars
+    /// (~30k tokens — headroom is cheap on 1M-context models; this just stops
+    /// a runaway file from eating the whole budget).
     pub(super) fn read_memory(&self) -> String {
         let text = std::fs::read_to_string(self.space.memory_path(&self.active_space.name))
             .unwrap_or_default();
-        text.chars().take(16_000).collect()
+        text.chars().take(120_000).collect()
     }
 
     /// After an assistant reply, ask the memory model for ADD/UPDATE/DELETE ops
@@ -19,7 +21,9 @@ impl App {
         if self.memory_model.trim().is_empty() {
             return;
         }
-        let Some(provider) = self.provider.clone() else { return };
+        let Some(provider) = self.provider.clone() else {
+            return;
+        };
         let [user_msg, assistant_msg] = match self.messages.as_slice() {
             [.., u, a] if u.role == "user" && a.role == "assistant" => [u.clone(), a.clone()],
             _ => return,
@@ -42,7 +46,7 @@ impl App {
                  Empty array [] if nothing memory-worthy. Facts must be durable and \
                  user/project-relevant (preferences, identity, ongoing goals) — never a \
                  summary of what was just said. Merge/update instead of duplicating. \
-                 Keep the total under 50 facts.",
+                 Keep the total under 500 facts.",
                 truncate(&user_msg.content),
                 truncate(&assistant_msg.content),
             );
@@ -71,7 +75,8 @@ impl App {
             .filter_map(parse_fact_line)
             .map(|(_, text)| text)
             .collect();
-        let mut updates: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+        let mut updates: std::collections::HashMap<usize, String> =
+            std::collections::HashMap::new();
         let mut deletes: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let mut adds: Vec<String> = Vec::new();
         for op in ops {
@@ -112,11 +117,21 @@ pub(super) fn parse_fact_line(line: &str) -> Option<(usize, String)> {
 /// prose/fences by extracting the first `[...]`; malformed or unrecognized
 /// entries are silently skipped rather than failing the whole batch.
 pub(super) fn parse_memory_ops(text: &str) -> Vec<MemoryOp> {
-    let Some(start) = text.find('[') else { return Vec::new() };
-    let Some(end) = text.rfind(']') else { return Vec::new() };
-    let Some(json) = text.get(start..=end) else { return Vec::new() };
-    let Ok(arr) = serde_json::from_str::<serde_json::Value>(json) else { return Vec::new() };
-    let Some(arr) = arr.as_array() else { return Vec::new() };
+    let Some(start) = text.find('[') else {
+        return Vec::new();
+    };
+    let Some(end) = text.rfind(']') else {
+        return Vec::new();
+    };
+    let Some(json) = text.get(start..=end) else {
+        return Vec::new();
+    };
+    let Ok(arr) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(arr) = arr.as_array() else {
+        return Vec::new();
+    };
     arr.iter()
         .filter_map(|v| {
             let op = v.get("op")?.as_str()?;

@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::provider::ToolDef;
 use crate::skills::{load_skills, skill_body};
@@ -384,16 +385,26 @@ impl ToolBox {
             });
             defs.push(ToolDef {
                 name: "edit_file".to_string(),
-                description: "Replace an exact string in an app file with a new string. old_string must appear exactly once; read the file first if unsure of its current content.".to_string(),
+                description: "Edit lines in an app file by hash, not by string matching. Call read_app_file first — each line comes back as `N:HASH<tab>content`. Each edit is {\"hash\": \"<the HASH for a line you read>\", \"new\": \"<replacement>\"}; `new` replaces that ENTIRE line (include the parts you're keeping) and may contain \\n to turn one line into several — that's also how you insert (replace a line with itself plus the new lines). Omit \"new\" (or set it null) to delete the line. Hashes are recomputed against the file's current content each call, so a stale hash (someone/something else changed the file since you read it) is rejected instead of silently hitting the wrong line.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "app": { "type": "string", "description": "app name" },
                         "path": { "type": "string", "description": "file path inside the app" },
-                        "old_string": { "type": "string", "description": "exact text to replace (must be unique in the file)" },
-                        "new_string": { "type": "string", "description": "replacement text" },
+                        "edits": {
+                            "type": "array",
+                            "description": "one or more line edits, from the HASH column of a prior read_app_file call",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "hash": { "type": "string", "description": "the line's HASH, from read_app_file's N:HASH prefix" },
+                                    "new": { "type": ["string", "null"], "description": "replacement text for the whole line (may contain \\n); null/omitted deletes the line" },
+                                },
+                                "required": ["hash"],
+                            },
+                        },
                     },
-                    "required": ["app", "path", "old_string", "new_string"],
+                    "required": ["app", "path", "edits"],
                 }),
             });
             defs.push(ToolDef {
@@ -410,7 +421,7 @@ impl ToolBox {
             });
             defs.push(ToolDef {
                 name: "read_app_file".to_string(),
-                description: "Read a file from an app, up to 200 lines per call. Use offset to page through longer files. Lines come back as `N\tcontent` — never include the number prefix in edit_file's old_string.".to_string(),
+                description: "Read a file from an app, up to 200 lines per call. Use offset to page through longer files. Lines come back as `N:HASH\tcontent` — HASH is what edit_file targets, and it changes if the line's content or position changes, so always re-read before editing something you read a while ago.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -424,7 +435,12 @@ impl ToolBox {
             });
         }
         if self.research_only {
-            defs.retain(|d| matches!(d.name.as_str(), "web_search" | "fetch_url" | "academic_search" | "discussion_search"));
+            defs.retain(|d| {
+                matches!(
+                    d.name.as_str(),
+                    "web_search" | "fetch_url" | "academic_search" | "discussion_search"
+                )
+            });
         }
         defs
     }
@@ -432,14 +448,19 @@ impl ToolBox {
     /// Resolve `<apps dir>/<app>/<rel>`, rejecting anything that could
     /// escape the apps dir (absolute paths, `..`/`.` segments, backslashes).
     fn app_path(&self, app: &str, rel: &str) -> Result<PathBuf, String> {
-        let Some(ctx) = &self.apps else { return Err("apps are not available".to_string()) };
+        let Some(ctx) = &self.apps else {
+            return Err("apps are not available".to_string());
+        };
         resolve_confined(&ctx.dir, app, rel)
     }
 
     /// The `run_python` scratch dir (venv + script), a sibling of the skills
     /// dir: `<data>/python`. Persistent so installed packages survive.
     fn python_dir(&self) -> PathBuf {
-        self.skills_dir.parent().map(|p| p.join("python")).unwrap_or_else(|| PathBuf::from("python"))
+        self.skills_dir
+            .parent()
+            .map(|p| p.join("python"))
+            .unwrap_or_else(|| PathBuf::from("python"))
     }
 
     /// The live URL for an app.
@@ -453,7 +474,12 @@ impl ToolBox {
     /// Run a tool by name. Returns `(result text sent back to the model,
     /// status label shown in the UI while it runs)`.
     pub async fn run(&self, name: &str, args: &str) -> (String, String) {
-        if self.research_only && !matches!(name, "web_search" | "fetch_url" | "academic_search" | "discussion_search") {
+        if self.research_only
+            && !matches!(
+                name,
+                "web_search" | "fetch_url" | "academic_search" | "discussion_search"
+            )
+        {
             return (
                 format!("tool '{name}' is not available in research mode"),
                 "blocked".to_string(),
@@ -482,10 +508,18 @@ impl ToolBox {
                 let result = match crate::skills::parse_gh_shorthand(&source) {
                     None => format!("invalid source {source:?} — expected owner/repo/path"),
                     Some((owner, repo, path)) => {
-                        match crate::skills::install_from_github(&self.client, &owner, &repo, &path, &self.skills_dir)
-                            .await
+                        match crate::skills::install_from_github(
+                            &self.client,
+                            &owner,
+                            &repo,
+                            &path,
+                            &self.skills_dir,
+                        )
+                        .await
                         {
-                            Ok(name) => format!("installed skill '{name}' — load it with the skill tool"),
+                            Ok(name) => {
+                                format!("installed skill '{name}' — load it with the skill tool")
+                            }
                             Err(e) => format!("install failed: {e}"),
                         }
                     }
@@ -494,12 +528,21 @@ impl ToolBox {
             }
             "run_script" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let field = |k: &str| {
+                    v.get(k)
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                };
                 let (skill, script) = (field("skill"), field("script"));
                 let extra: Vec<String> = v
                     .get("args")
                     .and_then(|a| a.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let status = format!("Running {skill}/{script}…");
                 let result = match resolve_confined(&self.skills_dir, &skill, &script) {
@@ -507,7 +550,11 @@ impl ToolBox {
                     Ok(file) if !file.is_file() => format!("no such script: {skill}/{script}"),
                     Ok(file) => {
                         let dir = self.skills_dir.join(&skill);
-                        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                        let ext = file
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
                         let run = async {
                             let mut argv: Vec<std::ffi::OsString> = Vec::new();
                             let program: std::ffi::OsString = match ext.as_str() {
@@ -527,7 +574,8 @@ impl ToolBox {
                                 _ => file.clone().into(),
                             };
                             argv.extend(extra.iter().map(std::ffi::OsString::from));
-                            let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
+                            let refs: Vec<&std::ffi::OsStr> =
+                                argv.iter().map(|s| s.as_os_str()).collect();
                             run_cmd(&program, &refs, &dir, 120).await
                         };
                         match run.await {
@@ -540,11 +588,20 @@ impl ToolBox {
             }
             "install_packages" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let field = |k: &str| {
+                    v.get(k)
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                };
                 let pkgs: Vec<String> = v
                     .get("packages")
                     .and_then(|a| a.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let (skill, app) = (field("skill"), field("app"));
                 let status = format!("Installing {}…", pkgs.join(" "));
@@ -564,14 +621,17 @@ impl ToolBox {
                                     let mut argv: Vec<std::ffi::OsString> =
                                         vec!["-m".into(), "pip".into(), "install".into()];
                                     argv.extend(pkgs.iter().map(std::ffi::OsString::from));
-                                    let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
+                                    let refs: Vec<&std::ffi::OsStr> =
+                                        argv.iter().map(|s| s.as_os_str()).collect();
                                     run_cmd(py.as_os_str(), &refs, &dir, 300).await
                                 };
                                 match run.await {
                                     Ok(out) if out.status.success() => {
                                         format!("installed {} into {skill}'s venv", pkgs.join(" "))
                                     }
-                                    Ok(out) => format!("pip install failed:\n{}", format_output(&out)),
+                                    Ok(out) => {
+                                        format!("pip install failed:\n{}", format_output(&out))
+                                    }
                                     Err(e) => e,
                                 }
                             }
@@ -587,23 +647,32 @@ impl ToolBox {
                                 } else {
                                     // npm walks up looking for a package.json — pin
                                     // the install to this app dir with a minimal one.
-                                    std::fs::write(&pkg_json, format!("{{\"name\":{:?},\"private\":true}}", app))
+                                    std::fs::write(
+                                        &pkg_json,
+                                        format!("{{\"name\":{:?},\"private\":true}}", app),
+                                    )
                                 }
                             });
                             match prep {
                                 Err(e) => format!("cannot prepare {app}: {e}"),
                                 Ok(()) => {
-                                    let mut argv: Vec<std::ffi::OsString> =
-                                        vec!["install".into(), "--no-audit".into(), "--no-fund".into()];
+                                    let mut argv: Vec<std::ffi::OsString> = vec![
+                                        "install".into(),
+                                        "--no-audit".into(),
+                                        "--no-fund".into(),
+                                    ];
                                     argv.extend(pkgs.iter().map(std::ffi::OsString::from));
-                                    let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
+                                    let refs: Vec<&std::ffi::OsStr> =
+                                        argv.iter().map(|s| s.as_os_str()).collect();
                                     match run_cmd("npm".as_ref(), &refs, &dir, 300).await {
                                         Ok(out) if out.status.success() => format!(
                                             "installed {} into {app}/node_modules — reference files as node_modules/<pkg>/… ; {}",
                                             pkgs.join(" "),
                                             self.app_link(&app),
                                         ),
-                                        Ok(out) => format!("npm install failed:\n{}", format_output(&out)),
+                                        Ok(out) => {
+                                            format!("npm install failed:\n{}", format_output(&out))
+                                        }
                                         Err(e) => e,
                                     }
                                 }
@@ -614,12 +683,14 @@ impl ToolBox {
                         // No target: the run_python scratch venv.
                         let dir = self.python_dir();
                         let run = async {
-                            std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+                            std::fs::create_dir_all(&dir)
+                                .map_err(|e| format!("cannot create {dir:?}: {e}"))?;
                             let py = ensure_venv(&dir).await?;
                             let mut argv: Vec<std::ffi::OsString> =
                                 vec!["-m".into(), "pip".into(), "install".into()];
                             argv.extend(pkgs.iter().map(std::ffi::OsString::from));
-                            let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
+                            let refs: Vec<&std::ffi::OsStr> =
+                                argv.iter().map(|s| s.as_os_str()).collect();
                             run_cmd(py.as_os_str(), &refs, &dir, 300).await
                         };
                         match run.await {
@@ -635,11 +706,19 @@ impl ToolBox {
             }
             "run_python" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let code = v.get("code").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let code = v
+                    .get("code")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let extra: Vec<String> = v
                     .get("args")
                     .and_then(|a| a.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let status = "Running python…".to_string();
                 let dir = self.python_dir();
@@ -647,9 +726,11 @@ impl ToolBox {
                     if code.trim().is_empty() {
                         return Err("code must not be empty".to_string());
                     }
-                    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+                    std::fs::create_dir_all(&dir)
+                        .map_err(|e| format!("cannot create {dir:?}: {e}"))?;
                     let script = dir.join("script.py");
-                    std::fs::write(&script, &code).map_err(|e| format!("cannot write script: {e}"))?;
+                    std::fs::write(&script, &code)
+                        .map_err(|e| format!("cannot write script: {e}"))?;
                     let py = ensure_venv(&dir).await?;
                     let mut argv: Vec<std::ffi::OsString> = vec![script.into()];
                     argv.extend(extra.iter().map(std::ffi::OsString::from));
@@ -664,19 +745,33 @@ impl ToolBox {
             }
             "web_search" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let query = v.get("query").and_then(|q| q.as_str()).unwrap_or_default().to_string();
-                let recency = v.get("recency").and_then(|r| r.as_str()).map(str::to_string);
+                let query = v
+                    .get("query")
+                    .and_then(|q| q.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let recency = v
+                    .get("recency")
+                    .and_then(|r| r.as_str())
+                    .map(str::to_string);
                 let str_list = |k: &str| {
                     v.get(k)
                         .and_then(|a| a.as_array())
-                        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(str::to_string))
+                                .collect::<Vec<_>>()
+                        })
                         .unwrap_or_default()
                 };
                 let include = str_list("include_domains");
                 let mut exclude = str_list("exclude_domains");
                 exclude.extend(self.blocked_domains.iter().cloned());
                 let status = "Searching the web…".to_string();
-                let result = match self.search(&query, recency.as_deref(), &include, &exclude).await {
+                let result = match self
+                    .search(&query, recency.as_deref(), &include, &exclude)
+                    .await
+                {
                     Ok(hits) if hits.is_empty() => "no results".to_string(),
                     Ok(hits) => format_results(&hits),
                     Err(e) => format!("search failed: {e}"),
@@ -685,9 +780,17 @@ impl ToolBox {
             }
             "fetch_url" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let url = v.get("url").and_then(|u| u.as_str()).unwrap_or_default().to_string();
+                let url = v
+                    .get("url")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let offset = v.get("offset").and_then(|o| o.as_u64()).unwrap_or(1).max(1) as usize;
-                let limit = v.get("limit").and_then(|l| l.as_u64()).unwrap_or(200).clamp(1, 200) as usize;
+                let limit = v
+                    .get("limit")
+                    .and_then(|l| l.as_u64())
+                    .unwrap_or(200)
+                    .clamp(1, 200) as usize;
                 let fresh = v.get("fresh").and_then(|f| f.as_bool()).unwrap_or(false);
                 let status = format!("Fetching {url}…");
                 let result = match self.fetch_cached(&url, fresh).await {
@@ -713,7 +816,11 @@ impl ToolBox {
             }
             "academic_search" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let query = v.get("query").and_then(|q| q.as_str()).unwrap_or_default().to_string();
+                let query = v
+                    .get("query")
+                    .and_then(|q| q.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let limit = v.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
                 let status = "Searching academic literature…".to_string();
                 let result = match academic_search(&self.client, &query, limit).await {
@@ -725,7 +832,11 @@ impl ToolBox {
             }
             "discussion_search" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let query = v.get("query").and_then(|q| q.as_str()).unwrap_or_default().to_string();
+                let query = v
+                    .get("query")
+                    .and_then(|q| q.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let status = "Searching HN and Reddit…".to_string();
                 let cache_key = format!("discussion://{query}");
 
@@ -752,7 +863,8 @@ impl ToolBox {
                     // Write through to cache if enabled
                     if let Some(db_path) = &self.web_cache_db {
                         if let Ok(conn) = rusqlite::Connection::open(db_path) {
-                            let _ = crate::db::cache_put(&conn, &cache_key, &cache_key, None, &text);
+                            let _ =
+                                crate::db::cache_put(&conn, &cache_key, &cache_key, None, &text);
                         }
                     }
                     text
@@ -766,21 +878,27 @@ impl ToolBox {
                     .unwrap_or_default();
                 let status = "Searching session sources…".to_string();
                 let result = match (&self.research_session_id, &self.web_cache_db) {
-                    (Some(session_id), Some(db_path)) => match rusqlite::Connection::open(db_path) {
-                        Err(e) => format!("source search failed: {e}"),
-                        Ok(conn) => match crate::db::search_session_sources(&conn, session_id, &query) {
-                            Ok(hits) if hits.is_empty() => "no matches in this session's sources".to_string(),
-                            Ok(hits) => hits
-                                .iter()
-                                .map(|(url, text)| {
-                                    let cut: String = text.chars().take(500).collect();
-                                    format!("{url}:\n{cut}")
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n\n"),
+                    (Some(session_id), Some(db_path)) => {
+                        match rusqlite::Connection::open(db_path) {
                             Err(e) => format!("source search failed: {e}"),
-                        },
-                    },
+                            Ok(conn) => {
+                                match crate::db::search_session_sources(&conn, session_id, &query) {
+                                    Ok(hits) if hits.is_empty() => {
+                                        "no matches in this session's sources".to_string()
+                                    }
+                                    Ok(hits) => hits
+                                        .iter()
+                                        .map(|(url, text)| {
+                                            let cut: String = text.chars().take(500).collect();
+                                            format!("{url}:\n{cut}")
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n\n"),
+                                    Err(e) => format!("source search failed: {e}"),
+                                }
+                            }
+                        }
+                    }
                     _ => "no session source bundle available".to_string(),
                 };
                 (result, status)
@@ -794,7 +912,11 @@ impl ToolBox {
                     None => "no space context available".to_string(),
                     Some(ctx) => match rusqlite::Connection::open(&ctx.db_path) {
                         Err(e) => format!("citation lookup failed: {e}"),
-                        Ok(conn) => match crate::db::search_citations(&conn, &ctx.space_id, query.as_deref()) {
+                        Ok(conn) => match crate::db::search_citations(
+                            &conn,
+                            &ctx.space_id,
+                            query.as_deref(),
+                        ) {
                             Ok(rows) if rows.is_empty() => "no citations recorded yet".to_string(),
                             Ok(rows) => rows
                                 .iter()
@@ -827,9 +949,17 @@ impl ToolBox {
             }
             "read_file" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let name = v.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string();
+                let name = v
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let offset = v.get("offset").and_then(|o| o.as_u64()).unwrap_or(1).max(1) as usize;
-                let limit = v.get("limit").and_then(|l| l.as_u64()).unwrap_or(200).clamp(1, 200) as usize;
+                let limit = v
+                    .get("limit")
+                    .and_then(|l| l.as_u64())
+                    .unwrap_or(200)
+                    .clamp(1, 200) as usize;
                 let status = format!("Reading {name}…");
                 let result = match &self.files {
                     None => "no files imported".to_string(),
@@ -861,7 +991,12 @@ impl ToolBox {
             }
             "write_file" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let field = |k: &str| {
+                    v.get(k)
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                };
                 let (app, path, content) = (field("app"), field("path"), field("content"));
                 let status = format!("Writing {app}/{path}…");
                 let result = match self.app_path(&app, &path) {
@@ -886,35 +1021,39 @@ impl ToolBox {
             }
             "edit_file" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let field = |k: &str| {
+                    v.get(k)
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                };
                 let (app, path) = (field("app"), field("path"));
-                let (old, new) = (field("old_string"), field("new_string"));
+                let edits: Vec<(String, Option<String>)> = v
+                    .get("edits")
+                    .and_then(|e| e.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|e| {
+                                let hash = e.get("hash")?.as_str()?.to_string();
+                                let new = e.get("new").and_then(|n| n.as_str()).map(str::to_string);
+                                Some((hash, new))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let status = format!("Editing {app}/{path}…");
                 let result = match self.app_path(&app, &path) {
                     Err(e) => e,
                     Ok(file) => match std::fs::read_to_string(&file) {
                         Err(e) => format!("cannot read {app}/{path}: {e}"),
-                        Ok(text) if old.is_empty() => {
-                            let _ = text;
-                            "old_string must not be empty".to_string()
-                        }
-                        Ok(text) => match text.matches(&old).count() {
-                            0 => format!("old_string not found in {app}/{path}; read the file to see its current content"),
-                            1 => match std::fs::write(&file, text.replacen(&old, &new, 1)) {
+                        Ok(text) => match apply_hashline_edits(&text, &edits) {
+                            Err(e) => e,
+                            Ok((new_text, diff)) => match std::fs::write(&file, new_text) {
                                 Ok(()) => {
-                                    // Show the change as a diff, harness-style.
-                                    let mut s = format!("edited {app}/{path} — {}", self.app_link(&app));
-                                    for l in old.lines() {
-                                        s.push_str(&format!("\n- {l}"));
-                                    }
-                                    for l in new.lines() {
-                                        s.push_str(&format!("\n+ {l}"));
-                                    }
-                                    s
+                                    format!("edited {app}/{path} — {}{diff}", self.app_link(&app))
                                 }
                                 Err(e) => format!("write failed: {e}"),
                             },
-                            n => format!("old_string matches {n} places in {app}/{path} — include more surrounding text to make it unique"),
                         },
                     },
                 };
@@ -922,10 +1061,18 @@ impl ToolBox {
             }
             "grep_app" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let field = |k: &str| {
+                    v.get(k)
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                };
                 let (app, pattern) = (field("app"), field("pattern"));
                 let status = format!("Searching {app}…");
-                let result = match self.app_path(&app, "index.html").map(|p| p.parent().unwrap().to_path_buf()) {
+                let result = match self
+                    .app_path(&app, "index.html")
+                    .map(|p| p.parent().unwrap().to_path_buf())
+                {
                     Err(e) => e,
                     Ok(dir) if !dir.is_dir() => format!("unknown app: {app}"),
                     Ok(_) if pattern.is_empty() => "pattern must not be empty".to_string(),
@@ -948,10 +1095,19 @@ impl ToolBox {
             }
             "read_app_file" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let field = |k: &str| {
+                    v.get(k)
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                };
                 let (app, path) = (field("app"), field("path"));
                 let offset = v.get("offset").and_then(|o| o.as_u64()).unwrap_or(1).max(1) as usize;
-                let limit = v.get("limit").and_then(|l| l.as_u64()).unwrap_or(200).clamp(1, 200) as usize;
+                let limit = v
+                    .get("limit")
+                    .and_then(|l| l.as_u64())
+                    .unwrap_or(200)
+                    .clamp(1, 200) as usize;
                 let status = format!("Reading {app}/{path}…");
                 let result = match self.app_path(&app, &path) {
                     Err(e) => e,
@@ -963,13 +1119,15 @@ impl ToolBox {
                             let start = (offset - 1).min(total);
                             let slice = &lines[start..(start + limit).min(total)];
                             if slice.is_empty() {
-                                format!("{app}/{path}: offset {offset} is past the end ({total} lines)")
+                                format!(
+                                    "{app}/{path}: offset {offset} is past the end ({total} lines)"
+                                )
                             } else {
                                 format!(
                                     "{app}/{path} (lines {}-{} of {total}):\n{}",
                                     start + 1,
                                     start + slice.len(),
-                                    number_lines(slice, start),
+                                    number_lines_with_hash(slice, start),
                                 )
                             }
                         }
@@ -977,7 +1135,10 @@ impl ToolBox {
                 };
                 (result, status)
             }
-            other => (format!("unknown tool: {other}"), "Running tool…".to_string()),
+            other => (
+                format!("unknown tool: {other}"),
+                "Running tool…".to_string(),
+            ),
         }
     }
 }
@@ -1052,10 +1213,108 @@ fn number_lines(slice: &[&str], start: usize) -> String {
         .join("\n")
 }
 
+/// sha256("{1-based line number}:{content}") truncated to 8 hex chars —
+/// stable for a given (position, content) pair, so a hash `edit_file` gets
+/// back always resolves to the same line it was read from, and a line that
+/// moved or changed since then simply won't match anything.
+fn line_hash(line_no: usize, content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{line_no}:{content}"));
+    hasher
+        .finalize()
+        .iter()
+        .take(4)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `read_app_file`'s line prefix: `N:HASH<tab>content`, one hash per line so
+/// `edit_file` can target it without substring matching.
+fn number_lines_with_hash(slice: &[&str], start: usize) -> String {
+    slice
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let n = start + i + 1;
+            format!("{:>5}:{}\t{l}", n, line_hash(n, l))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Apply hashline edits to `text`: each `(hash, new)` targets the line whose
+/// current (1-based position, content) hashes to it (see `line_hash`) —
+/// `new: None` deletes that line, `Some(t)` replaces it with `t`'s lines
+/// (0, 1, or many — this is also how you insert: include the original
+/// line's content in `t` alongside what's being added). Hashes are resolved
+/// against `text` as given, so a stale hash fails loudly instead of
+/// silently landing on the wrong line. Returns the new file content plus a
+/// git-diff-style summary of what changed, in the order edits were given.
+fn apply_hashline_edits(
+    text: &str,
+    edits: &[(String, Option<String>)],
+) -> Result<(String, String), String> {
+    if edits.is_empty() {
+        return Err("edits must not be empty".to_string());
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let mut resolved: Vec<(usize, Option<String>)> = Vec::new();
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (hash, new) in edits {
+        let idx = lines
+            .iter()
+            .enumerate()
+            .position(|(i, l)| line_hash(i + 1, l) == *hash)
+            .ok_or_else(|| {
+                format!("hash {hash} not found — read the file again, it may have changed")
+            })?;
+        if !seen.insert(idx) {
+            return Err(format!(
+                "hash {hash} targets a line already edited by another entry in this call"
+            ));
+        }
+        resolved.push((idx, new.clone()));
+    }
+
+    let mut diff = String::new();
+    for (idx, new) in &resolved {
+        diff.push_str(&format!("\n- {}", lines[*idx]));
+        if let Some(t) = new {
+            for l in t.lines() {
+                diff.push_str(&format!("\n+ {l}"));
+            }
+        }
+    }
+
+    // Apply highest index first so earlier (lower) indices, still unprocessed,
+    // stay valid regardless of how many lines an edit adds or removes.
+    let mut apply_order = resolved;
+    apply_order.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    for (idx, new) in apply_order {
+        match new {
+            None => {
+                out.remove(idx);
+            }
+            Some(t) => {
+                let replacement: Vec<String> = t.lines().map(str::to_string).collect();
+                out.splice(idx..idx + 1, replacement);
+            }
+        }
+    }
+    let mut new_text = out.join("\n");
+    if text.ends_with('\n') && !out.is_empty() {
+        new_text.push('\n');
+    }
+    Ok((new_text, diff))
+}
+
 /// Recursively collect `relpath:line: text` matches for a lowercase substring
 /// pattern, skipping dependency/venv dirs and unreadable (binary) files.
 fn grep_dir(root: &std::path::Path, dir: &std::path::Path, pattern: &str, out: &mut Vec<String>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
@@ -1112,7 +1371,10 @@ async fn run_cmd(
         .kill_on_drop(true)
         .output();
     match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
-        Err(_) => Err(format!("{} timed out after {secs}s", program.to_string_lossy())),
+        Err(_) => Err(format!(
+            "{} timed out after {secs}s",
+            program.to_string_lossy()
+        )),
         Ok(Err(e)) => Err(format!("cannot run {}: {e}", program.to_string_lossy())),
         Ok(Ok(out)) => Ok(out),
     }
@@ -1141,7 +1403,11 @@ fn format_output(out: &std::process::Output) -> String {
         s.push_str("\n… (output truncated)");
     }
     if !out.status.success() {
-        let code = out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "killed".to_string());
+        let code = out
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "killed".to_string());
         if !s.is_empty() {
             s.push('\n');
         }
@@ -1161,20 +1427,35 @@ async fn ensure_venv(skill_dir: &std::path::Path) -> Result<PathBuf, String> {
     if python.exists() {
         return Ok(python);
     }
-    let out = run_cmd("python3".as_ref(), &["-m".as_ref(), "venv".as_ref(), ".venv".as_ref()], skill_dir, 120).await?;
+    let out = run_cmd(
+        "python3".as_ref(),
+        &["-m".as_ref(), "venv".as_ref(), ".venv".as_ref()],
+        skill_dir,
+        120,
+    )
+    .await?;
     if !out.status.success() {
         return Err(format!("venv creation failed:\n{}", format_output(&out)));
     }
     if skill_dir.join("requirements.txt").exists() {
         let out = run_cmd(
             python.as_os_str(),
-            &["-m".as_ref(), "pip".as_ref(), "install".as_ref(), "-r".as_ref(), "requirements.txt".as_ref()],
+            &[
+                "-m".as_ref(),
+                "pip".as_ref(),
+                "install".as_ref(),
+                "-r".as_ref(),
+                "requirements.txt".as_ref(),
+            ],
             skill_dir,
             300,
         )
         .await?;
         if !out.status.success() {
-            return Err(format!("pip install -r requirements.txt failed:\n{}", format_output(&out)));
+            return Err(format!(
+                "pip install -r requirements.txt failed:\n{}",
+                format_output(&out)
+            ));
         }
     }
     Ok(python)
@@ -1218,8 +1499,15 @@ struct SearxngResult {
 /// Shared by backends that send a request and expect a JSON body back: send,
 /// raise on a non-2xx status, then deserialize. DuckDuckGo scrapes HTML
 /// instead of parsing JSON, so it doesn't use this helper.
-async fn send_and_parse<T: serde::de::DeserializeOwned>(req: reqwest::RequestBuilder) -> anyhow::Result<T> {
-    req.send().await?.error_for_status()?.json::<T>().await.map_err(Into::into)
+async fn send_and_parse<T: serde::de::DeserializeOwned>(
+    req: reqwest::RequestBuilder,
+) -> anyhow::Result<T> {
+    req.send()
+        .await?
+        .error_for_status()?
+        .json::<T>()
+        .await
+        .map_err(Into::into)
 }
 
 /// SearXNG's JSON API needs `search: formats: [html, json]` enabled in the
@@ -1232,7 +1520,9 @@ async fn searxng_search(
     query: &str,
     recency: Option<&str>,
 ) -> anyhow::Result<Vec<SearchHit>> {
-    let mut req = client.get(format!("{base_url}/search")).query(&[("q", query), ("format", "json")]);
+    let mut req = client
+        .get(format!("{base_url}/search"))
+        .query(&[("q", query), ("format", "json")]);
     if let Some(r) = recency {
         req = req.query(&[("time_range", r)]);
     }
@@ -1241,7 +1531,11 @@ async fn searxng_search(
         .results
         .into_iter()
         .take(8)
-        .map(|r| SearchHit { title: r.title, url: r.url, snippet: r.content })
+        .map(|r| SearchHit {
+            title: r.title,
+            url: r.url,
+            snippet: r.content,
+        })
         .collect())
 }
 
@@ -1290,7 +1584,10 @@ async fn langsearch_search(
         };
         body["freshness"] = serde_json::json!(freshness);
     }
-    let req = client.post("https://api.langsearch.com/v1/web-search").bearer_auth(key).json(&body);
+    let req = client
+        .post("https://api.langsearch.com/v1/web-search")
+        .bearer_auth(key)
+        .json(&body);
     let resp = send_and_parse::<LangsearchResponse>(req).await?;
     Ok(resp
         .data
@@ -1298,7 +1595,11 @@ async fn langsearch_search(
         .map(|w| w.value)
         .unwrap_or_default()
         .into_iter()
-        .map(|r| SearchHit { title: r.name, url: r.url, snippet: r.snippet })
+        .map(|r| SearchHit {
+            title: r.name,
+            url: r.url,
+            snippet: r.snippet,
+        })
         .collect())
 }
 
@@ -1307,7 +1608,10 @@ async fn langsearch_search(
 /// LM Studio/Open WebUI's built-in DuckDuckGo tools do. Unofficial — DuckDuckGo
 /// can change this markup or rate-limit it at any time; SearXNG is the more
 /// durable option if this stops working for you.
-async fn duckduckgo_search(client: &reqwest::Client, query: &str) -> anyhow::Result<Vec<SearchHit>> {
+async fn duckduckgo_search(
+    client: &reqwest::Client,
+    query: &str,
+) -> anyhow::Result<Vec<SearchHit>> {
     let html = client
         .get("https://html.duckduckgo.com/html/")
         .header("User-Agent", "Mozilla/5.0 (compatible; nexus-chat)")
@@ -1326,7 +1630,8 @@ async fn duckduckgo_search(client: &reqwest::Client, query: &str) -> anyhow::Res
 /// erroring the whole fetch — a scanned/malformed PDF shouldn't kill the
 /// searcher's tool call.
 fn extract_pdf_or_html(bytes: &[u8], content_type: &str) -> String {
-    let looks_like_pdf = content_type.to_lowercase().contains("application/pdf") || bytes.starts_with(b"%PDF");
+    let looks_like_pdf =
+        content_type.to_lowercase().contains("application/pdf") || bytes.starts_with(b"%PDF");
     if looks_like_pdf {
         return match pdf_extract::extract_text_from_mem(bytes) {
             Ok(text) => text.trim().to_string(),
@@ -1361,7 +1666,9 @@ async fn fetch_url_text(client: &reqwest::Client, url: &str) -> anyhow::Result<S
 
 /// Whether `url` points at a YouTube watch page (long or short form).
 fn is_youtube_url(url: &str) -> bool {
-    let Ok(u) = reqwest::Url::parse(url) else { return false };
+    let Ok(u) = reqwest::Url::parse(url) else {
+        return false;
+    };
     matches!(u.host_str(), Some(h) if h == "youtube.com" || h.ends_with(".youtube.com") || h == "youtu.be")
 }
 
@@ -1392,7 +1699,11 @@ fn strip_timedtext_xml(xml: &str) -> String {
 /// double-unescape compound entities — same ordering as `src/extract.rs`'s
 /// `xml_unescape`).
 fn html_unescape_entities(s: &str) -> String {
-    s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&")
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
 }
 
 /// Fetch a YouTube video's transcript via the keyless timedtext endpoint:
@@ -1432,18 +1743,30 @@ fn parse_ddg_html(html: &str) -> Vec<SearchHit> {
     while let Some(rel) = html[pos..].find("class=\"result__a\"") {
         let marker_at = pos + rel;
         let tag_start = html[..marker_at].rfind('<').unwrap_or(marker_at);
-        let Some(gt) = html[marker_at..].find('>') else { break };
+        let Some(gt) = html[marker_at..].find('>') else {
+            break;
+        };
         let tag = &html[tag_start..marker_at + gt];
         let text_start = marker_at + gt + 1;
-        let Some(close_rel) = html[text_start..].find("</a>") else { break };
+        let Some(close_rel) = html[text_start..].find("</a>") else {
+            break;
+        };
         let title = strip_tags(&html[text_start..text_start + close_rel]);
         pos = text_start + close_rel + 4;
 
-        let Some(href) = extract_attr(tag, "href") else { continue };
-        let Some(url) = resolve_ddg_href(&href) else { continue };
+        let Some(href) = extract_attr(tag, "href") else {
+            continue;
+        };
+        let Some(url) = resolve_ddg_href(&href) else {
+            continue;
+        };
         let snippet = find_snippet(html, pos);
         if !title.is_empty() {
-            hits.push(SearchHit { title, url, snippet });
+            hits.push(SearchHit {
+                title,
+                url,
+                snippet,
+            });
         }
     }
     hits
@@ -1452,11 +1775,17 @@ fn parse_ddg_html(html: &str) -> Vec<SearchHit> {
 /// The snippet immediately following a result's title anchor, if any.
 fn find_snippet(html: &str, from: usize) -> String {
     let marker = "class=\"result__snippet\"";
-    let Some(rel) = html[from..].find(marker) else { return String::new() };
+    let Some(rel) = html[from..].find(marker) else {
+        return String::new();
+    };
     let idx = from + rel;
-    let Some(gt) = html[idx..].find('>') else { return String::new() };
+    let Some(gt) = html[idx..].find('>') else {
+        return String::new();
+    };
     let text_start = idx + gt + 1;
-    let Some(close) = html[text_start..].find("</a>") else { return String::new() };
+    let Some(close) = html[text_start..].find("</a>") else {
+        return String::new();
+    };
     strip_tags(&html[text_start..text_start + close])
 }
 
@@ -1472,7 +1801,11 @@ fn resolve_ddg_href(href: &str) -> Option<String> {
         };
         let decoded = reqwest::Url::parse(&absolute)
             .ok()
-            .and_then(|url| url.query_pairs().find(|(k, _)| k == "uddg").map(|(_, v)| v.into_owned()))
+            .and_then(|url| {
+                url.query_pairs()
+                    .find(|(k, _)| k == "uddg")
+                    .map(|(_, v)| v.into_owned())
+            })
             .unwrap_or_default();
         return (!decoded.is_empty()).then_some(decoded);
     }
@@ -1614,9 +1947,13 @@ fn split_tag_blocks(html: &str, tag: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = html;
     while let Some(start) = rest.find(&open) {
-        let Some(tag_end) = rest[start..].find('>') else { break };
+        let Some(tag_end) = rest[start..].find('>') else {
+            break;
+        };
         let body_start = start + tag_end + 1;
-        let Some(close_rel) = rest[body_start..].find(&close) else { break };
+        let Some(close_rel) = rest[body_start..].find(&close) else {
+            break;
+        };
         let body_end = body_start + close_rel;
         out.push(rest[body_start..body_end].to_string());
         rest = &rest[body_end + close.len()..];
@@ -1678,12 +2015,21 @@ struct SemanticScholarAuthor {
 /// Semantic Scholar Graph API (api.semanticscholar.org): free, keyless.
 /// A 429 (rate limited) surfaces as an error the caller turns into
 /// tool-result text — the model falls back to web_search.
-async fn academic_search(client: &reqwest::Client, query: &str, limit: usize) -> anyhow::Result<Vec<Paper>> {
-    let req = client.get("https://api.semanticscholar.org/graph/v1/paper/search").query(&[
-        ("query", query),
-        ("limit", &limit.min(20).to_string()),
-        ("fields", "title,authors,year,venue,abstract,citationCount,url"),
-    ]);
+async fn academic_search(
+    client: &reqwest::Client,
+    query: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<Paper>> {
+    let req = client
+        .get("https://api.semanticscholar.org/graph/v1/paper/search")
+        .query(&[
+            ("query", query),
+            ("limit", &limit.min(20).to_string()),
+            (
+                "fields",
+                "title,authors,year,venue,abstract,citationCount,url",
+            ),
+        ]);
     let resp = send_and_parse::<SemanticScholarResponse>(req).await?;
     Ok(resp
         .data
@@ -1721,7 +2067,13 @@ fn format_papers(papers: &[Paper]) -> String {
                 meta.push(format!("{c} citations"));
             }
             let abs = p.abstract_snippet.as_deref().unwrap_or("");
-            format!("[{}] {}\n    {}\n    {abs}\n    {}", i + 1, p.title, meta.join(" · "), p.url)
+            format!(
+                "[{}] {}\n    {}\n    {abs}\n    {}",
+                i + 1,
+                p.title,
+                meta.join(" · "),
+                p.url
+            )
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -1763,7 +2115,9 @@ async fn hn_search(client: &reqwest::Client, query: &str) -> anyhow::Result<Vec<
         .into_iter()
         .take(8)
         .map(|h| {
-            let url = h.url.unwrap_or_else(|| format!("https://news.ycombinator.com/item?id={}", h.object_id));
+            let url = h
+                .url
+                .unwrap_or_else(|| format!("https://news.ycombinator.com/item?id={}", h.object_id));
             DiscussionHit {
                 title: h.title.unwrap_or_else(|| "(untitled)".to_string()),
                 url,
@@ -1798,7 +2152,10 @@ struct RedditPost {
     score: i64,
 }
 
-async fn reddit_search(client: &reqwest::Client, query: &str) -> anyhow::Result<Vec<DiscussionHit>> {
+async fn reddit_search(
+    client: &reqwest::Client,
+    query: &str,
+) -> anyhow::Result<Vec<DiscussionHit>> {
     let req = client
         .get("https://www.reddit.com/search.json")
         .header("User-Agent", "Mozilla/5.0 (compatible; nexus-chat)")
@@ -1847,7 +2204,9 @@ async fn discussion_search(client: &reqwest::Client, query: &str) -> String {
 /// Unparseable input (not actually a URL) is returned unchanged so it still
 /// participates in a plain string-equality dedup.
 pub(crate) fn normalize_url(url: &str) -> String {
-    let Ok(mut u) = reqwest::Url::parse(url) else { return url.to_string() };
+    let Ok(mut u) = reqwest::Url::parse(url) else {
+        return url.to_string();
+    };
     u.set_fragment(None);
     let kept: Vec<(String, String)> = u
         .query_pairs()
@@ -1857,7 +2216,11 @@ pub(crate) fn normalize_url(url: &str) -> String {
     if kept.is_empty() {
         u.set_query(None);
     } else {
-        let q = kept.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
+        let q = kept
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
         u.set_query(Some(&q));
     }
     if let Some(h) = u.host_str().map(str::to_lowercase) {
@@ -1932,7 +2295,11 @@ pub(crate) fn cited_url_norms(findings: &[String]) -> Vec<String> {
 /// engine this app talks to honors Google-style site filters), so
 /// `include_domains`/`exclude_domains`/`blocked_domains` need no per-backend
 /// plumbing beyond this string rewrite.
-pub(crate) fn rewrite_query_with_domains(query: &str, include: &[String], exclude: &[String]) -> String {
+pub(crate) fn rewrite_query_with_domains(
+    query: &str,
+    include: &[String],
+    exclude: &[String],
+) -> String {
     let mut q = query.to_string();
     for d in include {
         q.push_str(&format!(" site:{d}"));
@@ -1958,20 +2325,39 @@ mod tests {
 
     #[tokio::test]
     async fn search_sources_tool_only_appears_and_works_for_a_research_session_toolbox() {
-        let path = std::env::temp_dir().join(format!("nexus-searchsrc-{}.db", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("nexus-searchsrc-{}.db", uuid::Uuid::new_v4()));
         let db = crate::db::Db::open(&path).unwrap();
         let space = db.default_space_id().unwrap();
         let s = db.create_session("t", "a/b", &space).unwrap();
-        crate::db::cache_put(db.raw(), "https://example.com/a", "https://example.com/a", None, "rust borrow checker notes")
+        crate::db::cache_put(
+            db.raw(),
+            "https://example.com/a",
+            "https://example.com/a",
+            None,
+            "rust borrow checker notes",
+        )
+        .unwrap();
+        db.add_session_sources(&s.id, &["https://example.com/a".to_string()])
             .unwrap();
-        db.add_session_sources(&s.id, &["https://example.com/a".to_string()]).unwrap();
 
-        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), Some(path.clone()), None, None);
+        let tb = ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            Some(path.clone()),
+            None,
+            None,
+        );
         assert!(!tb.defs().iter().any(|d| d.name == "search_sources"));
 
         let tb = tb.with_research_session(s.id.clone());
         assert!(tb.defs().iter().any(|d| d.name == "search_sources"));
-        let (result, _) = tb.run("search_sources", r#"{"query":"borrow checker"}"#).await;
+        let (result, _) = tb
+            .run("search_sources", r#"{"query":"borrow checker"}"#)
+            .await;
         assert!(result.contains("borrow checker"), "{result}");
 
         let (result, _) = tb.run("search_sources", r#"{"query":"quantum"}"#).await;
@@ -1981,7 +2367,12 @@ mod tests {
     #[tokio::test]
     async fn list_citations_reports_recorded_sources_and_filters_by_query() {
         let (tb, db, space) = files_toolbox();
-        db.add_citations(&space, "research-a.md", &[("https://nature.com/x".to_string(), None)]).unwrap();
+        db.add_citations(
+            &space,
+            "research-a.md",
+            &[("https://nature.com/x".to_string(), None)],
+        )
+        .unwrap();
         let (result, _) = tb.run("list_citations", r#"{}"#).await;
         assert!(result.contains("research-a.md"), "{result}");
         assert!(result.contains("nature.com"), "{result}");
@@ -1994,19 +2385,38 @@ mod tests {
     async fn fetch_url_serves_from_cache_when_fresh() {
         let path = std::env::temp_dir().join(format!("nexus-webcache-{}.db", uuid::Uuid::new_v4()));
         let db = crate::db::Db::open(&path).unwrap();
-        crate::db::cache_put(db.raw(), "https://example.com/a", "https://example.com/a", None, "cached body")
-            .unwrap();
-        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), Some(path), None, None);
+        crate::db::cache_put(
+            db.raw(),
+            "https://example.com/a",
+            "https://example.com/a",
+            None,
+            "cached body",
+        )
+        .unwrap();
+        let tb = ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            Some(path),
+            None,
+            None,
+        );
         // A cache hit must not attempt the network — the result is the cached
         // text, not a "fetch failed" error.
-        let (result, _) = tb.run("fetch_url", r#"{"url":"https://example.com/a"}"#).await;
+        let (result, _) = tb
+            .run("fetch_url", r#"{"url":"https://example.com/a"}"#)
+            .await;
         assert!(result.contains("cached body"), "{result}");
     }
 
     #[test]
     fn normalize_url_lowercases_host_strips_tracking_params_and_trailing_slash() {
         assert_eq!(
-            normalize_url("HTTPS://Example.COM/Page/?utm_source=x&utm_medium=y&id=1&fbclid=abc#frag"),
+            normalize_url(
+                "HTTPS://Example.COM/Page/?utm_source=x&utm_medium=y&id=1&fbclid=abc#frag"
+            ),
             "https://example.com/Page?id=1"
         );
         assert_eq!(normalize_url("https://example.com/"), "https://example.com");
@@ -2017,7 +2427,10 @@ mod tests {
     #[test]
     fn cited_url_norms_extracts_every_sources_url() {
         let f = "text [1]\nSources:\n1. https://a.example/\n2. https://b.example?utm_source=x";
-        assert_eq!(cited_url_norms(&[f.to_string()]), vec!["https://a.example", "https://b.example"]);
+        assert_eq!(
+            cited_url_norms(&[f.to_string()]),
+            vec!["https://a.example", "https://b.example"]
+        );
     }
 
     #[test]
@@ -2039,7 +2452,10 @@ mod tests {
             &["docs.rs".into()],
             &["reddit.com".into(), "quora.com".into()],
         );
-        assert_eq!(out, "rust async runtimes site:docs.rs -site:reddit.com -site:quora.com");
+        assert_eq!(
+            out,
+            "rust async runtimes site:docs.rs -site:reddit.com -site:quora.com"
+        );
         assert_eq!(rewrite_query_with_domains("q", &[], &[]), "q");
     }
 
@@ -2094,7 +2510,10 @@ mod tests {
         let text = format_discussion_hits(&hn, &reddit);
         assert!(text.contains("[1] Rust 1.90 released"), "{text:?}");
         assert!(text.contains("312 points, 88 comments"), "{text:?}");
-        assert!(text.contains("[2] What do you think of Rust 1.90?"), "{text:?}");
+        assert!(
+            text.contains("[2] What do you think of Rust 1.90?"),
+            "{text:?}"
+        );
         assert!(text.contains("r/rust, 245 upvotes"), "{text:?}");
     }
 
@@ -2108,14 +2527,29 @@ mod tests {
         let path = std::env::temp_dir().join(format!("nexus-discache-{}.db", uuid::Uuid::new_v4()));
         let db = crate::db::Db::open(&path).unwrap();
         let cache_key = "discussion://rust performance";
-        let cached_response = "[1] Rust is fast\n    HN · 100 points\n    https://news.ycombinator.com/rust";
+        let cached_response =
+            "[1] Rust is fast\n    HN · 100 points\n    https://news.ycombinator.com/rust";
         crate::db::cache_put(db.raw(), cache_key, cache_key, None, cached_response).unwrap();
-        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), Some(path), None, None);
+        let tb = ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            Some(path),
+            None,
+            None,
+        );
         // A cache hit must not attempt the network — the result is the cached
         // text, not a "no results" or "search failed" error.
-        let (result, _) = tb.run("discussion_search", r#"{"query":"rust performance"}"#).await;
+        let (result, _) = tb
+            .run("discussion_search", r#"{"query":"rust performance"}"#)
+            .await;
         assert!(result.contains("Rust is fast"), "{result}");
-        assert!(result.contains("https://news.ycombinator.com/rust"), "{result}");
+        assert!(
+            result.contains("https://news.ycombinator.com/rust"),
+            "{result}"
+        );
     }
 
     #[test]
@@ -2132,8 +2566,16 @@ mod tests {
     #[test]
     fn formats_results_as_numbered_list() {
         let hits = vec![
-            SearchHit { title: "Rust 1.90".into(), url: "https://a".into(), snippet: "release notes".into() },
-            SearchHit { title: "Rust blog".into(), url: "https://b".into(), snippet: "announcement".into() },
+            SearchHit {
+                title: "Rust 1.90".into(),
+                url: "https://a".into(),
+                snippet: "release notes".into(),
+            },
+            SearchHit {
+                title: "Rust blog".into(),
+                url: "https://b".into(),
+                snippet: "announcement".into(),
+            },
         ];
         let out = format_results(&hits);
         assert!(out.starts_with("[1] Rust 1.90\n    https://a\n    release notes"));
@@ -2177,13 +2619,37 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_choice_errors_clearly_when_unconfigured_instead_of_swapping() {
-        let tb = ToolBox::new(PathBuf::new(), None, None, "langsearch".to_string(), Vec::new(), None, None, None);
+        let tb = ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "langsearch".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
         let err = tb.search("test", None, &[], &[]).await.unwrap_err();
-        assert!(err.to_string().contains("LangSearch selected but no API key"));
+        assert!(
+            err.to_string()
+                .contains("LangSearch selected but no API key")
+        );
 
-        let tb = ToolBox::new(PathBuf::new(), None, None, "searxng".to_string(), Vec::new(), None, None, None);
+        let tb = ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "searxng".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
         let err = tb.search("test", None, &[], &[]).await.unwrap_err();
-        assert!(err.to_string().contains("SearXNG selected but no instance URL"));
+        assert!(
+            err.to_string()
+                .contains("SearXNG selected but no instance URL")
+        );
     }
 
     #[tokio::test]
@@ -2209,18 +2675,27 @@ mod tests {
     #[test]
     fn resolves_uddg_redirect_href() {
         let href = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage&rut=abc";
-        assert_eq!(resolve_ddg_href(href).as_deref(), Some("https://example.com/page"));
+        assert_eq!(
+            resolve_ddg_href(href).as_deref(),
+            Some("https://example.com/page")
+        );
     }
 
     #[test]
     fn resolves_protocol_relative_href_without_uddg() {
-        assert_eq!(resolve_ddg_href("//example.com/x").as_deref(), Some("https://example.com/x"));
+        assert_eq!(
+            resolve_ddg_href("//example.com/x").as_deref(),
+            Some("https://example.com/x")
+        );
     }
 
     #[test]
     fn resolve_ddg_href_decodes_plus_as_space() {
         let href = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa+b";
-        assert_eq!(resolve_ddg_href(href).as_deref(), Some("https://example.com/a b"));
+        assert_eq!(
+            resolve_ddg_href(href).as_deref(),
+            Some("https://example.com/a b")
+        );
     }
 
     #[test]
@@ -2230,7 +2705,8 @@ mod tests {
 
     #[test]
     fn drop_tag_blocks_removes_script_and_style_content() {
-        let html = "<p>keep</p><script>var x = 1;</script><style>.a{color:red}</style><p>also keep</p>";
+        let html =
+            "<p>keep</p><script>var x = 1;</script><style>.a{color:red}</style><p>also keep</p>";
         let no_script = drop_tag_blocks(html, "script");
         assert!(!no_script.contains("var x"));
         assert!(no_script.contains("also keep"));
@@ -2365,8 +2841,12 @@ mod tests {
         let db = crate::db::Db::open(&path).unwrap();
         let space = db.default_space_id().unwrap();
         let id = db.upsert_file(&space, "report.md", "h", 1, "ok").unwrap();
-        let text: String = (1..=250).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-        db.set_file_chunks(&id, &crate::extract::chunk_lines(&text)).unwrap();
+        let text: String = (1..=250)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        db.set_file_chunks(&id, &crate::extract::chunk_lines(&text))
+            .unwrap();
         let tb = ToolBox::new(
             PathBuf::new(),
             None,
@@ -2374,7 +2854,11 @@ mod tests {
             "auto".to_string(),
             Vec::new(),
             None,
-            Some(FilesCtx { db_path: path, space_id: space.clone(), embedder: None }),
+            Some(FilesCtx {
+                db_path: path,
+                space_id: space.clone(),
+                embedder: None,
+            }),
             None,
         );
         (tb, db, space)
@@ -2383,8 +2867,21 @@ mod tests {
     fn skills_toolbox() -> (ToolBox, PathBuf) {
         let dir = std::env::temp_dir().join(format!("nexus-skills-tb-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("t")).unwrap();
-        std::fs::write(dir.join("t/SKILL.md"), "---\nname: t\ndescription: d\n---\nx").unwrap();
-        let tb = ToolBox::new(dir.clone(), None, None, "auto".to_string(), Vec::new(), None, None, None);
+        std::fs::write(
+            dir.join("t/SKILL.md"),
+            "---\nname: t\ndescription: d\n---\nx",
+        )
+        .unwrap();
+        let tb = ToolBox::new(
+            dir.clone(),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
         (tb, dir)
     }
 
@@ -2392,7 +2889,12 @@ mod tests {
     async fn run_script_runs_sh_with_args_and_reports_exit_code() {
         let (tb, dir) = skills_toolbox();
         std::fs::write(dir.join("t/go.sh"), "echo \"hi $1\"\nexit 3\n").unwrap();
-        let (result, status) = tb.run("run_script", r#"{"skill":"t","script":"go.sh","args":["there"]}"#).await;
+        let (result, status) = tb
+            .run(
+                "run_script",
+                r#"{"skill":"t","script":"go.sh","args":["there"]}"#,
+            )
+            .await;
         assert!(status.contains("Running t/go.sh"));
         assert!(result.contains("hi there"), "{result}");
         assert!(result.contains("exit code: 3"), "{result}");
@@ -2401,9 +2903,13 @@ mod tests {
     #[tokio::test]
     async fn run_script_is_confined_and_names_missing_scripts() {
         let (tb, _) = skills_toolbox();
-        let (result, _) = tb.run("run_script", r#"{"skill":"t","script":"../evil.sh"}"#).await;
+        let (result, _) = tb
+            .run("run_script", r#"{"skill":"t","script":"../evil.sh"}"#)
+            .await;
         assert!(result.contains("invalid"), "{result}");
-        let (result, _) = tb.run("run_script", r#"{"skill":"t","script":"nope.sh"}"#).await;
+        let (result, _) = tb
+            .run("run_script", r#"{"skill":"t","script":"nope.sh"}"#)
+            .await;
         assert!(result.contains("no such script"), "{result}");
     }
 
@@ -2412,20 +2918,43 @@ mod tests {
         let (tb, _) = skills_toolbox();
         let (result, _) = tb.run("install_packages", r#"{"packages":[]}"#).await;
         assert!(result.contains("no packages"), "{result}");
-        let (result, _) = tb.run("install_packages", r#"{"packages":["--upgrade"],"skill":"t"}"#).await;
+        let (result, _) = tb
+            .run(
+                "install_packages",
+                r#"{"packages":["--upgrade"],"skill":"t"}"#,
+            )
+            .await;
         assert!(result.contains("invalid package name"), "{result}");
-        let (result, _) = tb.run("install_packages", r#"{"packages":["--upgrade"]}"#).await;
+        let (result, _) = tb
+            .run("install_packages", r#"{"packages":["--upgrade"]}"#)
+            .await;
         assert!(result.contains("invalid package name"), "{result}");
-        let (result, _) = tb.run("install_packages", r#"{"packages":["x"],"skill":"a","app":"b"}"#).await;
+        let (result, _) = tb
+            .run(
+                "install_packages",
+                r#"{"packages":["x"],"skill":"a","app":"b"}"#,
+            )
+            .await;
         assert!(result.contains("not both"), "{result}");
-        let (result, _) = tb.run("install_packages", r#"{"packages":["x"],"skill":"ghost"}"#).await;
+        let (result, _) = tb
+            .run("install_packages", r#"{"packages":["x"],"skill":"ghost"}"#)
+            .await;
         assert!(result.contains("unknown skill"), "{result}");
     }
 
     #[tokio::test]
     async fn run_python_computes_in_scratch_venv() {
         let dir = std::env::temp_dir().join(format!("nexus-py-{}", uuid::Uuid::new_v4()));
-        let tb = ToolBox::new(dir.join("skills"), None, None, "auto".to_string(), Vec::new(), None, None, None);
+        let tb = ToolBox::new(
+            dir.join("skills"),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
         let (result, status) = tb.run("run_python", r#"{"code":"print(2**32)"}"#).await;
         assert!(status.contains("Running python"));
         assert!(result.contains("4294967296"), "{result}");
@@ -2437,26 +2966,52 @@ mod tests {
     async fn grep_app_finds_lines_and_skips_node_modules() {
         let (tb, dir) = apps_toolbox();
         let _ = tb.run("write_file", r#"{"app":"deck","path":"index.html","content":"<h1>Title</h1>\n<p>slide two</p>"}"#).await;
-        let _ = tb.run("write_file", r#"{"app":"deck","path":"js/a.js","content":"// slide logic"}"#).await;
+        let _ = tb
+            .run(
+                "write_file",
+                r#"{"app":"deck","path":"js/a.js","content":"// slide logic"}"#,
+            )
+            .await;
         std::fs::create_dir_all(dir.join("deck/node_modules/x")).unwrap();
         std::fs::write(dir.join("deck/node_modules/x/i.js"), "slide").unwrap();
-        let (result, _) = tb.run("grep_app", r#"{"app":"deck","pattern":"SLIDE"}"#).await;
-        assert!(result.contains("index.html:2: <p>slide two</p>"), "{result}");
+        let (result, _) = tb
+            .run("grep_app", r#"{"app":"deck","pattern":"SLIDE"}"#)
+            .await;
+        assert!(
+            result.contains("index.html:2: <p>slide two</p>"),
+            "{result}"
+        );
         assert!(result.contains("js/a.js:1: // slide logic"), "{result}");
         assert!(!result.contains("node_modules"), "{result}");
-        let (result, _) = tb.run("grep_app", r#"{"app":"deck","pattern":"zzz"}"#).await;
+        let (result, _) = tb
+            .run("grep_app", r#"{"app":"deck","pattern":"zzz"}"#)
+            .await;
         assert!(result.contains("no matches"), "{result}");
     }
 
     #[tokio::test]
-    async fn reads_are_line_numbered_and_edits_show_a_diff() {
+    async fn reads_are_line_hashed_and_edits_show_a_diff() {
         let (tb, _) = apps_toolbox();
-        let _ = tb.run("write_file", r#"{"app":"d","path":"i.html","content":"alpha\nbeta"}"#).await;
-        let (result, _) = tb.run("read_app_file", r#"{"app":"d","path":"i.html"}"#).await;
-        assert!(result.contains("    1\talpha"), "{result}");
-        assert!(result.contains("    2\tbeta"), "{result}");
+        let _ = tb
+            .run(
+                "write_file",
+                r#"{"app":"d","path":"i.html","content":"alpha\nbeta"}"#,
+            )
+            .await;
         let (result, _) = tb
-            .run("edit_file", r#"{"app":"d","path":"i.html","old_string":"beta","new_string":"gamma"}"#)
+            .run("read_app_file", r#"{"app":"d","path":"i.html"}"#)
+            .await;
+        let h1 = line_hash(1, "alpha");
+        let h2 = line_hash(2, "beta");
+        assert!(result.contains(&format!("    1:{h1}\talpha")), "{result}");
+        assert!(result.contains(&format!("    2:{h2}\tbeta")), "{result}");
+        let (result, _) = tb
+            .run(
+                "edit_file",
+                &format!(
+                    r#"{{"app":"d","path":"i.html","edits":[{{"hash":"{h2}","new":"gamma"}}]}}"#
+                ),
+            )
             .await;
         assert!(result.contains("- beta"), "{result}");
         assert!(result.contains("+ gamma"), "{result}");
@@ -2464,7 +3019,16 @@ mod tests {
 
     #[tokio::test]
     async fn install_skill_rejects_bad_shorthand_without_network() {
-        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None, None);
+        let tb = ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
         let (result, status) = tb.run("install_skill", r#"{"source":"nope"}"#).await;
         assert!(status.contains("Installing skill"));
         assert!(result.contains("invalid source"), "{result}");
@@ -2477,14 +3041,32 @@ mod tests {
         assert!(names.contains(&"search_files".to_string()));
         assert!(names.contains(&"read_file".to_string()));
 
-        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None, None);
+        let empty = ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
         let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
         assert!(!names.contains(&"search_files".to_string()));
     }
 
     #[test]
     fn fetch_url_is_always_available() {
-        let tb = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None, None);
+        let tb = ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
         assert!(names.contains(&"fetch_url".to_string()));
         assert!(names.contains(&"web_search".to_string()));
@@ -2512,10 +3094,14 @@ mod tests {
         let long = "long ".repeat(200);
         db.set_file_chunks(
             &id,
-            &[("p1".into(), long.clone()), ("p2".into(), "short target".into())],
+            &[
+                ("p1".into(), long.clone()),
+                ("p2".into(), "short target".into()),
+            ],
         )
         .unwrap();
-        db.set_chunk_embeddings(&id, &[(0, vec![1.0, 0.0]), (1, vec![0.0, 1.0])]).unwrap();
+        db.set_chunk_embeddings(&id, &[(0, vec![1.0, 0.0]), (1, vec![0.0, 1.0])])
+            .unwrap();
 
         let out = semantic_snippets(conn, &space, &[0.0, 1.0]).unwrap();
         let first = out.lines().next().unwrap();
@@ -2533,7 +3119,9 @@ mod tests {
         assert!(result.contains("line 200"));
         assert!(!result.contains("line 201")); // 200-line cap
 
-        let (result, _) = tb.run("read_file", r#"{"name":"report.md","offset":201}"#).await;
+        let (result, _) = tb
+            .run("read_file", r#"{"name":"report.md","offset":201}"#)
+            .await;
         assert!(result.contains("line 201"));
         assert!(result.contains("line 250"));
 
@@ -2551,7 +3139,10 @@ mod tests {
             Vec::new(),
             None,
             None,
-            Some(AppsCtx { dir: dir.clone(), space_url: "http://127.0.0.1:9999/default/".to_string() }),
+            Some(AppsCtx {
+                dir: dir.clone(),
+                space_url: "http://127.0.0.1:9999/default/".to_string(),
+            }),
         );
         (tb, dir)
     }
@@ -2563,7 +3154,16 @@ mod tests {
         for t in ["write_file", "edit_file", "read_app_file"] {
             assert!(names.contains(&t.to_string()), "missing {t}");
         }
-        let empty = ToolBox::new(PathBuf::new(), None, None, "auto".to_string(), Vec::new(), None, None, None);
+        let empty = ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
         let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
         assert!(!names.contains(&"write_file".to_string()));
     }
@@ -2572,43 +3172,99 @@ mod tests {
     async fn write_edit_read_round_trip_with_live_url() {
         let (tb, dir) = apps_toolbox();
         let (result, _) = tb
-            .run("write_file", r#"{"app":"deck","path":"index.html","content":"<h1>Hello</h1>"}"#)
+            .run(
+                "write_file",
+                r#"{"app":"deck","path":"index.html","content":"<h1>Hello</h1>"}"#,
+            )
             .await;
         assert!(result.contains("wrote deck/index.html"), "{result}");
-        assert!(result.contains("http://127.0.0.1:9999/default/deck/"), "{result}");
-        assert_eq!(std::fs::read_to_string(dir.join("deck/index.html")).unwrap(), "<h1>Hello</h1>");
+        assert!(
+            result.contains("http://127.0.0.1:9999/default/deck/"),
+            "{result}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("deck/index.html")).unwrap(),
+            "<h1>Hello</h1>"
+        );
 
         // nested path creates parent dirs
-        let (result, _) =
-            tb.run("write_file", r#"{"app":"deck","path":"js/a.js","content":"1"}"#).await;
+        let (result, _) = tb
+            .run(
+                "write_file",
+                r#"{"app":"deck","path":"js/a.js","content":"1"}"#,
+            )
+            .await;
         assert!(result.contains("wrote deck/js/a.js"), "{result}");
 
+        let h = line_hash(1, "<h1>Hello</h1>");
         let (result, _) = tb
-            .run("edit_file", r#"{"app":"deck","path":"index.html","old_string":"Hello","new_string":"Bye"}"#)
+            .run(
+                "edit_file",
+                &format!(r#"{{"app":"deck","path":"index.html","edits":[{{"hash":"{h}","new":"<h1>Bye</h1>"}}]}}"#),
+            )
             .await;
         assert!(result.contains("edited deck/index.html"), "{result}");
-        assert_eq!(std::fs::read_to_string(dir.join("deck/index.html")).unwrap(), "<h1>Bye</h1>");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("deck/index.html")).unwrap(),
+            "<h1>Bye</h1>"
+        );
 
-        let (result, _) =
-            tb.run("read_app_file", r#"{"app":"deck","path":"index.html"}"#).await;
+        let (result, _) = tb
+            .run("read_app_file", r#"{"app":"deck","path":"index.html"}"#)
+            .await;
         assert!(result.contains("<h1>Bye</h1>"), "{result}");
         assert!(result.contains("lines 1-1 of 1"), "{result}");
     }
 
     #[tokio::test]
-    async fn edit_file_rejects_zero_and_multiple_matches() {
+    async fn edit_file_rejects_stale_and_duplicate_hashes() {
         let (tb, _) = apps_toolbox();
         let _ = tb
-            .run("write_file", r#"{"app":"a","path":"f.txt","content":"x y x"}"#)
+            .run(
+                "write_file",
+                r#"{"app":"a","path":"f.txt","content":"x y x"}"#,
+            )
             .await;
+
+        // A hash for content that isn't in the file at all.
         let (result, _) = tb
-            .run("edit_file", r#"{"app":"a","path":"f.txt","old_string":"z","new_string":"w"}"#)
+            .run(
+                "edit_file",
+                r#"{"app":"a","path":"f.txt","edits":[{"hash":"deadbeef","new":"w"}]}"#,
+            )
             .await;
         assert!(result.contains("not found"), "{result}");
-        let (result, _) = tb
-            .run("edit_file", r#"{"app":"a","path":"f.txt","old_string":"x","new_string":"w"}"#)
+
+        // Two edits resolving to the same line in one call.
+        let h = line_hash(1, "x y x");
+        let args = format!(
+            r#"{{"app":"a","path":"f.txt","edits":[{{"hash":"{h}","new":"a"}},{{"hash":"{h}","new":"b"}}]}}"#
+        );
+        let (result, _) = tb.run("edit_file", &args).await;
+        assert!(result.contains("already edited"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn edit_file_can_delete_and_insert_via_multiline_replacement() {
+        let (tb, dir) = apps_toolbox();
+        let _ = tb
+            .run(
+                "write_file",
+                r#"{"app":"a","path":"f.txt","content":"one\ntwo\nthree"}"#,
+            )
             .await;
-        assert!(result.contains("matches 2 places"), "{result}");
+        let h = line_hash(2, "two");
+        // Delete "two" and insert an extra line after "one" in the same call.
+        let args = format!(
+            r#"{{"app":"a","path":"f.txt","edits":[{{"hash":"{}","new":"one\ninserted"}},{{"hash":"{h}"}}]}}"#,
+            line_hash(1, "one"),
+        );
+        let (result, _) = tb.run("edit_file", &args).await;
+        assert!(result.contains("edited a/f.txt"), "{result}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a/f.txt")).unwrap(),
+            "one\ninserted\nthree"
+        );
     }
 
     #[tokio::test]
@@ -2623,7 +3279,10 @@ mod tests {
             r#"{"app":"a","path":"","content":"x"}"#,
         ] {
             let (result, _) = tb.run("write_file", args).await;
-            assert!(result.contains("invalid") || result.contains("must be relative"), "{args} -> {result}");
+            assert!(
+                result.contains("invalid") || result.contains("must be relative"),
+                "{args} -> {result}"
+            );
         }
         assert!(!dir.join("../f.txt").exists());
     }
@@ -2643,7 +3302,10 @@ mod tests {
     async fn research_toolbox_refuses_to_run_other_tools() {
         let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new(), None);
         let (result, _) = tb.run("run_python", r#"{"code":"print(1)"}"#).await;
-        assert!(result.contains("not available in research mode"), "{result}");
+        assert!(
+            result.contains("not available in research mode"),
+            "{result}"
+        );
     }
 
     #[tokio::test]
@@ -2660,8 +3322,14 @@ mod tests {
         ).unwrap();
         drop(conn);
 
-        let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new(), Some(db_path)).cache_only();
-        let (result, _status) = tb.run("fetch_url", r#"{"url":"https://never-fetched.example/page"}"#).await;
+        let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new(), Some(db_path))
+            .cache_only();
+        let (result, _status) = tb
+            .run(
+                "fetch_url",
+                r#"{"url":"https://never-fetched.example/page"}"#,
+            )
+            .await;
         assert!(result.contains("not cached"), "{result}");
     }
 }

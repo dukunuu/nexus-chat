@@ -25,7 +25,10 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
                         Style::default().fg(app.theme.accent),
                     )))
                 } else {
-                    ListItem::new(Line::from(Span::styled(e.name.clone(), Style::default().fg(app.theme.fg))))
+                    ListItem::new(Line::from(Span::styled(
+                        e.name.clone(),
+                        Style::default().fg(app.theme.fg),
+                    )))
                 }
             })
             .collect();
@@ -53,7 +56,11 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         .iter()
         .map(|file| {
             let ok = file.status == "ok";
-            let status_style = if ok { dim } else { Style::default().fg(app.theme.warning) };
+            let status_style = if ok {
+                dim
+            } else {
+                Style::default().fg(app.theme.warning)
+            };
             ListItem::new(Line::from(vec![
                 Span::styled(file.name.clone(), Style::default().fg(app.theme.fg)),
                 Span::styled(format!("  {}", crate::app::human_size(file.size)), dim),
@@ -63,10 +70,20 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         .collect();
 
     let title = match app.files_mode {
-        FilesMode::Add => format!(" import path: {}▏  (Enter import · Esc cancel) ", app.files_edit),
-        FilesMode::Rename => format!(" rename to: {}▏  (Enter rename · Esc cancel) ", app.files_edit),
+        FilesMode::Add => format!(
+            " import path: {}▏  (Enter import · Esc cancel) ",
+            app.files_edit
+        ),
+        FilesMode::Rename => format!(
+            " rename to: {}▏  (Enter rename · Esc cancel) ",
+            app.files_edit
+        ),
         FilesMode::ConfirmDelete => {
-            let name = app.files_cache.get(app.files_selected).map(|f| f.name.clone()).unwrap_or_default();
+            let name = app
+                .files_cache
+                .get(app.files_selected)
+                .map(|f| f.name.clone())
+                .unwrap_or_default();
             format!(" remove \"{name}\"? (Ctrl+D confirm · Esc cancel) ")
         }
         FilesMode::Browse => crate::ui::hint_title(
@@ -91,12 +108,17 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    use super::{BrowseAction, ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key, classify_edit_key};
+    use super::{
+        BrowseAction, ConfirmDeleteAction, EditAction, classify_browse_key,
+        classify_confirm_delete_key, classify_edit_key,
+    };
     use crate::app::FilesMode;
     match app.files_mode {
         FilesMode::Add | FilesMode::Rename => match classify_edit_key(key) {
             Some(EditAction::Cancel) => app.files_mode = FilesMode::Browse,
-            Some(EditAction::Save) if app.files_mode == FilesMode::Add => app.confirm_files_add()?,
+            Some(EditAction::Save) if app.files_mode == FilesMode::Add => {
+                app.confirm_files_add()?
+            }
             Some(EditAction::Save) => app.confirm_files_rename()?,
             Some(EditAction::Backspace) => {
                 app.files_edit.pop();
@@ -116,7 +138,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             }
             // Ctrl+O: re-extract with the current OCR engine (clears old text).
             if key.code == KeyCode::Char('o')
-                && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                && key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
             {
                 app.reextract_selected_file();
                 return Ok(());
@@ -140,7 +164,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             KeyCode::Backspace => app.picker_backspace(),
             KeyCode::Up => app.move_picker_selection(-1),
             KeyCode::Down => app.move_picker_selection(1),
-            KeyCode::Char(c) if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
                 app.picker_filter_push(c)
             }
             _ => {}

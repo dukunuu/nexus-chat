@@ -22,9 +22,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),           // history
-            Constraint::Length(input_h),  // input (auto-height, max 22)
-            Constraint::Length(1),        // status (with inline context bar)
+            Constraint::Min(1),          // history
+            Constraint::Length(input_h), // input (auto-height, max 22)
+            Constraint::Length(1),       // status (with inline context bar)
         ])
         .split(f.area());
 
@@ -48,6 +48,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         Popup::Files => popups::files::render(f, app),
         Popup::Apps => popups::apps::render(f, app),
         Popup::Watch => popups::watches::render(f, app),
+        Popup::ResearchLive => popups::research_live::render(f, app),
         Popup::None => {}
     }
 }
@@ -64,7 +65,9 @@ pub(super) fn dim(s: impl Into<String>, theme: &crate::theme::Theme) -> Span<'st
 pub(super) fn dot(theme: &crate::theme::Theme) -> Line<'static> {
     Line::from(Span::styled(
         "⏺",
-        Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.success)
+            .add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -75,9 +78,11 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
         " …working (Esc to stop) ".to_string()
     } else if let Some((_, title)) = app.stream_session.as_ref().filter(|_| app.is_streaming()) {
         format!(" ⟳ streaming in: {title} ")
-    } else if let Some((_, topic)) = app.research_running.as_ref().filter(|(id, _)| {
-        app.session.as_ref().is_none_or(|s| &s.id != id)
-    }) {
+    } else if let Some((_, topic)) = app
+        .research_running
+        .as_ref()
+        .filter(|(id, _)| app.session.as_ref().is_none_or(|s| &s.id != id))
+    {
         format!(" 🔎 researching: {topic} ")
     } else {
         " message (Enter to send, /help) ".to_string()
@@ -95,11 +100,21 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
     if !app.pending_images.is_empty() {
         let n = app.pending_images.len();
         block = block.title_top(Line::from(Span::styled(
-            format!(" 📎 {} image{} — Esc clears ", n, if n == 1 { "" } else { "s" }),
+            format!(
+                " 📎 {} image{} — Esc clears ",
+                n,
+                if n == 1 { "" } else { "s" }
+            ),
             Style::default().fg(app.theme.warning),
         )));
     }
-    block = block.title_top(Line::from(Span::styled(format!(" {name} "), Style::default().fg(app.theme.accent))).right_aligned());
+    block = block.title_top(
+        Line::from(Span::styled(
+            format!(" {name} "),
+            Style::default().fg(app.theme.accent),
+        ))
+        .right_aligned(),
+    );
     let inner = block.inner(area);
     app.input_inner = inner; // remembered for mouse click -> cursor mapping
     f.render_widget(block, area);
@@ -120,16 +135,29 @@ fn render_command_popup(f: &mut Frame, app: &App, input_area: Rect) {
     let h = n + title_rows;
     let w = input_area.width; // full width, no border
     let y = input_area.y.saturating_sub(h);
-    let area = Rect { x: input_area.x, y, width: w, height: h };
+    let area = Rect {
+        x: input_area.x,
+        y,
+        width: w,
+        height: h,
+    };
 
     // Pad the `/name` column so every description starts at the same column.
-    let name_w = matches.iter().map(|c| c.name().chars().count()).max().unwrap_or(0) + 1;
+    let name_w = matches
+        .iter()
+        .map(|c| c.name().chars().count())
+        .max()
+        .unwrap_or(0)
+        + 1;
     let items: Vec<ListItem> = matches
         .iter()
         .map(|c| {
             let name = format!("/{}", c.name());
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{name:<name_w$}"), Style::default().fg(app.theme.accent)),
+                Span::styled(
+                    format!("{name:<name_w$}"),
+                    Style::default().fg(app.theme.accent),
+                ),
                 Span::raw("   "),
                 Span::styled(c.desc().to_string(), Style::default().fg(app.theme.fg_dim)),
             ]))
@@ -177,7 +205,11 @@ fn render_context_bar(f: &mut Frame, app: &App, area: Rect) {
     for x in 0..width {
         if x < filled {
             // Position along the whole bar → gradient stop.
-            let t = if width > 1 { x as f64 / (width - 1) as f64 } else { 0.0 };
+            let t = if width > 1 {
+                x as f64 / (width - 1) as f64
+            } else {
+                0.0
+            };
             spans.push(Span::styled("█", Style::default().fg(gradient(t))));
         } else {
             spans.push(Span::styled("░", Style::default().fg(app.theme.border_dim)));
@@ -203,7 +235,11 @@ fn gradient(t: f64) -> Color {
 fn context_label(app: &App) -> Option<String> {
     let limit = app.context_limit()?;
     let used = app.context_used();
-    let pct = if limit > 0 { used as f64 / limit as f64 * 100.0 } else { 0.0 };
+    let pct = if limit > 0 {
+        used as f64 / limit as f64 * 100.0
+    } else {
+        0.0
+    };
     Some(format!("{pct:.0}% {}/{}", humanize(used), humanize(limit)))
 }
 
@@ -258,7 +294,11 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
 /// Short absolute timestamp from an rfc3339 string (falls back to the raw text).
 fn fmt_created(rfc3339: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
-        .map(|dt| dt.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string())
+        .map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%b %-d, %H:%M")
+                .to_string()
+        })
         .unwrap_or_else(|_| rfc3339.to_string())
 }
 

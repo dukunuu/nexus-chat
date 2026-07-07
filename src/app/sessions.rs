@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use super::{App, SessionMode, Popup};
+use super::{App, Popup, SessionMode};
 use crate::db::Session;
 
 impl App {
@@ -45,7 +45,9 @@ impl App {
 
     /// The session under the picker cursor (respecting the active filter).
     pub(crate) fn selected_session(&self) -> Option<Session> {
-        self.filtered_sessions().get(self.session_selected).map(|s| (*s).clone())
+        self.filtered_sessions()
+            .get(self.session_selected)
+            .map(|s| (*s).clone())
     }
 
     pub(crate) fn move_session_selection(&mut self, delta: i32) {
@@ -92,7 +94,11 @@ impl App {
     pub(crate) fn confirm_delete(&mut self) -> Result<()> {
         if let Some(s) = self.selected_session() {
             self.db.delete_session(&s.id)?;
-            if self.stream_session.as_ref().is_some_and(|(id, _)| *id == s.id) {
+            if self
+                .stream_session
+                .as_ref()
+                .is_some_and(|(id, _)| *id == s.id)
+            {
                 self.discard_stream();
             }
             self.unread.remove(&s.id);
@@ -174,5 +180,9 @@ pub(super) fn slugify(s: &str) -> String {
         .take(5)
         .collect::<Vec<_>>()
         .join("-");
-    if slug.is_empty() { "chat".to_string() } else { slug }
+    if slug.is_empty() {
+        "chat".to_string()
+    } else {
+        slug
+    }
 }

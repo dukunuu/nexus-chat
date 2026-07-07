@@ -45,27 +45,106 @@ impl Match {
 }
 
 pub const COMMANDS: &[Command] = &[
-    Command { name: "new", desc: "start new chat", aliases: &["chat", "clear"] },
-    Command { name: "compact", desc: "summarize old messages", aliases: &["compaction", "summarize"] },
-    Command { name: "session", desc: "switch sessions", aliases: &["sessions", "history", "resume", "continue", "switch"] },
-    Command { name: "space", desc: "switch spaces", aliases: &["spaces", "project", "workspace"] },
-    Command { name: "model", desc: "pick a model", aliases: &["models", "llm"] },
-    Command { name: "key", desc: "set API key", aliases: &["apikey", "token", "auth"] },
-    Command { name: "config", desc: "settings & stats", aliases: &["settings", "stats", "nerd", "params"] },
-    Command { name: "skills", desc: "manage skills", aliases: &["addskill"] },
-    Command { name: "files", desc: "space files", aliases: &["file", "attach", "upload", "docs"] },
-    Command { name: "apps", desc: "view space apps", aliases: &["app", "webapps"] },
-    Command { name: "ocr-local", desc: "pull a local OCR model via ollama (default glm-ocr)", aliases: &["ocrlocal"] },
-    Command { name: "research", desc: "deep multi-agent research on a topic (background)", aliases: &["deep-research"] },
-    Command { name: "export", desc: "write session's report + sources to a file", aliases: &["save-report"] },
-    Command { name: "watch", desc: "standing research, re-runs every 24h", aliases: &["watches"] },
-    Command { name: "web", desc: "toggle web answer mode (search-first, cited)", aliases: &["websearch"] },
-    Command { name: "steer", desc: "inject a research instruction mid-flight", aliases: &["nudge"] },
-    Command { name: "edit", desc: "open app file in $EDITOR", aliases: &["open"] },
-    Command { name: "think", desc: "reasoning view", aliases: &["reasoning", "thinking"] },
-    Command { name: "copy", desc: "copy last reply", aliases: &["yank", "clip"] },
-    Command { name: "help", desc: "list commands", aliases: &["commands"] },
-    Command { name: "quit", desc: "exit the app", aliases: &["q", "exit"] },
+    Command {
+        name: "new",
+        desc: "start new chat",
+        aliases: &["chat", "clear"],
+    },
+    Command {
+        name: "compact",
+        desc: "summarize old messages",
+        aliases: &["compaction", "summarize"],
+    },
+    Command {
+        name: "session",
+        desc: "switch sessions",
+        aliases: &["sessions", "history", "resume", "continue", "switch"],
+    },
+    Command {
+        name: "space",
+        desc: "switch spaces",
+        aliases: &["spaces", "project", "workspace"],
+    },
+    Command {
+        name: "model",
+        desc: "pick a model",
+        aliases: &["models", "llm"],
+    },
+    Command {
+        name: "key",
+        desc: "set API key",
+        aliases: &["apikey", "token", "auth"],
+    },
+    Command {
+        name: "login",
+        desc: "ChatGPT Codex login",
+        aliases: &["codex", "subscription", "oauth", "chatgpt"],
+    },
+    Command {
+        name: "config",
+        desc: "settings & stats",
+        aliases: &["settings", "stats", "nerd", "params"],
+    },
+    Command {
+        name: "skills",
+        desc: "manage skills",
+        aliases: &["addskill"],
+    },
+    Command {
+        name: "files",
+        desc: "space files",
+        aliases: &["file", "attach", "upload", "docs"],
+    },
+    Command {
+        name: "apps",
+        desc: "view space apps",
+        aliases: &["app", "webapps"],
+    },
+    Command {
+        name: "research",
+        desc: "deep multi-agent research (blank = scope topic from this chat)",
+        aliases: &["deep-research"],
+    },
+    Command {
+        name: "export",
+        desc: "write session's report + sources to a file",
+        aliases: &["save-report"],
+    },
+    Command {
+        name: "watch",
+        desc: "standing research, re-runs every 24h",
+        aliases: &["watches"],
+    },
+    Command {
+        name: "web",
+        desc: "toggle web answer mode (search-first, cited)",
+        aliases: &["websearch"],
+    },
+    Command {
+        name: "steer",
+        desc: "inject a research instruction mid-flight",
+        aliases: &["nudge"],
+    },
+    Command {
+        name: "edit",
+        desc: "open app file in $EDITOR",
+        aliases: &["open"],
+    },
+    Command {
+        name: "copy",
+        desc: "copy last reply",
+        aliases: &["yank", "clip"],
+    },
+    Command {
+        name: "help",
+        desc: "list commands",
+        aliases: &["commands"],
+    },
+    Command {
+        name: "quit",
+        desc: "exit the app",
+        aliases: &["q", "exit"],
+    },
 ];
 
 /// Subsequence fuzzy score, case-insensitive. `None` if `needle` isn't a
@@ -142,7 +221,10 @@ pub(crate) fn copy_to_clipboard(clipboard: &mut Option<arboard::Clipboard>, text
         return String::new();
     }
     let n = text.chars().count();
-    if clipboard.as_mut().is_some_and(|cb| cb.set_text(text.to_string()).is_ok()) {
+    if clipboard
+        .as_mut()
+        .is_some_and(|cb| cb.set_text(text.to_string()).is_ok())
+    {
         format!("copied {n} chars")
     } else {
         "clipboard unavailable".to_string()
@@ -197,7 +279,9 @@ impl App {
     /// fine for an explicit copy but wrong for keeping the clipboard synced
     /// while a keyboard (Shift+arrow) selection is still growing.
     pub fn copy_selection_live(&mut self) {
-        let Some(((r1, c1), (r2, c2))) = self.input.selection_range() else { return };
+        let Some(((r1, c1), (r2, c2))) = self.input.selection_range() else {
+            return;
+        };
         let lines = self.input.lines();
         let text = if r1 == r2 {
             lines[r1].chars().skip(c1).take(c2 - c1).collect::<String>()
@@ -248,12 +332,18 @@ impl App {
                 self.input.insert_str(text);
             }
             Popup::Key => self.key_input.push_str(text),
-            Popup::Session if self.session_mode == SessionMode::Rename => self.session_edit.push_str(text),
+            Popup::Session if self.session_mode == SessionMode::Rename => {
+                self.session_edit.push_str(text)
+            }
             Popup::Space if matches!(self.space_mode, SpaceMode::Create | SpaceMode::Rename) => {
                 self.space_edit.push_str(text);
             }
-            Popup::Skills if self.skills_mode == SkillsMode::Install => self.skills_edit.push_str(text),
-            Popup::Files if self.files_mode == crate::app::FilesMode::Add => self.files_edit.push_str(text),
+            Popup::Skills if self.skills_mode == SkillsMode::Install => {
+                self.skills_edit.push_str(text)
+            }
+            Popup::Files if self.files_mode == crate::app::FilesMode::Add => {
+                self.files_edit.push_str(text)
+            }
             Popup::Files if self.files_mode == crate::app::FilesMode::Pick => {
                 for c in text.chars().filter(|c| !c.is_control()) {
                     self.picker_filter_push(c);
@@ -270,7 +360,9 @@ impl App {
                             | Some(SettingsField::BlockedDomains)
                     );
                     let filtered: String = if numeric {
-                        text.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect()
+                        text.chars()
+                            .filter(|c| c.is_ascii_digit() || *c == '.')
+                            .collect()
                     } else {
                         text.chars().filter(|c| !c.is_control()).collect()
                     };
@@ -292,7 +384,9 @@ impl App {
             self.attach_clipboard_image(img);
             return;
         }
-        let Some(cb) = self.clipboard.as_mut() else { return };
+        let Some(cb) = self.clipboard.as_mut() else {
+            return;
+        };
         let Ok(text) = cb.get_text() else { return };
         self.paste(&text);
     }
@@ -341,7 +435,9 @@ impl App {
     /// whichever word the cursor (already jumped to the drag position) is
     /// over now, snapping both ends to word boundaries.
     pub fn extend_composer_word_selection(&mut self) {
-        let Some(anchor) = self.composer_word_anchor else { return };
+        let Some(anchor) = self.composer_word_anchor else {
+            return;
+        };
         let cur = self.input.cursor();
         self.input.cancel_selection();
         if cur >= anchor {
@@ -368,7 +464,9 @@ impl App {
     /// Extend a line-mode drag: re-select every full line between the anchor
     /// line and wherever the cursor (already jumped to the drag position) is.
     pub fn extend_composer_line_selection(&mut self) {
-        let Some(anchor) = self.composer_word_anchor else { return };
+        let Some(anchor) = self.composer_word_anchor else {
+            return;
+        };
         let cur = self.input.cursor();
         self.input.cancel_selection();
         if cur >= anchor {
@@ -385,7 +483,8 @@ impl App {
     }
 
     fn jump_cursor(&mut self, (row, col): (usize, usize)) {
-        self.input.move_cursor(CursorMove::Jump(row as u16, col as u16));
+        self.input
+            .move_cursor(CursorMove::Jump(row as u16, col as u16));
     }
 
     // --- slash command autocomplete ---
@@ -408,15 +507,25 @@ impl App {
             .collect();
         scored.extend(self.skills.iter().filter_map(|s| {
             if rest.is_empty() {
-                return Some((0, Match::Skill { name: s.name.clone(), desc: s.description.clone() }));
+                return Some((
+                    0,
+                    Match::Skill {
+                        name: s.name.clone(),
+                        desc: s.description.clone(),
+                    },
+                ));
             }
             let name_score = fuzzy_score(&s.name, rest).map(|sc| sc + 100);
             let desc_score = fuzzy_score(&s.description, rest);
-            name_score
-                .into_iter()
-                .chain(desc_score)
-                .max()
-                .map(|score| (score, Match::Skill { name: s.name.clone(), desc: s.description.clone() }))
+            name_score.into_iter().chain(desc_score).max().map(|score| {
+                (
+                    score,
+                    Match::Skill {
+                        name: s.name.clone(),
+                        desc: s.description.clone(),
+                    },
+                )
+            })
         }));
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name().cmp(b.1.name())));
         scored.into_iter().map(|(_, m)| m).collect()
@@ -444,7 +553,10 @@ impl App {
     /// otherwise just fill it into the composer (Tab).
     pub fn accept_command(&mut self, run: bool) -> Result<()> {
         let matches = self.command_matches();
-        let Some(idx) = matches.get(self.command_selected()).map(|_| self.command_selected()) else {
+        let Some(idx) = matches
+            .get(self.command_selected())
+            .map(|_| self.command_selected())
+        else {
             return Ok(());
         };
         let name = matches[idx].name().to_string();
@@ -467,7 +579,9 @@ mod tests {
 
     fn test_app() -> App {
         let db = Db::open_in_memory().unwrap();
-        let space = Space { root: std::env::temp_dir().join(format!("nexus-input-test-{}", uuid::Uuid::new_v4())) };
+        let space = Space {
+            root: std::env::temp_dir().join(format!("nexus-input-test-{}", uuid::Uuid::new_v4())),
+        };
         App::new(db, Some("k".into()), space)
     }
 

@@ -1,4 +1,4 @@
-use super::{code_blocks, App, CopyOption, Popup};
+use super::{App, CopyOption, Popup, code_blocks};
 
 impl App {
     /// Copy arbitrary text to the clipboard and report it in the status line.
@@ -52,13 +52,18 @@ impl App {
 
     /// Copy the highlighted `/copy` menu entry and close the menu.
     pub(crate) fn confirm_copy(&mut self) {
-        if let Some(text) = self.copy_options.get(self.copy_selected).map(|o| o.text.clone()) {
+        if let Some(text) = self
+            .copy_options
+            .get(self.copy_selected)
+            .map(|o| o.text.clone())
+        {
             self.copy_text(text);
         }
         self.popup = Popup::None;
     }
 
     pub(crate) fn move_copy_selection(&mut self, delta: i32) {
-        self.copy_selected = super::clamp_cursor(self.copy_selected, self.copy_options.len(), delta);
+        self.copy_selected =
+            super::clamp_cursor(self.copy_selected, self.copy_options.len(), delta);
     }
 }

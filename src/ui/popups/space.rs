@@ -21,7 +21,11 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         .iter()
         .map(|s| {
             let n = app.db.count_sessions(&s.id).unwrap_or(0);
-            let mark = if s.name == app.active_space.name { "● " } else { "  " };
+            let mark = if s.name == app.active_space.name {
+                "● "
+            } else {
+                "  "
+            };
             let name = if s.name == DEFAULT_SPACE {
                 format!("{mark}{} (default)", s.name)
             } else {
@@ -29,19 +33,33 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             };
             let line = Line::from(vec![
                 Span::styled(name, Style::default().fg(app.theme.fg)),
-                Span::styled(format!("  {n} session{}", if n == 1 { "" } else { "s" }), dim),
-                Span::styled(format!("  · {}", crate::ui::fmt_created(&s.created_at)), dim),
+                Span::styled(
+                    format!("  {n} session{}", if n == 1 { "" } else { "s" }),
+                    dim,
+                ),
+                Span::styled(
+                    format!("  · {}", crate::ui::fmt_created(&s.created_at)),
+                    dim,
+                ),
             ]);
             ListItem::new(line)
         })
         .collect();
 
     let title: Line = match app.space_mode {
-        SpaceMode::Create => Line::from(format!(" new space: {}▏  (Enter create · Esc cancel) ", app.space_edit)),
-        SpaceMode::Rename => Line::from(format!(" rename: {}▏  (Enter save · Esc cancel) ", app.space_edit)),
+        SpaceMode::Create => Line::from(format!(
+            " new space: {}▏  (Enter create · Esc cancel) ",
+            app.space_edit
+        )),
+        SpaceMode::Rename => Line::from(format!(
+            " rename: {}▏  (Enter save · Esc cancel) ",
+            app.space_edit
+        )),
         SpaceMode::ConfirmDelete => {
             let name = app.selected_space().map(|s| s.name).unwrap_or_default();
-            Line::from(format!(" delete \"{name}\"? sessions move to default. (Ctrl+D confirm · Esc cancel) "))
+            Line::from(format!(
+                " delete \"{name}\"? sessions move to default. (Ctrl+D confirm · Esc cancel) "
+            ))
         }
         SpaceMode::Browse => {
             let keys = if app.settings.hide_hints {
@@ -68,7 +86,10 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    use super::{ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key, classify_edit_key};
+    use super::{
+        ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key,
+        classify_edit_key,
+    };
     use crate::app::SpaceMode;
     use crate::db::DEFAULT_SPACE;
     match app.space_mode {
@@ -104,7 +125,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 Some(super::BrowseAction::Rename) => app.start_space_rename(),
                 // The default space is never deletable.
                 Some(super::BrowseAction::ConfirmDelete)
-                    if app.selected_space().is_some_and(|s| s.name != DEFAULT_SPACE) =>
+                    if app
+                        .selected_space()
+                        .is_some_and(|s| s.name != DEFAULT_SPACE) =>
                 {
                     app.space_mode = SpaceMode::ConfirmDelete;
                 }

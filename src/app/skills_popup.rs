@@ -7,7 +7,9 @@ impl App {
     /// a later phase; `/skills` needs *something* to do meanwhile.
     pub(super) fn open_skills_popup(&mut self) {
         self.skills_mode = SkillsMode::Browse;
-        self.skills_selected = self.skills_selected.min(self.skills.len().saturating_sub(1));
+        self.skills_selected = self
+            .skills_selected
+            .min(self.skills.len().saturating_sub(1));
         self.popup = Popup::Skills;
     }
 
@@ -78,6 +80,8 @@ impl App {
 
     /// Path to the highlighted skill's SKILL.md, for Ctrl+E in the skills popup.
     pub(crate) fn skill_edit_path_for_selected(&self) -> Option<std::path::PathBuf> {
-        self.skills.get(self.skills_selected).map(|s| s.dir.join("SKILL.md"))
+        self.skills
+            .get(self.skills_selected)
+            .map(|s| s.dir.join("SKILL.md"))
     }
 }

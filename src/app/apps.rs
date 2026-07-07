@@ -7,7 +7,9 @@ use super::{App, AppsMode};
 impl App {
     pub(crate) fn open_apps_popup(&mut self) {
         self.apps_cache = self.list_apps();
-        self.apps_selected = self.apps_selected.min(self.apps_cache.len().saturating_sub(1));
+        self.apps_selected = self
+            .apps_selected
+            .min(self.apps_cache.len().saturating_sub(1));
         self.apps_mode = AppsMode::Browse;
         self.popup = super::Popup::Apps;
     }
@@ -19,12 +21,18 @@ impl App {
     /// An app's live URL, when the server is running.
     pub fn app_url(&self, name: &str) -> Option<String> {
         let s = self.app_server.as_ref()?;
-        Some(format!("{}{}/", s.space_url(&self.active_space.name), crate::appserver::encode(name)))
+        Some(format!(
+            "{}{}/",
+            s.space_url(&self.active_space.name),
+            crate::appserver::encode(name)
+        ))
     }
 
     /// Enter in Browse: open the highlighted app in the system browser.
     pub fn open_selected_app(&mut self) {
-        let Some(name) = self.apps_cache.get(self.apps_selected) else { return };
+        let Some(name) = self.apps_cache.get(self.apps_selected) else {
+            return;
+        };
         match self.app_url(name) {
             Some(url) => {
                 let _ = open::that_detached(&url);
@@ -41,7 +49,9 @@ impl App {
             std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
             self.status = format!("removed app {name}");
             self.apps_cache = self.list_apps();
-            self.apps_selected = self.apps_selected.min(self.apps_cache.len().saturating_sub(1));
+            self.apps_selected = self
+                .apps_selected
+                .min(self.apps_cache.len().saturating_sub(1));
         }
         self.apps_mode = AppsMode::Browse;
         Ok(())
@@ -51,12 +61,18 @@ impl App {
     /// "deps" marker would be noise, so it's skipped entirely).
     pub fn app_file_count(&self, name: &str) -> usize {
         fn count(dir: &std::path::Path) -> usize {
-            let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return 0;
+            };
             rd.flatten()
                 .map(|e| {
                     let p = e.path();
                     if p.is_dir() {
-                        if e.file_name() == "node_modules" { 0 } else { count(&p) }
+                        if e.file_name() == "node_modules" {
+                            0
+                        } else {
+                            count(&p)
+                        }
                     } else {
                         1
                     }

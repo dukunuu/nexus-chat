@@ -18,12 +18,16 @@ fn split_label(label: &'static str) -> (String, String) {
 }
 
 pub(crate) fn render(f: &mut Frame, app: &App) {
-    use crate::app::{SettingsField, SETTINGS_GROUPS};
+    use crate::app::{SETTINGS_GROUPS, SettingsField};
     let area = crate::ui::centered(f.area(), 64, 60);
     f.render_widget(Clear, area);
 
     let dim = Style::default().fg(app.theme.fg_dim);
-    let name_w = SettingsField::ALL.iter().map(|f| split_label(f.label()).0.chars().count()).max().unwrap_or(0);
+    let name_w = SettingsField::ALL
+        .iter()
+        .map(|f| split_label(f.label()).0.chars().count())
+        .max()
+        .unwrap_or(0);
 
     let toggle = |b: bool| -> Span<'static> {
         if b {
@@ -50,16 +54,22 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             SettingsField::MemoryModel => numeric(&app.memory_model),
             SettingsField::CompactThreshold => numeric(&app.settings_inputs[3]),
             SettingsField::SearxngUrl => numeric(&app.settings_inputs[4]),
-            SettingsField::Verbosity => Span::styled(app.verbosity.clone(), Style::default().fg(app.theme.accent)),
-            SettingsField::LangsearchKey => numeric(&app.settings_inputs[5]),
-            SettingsField::SearchProvider => {
-                Span::styled(app.search_provider.clone(), Style::default().fg(app.theme.accent))
+            SettingsField::Verbosity => {
+                Span::styled(app.verbosity.clone(), Style::default().fg(app.theme.accent))
             }
+            SettingsField::LangsearchKey => numeric(&app.settings_inputs[5]),
+            SettingsField::SearchProvider => Span::styled(
+                app.search_provider.clone(),
+                Style::default().fg(app.theme.accent),
+            ),
             SettingsField::TranscriberModel => numeric(&app.transcriber_model),
             SettingsField::OcrModel => numeric(&app.ocr_model),
             SettingsField::ResearchModel => numeric(&app.research_model),
             SettingsField::EscalationModel => numeric(&app.escalation_model),
-            SettingsField::OcrEngine => Span::styled(app.ocr_engine.clone(), Style::default().fg(app.theme.accent)),
+            SettingsField::OcrEngine => Span::styled(
+                app.ocr_engine.clone(),
+                Style::default().fg(app.theme.accent),
+            ),
             SettingsField::EmbeddingModel => numeric(&app.settings_inputs[6]),
             SettingsField::BlockedDomains => numeric(&app.settings_inputs[7]),
         }
@@ -71,10 +81,16 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         .map(|row| match row {
             SettingsRow::Group(i) => {
                 let g = &SETTINGS_GROUPS[*i];
-                let arrow = if app.settings_collapsed.contains(i) { "▸" } else { "▾" };
+                let arrow = if app.settings_collapsed.contains(i) {
+                    "▸"
+                } else {
+                    "▾"
+                };
                 ListItem::new(Line::from(Span::styled(
                     format!("{arrow} {}", g.name),
-                    Style::default().fg(app.theme.accent2).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(app.theme.accent2)
+                        .add_modifier(Modifier::BOLD),
                 )))
             }
             SettingsRow::Field(field) => {

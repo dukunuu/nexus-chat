@@ -57,7 +57,9 @@ impl FilterInput {
     }
 
     fn delete_selection(&mut self) -> bool {
-        let Some((s, e)) = self.selection_range() else { return false };
+        let Some((s, e)) = self.selection_range() else {
+            return false;
+        };
         let chars: Vec<char> = self.text.chars().collect();
         self.text = chars[..s].iter().chain(chars[e..].iter()).collect();
         self.cursor = s;
@@ -201,7 +203,12 @@ impl FilterInput {
         } else if self.cursor >= chars.len() {
             vec![
                 Span::raw(self.text.clone()),
-                Span::styled("▏", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "▏",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]
         } else {
             vec![

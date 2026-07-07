@@ -1,21 +1,34 @@
 use anyhow::Result;
 
-use super::{App, Popup, SettingsField, SettingsRow, SEARCH_PROVIDERS, SETTINGS_GROUPS, VERBOSITY_LEVELS};
+use super::{
+    App, Popup, SEARCH_PROVIDERS, SETTINGS_GROUPS, SettingsField, SettingsRow, VERBOSITY_LEVELS,
+};
 
 impl App {
     pub(super) fn open_settings(&mut self) {
         self.settings_selected = 0;
         self.settings_inputs = [
-            self.settings.temperature.map(|v| v.to_string()).unwrap_or_default(),
-            self.settings.top_p.map(|v| v.to_string()).unwrap_or_default(),
-            self.settings.max_tokens.map(|v| v.to_string()).unwrap_or_default(),
+            self.settings
+                .temperature
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            self.settings
+                .top_p
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            self.settings
+                .max_tokens
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
             self.settings.compact_threshold.to_string(),
             self.searxng_url.clone(),
             self.langsearch_key.clone(),
             self.embedding_model.clone(),
-            std::fs::read_to_string(self.space.blocked_domains_path(&self.active_space.name)).unwrap_or_default(),
+            std::fs::read_to_string(self.space.blocked_domains_path(&self.active_space.name))
+                .unwrap_or_default(),
         ];
-        self.status = "↑/↓ field · type to edit · Space toggles · Ctrl+E system prompt · Esc saves".to_string();
+        self.status = "↑/↓ field · type to edit · Space toggles · Ctrl+E system prompt · Esc saves"
+            .to_string();
         self.popup = Popup::Settings;
     }
 
@@ -72,12 +85,19 @@ impl App {
                 }
                 SettingsField::HideHints => self.settings.hide_hints = !self.settings.hide_hints,
                 SettingsField::Verbosity => {
-                    let i = VERBOSITY_LEVELS.iter().position(|&l| l == self.verbosity).unwrap_or(1);
+                    let i = VERBOSITY_LEVELS
+                        .iter()
+                        .position(|&l| l == self.verbosity)
+                        .unwrap_or(1);
                     self.verbosity = VERBOSITY_LEVELS[(i + 1) % VERBOSITY_LEVELS.len()].to_string();
                 }
                 SettingsField::SearchProvider => {
-                    let i = SEARCH_PROVIDERS.iter().position(|&p| p == self.search_provider).unwrap_or(0);
-                    self.search_provider = SEARCH_PROVIDERS[(i + 1) % SEARCH_PROVIDERS.len()].to_string();
+                    let i = SEARCH_PROVIDERS
+                        .iter()
+                        .position(|&p| p == self.search_provider)
+                        .unwrap_or(0);
+                    self.search_provider =
+                        SEARCH_PROVIDERS[(i + 1) % SEARCH_PROVIDERS.len()].to_string();
                 }
                 SettingsField::OcrEngine => {
                     let _ = self.cycle_ocr_engine();
@@ -87,10 +107,23 @@ impl App {
         }
     }
 
-    /// Advance the OCR engine auto → tesseract → vlm → auto, persisted.
+    /// Advance the OCR engine auto → tesseract → vlm → local → auto,
+    /// persisted. Cycling into "local" pulls the configured model via ollama
+    /// in the background (formerly the separate `/ocr-local` command) —
+    /// `ocr_local_install` itself flips the engine to "local" and persists it
+    /// once the pull actually succeeds, so a failed pull doesn't leave the
+    /// engine silently pointed at a model that was never fetched.
     pub(crate) fn cycle_ocr_engine(&mut self) -> Result<()> {
-        let i = super::OCR_ENGINES.iter().position(|&e| e == self.ocr_engine).unwrap_or(0);
-        self.ocr_engine = super::OCR_ENGINES[(i + 1) % super::OCR_ENGINES.len()].to_string();
+        let i = super::OCR_ENGINES
+            .iter()
+            .position(|&e| e == self.ocr_engine)
+            .unwrap_or(0);
+        let next = super::OCR_ENGINES[(i + 1) % super::OCR_ENGINES.len()];
+        if next == "local" {
+            self.ocr_local_install("");
+            return Ok(());
+        }
+        self.ocr_engine = next.to_string();
         self.db.set_setting("ocr_engine", &self.ocr_engine)?;
         Ok(())
     }
@@ -100,7 +133,11 @@ impl App {
         self.settings.show_reasoning = !self.settings.show_reasoning;
         self.db.set_setting(
             "show_reasoning",
-            if self.settings.show_reasoning { "1" } else { "0" },
+            if self.settings.show_reasoning {
+                "1"
+            } else {
+                "0"
+            },
         )?;
         self.status = if self.settings.show_reasoning {
             "reasoning expanded".to_string()
@@ -145,34 +182,53 @@ impl App {
             self.settings_inputs[3].trim().parse().unwrap_or(0).min(100);
 
         let stats = if self.settings.show_stats { "1" } else { "0" };
-        let reason = if self.settings.show_reasoning { "1" } else { "0" };
+        let reason = if self.settings.show_reasoning {
+            "1"
+        } else {
+            "0"
+        };
         let hints = if self.settings.hide_hints { "1" } else { "0" };
         self.db.set_setting("show_stats", stats)?;
         self.db.set_setting("show_reasoning", reason)?;
         self.db.set_setting("hide_hints", hints)?;
-        self.db.set_setting("temperature", self.settings_inputs[0].trim())?;
-        self.db.set_setting("top_p", self.settings_inputs[1].trim())?;
-        self.db.set_setting("max_tokens", self.settings_inputs[2].trim())?;
-        self.db.set_setting("compact_threshold", &self.settings.compact_threshold.to_string())?;
+        self.db
+            .set_setting("temperature", self.settings_inputs[0].trim())?;
+        self.db
+            .set_setting("top_p", self.settings_inputs[1].trim())?;
+        self.db
+            .set_setting("max_tokens", self.settings_inputs[2].trim())?;
+        self.db.set_setting(
+            "compact_threshold",
+            &self.settings.compact_threshold.to_string(),
+        )?;
         self.memory_model = self.memory_model.trim().to_string();
         self.db.set_setting("memory_model", &self.memory_model)?;
         self.transcriber_model = self.transcriber_model.trim().to_string();
-        self.db.set_setting("transcriber_model", &self.transcriber_model)?;
-        self.searxng_url = self.settings_inputs[4].trim().trim_end_matches('/').to_string();
+        self.db
+            .set_setting("transcriber_model", &self.transcriber_model)?;
+        self.searxng_url = self.settings_inputs[4]
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
         self.db.set_setting("searxng_url", &self.searxng_url)?;
         self.db.set_setting("verbosity", &self.verbosity)?;
         self.langsearch_key = self.settings_inputs[5].trim().to_string();
-        self.db.set_setting("langsearch_key", &self.langsearch_key)?;
-        self.db.set_setting("search_provider", &self.search_provider)?;
+        self.db
+            .set_setting("langsearch_key", &self.langsearch_key)?;
+        self.db
+            .set_setting("search_provider", &self.search_provider)?;
         self.ocr_model = self.ocr_model.trim().to_string();
         self.db.set_setting("ocr_model", &self.ocr_model)?;
         self.db.set_setting("ocr_engine", &self.ocr_engine)?;
         self.research_model = self.research_model.trim().to_string();
-        self.db.set_setting("research_model", &self.research_model)?;
+        self.db
+            .set_setting("research_model", &self.research_model)?;
         self.escalation_model = self.escalation_model.trim().to_string();
-        self.db.set_setting("escalation_model", &self.escalation_model)?;
+        self.db
+            .set_setting("escalation_model", &self.escalation_model)?;
         self.embedding_model = self.settings_inputs[6].trim().to_string();
-        self.db.set_setting("embedding_model", &self.embedding_model)?;
+        self.db
+            .set_setting("embedding_model", &self.embedding_model)?;
         // Per-space (not a db setting): lives next to the space's other
         // config files so it travels with the space.
         let _ = std::fs::write(

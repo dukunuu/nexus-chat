@@ -166,7 +166,10 @@ impl HistorySel {
     /// The URL (if any) under `pos`, scanned from that line's plain text.
     pub fn url_at(&self, (line, col): Pos) -> Option<String> {
         let text = self.lines.get(line)?;
-        scan_bare_urls(text).into_iter().find(|(range, _)| range.contains(&col)).map(|(_, url)| url)
+        scan_bare_urls(text)
+            .into_iter()
+            .find(|(range, _)| range.contains(&col))
+            .map(|(_, url)| url)
     }
 
     /// When to wake the event loop to check for a long press (if a press is held
@@ -218,7 +221,11 @@ impl HistorySel {
 
     /// The word-boundary range (start, end) around `pos`, on its own line.
     fn word_bounds(&self, (line, col): Pos) -> (Pos, Pos) {
-        let chars: Vec<char> = self.lines.get(line).map(|l| l.chars().collect()).unwrap_or_default();
+        let chars: Vec<char> = self
+            .lines
+            .get(line)
+            .map(|l| l.chars().collect())
+            .unwrap_or_default();
         let mut lo = col.min(chars.len());
         let mut hi = lo;
         while lo > 0 && !chars[lo - 1].is_whitespace() {
@@ -252,7 +259,11 @@ impl HistorySel {
     /// Line-snapped range covering every line between `anchor` and `pos`.
     fn line_extend(&self, anchor: Pos, pos: Pos) -> (Pos, Pos) {
         let (lo_line, hi_line) = (anchor.0.min(pos.0), anchor.0.max(pos.0));
-        let len = self.lines.get(hi_line).map(|l| l.chars().count()).unwrap_or(0);
+        let len = self
+            .lines
+            .get(hi_line)
+            .map(|l| l.chars().count())
+            .unwrap_or(0);
         ((lo_line, 0), (hi_line, len))
     }
 
@@ -335,7 +346,12 @@ fn scan_bare_urls(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
                 end += 1;
             }
             let mut trimmed_end = end;
-            while trimmed_end > i && matches!(chars[trimmed_end - 1], '.' | ',' | ')' | ']' | '>' | ':' | ';' | '"' | '\'') {
+            while trimmed_end > i
+                && matches!(
+                    chars[trimmed_end - 1],
+                    '.' | ',' | ')' | ']' | '>' | ':' | ';' | '"' | '\''
+                )
+            {
                 trimmed_end -= 1;
             }
             if trimmed_end > i {
@@ -376,7 +392,12 @@ fn regroup(row: Vec<(char, Style)>) -> Line<'static> {
 mod tests {
     use super::*;
 
-    fn build(lines: &[&str], owner: &[Option<usize>], code: &[Option<usize>], raw: &[&str]) -> HistorySel {
+    fn build(
+        lines: &[&str],
+        owner: &[Option<usize>],
+        code: &[Option<usize>],
+        raw: &[&str],
+    ) -> HistorySel {
         let mut s = HistorySel::default();
         s.record_render(
             Rect::new(0, 0, 40, 10),
@@ -390,7 +411,12 @@ mod tests {
     }
 
     fn sel_with(lines: &[&str]) -> HistorySel {
-        build(lines, &vec![Some(0); lines.len()], &vec![None; lines.len()], &[])
+        build(
+            lines,
+            &vec![Some(0); lines.len()],
+            &vec![None; lines.len()],
+            &[],
+        )
     }
 
     fn with_owner(lines: &[&str], owner: &[Option<usize>]) -> HistorySel {
@@ -431,7 +457,10 @@ mod tests {
         assert_eq!(copy_of(s.on_up(Some((0, 2)))), Some("hello".to_string()));
         // Third click -> whole line.
         s.on_down((0, 2));
-        assert_eq!(copy_of(s.on_up(Some((0, 2)))), Some("hello world".to_string()));
+        assert_eq!(
+            copy_of(s.on_up(Some((0, 2)))),
+            Some("hello world".to_string())
+        );
     }
 
     #[test]

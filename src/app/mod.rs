@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use tui_textarea::TextArea;
 
 use crate::config;
+use crate::db::{DEFAULT_SPACE, Db, Message, Session, Space as SpaceRow};
 use crate::input::{COMMANDS, new_textarea};
-use crate::db::{Db, Message, Session, Space as SpaceRow, DEFAULT_SPACE};
 use crate::provider::openrouter::OpenRouter;
 use crate::provider::{Model, StreamEvent, Usage};
 use crate::space::Space;
@@ -34,10 +34,10 @@ mod spaces;
 mod tests;
 mod transcribe;
 mod watches;
+pub(crate) use chat::human_size;
 #[cfg(test)]
 use chat::split_inline_reasoning;
 use chat::{code_blocks, pick_greeting};
-pub(crate) use chat::human_size;
 #[cfg(test)]
 use memory::{parse_fact_line, parse_memory_ops};
 use sessions::parse_topic;
@@ -82,6 +82,7 @@ pub enum Popup {
     Files,
     Apps,
     Watch,
+    ResearchLive,
 }
 
 /// What the apps popup is doing: browsing the space's apps or confirming
@@ -236,14 +237,22 @@ impl SettingsField {
             SettingsField::SearxngUrl => "web search URL (SearXNG instance, blank disables)",
             SettingsField::Verbosity => "answer length (Space cycles normal/concise/caveman)",
             SettingsField::LangsearchKey => "LangSearch API key (langsearch.com/dashboard, free)",
-            SettingsField::SearchProvider => "search provider (Space cycles auto/langsearch/searxng/duckduckgo)",
+            SettingsField::SearchProvider => {
+                "search provider (Space cycles auto/langsearch/searxng/duckduckgo)"
+            }
             SettingsField::TranscriberModel => "image model (Enter to pick, Backspace clears)",
             SettingsField::OcrModel => "OCR model (Enter to pick, Backspace clears)",
             SettingsField::ResearchModel => "research model (Enter to pick, Backspace clears)",
-            SettingsField::EscalationModel => "escalation model (Enter to pick, Backspace clears; blank = same as research model)",
-            SettingsField::OcrEngine => "OCR engine (Space cycles auto/tesseract/vlm)",
+            SettingsField::EscalationModel => {
+                "escalation model (Enter to pick, Backspace clears; blank = same as research model)"
+            }
+            SettingsField::OcrEngine => {
+                "OCR engine (Space cycles auto/tesseract/vlm/local; local pulls via ollama)"
+            }
             SettingsField::EmbeddingModel => "embedding model (file search, blank disables)",
-            SettingsField::BlockedDomains => "blocked domains (comma-separated, always excluded; per-space)",
+            SettingsField::BlockedDomains => {
+                "blocked domains (comma-separated, always excluded; per-space)"
+            }
         }
     }
 }
@@ -269,7 +278,11 @@ pub const SETTINGS_GROUPS: &[SettingsGroup] = &[
     },
     SettingsGroup {
         name: "Generation",
-        fields: &[SettingsField::Temperature, SettingsField::TopP, SettingsField::MaxTokens],
+        fields: &[
+            SettingsField::Temperature,
+            SettingsField::TopP,
+            SettingsField::MaxTokens,
+        ],
     },
     SettingsGroup {
         name: "Memory & Context",
@@ -294,7 +307,11 @@ pub const SETTINGS_GROUPS: &[SettingsGroup] = &[
     },
     SettingsGroup {
         name: "Voice & Vision",
-        fields: &[SettingsField::TranscriberModel, SettingsField::OcrModel, SettingsField::OcrEngine],
+        fields: &[
+            SettingsField::TranscriberModel,
+            SettingsField::OcrModel,
+            SettingsField::OcrEngine,
+        ],
     },
 ];
 
@@ -347,9 +364,15 @@ impl Default for Settings {
 /// matching the community caveman-prompt technique, for users who want it.
 fn verbosity_clause(level: &str) -> &'static str {
     match level {
-        "normal" => "Answer at whatever length the question deserves — don't optimize for brevity over completeness.",
-        "caveman" => "Talk caveman-terse. Drop articles (a/an/the) and filler words. Short fragments over full sentences. No politeness, no hedging, no restating the question. Symbols over words where clear (→, =, vs). Full explanations ONLY when explicitly asked — otherwise state the fact/answer and stop. Preserve numbers, code, names, and technical terms exactly.",
-        _ => "Answer style: default to short. Say the answer, then stop — don't restate the question, don't add a summary, don't hedge (\"it's worth noting...\", \"generally speaking...\"). No preamble (\"Great question!\", \"I'd be happy to help with that\"), no postamble (\"Let me know if you have questions!\"). One clear sentence beats three vague ones.\nThis is a floor, not a ceiling: if the user asks to explain, teach, or go deep, or the topic genuinely needs multiple steps to be correct (debugging, multi-part instructions, tradeoffs), give it the room it needs. Brevity for its own sake that omits a needed step is wrong, not concise.\nKeep full grammar — this isn't telegraphic shorthand. Drop filler, not clarity.",
+        "normal" => {
+            "Answer at whatever length the question deserves — don't optimize for brevity over completeness."
+        }
+        "caveman" => {
+            "Talk caveman-terse. Drop articles (a/an/the) and filler words. Short fragments over full sentences. No politeness, no hedging, no restating the question. Symbols over words where clear (→, =, vs). Full explanations ONLY when explicitly asked — otherwise state the fact/answer and stop. Preserve numbers, code, names, and technical terms exactly."
+        }
+        _ => {
+            "Answer style: default to short. Say the answer, then stop — don't restate the question, don't add a summary, don't hedge (\"it's worth noting...\", \"generally speaking...\"). No preamble (\"Great question!\", \"I'd be happy to help with that\"), no postamble (\"Let me know if you have questions!\"). One clear sentence beats three vague ones.\nThis is a floor, not a ceiling: if the user asks to explain, teach, or go deep, or the topic genuinely needs multiple steps to be correct (debugging, multi-part instructions, tradeoffs), give it the room it needs. Brevity for its own sake that omits a needed step is wrong, not concise.\nKeep full grammar — this isn't telegraphic shorthand. Drop filler, not clarity."
+        }
     }
 }
 
@@ -419,11 +442,20 @@ pub(crate) enum MemoryOp {
 /// A background event surfaced to the event loop. `None` means that source's
 /// channel closed (task ended).
 /// One file's embedding result: (space id, file id, (seq, vector) pairs or error).
-pub type EmbedMsg = (String, String, std::result::Result<Vec<(i64, Vec<f32>)>, String>);
+pub type EmbedMsg = (
+    String,
+    String,
+    std::result::Result<Vec<(i64, Vec<f32>)>, String>,
+);
 
 /// A background research pipeline update: (session id, space id, space name,
 /// stage update or final result).
 pub type ResearchMsg = (String, String, String, research::ResearchUpdate);
+
+pub enum LoginMsg {
+    Status(String),
+    Done(Result<String, String>),
+}
 
 pub enum AppEvent {
     Stream(Option<StreamEvent>),
@@ -445,10 +477,14 @@ pub enum AppEvent {
     Ocr(Option<(String, String, files::OcrUpdate)>),
     /// One file's chunk-embedding job finished (or the channel closed).
     Embed(Option<EmbedMsg>),
-    /// `/ocr-local` pull finished: model name or error.
+    /// A local-OCR-model pull finished: model name or error.
     OcrPull(Option<Result<String, String>>),
     /// A deep-research pipeline update, or `None` when its channel closed.
     Research(Option<ResearchMsg>),
+    /// `/research` with no topic: a distilled topic from recent chat, or an error.
+    ResearchTopic(Option<Result<String, String>>),
+    /// OpenAI Codex subscription login status or final result.
+    Login(Option<LoginMsg>),
 }
 
 pub struct App {
@@ -477,7 +513,7 @@ pub struct App {
     /// resolution) stage; empty = falls back to `research_model`.
     pub escalation_model: String,
     /// OCR engine choice: "auto" (vlm when ocr_model set), "tesseract",
-    /// "vlm", or "local" (Ollama on 127.0.0.1:11434, set up by /ocr-local).
+    /// "vlm", or "local" (Ollama on 127.0.0.1:11434, set up by cycling to it in /config).
     pub ocr_engine: String,
     /// Ollama model name for the "local" OCR engine.
     pub local_ocr_model: String,
@@ -510,11 +546,18 @@ pub struct App {
     /// A running `/research` job's plan-approval gate: the sender its
     /// pipeline awaits, keyed by session id, plus the sub-questions shown
     /// while the gate is open.
-    pub(crate) research_plan_gate:
-        Option<(String, tokio::sync::oneshot::Sender<Vec<String>>, Vec<String>)>,
+    pub(crate) research_plan_gate: Option<(
+        String,
+        tokio::sync::oneshot::Sender<Vec<String>>,
+        Vec<String>,
+    )>,
     /// Queues `/steer` instructions into the currently running research job's
     /// round-boundary check. `None` when no research job is running.
     pub(crate) research_steer_tx: Option<mpsc::UnboundedSender<String>>,
+    /// In-progress `/research` (no args) topic distillation from recent chat.
+    pub(crate) research_topic_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
+    /// Composer buffer for the live research-activity view's steer input.
+    pub(crate) research_live_input: String,
     pub(crate) toolbox: std::sync::Arc<crate::tools::ToolBox>,
     /// Local static server for model-created apps (None if it failed to bind).
     pub app_server: Option<crate::appserver::AppServer>,
@@ -524,15 +567,17 @@ pub struct App {
     pub skills_edit: String,
     pub(crate) skills_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
     /// Background image-description result channel: (message_images row id, description or error).
-    pub(crate) describe_rx: Option<mpsc::UnboundedReceiver<(String, std::result::Result<String, String>)>>,
+    pub(crate) describe_rx:
+        Option<mpsc::UnboundedReceiver<(String, std::result::Result<String, String>)>>,
     /// Background OCR updates: (space_id, file name, progress or final result).
     pub(crate) ocr_rx: Option<mpsc::UnboundedReceiver<(String, String, files::OcrUpdate)>>,
     /// One in-flight chunk-embedding job: (space id, file id, vectors or error).
     pub(crate) embed_rx: Option<mpsc::UnboundedReceiver<EmbedMsg>>,
-    /// A running `/ocr-local` model pull: model name on success, error text on failure.
+    /// A running local-OCR-model pull: model name on success, error text on failure.
     pub(crate) ocr_pull_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
     /// A running `/research` job's channel, or None when idle.
     pub(crate) research_rx: Option<mpsc::UnboundedReceiver<ResearchMsg>>,
+    pub(crate) login_rx: Option<mpsc::UnboundedReceiver<LoginMsg>>,
     /// (session id, topic) of the `/research` job currently running, if any —
     /// cleared when its channel closes.
     pub(crate) research_running: Option<(String, String)>,
@@ -628,6 +673,8 @@ pub struct App {
 
     pub popup: Popup,
     pub model_filter: FilterInput,
+    /// Optional model-owner filter for noisy catalogs like OpenRouter (e.g. "anthropic", "openai", "google").
+    pub model_provider_filter: Option<String>,
     pub model_focus: ModelPanel,
     /// What a confirmed selection in the model picker is currently for.
     pub model_pick_target: ModelPickTarget,
@@ -682,22 +729,48 @@ pub struct App {
 
 impl App {
     pub fn new(db: Db, key: Option<String>, space: Space) -> Self {
-        let provider = key.clone().map(OpenRouter::new);
+        let provider = key.clone().map(OpenRouter::from_key_auto);
         let status = if key.is_some() {
             "loading models…  (/model to pick, /help for commands)".to_string()
         } else {
-            "no API key — set it with /key (or $OPENROUTER_API_KEY)".to_string()
+            "no API key — set it with /key (or $OPENROUTER_API_KEY/$OPENAI_API_KEY)".to_string()
         };
         // Fall back to a fresh in-memory default row if the db lookup somehow
         // fails — the space name still resolves to real files on disk.
-        let active_space = db.default_space_id().ok().and_then(|id| {
-            db.list_spaces().ok().and_then(|s| s.into_iter().find(|s| s.id == id))
-        }).unwrap_or_else(|| SpaceRow {
-            id: String::new(),
-            name: DEFAULT_SPACE.to_string(),
-            created_at: Utc::now().to_rfc3339(),
-        });
+        let active_space = db
+            .default_space_id()
+            .ok()
+            .and_then(|id| {
+                db.list_spaces()
+                    .ok()
+                    .and_then(|s| s.into_iter().find(|s| s.id == id))
+            })
+            .unwrap_or_else(|| SpaceRow {
+                id: String::new(),
+                name: DEFAULT_SPACE.to_string(),
+                created_at: Utc::now().to_rfc3339(),
+            });
         let _ = space.ensure_space_dir(&active_space.name);
+        let utility_model = provider
+            .as_ref()
+            .map(OpenRouter::default_utility_model)
+            .unwrap_or("google/gemini-2.5-flash-lite")
+            .to_string();
+        let research_model = provider
+            .as_ref()
+            .map(OpenRouter::default_research_model)
+            .unwrap_or("google/gemini-2.5-flash")
+            .to_string();
+        let escalation_model = provider
+            .as_ref()
+            .map(OpenRouter::default_escalation_model)
+            .unwrap_or("anthropic/claude-sonnet-4.5")
+            .to_string();
+        let embedding_model = provider
+            .as_ref()
+            .map(OpenRouter::default_embedding_model)
+            .unwrap_or("openai/text-embedding-3-small")
+            .to_string();
         let skills_dir = crate::skills::skills_dir(&space.root);
         let skills = crate::skills::load_skills(&skills_dir);
         // Built with search disabled; `load_settings()` below reads the
@@ -712,9 +785,10 @@ impl App {
             Some(crate::tools::FilesCtx {
                 db_path: space.db_path(),
                 space_id: active_space.id.clone(),
-                embedder: provider
-                    .clone()
-                    .map(|p| (p, "openai/text-embedding-3-small".to_string())),
+                embedder: provider.clone().and_then(|p| {
+                    let model = p.default_embedding_model();
+                    (!model.is_empty()).then(|| (p, model.to_string()))
+                }),
             }),
             // No apps ctx yet — the app server starts after construction;
             // main() calls refresh_toolbox() once it's up.
@@ -733,6 +807,8 @@ impl App {
             web_mode: false,
             research_plan_gate: None,
             research_steer_tx: None,
+            research_topic_rx: None,
+            research_live_input: String::new(),
             toolbox,
             app_server: None,
             skills_mode: SkillsMode::Browse,
@@ -744,6 +820,7 @@ impl App {
             embed_rx: None,
             ocr_pull_rx: None,
             research_rx: None,
+            login_rx: None,
             research_running: None,
             pending_images: Vec::new(),
             deferred_send: None,
@@ -766,14 +843,14 @@ impl App {
             space_filter: FilterInput::default(),
             space_mode: SpaceMode::Browse,
             space_edit: String::new(),
-            memory_model: "google/gemini-2.5-flash-lite".to_string(),
-            transcriber_model: "google/gemini-2.5-flash-lite".to_string(),
-            ocr_model: "google/gemini-2.5-flash-lite".to_string(),
-            research_model: "google/gemini-2.5-flash".to_string(),
-            escalation_model: "anthropic/claude-sonnet-4.5".to_string(),
+            memory_model: utility_model.clone(),
+            transcriber_model: utility_model.clone(),
+            ocr_model: utility_model,
+            research_model,
+            escalation_model,
             ocr_engine: "auto".to_string(),
             local_ocr_model: "glm-ocr".to_string(),
-            embedding_model: "openai/text-embedding-3-small".to_string(),
+            embedding_model,
             base_system_prompt: config::load_system_prompt().unwrap_or_default(),
             verbosity: "concise".to_string(),
             memory_rx: None,
@@ -811,6 +888,7 @@ impl App {
             theme_gen: 0,
             popup: Popup::None,
             model_filter: FilterInput::default(),
+            model_provider_filter: None,
             model_focus: ModelPanel::Available,
             model_pick_target: ModelPickTarget::Session,
             fav_state: ListState::default(),
@@ -900,7 +978,9 @@ impl App {
                 "searxng_url" => self.searxng_url = v,
                 "verbosity" if VERBOSITY_LEVELS.contains(&v.as_str()) => self.verbosity = v,
                 "langsearch_key" => self.langsearch_key = v,
-                "search_provider" if SEARCH_PROVIDERS.contains(&v.as_str()) => self.search_provider = v,
+                "search_provider" if SEARCH_PROVIDERS.contains(&v.as_str()) => {
+                    self.search_provider = v
+                }
                 _ => {}
             }
         }
@@ -912,8 +992,10 @@ impl App {
     /// way (SearXNG if configured, DuckDuckGo scraping otherwise), so the
     /// built-in skill is always installed.
     pub(crate) fn refresh_toolbox(&mut self) {
-        let url = (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
-        let key = (!self.langsearch_key.trim().is_empty()).then(|| self.langsearch_key.trim().to_string());
+        let url =
+            (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
+        let key = (!self.langsearch_key.trim().is_empty())
+            .then(|| self.langsearch_key.trim().to_string());
         crate::skills::install_builtin(&self.toolbox.skills_dir);
         let mut toolbox = crate::tools::ToolBox::new(
             self.toolbox.skills_dir.clone(),
@@ -925,11 +1007,10 @@ impl App {
             Some(crate::tools::FilesCtx {
                 db_path: self.space.db_path(),
                 space_id: self.active_space.id.clone(),
-                embedder: self
-                    .provider
-                    .clone()
-                    .zip((!self.embedding_model.trim().is_empty())
-                        .then(|| self.embedding_model.trim().to_string())),
+                embedder: self.provider.clone().zip(
+                    (!self.embedding_model.trim().is_empty())
+                        .then(|| self.embedding_model.trim().to_string()),
+                ),
             }),
             // App tools only exist while the server runs — a write_file whose
             // link can never load is worse than no tool.
@@ -1097,6 +1178,18 @@ impl App {
                     None => std::future::pending().await,
                 }
             } => AppEvent::Research(r),
+            r = async {
+                match self.research_topic_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => AppEvent::ResearchTopic(r),
+            r = async {
+                match self.login_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => AppEvent::Login(r),
         }
     }
 
@@ -1159,8 +1252,8 @@ impl App {
             "space" => self.open_space_picker()?,
             "model" => self.open_model_picker(),
             "key" => self.open_key_prompt(),
+            "login" => self.start_codex_login(),
             "config" => self.open_settings(),
-            "think" => self.toggle_reasoning_view()?,
             "copy" => self.open_copy_menu(),
             "help" => {
                 let list = COMMANDS
@@ -1173,8 +1266,14 @@ impl App {
             "skills" => self.open_skills_popup(),
             "files" => self.open_files_popup(),
             "apps" => self.open_apps_popup(),
-            "ocr-local" => self.ocr_local_install(cmd[token.len()..].trim()),
-            "research" => self.start_research(cmd[token.len()..].trim()),
+            "research" => {
+                let arg = cmd[token.len()..].trim();
+                if arg.is_empty() {
+                    self.start_research_from_chat();
+                } else {
+                    self.start_research(arg);
+                }
+            }
             "export" => self.export_report()?,
             "web" => self.toggle_web_mode(),
             "steer" => self.steer_research(cmd[token.len()..].trim()),
@@ -1211,7 +1310,11 @@ impl App {
             self.status = "usage: /edit <app>/<file>  e.g. /edit deck/index.html".to_string();
             return;
         }
-        if arg.starts_with('/') || arg.split('/').any(|s| s.is_empty() || s == "." || s == "..") {
+        if arg.starts_with('/')
+            || arg
+                .split('/')
+                .any(|s| s.is_empty() || s == "." || s == "..")
+        {
             self.status = format!("invalid path: {arg}");
             return;
         }
@@ -1224,7 +1327,6 @@ impl App {
     }
 
     // --- commands ---
-
 
     // --- nerd config (settings popup) ---
 
@@ -1258,47 +1360,70 @@ impl App {
     /// explicit "vlm", or "auto" with an OCR model configured. ("local" and
     /// "tesseract" route elsewhere.)
     pub(crate) fn vlm_ocr_enabled(&self) -> bool {
-        !self.ocr_model.trim().is_empty()
-            && matches!(self.ocr_engine.as_str(), "vlm" | "auto")
+        !self.ocr_model.trim().is_empty() && matches!(self.ocr_engine.as_str(), "vlm" | "auto")
     }
-
 }
 
 /// The one-line transcript summary for a tool-call block: the tool's name
 /// plus the argument (and result shape) a reader actually cares about.
 pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
-    let f = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let f = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
     match name {
         "skill" => format!("skill {}", f("name")),
         "install_skill" => format!("install_skill {} → {}", f("source"), first_line(result)),
         "run_script" => format!("run_script {}/{}", f("skill"), f("script")),
         "run_python" => format!("run_python ({} lines)", f("code").lines().count().max(1)),
         "grep_app" => {
-            let hits = if result.starts_with("no matches") { "no hits".to_string() } else { format!("{} hits", result.lines().count()) };
+            let hits = if result.starts_with("no matches") {
+                "no hits".to_string()
+            } else {
+                format!("{} hits", result.lines().count())
+            };
             format!("grep_app {} \"{}\" → {hits}", f("app"), f("pattern"))
         }
         "install_packages" => {
             let pkgs = v
                 .get("packages")
                 .and_then(|a| a.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" "))
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
                 .unwrap_or_default();
-            let target = [f("skill"), f("app")].into_iter().find(|t| !t.is_empty()).unwrap_or_default();
+            let target = [f("skill"), f("app")]
+                .into_iter()
+                .find(|t| !t.is_empty())
+                .unwrap_or_default();
             format!("install_packages {pkgs} → {target}")
         }
         "web_search" | "search_files" => {
             let failed = result.starts_with("no results")
                 || result.starts_with("no matches")
                 || result.contains("failed");
-            let hits =
-                if failed { "no hits".to_string() } else { format!("{} hits", result.lines().count()) };
+            let hits = if failed {
+                "no hits".to_string()
+            } else {
+                format!("{} hits", result.lines().count())
+            };
             format!("{name} \"{}\" → {hits}", f("query"))
         }
         "read_file" => format!("read_file {} → {}", f("name"), first_line(result)),
         "read_app_file" => format!("read_app_file {}/{}", f("app"), f("path")),
         "write_file" => {
-            format!("write_file {}/{} ({} bytes)", f("app"), f("path"), f("content").len())
+            format!(
+                "write_file {}/{} ({} bytes)",
+                f("app"),
+                f("path"),
+                f("content").len()
+            )
         }
         "edit_file" => format!("edit_file {}/{}", f("app"), f("path")),
         _ => {
@@ -1313,6 +1438,10 @@ pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String 
 
 /// First line of a tool result, e.g. `report.pdf (lines 1-200 of 831):`.
 fn first_line(result: &str) -> String {
-    result.lines().next().unwrap_or("").trim_end_matches(':').to_string()
+    result
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(':')
+        .to_string()
 }
-

@@ -19,7 +19,7 @@ use anyhow::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let key = config::load_key()?;
+    let key = config::load_key().await?;
     let space = space::Space::open()?;
     let space_root = space.spaces_root();
     let db = db::Db::open(&space.db_path())?;

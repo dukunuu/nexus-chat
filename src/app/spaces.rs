@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use super::{App, Popup, SpaceMode};
-use crate::db::{Space as SpaceRow, DEFAULT_SPACE};
+use crate::db::{DEFAULT_SPACE, Space as SpaceRow};
 
 impl App {
     pub(super) fn open_space_picker(&mut self) -> Result<()> {
@@ -29,7 +29,9 @@ impl App {
     }
 
     pub fn selected_space(&self) -> Option<SpaceRow> {
-        self.filtered_spaces().get(self.space_selected).map(|s| (*s).clone())
+        self.filtered_spaces()
+            .get(self.space_selected)
+            .map(|s| (*s).clone())
     }
 
     pub fn move_space_selection(&mut self, delta: i32) {
@@ -157,7 +159,10 @@ impl App {
         if !path.exists() {
             let _ = std::fs::write(
                 &path,
-                format!("<!-- memory for the \"{}\" space — numbered facts, one per line -->\n", s.name),
+                format!(
+                    "<!-- memory for the \"{}\" space — numbered facts, one per line -->\n",
+                    s.name
+                ),
             );
         }
         Some(path)

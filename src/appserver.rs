@@ -27,7 +27,9 @@ impl AppServer {
         let port = listener.local_addr().ok()?.port();
         tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { continue };
+                let Ok((stream, _)) = listener.accept().await else {
+                    continue;
+                };
                 let root = spaces_root.clone();
                 tokio::spawn(async move {
                     let _ = handle(stream, &root).await;
@@ -134,7 +136,13 @@ async fn respond(
 }
 
 fn mime_for(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase().as_str() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
         "html" | "htm" => "text/html; charset=utf-8",
         "css" => "text/css",
         "js" | "mjs" => "text/javascript",
@@ -158,7 +166,8 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len()
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
             && let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16)
         {
             out.push(b);
@@ -232,13 +241,25 @@ mod tests {
         assert_eq!(r.headers()["cache-control"], "no-store");
         assert_eq!(r.text().await.unwrap(), "<h1>slides</h1>");
 
-        let r = c.get(format!("{base}/default/deck/style.css")).send().await.unwrap();
+        let r = c
+            .get(format!("{base}/default/deck/style.css"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.headers()["content-type"], "text/css");
 
-        let r = c.get(format!("{base}/default/deck/nope.js")).send().await.unwrap();
+        let r = c
+            .get(format!("{base}/default/deck/nope.js"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status(), 404);
 
-        let r = c.post(format!("{base}/default/deck/")).send().await.unwrap();
+        let r = c
+            .post(format!("{base}/default/deck/"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status(), 405);
     }
 

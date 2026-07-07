@@ -31,11 +31,21 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
 
     // Available column (with the search box in the title).
     let avail_items = model_items(app, &app.available_models());
-    let hint = if app.settings.hide_hints { "" } else { "  (Ctrl+S fav · Ctrl+T reason)" };
-    let mut title_spans = vec![Span::raw(" Available — search: ")];
+    let provider = app.model_provider_filter.as_deref().unwrap_or("all");
+    let hint = if app.settings.hide_hints {
+        ""
+    } else {
+        "  (Ctrl+P provider · Ctrl+S fav · Ctrl+T reason)"
+    };
+    let mut title_spans = vec![Span::raw(format!(" Available [{provider}] — search: "))];
     title_spans.extend(app.model_filter.spans(&app.theme));
     title_spans.push(Span::raw(format!("{hint} ")));
-    let avail_list = panel_list(avail_items, Line::from(title_spans), !fav_focused, &app.theme);
+    let avail_list = panel_list(
+        avail_items,
+        Line::from(title_spans),
+        !fav_focused,
+        &app.theme,
+    );
     f.render_stateful_widget(avail_list, avail_outer, &mut app.avail_state);
 }
 
@@ -66,8 +76,17 @@ fn model_items(app: &App, models: &[&Model]) -> Vec<ListItem<'static>> {
         .collect()
 }
 
-fn panel_list<'a>(items: Vec<ListItem<'a>>, title: Line<'a>, focused: bool, theme: &crate::theme::Theme) -> List<'a> {
-    let border = if focused { theme.border } else { theme.border_dim };
+fn panel_list<'a>(
+    items: Vec<ListItem<'a>>,
+    title: Line<'a>,
+    focused: bool,
+    theme: &crate::theme::Theme,
+) -> List<'a> {
+    let border = if focused {
+        theme.border
+    } else {
+        theme.border_dim
+    };
     List::new(items)
         .block(
             Block::default()
@@ -83,8 +102,8 @@ fn panel_list<'a>(items: Vec<ListItem<'a>>, title: Line<'a>, focused: bool, them
 /// Shared by the renderer and the mouse hit-tester so they always agree.
 pub(crate) fn model_popup_areas(screen: Rect) -> (Rect, Rect) {
     let outer = crate::ui::centered(screen, 82, 74);
-    let cols = Layout::horizontal([Constraint::Percentage(36), Constraint::Percentage(64)])
-        .split(outer);
+    let cols =
+        Layout::horizontal([Constraint::Percentage(36), Constraint::Percentage(64)]).split(outer);
     (cols[0], cols[1])
 }
 
@@ -96,7 +115,8 @@ pub(crate) fn list_inner(outer: Rect) -> Rect {
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        // Ctrl+S favorites the focused model; Ctrl+T cycles reasoning effort.
+        // Ctrl+P narrows noisy provider catalogs; Ctrl+S favorites; Ctrl+T cycles reasoning effort.
+        KeyCode::Char('p') if ctrl => app.cycle_model_provider_filter(),
         KeyCode::Char('s') if ctrl => app.toggle_favorite_focused()?,
         KeyCode::Char('t') if ctrl => app.cycle_reasoning_focused()?,
         // Cancelling a memory-model pick returns to /config, same as picking one.

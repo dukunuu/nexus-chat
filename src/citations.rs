@@ -26,8 +26,12 @@ pub(crate) fn parse_citations(content: &str) -> Vec<(usize, String)> {
         if t.is_empty() {
             continue;
         }
-        let Some((num, rest)) = t.split_once(['.', ')']) else { break };
-        let Ok(n) = num.trim().parse::<usize>() else { break };
+        let Some((num, rest)) = t.split_once(['.', ')']) else {
+            break;
+        };
+        let Ok(n) = num.trim().parse::<usize>() else {
+            break;
+        };
         let url = rest.trim().to_string();
         if url.is_empty() {
             break;
@@ -42,7 +46,9 @@ pub(crate) fn citation_number_in(text: &str) -> Option<usize> {
     let mut rest = text;
     while let Some(start) = rest.find('[') {
         rest = &rest[start + 1..];
-        let Some(end) = rest.find(']') else { return None };
+        let Some(end) = rest.find(']') else {
+            return None;
+        };
         let inner = &rest[..end];
         if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
             return inner.parse().ok();
@@ -146,7 +152,10 @@ fn split_confidence_span(span: Span<'static>) -> Vec<Span<'static>> {
             return out;
         };
         let end = start + end_rel + '\u{203a}'.len_utf8();
-        out.push(Span::styled(rest[start..end].to_string(), span.style.add_modifier(Modifier::DIM)));
+        out.push(Span::styled(
+            rest[start..end].to_string(),
+            span.style.add_modifier(Modifier::DIM),
+        ));
         rest = &rest[end..];
     }
     if !rest.is_empty() {
@@ -161,18 +170,23 @@ mod tests {
 
     #[test]
     fn parse_citations_reads_a_sources_heading_section() {
-        let content =
-            "# Report\n\nBody text [1] and more [2].\n\n## Sources\n1. https://a.example\n2. https://b.example/page\n";
+        let content = "# Report\n\nBody text [1] and more [2].\n\n## Sources\n1. https://a.example\n2. https://b.example/page\n";
         assert_eq!(
             parse_citations(content),
-            vec![(1, "https://a.example".into()), (2, "https://b.example/page".into())]
+            vec![
+                (1, "https://a.example".into()),
+                (2, "https://b.example/page".into())
+            ]
         );
     }
 
     #[test]
     fn parse_citations_reads_a_plain_sources_colon_line() {
         let content = "findings text [1]\nSources:\n1. https://a.example\n";
-        assert_eq!(parse_citations(content), vec![(1, "https://a.example".into())]);
+        assert_eq!(
+            parse_citations(content),
+            vec![(1, "https://a.example".into())]
+        );
     }
 
     #[test]
@@ -182,7 +196,10 @@ mod tests {
 
     #[test]
     fn citation_number_in_finds_first_bracketed_number() {
-        assert_eq!(citation_number_in("supported by research [3] and also [4]"), Some(3));
+        assert_eq!(
+            citation_number_in("supported by research [3] and also [4]"),
+            Some(3)
+        );
         assert_eq!(citation_number_in("no citation here"), None);
         assert_eq!(citation_number_in("[not a number] but [5] later"), Some(5));
         assert_eq!(citation_number_in("[not a number]"), None);
@@ -190,11 +207,17 @@ mod tests {
 
     #[test]
     fn style_citations_restyles_bracketed_numbers_and_preserves_the_rest() {
-        let lines = vec![Line::from(vec![Span::raw("supported by "), Span::raw("[1]"), Span::raw(" evidence")])];
+        let lines = vec![Line::from(vec![
+            Span::raw("supported by "),
+            Span::raw("[1]"),
+            Span::raw(" evidence"),
+        ])];
         let out = style_citations(lines, Color::Cyan);
         assert_eq!(out.len(), 1);
-        let has_accent =
-            out[0].spans.iter().any(|s| s.content.as_ref() == "[1]" && s.style.fg == Some(Color::Cyan));
+        let has_accent = out[0]
+            .spans
+            .iter()
+            .any(|s| s.content.as_ref() == "[1]" && s.style.fg == Some(Color::Cyan));
         assert!(has_accent);
         let plain: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(plain, "supported by [1] evidence");
@@ -212,11 +235,21 @@ mod tests {
     #[test]
     fn style_confidence_tags_dims_low_and_med_tags() {
         use ratatui::text::Line;
-        let lines = vec![Line::from("Some claim [1] \u{2039}low\u{203a}. Another [2] \u{2039}med\u{203a}.")];
+        let lines = vec![Line::from(
+            "Some claim [1] \u{2039}low\u{203a}. Another [2] \u{2039}med\u{203a}.",
+        )];
         let styled = style_confidence_tags(lines);
-        let tag_spans: Vec<_> = styled[0].spans.iter().filter(|s| s.content.contains('\u{2039}')).collect();
+        let tag_spans: Vec<_> = styled[0]
+            .spans
+            .iter()
+            .filter(|s| s.content.contains('\u{2039}'))
+            .collect();
         assert_eq!(tag_spans.len(), 2);
-        assert!(tag_spans.iter().all(|s| s.style.add_modifier.contains(ratatui::style::Modifier::DIM)));
+        assert!(
+            tag_spans
+                .iter()
+                .all(|s| s.style.add_modifier.contains(ratatui::style::Modifier::DIM))
+        );
     }
 
     #[test]

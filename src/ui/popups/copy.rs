@@ -16,7 +16,10 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         .iter()
         .map(|o| ListItem::new(o.label.clone()))
         .collect();
-    let block = chrome::popup_block(crate::ui::hint_title(app, " copy ", "copy — ↑/↓, Enter, Esc"), &app.theme);
+    let block = chrome::popup_block(
+        crate::ui::hint_title(app, " copy ", "copy — ↑/↓, Enter, Esc"),
+        &app.theme,
+    );
     let list = List::new(items)
         .block(block)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))

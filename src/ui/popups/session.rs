@@ -23,14 +23,21 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         .map(|s| {
             // id on top (model-generated slug, else a uuid prefix), with the
             // created-at date right-aligned on the same row.
-            let id = s.slug.clone().unwrap_or_else(|| format!("{}…", &s.id[..8.min(s.id.len())]));
+            let id = s
+                .slug
+                .clone()
+                .unwrap_or_else(|| format!("{}…", &s.id[..8.min(s.id.len())]));
             let when = crate::ui::fmt_created(&s.created_at);
             // ⟳ = a response is streaming here; 🔎 = a research job is running
             // here; ● = finished while unviewed.
-            let streaming_here =
-                app.stream_session.as_ref().is_some_and(|(id, _)| *id == s.id);
-            let researching_here =
-                app.research_running.as_ref().is_some_and(|(id, _)| *id == s.id);
+            let streaming_here = app
+                .stream_session
+                .as_ref()
+                .is_some_and(|(id, _)| *id == s.id);
+            let researching_here = app
+                .research_running
+                .as_ref()
+                .is_some_and(|(id, _)| *id == s.id);
             let marker = if streaming_here {
                 Some(Span::styled("⟳ ", Style::default().fg(app.theme.accent)))
             } else if researching_here {
@@ -65,13 +72,23 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 
     // Title bar doubles as the search box / rename field / delete prompt.
     let title: Line = match app.session_mode {
-        SessionMode::Rename => Line::from(format!(" rename: {}▏  (Enter save · Esc cancel) ", app.session_edit)),
+        SessionMode::Rename => Line::from(format!(
+            " rename: {}▏  (Enter save · Esc cancel) ",
+            app.session_edit
+        )),
         SessionMode::ConfirmDelete => {
             let name = app.selected_session().map(|s| s.title).unwrap_or_default();
-            Line::from(format!(" delete \"{}\"? (Ctrl+D confirm · Esc cancel) ", truncate(&name, 30)))
+            Line::from(format!(
+                " delete \"{}\"? (Ctrl+D confirm · Esc cancel) ",
+                truncate(&name, 30)
+            ))
         }
         SessionMode::Browse => {
-            let keys = if app.settings.hide_hints { "" } else { "  (Ctrl+R rename · Ctrl+D delete)" };
+            let keys = if app.settings.hide_hints {
+                ""
+            } else {
+                "  (Ctrl+R rename · Ctrl+D delete)"
+            };
             let mut spans = vec![Span::raw(" session — search: ")];
             spans.extend(app.session_filter.spans(&app.theme));
             spans.push(Span::raw(format!("{keys} ")));
@@ -101,7 +118,10 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    use super::{ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key, classify_edit_key};
+    use super::{
+        ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key,
+        classify_edit_key,
+    };
     use crate::app::SessionMode;
     match app.session_mode {
         // Renaming: type into the edit buffer; Enter saves, Esc cancels.
@@ -136,7 +156,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 Some(super::BrowseAction::MoveUp) => app.move_session_selection(-1),
                 Some(super::BrowseAction::MoveDown) => app.move_session_selection(1),
                 Some(super::BrowseAction::Rename) => app.start_rename(),
-                Some(super::BrowseAction::ConfirmDelete) => app.session_mode = SessionMode::ConfirmDelete,
+                Some(super::BrowseAction::ConfirmDelete) => {
+                    app.session_mode = SessionMode::ConfirmDelete
+                }
                 Some(super::BrowseAction::Backspace) => app.session_filter_pop(),
                 Some(super::BrowseAction::Filter(c)) => app.session_filter_push(c),
                 Some(super::BrowseAction::Create) | None => {}

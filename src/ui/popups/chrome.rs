@@ -13,7 +13,11 @@ use crate::theme::Theme;
 
 /// The rounded border + bold accent title shared by every popup.
 pub(crate) fn popup_block<'a>(title: impl Into<Line<'a>>, theme: &Theme) -> Block<'a> {
-    let title = title.into().style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD));
+    let title = title.into().style(
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    );
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -44,7 +48,9 @@ pub(crate) fn render_detail(f: &mut Frame, area: Rect, desc: &str, theme: &Theme
     if area.height == 0 || desc.trim().is_empty() {
         return;
     }
-    let block = Block::default().borders(Borders::TOP).border_style(Style::default().fg(theme.border_dim));
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(theme.border_dim));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let p = Paragraph::new(desc.to_string())
