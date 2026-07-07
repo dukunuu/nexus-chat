@@ -35,7 +35,7 @@ const CRITIC_PROMPT: &str = "You are the critic stage of a research pipeline. Gi
 
 const ESCALATION_PROMPT: &str = "You are resolving a contradiction found in a research draft. You are given the topic, the draft, the full set of source findings gathered so far, and a description of the contradiction. Determine which claim the evidence better supports (or that both apply in different contexts) and write one paragraph resolving it, citing the [n] sources involved. Output only that paragraph.";
 
-const VERIFIER_PROMPT: &str = "You are the verifier stage. Given the topic, the gathered source findings (with their citations), and a draft report, check every factual claim in the draft against the source findings. Rewrite the draft unchanged except: (1) remove or mark with '⚠ unverifiable:' any claim not actually supported by the gathered findings; (2) immediately after a claim's citations, judge its confidence from citation count and cross-source agreement and, only for low or medium confidence, append the tag ‹low› or ‹med› right after the citation (high confidence is the default and stays untagged — do not tag it). Output the corrected draft in markdown, nothing else.";
+const VERIFIER_PROMPT: &str = "You are the verifier stage. Given the topic, the gathered source findings (with their citations), and a draft report, check every factual claim in the draft against the source findings. Rewrite the draft unchanged except: (1) remove or mark with '⚠ unverifiable:' any claim not actually supported by the gathered findings; (2) immediately after a claim's citations, judge its confidence from citation count and cross-source agreement and, only for low or medium confidence, append the tag ‹low› or ‹med› right after the citation (high confidence is the default and stays untagged — do not tag it). Output the corrected draft in markdown, nothing else. You have a fetch_url tool restricted to already-cached pages: use it to check any direct quote in the draft against the cached source text, and mark a quote that doesn't actually match with '‹unverified quote›' immediately after it.";
 
 const WRITER_PROMPT: &str = "You are the final writer stage. Given the topic and a verified draft report (with inline [n] citations and prose from earlier stages, possibly including a contradiction-resolution paragraph to fold in), produce the final report: clean markdown, a short introductory paragraph, organized sections with headers, inline [n] citations preserved/renumbered consistently, and a trailing '## Sources' section listing every cited URL as 'n. url'. Output only the final report markdown, nothing else — it will be saved and shown to the user as-is.";
 
@@ -299,6 +299,39 @@ async fn run_searcher(
     }
 }
 
+/// Run the Verifier stage with a cache-only toolbox so it can check direct
+/// quotes against exactly the pages searchers already gathered (never a
+/// fresh fetch). Never returns an `Err` — returns whatever text accumulated
+/// before the stream ended, or an empty string if it errored before
+/// producing any. The caller falls back to the unverified draft when this
+/// comes back empty, so verification failing must never blank out an
+/// otherwise-good report.
+async fn verify_with_quote_check(
+    provider: &OpenRouter,
+    model: &str,
+    messages: Vec<ChatMessage>,
+    cache_only_toolbox: Arc<ToolBox>,
+) -> String {
+    let tools = cache_only_toolbox.defs();
+    let (mut rx, _abort) = provider.stream_chat(
+        model.to_string(),
+        messages,
+        ChatParams::default(),
+        tools,
+        cache_only_toolbox,
+        RESEARCH_SEARCHER_MAX_ITERS,
+    );
+    let mut buf = String::new();
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            StreamEvent::Token(t) => buf.push_str(&t),
+            StreamEvent::Done | StreamEvent::Error(_) => break,
+            _ => {}
+        }
+    }
+    buf
+}
+
 /// Fan out one Searcher per question in parallel, sending a running
 /// `{done}/{total}` stage update as each finishes (in addition to each
 /// searcher's own live per-tool-call feed). Order of the returned findings
@@ -469,7 +502,13 @@ async fn run_research_inner(
     }
 
     send_stage(tx, ids, "verifying", "");
-    let verified = complete_text(provider, research_model, verifier_messages(topic, &draft, &findings)).await?;
+    let verify_toolbox = Arc::new(
+        ToolBox::research(None, None, "auto".to_string(), Vec::new(), Some(db_path.to_path_buf())).cache_only(),
+    );
+    let verified_raw =
+        verify_with_quote_check(provider, research_model, verifier_messages(topic, &draft, &findings), verify_toolbox)
+            .await;
+    let verified = if verified_raw.trim().is_empty() { draft.clone() } else { verified_raw };
 
     send_stage(tx, ids, "writing final report", "");
     complete_text(provider, research_model, writer_messages(topic, &verified, &pinned)).await
@@ -783,6 +822,11 @@ mod tests {
         let msgs = planner_messages_with_context("topic", &[]);
         assert!(!msgs[1].content.contains("Already known"));
         assert_eq!(msgs[1].content, "topic");
+    }
+
+    #[test]
+    fn verifier_prompt_mentions_quote_checking() {
+        assert!(VERIFIER_PROMPT.to_lowercase().contains("quote"));
     }
 
     #[tokio::test]
