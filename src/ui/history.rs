@@ -281,6 +281,7 @@ fn push_assistant_stored(
 
     let mut rendered = crate::markdown::render(&msg.content, width);
     rendered.lines = crate::citations::style_citations(rendered.lines, theme.accent);
+    rendered.lines = crate::citations::style_confidence_tags(rendered.lines);
     push_rendered(out, code, blocks, rendered);
 
     // Footer below the response.
@@ -323,6 +324,7 @@ fn push_assistant_streaming(
     let buf = app.streaming.as_deref().unwrap_or("");
     let mut rendered = crate::markdown::render(buf, width);
     rendered.lines = crate::citations::style_citations(rendered.lines, app.theme.accent);
+    rendered.lines = crate::citations::style_confidence_tags(rendered.lines);
     push_rendered(out, code, blocks, rendered);
     out.push(Line::from(""));
 }
