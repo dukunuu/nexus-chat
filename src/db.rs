@@ -880,6 +880,14 @@ impl Db {
         Ok(())
     }
 
+    /// Repoint a watch at the session its most recent re-run actually used,
+    /// so the next due-check's diff-section lookup
+    /// (`previous_citations_for_watch_session`) can match against it.
+    pub fn set_watch_session(&self, id: &str, session_id: &str) -> Result<()> {
+        self.conn.execute("UPDATE watches SET session_id = ?2 WHERE id = ?1", (id, session_id))?;
+        Ok(())
+    }
+
     pub fn delete_watch(&self, id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM watches WHERE id = ?1", [id])?;
         Ok(())

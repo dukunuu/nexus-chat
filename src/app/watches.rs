@@ -135,6 +135,17 @@ impl super::App {
                 self.active_space = space_row;
                 self.session = Some(s);
                 self.start_research_with_gate(&w.topic, false);
+                // `start_research_with_gate` unconditionally creates a brand-new
+                // session (it never reuses `self.session` as set above) — but
+                // that new session id is set synchronously into `self.session`
+                // before the research job's background task is spawned, so it's
+                // available here. Track it as the watch's current session so the
+                // next due-check / `previous_citations_for_watch_session` lookup
+                // matches against the run that's now in flight, not the stale
+                // first-run session.
+                if let Some(new_session) = self.session.as_ref() {
+                    let _ = self.db.set_watch_session(&w.id, &new_session.id);
+                }
                 let _ = self.db.touch_watch(&w.id, &chrono::Utc::now().to_rfc3339());
             }
             self.active_space = restore_space;
@@ -172,6 +183,38 @@ impl super::App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::App;
+    use crate::db::Db;
+    use crate::space::Space;
+
+    fn test_app() -> App {
+        let db = Db::open_in_memory().unwrap();
+        let root = std::env::temp_dir().join(format!("nexus-watches-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("spaces")).unwrap();
+        let space = Space { root };
+        App::new(db, Some("k".into()), space)
+    }
+
+    #[tokio::test]
+    async fn run_due_watches_repoints_the_watch_at_its_new_session() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        let space_id = a.active_space.id.clone();
+
+        // The watch's original session, from some earlier run.
+        let first_session = a.db.create_session("first run", "openai/gpt-5-mini", &space_id).unwrap();
+        let watch_id = a.db.create_watch(&space_id, "rust async runtimes", 24, &first_session.id).unwrap();
+
+        a.run_due_watches();
+
+        let updated = a.db.list_all_watches().unwrap().into_iter().find(|w| w.id == watch_id).unwrap();
+        assert_ne!(
+            updated.session_id, first_session.id,
+            "run_due_watches should repoint the watch at the session its re-run actually used, \
+             not leave it pinned to the first run's session forever"
+        );
+        assert!(updated.last_run_at.is_some());
+    }
 
     fn watch(topic: &str, interval_hours: i64, last_run_at: Option<&str>) -> Watch {
         Watch {
