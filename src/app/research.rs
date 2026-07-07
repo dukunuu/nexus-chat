@@ -219,6 +219,17 @@ fn send_stage(
     ));
 }
 
+/// Every steer instruction queued since the last drain, without blocking —
+/// `try_recv` until the channel is empty. Called at each round boundary so
+/// a user's mid-flight `/steer` gets picked up as an extra searcher round.
+pub(crate) async fn drain_steers(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Ok(s) = rx.try_recv() {
+        out.push(s);
+    }
+    out
+}
+
 async fn complete_text(provider: &OpenRouter, model: &str, messages: Vec<ChatMessage>) -> Result<String, String> {
     provider.complete(model, messages).await.map(|s| s.trim().to_string()).map_err(|e| e.to_string())
 }
@@ -376,6 +387,7 @@ pub(crate) async fn run_research(
     db_path: std::path::PathBuf,
     topic: String,
     gate_rx: Option<tokio::sync::oneshot::Receiver<Vec<String>>>,
+    steer_rx: mpsc::UnboundedReceiver<String>,
     toolbox: Arc<ToolBox>,
     tx: mpsc::UnboundedSender<ResearchMsg>,
     session_id: String,
@@ -391,6 +403,7 @@ pub(crate) async fn run_research(
         &topic,
         &known,
         gate_rx,
+        steer_rx,
         &db_path,
         &toolbox,
         &tx,
@@ -435,6 +448,7 @@ async fn run_research_inner(
     topic: &str,
     known: &[String],
     gate_rx: Option<tokio::sync::oneshot::Receiver<Vec<String>>>,
+    mut steer_rx: mpsc::UnboundedReceiver<String>,
     db_path: &std::path::Path,
     toolbox: &Arc<ToolBox>,
     tx: &mpsc::UnboundedSender<ResearchMsg>,
@@ -467,6 +481,16 @@ async fn run_research_inner(
     let mut findings = run_searchers(provider, research_model, toolbox, &questions, tx, ids, 1).await;
     persist_session_sources(db_path, &ids.0, &findings);
 
+    let steers = drain_steers(&mut steer_rx).await;
+    if !steers.is_empty() {
+        for s in &steers {
+            send_stage(tx, ids, "steer", s.clone());
+        }
+        let steered = run_searchers(provider, research_model, toolbox, &steers, tx, ids, 1).await;
+        persist_session_sources(db_path, &ids.0, &steered);
+        findings.extend(steered);
+    }
+
     send_stage(tx, ids, "synthesizing", "");
     let mut draft = complete_text(
         provider,
@@ -482,6 +506,17 @@ async fn run_research_inner(
         let more = run_searchers(provider, research_model, toolbox, gaps, tx, ids, 2).await;
         persist_session_sources(db_path, &ids.0, &more);
         findings.extend(more);
+
+        let steers = drain_steers(&mut steer_rx).await;
+        if !steers.is_empty() {
+            for s in &steers {
+                send_stage(tx, ids, "steer", s.clone());
+            }
+            let steered = run_searchers(provider, research_model, toolbox, &steers, tx, ids, 2).await;
+            persist_session_sources(db_path, &ids.0, &steered);
+            findings.extend(steered);
+        }
+
         send_stage(tx, ids, "re-synthesizing", "");
         draft = complete_text(
             provider,
@@ -535,6 +570,22 @@ impl super::App {
         self.start_research_with_gate(topic, true)
     }
 
+    /// `/steer <text>`: queue an extra instruction for the running research
+    /// job, picked up at the next round boundary. No-op with a status message
+    /// if no research job is running.
+    pub(crate) fn steer_research(&mut self, text: &str) {
+        if text.is_empty() {
+            self.status = "usage: /steer <what to also look into>".to_string();
+            return;
+        }
+        match &self.research_steer_tx {
+            Some(tx) if tx.send(text.to_string()).is_ok() => {
+                self.status = format!("queued steer: {text}");
+            }
+            _ => self.status = "no research job is running".to_string(),
+        }
+    }
+
     pub(crate) fn start_research_with_gate(&mut self, topic: &str, gated: bool) {
         let topic = topic.trim().to_string();
         if topic.is_empty() {
@@ -584,6 +635,9 @@ impl super::App {
         self.research_running = Some((session.id.clone(), topic.clone()));
         self.status = format!("researching: {topic}");
 
+        let (steer_tx, steer_rx) = mpsc::unbounded_channel();
+        self.research_steer_tx = Some(steer_tx);
+
         let gate_rx = if gated {
             let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
             self.research_plan_gate = Some((session.id.clone(), gate_tx, Vec::new()));
@@ -608,6 +662,7 @@ impl super::App {
             self.space.db_path(),
             topic,
             gate_rx,
+            steer_rx,
             toolbox,
             tx,
             session.id,
@@ -653,6 +708,7 @@ impl super::App {
             self.research_rx = None;
             self.research_running = None;
             self.research_plan_gate = None;
+            self.research_steer_tx = None;
             return;
         };
         let viewing = self.session.as_ref().is_some_and(|s| s.id == session_id);
@@ -803,6 +859,18 @@ mod tests {
         std::fs::create_dir_all(root.join("spaces")).unwrap();
         let space = Space { root };
         App::new(db, Some("k".into()), space)
+    }
+
+    #[tokio::test]
+    async fn drain_steers_collects_all_queued_without_blocking() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send("look into X".to_string()).unwrap();
+        tx.send("also Y".to_string()).unwrap();
+        let drained = drain_steers(&mut rx).await;
+        assert_eq!(drained, vec!["look into X".to_string(), "also Y".to_string()]);
+        // Second call with nothing queued returns empty immediately (no hang).
+        let empty = drain_steers(&mut rx).await;
+        assert!(empty.is_empty());
     }
 
     #[test]

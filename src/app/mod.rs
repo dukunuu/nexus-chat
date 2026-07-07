@@ -509,6 +509,9 @@ pub struct App {
     /// while the gate is open.
     pub(crate) research_plan_gate:
         Option<(String, tokio::sync::oneshot::Sender<Vec<String>>, Vec<String>)>,
+    /// Queues `/steer` instructions into the currently running research job's
+    /// round-boundary check. `None` when no research job is running.
+    pub(crate) research_steer_tx: Option<mpsc::UnboundedSender<String>>,
     pub(crate) toolbox: std::sync::Arc<crate::tools::ToolBox>,
     /// Local static server for model-created apps (None if it failed to bind).
     pub app_server: Option<crate::appserver::AppServer>,
@@ -723,6 +726,7 @@ impl App {
             forced_skill: None,
             web_mode: false,
             research_plan_gate: None,
+            research_steer_tx: None,
             toolbox,
             app_server: None,
             skills_mode: SkillsMode::Browse,
@@ -1164,6 +1168,7 @@ impl App {
             "ocr-local" => self.ocr_local_install(cmd[token.len()..].trim()),
             "research" => self.start_research(cmd[token.len()..].trim()),
             "web" => self.toggle_web_mode(),
+            "steer" => self.steer_research(cmd[token.len()..].trim()),
             "edit" => self.request_app_file_edit(cmd[token.len()..].trim()),
             other => {
                 if self.skills.iter().any(|s| s.name == other) {
