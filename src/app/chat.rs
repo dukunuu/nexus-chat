@@ -561,7 +561,11 @@ impl App {
             return;
         };
         let url_norm = crate::tools::normalize_url(url);
-        let verb = if flag.is_some() { "pinned" } else { "cleared" };
+        let verb = match flag {
+            Some("discarded") => "discarded",
+            Some(_) => "pinned",
+            None => "cleared",
+        };
         match self.db.set_source_flag(&session.id, &url_norm, flag) {
             Ok(()) => {
                 self.status = format!("{verb} [{n}]: {url}");
