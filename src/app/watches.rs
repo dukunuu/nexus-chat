@@ -132,21 +132,27 @@ impl super::App {
             let restore_session = self.session.clone();
             let restore_messages = std::mem::take(&mut self.messages);
             if let Ok(Some(s)) = self.db.get_session(&w.session_id) {
+                let prior_session_id = s.id.clone();
                 self.active_space = space_row;
                 self.session = Some(s);
                 self.start_research_with_gate(&w.topic, false);
-                // `start_research_with_gate` unconditionally creates a brand-new
-                // session (it never reuses `self.session` as set above) — but
-                // that new session id is set synchronously into `self.session`
-                // before the research job's background task is spawned, so it's
-                // available here. Track it as the watch's current session so the
-                // next due-check / `previous_citations_for_watch_session` lookup
-                // matches against the run that's now in flight, not the stale
-                // first-run session.
-                if let Some(new_session) = self.session.as_ref() {
+                // `start_research_with_gate` only allows one job at a time —
+                // for the 2nd+ due watch in this loop, `research_rx.is_some()`
+                // is still set from the first watch's job (it isn't cleared
+                // until that job's background task finishes, long after this
+                // synchronous loop returns), so the guard fires and the call
+                // above is a no-op: `self.session` is left exactly as set on
+                // the line above (the watch's *prior* session), unchanged.
+                // Only when a new session was actually created do we know the
+                // job really started — compare ids to tell those cases apart,
+                // and leave a not-actually-run watch untouched (still due) for
+                // the next startup rather than falsely marking it caught up.
+                if let Some(new_session) = self.session.as_ref()
+                    && new_session.id != prior_session_id
+                {
                     let _ = self.db.set_watch_session(&w.id, &new_session.id);
+                    let _ = self.db.touch_watch(&w.id, &chrono::Utc::now().to_rfc3339());
                 }
-                let _ = self.db.touch_watch(&w.id, &chrono::Utc::now().to_rfc3339());
             }
             self.active_space = restore_space;
             self.session = restore_session;
@@ -168,11 +174,19 @@ impl super::App {
         session_id: &str,
         space_id: &str,
     ) -> anyhow::Result<Option<Vec<String>>> {
-        let is_watch_session = self.db.list_all_watches()?.iter().any(|w| w.session_id == session_id);
-        if !is_watch_session {
+        let Some(w) = self.db.list_all_watches()?.into_iter().find(|w| w.session_id == session_id) else {
             return Ok(None);
-        }
-        let rows = self.db.search_citations(space_id, None)?;
+        };
+        // Scope to this watch's own prior report(s): `save_research_report`
+        // names every report it saves `research-<slug>-<timestamp>.md` where
+        // `slug = slugify(topic)`, and a watch's topic (hence its slug) is
+        // stable across re-runs. Filtering `report_file` to that prefix keeps
+        // an unrelated `/research` session elsewhere in the same space from
+        // suppressing a source as "not new" for this watch.
+        let slug = super::sessions::slugify(&w.topic);
+        let prefix = format!("research-{slug}-");
+        let rows = self.db.search_citations(space_id, Some(&prefix))?;
+        let rows: Vec<_> = rows.into_iter().filter(|(report_file, _, _)| report_file.starts_with(&prefix)).collect();
         if rows.is_empty() {
             return Ok(None);
         }
@@ -214,6 +228,46 @@ mod tests {
              not leave it pinned to the first run's session forever"
         );
         assert!(updated.last_run_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn run_due_watches_only_touches_the_watch_whose_job_actually_started() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        let space_id = a.active_space.id.clone();
+
+        let first_session = a.db.create_session("first run", "openai/gpt-5-mini", &space_id).unwrap();
+        let second_session = a.db.create_session("second run", "openai/gpt-5-mini", &space_id).unwrap();
+        let watch_a = a.db.create_watch(&space_id, "rust async runtimes", 24, &first_session.id).unwrap();
+        let watch_b = a.db.create_watch(&space_id, "wasm gc proposal", 24, &second_session.id).unwrap();
+
+        // Only one research job can run at a time — the pipeline's guard
+        // (`research_rx.is_some()`) fires for the 2nd+ watch in this
+        // synchronous startup loop, since nothing clears `research_rx` until
+        // a background job later completes. So watch_a's run actually
+        // starts (fresh session, repointed + touched); watch_b's call is a
+        // no-op (guard fires) and must be left exactly as it was — still due
+        // — for the next startup.
+        a.run_due_watches();
+
+        let updated_a = a.db.list_all_watches().unwrap().into_iter().find(|w| w.id == watch_a).unwrap();
+        let updated_b = a.db.list_all_watches().unwrap().into_iter().find(|w| w.id == watch_b).unwrap();
+
+        assert_ne!(
+            updated_a.session_id, first_session.id,
+            "watch_a's job actually started, so it should be repointed at its new session"
+        );
+        assert!(updated_a.last_run_at.is_some(), "watch_a's job actually started, so it should be touched");
+
+        assert_eq!(
+            updated_b.session_id, second_session.id,
+            "watch_b's job never started (guard fired) — it must not be repointed"
+        );
+        assert!(
+            updated_b.last_run_at.is_none(),
+            "watch_b's job never started (guard fired) — touching it would falsely mark it caught up \
+             and make it silently skip a full interval"
+        );
     }
 
     fn watch(topic: &str, interval_hours: i64, last_run_at: Option<&str>) -> Watch {
@@ -272,6 +326,46 @@ mod tests {
         let previous = vec!["https://old.example/a".to_string()];
         let new_sources = new_sources_since(new_report, &previous);
         assert_eq!(new_sources, vec!["https://fresh.example/b".to_string()]);
+    }
+
+    #[test]
+    fn previous_citations_for_watch_session_is_scoped_to_the_watchs_own_reports() {
+        let a = test_app();
+        let space_id = a.active_space.id.clone();
+        let session = a.db.create_session("rust async runtimes", "openai/gpt-5-mini", &space_id).unwrap();
+        let watch_id = a.db.create_watch(&space_id, "rust async runtimes", 24, &session.id).unwrap();
+        let _ = watch_id;
+
+        // This watch's own prior report (named per `save_research_report`'s
+        // `research-<slug>-<timestamp>.md` scheme, slug derived from its topic).
+        let slug = super::super::sessions::slugify("rust async runtimes");
+        a.db
+            .add_citations(
+                &space_id,
+                &format!("research-{slug}-20260101-000000.md"),
+                &[("https://own-report.example".to_string(), None)],
+            )
+            .unwrap();
+
+        // An unrelated report elsewhere in the *same space* (a plain
+        // `/research` session, or another watch's topic) must not pollute
+        // this watch's diff.
+        a.db
+            .add_citations(
+                &space_id,
+                "research-some-other-topic-20260101-000000.md",
+                &[("https://unrelated.example".to_string(), None)],
+            )
+            .unwrap();
+
+        let prev = a.previous_citations_for_watch_session(&session.id, &space_id).unwrap();
+        let prev = prev.expect("watch session with prior citations should yield Some");
+        assert_eq!(prev, vec!["https://own-report.example".to_string()]);
+        assert!(
+            !prev.contains(&"https://unrelated.example".to_string()),
+            "an unrelated citation elsewhere in the space must not suppress a source as \
+             already-cited for this watch: {prev:?}"
+        );
     }
 
     #[test]
