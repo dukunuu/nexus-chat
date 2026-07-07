@@ -1402,13 +1402,96 @@ fn drop_tag_blocks(html: &str, tag: &str) -> String {
     out
 }
 
+/// Pull every top-level `<table>...</table>` block out of `html`, replacing
+/// it with a markdown pipe-table rendering. Runs before the generic
+/// tag-stripper so table structure survives; a `<table>` nested inside
+/// another is left as inner markup (rendered as flattened text by the
+/// generic stripper afterward) rather than recursed into — good enough for
+/// the benchmark/pricing tables research actually hits.
+fn render_tables_as_markdown(html: &str) -> String {
+    let mut out = String::new();
+    let mut rest = html;
+    while let Some(start) = rest.find("<table") {
+        out.push_str(&rest[..start]);
+        let Some(tag_end) = rest[start..].find('>') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let body_start = start + tag_end + 1;
+        let Some(close_rel) = rest[body_start..].find("</table>") else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let body_end = body_start + close_rel;
+        out.push_str(&table_to_markdown(&rest[body_start..body_end]));
+        rest = &rest[body_end + "</table>".len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Render one table's inner HTML (rows of `<tr>`, cells `<th>`/`<td>`) as a
+/// GitHub-style pipe table. Header row = first `<tr>`'s cells; a `---`
+/// separator follows it unconditionally (even if that row used `<td>`, not
+/// `<th>` — most scraped tables don't bother with `<th>`).
+fn table_to_markdown(table_html: &str) -> String {
+    let rows: Vec<Vec<String>> = split_tag_blocks(table_html, "tr")
+        .iter()
+        .map(|row_html| {
+            let mut cells: Vec<String> = split_tag_blocks(row_html, "th")
+                .iter()
+                .map(|c| strip_tags(c).replace('\n', " ").trim().to_string())
+                .collect();
+            cells.extend(
+                split_tag_blocks(row_html, "td")
+                    .iter()
+                    .map(|c| strip_tags(c).replace('\n', " ").trim().to_string()),
+            );
+            cells
+        })
+        .filter(|r| !r.is_empty())
+        .collect();
+    if rows.is_empty() {
+        return String::new();
+    }
+    let cols = rows[0].len();
+    let mut out = String::from("\n");
+    out.push_str(&format!("| {} |\n", rows[0].join(" | ")));
+    out.push_str(&format!("| {} |\n", vec!["---"; cols].join(" | ")));
+    for row in &rows[1..] {
+        out.push_str(&format!("| {} |\n", row.join(" | ")));
+    }
+    out.push('\n');
+    out
+}
+
+/// Every top-level `<tag>...</tag>` block's inner HTML, in order. Does not
+/// recurse into nested same-named tags — a nested `<tr>` inside a cell (rare,
+/// malformed markup) is left as part of the outer block's text.
+fn split_tag_blocks(html: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(start) = rest.find(&open) {
+        let Some(tag_end) = rest[start..].find('>') else { break };
+        let body_start = start + tag_end + 1;
+        let Some(close_rel) = rest[body_start..].find(&close) else { break };
+        let body_end = body_start + close_rel;
+        out.push(rest[body_start..body_end].to_string());
+        rest = &rest[body_end + close.len()..];
+    }
+    out
+}
+
 /// HTML page body → plain readable text: drop script/style blocks, strip all
 /// remaining tags, unescape entities, and collapse blank/whitespace-only
 /// lines so paginated output isn't mostly empty lines.
 fn strip_html_to_text(html: &str) -> String {
     let no_script = drop_tag_blocks(html, "script");
     let no_style = drop_tag_blocks(&no_script, "style");
-    strip_tags(&no_style)
+    let with_tables = render_tables_as_markdown(&no_style);
+    strip_tags(&with_tables)
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -1882,6 +1965,31 @@ mod tests {
         assert!(text.contains("More"));
         // No blank lines left over from stripped block-level tags.
         assert!(!text.contains("\n\n"));
+    }
+
+    #[test]
+    fn strip_html_to_text_renders_table_as_markdown_pipe_table() {
+        let html = "<body><p>Intro</p><table>\
+            <tr><th>Model</th><th>Score</th></tr>\
+            <tr><td>A</td><td>91</td></tr>\
+            <tr><td>B</td><td>88</td></tr>\
+            </table><p>Outro</p></body>";
+        let text = strip_html_to_text(html);
+        assert!(text.contains("| Model | Score |"), "{text:?}");
+        assert!(text.contains("| --- | --- |"), "{text:?}");
+        assert!(text.contains("| A | 91 |"), "{text:?}");
+        assert!(text.contains("| B | 88 |"), "{text:?}");
+        assert!(text.contains("Intro"));
+        assert!(text.contains("Outro"));
+    }
+
+    #[test]
+    fn strip_html_to_text_flattens_nested_tables_without_recursing() {
+        let html = "<table><tr><td>outer<table><tr><td>inner</td></tr></table></td></tr></table>";
+        // Must not panic or infinite-loop; nested content just degrades to flattened text.
+        let text = strip_html_to_text(html);
+        assert!(text.contains("outer"));
+        assert!(text.contains("inner"));
     }
 
     #[test]
