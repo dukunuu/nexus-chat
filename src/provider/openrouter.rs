@@ -13,7 +13,11 @@ use crate::tools::ToolBox;
 const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api";
-const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
+// The general Zen catalog, not the narrower `zen/go/v1` (Go-subscription-
+// only bundle) — Zen's /models reports everything actually enabled for the
+// account's key, including free-tier models (e.g. DeepSeek V4 Flash Free)
+// that a Go subscription alone wouldn't surface.
+const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/v1";
 /// Hard cap on tool round-trips per response, so a model that keeps calling
 /// tools can't loop forever. The default for interactive chat; background
 /// jobs (e.g. deep-research searcher agents) pass their own smaller budget.
@@ -1201,7 +1205,7 @@ mod tests {
     fn opencode_go_reports_its_own_backend_name_base_and_defaults() {
         let p = OpenRouter::opencode_go("k".into());
         assert_eq!(p.backend_name(), "OpenCode Go");
-        assert_eq!(p.flavor.base(), "https://opencode.ai/zen/go/v1");
+        assert_eq!(p.flavor.base(), "https://opencode.ai/zen/v1");
         assert!(!p.default_utility_model().is_empty());
         assert!(!p.default_research_model().is_empty());
         assert!(!p.default_escalation_model().is_empty());
