@@ -675,58 +675,64 @@ impl OpenRouter {
         if !tools.is_empty() {
             obj.insert("tools".into(), serde_json::json!(codex_tools(tools)));
         }
-        let request = self
+        // Not reqwest_eventsource here: it gates the whole response on a
+        // strict Content-Type == "text/event-stream" check, and ChatGPT's
+        // backend has been observed sending a genuine SSE body (starting
+        // with a real "event: response.created" line) under a Content-Type
+        // that check doesn't accept — the crate then reports the situation
+        // as an opaque "invalid header value" and discards the (valid) body
+        // entirely. Reading the response as a raw byte stream and splitting
+        // on blank lines ourselves doesn't care what Content-Type says.
+        let response = self
             .client
             .post(format!("{}/codex/responses", self.flavor.base()))
             .headers(self.codex_headers(true)?)
-            .json(&body);
-        let mut es = EventSource::new(request).context("opening Codex SSE stream")?;
+            .json(&body)
+            .send()
+            .await
+            .context("sending Codex request")?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            let msg = format!("request failed ({status}): {}", truncate_error_body(&text));
+            let _ = tx.send(StreamEvent::Error(msg));
+            return Ok(Finish::Errored);
+        }
+
         let mut tool_calls: BTreeMap<usize, ToolCall> = BTreeMap::new();
         let mut content_acc = String::new();
-        while let Some(event) = es.next().await {
-            match event {
-                Ok(Event::Open) => {}
-                Ok(Event::Message(msg)) => {
-                    if msg.data == "[DONE]" {
-                        break;
-                    }
-                    if let Some(token) = codex_text_delta(&msg.data)
-                        && !token.is_empty()
-                    {
-                        content_acc.push_str(&token);
-                        let _ = tx.send(StreamEvent::Token(token));
-                    }
-                    if let Some(r) = codex_reasoning_delta(&msg.data)
-                        && !r.is_empty()
-                    {
-                        let _ = tx.send(StreamEvent::Reasoning(r));
-                    }
-                    accumulate_codex_tool_calls(&mut tool_calls, &msg.data);
-                    if let Some(usage) = codex_usage(&msg.data) {
-                        let _ = tx.send(StreamEvent::Usage(usage));
-                    }
+        let mut buf = String::new();
+        let mut stream = response.bytes_stream();
+        'stream: while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("reading Codex stream")?;
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            // SSE events are separated by a blank line; a "data:" line's
+            // content (possibly spread across several, joined by \n per the
+            // spec — Codex never does this in practice, but handle it) is
+            // the payload we care about.
+            while let Some(end) = buf.find("\n\n") {
+                let event_block: String = buf.drain(..end + 2).collect();
+                let data = sse_event_data(&event_block);
+                if data.is_empty() {
+                    continue;
                 }
-                Err(reqwest_eventsource::Error::StreamEnded) => break,
-                // These two variants carry the actual HTTP response, but
-                // their `Display` is close to useless ("Invalid header
-                // value: \"\"" when Content-Type is simply absent — no
-                // status, no body shown). Read the response through instead
-                // so the real reason (an auth/entitlement error page, a
-                // rate limit, etc.) reaches the user rather than a
-                // header-parsing artifact.
-                Err(reqwest_eventsource::Error::InvalidStatusCode(_, response))
-                | Err(reqwest_eventsource::Error::InvalidContentType(_, response)) => {
-                    let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
-                    let msg = format!("request failed ({status}): {}", truncate_error_body(&body));
-                    let _ = tx.send(StreamEvent::Error(msg));
-                    es.close();
-                    return Ok(Finish::Errored);
+                if data == "[DONE]" {
+                    break 'stream;
                 }
-                Err(e) => {
-                    let _ = tx.send(StreamEvent::Error(e.to_string()));
-                    es.close();
-                    return Ok(Finish::Errored);
+                if let Some(token) = codex_text_delta(&data)
+                    && !token.is_empty()
+                {
+                    content_acc.push_str(&token);
+                    let _ = tx.send(StreamEvent::Token(token));
+                }
+                if let Some(r) = codex_reasoning_delta(&data)
+                    && !r.is_empty()
+                {
+                    let _ = tx.send(StreamEvent::Reasoning(r));
+                }
+                accumulate_codex_tool_calls(&mut tool_calls, &data);
+                if let Some(usage) = codex_usage(&data) {
+                    let _ = tx.send(StreamEvent::Usage(usage));
                 }
             }
         }
@@ -992,6 +998,20 @@ fn codex_response_text(v: &serde_json::Value) -> String {
         .join("")
 }
 
+/// Extract an SSE event block's `data:` payload — possibly spread across
+/// several `data:` lines, joined by `\n` per the SSE spec (Codex never
+/// actually does this, but it costs nothing to handle). Ignores any
+/// `event:`/`id:`/comment lines in the block; we key off the JSON payload's
+/// own `"type"` field instead of the SSE `event:` name.
+fn sse_event_data(event_block: &str) -> String {
+    event_block
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn codex_text_delta(data: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(data).ok()?;
     match v.get("type")?.as_str()? {
@@ -1145,6 +1165,24 @@ fn vision_body(model: &str, image_data_url: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sse_event_data_joins_multiple_data_lines() {
+        let block = "event: response.created\ndata: {\"a\":1}\ndata: more\n\n";
+        assert_eq!(sse_event_data(block), "{\"a\":1}\nmore");
+    }
+
+    #[test]
+    fn sse_event_data_ignores_non_data_lines() {
+        let block = "id: 5\nevent: ping\n\n";
+        assert_eq!(sse_event_data(block), "");
+    }
+
+    #[test]
+    fn sse_event_data_handles_done_sentinel() {
+        let block = "event: done\ndata: [DONE]\n\n";
+        assert_eq!(sse_event_data(block), "[DONE]");
+    }
 
     #[test]
     fn truncate_error_body_reports_empty_body_explicitly() {
