@@ -295,76 +295,62 @@ async fn run_swarm_turn(
         return;
     }
 
-    // (persona name, reply content), in the order replies landed, across all rounds.
+    // (persona name, reply content), in speaking order — a running
+    // transcript every persona actually converses through, turn by turn,
+    // rather than replying blind and only syncing between rounds.
     let mut discussion: Vec<(String, String)> = Vec::new();
     let mut round = 0usize;
     loop {
         round += 1;
-        send(SwarmUpdate::Progress(format!(
-            "round {round}/{MAX_ROUNDS} — 0 of {} personas replied",
-            personas.len()
-        )));
-
-        let transcript_so_far = render_discussion(&discussion);
-        let mut set = tokio::task::JoinSet::new();
         for (i, p) in personas.iter().enumerate() {
-            let provider = provider.clone();
-            let model = p.model.clone();
-            let name = p.name.clone();
+            send(SwarmUpdate::Progress(format!(
+                "round {round}/{MAX_ROUNDS} — {} is responding ({}/{})",
+                p.name,
+                i + 1,
+                personas.len()
+            )));
+
             let mut messages = base_history.clone();
             messages.push(ChatMessage::text(
                 "system",
                 format!(
-                    "You are participating in a multi-persona discussion. Your persona: {}. \
-                     Respond briefly (a few sentences) and stay in character, from this \
-                     perspective only.",
-                    p.blurb
+                    "You are {} in a live group conversation with the other personas below. \
+                     Your persona: {}. Speak naturally and briefly (a few sentences), stay in \
+                     character, and actually engage with what the last speaker said — agree, \
+                     push back, build on it, or ask a question, the way a real person would in \
+                     a discussion. Don't just restate your own opening position every time.",
+                    p.name, p.blurb
                 ),
             ));
-            if let Some(transcript) = &transcript_so_far {
-                messages.push(ChatMessage::text(
+            match render_discussion(&discussion) {
+                Some(transcript) => messages.push(ChatMessage::text(
                     "user",
                     format!(
-                        "Discussion so far:\n\n{transcript}\n\nGive your next response, \
-                         reacting to the above from your persona's perspective."
+                        "Conversation so far:\n\n{transcript}\n\nIt's your turn, {}. Respond to \
+                         what was just said.",
+                        p.name
                     ),
-                ));
+                )),
+                None => messages.push(ChatMessage::text(
+                    "user",
+                    format!(
+                        "You're opening the discussion, {}. Give your first take.",
+                        p.name
+                    ),
+                )),
             }
-            set.spawn(async move {
-                let res = provider
-                    .complete(&model, messages)
-                    .await
-                    .map_err(|e| e.to_string());
-                (i, name, model, res)
-            });
-        }
 
-        let mut round_replies: Vec<(usize, String, String, String)> = Vec::new();
-        let mut done = 0usize;
-        while let Some(joined) = set.join_next().await {
-            let Ok((i, name, model, res)) = joined else {
-                continue;
-            };
-            match res {
+            match provider.complete(&p.model, messages).await {
                 Ok(content) => {
-                    done += 1;
-                    send(SwarmUpdate::Progress(format!(
-                        "round {round}/{MAX_ROUNDS} — {done} of {} personas replied",
-                        personas.len()
-                    )));
                     send(SwarmUpdate::Reply {
-                        persona: name.clone(),
-                        model: model.clone(),
+                        persona: p.name.clone(),
+                        model: p.model.clone(),
                         content: content.clone(),
                     });
-                    round_replies.push((i, name, model, content));
+                    discussion.push((p.name.clone(), content));
                 }
-                Err(e) => send(SwarmUpdate::Error(format!("{name} failed: {e}"))),
+                Err(e) => send(SwarmUpdate::Error(format!("{} failed: {e}", p.name))),
             }
-        }
-        round_replies.sort_by_key(|(i, ..)| *i);
-        for (_, name, _, content) in round_replies {
-            discussion.push((name, content));
         }
 
         if round >= MAX_ROUNDS {
@@ -452,9 +438,11 @@ async fn moderator_converged(
 ) -> Result<bool, String> {
     let transcript = render_discussion(discussion).unwrap_or_default();
     let prompt = format!(
-        "A panel of personas is discussing this message:\n\n{topic}\n\nDiscussion so far:\n\n\
-         {transcript}\n\nHas the discussion converged (little new perspective left to add), or \
-         should another round run? Reply with ONLY one word: CONVERGED or CONTINUE."
+        "A panel of personas is having a live conversation about this message:\n\n{topic}\n\n\
+         Conversation so far:\n\n{transcript}\n\nHave they reached a conclusion — agreement, a \
+         clear resolution, or a settled trade-off — or are they still meaningfully working \
+         toward one? Reply with ONLY one word: CONVERGED if they've reached a conclusion, \
+         CONTINUE if the conversation should keep going."
     );
     let raw = provider
         .complete(meta_model, vec![ChatMessage::text("user", prompt)])
@@ -471,10 +459,12 @@ async fn synthesize(
 ) -> Result<String> {
     let transcript = render_discussion(discussion).unwrap_or_default();
     let prompt = format!(
-        "A panel of personas discussed this message:\n\n{topic}\n\nDiscussion:\n\n{transcript}\n\n\
-         Write one final reply to the original message that reconciles the perspectives above \
-         into a clear, useful answer. Markdown allowed. Don't mention that this came from a \
-         panel — just answer well, informed by the discussion."
+        "A panel of personas had this conversation about a message:\n\n{topic}\n\n\
+         Conversation:\n\n{transcript}\n\nWrite one final reply to the original message that \
+         states the conclusion this conversation actually reached — the agreement, resolution, \
+         or trade-off they settled on — as a clear, useful answer. If they genuinely disagreed \
+         to the end, say so and give the best-supported call. Markdown allowed. Don't mention \
+         that this came from a panel — just answer well, informed by the conversation."
     );
     provider
         .complete(meta_model, vec![ChatMessage::text("user", prompt)])
