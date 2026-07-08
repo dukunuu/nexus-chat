@@ -576,6 +576,22 @@ impl OpenRouter {
                     }
                 }
                 Err(reqwest_eventsource::Error::StreamEnded) => break,
+                // These two variants carry the actual HTTP response, but
+                // their `Display` is close to useless ("Invalid header
+                // value: \"\"" when Content-Type is simply absent — no
+                // status, no body shown). Read the response through instead
+                // so the real reason (an auth/entitlement error page, a
+                // rate limit, etc.) reaches the user rather than a
+                // header-parsing artifact.
+                Err(reqwest_eventsource::Error::InvalidStatusCode(_, response))
+                | Err(reqwest_eventsource::Error::InvalidContentType(_, response)) => {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    let msg = format!("request failed ({status}): {}", truncate_error_body(&body));
+                    let _ = tx.send(StreamEvent::Error(msg));
+                    es.close();
+                    return Ok(Finish::Errored);
+                }
                 Err(e) => {
                     let _ = tx.send(StreamEvent::Error(e.to_string()));
                     es.close();
@@ -691,6 +707,22 @@ impl OpenRouter {
                     }
                 }
                 Err(reqwest_eventsource::Error::StreamEnded) => break,
+                // These two variants carry the actual HTTP response, but
+                // their `Display` is close to useless ("Invalid header
+                // value: \"\"" when Content-Type is simply absent — no
+                // status, no body shown). Read the response through instead
+                // so the real reason (an auth/entitlement error page, a
+                // rate limit, etc.) reaches the user rather than a
+                // header-parsing artifact.
+                Err(reqwest_eventsource::Error::InvalidStatusCode(_, response))
+                | Err(reqwest_eventsource::Error::InvalidContentType(_, response)) => {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    let msg = format!("request failed ({status}): {}", truncate_error_body(&body));
+                    let _ = tx.send(StreamEvent::Error(msg));
+                    es.close();
+                    return Ok(Finish::Errored);
+                }
                 Err(e) => {
                     let _ = tx.send(StreamEvent::Error(e.to_string()));
                     es.close();
@@ -713,6 +745,21 @@ enum Finish {
     Done,
     ToolCalls(Vec<ToolCall>, String),
     Errored,
+}
+
+/// Cap an error response body shown to the user — a WAF/error page can be
+/// arbitrarily large HTML, and the status line has no room for it anyway.
+fn truncate_error_body(body: &str) -> String {
+    const MAX: usize = 300;
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "(empty body)".to_string();
+    }
+    let mut truncated: String = trimmed.chars().take(MAX).collect();
+    if trimmed.chars().count() > MAX {
+        truncated.push('…');
+    }
+    truncated
 }
 
 /// Pull `(content, reasoning)` deltas out of one SSE data chunk. OpenRouter puts
@@ -1098,6 +1145,25 @@ fn vision_body(model: &str, image_data_url: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_error_body_reports_empty_body_explicitly() {
+        assert_eq!(truncate_error_body(""), "(empty body)");
+        assert_eq!(truncate_error_body("   \n  "), "(empty body)");
+    }
+
+    #[test]
+    fn truncate_error_body_passes_short_text_through() {
+        assert_eq!(truncate_error_body("  access denied  "), "access denied");
+    }
+
+    #[test]
+    fn truncate_error_body_caps_long_text_with_ellipsis() {
+        let long = "x".repeat(1000);
+        let out = truncate_error_body(&long);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), 301); // 300 chars + the ellipsis marker
+    }
 
     #[test]
     fn ocr_body_has_prompt_image_and_token_budget() {
