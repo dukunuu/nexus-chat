@@ -1,8 +1,9 @@
 //! `/swarm`: a per-session roster of persona+model rows that, when swarm
-//! mode is on, turns a normal chat message into a multi-persona roundtable —
-//! each persona replies each round, a moderator decides when the discussion
-//! has converged (bounded by a hard cap), then a synthesis reply is written
-//! as the turn's canonical assistant message.
+//! mode is on, turns a normal chat message into a live conversation between
+//! personas — each takes a turn in sequence, sees everything said before it,
+//! and a moderator checks after every turn whether they've reached a
+//! conclusion (bounded by a hard cap either way). A synthesis reply is then
+//! written as the turn's canonical assistant message.
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -12,9 +13,11 @@ use crate::db::Persona;
 use crate::provider::ChatMessage;
 use crate::provider::openrouter::OpenRouter;
 
-/// Bounds how many rounds a roundtable can run before the moderator's answer
-/// stops being consulted and synthesis runs regardless.
-const MAX_ROUNDS: usize = 4;
+/// Bounds how many individual persona turns a conversation can run before
+/// stopping and synthesizing regardless of what the moderator says. Scales
+/// with roster size so a bigger panel isn't cut off after everyone's barely
+/// spoken.
+const MAX_TURNS_PER_PERSONA: usize = 4;
 
 /// A `/swarm` turn update tagged with the session it belongs to (the turn
 /// runs in the background, so the viewer may have navigated away by the
@@ -22,11 +25,12 @@ const MAX_ROUNDS: usize = 4;
 pub type SwarmMsg = (String, SwarmUpdate);
 
 pub enum SwarmUpdate {
-    /// The roster was empty, so one was suggested — persist it before round 1.
+    /// The roster was empty, so one was suggested — persist it before the
+    /// conversation's first turn.
     RosterSuggested(Vec<Persona>),
     /// Status-line progress text.
     Progress(String),
-    /// One persona's reply for the round just run.
+    /// One persona's reply for the turn just run.
     Reply {
         persona: String,
         model: String,
@@ -193,7 +197,8 @@ impl App {
                 let _ = self.db.save_swarm_personas(&session_id, &personas);
                 if viewing {
                     self.swarm_cache = personas;
-                    self.status = "swarm: roster suggested — round 1…".to_string();
+                    self.status =
+                        "swarm: roster suggested — starting the conversation…".to_string();
                 }
             }
             SwarmUpdate::Progress(s) => {
@@ -296,18 +301,16 @@ async fn run_swarm_turn(
     }
 
     // (persona name, reply content), in speaking order — a running
-    // transcript every persona actually converses through, turn by turn,
-    // rather than replying blind and only syncing between rounds.
+    // transcript every persona actually converses through, turn by turn.
     let mut discussion: Vec<(String, String)> = Vec::new();
-    let mut round = 0usize;
-    loop {
-        round += 1;
-        for (i, p) in personas.iter().enumerate() {
+    let max_turns = personas.len().max(1) * MAX_TURNS_PER_PERSONA;
+    let mut turn = 0usize;
+    'convo: loop {
+        for p in personas.iter() {
+            turn += 1;
             send(SwarmUpdate::Progress(format!(
-                "round {round}/{MAX_ROUNDS} — {} is responding ({}/{})",
-                p.name,
-                i + 1,
-                personas.len()
+                "turn {turn}/{max_turns} — {} is responding",
+                p.name
             )));
 
             let mut messages = base_history.clone();
@@ -351,18 +354,18 @@ async fn run_swarm_turn(
                 }
                 Err(e) => send(SwarmUpdate::Error(format!("{} failed: {e}", p.name))),
             }
-        }
 
-        if round >= MAX_ROUNDS {
-            break;
-        }
-        send(SwarmUpdate::Progress(
-            "moderator checking convergence…".to_string(),
-        ));
-        match moderator_converged(&provider, &meta_model, &user_message, &discussion).await {
-            Ok(true) => break,
-            Ok(false) => continue,
-            Err(_) => break, // fail safe: stop and synthesize with what's gathered
+            if turn >= max_turns {
+                break 'convo;
+            }
+            send(SwarmUpdate::Progress(
+                "moderator checking for a conclusion…".to_string(),
+            ));
+            match moderator_converged(&provider, &meta_model, &user_message, &discussion).await {
+                Ok(true) => break 'convo,
+                Ok(false) => {}
+                Err(_) => break 'convo, // fail safe: stop and synthesize with what's gathered
+            }
         }
     }
 
