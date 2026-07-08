@@ -19,6 +19,10 @@ use crate::provider::openrouter::OpenRouter;
 /// spoken.
 const MAX_TURNS_PER_PERSONA: usize = 4;
 
+/// Hard ceiling on how many personas a conversation can grow to via the
+/// moderator adding new voices mid-run.
+const MAX_PERSONAS: usize = 6;
+
 /// A `/swarm` turn update tagged with the session it belongs to (the turn
 /// runs in the background, so the viewer may have navigated away by the
 /// time an update lands).
@@ -36,6 +40,9 @@ pub enum SwarmUpdate {
         model: String,
         content: String,
     },
+    /// The moderator decided the conversation needed a new voice — persist
+    /// it to the roster so it shows up in the popup too.
+    PersonaJoined(Persona),
     /// The turn's final synthesis reply — the canonical assistant message.
     Synthesis(String),
     Error(String),
@@ -230,6 +237,19 @@ impl App {
                     });
                 }
             }
+            SwarmUpdate::PersonaJoined(persona) => {
+                let mut roster = self.db.list_swarm_personas(&session_id).unwrap_or_default();
+                if !roster.iter().any(|p| p.name == persona.name) {
+                    roster.push(persona.clone());
+                    let _ = self.db.save_swarm_personas(&session_id, &roster);
+                }
+                if viewing {
+                    if !self.swarm_cache.iter().any(|p| p.name == persona.name) {
+                        self.swarm_cache.push(persona.clone());
+                    }
+                    self.status = format!("swarm: {} joined the conversation", persona.name);
+                }
+            }
             SwarmUpdate::Synthesis(content) => {
                 let _ = self.db.add_assistant_message(
                     &session_id,
@@ -302,70 +322,94 @@ async fn run_swarm_turn(
 
     // (persona name, reply content), in speaking order — a running
     // transcript every persona actually converses through, turn by turn.
+    // `personas` can grow mid-conversation (the moderator can bring in a new
+    // voice), so turns are driven by index, wrapping, rather than an
+    // iterator over a fixed snapshot.
     let mut discussion: Vec<(String, String)> = Vec::new();
     let max_turns = personas.len().max(1) * MAX_TURNS_PER_PERSONA;
     let mut turn = 0usize;
+    let mut idx = 0usize;
     'convo: loop {
-        for p in personas.iter() {
-            turn += 1;
-            send(SwarmUpdate::Progress(format!(
-                "turn {turn}/{max_turns} — {} is responding",
-                p.name
-            )));
+        if idx >= personas.len() {
+            idx = 0;
+        }
+        let p = personas[idx].clone();
+        idx += 1;
+        turn += 1;
+        send(SwarmUpdate::Progress(format!(
+            "turn {turn}/{max_turns} — {} is responding",
+            p.name
+        )));
 
-            let mut messages = base_history.clone();
-            messages.push(ChatMessage::text(
-                "system",
+        let mut messages = base_history.clone();
+        messages.push(ChatMessage::text(
+            "system",
+            format!(
+                "You are {} in a live group conversation with the other personas below. \
+                 Your persona: {}. Speak naturally and briefly (a few sentences), stay in \
+                 character, and actually engage with what the last speaker said — agree, \
+                 push back, build on it, or ask a question, the way a real person would in \
+                 a discussion. Don't just restate your own opening position every time.",
+                p.name, p.blurb
+            ),
+        ));
+        match render_discussion(&discussion) {
+            Some(transcript) => messages.push(ChatMessage::text(
+                "user",
                 format!(
-                    "You are {} in a live group conversation with the other personas below. \
-                     Your persona: {}. Speak naturally and briefly (a few sentences), stay in \
-                     character, and actually engage with what the last speaker said — agree, \
-                     push back, build on it, or ask a question, the way a real person would in \
-                     a discussion. Don't just restate your own opening position every time.",
-                    p.name, p.blurb
+                    "Conversation so far:\n\n{transcript}\n\nIt's your turn, {}. Respond to \
+                     what was just said.",
+                    p.name
                 ),
-            ));
-            match render_discussion(&discussion) {
-                Some(transcript) => messages.push(ChatMessage::text(
-                    "user",
-                    format!(
-                        "Conversation so far:\n\n{transcript}\n\nIt's your turn, {}. Respond to \
-                         what was just said.",
-                        p.name
-                    ),
-                )),
-                None => messages.push(ChatMessage::text(
-                    "user",
-                    format!(
-                        "You're opening the discussion, {}. Give your first take.",
-                        p.name
-                    ),
-                )),
-            }
+            )),
+            None => messages.push(ChatMessage::text(
+                "user",
+                format!(
+                    "You're opening the discussion, {}. Give your first take.",
+                    p.name
+                ),
+            )),
+        }
 
-            match provider.complete(&p.model, messages).await {
-                Ok(content) => {
-                    send(SwarmUpdate::Reply {
-                        persona: p.name.clone(),
-                        model: p.model.clone(),
-                        content: content.clone(),
-                    });
-                    discussion.push((p.name.clone(), content));
+        match provider.complete(&p.model, messages).await {
+            Ok(content) => {
+                send(SwarmUpdate::Reply {
+                    persona: p.name.clone(),
+                    model: p.model.clone(),
+                    content: content.clone(),
+                });
+                discussion.push((p.name.clone(), content));
+            }
+            Err(e) => send(SwarmUpdate::Error(format!("{} failed: {e}", p.name))),
+        }
+
+        if turn >= max_turns {
+            break 'convo;
+        }
+        send(SwarmUpdate::Progress(
+            "moderator checking for a conclusion…".to_string(),
+        ));
+        match moderator_check(&provider, &meta_model, &user_message, &discussion).await {
+            Ok(ModeratorVerdict::Converged) => break 'convo,
+            Ok(ModeratorVerdict::Continue) => {}
+            Ok(ModeratorVerdict::AddPersona { name, blurb }) => {
+                // ponytail: fixed cap on dynamic growth, not configurable — a
+                // 3-persona chat that keeps spawning new voices would never
+                // converge and never hit MAX_TURNS_PER_PERSONA-driven synthesis.
+                if personas.len() >= MAX_PERSONAS
+                    || personas.iter().any(|existing| existing.name == name)
+                {
+                    continue;
                 }
-                Err(e) => send(SwarmUpdate::Error(format!("{} failed: {e}", p.name))),
+                let new_persona = Persona {
+                    name,
+                    model: default_model.clone(),
+                    blurb,
+                };
+                send(SwarmUpdate::PersonaJoined(new_persona.clone()));
+                personas.push(new_persona);
             }
-
-            if turn >= max_turns {
-                break 'convo;
-            }
-            send(SwarmUpdate::Progress(
-                "moderator checking for a conclusion…".to_string(),
-            ));
-            match moderator_converged(&provider, &meta_model, &user_message, &discussion).await {
-                Ok(true) => break 'convo,
-                Ok(false) => {}
-                Err(_) => break 'convo, // fail safe: stop and synthesize with what's gathered
-            }
+            Err(_) => break 'convo, // fail safe: stop and synthesize with what's gathered
         }
     }
 
@@ -433,25 +477,59 @@ fn parse_suggested_personas(raw: &str, default_model: &str) -> Result<Vec<Person
         .collect())
 }
 
-async fn moderator_converged(
+enum ModeratorVerdict {
+    Converged,
+    Continue,
+    /// The conversation would benefit from a new voice — its name and a
+    /// one-sentence personality/perspective blurb.
+    AddPersona {
+        name: String,
+        blurb: String,
+    },
+}
+
+async fn moderator_check(
     provider: &OpenRouter,
     meta_model: &str,
     topic: &str,
     discussion: &[(String, String)],
-) -> Result<bool, String> {
+) -> Result<ModeratorVerdict, String> {
     let transcript = render_discussion(discussion).unwrap_or_default();
     let prompt = format!(
         "A panel of personas is having a live conversation about this message:\n\n{topic}\n\n\
-         Conversation so far:\n\n{transcript}\n\nHave they reached a conclusion — agreement, a \
-         clear resolution, or a settled trade-off — or are they still meaningfully working \
-         toward one? Reply with ONLY one word: CONVERGED if they've reached a conclusion, \
-         CONTINUE if the conversation should keep going."
+         Conversation so far:\n\n{transcript}\n\nDecide one of three things and reply with ONLY \
+         one line, no other text:\n\
+         - If they've reached a conclusion (agreement, a clear resolution, or a settled \
+         trade-off), reply exactly: CONVERGED\n\
+         - If the conversation is missing an important point of view that would meaningfully \
+         change it, reply exactly: ADD: <short persona name> | <one-sentence personality and \
+         perspective>\n\
+         - Otherwise, reply exactly: CONTINUE"
     );
     let raw = provider
         .complete(meta_model, vec![ChatMessage::text("user", prompt)])
         .await
         .map_err(|e| e.to_string())?;
-    Ok(raw.to_uppercase().contains("CONVERGED"))
+    Ok(parse_moderator_verdict(&raw))
+}
+
+fn parse_moderator_verdict(raw: &str) -> ModeratorVerdict {
+    // ASCII-only uppercasing so byte offsets stay valid for slicing `raw`
+    // (full Unicode `to_uppercase` can change a string's byte length).
+    let upper = raw.to_ascii_uppercase();
+    if let Some(rest) = upper.find("ADD:").map(|i| &raw[i + 4..]) {
+        if let Some((name, blurb)) = rest.split_once('|') {
+            let name = name.trim().trim_matches('*').to_string();
+            let blurb = blurb.lines().next().unwrap_or("").trim().to_string();
+            if !name.is_empty() && !blurb.is_empty() {
+                return ModeratorVerdict::AddPersona { name, blurb };
+            }
+        }
+    }
+    if upper.contains("CONVERGED") {
+        return ModeratorVerdict::Converged;
+    }
+    ModeratorVerdict::Continue
 }
 
 async fn synthesize(
@@ -509,5 +587,48 @@ mod tests {
         let rendered = render_discussion(&d).unwrap();
         assert!(rendered.contains("**Skeptic**"));
         assert!(rendered.contains("wait, really?"));
+    }
+
+    #[test]
+    fn parse_moderator_verdict_recognizes_converged() {
+        assert!(matches!(
+            parse_moderator_verdict("CONVERGED"),
+            ModeratorVerdict::Converged
+        ));
+        assert!(matches!(
+            parse_moderator_verdict("  converged.\n"),
+            ModeratorVerdict::Converged
+        ));
+    }
+
+    #[test]
+    fn parse_moderator_verdict_defaults_to_continue() {
+        assert!(matches!(
+            parse_moderator_verdict("CONTINUE"),
+            ModeratorVerdict::Continue
+        ));
+        assert!(matches!(
+            parse_moderator_verdict("something unexpected"),
+            ModeratorVerdict::Continue
+        ));
+    }
+
+    #[test]
+    fn parse_moderator_verdict_extracts_name_and_blurb_for_add() {
+        match parse_moderator_verdict("ADD: Realist | grounds the discussion in constraints") {
+            ModeratorVerdict::AddPersona { name, blurb } => {
+                assert_eq!(name, "Realist");
+                assert_eq!(blurb, "grounds the discussion in constraints");
+            }
+            _ => panic!("expected AddPersona"),
+        }
+    }
+
+    #[test]
+    fn parse_moderator_verdict_falls_back_to_continue_on_malformed_add() {
+        assert!(matches!(
+            parse_moderator_verdict("ADD: no separator here"),
+            ModeratorVerdict::Continue
+        ));
     }
 }
