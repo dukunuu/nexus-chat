@@ -82,7 +82,7 @@ fn code_blocks_split_by_fence_with_lang() {
 
 pub(super) fn app_with_key() -> App {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("test-key".into()), test_space());
+    let mut a = App::new(db, Some("sk-or-test-key".into()), test_space());
     a.models = vec![
         Model {
             id: "a/one".into(),
@@ -200,7 +200,7 @@ async fn message_with_model_creates_session_and_streams() {
 #[test]
 fn ocr_settings_defaults_gate_and_cycle() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("sk-or-test".into()), test_space());
     assert_eq!(a.ocr_model, "google/gemini-2.5-flash-lite");
     assert_eq!(a.ocr_engine, "auto");
     assert_eq!(a.embedding_model, "openai/text-embedding-3-small");
