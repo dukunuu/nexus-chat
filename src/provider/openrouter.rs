@@ -182,6 +182,15 @@ impl OpenRouter {
         }
     }
 
+    /// Display name for the active backend, shown in the model picker.
+    pub fn backend_name(&self) -> &'static str {
+        match self.flavor {
+            ProviderFlavor::OpenRouter => "OpenRouter",
+            ProviderFlavor::OpenAi => "OpenAI",
+            ProviderFlavor::OpenAiCodex => "Codex",
+        }
+    }
+
     pub fn default_utility_model(&self) -> &'static str {
         match self.flavor {
             ProviderFlavor::OpenRouter => "google/gemini-2.5-flash-lite",

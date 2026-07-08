@@ -699,8 +699,6 @@ pub struct App {
 
     pub popup: Popup,
     pub model_filter: FilterInput,
-    /// Optional model-owner filter for noisy catalogs like OpenRouter (e.g. "anthropic", "openai", "google").
-    pub model_provider_filter: Option<String>,
     pub model_focus: ModelPanel,
     /// What a confirmed selection in the model picker is currently for.
     pub model_pick_target: ModelPickTarget,
@@ -920,7 +918,6 @@ impl App {
             theme_gen: 0,
             popup: Popup::None,
             model_filter: FilterInput::default(),
-            model_provider_filter: None,
             model_focus: ModelPanel::Available,
             model_pick_target: ModelPickTarget::Session,
             fav_state: ListState::default(),

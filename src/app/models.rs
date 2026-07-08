@@ -6,14 +6,13 @@ use crate::config;
 use crate::provider::Model;
 use chrono::Utc;
 
-fn model_provider_key(m: &Model) -> String {
-    m.id.split_once('/')
-        .map(|(provider, _)| provider)
-        .unwrap_or("openai")
-        .to_string()
-}
-
 impl App {
+    /// Display name of the currently active backend, for the model picker's
+    /// title. `None` when nothing's configured yet.
+    pub(crate) fn provider_backend_name(&self) -> Option<&'static str> {
+        self.provider.as_ref().map(|p| p.backend_name())
+    }
+
     pub(super) fn open_model_picker(&mut self) {
         self.model_pick_target = ModelPickTarget::Session;
         self.open_model_picker_impl();
@@ -130,7 +129,6 @@ impl App {
                 self.saved.codex = Some(creds);
                 let _ = config::save_active_backend("codex");
                 self.models.clear();
-                self.model_provider_filter = None;
                 self.status = "OpenAI Codex login saved, loading models…".to_string();
                 self.fetch_models();
                 self.refresh_toolbox();
@@ -164,7 +162,6 @@ impl App {
             key.clone(),
         ));
         self.key = Some(key);
-        self.model_provider_filter = None;
         self.status = "key saved, loading models…".to_string();
         self.fetch_models();
     }
@@ -205,7 +202,6 @@ impl App {
         let _ = config::save_active_backend(tag);
         self.key = Some(key);
         self.models.clear();
-        self.model_provider_filter = None;
         self.status = format!("switched to {name} — loading models…");
         self.fetch_models();
     }
@@ -222,12 +218,10 @@ impl App {
 
     fn filtered_panel(&self, want_fav: bool) -> Vec<&Model> {
         let f = self.model_filter.to_lowercase();
-        let provider_filter = self.model_provider_filter.as_deref();
         let mut out: Vec<&Model> = self
             .models
             .iter()
             .filter(|m| self.favorites.contains(&m.id) == want_fav)
-            .filter(|m| provider_filter.is_none_or(|p| model_provider_key(m) == p))
             .filter(|m| {
                 f.is_empty()
                     || m.id.to_lowercase().contains(&f)
@@ -241,30 +235,6 @@ impl App {
             rb.cmp(&ra).then_with(|| a.id.cmp(&b.id))
         });
         out
-    }
-
-    pub(crate) fn model_provider_options(&self) -> Vec<String> {
-        let mut providers: Vec<String> = self.models.iter().map(model_provider_key).collect();
-        providers.sort();
-        providers.dedup();
-        providers
-    }
-
-    pub(crate) fn cycle_model_provider_filter(&mut self) {
-        let providers = self.model_provider_options();
-        if providers.is_empty() {
-            self.model_provider_filter = None;
-            return;
-        }
-        let next = match self.model_provider_filter.as_deref() {
-            None => providers.first().cloned(),
-            Some(cur) => providers
-                .iter()
-                .position(|p| p == cur)
-                .and_then(|i| providers.get(i + 1).cloned()),
-        };
-        self.model_provider_filter = next;
-        self.reset_model_selection();
     }
 
     fn panel_len(&self, panel: ModelPanel) -> usize {

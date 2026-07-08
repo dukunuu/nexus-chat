@@ -32,13 +32,15 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
 
     // Available column (with the search box in the title).
     let avail_items = model_items(app, &app.available_models());
-    let provider = app.model_provider_filter.as_deref().unwrap_or("all");
+    let backend = app
+        .provider_backend_name()
+        .unwrap_or("no backend configured");
     let hint = if app.settings.hide_hints {
         ""
     } else {
-        "  (Ctrl+P provider · Ctrl+S fav · Ctrl+T reason)"
+        "  (Ctrl+P switch backend · Ctrl+S fav · Ctrl+T reason)"
     };
-    let mut title_spans = vec![Span::raw(format!(" Available [{provider}] — search: "))];
+    let mut title_spans = vec![Span::raw(format!(" Available [{backend}] — search: "))];
     title_spans.extend(app.model_filter.spans(&app.theme));
     title_spans.push(Span::raw(format!("{hint} ")));
     let avail_list = panel_list(
@@ -117,7 +119,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         // Ctrl+P narrows noisy provider catalogs; Ctrl+S favorites; Ctrl+T cycles reasoning effort.
-        KeyCode::Char('p') if ctrl => app.cycle_model_provider_filter(),
+        KeyCode::Char('p') if ctrl => app.cycle_backend(),
         KeyCode::Char('s') if ctrl => app.toggle_favorite_focused()?,
         KeyCode::Char('t') if ctrl => app.cycle_reasoning_focused()?,
         // Cancelling a memory-model pick returns to /config, same as picking one.
