@@ -86,6 +86,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["provider", "providers"],
     },
     Command {
+        name: "swarm",
+        desc: "multi-persona roundtable roster",
+        aliases: &["swarms", "personas", "panel"],
+    },
+    Command {
         name: "config",
         desc: "settings & stats",
         aliases: &["settings", "stats", "nerd", "params"],

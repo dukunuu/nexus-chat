@@ -30,6 +30,7 @@ mod sessions;
 mod settings;
 mod skills_popup;
 mod spaces;
+mod swarm;
 #[cfg(test)]
 mod tests;
 mod transcribe;
@@ -83,6 +84,16 @@ pub enum Popup {
     Apps,
     Watch,
     ResearchLive,
+    Swarm,
+}
+
+/// What the `/swarm` roster popup is doing.
+#[derive(PartialEq, Clone, Copy)]
+pub enum SwarmPopupMode {
+    Browse,
+    EditName,
+    EditBlurb,
+    ConfirmDelete,
 }
 
 /// What the apps popup is doing: browsing the space's apps or confirming
@@ -175,6 +186,8 @@ pub enum ModelPickTarget {
     Ocr,
     Research,
     Escalation,
+    /// Picking the model for one row of the active session's `/swarm` roster.
+    SwarmPersona(usize),
 }
 
 /// Editable rows in the nerd-config popup.
@@ -485,6 +498,8 @@ pub enum AppEvent {
     ResearchTopic(Option<Result<String, String>>),
     /// OpenAI Codex subscription login status or final result.
     Login(Option<LoginMsg>),
+    /// A `/swarm` turn update, or `None` when its channel closed.
+    Swarm(Option<swarm::SwarmMsg>),
 }
 
 pub struct App {
@@ -581,6 +596,14 @@ pub struct App {
     /// A running `/research` job's channel, or None when idle.
     pub(crate) research_rx: Option<mpsc::UnboundedReceiver<ResearchMsg>>,
     pub(crate) login_rx: Option<mpsc::UnboundedReceiver<LoginMsg>>,
+    /// A running `/swarm` turn's channel, or None when idle.
+    pub(crate) swarm_rx: Option<mpsc::UnboundedReceiver<swarm::SwarmMsg>>,
+    /// The active session's `/swarm` roster, cached for the popup.
+    pub swarm_cache: Vec<crate::db::Persona>,
+    pub swarm_selected: usize,
+    pub swarm_popup_mode: SwarmPopupMode,
+    /// Edit buffer while naming/re-blurbing a persona row.
+    pub swarm_edit: String,
     /// (session id, topic) of the `/research` job currently running, if any —
     /// cleared when its channel closes.
     pub(crate) research_running: Option<(String, String)>,
@@ -825,6 +848,11 @@ impl App {
             ocr_pull_rx: None,
             research_rx: None,
             login_rx: None,
+            swarm_rx: None,
+            swarm_cache: Vec::new(),
+            swarm_selected: 0,
+            swarm_popup_mode: SwarmPopupMode::Browse,
+            swarm_edit: String::new(),
             research_running: None,
             pending_images: Vec::new(),
             deferred_send: None,
@@ -1194,6 +1222,12 @@ impl App {
                     None => std::future::pending().await,
                 }
             } => AppEvent::Login(r),
+            r = async {
+                match self.swarm_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => AppEvent::Swarm(r),
         }
     }
 
@@ -1258,6 +1292,7 @@ impl App {
             "key" => self.open_key_prompt(),
             "login" => self.start_codex_login(),
             "backend" => self.cycle_backend(),
+            "swarm" => self.open_swarm_popup(),
             "config" => self.open_settings(),
             "copy" => self.open_copy_menu(),
             "help" => {

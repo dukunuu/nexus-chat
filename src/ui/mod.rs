@@ -49,6 +49,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         Popup::Apps => popups::apps::render(f, app),
         Popup::Watch => popups::watches::render(f, app),
         Popup::ResearchLive => popups::research_live::render(f, app),
+        Popup::Swarm => popups::swarm::render(f, app),
         Popup::None => {}
     }
 }

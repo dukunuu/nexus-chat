@@ -88,6 +88,7 @@ impl App {
             secs: None,
             phrase: None,
             images,
+            persona: None,
         });
 
         // Deferred-send gate: a non-vision model can't see the images just
@@ -108,6 +109,10 @@ impl App {
             }
         }
 
+        if self.session.as_ref().is_some_and(|s| s.swarm_mode) {
+            self.start_swarm_turn();
+            return Ok(());
+        }
         self.start_stream()
     }
 
@@ -148,8 +153,11 @@ impl App {
             // prior turns — dropping these caused it to repeat the same
             // mistakes on file-writing tools with no memory of the failure.
             // Skip research_stage/research_plan rows — background job scratch
-            // work and UI-only prompts, never shown to the model.
-            if m.role == "research_stage" || m.role == "research_plan" {
+            // work and UI-only prompts, never shown to the model. Skip
+            // per-persona swarm round replies too — supporting detail for
+            // that turn, not part of ongoing conversation context; only the
+            // turn's final synthesis reply (persona: None) carries forward.
+            if m.role == "research_stage" || m.role == "research_plan" || m.persona.is_some() {
                 continue;
             }
             if m.role == "tool_call" {
@@ -292,6 +300,7 @@ impl App {
                         secs: None,
                         phrase: None,
                         images: Vec::new(),
+                        persona: None,
                     });
                 }
             }
@@ -414,6 +423,7 @@ impl App {
                 secs,
                 phrase,
                 images: Vec::new(),
+                persona: None,
             });
             // These read the *active* conversation, so they only make sense here.
             self.maybe_generate_title();

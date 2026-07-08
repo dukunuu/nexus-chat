@@ -10,6 +10,7 @@ pub(crate) mod session;
 pub(crate) mod settings;
 pub(crate) mod skills;
 pub(crate) mod space;
+pub(crate) mod swarm;
 pub(crate) mod watches;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

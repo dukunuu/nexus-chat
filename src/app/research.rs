@@ -932,6 +932,7 @@ impl super::App {
                             secs: None,
                             phrase: None,
                             images: Vec::new(),
+                            persona: None,
                         });
                     }
                     self.status = format!("research: {text}");
@@ -964,6 +965,7 @@ impl super::App {
                         secs: None,
                         phrase: None,
                         images: Vec::new(),
+                        persona: None,
                     });
                     self.status = "research plan ready — [e]dit / Enter to continue".to_string();
                 }
@@ -1010,6 +1012,7 @@ impl super::App {
                         secs: None,
                         phrase: Some("Researched".to_string()),
                         images: Vec::new(),
+                        persona: None,
                     });
                     self.status = "research complete".to_string();
                 } else {
@@ -1035,6 +1038,7 @@ impl super::App {
                         secs: None,
                         phrase: None,
                         images: Vec::new(),
+                        persona: None,
                     });
                 }
                 self.status = msg;

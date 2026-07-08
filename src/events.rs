@@ -124,6 +124,7 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                 AppEvent::Research(r) => app.on_research_done(r),
                 AppEvent::ResearchTopic(r) => app.on_research_topic_derived(r),
                 AppEvent::Login(r) => app.on_login_result(r),
+                AppEvent::Swarm(r) => app.on_swarm_update(r),
             },
             _ = async {
                 if streaming {
@@ -198,6 +199,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         Popup::Apps => ui::popups::apps::handle_key(app, key)?,
         Popup::Watch => ui::popups::watches::handle_key(app, key)?,
         Popup::ResearchLive => ui::popups::research_live::handle_key(app, key)?,
+        Popup::Swarm => ui::popups::swarm::handle_key(app, key)?,
         Popup::None => handle_normal(app, key)?,
     }
     Ok(())

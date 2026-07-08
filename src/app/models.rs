@@ -54,6 +54,13 @@ impl App {
         self.open_model_picker_impl();
     }
 
+    /// Open the same model picker, but a confirmed pick sets the model for
+    /// one row of the active session's `/swarm` roster.
+    pub(crate) fn open_model_picker_for_swarm_persona(&mut self, row: usize) {
+        self.model_pick_target = ModelPickTarget::SwarmPersona(row);
+        self.open_model_picker_impl();
+    }
+
     fn open_model_picker_impl(&mut self) {
         if self.provider.is_none() {
             self.open_key_prompt();
@@ -485,6 +492,16 @@ impl App {
                 self.db.set_setting("escalation_model", &id)?;
                 self.status = format!("escalation model: {id}");
                 self.popup = Popup::Settings;
+            }
+            ModelPickTarget::SwarmPersona(row) => {
+                if let Some(p) = self.swarm_cache.get_mut(row) {
+                    p.model = id.clone();
+                }
+                if let Some(session) = &self.session {
+                    let _ = self.db.save_swarm_personas(&session.id, &self.swarm_cache);
+                }
+                self.status = format!("persona model: {id}");
+                self.popup = Popup::Swarm;
             }
         }
         Ok(())

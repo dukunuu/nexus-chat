@@ -314,6 +314,19 @@ fn push_assistant_stored(
     blocks: &mut Vec<String>,
     theme: &crate::theme::Theme,
 ) {
+    // A `/swarm` persona's round reply gets a small header identifying it.
+    if let Some(persona) = &msg.persona {
+        let model = msg.model.as_deref().unwrap_or("");
+        out.push(Line::from(vec![
+            Span::styled(
+                format!("**{persona}**"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            dim(format!(" · {model}"), theme),
+        ]));
+    }
     // Completion line: "⏺ Vibed for 13.3 seconds" (dot green, text dim).
     match (&msg.phrase, msg.secs) {
         (Some(p), Some(secs)) => out.push(Line::from(vec![
@@ -445,6 +458,7 @@ mod tests {
             secs: None,
             phrase: None,
             images: Vec::new(),
+            persona: None,
         }
     }
 

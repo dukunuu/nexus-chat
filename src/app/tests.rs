@@ -60,6 +60,7 @@ fn delete_removes_session_and_clears_if_active() {
         secs: None,
         phrase: None,
         images: Vec::new(),
+        persona: None,
     });
     a.session_selected = 0;
     a.confirm_delete().unwrap();
@@ -148,6 +149,7 @@ fn open_citation_under_selection_resolves_against_the_owning_messages_sources() 
         secs: None,
         phrase: None,
         images: Vec::new(),
+        persona: None,
     });
     // Simulate a render + a selection covering "[2]" on message index 0.
     a.sel.record_render(
@@ -661,6 +663,7 @@ fn context_used_and_limit() {
         secs: None,
         phrase: None,
         images: Vec::new(),
+        persona: None,
     });
     assert_eq!(a.context_used(), 10);
 }
@@ -685,6 +688,7 @@ fn compaction_narrows_effective_messages_and_context_used() {
             secs: None,
             phrase: None,
             images: Vec::new(),
+            persona: None,
         });
     }
     s.compact_summary = Some("y".repeat(80)); // ~20 tokens
@@ -767,6 +771,7 @@ async fn force_compact_reports_why_it_no_ops() {
         secs: None,
         phrase: None,
         images: Vec::new(),
+        persona: None,
     });
     a.force_compact();
     assert!(a.compact_rx.is_some());
@@ -787,6 +792,7 @@ fn context_breakdown_reports_system_memory_conversation() {
         secs: None,
         phrase: None,
         images: Vec::new(),
+        persona: None,
     });
     let b = a.context_breakdown();
     assert_eq!(b.conversation_tokens, 10);
@@ -1177,6 +1183,7 @@ fn copy_message_uses_exact_original_content() {
         secs: None,
         phrase: None,
         images: Vec::new(),
+        persona: None,
     });
     a.messages.push(Message {
         id: String::new(),
@@ -1188,6 +1195,7 @@ fn copy_message_uses_exact_original_content() {
         secs: None,
         phrase: None,
         images: Vec::new(),
+        persona: None,
     });
     // copy_message resolves *some* text at each index (clipboard availability
     // is environment-dependent in CI, so just assert it didn't silently no-op).
@@ -1423,4 +1431,109 @@ fn tool_call_summaries_name_the_interesting_argument() {
     );
     let long = format!(r#"{{"x":"{}"}}"#, "y".repeat(100));
     assert!(tool_call_summary("mystery", &long, "").ends_with('…'));
+}
+
+#[tokio::test]
+async fn swarm_popup_add_edit_remove_and_toggle_persist_to_db() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("hi");
+    a.submit().unwrap();
+    let sid = a.session.as_ref().unwrap().id.clone();
+
+    a.run_command("swarm").unwrap();
+    assert!(a.popup == Popup::Swarm);
+    assert!(a.swarm_cache.is_empty());
+
+    a.swarm_add_row();
+    assert!(a.swarm_popup_mode == SwarmPopupMode::EditName);
+    a.swarm_edit = "Skeptic".into();
+    a.swarm_confirm_edit().unwrap();
+    assert_eq!(a.swarm_cache.len(), 1);
+    assert_eq!(a.swarm_cache[0].name, "Skeptic");
+    assert_eq!(a.swarm_cache[0].model, "a/one"); // defaults to current_model
+
+    a.swarm_start_edit_blurb();
+    a.swarm_edit = "pokes holes in every claim".into();
+    a.swarm_confirm_edit().unwrap();
+    assert_eq!(a.swarm_cache[0].blurb, "pokes holes in every claim");
+
+    // Persisted immediately, not just held in the popup's cache.
+    let stored = a.db.list_swarm_personas(&sid).unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].blurb, "pokes holes in every claim");
+
+    assert!(!a.session.as_ref().unwrap().swarm_mode);
+    a.toggle_swarm_mode().unwrap();
+    assert!(a.session.as_ref().unwrap().swarm_mode);
+    assert!(a.db.get_session(&sid).unwrap().unwrap().swarm_mode);
+
+    a.swarm_remove_row().unwrap();
+    assert!(a.swarm_cache.is_empty());
+    assert!(a.db.list_swarm_personas(&sid).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn swarm_add_row_then_cancel_without_naming_drops_the_blank_row() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("hi");
+    a.submit().unwrap();
+
+    a.run_command("swarm").unwrap();
+    a.swarm_add_row();
+    assert_eq!(a.swarm_cache.len(), 1);
+    a.swarm_cancel_edit().unwrap(); // never typed a name
+    assert!(a.swarm_cache.is_empty());
+}
+
+#[test]
+fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.messages.push(Message {
+        id: "m1".into(),
+        role: "user".into(),
+        content: "what should we do?".into(),
+        model: None,
+        reasoning: None,
+        tokens: None,
+        secs: None,
+        phrase: None,
+        images: Vec::new(),
+        persona: None,
+    });
+    a.messages.push(Message {
+        id: "m2".into(),
+        role: "assistant".into(),
+        content: "ship it fast".into(),
+        model: Some("a/one".into()),
+        reasoning: None,
+        tokens: None,
+        secs: None,
+        phrase: None,
+        images: Vec::new(),
+        persona: Some("Optimist".into()),
+    });
+    a.messages.push(Message {
+        id: "m3".into(),
+        role: "assistant".into(),
+        content: "balance speed and safety".into(),
+        model: None,
+        reasoning: None,
+        tokens: None,
+        secs: None,
+        phrase: None,
+        images: Vec::new(),
+        persona: None,
+    });
+    let history = a.build_history();
+    let contents: Vec<&str> = history.iter().map(|m| m.content.as_str()).collect();
+    assert!(!contents.iter().any(|c| c.contains("ship it fast")));
+    assert!(contents.iter().any(|c| c.contains("what should we do?")));
+    assert!(
+        contents
+            .iter()
+            .any(|c| c.contains("balance speed and safety"))
+    );
 }

@@ -40,6 +40,17 @@ pub struct Session {
     pub compact_through: i64,
     /// `/web` answer mode: force search-first, inline-cited replies.
     pub web_mode: bool,
+    /// `/swarm` mode: turns replace a single reply with a multi-persona
+    /// roundtable (see `swarm_personas`).
+    pub swarm_mode: bool,
+}
+
+/// One row of a session's `/swarm` roster: a model + a personality blurb.
+#[derive(Debug, Clone)]
+pub struct Persona {
+    pub name: String,
+    pub model: String,
+    pub blurb: String,
 }
 
 /// A standing research watch: runs a topic's research on an interval.
@@ -82,6 +93,9 @@ pub struct Message {
     /// Past-tense flavour phrase for the completion line, e.g. "Vibed".
     pub phrase: Option<String>,
     pub images: Vec<MessageImage>,
+    /// Which `/swarm` persona produced this reply, if any (`None` for
+    /// ordinary messages and for a swarm turn's final synthesis reply).
+    pub persona: Option<String>,
 }
 
 /// An image attached to a message: PNG on disk plus the one-time generated
@@ -215,7 +229,16 @@ impl Db {
                 interval_hours INTEGER NOT NULL,
                 session_id     TEXT NOT NULL,
                 last_run_at    TEXT
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS swarm_personas (
+                session_id TEXT NOT NULL,
+                ord        INTEGER NOT NULL,
+                name       TEXT NOT NULL,
+                model      TEXT NOT NULL,
+                persona    TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_swarm_personas_session
+                ON swarm_personas(session_id, ord);",
         )?;
         // Columns added after v1; ignore "duplicate column" on existing dbs.
         for stmt in [
@@ -232,6 +255,8 @@ impl Db {
             "ALTER TABLE files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE sessions ADD COLUMN web_mode INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE session_sources ADD COLUMN flag TEXT",
+            "ALTER TABLE sessions ADD COLUMN swarm_mode INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE messages ADD COLUMN persona TEXT",
         ] {
             let _ = self.conn.execute(stmt, []);
         }
@@ -407,6 +432,7 @@ impl Db {
             compact_summary: None,
             compact_through: 0,
             web_mode: false,
+            swarm_mode: false,
         })
     }
 
@@ -415,7 +441,7 @@ impl Db {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.conn
             .query_row(
-                "SELECT id, title, model, slug, created_at, compact_summary, compact_through, web_mode
+                "SELECT id, title, model, slug, created_at, compact_summary, compact_through, web_mode, swarm_mode
                  FROM sessions WHERE id = ?1",
                 [id],
                 |r| {
@@ -428,6 +454,7 @@ impl Db {
                         compact_summary: r.get(5)?,
                         compact_through: r.get(6)?,
                         web_mode: r.get::<_, i64>(7)? != 0,
+                        swarm_mode: r.get::<_, i64>(8)? != 0,
                     })
                 },
             )
@@ -438,7 +465,7 @@ impl Db {
     /// Sessions in `space_id`, most-recently-updated first.
     pub fn list_sessions(&self, space_id: &str) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, model, slug, created_at, compact_summary, compact_through, web_mode
+            "SELECT id, title, model, slug, created_at, compact_summary, compact_through, web_mode, swarm_mode
              FROM sessions WHERE space_id = ?1 ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([space_id], |r| {
@@ -451,6 +478,7 @@ impl Db {
                 compact_summary: r.get(5)?,
                 compact_through: r.get(6)?,
                 web_mode: r.get::<_, i64>(7)? != 0,
+                swarm_mode: r.get::<_, i64>(8)? != 0,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -472,6 +500,47 @@ impl Db {
             "UPDATE sessions SET web_mode = ?2 WHERE id = ?1",
             (session_id, on as i64),
         )?;
+        Ok(())
+    }
+
+    /// Persist a session's `/swarm` mode toggle.
+    pub fn set_session_swarm_mode(&self, session_id: &str, on: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET swarm_mode = ?2 WHERE id = ?1",
+            (session_id, on as i64),
+        )?;
+        Ok(())
+    }
+
+    /// A session's `/swarm` roster, in display order.
+    pub fn list_swarm_personas(&self, session_id: &str) -> Result<Vec<Persona>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, model, persona FROM swarm_personas
+             WHERE session_id = ?1 ORDER BY ord ASC",
+        )?;
+        let rows = stmt.query_map([session_id], |r| {
+            Ok(Persona {
+                name: r.get(0)?,
+                model: r.get(1)?,
+                blurb: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Replace a session's whole `/swarm` roster with `personas`, in order.
+    pub fn save_swarm_personas(&self, session_id: &str, personas: &[Persona]) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM swarm_personas WHERE session_id = ?1",
+            [session_id],
+        )?;
+        for (i, p) in personas.iter().enumerate() {
+            self.conn.execute(
+                "INSERT INTO swarm_personas (session_id, ord, name, model, persona)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                (session_id, i as i64, &p.name, &p.model, &p.blurb),
+            )?;
+        }
         Ok(())
     }
 
@@ -499,7 +568,7 @@ impl Db {
 
     pub fn load_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, role, content, model, reasoning, tokens, secs, phrase FROM messages
+            "SELECT id, role, content, model, reasoning, tokens, secs, phrase, persona FROM messages
              WHERE session_id = ?1 ORDER BY created_at ASC",
         )?;
         let mut messages = stmt
@@ -514,6 +583,7 @@ impl Db {
                     secs: r.get(6)?,
                     phrase: r.get(7)?,
                     images: Vec::new(),
+                    persona: r.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -695,6 +765,32 @@ impl Db {
             phrase,
         )?;
         Ok(())
+    }
+
+    /// Insert a `/swarm` persona's round reply: an assistant message tagged
+    /// with which persona (and its own model) produced it.
+    pub fn add_persona_message(
+        &self,
+        session_id: &str,
+        content: &str,
+        persona_name: &str,
+        model: &str,
+    ) -> Result<String> {
+        let id = self.insert_message(
+            session_id,
+            "assistant",
+            content,
+            Some(model),
+            None,
+            None,
+            None,
+            None,
+        )?;
+        self.conn.execute(
+            "UPDATE messages SET persona = ?2 WHERE id = ?1",
+            (&id, persona_name),
+        )?;
+        Ok(id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1334,6 +1430,67 @@ mod tests {
         assert!(!s.web_mode);
         db.set_session_web_mode(&s.id, true).unwrap();
         assert!(db.list_sessions(&space).unwrap()[0].web_mode);
+    }
+
+    #[test]
+    fn swarm_mode_defaults_off_and_toggles() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let s = db.create_session("t", "a/b", &space).unwrap();
+        assert!(!s.swarm_mode);
+        db.set_session_swarm_mode(&s.id, true).unwrap();
+        assert!(db.list_sessions(&space).unwrap()[0].swarm_mode);
+        assert!(db.get_session(&s.id).unwrap().unwrap().swarm_mode);
+    }
+
+    #[test]
+    fn swarm_personas_roundtrip_and_replace_all_on_save() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let s = db.create_session("t", "a/b", &space).unwrap();
+        assert!(db.list_swarm_personas(&s.id).unwrap().is_empty());
+
+        let roster = vec![
+            Persona {
+                name: "Skeptic".into(),
+                model: "a/one".into(),
+                blurb: "pokes holes".into(),
+            },
+            Persona {
+                name: "Advocate".into(),
+                model: "b/two".into(),
+                blurb: "user-first".into(),
+            },
+        ];
+        db.save_swarm_personas(&s.id, &roster).unwrap();
+        let loaded = db.list_swarm_personas(&s.id).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].name, "Skeptic");
+        assert_eq!(loaded[1].name, "Advocate");
+
+        // A second save fully replaces the roster, not appends.
+        db.save_swarm_personas(&s.id, &roster[..1]).unwrap();
+        assert_eq!(db.list_swarm_personas(&s.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn persona_message_tags_role_assistant_with_persona_and_model() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let s = db.create_session("t", "a/b", &space).unwrap();
+        db.add_persona_message(&s.id, "reply text", "Skeptic", "a/one")
+            .unwrap();
+        let msgs = db.load_messages(&s.id).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "assistant");
+        assert_eq!(msgs[0].persona.as_deref(), Some("Skeptic"));
+        assert_eq!(msgs[0].model.as_deref(), Some("a/one"));
+
+        // An ordinary assistant message has no persona tag.
+        db.add_assistant_message(&s.id, "final answer", None, None, None, None, None)
+            .unwrap();
+        let msgs = db.load_messages(&s.id).unwrap();
+        assert_eq!(msgs[1].persona, None);
     }
 
     #[test]
