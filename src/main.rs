@@ -19,12 +19,18 @@ use anyhow::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let key = config::load_key().await?;
+    let saved = config::load_all_providers().await?;
+    let key = saved
+        .openrouter_key
+        .clone()
+        .or_else(|| saved.openai_key.clone())
+        .or_else(|| saved.codex.as_ref().map(|c| c.access.clone()));
     let space = space::Space::open()?;
     let space_root = space.spaces_root();
     let db = db::Db::open(&space.db_path())?;
 
     let mut app = app::App::new(db, key, space);
+    app.saved = saved;
     app.app_server = appserver::AppServer::start(space_root).await;
     app.refresh_toolbox();
 

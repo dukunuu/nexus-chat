@@ -454,7 +454,7 @@ pub type ResearchMsg = (String, String, String, research::ResearchUpdate);
 
 pub enum LoginMsg {
     Status(String),
-    Done(Result<String, String>),
+    Done(Result<crate::config::CodexCredentials, String>),
 }
 
 pub enum AppEvent {
@@ -492,6 +492,9 @@ pub struct App {
     pub(crate) space: Space,
     pub(crate) provider: Option<OpenRouter>,
     pub(crate) key: Option<String>,
+    /// Every credential configured on disk, kept live so `/backend` can
+    /// switch `provider` without re-authenticating.
+    pub(crate) saved: crate::config::SavedCreds,
 
     /// The space the current/next session belongs to.
     pub active_space: SpaceRow,
@@ -799,6 +802,7 @@ impl App {
             space,
             provider,
             key,
+            saved: crate::config::SavedCreds::default(),
             skills,
             searxng_url: String::new(),
             langsearch_key: String::new(),
@@ -1253,6 +1257,7 @@ impl App {
             "model" => self.open_model_picker(),
             "key" => self.open_key_prompt(),
             "login" => self.start_codex_login(),
+            "backend" => self.cycle_backend(),
             "config" => self.open_settings(),
             "copy" => self.open_copy_menu(),
             "help" => {

@@ -249,7 +249,8 @@ impl OpenRouter {
                 },
             ];
             if let Some(key) = crate::config::load_openrouter_key_only()
-                && let Ok(mut router_models) = Box::pin(OpenRouter::openrouter(key).list_models()).await
+                && let Ok(mut router_models) =
+                    Box::pin(OpenRouter::openrouter(key).list_models()).await
             {
                 models.append(&mut router_models);
             }

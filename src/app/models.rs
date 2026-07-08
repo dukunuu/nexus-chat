@@ -106,7 +106,6 @@ impl App {
             });
             let result = crate::config::login_openai_codex_device(status_tx)
                 .await
-                .map(|c| c.access)
                 .map_err(|e| e.to_string());
             let _ = tx.send(LoginMsg::Done(result));
         });
@@ -115,13 +114,15 @@ impl App {
     pub(crate) fn on_login_result(&mut self, msg: Option<LoginMsg>) {
         match msg {
             Some(LoginMsg::Status(s)) => self.status = s,
-            Some(LoginMsg::Done(Ok(access))) => {
+            Some(LoginMsg::Done(Ok(creds))) => {
                 self.login_rx = None;
                 self.provider = Some(crate::provider::openrouter::OpenRouter::openai_codex(
-                    access.clone(),
+                    creds.access.clone(),
                 ));
-                self.key = Some(access);
+                self.key = Some(creds.access.clone());
+                self.saved.codex = Some(creds);
                 self.models.clear();
+                self.model_provider_filter = None;
                 self.status = "OpenAI Codex login saved, loading models…".to_string();
                 self.fetch_models();
                 self.refresh_toolbox();
@@ -146,11 +147,52 @@ impl App {
         if let Err(e) = config::save_key(&key) {
             self.status = format!("could not save key: {e}");
         }
+        if key.trim_start().starts_with("sk-or-") {
+            self.saved.openrouter_key = Some(key.clone());
+        } else {
+            self.saved.openai_key = Some(key.clone());
+        }
         self.provider = Some(crate::provider::openrouter::OpenRouter::from_key_auto(
             key.clone(),
         ));
         self.key = Some(key);
+        self.model_provider_filter = None;
         self.status = "key saved, loading models…".to_string();
+        self.fetch_models();
+    }
+
+    /// Cycle the active backend among whichever of OpenRouter/OpenAI/Codex
+    /// are configured, without re-authenticating.
+    pub(crate) fn cycle_backend(&mut self) {
+        let slots: Vec<(&'static str, String)> = [
+            ("OpenRouter", self.saved.openrouter_key.clone()),
+            ("OpenAI", self.saved.openai_key.clone()),
+            ("Codex", self.saved.codex.as_ref().map(|c| c.access.clone())),
+        ]
+        .into_iter()
+        .filter_map(|(name, key)| key.map(|k| (name, k)))
+        .collect();
+
+        if slots.len() < 2 {
+            self.status = "only one backend configured — /key or /login to add another".into();
+            return;
+        }
+
+        let current = slots
+            .iter()
+            .position(|(_, k)| self.key.as_deref() == Some(k.as_str()));
+        let next = current.map_or(0, |i| (i + 1) % slots.len());
+        let (name, key) = slots[next].clone();
+
+        self.provider = Some(match name {
+            "OpenRouter" => crate::provider::openrouter::OpenRouter::openrouter(key.clone()),
+            "OpenAI" => crate::provider::openrouter::OpenRouter::openai(key.clone()),
+            _ => crate::provider::openrouter::OpenRouter::openai_codex(key.clone()),
+        });
+        self.key = Some(key);
+        self.models.clear();
+        self.model_provider_filter = None;
+        self.status = format!("switched to {name} — loading models…");
         self.fetch_models();
     }
 

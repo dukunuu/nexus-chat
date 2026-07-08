@@ -81,6 +81,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["codex", "subscription", "oauth", "chatgpt"],
     },
     Command {
+        name: "backend",
+        desc: "switch active model backend",
+        aliases: &["provider", "providers"],
+    },
+    Command {
         name: "config",
         desc: "settings & stats",
         aliases: &["settings", "stats", "nerd", "params"],

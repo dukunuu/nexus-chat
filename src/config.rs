@@ -33,6 +33,16 @@ pub struct CodexCredentials {
     pub account_id: String,
 }
 
+/// Every credential the app knows about at once — populated at startup and
+/// kept in sync as `/key`/`/login` add more, so `/backend` can switch the
+/// active provider without re-authenticating.
+#[derive(Debug, Clone, Default)]
+pub struct SavedCreds {
+    pub openrouter_key: Option<String>,
+    pub openai_key: Option<String>,
+    pub codex: Option<CodexCredentials>,
+}
+
 /// XDG dirs for the app: `~/.config/nexus-chat` and `~/.local/share/nexus-chat`.
 pub fn project_dirs() -> Result<ProjectDirs> {
     ProjectDirs::from("", "", "nexus-chat").context("could not resolve home directory")
@@ -71,42 +81,43 @@ pub fn load_system_prompt() -> Result<String> {
     std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
 }
 
-/// Resolve an API key. `$OPENROUTER_API_KEY` wins, then `$OPENAI_API_KEY`, then
-/// the config file. Scaffolds an empty config on first run. Never fails on a
-/// missing key — the app launches regardless and the key can be set in-app with `/key`.
-pub async fn load_key() -> Result<Option<String>> {
-    for env_key in [OPENROUTER_ENV_KEY, OPENAI_ENV_KEY] {
-        if let Ok(v) = std::env::var(env_key) {
-            let v = v.trim();
-            if !v.is_empty() {
-                return Ok(Some(v.to_string()));
-            }
-        }
-    }
-
+/// Resolve every configured credential at once: `$OPENROUTER_API_KEY`/
+/// `$OPENAI_API_KEY` (if set) win over the config file for their respective
+/// slot, Codex creds always come from the config file (refreshed if stale).
+/// Scaffolds an empty config on first run. Never fails on missing
+/// credentials — the app launches regardless and they can be set in-app
+/// with `/key` or `/login`.
+pub async fn load_all_providers() -> Result<SavedCreds> {
     let path = config_path()?;
     if !path.exists() {
         save_key("")?; // scaffold template
-        return Ok(None);
     }
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let cfg: Config =
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    let openrouter_key = cfg.provider.openrouter_key.trim();
-    if !openrouter_key.is_empty() {
-        return Ok(Some(openrouter_key.to_string()));
+    let (mut openrouter_key, mut openai_key, codex) = load_config_all().unwrap_or_default();
+    if openrouter_key.is_empty()
+        && let Ok(v) = std::env::var(OPENROUTER_ENV_KEY)
+        && !v.trim().is_empty()
+    {
+        openrouter_key = v.trim().to_string();
     }
-    let openai_key = cfg.provider.openai_key.trim();
-    if !openai_key.is_empty() {
-        return Ok(Some(openai_key.to_string()));
+    if openai_key.is_empty()
+        && let Ok(v) = std::env::var(OPENAI_ENV_KEY)
+        && !v.trim().is_empty()
+    {
+        openai_key = v.trim().to_string();
     }
-    if let Some(creds) = cfg.provider.openai_codex {
-        let creds = refresh_codex_if_needed(creds).await?;
-        save_codex_credentials(&creds)?;
-        return Ok(Some(creds.access));
-    }
-    Ok(None)
+    let codex = match codex {
+        Some(creds) => {
+            let creds = refresh_codex_if_needed(creds).await?;
+            save_codex_credentials(&creds)?;
+            Some(creds)
+        }
+        None => None,
+    };
+    Ok(SavedCreds {
+        openrouter_key: (!openrouter_key.is_empty()).then_some(openrouter_key),
+        openai_key: (!openai_key.is_empty()).then_some(openai_key),
+        codex,
+    })
 }
 
 pub fn codex_account_id(access_token: &str) -> Result<String> {
@@ -170,7 +181,7 @@ async fn refresh_codex_if_needed(creds: CodexCredentials) -> Result<CodexCredent
 }
 
 pub fn save_codex_credentials(creds: &CodexCredentials) -> Result<()> {
-    let (openrouter_key, openai_key) = load_config_keys().unwrap_or_default();
+    let (openrouter_key, openai_key, _) = load_config_all().unwrap_or_default();
     write_provider_config(&openrouter_key, &openai_key, Some(creds))
 }
 
@@ -181,19 +192,26 @@ pub fn load_openrouter_key_only() -> Option<String> {
             return Some(v.to_string());
         }
     }
-    load_config_keys().ok().and_then(|(openrouter_key, _)| (!openrouter_key.is_empty()).then_some(openrouter_key))
+    load_config_all()
+        .ok()
+        .and_then(|(openrouter_key, ..)| (!openrouter_key.is_empty()).then_some(openrouter_key))
 }
 
-fn load_config_keys() -> Result<(String, String)> {
+/// Read all three credential fields straight off disk, no env overrides.
+fn load_config_all() -> Result<(String, String, Option<CodexCredentials>)> {
     let path = config_path()?;
     if !path.exists() {
-        return Ok((String::new(), String::new()));
+        return Ok((String::new(), String::new(), None));
     }
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let cfg: Config =
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    Ok((cfg.provider.openrouter_key, cfg.provider.openai_key))
+    Ok((
+        cfg.provider.openrouter_key,
+        cfg.provider.openai_key,
+        cfg.provider.openai_codex,
+    ))
 }
 
 pub async fn login_openai_codex_device(
@@ -229,8 +247,11 @@ pub async fn login_openai_codex_device(
     let url = "https://auth.openai.com/codex/device";
     let prefilled_url = format!("{url}?user_code={user_code}");
     // Put only the raw code first so it stays visible even on narrow status lines.
-    let _ = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(user_code.clone()));
-    let _ = status.send(format!("{user_code}  ← copied to clipboard; enter at {url}"));
+    let _ =
+        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(user_code.clone()));
+    let _ = status.send(format!(
+        "{user_code}  ← copied to clipboard; enter at {url}"
+    ));
     let _ = open::that(&prefilled_url);
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
@@ -340,13 +361,16 @@ fn write_provider_config(
     Ok(())
 }
 
-/// Persist an OpenRouter or OpenAI key to the config file (overwrites it).
+/// Persist an OpenRouter or OpenAI key to the config file, by shape, without
+/// disturbing the sibling key or any saved Codex login.
 pub fn save_key(key: &str) -> Result<()> {
+    let (mut openrouter_key, mut openai_key, codex) = load_config_all().unwrap_or_default();
     if key.trim_start().starts_with("sk-or-") {
-        write_provider_config(key, "", None)
+        openrouter_key = key.to_string();
     } else {
-        write_provider_config("", key, None)
+        openai_key = key.to_string();
     }
+    write_provider_config(&openrouter_key, &openai_key, codex.as_ref())
 }
 
 #[cfg(test)]
