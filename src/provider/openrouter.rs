@@ -13,11 +13,18 @@ use crate::tools::ToolBox;
 const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api";
-// The general Zen catalog, not the narrower `zen/go/v1` (Go-subscription-
-// only bundle) — Zen's /models reports everything actually enabled for the
-// account's key, including free-tier models (e.g. DeepSeek V4 Flash Free)
-// that a Go subscription alone wouldn't surface.
-const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/v1";
+/// The general Zen catalog: free-tier and pay-per-token models, plus
+/// whatever a Go subscription adds. This is the default/fallback base.
+const OPENCODE_ZEN_BASE: &str = "https://opencode.ai/zen/v1";
+/// The flat-fee Go-subscription bundle — a *different* endpoint from Zen's
+/// general catalog, even though it's the same account key. Requests for a
+/// Go-bundled model must go here, not to Zen general, or they'd be billed
+/// per-token instead of covered by the flat $10/mo.
+const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
+/// Prefix on a Model id (from `list_models`) marking it as a flat-fee Go
+/// model rather than a general Zen one — stripped before it's ever sent to
+/// the API; only used to pick which of the two bases above to hit.
+const OPENCODE_GO_PREFIX: &str = "go:";
 /// Hard cap on tool round-trips per response, so a model that keeps calling
 /// tools can't loop forever. The default for interactive chat; background
 /// jobs (e.g. deep-research searcher agents) pass their own smaller budget.
@@ -47,7 +54,7 @@ impl ProviderFlavor {
             ProviderFlavor::OpenRouter => OPENROUTER_BASE,
             ProviderFlavor::OpenAi => OPENAI_BASE,
             ProviderFlavor::OpenAiCodex => CODEX_BASE,
-            ProviderFlavor::OpencodeGo => OPENCODE_GO_BASE,
+            ProviderFlavor::OpencodeGo => OPENCODE_ZEN_BASE,
         }
     }
 
@@ -292,9 +299,45 @@ impl OpenRouter {
                 },
             ]);
         }
+        if self.flavor == ProviderFlavor::OpencodeGo {
+            // Two distinct catalogs behind the same account key: Zen
+            // general (free + pay-per-token) and the flat-fee Go bundle.
+            // Fetch both and show them together — Go entries tagged so
+            // requests route (and bill) correctly; see `opencode_route`.
+            let (zen, go) = tokio::join!(
+                self.fetch_models_from(OPENCODE_ZEN_BASE),
+                self.fetch_models_from(OPENCODE_GO_BASE),
+            );
+            // Zen general is the primary catalog — a failure there is a
+            // real problem (bad key, network) and should surface. Go's
+            // bundle can legitimately 403 for an account without that
+            // subscription; treat it as "no Go models" rather than an error.
+            let zen = zen?;
+            let go = go.unwrap_or_default();
+            let go_ids: std::collections::HashSet<&str> =
+                go.iter().map(|m| m.id.as_str()).collect();
+            let mut models: Vec<Model> = zen
+                .into_iter()
+                // A model covered by the flat-fee Go bundle is strictly
+                // better than its metered Zen-general twin — don't show both.
+                .filter(|m| !go_ids.contains(m.id.as_str()))
+                .collect();
+            models.extend(go.into_iter().map(|mut m| {
+                m.id = format!("{OPENCODE_GO_PREFIX}{}", m.id);
+                m
+            }));
+            models.sort_by(|a, b| a.id.cmp(&b.id));
+            return Ok(models);
+        }
+        self.fetch_models_from(self.flavor.base()).await
+    }
+
+    /// GET `{base}/models` and map the response into our `Model` type using
+    /// this instance's flavor for reasoning/image-support inference.
+    async fn fetch_models_from(&self, base: &str) -> Result<Vec<Model>> {
         let resp = self
             .client
-            .get(format!("{}/models", self.flavor.base()))
+            .get(format!("{base}/models"))
             .bearer_auth(&self.key)
             .send()
             .await
@@ -360,9 +403,19 @@ impl OpenRouter {
                 .context("parsing Codex completion")?;
             return Ok(codex_response_text(&v));
         }
+        let mut body = body;
+        let base = if let Some(model) = body.get("model").and_then(|m| m.as_str()) {
+            let (base, real_model) = self.opencode_route(model);
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("model".into(), serde_json::json!(real_model));
+            }
+            base
+        } else {
+            self.flavor.base()
+        };
         let v = self
             .client
-            .post(format!("{}/chat/completions", self.flavor.base()))
+            .post(format!("{base}/chat/completions"))
             .bearer_auth(&self.key)
             .json(&body)
             .send()
@@ -399,9 +452,10 @@ impl OpenRouter {
         if let Some(delegate) = self.openrouter_delegate_for_model(model) {
             return Box::pin(delegate.embed(model, inputs)).await;
         }
+        let (base, model) = self.opencode_route(model);
         let v = self
             .client
-            .post(format!("{}/embeddings", self.flavor.base()))
+            .post(format!("{base}/embeddings"))
             .bearer_auth(&self.key)
             .json(&serde_json::json!({ "model": model, "input": inputs }))
             .send()
@@ -546,6 +600,7 @@ impl OpenRouter {
                 .run_codex_stream(model, messages, params, tools, tx)
                 .await;
         }
+        let (base, model) = self.opencode_route(model);
         let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
@@ -579,7 +634,7 @@ impl OpenRouter {
         }
         let request = self
             .client
-            .post(format!("{}/chat/completions", self.flavor.base()))
+            .post(format!("{base}/chat/completions"))
             .bearer_auth(&self.key)
             .json(&body);
 
@@ -645,6 +700,19 @@ impl OpenRouter {
         } else {
             Ok(Finish::Done)
         }
+    }
+
+    /// For OpenCode Go: pick the base to hit and the raw model id to send,
+    /// stripping the `go:` tag `list_models` adds to flat-fee Go models. A
+    /// no-op (returns the flavor's default base, id unchanged) for every
+    /// other flavor and for untagged (general Zen) OpenCode ids.
+    fn opencode_route(&self, model: &str) -> (&'static str, String) {
+        if self.flavor == ProviderFlavor::OpencodeGo
+            && let Some(stripped) = model.strip_prefix(OPENCODE_GO_PREFIX)
+        {
+            return (OPENCODE_GO_BASE, stripped.to_string());
+        }
+        (self.flavor.base(), model.to_string())
     }
 
     fn openrouter_delegate_for_model(&self, model: &str) -> Option<OpenRouter> {
@@ -1211,6 +1279,32 @@ mod tests {
         assert!(!p.default_escalation_model().is_empty());
         // No embedding models on Go — feature stays disabled by default.
         assert_eq!(p.default_embedding_model(), "");
+    }
+
+    #[test]
+    fn opencode_route_sends_go_tagged_models_to_the_go_base_untagged() {
+        let p = OpenRouter::opencode_go("k".into());
+        let (base, model) = p.opencode_route("go:deepseek-v4-pro");
+        assert_eq!(base, "https://opencode.ai/zen/go/v1");
+        assert_eq!(model, "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn opencode_route_sends_untagged_models_to_zen_general() {
+        let p = OpenRouter::opencode_go("k".into());
+        let (base, model) = p.opencode_route("deepseek-v4-flash-free");
+        assert_eq!(base, "https://opencode.ai/zen/v1");
+        assert_eq!(model, "deepseek-v4-flash-free");
+    }
+
+    #[test]
+    fn opencode_route_is_a_no_op_for_other_flavors() {
+        // A "go:"-prefixed id is meaningless outside OpenCode Go — must not
+        // be stripped or rerouted for another flavor.
+        let p = OpenRouter::openrouter("k".into());
+        let (base, model) = p.opencode_route("go:whatever");
+        assert_eq!(base, "https://openrouter.ai/api/v1");
+        assert_eq!(model, "go:whatever");
     }
 
     #[test]
