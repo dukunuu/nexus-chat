@@ -23,6 +23,12 @@ struct Provider {
     openai_key: String,
     #[serde(default)]
     openai_codex: Option<CodexCredentials>,
+    /// Which backend ("openrouter" / "openai" / "codex") was last made
+    /// active via `/key`, `/login`, or `/backend` — read back at startup so
+    /// the app resumes on the same backend instead of always defaulting to
+    /// whichever credential wins a fixed priority order.
+    #[serde(default)]
+    active_backend: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -41,6 +47,9 @@ pub struct SavedCreds {
     pub openrouter_key: Option<String>,
     pub openai_key: Option<String>,
     pub codex: Option<CodexCredentials>,
+    /// Which backend was last active ("openrouter" / "openai" / "codex"),
+    /// if one was ever explicitly chosen.
+    pub active_backend: Option<String>,
 }
 
 /// XDG dirs for the app: `~/.config/nexus-chat` and `~/.local/share/nexus-chat`.
@@ -92,7 +101,8 @@ pub async fn load_all_providers() -> Result<SavedCreds> {
     if !path.exists() {
         save_key("")?; // scaffold template
     }
-    let (mut openrouter_key, mut openai_key, codex) = load_config_all().unwrap_or_default();
+    let (mut openrouter_key, mut openai_key, codex, active_backend) =
+        load_config_all().unwrap_or_default();
     if openrouter_key.is_empty()
         && let Ok(v) = std::env::var(OPENROUTER_ENV_KEY)
         && !v.trim().is_empty()
@@ -117,6 +127,7 @@ pub async fn load_all_providers() -> Result<SavedCreds> {
         openrouter_key: (!openrouter_key.is_empty()).then_some(openrouter_key),
         openai_key: (!openai_key.is_empty()).then_some(openai_key),
         codex,
+        active_backend: (!active_backend.is_empty()).then_some(active_backend),
     })
 }
 
@@ -181,8 +192,8 @@ async fn refresh_codex_if_needed(creds: CodexCredentials) -> Result<CodexCredent
 }
 
 pub fn save_codex_credentials(creds: &CodexCredentials) -> Result<()> {
-    let (openrouter_key, openai_key, _) = load_config_all().unwrap_or_default();
-    write_provider_config(&openrouter_key, &openai_key, Some(creds))
+    let (openrouter_key, openai_key, _, active_backend) = load_config_all().unwrap_or_default();
+    write_provider_config(&openrouter_key, &openai_key, Some(creds), &active_backend)
 }
 
 pub fn load_openrouter_key_only() -> Option<String> {
@@ -197,11 +208,34 @@ pub fn load_openrouter_key_only() -> Option<String> {
         .and_then(|(openrouter_key, ..)| (!openrouter_key.is_empty()).then_some(openrouter_key))
 }
 
-/// Read all three credential fields straight off disk, no env overrides.
-fn load_config_all() -> Result<(String, String, Option<CodexCredentials>)> {
+/// Persist which backend is now active, without disturbing any saved keys
+/// or Codex login. Called by `/key`, `/login`, and `/backend`.
+pub fn save_active_backend(tag: &str) -> Result<()> {
+    let (openrouter_key, openai_key, codex, _) = load_config_all().unwrap_or_default();
+    write_provider_config(&openrouter_key, &openai_key, codex.as_ref(), tag)
+}
+
+/// The key/token to boot the app's initial provider with: whichever backend
+/// was last active, if its credential is still there, else a fixed priority
+/// (openrouter > openai > codex).
+pub fn resolve_initial_key(saved: &SavedCreds) -> Option<String> {
+    match saved.active_backend.as_deref() {
+        Some("openrouter") => saved.openrouter_key.clone(),
+        Some("openai") => saved.openai_key.clone(),
+        Some("codex") => saved.codex.as_ref().map(|c| c.access.clone()),
+        _ => None,
+    }
+    .or_else(|| saved.openrouter_key.clone())
+    .or_else(|| saved.openai_key.clone())
+    .or_else(|| saved.codex.as_ref().map(|c| c.access.clone()))
+}
+
+/// Read all credential fields (and the last-active-backend tag) straight
+/// off disk, no env overrides.
+fn load_config_all() -> Result<(String, String, Option<CodexCredentials>, String)> {
     let path = config_path()?;
     if !path.exists() {
-        return Ok((String::new(), String::new(), None));
+        return Ok((String::new(), String::new(), None, String::new()));
     }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -211,6 +245,7 @@ fn load_config_all() -> Result<(String, String, Option<CodexCredentials>)> {
         cfg.provider.openrouter_key,
         cfg.provider.openai_key,
         cfg.provider.openai_codex,
+        cfg.provider.active_backend,
     ))
 }
 
@@ -339,6 +374,7 @@ fn write_provider_config(
     openrouter_key: &str,
     openai_key: &str,
     codex: Option<&CodexCredentials>,
+    active_backend: &str,
 ) -> Result<()> {
     let path = config_path()?;
     if let Some(dir) = path.parent() {
@@ -346,9 +382,10 @@ fn write_provider_config(
     }
     let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let mut body = format!(
-        "[provider]\n# OpenRouter key (or set ${OPENROUTER_ENV_KEY})\nopenrouter_key = \"{}\"\n# OpenAI API key (or set ${OPENAI_ENV_KEY})\nopenai_key = \"{}\"\n",
+        "[provider]\n# OpenRouter key (or set ${OPENROUTER_ENV_KEY})\nopenrouter_key = \"{}\"\n# OpenAI API key (or set ${OPENAI_ENV_KEY})\nopenai_key = \"{}\"\n# Last active backend (\"openrouter\" / \"openai\" / \"codex\")\nactive_backend = \"{}\"\n",
         escape(openrouter_key),
         escape(openai_key),
+        escape(active_backend),
     );
     if let Some(c) = codex {
         body.push_str("\n[provider.openai_codex]\n");
@@ -364,13 +401,21 @@ fn write_provider_config(
 /// Persist an OpenRouter or OpenAI key to the config file, by shape, without
 /// disturbing the sibling key or any saved Codex login.
 pub fn save_key(key: &str) -> Result<()> {
-    let (mut openrouter_key, mut openai_key, codex) = load_config_all().unwrap_or_default();
-    if key.trim_start().starts_with("sk-or-") {
+    let (mut openrouter_key, mut openai_key, codex, active_backend) =
+        load_config_all().unwrap_or_default();
+    let tag = if key.trim_start().starts_with("sk-or-") {
         openrouter_key = key.to_string();
+        "openrouter"
     } else {
         openai_key = key.to_string();
-    }
-    write_provider_config(&openrouter_key, &openai_key, codex.as_ref())
+        "openai"
+    };
+    let active_backend = if key.is_empty() {
+        &active_backend // scaffolding an empty template — don't touch it
+    } else {
+        tag
+    };
+    write_provider_config(&openrouter_key, &openai_key, codex.as_ref(), active_backend)
 }
 
 #[cfg(test)]
@@ -392,5 +437,59 @@ mod tests {
         let cfg: Config = toml::from_str("[provider]\n").unwrap();
         assert!(cfg.provider.openrouter_key.is_empty());
         assert!(cfg.provider.openai_key.is_empty());
+        assert!(cfg.provider.active_backend.is_empty());
+    }
+
+    #[test]
+    fn parses_active_backend() {
+        let cfg: Config = toml::from_str("[provider]\nactive_backend = \"codex\"\n").unwrap();
+        assert_eq!(cfg.provider.active_backend, "codex");
+    }
+
+    fn codex_creds(access: &str) -> CodexCredentials {
+        CodexCredentials {
+            access: access.to_string(),
+            refresh: "r".to_string(),
+            expires: 0,
+            account_id: "a".to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_initial_key_prefers_the_recorded_active_backend() {
+        // Both an OpenRouter key and Codex creds are present, but Codex was
+        // the one last explicitly chosen — it should win, not the fixed
+        // openrouter-first priority.
+        let saved = SavedCreds {
+            openrouter_key: Some("sk-or-abc".into()),
+            openai_key: None,
+            codex: Some(codex_creds("codex-token")),
+            active_backend: Some("codex".to_string()),
+        };
+        assert_eq!(resolve_initial_key(&saved), Some("codex-token".to_string()));
+    }
+
+    #[test]
+    fn resolve_initial_key_falls_back_to_priority_when_recorded_backend_is_gone() {
+        // active_backend says "codex", but the codex login was revoked/removed.
+        let saved = SavedCreds {
+            openrouter_key: Some("sk-or-abc".into()),
+            openai_key: None,
+            codex: None,
+            active_backend: Some("codex".to_string()),
+        };
+        assert_eq!(resolve_initial_key(&saved), Some("sk-or-abc".to_string()));
+    }
+
+    #[test]
+    fn resolve_initial_key_falls_back_to_priority_when_never_recorded() {
+        let saved = SavedCreds {
+            openrouter_key: None,
+            openai_key: Some("sk-proj-abc".into()),
+            codex: Some(codex_creds("codex-token")),
+            active_backend: None,
+        };
+        // openai comes before codex in the fixed priority.
+        assert_eq!(resolve_initial_key(&saved), Some("sk-proj-abc".to_string()));
     }
 }

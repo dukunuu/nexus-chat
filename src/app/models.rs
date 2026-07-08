@@ -128,6 +128,7 @@ impl App {
                 ));
                 self.key = Some(creds.access.clone());
                 self.saved.codex = Some(creds);
+                let _ = config::save_active_backend("codex");
                 self.models.clear();
                 self.model_provider_filter = None;
                 self.status = "OpenAI Codex login saved, loading models…".to_string();
@@ -196,6 +197,12 @@ impl App {
             "OpenAI" => crate::provider::openrouter::OpenRouter::openai(key.clone()),
             _ => crate::provider::openrouter::OpenRouter::openai_codex(key.clone()),
         });
+        let tag = match name {
+            "OpenRouter" => "openrouter",
+            "OpenAI" => "openai",
+            _ => "codex",
+        };
+        let _ = config::save_active_backend(tag);
         self.key = Some(key);
         self.models.clear();
         self.model_provider_filter = None;

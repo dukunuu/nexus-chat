@@ -20,11 +20,10 @@ use anyhow::Result;
 #[tokio::main]
 async fn main() -> Result<()> {
     let saved = config::load_all_providers().await?;
-    let key = saved
-        .openrouter_key
-        .clone()
-        .or_else(|| saved.openai_key.clone())
-        .or_else(|| saved.codex.as_ref().map(|c| c.access.clone()));
+    // Resume on whichever backend was last active; only falls back to a
+    // fixed priority (openrouter > openai > codex) if that wasn't recorded
+    // or its credential is gone (e.g. the login was revoked).
+    let key = config::resolve_initial_key(&saved);
     let space = space::Space::open()?;
     let space_root = space.spaces_root();
     let db = db::Db::open(&space.db_path())?;
