@@ -16,7 +16,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     let dim = Style::default().fg(app.theme.fg_dim);
     let items: Vec<ListItem> = if app.swarm_cache.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
-            "no personas yet — Ctrl+N to add one, or leave empty and send a message to auto-suggest",
+            "no personas yet — press Ctrl+N to add one, or just send a message and 3 will be suggested for you",
             dim,
         )))]
     } else {
@@ -46,9 +46,10 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         SwarmPopupMode::EditName => " persona name — Enter save · Esc cancel ".to_string(),
         SwarmPopupMode::EditBlurb => " persona blurb — Enter save · Esc cancel ".to_string(),
         SwarmPopupMode::Browse => format!(
-            " swarm — mode: {} · Ctrl+G toggle · Ctrl+N add · Ctrl+R name · Ctrl+B blurb · \
-             Ctrl+M model · Ctrl+D remove ",
-            if on { "ON" } else { "off" }
+            " swarm mode is {} — Ctrl+G turns it on/off · Ctrl+N adds a persona · \
+             Ctrl+R renames · Ctrl+B edits the blurb · Ctrl+M sets the model · \
+             Ctrl+D removes ",
+            if on { "ON" } else { "OFF" }
         ),
     };
 
