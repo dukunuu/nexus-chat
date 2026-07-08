@@ -788,7 +788,7 @@ impl super::App {
             return;
         }
         let Some(provider) = self.provider.clone() else {
-            self.open_key_prompt();
+            self.open_login_popup();
             return;
         };
         let research_model = self.research_model.trim().to_string();

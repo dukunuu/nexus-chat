@@ -85,6 +85,18 @@ pub enum Popup {
     Watch,
     ResearchLive,
     Swarm,
+    /// `/login`'s provider selector (OpenRouter / OpenCode Go / OpenAI / Codex).
+    Login,
+}
+
+/// Which backend a pasted key in `Popup::Key` is for — set by whichever
+/// `/login` row opened the prompt, since these keys aren't distinguishable
+/// by shape (unlike OpenRouter's `sk-or-` prefix).
+#[derive(PartialEq, Clone, Copy)]
+pub enum KeyTarget {
+    OpenRouter,
+    OpenAi,
+    OpencodeGo,
 }
 
 /// What the `/swarm` roster popup is doing.
@@ -718,6 +730,10 @@ pub struct App {
     pub copy_options: Vec<CopyOption>,
     pub copy_selected: usize,
     pub key_input: String,
+    /// Which backend the current `Popup::Key` entry is for.
+    pub key_target: KeyTarget,
+    /// Highlighted row in the `/login` provider selector.
+    pub login_selected: usize,
     pub settings_selected: usize,
     /// Text edit buffers for the numeric settings (temperature, top_p, max_tokens).
     pub settings_inputs: [String; 8],
@@ -931,6 +947,8 @@ impl App {
             copy_options: Vec::new(),
             copy_selected: 0,
             key_input: String::new(),
+            key_target: KeyTarget::OpenRouter,
+            login_selected: 0,
             settings_selected: 0,
             settings_inputs: Default::default(),
             settings_collapsed: HashSet::new(),
@@ -1286,8 +1304,7 @@ impl App {
             "session" => self.open_session_picker()?,
             "space" => self.open_space_picker()?,
             "model" => self.open_model_picker(),
-            "key" => self.open_key_prompt(),
-            "login" => self.start_codex_login(),
+            "login" => self.open_login_popup(),
             "backend" => self.cycle_backend(),
             "swarm" => self.open_swarm_popup(),
             "config" => self.open_settings(),

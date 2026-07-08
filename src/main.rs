@@ -21,14 +21,20 @@ use anyhow::Result;
 async fn main() -> Result<()> {
     let saved = config::load_all_providers().await?;
     // Resume on whichever backend was last active; only falls back to a
-    // fixed priority (openrouter > openai > codex) if that wasn't recorded
-    // or its credential is gone (e.g. the login was revoked).
-    let key = config::resolve_initial_key(&saved);
+    // fixed priority (openrouter > openai > opencode > codex) if that
+    // wasn't recorded or its credential is gone (e.g. the login was revoked).
+    let initial = config::resolve_initial_backend(&saved);
+    let key = initial.as_ref().map(|(_, k)| k.clone());
     let space = space::Space::open()?;
     let space_root = space.spaces_root();
     let db = db::Db::open(&space.db_path())?;
 
     let mut app = app::App::new(db, key, space);
+    // App::new's internal guess (shape-sniffed) can't tell OpenAI and
+    // OpenCode Go keys apart — override with the authoritative tag.
+    if let Some((tag, _)) = &initial {
+        app.set_provider_flavor(tag);
+    }
     app.saved = saved;
     app.app_server = appserver::AppServer::start(space_root).await;
     app.refresh_toolbox();

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ratatui::widgets::ListState;
 
-use super::{App, LoginMsg, ModelPanel, ModelPickTarget, Popup};
+use super::{App, KeyTarget, LoginMsg, ModelPanel, ModelPickTarget, Popup};
 use crate::config;
 use crate::provider::Model;
 use chrono::Utc;
@@ -11,6 +11,21 @@ impl App {
     /// title. `None` when nothing's configured yet.
     pub(crate) fn provider_backend_name(&self) -> Option<&'static str> {
         self.provider.as_ref().map(|p| p.backend_name())
+    }
+
+    /// Force `self.provider`'s flavor to `tag`, keeping the same key/token.
+    /// Used once at startup: `App::new`'s internal key-shape guess can't
+    /// distinguish OpenAI from OpenCode Go, so main.rs corrects it using the
+    /// authoritative `active_backend` record.
+    pub(crate) fn set_provider_flavor(&mut self, tag: &str) {
+        let Some(key) = self.key.clone() else { return };
+        self.provider = Some(match tag {
+            "openrouter" => crate::provider::openrouter::OpenRouter::openrouter(key),
+            "openai" => crate::provider::openrouter::OpenRouter::openai(key),
+            "opencode" => crate::provider::openrouter::OpenRouter::opencode_go(key),
+            "codex" => crate::provider::openrouter::OpenRouter::openai_codex(key),
+            _ => return,
+        });
     }
 
     pub(super) fn open_model_picker(&mut self) {
@@ -62,7 +77,7 @@ impl App {
 
     fn open_model_picker_impl(&mut self) {
         if self.provider.is_none() {
-            self.open_key_prompt();
+            self.open_login_popup();
             return;
         }
         if self.models.is_empty() {
@@ -88,10 +103,91 @@ impl App {
             .select((!self.available_models().is_empty()).then_some(0));
     }
 
-    pub(super) fn open_key_prompt(&mut self) {
+    /// `/login`: open the provider selector. Also what `open_model_picker`
+    /// falls back to when nothing's configured yet.
+    pub(super) fn open_login_popup(&mut self) {
+        self.login_selected = 0;
+        self.popup = Popup::Login;
+    }
+
+    pub(crate) fn move_login_selection(&mut self, delta: i32) {
+        self.login_selected = super::clamp_cursor(self.login_selected, 4, delta);
+    }
+
+    /// Enter on a `/login` row: OpenRouter/OpenCode Go/OpenAI activate
+    /// immediately from their env var if set, else drop into the key-paste
+    /// popup; Codex has no key, so it starts the device-code login instead.
+    pub(crate) fn confirm_login_selection(&mut self) {
+        match self.login_selected {
+            0 => self.start_key_login(
+                KeyTarget::OpenRouter,
+                config::OPENROUTER_ENV_KEY,
+                "openrouter",
+                "OpenRouter",
+            ),
+            1 => self.start_key_login(
+                KeyTarget::OpencodeGo,
+                config::OPENCODE_ENV_KEY,
+                "opencode",
+                "OpenCode Go",
+            ),
+            2 => self.start_key_login(
+                KeyTarget::OpenAi,
+                config::OPENAI_ENV_KEY,
+                "openai",
+                "OpenAI",
+            ),
+            _ => self.start_codex_login(),
+        }
+    }
+
+    fn start_key_login(&mut self, target: KeyTarget, env_var: &str, tag: &str, label: &str) {
+        if let Ok(v) = std::env::var(env_var) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                self.activate_key(target, tag, v);
+                return;
+            }
+        }
+        self.key_target = target;
         self.key_input.clear();
-        self.status = "paste your OpenRouter or OpenAI key, then Enter".to_string();
+        self.status = format!("paste your {label} API key, then Enter");
         self.popup = Popup::Key;
+    }
+
+    /// Label for the key-entry popup's hint, matching whichever `/login`
+    /// row opened it.
+    pub(crate) fn key_target_label(&self) -> &'static str {
+        match self.key_target {
+            KeyTarget::OpenRouter => "OpenRouter",
+            KeyTarget::OpenAi => "OpenAI",
+            KeyTarget::OpencodeGo => "OpenCode Go",
+        }
+    }
+
+    fn activate_key(&mut self, target: KeyTarget, tag: &str, key: String) {
+        if let Err(e) = config::save_provider_key(tag, &key) {
+            self.status = format!("could not save key: {e}");
+        }
+        match target {
+            KeyTarget::OpenRouter => self.saved.openrouter_key = Some(key.clone()),
+            KeyTarget::OpenAi => self.saved.openai_key = Some(key.clone()),
+            KeyTarget::OpencodeGo => self.saved.opencode_key = Some(key.clone()),
+        }
+        self.provider = Some(match target {
+            KeyTarget::OpenRouter => {
+                crate::provider::openrouter::OpenRouter::openrouter(key.clone())
+            }
+            KeyTarget::OpenAi => crate::provider::openrouter::OpenRouter::openai(key.clone()),
+            KeyTarget::OpencodeGo => {
+                crate::provider::openrouter::OpenRouter::opencode_go(key.clone())
+            }
+        });
+        self.key = Some(key);
+        self.models.clear();
+        self.popup = Popup::None;
+        self.status = "key saved, loading models…".to_string();
+        self.fetch_models();
     }
 
     pub(crate) fn start_codex_login(&mut self) {
@@ -141,36 +237,30 @@ impl App {
         }
     }
 
-    /// Save the entered key: persist it, build the provider, fetch models.
+    /// Save the key pasted into `Popup::Key`, for whichever backend
+    /// `self.key_target` says it's for.
     pub(crate) fn confirm_key(&mut self) {
         let key = std::mem::take(&mut self.key_input);
         let key = key.trim().to_string();
-        self.popup = Popup::None;
         if key.is_empty() {
             self.status = "no key entered".to_string();
+            self.popup = Popup::None;
             return;
         }
-        if let Err(e) = config::save_key(&key) {
-            self.status = format!("could not save key: {e}");
-        }
-        if key.trim_start().starts_with("sk-or-") {
-            self.saved.openrouter_key = Some(key.clone());
-        } else {
-            self.saved.openai_key = Some(key.clone());
-        }
-        self.provider = Some(crate::provider::openrouter::OpenRouter::from_key_auto(
-            key.clone(),
-        ));
-        self.key = Some(key);
-        self.status = "key saved, loading models…".to_string();
-        self.fetch_models();
+        let (target, tag) = match self.key_target {
+            KeyTarget::OpenRouter => (KeyTarget::OpenRouter, "openrouter"),
+            KeyTarget::OpenAi => (KeyTarget::OpenAi, "openai"),
+            KeyTarget::OpencodeGo => (KeyTarget::OpencodeGo, "opencode"),
+        };
+        self.activate_key(target, tag, key);
     }
 
-    /// Cycle the active backend among whichever of OpenRouter/OpenAI/Codex
-    /// are configured, without re-authenticating.
+    /// Cycle the active backend among whichever of OpenRouter/OpenCode
+    /// Go/OpenAI/Codex are configured, without re-authenticating.
     pub(crate) fn cycle_backend(&mut self) {
         let slots: Vec<(&'static str, String)> = [
             ("OpenRouter", self.saved.openrouter_key.clone()),
+            ("OpenCode Go", self.saved.opencode_key.clone()),
             ("OpenAI", self.saved.openai_key.clone()),
             ("Codex", self.saved.codex.as_ref().map(|c| c.access.clone())),
         ]
@@ -179,7 +269,7 @@ impl App {
         .collect();
 
         if slots.len() < 2 {
-            self.status = "only one backend configured — /key or /login to add another".into();
+            self.status = "only one backend configured — /login to add another".into();
             return;
         }
 
@@ -191,11 +281,13 @@ impl App {
 
         self.provider = Some(match name {
             "OpenRouter" => crate::provider::openrouter::OpenRouter::openrouter(key.clone()),
+            "OpenCode Go" => crate::provider::openrouter::OpenRouter::opencode_go(key.clone()),
             "OpenAI" => crate::provider::openrouter::OpenRouter::openai(key.clone()),
             _ => crate::provider::openrouter::OpenRouter::openai_codex(key.clone()),
         });
         let tag = match name {
             "OpenRouter" => "openrouter",
+            "OpenCode Go" => "opencode",
             "OpenAI" => "openai",
             _ => "codex",
         };

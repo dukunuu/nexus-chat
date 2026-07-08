@@ -11,11 +11,12 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     f.render_widget(Clear, outer);
     // Mask the key so it isn't shown in the clear.
     let masked = "*".repeat(app.key_input.chars().count());
+    let label = app.key_target_label();
     let block = chrome::popup_block(
         crate::ui::hint_title(
             app,
             " API key ",
-            "OpenRouter/OpenAI key — Enter to save, Esc to cancel",
+            &format!("{label} key — Enter to save, Esc to go back"),
         ),
         &app.theme,
     );
@@ -25,7 +26,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     match key.code {
-        KeyCode::Esc => app.popup = Popup::None,
+        KeyCode::Esc => app.popup = Popup::Login,
         KeyCode::Enter => app.confirm_key(),
         KeyCode::Char(c) => app.key_input.push(c),
         KeyCode::Backspace => {

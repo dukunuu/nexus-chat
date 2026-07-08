@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub const OPENROUTER_ENV_KEY: &str = "OPENROUTER_API_KEY";
 pub const OPENAI_ENV_KEY: &str = "OPENAI_API_KEY";
+pub const OPENCODE_ENV_KEY: &str = "OPENCODE_API_KEY";
 
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../assets/system-prompt-base.md");
 
@@ -22,11 +23,13 @@ struct Provider {
     #[serde(default)]
     openai_key: String,
     #[serde(default)]
+    opencode_key: String,
+    #[serde(default)]
     openai_codex: Option<CodexCredentials>,
-    /// Which backend ("openrouter" / "openai" / "codex") was last made
-    /// active via `/key`, `/login`, or `/backend` — read back at startup so
-    /// the app resumes on the same backend instead of always defaulting to
-    /// whichever credential wins a fixed priority order.
+    /// Which backend ("openrouter" / "openai" / "opencode" / "codex") was
+    /// last made active via `/login` or `/backend` — read back at startup
+    /// so the app resumes on the same backend instead of always defaulting
+    /// to whichever credential wins a fixed priority order.
     #[serde(default)]
     active_backend: String,
 }
@@ -40,15 +43,16 @@ pub struct CodexCredentials {
 }
 
 /// Every credential the app knows about at once — populated at startup and
-/// kept in sync as `/key`/`/login` add more, so `/backend` can switch the
-/// active provider without re-authenticating.
+/// kept in sync as `/login` adds more, so `/backend` can switch the active
+/// provider without re-authenticating.
 #[derive(Debug, Clone, Default)]
 pub struct SavedCreds {
     pub openrouter_key: Option<String>,
     pub openai_key: Option<String>,
+    pub opencode_key: Option<String>,
     pub codex: Option<CodexCredentials>,
-    /// Which backend was last active ("openrouter" / "openai" / "codex"),
-    /// if one was ever explicitly chosen.
+    /// Which backend was last active ("openrouter" / "openai" / "opencode"
+    /// / "codex"), if one was ever explicitly chosen.
     pub active_backend: Option<String>,
 }
 
@@ -91,17 +95,17 @@ pub fn load_system_prompt() -> Result<String> {
 }
 
 /// Resolve every configured credential at once: `$OPENROUTER_API_KEY`/
-/// `$OPENAI_API_KEY` (if set) win over the config file for their respective
-/// slot, Codex creds always come from the config file (refreshed if stale).
-/// Scaffolds an empty config on first run. Never fails on missing
-/// credentials — the app launches regardless and they can be set in-app
-/// with `/key` or `/login`.
+/// `$OPENAI_API_KEY`/`$OPENCODE_API_KEY` (if set) win over the config file
+/// for their respective slot, Codex creds always come from the config file
+/// (refreshed if stale). Scaffolds an empty config on first run. Never
+/// fails on missing credentials — the app launches regardless and they can
+/// be set in-app with `/login`.
 pub async fn load_all_providers() -> Result<SavedCreds> {
     let path = config_path()?;
     if !path.exists() {
-        save_key("")?; // scaffold template
+        write_provider_config("", "", "", None, "")?; // scaffold template
     }
-    let (mut openrouter_key, mut openai_key, codex, active_backend) =
+    let (mut openrouter_key, mut openai_key, mut opencode_key, codex, active_backend) =
         load_config_all().unwrap_or_default();
     if openrouter_key.is_empty()
         && let Ok(v) = std::env::var(OPENROUTER_ENV_KEY)
@@ -115,6 +119,12 @@ pub async fn load_all_providers() -> Result<SavedCreds> {
     {
         openai_key = v.trim().to_string();
     }
+    if opencode_key.is_empty()
+        && let Ok(v) = std::env::var(OPENCODE_ENV_KEY)
+        && !v.trim().is_empty()
+    {
+        opencode_key = v.trim().to_string();
+    }
     let codex = match codex {
         Some(creds) => {
             let creds = refresh_codex_if_needed(creds).await?;
@@ -126,6 +136,7 @@ pub async fn load_all_providers() -> Result<SavedCreds> {
     Ok(SavedCreds {
         openrouter_key: (!openrouter_key.is_empty()).then_some(openrouter_key),
         openai_key: (!openai_key.is_empty()).then_some(openai_key),
+        opencode_key: (!opencode_key.is_empty()).then_some(opencode_key),
         codex,
         active_backend: (!active_backend.is_empty()).then_some(active_backend),
     })
@@ -192,8 +203,15 @@ async fn refresh_codex_if_needed(creds: CodexCredentials) -> Result<CodexCredent
 }
 
 pub fn save_codex_credentials(creds: &CodexCredentials) -> Result<()> {
-    let (openrouter_key, openai_key, _, active_backend) = load_config_all().unwrap_or_default();
-    write_provider_config(&openrouter_key, &openai_key, Some(creds), &active_backend)
+    let (openrouter_key, openai_key, opencode_key, _, active_backend) =
+        load_config_all().unwrap_or_default();
+    write_provider_config(
+        &openrouter_key,
+        &openai_key,
+        &opencode_key,
+        Some(creds),
+        &active_backend,
+    )
 }
 
 pub fn load_openrouter_key_only() -> Option<String> {
@@ -208,34 +226,79 @@ pub fn load_openrouter_key_only() -> Option<String> {
         .and_then(|(openrouter_key, ..)| (!openrouter_key.is_empty()).then_some(openrouter_key))
 }
 
+/// Persist a provider's key by explicit flavor tag ("openrouter" / "openai"
+/// / "opencode"), and mark it the active backend — called only from the
+/// `/login` provider selector, which always knows exactly which flavor a
+/// pasted key is for (no shape-sniffing).
+pub fn save_provider_key(flavor: &str, key: &str) -> Result<()> {
+    let (mut openrouter_key, mut openai_key, mut opencode_key, codex, _) =
+        load_config_all().unwrap_or_default();
+    match flavor {
+        "openrouter" => openrouter_key = key.to_string(),
+        "openai" => openai_key = key.to_string(),
+        "opencode" => opencode_key = key.to_string(),
+        _ => {}
+    }
+    write_provider_config(
+        &openrouter_key,
+        &openai_key,
+        &opencode_key,
+        codex.as_ref(),
+        flavor,
+    )
+}
+
 /// Persist which backend is now active, without disturbing any saved keys
-/// or Codex login. Called by `/key`, `/login`, and `/backend`.
+/// or Codex login. Called by `/login` and `/backend`.
 pub fn save_active_backend(tag: &str) -> Result<()> {
-    let (openrouter_key, openai_key, codex, _) = load_config_all().unwrap_or_default();
-    write_provider_config(&openrouter_key, &openai_key, codex.as_ref(), tag)
+    let (openrouter_key, openai_key, opencode_key, codex, _) =
+        load_config_all().unwrap_or_default();
+    write_provider_config(
+        &openrouter_key,
+        &openai_key,
+        &opencode_key,
+        codex.as_ref(),
+        tag,
+    )
 }
 
 /// The key/token to boot the app's initial provider with: whichever backend
 /// was last active, if its credential is still there, else a fixed priority
-/// (openrouter > openai > codex).
-pub fn resolve_initial_key(saved: &SavedCreds) -> Option<String> {
-    match saved.active_backend.as_deref() {
-        Some("openrouter") => saved.openrouter_key.clone(),
-        Some("openai") => saved.openai_key.clone(),
-        Some("codex") => saved.codex.as_ref().map(|c| c.access.clone()),
-        _ => None,
-    }
-    .or_else(|| saved.openrouter_key.clone())
-    .or_else(|| saved.openai_key.clone())
-    .or_else(|| saved.codex.as_ref().map(|c| c.access.clone()))
+/// (openrouter > openai > opencode > codex). Returns the backend's tag too
+/// (not just the key/token) — needed since OpenAI and OpenCode Go keys look
+/// identical by shape, so the caller can't tell them apart on its own.
+pub fn resolve_initial_backend(saved: &SavedCreds) -> Option<(&'static str, String)> {
+    let try_tag = |tag: &str| -> Option<(&'static str, String)> {
+        match tag {
+            "openrouter" => saved.openrouter_key.clone().map(|k| ("openrouter", k)),
+            "openai" => saved.openai_key.clone().map(|k| ("openai", k)),
+            "opencode" => saved.opencode_key.clone().map(|k| ("opencode", k)),
+            "codex" => saved.codex.as_ref().map(|c| ("codex", c.access.clone())),
+            _ => None,
+        }
+    };
+    saved
+        .active_backend
+        .as_deref()
+        .and_then(try_tag)
+        .or_else(|| try_tag("openrouter"))
+        .or_else(|| try_tag("openai"))
+        .or_else(|| try_tag("opencode"))
+        .or_else(|| try_tag("codex"))
 }
 
 /// Read all credential fields (and the last-active-backend tag) straight
 /// off disk, no env overrides.
-fn load_config_all() -> Result<(String, String, Option<CodexCredentials>, String)> {
+fn load_config_all() -> Result<(String, String, String, Option<CodexCredentials>, String)> {
     let path = config_path()?;
     if !path.exists() {
-        return Ok((String::new(), String::new(), None, String::new()));
+        return Ok((
+            String::new(),
+            String::new(),
+            String::new(),
+            None,
+            String::new(),
+        ));
     }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -244,6 +307,7 @@ fn load_config_all() -> Result<(String, String, Option<CodexCredentials>, String
     Ok((
         cfg.provider.openrouter_key,
         cfg.provider.openai_key,
+        cfg.provider.opencode_key,
         cfg.provider.openai_codex,
         cfg.provider.active_backend,
     ))
@@ -373,6 +437,7 @@ pub async fn login_openai_codex_device(
 fn write_provider_config(
     openrouter_key: &str,
     openai_key: &str,
+    opencode_key: &str,
     codex: Option<&CodexCredentials>,
     active_backend: &str,
 ) -> Result<()> {
@@ -382,9 +447,15 @@ fn write_provider_config(
     }
     let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let mut body = format!(
-        "[provider]\n# OpenRouter key (or set ${OPENROUTER_ENV_KEY})\nopenrouter_key = \"{}\"\n# OpenAI API key (or set ${OPENAI_ENV_KEY})\nopenai_key = \"{}\"\n# Last active backend (\"openrouter\" / \"openai\" / \"codex\")\nactive_backend = \"{}\"\n",
+        "[provider]\n\
+         # OpenRouter key (or set ${OPENROUTER_ENV_KEY})\nopenrouter_key = \"{}\"\n\
+         # OpenAI API key (or set ${OPENAI_ENV_KEY})\nopenai_key = \"{}\"\n\
+         # OpenCode Go key (or set ${OPENCODE_ENV_KEY})\nopencode_key = \"{}\"\n\
+         # Last active backend (\"openrouter\" / \"openai\" / \"opencode\" / \"codex\")\n\
+         active_backend = \"{}\"\n",
         escape(openrouter_key),
         escape(openai_key),
+        escape(opencode_key),
         escape(active_backend),
     );
     if let Some(c) = codex {
@@ -396,26 +467,6 @@ fn write_provider_config(
     }
     std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
-}
-
-/// Persist an OpenRouter or OpenAI key to the config file, by shape, without
-/// disturbing the sibling key or any saved Codex login.
-pub fn save_key(key: &str) -> Result<()> {
-    let (mut openrouter_key, mut openai_key, codex, active_backend) =
-        load_config_all().unwrap_or_default();
-    let tag = if key.trim_start().starts_with("sk-or-") {
-        openrouter_key = key.to_string();
-        "openrouter"
-    } else {
-        openai_key = key.to_string();
-        "openai"
-    };
-    let active_backend = if key.is_empty() {
-        &active_backend // scaffolding an empty template — don't touch it
-    } else {
-        tag
-    };
-    write_provider_config(&openrouter_key, &openai_key, codex.as_ref(), active_backend)
 }
 
 #[cfg(test)]
@@ -456,40 +507,67 @@ mod tests {
     }
 
     #[test]
-    fn resolve_initial_key_prefers_the_recorded_active_backend() {
+    fn resolve_initial_backend_prefers_the_recorded_active_backend() {
         // Both an OpenRouter key and Codex creds are present, but Codex was
         // the one last explicitly chosen — it should win, not the fixed
         // openrouter-first priority.
         let saved = SavedCreds {
             openrouter_key: Some("sk-or-abc".into()),
             openai_key: None,
+            opencode_key: None,
             codex: Some(codex_creds("codex-token")),
             active_backend: Some("codex".to_string()),
         };
-        assert_eq!(resolve_initial_key(&saved), Some("codex-token".to_string()));
+        assert_eq!(
+            resolve_initial_backend(&saved),
+            Some(("codex", "codex-token".to_string()))
+        );
     }
 
     #[test]
-    fn resolve_initial_key_falls_back_to_priority_when_recorded_backend_is_gone() {
+    fn resolve_initial_backend_falls_back_to_priority_when_recorded_backend_is_gone() {
         // active_backend says "codex", but the codex login was revoked/removed.
         let saved = SavedCreds {
             openrouter_key: Some("sk-or-abc".into()),
             openai_key: None,
+            opencode_key: None,
             codex: None,
             active_backend: Some("codex".to_string()),
         };
-        assert_eq!(resolve_initial_key(&saved), Some("sk-or-abc".to_string()));
+        assert_eq!(
+            resolve_initial_backend(&saved),
+            Some(("openrouter", "sk-or-abc".to_string()))
+        );
     }
 
     #[test]
-    fn resolve_initial_key_falls_back_to_priority_when_never_recorded() {
+    fn resolve_initial_backend_falls_back_to_priority_when_never_recorded() {
         let saved = SavedCreds {
             openrouter_key: None,
             openai_key: Some("sk-proj-abc".into()),
+            opencode_key: None,
             codex: Some(codex_creds("codex-token")),
             active_backend: None,
         };
-        // openai comes before codex in the fixed priority.
-        assert_eq!(resolve_initial_key(&saved), Some("sk-proj-abc".to_string()));
+        // openai comes before opencode/codex in the fixed priority.
+        assert_eq!(
+            resolve_initial_backend(&saved),
+            Some(("openai", "sk-proj-abc".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_initial_backend_prefers_recorded_opencode_backend() {
+        let saved = SavedCreds {
+            openrouter_key: Some("sk-or-abc".into()),
+            openai_key: None,
+            opencode_key: Some("oc-token".into()),
+            codex: None,
+            active_backend: Some("opencode".to_string()),
+        };
+        assert_eq!(
+            resolve_initial_backend(&saved),
+            Some(("opencode", "oc-token".to_string()))
+        );
     }
 }

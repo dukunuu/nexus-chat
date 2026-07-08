@@ -71,14 +71,19 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["models", "llm"],
     },
     Command {
-        name: "key",
-        desc: "set API key",
-        aliases: &["apikey", "token", "auth"],
-    },
-    Command {
         name: "login",
-        desc: "ChatGPT Codex login",
-        aliases: &["codex", "subscription", "oauth", "chatgpt"],
+        desc: "pick a backend to log into",
+        aliases: &[
+            "key",
+            "apikey",
+            "token",
+            "auth",
+            "codex",
+            "subscription",
+            "oauth",
+            "chatgpt",
+            "opencode",
+        ],
     },
     Command {
         name: "backend",

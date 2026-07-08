@@ -157,7 +157,7 @@ impl App {
             return;
         }
         let Some(provider) = self.provider.clone() else {
-            self.open_key_prompt();
+            self.open_login_popup();
             return;
         };
         let default_model = self.current_model.clone().unwrap_or_default();

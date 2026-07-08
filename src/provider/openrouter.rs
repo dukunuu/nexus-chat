@@ -13,6 +13,7 @@ use crate::tools::ToolBox;
 const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api";
+const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
 /// Hard cap on tool round-trips per response, so a model that keeps calling
 /// tools can't loop forever. The default for interactive chat; background
 /// jobs (e.g. deep-research searcher agents) pass their own smaller budget.
@@ -23,6 +24,10 @@ enum ProviderFlavor {
     OpenRouter,
     OpenAi,
     OpenAiCodex,
+    /// OpenCode Go: a low-cost subscription bundling several open coding
+    /// models behind a fully OpenAI-compatible endpoint — no special
+    /// request/response handling needed, unlike Codex.
+    OpencodeGo,
 }
 
 #[derive(Clone)]
@@ -38,6 +43,7 @@ impl ProviderFlavor {
             ProviderFlavor::OpenRouter => OPENROUTER_BASE,
             ProviderFlavor::OpenAi => OPENAI_BASE,
             ProviderFlavor::OpenAiCodex => CODEX_BASE,
+            ProviderFlavor::OpencodeGo => OPENCODE_GO_BASE,
         }
     }
 
@@ -49,6 +55,10 @@ impl ProviderFlavor {
                 id.starts_with("o") || id.starts_with("gpt-5")
             }
             ProviderFlavor::OpenAiCodex => true,
+            // Several Go models (DeepSeek, Qwen, GLM) support a thinking
+            // mode; no catalog metadata to check, so offer the toggle on
+            // all of them rather than silently hiding it on ones that do.
+            ProviderFlavor::OpencodeGo => true,
         }
     }
 
@@ -66,6 +76,7 @@ impl ProviderFlavor {
                 )
             }
             ProviderFlavor::OpenAiCodex => Some(true),
+            ProviderFlavor::OpencodeGo => Some(false),
         }
     }
 
@@ -75,8 +86,9 @@ impl ProviderFlavor {
             ProviderFlavor::OpenRouter => {
                 obj.insert("usage".into(), serde_json::json!({ "include": true }));
             }
-            // OpenAI's equivalent switch lives under stream_options.
-            ProviderFlavor::OpenAi => {
+            // OpenAI (and OpenCode Go, which mirrors OpenAI's API shape)
+            // put the equivalent switch under stream_options.
+            ProviderFlavor::OpenAi | ProviderFlavor::OpencodeGo => {
                 obj.insert(
                     "stream_options".into(),
                     serde_json::json!({ "include_usage": true }),
@@ -95,7 +107,7 @@ impl ProviderFlavor {
             ProviderFlavor::OpenRouter => {
                 obj.insert("reasoning".into(), serde_json::json!({ "effort": effort }));
             }
-            ProviderFlavor::OpenAi => {
+            ProviderFlavor::OpenAi | ProviderFlavor::OpencodeGo => {
                 obj.insert("reasoning_effort".into(), serde_json::json!(effort));
             }
             ProviderFlavor::OpenAiCodex => {
@@ -174,6 +186,14 @@ impl OpenRouter {
         }
     }
 
+    pub fn opencode_go(key: String) -> Self {
+        OpenRouter {
+            client: reqwest::Client::new(),
+            key,
+            flavor: ProviderFlavor::OpencodeGo,
+        }
+    }
+
     pub fn openai_codex(key: String) -> Self {
         OpenRouter {
             client: reqwest::Client::new(),
@@ -188,6 +208,7 @@ impl OpenRouter {
             ProviderFlavor::OpenRouter => "OpenRouter",
             ProviderFlavor::OpenAi => "OpenAI",
             ProviderFlavor::OpenAiCodex => "Codex",
+            ProviderFlavor::OpencodeGo => "OpenCode Go",
         }
     }
 
@@ -196,6 +217,7 @@ impl OpenRouter {
             ProviderFlavor::OpenRouter => "google/gemini-2.5-flash-lite",
             ProviderFlavor::OpenAi => "gpt-4.1-mini",
             ProviderFlavor::OpenAiCodex => "gpt-5.4-mini",
+            ProviderFlavor::OpencodeGo => "deepseek-v4-flash",
         }
     }
 
@@ -204,6 +226,7 @@ impl OpenRouter {
             ProviderFlavor::OpenRouter => "google/gemini-2.5-flash",
             ProviderFlavor::OpenAi => "gpt-4.1",
             ProviderFlavor::OpenAiCodex => "gpt-5.5",
+            ProviderFlavor::OpencodeGo => "kimi-k2.7-code",
         }
     }
 
@@ -212,6 +235,7 @@ impl OpenRouter {
             ProviderFlavor::OpenRouter => "anthropic/claude-sonnet-4.5",
             ProviderFlavor::OpenAi => "gpt-4.1",
             ProviderFlavor::OpenAiCodex => "gpt-5.5",
+            ProviderFlavor::OpencodeGo => "deepseek-v4-pro",
         }
     }
 
@@ -220,6 +244,8 @@ impl OpenRouter {
             ProviderFlavor::OpenRouter => "openai/text-embedding-3-small",
             ProviderFlavor::OpenAi => "text-embedding-3-small",
             ProviderFlavor::OpenAiCodex => "",
+            // Go's bundled models are all chat/coding models, no embeddings.
+            ProviderFlavor::OpencodeGo => "",
         }
     }
 
@@ -1170,6 +1196,18 @@ fn vision_body(model: &str, image_data_url: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_go_reports_its_own_backend_name_base_and_defaults() {
+        let p = OpenRouter::opencode_go("k".into());
+        assert_eq!(p.backend_name(), "OpenCode Go");
+        assert_eq!(p.flavor.base(), "https://opencode.ai/zen/go/v1");
+        assert!(!p.default_utility_model().is_empty());
+        assert!(!p.default_research_model().is_empty());
+        assert!(!p.default_escalation_model().is_empty());
+        // No embedding models on Go — feature stays disabled by default.
+        assert_eq!(p.default_embedding_model(), "");
+    }
 
     #[test]
     fn sse_event_data_joins_multiple_data_lines() {

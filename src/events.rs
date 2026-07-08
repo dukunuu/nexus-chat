@@ -200,6 +200,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         Popup::Watch => ui::popups::watches::handle_key(app, key)?,
         Popup::ResearchLive => ui::popups::research_live::handle_key(app, key)?,
         Popup::Swarm => ui::popups::swarm::handle_key(app, key)?,
+        Popup::Login => ui::popups::login::handle_key(app, key)?,
         Popup::None => handle_normal(app, key)?,
     }
     Ok(())

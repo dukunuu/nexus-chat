@@ -926,11 +926,11 @@ async fn finish_stream_persists_assistant_message() {
 }
 
 #[test]
-fn model_picker_without_key_opens_key_prompt() {
+fn model_picker_without_key_opens_login_popup() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, None, test_space());
     a.open_model_picker();
-    assert!(a.popup == Popup::Key);
+    assert!(a.popup == Popup::Login);
 }
 
 #[test]
