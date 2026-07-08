@@ -227,7 +227,11 @@ impl OpenRouter {
     /// subscription endpoint does not expose the normal OpenAI models catalog.
     pub async fn list_models(&self) -> Result<Vec<Model>> {
         if self.flavor == ProviderFlavor::OpenAiCodex {
-            let mut models = vec![
+            // Codex-only models — deliberately not merged with OpenRouter's
+            // catalog (switch backends with Ctrl+P / /backend to see that
+            // instead): a few hundred OpenRouter entries used to bury these
+            // 4 alphabetically, making it look like Codex had no models.
+            return Ok(vec![
                 Model {
                     id: "gpt-5.3-codex-spark".into(),
                     name: "GPT-5.3 Codex Spark".into(),
@@ -256,15 +260,7 @@ impl OpenRouter {
                     context_length: Some(272_000),
                     supports_images: true,
                 },
-            ];
-            if let Some(key) = crate::config::load_openrouter_key_only()
-                && let Ok(mut router_models) =
-                    Box::pin(OpenRouter::openrouter(key).list_models()).await
-            {
-                models.append(&mut router_models);
-            }
-            models.sort_by(|a, b| a.id.cmp(&b.id));
-            return Ok(models);
+            ]);
         }
         let resp = self
             .client
