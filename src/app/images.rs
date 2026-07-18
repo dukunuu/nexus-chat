@@ -37,15 +37,6 @@ impl App {
         self.images_cache.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    pub(crate) fn open_images_popup(&mut self) {
-        self.refresh_images();
-        self.images_selected = self
-            .images_selected
-            .min(self.images_cache.len().saturating_sub(1));
-        self.images_mode = ImagesMode::Browse;
-        self.popup = super::Popup::Images;
-    }
-
     pub fn move_images_selection(&mut self, delta: i32) {
         self.images_selected =
             super::clamp_cursor(self.images_selected, self.images_cache.len(), delta);

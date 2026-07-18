@@ -73,6 +73,14 @@ pub(super) fn fuzzy_filter_sorted<'a, T>(
     scored.into_iter().map(|(_, item)| item).collect()
 }
 
+/// Which tab in the `/files` popup is active.
+#[derive(PartialEq, Clone, Copy)]
+pub enum FilesTab {
+    Files,
+    Images,
+    Scripts,
+}
+
 /// Which modal popover, if any, is open.
 #[derive(Debug, PartialEq)]
 pub enum Popup {
@@ -92,8 +100,6 @@ pub enum Popup {
     Swarm,
     /// `/login`'s provider selector (OpenRouter / OpenCode Go / OpenAI / Codex).
     Login,
-    Images,
-    Scripts,
 }
 
 /// Which backend a pasted key in `Popup::Key` is for — set by whichever
@@ -119,6 +125,7 @@ pub enum SwarmPopupMode {
 pub enum AppsMode {
     Browse,
     ConfirmDelete,
+    EditFile,
 }
 
 /// What the watch picker is doing: browsing or confirming removal of the
@@ -715,10 +722,12 @@ pub struct App {
     pub files_cache: Vec<crate::db::FileRow>,
     pub files_selected: usize,
     pub files_mode: FilesMode,
+    pub files_tab: FilesTab,
     /// The space's apps (`/apps` popup): names, cursor, and mode.
     pub apps_cache: Vec<String>,
     pub apps_selected: usize,
     pub apps_mode: AppsMode,
+    pub apps_edit: String,
 
     /// The space's images (`/image` popup): cache and cursor.
     pub images_cache: Vec<ImageMeta>,
@@ -1005,9 +1014,11 @@ impl App {
             files_cache: Vec::new(),
             files_selected: 0,
             files_mode: FilesMode::Browse,
+            files_tab: FilesTab::Files,
             apps_cache: Vec::new(),
             apps_selected: 0,
             apps_mode: AppsMode::Browse,
+            apps_edit: String::new(),
             watches_cache: Vec::new(),
             watch_selected: 0,
             watch_mode: WatchMode::Browse,
@@ -1508,19 +1519,16 @@ impl App {
                 self.status = list;
             }
             "skills" => self.open_skills_popup(),
-            "files" => self.open_files_popup(),
-            "image" => {
+            "files" => {
                 if self.incognito {
-                    self.status = "images not available in incognito mode".to_string();
+                    self.status = "not available in incognito mode".to_string();
                 } else {
-                    self.open_images_popup();
-                }
-            }
-            "script" => {
-                if self.incognito {
-                    self.status = "scripts not available in incognito mode".to_string();
-                } else {
-                    self.open_scripts_popup();
+                    let tab = match token {
+                        t if t == "image" || t == "images" || t == "img" || t == "pictures" => FilesTab::Images,
+                        t if t == "script" || t == "scripts" => FilesTab::Scripts,
+                        _ => FilesTab::Files,
+                    };
+                    self.open_files_popup(tab);
                 }
             }
             "apps" => {
@@ -1561,13 +1569,6 @@ impl App {
                     self.status = "nothing is running".to_string();
                 }
             }
-            "edit" => {
-                if self.incognito {
-                    self.status = "app editing not available in incognito mode".to_string();
-                } else {
-                    self.request_app_file_edit(cmd[token.len()..].trim());
-                }
-            }
             "watch" => {
                 let arg = cmd[token.len()..].trim();
                 if arg.is_empty() {
@@ -1592,31 +1593,6 @@ impl App {
         }
         Ok(())
     }
-
-    /// `/edit <app>/<file>` — queue an app file for `$EDITOR` (the event loop
-    /// owns the terminal and does the actual suspend/open).
-    fn request_app_file_edit(&mut self, arg: &str) {
-        if arg.is_empty() || !arg.contains('/') {
-            self.status = "usage: /edit <app>/<file>  e.g. /edit deck/index.html".to_string();
-            return;
-        }
-        if arg.starts_with('/')
-            || arg
-                .split('/')
-                .any(|s| s.is_empty() || s == "." || s == "..")
-        {
-            self.status = format!("invalid path: {arg}");
-            return;
-        }
-        let path = self.space.apps_dir(&self.active_space.name).join(arg);
-        if !path.is_file() {
-            self.status = format!("no such app file: {arg}");
-            return;
-        }
-        self.pending_editor = Some(PendingEditor::AppFile(path));
-    }
-
-    // --- commands ---
 
     // --- nerd config (settings popup) ---
 

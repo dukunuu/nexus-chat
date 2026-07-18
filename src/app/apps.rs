@@ -29,6 +29,35 @@ impl App {
         ))
     }
 
+    /// Enter edit-file mode for the selected app (Ctrl+E in Browse).
+    pub fn start_app_edit(&mut self) {
+        let Some(name) = self.apps_cache.get(self.apps_selected).cloned() else {
+            return;
+        };
+        self.apps_edit = "index.html".to_string();
+        self.apps_mode = AppsMode::EditFile;
+        self.status = format!("edit {name}/ (type filename, Enter to open in $EDITOR)");
+    }
+
+    /// Confirm in EditFile: open the typed path in $EDITOR.
+    pub fn confirm_app_edit(&mut self) {
+        let Some(name) = self.apps_cache.get(self.apps_selected).cloned() else {
+            return;
+        };
+        let file = self.apps_edit.trim().to_string();
+        if file.is_empty() || file.starts_with('/') || file.contains("..") {
+            self.status = format!("invalid path: {file}");
+            return;
+        }
+        let path = self.space.apps_dir(&self.active_space.name).join(&name).join(&file);
+        if !path.is_file() {
+            self.status = format!("no such file: {name}/{file}");
+            return;
+        }
+        self.pending_editor = Some(crate::app::PendingEditor::AppFile(path));
+        self.apps_mode = AppsMode::Browse;
+    }
+
     /// Enter in Browse: open the highlighted app in the system browser.
     pub fn open_selected_app(&mut self) {
         let Some(name) = self.apps_cache.get(self.apps_selected) else {

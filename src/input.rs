@@ -107,18 +107,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "files",
-        desc: "space files",
-        aliases: &["file", "attach", "upload", "docs"],
-    },
-    Command {
-        name: "image",
-        desc: "browse space images",
-        aliases: &["images", "img", "pictures"],
-    },
-    Command {
-        name: "script",
-        desc: "manage space scripts",
-        aliases: &["scripts"],
+        desc: "browse space files / images / scripts",
+        aliases: &["file", "attach", "upload", "docs", "image", "images", "img", "pictures", "script", "scripts"],
     },
     Command {
         name: "apps",
@@ -159,11 +149,6 @@ pub const COMMANDS: &[Command] = &[
         name: "stop",
         desc: "stop active response, research, or swarm",
         aliases: &["cancel", "abort"],
-    },
-    Command {
-        name: "edit",
-        desc: "open app file in $EDITOR",
-        aliases: &["open"],
     },
     Command {
         name: "copy",
@@ -353,12 +338,12 @@ impl App {
         if text.is_empty() {
             return;
         }
-        use crate::app::{Popup, SessionMode, SkillsMode, SpaceMode};
+        use crate::app::{AppsMode, Popup, SessionMode, SkillsMode, SpaceMode};
         match self.popup {
             Popup::None => {
                 // A dropped/pasted file path becomes an import offer instead of text.
                 if let Some(path) = pasted_file_path(text) {
-                    self.open_files_popup();
+                    self.open_files_popup(crate::app::FilesTab::Files);
                     self.start_files_add();
                     self.files_edit = path.to_string_lossy().to_string();
                     self.status = "import this file? Enter to confirm · Esc to cancel".to_string();
@@ -376,10 +361,13 @@ impl App {
             Popup::Skills if self.skills_mode == SkillsMode::Install => {
                 self.skills_edit.push_str(text)
             }
+            Popup::Apps if self.apps_mode == AppsMode::EditFile => {
+                self.apps_edit.push_str(text)
+            }
             Popup::Files if self.files_mode == crate::app::FilesMode::Add => {
                 self.files_edit.push_str(text)
             }
-            Popup::Scripts if self.scripts_mode == crate::app::ScriptsMode::Create => {
+            Popup::Files if self.files_tab == crate::app::FilesTab::Scripts && self.scripts_mode == crate::app::ScriptsMode::Create => {
                 self.scripts_edit.push_str(text)
             }
             Popup::Files if self.files_mode == crate::app::FilesMode::Pick => {

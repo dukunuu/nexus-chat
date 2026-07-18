@@ -902,8 +902,13 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn open_files_popup(&mut self) {
-        self.rescan_files();
+    pub(crate) fn open_files_popup(&mut self, tab: super::FilesTab) {
+        self.files_tab = tab;
+        match tab {
+            super::FilesTab::Images => { self.refresh_images(); }
+            super::FilesTab::Scripts => { self.refresh_scripts(); }
+            super::FilesTab::Files => { self.rescan_files(); }
+        }
         self.files_mode = super::FilesMode::Browse;
         self.popup = super::Popup::Files;
     }

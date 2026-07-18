@@ -37,15 +37,6 @@ impl App {
         self.scripts_cache.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    pub(crate) fn open_scripts_popup(&mut self) {
-        self.refresh_scripts();
-        self.scripts_selected = self
-            .scripts_selected
-            .min(self.scripts_cache.len().saturating_sub(1));
-        self.scripts_mode = ScriptsMode::Browse;
-        self.popup = super::Popup::Scripts;
-    }
-
     pub fn move_scripts_selection(&mut self, delta: i32) {
         self.scripts_selected =
             super::clamp_cursor(self.scripts_selected, self.scripts_cache.len(), delta);
