@@ -733,24 +733,48 @@ impl App {
     /// apps. Present whenever the app server is running.
     fn apps_section(&self) -> Option<String> {
         self.app_server.as_ref()?;
-        let mut s = "## Apps\nYou can build static web apps (HTML/CSS/JS) the user opens in a \
-                     browser. Use `write_file(app, path, content)` to create files (start with \
-                     `index.html`), `read_app_file(app, path)` to see current content (lines come \
-                     back as `N:HASH<tab>content`), and `edit_file(app, path, edits)` to change \
-                     specific lines by hash — no string matching, and a stale hash (file changed \
-                     since you read it) is rejected instead of silently editing the wrong line. \
-                     Files are served immediately — after writing, give the user the live URL \
-                     from the tool result. No build steps or servers to manage; static files only. \
-                     Need a JS library? `install_packages(app, packages)` npm-installs it into the \
-                     app — reference it as `node_modules/<pkg>/…` in your HTML.\n"
+        let mut s = "## Apps\nYou can build apps with persistent storage (KV store), file upload, \
+                     and access to user-uploaded images. Apps are served at UUID-based URLs.\n\n"
             .to_string();
+
+        s.push_str("### Tools\n");
+        s.push_str("- `write_file(app, path, content)` — create/edit a file. App can be a name or its UUID. First write to a new app auto-generates a UUID.\n");
+        s.push_str("- `read_app_file(app, path)` / `edit_file(app, path, edits)` — read and edit by hashline.\n");
+        s.push_str("- `grep_app(app, pattern)` — search all files in an app.\n");
+        s.push_str("- `install_packages(app=..., packages=[...])` — npm-install into an app.\n");
+        s.push_str("- `list_images` — list pasted conversation images.\n");
+        s.push_str("- `copy_images_to_app(image_ids, app)` — copy images into `_images/` for `<img src=\"...\">`.\n");
+        s.push_str("- `copy_file_to_app(file_name, app)` — copy a space file's text into the app's KV store.\n\n");
+
+        s.push_str("### KV Store (persistent key-value per app)\n");
+        s.push_str("Each app has a SQLite-backed KV store. Call these from frontend JS:\n");
+        s.push_str("- `PUT <app_url>/_api/kv/<key>` — upsert a value (body = raw text)\n");
+        s.push_str("- `GET <app_url>/_api/kv/<key>` — read a value\n");
+        s.push_str("- `DELETE <app_url>/_api/kv/<key>` — delete a value\n");
+        s.push_str("- `GET <app_url>/_api/kv` — list all keys (returns JSON array)\n\n");
+
+        s.push_str("### File Upload\n");
+        s.push_str("- `POST <app_url>/_api/upload` with `multipart/form-data` — upload a file. Returns `{\"name\", \"url\"}`. Files persist and are served via GET.\n\n");
+
+        s.push_str("### Using User Images\n");
+        s.push_str("1. `list_images` to see conversation images.\n");
+        s.push_str("2. `copy_images_to_app(image_ids, app)` to copy them into `_images/`.\n");
+        s.push_str("3. Use returned URLs in `<img src=\"...\">` tags.\n\n");
+
+        s.push_str("### Using Space Files\n");
+        s.push_str("- `copy_file_to_app(file_name, app)` copies file text into KV under `_file:<name>`. Read it via `GET <app_url>/_api/kv/_file:<name>`.\n\n");
+
         let apps = self.list_apps();
         if apps.is_empty() {
             s.push_str("No apps exist in this space yet.");
         } else {
-            s.push_str("Existing apps in this space:\n");
-            for a in apps {
-                s.push_str(&format!("- {a}\n"));
+            s.push_str("Existing apps:\n");
+            for a in &apps {
+                if let Some(uuid) = self.app_server.as_ref().and_then(|s| s.registry().resolve(&self.active_space.name, a)) {
+                    s.push_str(&format!("- {a} (uuid {uuid})\n"));
+                } else {
+                    s.push_str(&format!("- {a}\n"));
+                }
             }
         }
         Some(s.trim_end().to_string())

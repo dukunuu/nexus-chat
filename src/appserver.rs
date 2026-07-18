@@ -32,11 +32,50 @@ pub struct AppRegistry {
 impl AppRegistry {
     pub fn load(spaces_root: &Path) -> Self {
         let path = spaces_root.join("_apps.json");
-        let map = match std::fs::read_to_string(&path) {
+        let mut map: HashMap<String, AppEntry> = match std::fs::read_to_string(&path) {
             Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
             Err(_) => HashMap::new(),
         };
-        AppRegistry { inner: Arc::new(RwLock::new(map)), path }
+        // Scan for orphan apps (app dirs not yet in the registry) and assign
+        // UUIDs so old space-name URLs keep working.
+        if let Ok(rd) = std::fs::read_dir(spaces_root) {
+            for entry in rd.filter_map(|e| e.ok()) {
+                let space_path = entry.path();
+                if !space_path.is_dir() {
+                    continue;
+                }
+                let space_name = match space_path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                let apps_dir = space_path.join("apps");
+                if !apps_dir.is_dir() {
+                    continue;
+                }
+                if let Ok(ad) = std::fs::read_dir(&apps_dir) {
+                    for app_entry in ad.filter_map(|e| e.ok()) {
+                        if !app_entry.path().is_dir() {
+                            continue;
+                        }
+                        let app_name = match app_entry.file_name().into_string() {
+                            Ok(n) => n,
+                            Err(_) => continue,
+                        };
+                        let already = map.values().any(|e| e.space == space_name && e.name == app_name);
+                        if !already {
+                            let uuid = uuid::Uuid::new_v4().to_string();
+                            map.insert(
+                                uuid,
+                                AppEntry { space: space_name.clone(), name: app_name },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let registry = AppRegistry { inner: Arc::new(RwLock::new(map)), path: path.clone() };
+        let _ = registry.save();
+        registry
     }
 
     pub fn assign(&self, space: &str, name: &str) -> String {
