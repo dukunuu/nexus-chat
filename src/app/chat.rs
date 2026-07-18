@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::db::Message;
 use crate::provider::{ChatMessage, ChatParams, StreamEvent, ToolCall};
 
-use super::{transcribe, App, SPINNER_COLORS, THINKING, parse_topic, verbosity_clause};
+use super::{App, SPINNER_COLORS, THINKING, parse_topic, verbosity_clause};
 
 impl App {
     pub fn submit(&mut self) -> Result<()> {
@@ -477,19 +477,6 @@ impl App {
                 if name == "install_skill" && result.starts_with("installed") {
                     self.reload_skills(); // new skill shows in the system prompt next turn
                 }
-                if name == "generate_image" {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&result) {
-                        if let (Some(_id), Some(path)) = (v["id"].as_str(), v["path"].as_str()) {
-                            let p = std::path::Path::new(path);
-                            if p.exists() {
-                                self.pending_gen_images.push(transcribe::PendingGenImage {
-                                    path: p.to_path_buf(),
-                                    description: v["description"].as_str().unwrap_or("generated image").to_string(),
-                                });
-                            }
-                        }
-                    }
-                }
                 let content =
                     serde_json::json!({ "name": name, "arguments": arguments, "result": result })
                         .to_string();
@@ -517,6 +504,49 @@ impl App {
                         images: Vec::new(),
                         persona: None,
                     });
+                }
+                // Generate-image tool: inject the result image immediately so it
+                // renders in the UI even if the AI produces no follow-up text.
+                if name == "generate_image" {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&result) {
+                        if let (Some(_id), Some(path), Some(desc)) =
+                            (v["id"].as_str(), v["path"].as_str(), v["description"].as_str())
+                        {
+                            let p = std::path::Path::new(path);
+                            if p.exists() {
+                                let desc = desc.to_string();
+                                let sid = target.clone().unwrap_or_default();
+                                if !sid.is_empty() && !self.incognito {
+                                    let mid = self.db.insert_message(
+                                        &sid, "assistant", "",
+                                        self.current_model.as_deref(), None, None, None, None,
+                                    ).unwrap_or_default();
+                                    if !mid.is_empty() {
+                                        let imgs = self.db.add_message_images(
+                                            &mid, &[path.to_string()],
+                                        ).unwrap_or_default();
+                                        for img in &imgs {
+                                            let _ = self.db.set_image_description(&img.id, &desc);
+                                        }
+                                        if self.viewing_stream() {
+                                            self.messages.push(Message {
+                                                id: mid,
+                                                role: "assistant".to_string(),
+                                                content: String::new(),
+                                                model: self.current_model.clone(),
+                                                reasoning: None,
+                                                tokens: None,
+                                                secs: None,
+                                                phrase: Some("Generated".to_string()),
+                                                images: imgs,
+                                                persona: None,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             StreamEvent::Done => self.finish_stream()?,
@@ -598,9 +628,10 @@ impl App {
         let origin = self.stream_session.take();
         let started = self.stream_started.take();
         let mut reasoning = std::mem::take(&mut self.thinking_text);
-        let has_pending = !self.pending_gen_images.is_empty();
-        let mut buf = self.streaming.take().unwrap_or_default();
-        if buf.is_empty() && !has_pending {
+        let Some(buf) = self.streaming.take() else {
+            return Ok(());
+        };
+        if buf.is_empty() {
             return Ok(());
         }
         // Some reasoning models (routed without the separate `reasoning` delta
@@ -660,17 +691,7 @@ impl App {
                 )?;
             }
         }
-        let images = if !self.incognito && !msg_id.is_empty() && !self.pending_gen_images.is_empty() {
-            let paths: Vec<String> = self.pending_gen_images.iter().map(|i| i.path.to_string_lossy().to_string()).collect();
-            let imgs = self.db.add_message_images(&msg_id, &paths).unwrap_or_default();
-            for (img, pending) in imgs.iter().zip(&self.pending_gen_images) {
-                let _ = self.db.set_image_description(&img.id, &pending.description);
-            }
-            self.pending_gen_images.clear();
-            imgs
-        } else {
-            Vec::new()
-        };
+        let images = Vec::new();
         if viewing {
             self.messages.push(Message {
                 id: msg_id,

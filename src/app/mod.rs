@@ -712,9 +712,6 @@ pub struct App {
     pub(crate) research_running: Option<(String, String)>,
     /// Images pasted from the clipboard, staged for the next message.
     pub pending_images: Vec<transcribe::PendingImage>,
-    /// AI-generated images from `generate_image` tool, staged for the next
-    /// assistant message. Flushed in `finish_stream`.
-    pub pending_gen_images: Vec<transcribe::PendingGenImage>,
     /// A message queued to send once its images finish being described.
     pub(crate) deferred_send: Option<String>,
 
@@ -1009,7 +1006,6 @@ impl App {
             swarm_popup_mode: SwarmPopupMode::Browse,
             research_running: None,
             pending_images: Vec::new(),
-            pending_gen_images: Vec::new(),
             deferred_send: None,
             files_cache: Vec::new(),
             files_selected: 0,
@@ -1510,14 +1506,6 @@ impl App {
             "swarm" => self.open_swarm_popup(),
             "config" => self.open_settings(),
             "copy" => self.open_copy_menu(),
-            "help" => {
-                let list = COMMANDS
-                    .iter()
-                    .map(|c| format!("/{}", c.name))
-                    .collect::<Vec<_>>()
-                    .join("  ");
-                self.status = list;
-            }
             "skills" => self.open_skills_popup(),
             "files" => {
                 if self.incognito {
@@ -1550,25 +1538,6 @@ impl App {
             "web" => self.toggle_web_mode(),
             "incognito" => self.toggle_incognito()?,
             "steer" => self.steer_research(cmd[token.len()..].trim()),
-            "stop" => {
-                let had_research = self.research_rx.is_some();
-                let had_swarm = self.swarm_rx.is_some();
-                let had_stream = self.is_streaming();
-                if had_research {
-                    self.stop_research();
-                }
-                if had_swarm {
-                    self.stop_swarm();
-                }
-                if had_stream {
-                    self.stop_stream()?;
-                }
-                if had_research || had_swarm || had_stream {
-                    self.status = "stopped active job".to_string();
-                } else {
-                    self.status = "nothing is running".to_string();
-                }
-            }
             "watch" => {
                 let arg = cmd[token.len()..].trim();
                 if arg.is_empty() {

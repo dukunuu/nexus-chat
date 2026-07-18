@@ -142,19 +142,9 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["nudge"],
     },
     Command {
-        name: "stop",
-        desc: "stop active response, research, or swarm",
-        aliases: &["cancel", "abort"],
-    },
-    Command {
         name: "copy",
         desc: "copy last reply",
         aliases: &["yank", "clip"],
-    },
-    Command {
-        name: "help",
-        desc: "list commands",
-        aliases: &["commands"],
     },
     Command {
         name: "quit",

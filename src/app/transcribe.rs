@@ -43,13 +43,6 @@ pub struct PendingImage {
     pub path: std::path::PathBuf,
 }
 
-/// An AI-generated image produced by `generate_image`, pending attachment to
-/// the next assistant message.
-pub struct PendingGenImage {
-    pub path: std::path::PathBuf,
-    pub description: String,
-}
-
 impl App {
     /// Save a clipboard image to the space's images dir and stage it for the
     /// next message. No model call happens here — vision models get the raw

@@ -387,7 +387,6 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Esc => {
             app.set_input("");
             app.pending_images.clear();
-            app.pending_gen_images.clear();
         }
         // Everything else (chars, word-jump, selection, cut/copy/paste, undo)
         // goes to the editor via its default keymap. A keyboard (Shift+arrow)

@@ -1692,30 +1692,6 @@ fn swarm_persona_round_trips_through_external_editor_file() {
     assert!(!path.exists());
 }
 
-#[tokio::test]
-async fn stop_command_aborts_research_and_swarm_jobs() {
-    let mut a = app_with_key();
-    let (_research_tx, research_rx) = tokio::sync::mpsc::unbounded_channel();
-    let research_task = tokio::spawn(std::future::pending::<()>());
-    a.research_rx = Some(research_rx);
-    a.research_abort = Some(research_task.abort_handle());
-    a.research_running = Some(("session".into(), "topic".into()));
-
-    let (_swarm_tx, swarm_rx) = tokio::sync::mpsc::unbounded_channel();
-    let swarm_task = tokio::spawn(std::future::pending::<()>());
-    a.swarm_rx = Some(swarm_rx);
-    a.swarm_abort = Some(swarm_task.abort_handle());
-
-    a.run_command("stop").unwrap();
-
-    assert!(a.research_rx.is_none());
-    assert!(a.research_abort.is_none());
-    assert!(a.research_running.is_none());
-    assert!(a.swarm_rx.is_none());
-    assert!(a.swarm_abort.is_none());
-    assert!(a.status.contains("stopped"));
-}
-
 #[test]
 fn swarm_progress_and_errors_are_visible_in_transcript() {
     let mut a = app_with_key();
