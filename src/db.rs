@@ -759,7 +759,7 @@ impl Db {
         tokens: Option<i64>,
         secs: Option<f64>,
         phrase: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         self.insert_message(
             session_id,
             "assistant",
@@ -769,8 +769,7 @@ impl Db {
             tokens,
             secs,
             phrase,
-        )?;
-        Ok(())
+        )
     }
 
     /// Insert a `/swarm` persona's round reply: an assistant message tagged

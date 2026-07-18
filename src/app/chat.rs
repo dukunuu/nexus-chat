@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::db::Message;
 use crate::provider::{ChatMessage, ChatParams, StreamEvent, ToolCall};
 
-use super::{App, SPINNER_COLORS, THINKING, parse_topic, verbosity_clause};
+use super::{transcribe, App, SPINNER_COLORS, THINKING, parse_topic, verbosity_clause};
 
 impl App {
     pub fn submit(&mut self) -> Result<()> {
@@ -477,6 +477,19 @@ impl App {
                 if name == "install_skill" && result.starts_with("installed") {
                     self.reload_skills(); // new skill shows in the system prompt next turn
                 }
+                if name == "generate_image" {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&result) {
+                        if let (Some(_id), Some(path)) = (v["id"].as_str(), v["path"].as_str()) {
+                            let p = std::path::Path::new(path);
+                            if p.exists() {
+                                self.pending_gen_images.push(transcribe::PendingGenImage {
+                                    path: p.to_path_buf(),
+                                    description: v["description"].as_str().unwrap_or("generated image").to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
                 let content =
                     serde_json::json!({ "name": name, "arguments": arguments, "result": result })
                         .to_string();
@@ -634,9 +647,10 @@ impl App {
             .as_ref()
             .map(|(id, _)| id.clone())
             .or_else(|| self.session.as_ref().map(|s| s.id.clone()));
+        let mut msg_id = String::new();
         if let Some(id) = &target {
             if !self.incognito {
-                self.db.add_assistant_message(
+                msg_id = self.db.add_assistant_message(
                     id,
                     &buf,
                     model.as_deref(),
@@ -647,9 +661,20 @@ impl App {
                 )?;
             }
         }
+        let images = if !self.incognito && !msg_id.is_empty() && !self.pending_gen_images.is_empty() {
+            let paths: Vec<String> = self.pending_gen_images.iter().map(|i| i.path.to_string_lossy().to_string()).collect();
+            let imgs = self.db.add_message_images(&msg_id, &paths).unwrap_or_default();
+            for (img, pending) in imgs.iter().zip(&self.pending_gen_images) {
+                let _ = self.db.set_image_description(&img.id, &pending.description);
+            }
+            self.pending_gen_images.clear();
+            imgs
+        } else {
+            Vec::new()
+        };
         if viewing {
             self.messages.push(Message {
-                id: String::new(),
+                id: msg_id,
                 role: "assistant".to_string(),
                 content: buf,
                 model,
@@ -657,7 +682,7 @@ impl App {
                 tokens,
                 secs,
                 phrase,
-                images: Vec::new(),
+                images,
                 persona: None,
             });
             // These read the *active* conversation, so they only make sense here.

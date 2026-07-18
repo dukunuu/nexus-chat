@@ -705,6 +705,9 @@ pub struct App {
     pub(crate) research_running: Option<(String, String)>,
     /// Images pasted from the clipboard, staged for the next message.
     pub pending_images: Vec<transcribe::PendingImage>,
+    /// AI-generated images from `generate_image` tool, staged for the next
+    /// assistant message. Flushed in `finish_stream`.
+    pub pending_gen_images: Vec<transcribe::PendingGenImage>,
     /// A message queued to send once its images finish being described.
     pub(crate) deferred_send: Option<String>,
 
@@ -997,6 +1000,7 @@ impl App {
             swarm_popup_mode: SwarmPopupMode::Browse,
             research_running: None,
             pending_images: Vec::new(),
+            pending_gen_images: Vec::new(),
             deferred_send: None,
             files_cache: Vec::new(),
             files_selected: 0,
