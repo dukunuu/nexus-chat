@@ -121,11 +121,30 @@ impl App {
         Ok(())
     }
 
+    /// Switch to a session by its id. Used by session-link navigation (Ctrl+O).
+    pub(crate) fn switch_to_session_by_id(&mut self, id: &str) -> Result<()> {
+        let Some(s) = self.db.get_session(id)?.or_else(|| {
+            self.sessions_cache.iter().find(|s| s.id == id).cloned()
+        }) else {
+            self.status = format!("session not found: {id}");
+            return Ok(());
+        };
+        self.messages = self.db.load_messages(&s.id)?;
+        self.unread.remove(&s.id);
+        self.status = format!("switched to: {}", s.title);
+        self.web_mode = s.web_mode;
+        self.session = Some(s);
+        self.refresh_toolbox();
+        self.context_total = None;
+        self.scroll = 0;
+        self.clear_image_state();
+        Ok(())
+    }
+
     pub(crate) fn confirm_session(&mut self) -> Result<()> {
         if let Some(s) = self.selected_session() {
             self.messages = self.db.load_messages(&s.id)?;
             self.unread.remove(&s.id);
-            self.current_model = Some(s.model.clone());
             self.status = format!("switched to: {}", s.title);
             self.web_mode = s.web_mode;
             self.session = Some(s);
