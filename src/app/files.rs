@@ -41,6 +41,54 @@ impl OcrBackend {
         self.transcribe_image(png, "image/png").await
     }
 
+    /// Describe an image (not OCR — uses a description prompt so another model
+    /// can reason about the image content). For standalone space-file images.
+    async fn describe(&self, bytes: &[u8], mime: &str) -> anyhow::Result<String> {
+        match self {
+            OcrBackend::Router(provider, model) => {
+                use base64::Engine;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                let url = format!("data:{mime};base64,{b64}");
+                provider.describe_image(model, &url).await
+            }
+            OcrBackend::Ollama(client, model) => {
+                use base64::Engine;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                let resp = client
+                    .post("http://127.0.0.1:11434/api/generate")
+                    .timeout(std::time::Duration::from_secs(600))
+                    .json(&serde_json::json!({
+                        "model": model,
+                        "prompt": "Describe this image so another AI model can reason about \
+                                   it without seeing it. Cover: what it is (screenshot, chart, \
+                                   photo, diagram…), overall layout and structure, the key \
+                                   entities and how they relate, ALL visible text verbatim, \
+                                   and any notable visual details. Be thorough but do not \
+                                   speculate beyond what is visible.",
+                        "images": [b64],
+                        "stream": false,
+                        "options": { "num_ctx": 8192 },
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        if e.is_timeout() {
+                            anyhow::anyhow!("timeout after 600s")
+                        } else if e.is_connect() {
+                            anyhow::anyhow!("cannot reach ollama — is it running?")
+                        } else {
+                            e.into()
+                        }
+                    })?;
+                if resp.status().as_u16() == 404 {
+                    anyhow::bail!("model '{model}' not pulled");
+                }
+                let v = resp.error_for_status()?.json::<serde_json::Value>().await?;
+                Ok(v.get("response").and_then(|r| r.as_str()).unwrap_or("").to_string())
+            }
+        }
+    }
+
     /// Transcribe an image file with the given MIME type. For standalone images
     /// (not PDF pages) that may be JPEG, PNG, etc.
     async fn transcribe_image(&self, bytes: &[u8], mime: &str) -> anyhow::Result<String> {
@@ -254,7 +302,7 @@ async fn ocr_image_vlm(
         name.to_string(),
         OcrUpdate::Progress(0, 1, 0),
     ));
-    match backend.transcribe_image(&bytes, mime).await {
+    match backend.describe(&bytes, mime).await {
         Ok(text) => {
             let _ = tx.send((
                 space_id.to_string(),
