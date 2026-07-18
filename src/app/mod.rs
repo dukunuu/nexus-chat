@@ -12,12 +12,13 @@ use crate::config;
 use crate::db::{DEFAULT_SPACE, Db, Message, Session, Space as SpaceRow};
 use crate::input::{COMMANDS, new_textarea};
 use crate::provider::openrouter::OpenRouter;
-use crate::provider::{Model, StreamEvent, Usage};
+use crate::provider::{BackendTag, Model, StreamEvent, Usage};
 use crate::space::Space;
 use crate::theme::Theme;
 use crate::ui::filter_input::FilterInput;
 
 mod apps;
+mod backends;
 mod chat;
 mod compaction;
 mod copy;
@@ -35,12 +36,13 @@ mod swarm;
 mod tests;
 mod transcribe;
 mod watches;
+pub(crate) use backends::{Backends, composite_id};
 pub(crate) use chat::human_size;
 #[cfg(test)]
 use chat::split_inline_reasoning;
 use chat::{code_blocks, pick_greeting};
 #[cfg(test)]
-use memory::{parse_fact_line, parse_memory_ops};
+use memory::parse_memory_ops;
 use sessions::parse_topic;
 
 /// Nudge a bounded selection index by `delta`, hard-clamping to `[0, len-1]`
@@ -69,7 +71,7 @@ pub(super) fn fuzzy_filter_sorted<'a, T>(
 }
 
 /// Which modal popover, if any, is open.
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Popup {
     None,
     Model,
@@ -103,8 +105,6 @@ pub enum KeyTarget {
 #[derive(PartialEq, Clone, Copy)]
 pub enum SwarmPopupMode {
     Browse,
-    EditName,
-    EditBlurb,
     ConfirmDelete,
 }
 
@@ -112,6 +112,14 @@ pub enum SwarmPopupMode {
 /// removal of the highlighted one.
 #[derive(PartialEq, Clone, Copy)]
 pub enum AppsMode {
+    Browse,
+    ConfirmDelete,
+}
+
+/// What the watch picker is doing: browsing or confirming removal of the
+/// highlighted watch.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum WatchMode {
     Browse,
     ConfirmDelete,
 }
@@ -482,6 +490,24 @@ pub enum LoginMsg {
     Done(Result<crate::config::CodexCredentials, String>),
 }
 
+/// External-editor request queued by app/input code. The event loop owns the
+/// terminal suspend/resume and applies structured edits after `$EDITOR` exits.
+pub enum PendingEditor {
+    AppFile(std::path::PathBuf),
+    Persona(std::path::PathBuf),
+    ResearchPlan(std::path::PathBuf),
+}
+
+/// Ensures a child stream spawned by `OpenRouter::stream_chat` is cancelled
+/// when its parent research/swarm task is aborted or otherwise dropped.
+pub(crate) struct AbortOnDrop(pub tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub enum AppEvent {
     Stream(Option<StreamEvent>),
     Models(Option<ModelsResult>),
@@ -517,10 +543,11 @@ pub enum AppEvent {
 pub struct App {
     pub db: Db,
     pub(crate) space: Space,
-    pub(crate) provider: Option<OpenRouter>,
-    pub(crate) key: Option<String>,
-    /// Every credential configured on disk, kept live so `/backend` can
-    /// switch `provider` without re-authenticating.
+    /// Every backend currently logged into. `/model` merges all of their
+    /// catalogs into one list; picking a model resolves back to the right
+    /// one here.
+    pub(crate) backends: Backends,
+    /// Every credential configured on disk, kept in sync with `backends`.
     pub(crate) saved: crate::config::SavedCreds,
 
     /// The space the current/next session belongs to.
@@ -549,7 +576,7 @@ pub struct App {
     pub local_ocr_model: String,
     /// Embedding model for semantic file search (empty = keyword FTS only).
     pub embedding_model: String,
-    /// Base URL of a SearXNG instance for the web-search skill, or empty to
+    /// Base URL of a SearXNG instance for the web-search tool, or empty to
     /// disable it. Configured in-app (Ctrl+O settings), not a config file.
     pub searxng_url: String,
     /// LangSearch API key (free tier), or empty to disable it.
@@ -605,17 +632,19 @@ pub struct App {
     pub(crate) embed_rx: Option<mpsc::UnboundedReceiver<EmbedMsg>>,
     /// A running local-OCR-model pull: model name on success, error text on failure.
     pub(crate) ocr_pull_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
-    /// A running `/research` job's channel, or None when idle.
+    /// A running `/research` job's channel and cancellation handle.
     pub(crate) research_rx: Option<mpsc::UnboundedReceiver<ResearchMsg>>,
+    pub(crate) research_abort: Option<tokio::task::AbortHandle>,
     pub(crate) login_rx: Option<mpsc::UnboundedReceiver<LoginMsg>>,
-    /// A running `/swarm` turn's channel, or None when idle.
+    /// A running `/swarm` discussion's channel, cancellation handle, and
+    /// origin session id (used for targeting the correct progress row).
     pub(crate) swarm_rx: Option<mpsc::UnboundedReceiver<swarm::SwarmMsg>>,
+    pub(crate) swarm_abort: Option<tokio::task::AbortHandle>,
+    pub(crate) swarm_session: Option<String>,
     /// The active session's `/swarm` roster, cached for the popup.
     pub swarm_cache: Vec<crate::db::Persona>,
     pub swarm_selected: usize,
     pub swarm_popup_mode: SwarmPopupMode,
-    /// Edit buffer while naming/re-blurbing a persona row.
-    pub swarm_edit: String,
     /// (session id, topic) of the `/research` job currently running, if any —
     /// cleared when its channel closes.
     pub(crate) research_running: Option<(String, String)>,
@@ -635,6 +664,7 @@ pub struct App {
     /// The space's standing research watches (`/watch` picker): cache + cursor.
     pub watches_cache: Vec<crate::db::Watch>,
     pub watch_selected: usize,
+    pub watch_mode: WatchMode,
     /// Path being typed/pasted in the files popup's Add mode.
     pub files_edit: String,
     /// Directory the file-picker browser is showing (remembered across opens).
@@ -676,9 +706,9 @@ pub struct App {
     /// Wrapped-line cache for the transcript, so redraws don't re-render
     /// markdown for the whole conversation every frame.
     pub(crate) history_cache: crate::ui::history::HistoryCache,
-    /// File `/edit` wants opened in `$EDITOR`; the event loop (which owns the
-    /// terminal) takes it and suspends the TUI.
-    pub pending_editor: Option<std::path::PathBuf>,
+    /// External edit queued for the event loop, which owns terminal
+    /// suspension and knows which app callback should consume the saved file.
+    pub pending_editor: Option<PendingEditor>,
     pub(crate) stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
     /// Abort handle for the in-flight chat task (Esc stops the response).
     pub(crate) stream_abort: Option<tokio::task::AbortHandle>,
@@ -711,6 +741,8 @@ pub struct App {
 
     pub popup: Popup,
     pub model_filter: FilterInput,
+    /// Narrow the merged model list to one backend (Ctrl+P cycles it); `None` = all.
+    pub model_backend_filter: Option<BackendTag>,
     pub model_focus: ModelPanel,
     /// What a confirmed selection in the model picker is currently for.
     pub model_pick_target: ModelPickTarget,
@@ -770,6 +802,25 @@ pub struct App {
 impl App {
     pub fn new(db: Db, key: Option<String>, space: Space) -> Self {
         let provider = key.clone().map(OpenRouter::from_key_auto);
+        // A single bootstrap key (test convenience / a fresh single-backend
+        // config): guess its flavor and seed both `backends` and `saved`
+        // with it. Real app startup (main.rs) overwrites `saved` with the
+        // authoritative on-disk creds right after construction and rebuilds
+        // `backends` from that instead.
+        let mut backends = Backends::default();
+        let mut saved = crate::config::SavedCreds::default();
+        if let (Some(k), Some(p)) = (&key, &provider) {
+            let tag = p.backend_tag();
+            backends.set(tag, p.clone());
+            match tag {
+                crate::provider::BackendTag::OpenRouter => saved.openrouter_key = Some(k.clone()),
+                crate::provider::BackendTag::OpenAi => saved.openai_key = Some(k.clone()),
+                crate::provider::BackendTag::OpencodeGo => saved.opencode_key = Some(k.clone()),
+                // No full CodexCredentials from a bare key — fine for the
+                // bootstrap/test path, main.rs always has the real ones.
+                crate::provider::BackendTag::Codex => {}
+            }
+        }
         let status = if key.is_some() {
             "loading models…  (/model to pick, /help for commands)".to_string()
         } else {
@@ -791,26 +842,28 @@ impl App {
                 created_at: Utc::now().to_rfc3339(),
             });
         let _ = space.ensure_space_dir(&active_space.name);
-        let utility_model = provider
-            .as_ref()
-            .map(OpenRouter::default_utility_model)
-            .unwrap_or("google/gemini-2.5-flash-lite")
-            .to_string();
-        let research_model = provider
-            .as_ref()
-            .map(OpenRouter::default_research_model)
-            .unwrap_or("google/gemini-2.5-flash")
-            .to_string();
-        let escalation_model = provider
-            .as_ref()
-            .map(OpenRouter::default_escalation_model)
-            .unwrap_or("anthropic/claude-sonnet-4.5")
-            .to_string();
-        let embedding_model = provider
-            .as_ref()
-            .map(OpenRouter::default_embedding_model)
-            .unwrap_or("openai/text-embedding-3-small")
-            .to_string();
+        let default_model_id = |f: fn(&OpenRouter) -> &'static str, fallback: &'static str| {
+            provider
+                .as_ref()
+                .map(|p| format!("{}{}", p.backend_tag().key_prefix(), f(p)))
+                .unwrap_or_else(|| fallback.to_string())
+        };
+        let utility_model = default_model_id(
+            OpenRouter::default_utility_model,
+            "google/gemini-2.5-flash-lite",
+        );
+        let research_model = default_model_id(
+            OpenRouter::default_research_model,
+            "google/gemini-2.5-flash",
+        );
+        let escalation_model = default_model_id(
+            OpenRouter::default_escalation_model,
+            "anthropic/claude-sonnet-4.5",
+        );
+        let embedding_model = default_model_id(
+            OpenRouter::default_embedding_model,
+            "openai/text-embedding-3-small",
+        );
         let skills_dir = crate::skills::skills_dir(&space.root);
         let skills = crate::skills::load_skills(&skills_dir);
         // Built with search disabled; `load_settings()` below reads the
@@ -825,10 +878,9 @@ impl App {
             Some(crate::tools::FilesCtx {
                 db_path: space.db_path(),
                 space_id: active_space.id.clone(),
-                embedder: provider.clone().and_then(|p| {
-                    let model = p.default_embedding_model();
-                    (!model.is_empty()).then(|| (p, model.to_string()))
-                }),
+                embedder: (!embedding_model.is_empty())
+                    .then(|| backends.resolve(&embedding_model))
+                    .flatten(),
             }),
             // No apps ctx yet — the app server starts after construction;
             // main() calls refresh_toolbox() once it's up.
@@ -837,9 +889,8 @@ impl App {
         let mut app = App {
             db,
             space,
-            provider,
-            key,
-            saved: crate::config::SavedCreds::default(),
+            backends,
+            saved,
             skills,
             searxng_url: String::new(),
             langsearch_key: String::new(),
@@ -861,12 +912,14 @@ impl App {
             embed_rx: None,
             ocr_pull_rx: None,
             research_rx: None,
+            research_abort: None,
             login_rx: None,
             swarm_rx: None,
+            swarm_abort: None,
+            swarm_session: None,
             swarm_cache: Vec::new(),
             swarm_selected: 0,
             swarm_popup_mode: SwarmPopupMode::Browse,
-            swarm_edit: String::new(),
             research_running: None,
             pending_images: Vec::new(),
             deferred_send: None,
@@ -878,6 +931,7 @@ impl App {
             apps_mode: AppsMode::Browse,
             watches_cache: Vec::new(),
             watch_selected: 0,
+            watch_mode: WatchMode::Browse,
             files_edit: String::new(),
             picker_dir: std::env::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")),
             picker_entries: Vec::new(),
@@ -934,6 +988,7 @@ impl App {
             theme_gen: 0,
             popup: Popup::None,
             model_filter: FilterInput::default(),
+            model_backend_filter: None,
             model_focus: ModelPanel::Available,
             model_pick_target: ModelPickTarget::Session,
             fav_state: ListState::default(),
@@ -989,7 +1044,7 @@ impl App {
         }
         if let Some((id, _)) = self.last_used.iter().max_by(|a, b| a.1.cmp(b.1)) {
             let id = id.clone();
-            if self.provider.is_some() {
+            if self.backends.any() {
                 self.status = format!("model: {id} — type a message, /model to change");
             }
             self.current_model = Some(id);
@@ -1036,8 +1091,7 @@ impl App {
 
     /// Rebuild the toolbox from the current `searxng_url`, so a settings
     /// change takes effect immediately (no restart). Web search works either
-    /// way (SearXNG if configured, DuckDuckGo scraping otherwise), so the
-    /// built-in skill is always installed.
+    /// way (SearXNG if configured, DuckDuckGo scraping otherwise).
     pub(crate) fn refresh_toolbox(&mut self) {
         let url =
             (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
@@ -1054,16 +1108,15 @@ impl App {
             Some(crate::tools::FilesCtx {
                 db_path: self.space.db_path(),
                 space_id: self.active_space.id.clone(),
-                embedder: self.provider.clone().zip(
-                    (!self.embedding_model.trim().is_empty())
-                        .then(|| self.embedding_model.trim().to_string()),
-                ),
+                embedder: (!self.embedding_model.trim().is_empty())
+                    .then(|| self.backends.resolve(self.embedding_model.trim()))
+                    .flatten(),
             }),
             // App tools only exist while the server runs — a write_file whose
             // link can never load is worse than no tool.
             self.app_server.as_ref().map(|s| crate::tools::AppsCtx {
                 dir: self.space.apps_dir(&self.active_space.name),
-                space_url: s.space_url(&self.active_space.name),
+                space_url: format!("http://127.0.0.1:{}/{}/", s.port(), crate::appserver::encode(&self.active_space.name)),
             }),
         );
         if self.is_research_session() {
@@ -1101,7 +1154,7 @@ impl App {
     /// Kick off the initial model fetch if a key is already present. Call once
     /// after construction, from within the tokio runtime.
     pub fn init(&mut self) {
-        if self.provider.is_some() {
+        if self.backends.any() {
             self.fetch_models();
         }
         self.rescan_files();
@@ -1246,14 +1299,45 @@ impl App {
         }
     }
 
+    /// Fetch every configured backend's catalog concurrently and merge them
+    /// into one list. A backend that fails is dropped from the merge (its
+    /// error is only surfaced if *every* backend failed) — one flaky login
+    /// shouldn't blank out the models of the others.
     fn fetch_models(&mut self) {
-        let Some(provider) = self.provider.clone() else {
+        let providers: Vec<OpenRouter> = [
+            self.backends.openrouter.clone(),
+            self.backends.openai.clone(),
+            self.backends.opencode.clone(),
+            self.backends.codex.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if providers.is_empty() {
             return;
-        };
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         self.models_rx = Some(rx);
         tokio::spawn(async move {
-            let result = provider.list_models().await.map_err(|e| e.to_string());
+            let mut set = tokio::task::JoinSet::new();
+            for p in providers {
+                set.spawn(async move { p.list_models().await });
+            }
+            let mut merged = Vec::new();
+            let mut errors = Vec::new();
+            while let Some(joined) = set.join_next().await {
+                match joined {
+                    Ok(Ok(models)) => merged.extend(models),
+                    Ok(Err(e)) => errors.push(e.to_string()),
+                    Err(e) => errors.push(e.to_string()),
+                }
+            }
+            let result = if merged.is_empty() && !errors.is_empty() {
+                Err(errors.join("; "))
+            } else {
+                merged.sort_by(|a, b| a.id.cmp(&b.id));
+                Ok(merged)
+            };
             let _ = tx.send(result);
         });
     }
@@ -1305,7 +1389,6 @@ impl App {
             "space" => self.open_space_picker()?,
             "model" => self.open_model_picker(),
             "login" => self.open_login_popup(),
-            "backend" => self.cycle_backend(),
             "swarm" => self.open_swarm_popup(),
             "config" => self.open_settings(),
             "copy" => self.open_copy_menu(),
@@ -1331,6 +1414,25 @@ impl App {
             "export" => self.export_report()?,
             "web" => self.toggle_web_mode(),
             "steer" => self.steer_research(cmd[token.len()..].trim()),
+            "stop" => {
+                let had_research = self.research_rx.is_some();
+                let had_swarm = self.swarm_rx.is_some();
+                let had_stream = self.is_streaming();
+                if had_research {
+                    self.stop_research();
+                }
+                if had_swarm {
+                    self.stop_swarm();
+                }
+                if had_stream {
+                    self.stop_stream()?;
+                }
+                if had_research || had_swarm || had_stream {
+                    self.status = "stopped active job".to_string();
+                } else {
+                    self.status = "nothing is running".to_string();
+                }
+            }
             "edit" => self.request_app_file_edit(cmd[token.len()..].trim()),
             "watch" => {
                 let arg = cmd[token.len()..].trim();
@@ -1377,7 +1479,7 @@ impl App {
             self.status = format!("no such app file: {arg}");
             return;
         }
-        self.pending_editor = Some(path);
+        self.pending_editor = Some(PendingEditor::AppFile(path));
     }
 
     // --- commands ---

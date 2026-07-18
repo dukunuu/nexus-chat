@@ -22,8 +22,9 @@ impl App {
     pub fn app_url(&self, name: &str) -> Option<String> {
         let s = self.app_server.as_ref()?;
         Some(format!(
-            "{}{}/",
-            s.space_url(&self.active_space.name),
+            "http://127.0.0.1:{}/{}/{}/",
+            s.port(),
+            crate::appserver::encode(&self.active_space.name),
             crate::appserver::encode(name)
         ))
     }

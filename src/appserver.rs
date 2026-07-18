@@ -3,7 +3,9 @@
 //! localhost only, GET/HEAD only. Hand-rolled on tokio — no framework dep
 //! for ~150 lines of static serving.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -11,9 +13,70 @@ use tokio::net::TcpListener;
 /// Preferred fixed port so links stay stable across restarts.
 const PORT: u16 = 8642;
 
+// ---------------------------------------------------------------------------
+// App registry — maps UUID ↔ (space, name), persisted to spaces_root/_apps.json
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AppEntry {
+    pub space: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppRegistry {
+    inner: Arc<RwLock<HashMap<String, AppEntry>>>,
+    path: std::path::PathBuf,
+}
+
+impl AppRegistry {
+    pub fn load(spaces_root: &Path) -> Self {
+        let path = spaces_root.join("_apps.json");
+        let map = match std::fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+            Err(_) => HashMap::new(),
+        };
+        AppRegistry { inner: Arc::new(RwLock::new(map)), path }
+    }
+
+    pub fn assign(&self, space: &str, name: &str) -> String {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        {
+            let mut map = self.inner.write().unwrap();
+            map.insert(uuid.clone(), AppEntry { space: space.to_string(), name: name.to_string() });
+        }
+        let _ = self.save();
+        uuid
+    }
+
+    pub fn lookup(&self, uuid: &str) -> Option<AppEntry> {
+        self.inner.read().unwrap().get(uuid).cloned()
+    }
+
+    pub fn resolve(&self, space: &str, name: &str) -> Option<String> {
+        self.inner.read().unwrap().iter()
+            .find(|(_, e)| e.space == space && e.name == name)
+            .map(|(u, _)| u.clone())
+    }
+
+    fn save(&self) -> Result<(), std::io::Error> {
+        let json = serde_json::to_string_pretty(&*self.inner.read().unwrap())?;
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json)?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App server
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
 pub struct AppServer {
     port: u16,
+    registry: AppRegistry,
+    spaces_root: PathBuf,
 }
 
 impl AppServer {
@@ -25,31 +88,45 @@ impl AppServer {
             Err(_) => TcpListener::bind(("127.0.0.1", 0)).await.ok()?,
         };
         let port = listener.local_addr().ok()?.port();
+        let registry = AppRegistry::load(&spaces_root);
+        let srv = AppServer { port, registry: registry.clone(), spaces_root: spaces_root.clone() };
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     continue;
                 };
                 let root = spaces_root.clone();
+                let reg = registry.clone();
                 tokio::spawn(async move {
-                    let _ = handle(stream, &root).await;
+                    let _ = handle(stream, &root, &reg).await;
                 });
             }
         });
-        Some(AppServer { port })
+        Some(srv)
     }
 
     pub fn port(&self) -> u16 {
         self.port
     }
 
-    /// URL prefix for a space's apps: `http://127.0.0.1:port/<space>/`.
-    pub fn space_url(&self, space: &str) -> String {
-        format!("http://127.0.0.1:{}/{}/", self.port(), encode(space))
+    pub fn app_url(&self, uuid: &str) -> String {
+        format!("http://127.0.0.1:{}/{}/", self.port(), uuid)
+    }
+
+    pub fn registry(&self) -> &AppRegistry {
+        &self.registry
+    }
+
+    pub fn spaces_root(&self) -> &Path {
+        &self.spaces_root
     }
 }
 
-async fn handle(mut stream: tokio::net::TcpStream, spaces_root: &Path) -> std::io::Result<()> {
+async fn handle(
+    mut stream: tokio::net::TcpStream,
+    spaces_root: &Path,
+    registry: &AppRegistry,
+) -> std::io::Result<()> {
     // Read until end of headers; requests are tiny GETs, cap at 8 KiB.
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
@@ -72,7 +149,7 @@ async fn handle(mut stream: tokio::net::TcpStream, spaces_root: &Path) -> std::i
     if method != "GET" && !head {
         return respond(&mut stream, 405, "text/plain", b"method not allowed", head).await;
     }
-    match resolve(spaces_root, raw_path) {
+    match resolve(spaces_root, registry, raw_path) {
         Some(file) => {
             let mime = mime_for(&file);
             match tokio::fs::read(&file).await {
@@ -84,25 +161,44 @@ async fn handle(mut stream: tokio::net::TcpStream, spaces_root: &Path) -> std::i
     }
 }
 
-/// Map a request path `/<space>/<app>/<rest…>` to a file under
-/// `spaces_root/<space>/apps/<app>/<rest…>`, or None if malformed/escaping.
-fn resolve(spaces_root: &Path, raw_path: &str) -> Option<PathBuf> {
+/// Map a request path to a file under `spaces_root`. The first path segment
+/// is either a UUID (looked up in the registry) or a space name (with the
+/// second segment as the app name).
+fn resolve(spaces_root: &Path, registry: &AppRegistry, raw_path: &str) -> Option<PathBuf> {
     let path = raw_path.split(['?', '#']).next().unwrap_or("");
     let decoded = percent_decode(path);
-    let mut segs = decoded.split('/').filter(|s| !s.is_empty());
-    let space = segs.next()?;
-    let app = segs.next()?;
-    let rest: Vec<&str> = segs.collect();
-    for seg in [space, app].iter().chain(rest.iter()) {
+    let segs: Vec<&str> = decoded.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.is_empty() {
+        return None;
+    }
+
+    for seg in &segs {
         if *seg == ".." || *seg == "." || seg.contains('\\') {
             return None;
         }
     }
-    let mut file = spaces_root.join(space).join("apps").join(app);
-    for seg in &rest {
+
+    // API route: /<uuid>/_api/...
+    if segs.len() >= 2 && segs[1] == "_api" {
+        let entry = registry.lookup(segs[0])?;
+        let app_dir = spaces_root.join(&entry.space).join("apps").join(&entry.name);
+        return app_dir.is_dir().then_some(app_dir);
+    }
+
+    let (space, app, path_start) = match registry.lookup(segs[0]) {
+        Some(entry) => (entry.space, entry.name, 1usize),
+        None => {
+            if segs.len() < 2 {
+                return None;
+            }
+            (segs[0].to_string(), segs[1].to_string(), 2)
+        }
+    };
+    let mut file = spaces_root.join(&space).join("apps").join(&app);
+    for seg in &segs[path_start..] {
         file.push(seg);
     }
-    if file.is_dir() || rest.is_empty() {
+    if file.is_dir() || path_start >= segs.len() {
         file.push("index.html");
     }
     // Backstop against traversal tricks the segment filter missed: the
@@ -208,18 +304,46 @@ mod tests {
     #[test]
     fn resolve_maps_and_guards() {
         let root = &setup();
-        let f = resolve(root, "/default/deck/style.css").unwrap();
+        let reg = AppRegistry::load(root);
+        let f = resolve(root, &reg, "/default/deck/style.css").unwrap();
         assert!(f.ends_with("default/apps/deck/style.css"));
         // dir root → index.html
-        let f = resolve(root, "/default/deck/").unwrap();
+        let f = resolve(root, &reg, "/default/deck/").unwrap();
         assert!(f.ends_with("deck/index.html"));
-        let f = resolve(root, "/default/deck").unwrap();
+        let f = resolve(root, &reg, "/default/deck").unwrap();
         assert!(f.ends_with("deck/index.html"));
         // traversal + malformed rejected
-        assert!(resolve(root, "/default/deck/../../secret").is_none());
-        assert!(resolve(root, "/default/%2e%2e/apps/deck/index.html").is_none());
-        assert!(resolve(root, "/default").is_none());
-        assert!(resolve(root, "/default/deck/missing.js").is_none());
+        assert!(resolve(root, &reg, "/default/deck/../../secret").is_none());
+        assert!(resolve(root, &reg, "/default/%2e%2e/apps/deck/index.html").is_none());
+        assert!(resolve(root, &reg, "/default").is_none());
+        assert!(resolve(root, &reg, "/default/deck/missing.js").is_none());
+    }
+
+    #[test]
+    fn resolve_uuid() {
+        let root = &setup();
+        let reg = AppRegistry::load(root);
+        let uuid = reg.assign("default", "deck");
+
+        let f = resolve(root, &reg, &format!("/{uuid}/style.css")).unwrap();
+        assert!(f.ends_with("default/apps/deck/style.css"));
+
+        let f = resolve(root, &reg, &format!("/{uuid}/")).unwrap();
+        assert!(f.ends_with("deck/index.html"));
+
+        let f = resolve(root, &reg, &format!("/{uuid}")).unwrap();
+        assert!(f.ends_with("deck/index.html"));
+    }
+
+    #[test]
+    fn resolve_api() {
+        let root = &setup();
+        let reg = AppRegistry::load(root);
+        let uuid = reg.assign("default", "deck");
+
+        // API route returns the app directory path
+        let f = resolve(root, &reg, &format!("/{uuid}/_api/"));
+        assert!(f.is_some());
     }
 
     #[test]
@@ -264,8 +388,9 @@ mod tests {
     }
 
     #[test]
-    fn space_url_encodes_segment() {
-        let s = AppServer { port: 9999 };
-        assert_eq!(s.space_url("my space"), "http://127.0.0.1:9999/my%20space/");
+    fn app_url_format() {
+        let reg = AppRegistry::load(&PathBuf::from("/tmp"));
+        let s = AppServer { port: 9999, registry: reg, spaces_root: PathBuf::from("/tmp") };
+        assert_eq!(s.app_url("some-uuid"), "http://127.0.0.1:9999/some-uuid/");
     }
 }
