@@ -52,11 +52,17 @@ pub struct FilesCtx {
     pub embedder: Option<(crate::provider::openrouter::OpenRouter, String)>,
 }
 
-/// Where the app tools write: the active space's apps dir, plus the URL
-/// prefix the app server serves it at. Only present while the server runs.
+/// Where the app tools write: the active space's apps dir, plus the
+/// registry, server port and space metadata. Only present while the server
+/// runs.
 pub struct AppsCtx {
     pub dir: PathBuf,
-    pub space_url: String,
+    pub server_port: u16,
+    pub registry: crate::appserver::AppRegistry,
+    pub space_name: String,
+    pub space_db_path: PathBuf,
+    pub images_dir: PathBuf,
+    pub session_id: String,
 }
 
 impl ToolBox {
@@ -466,7 +472,12 @@ impl ToolBox {
     /// The live URL for an app.
     fn app_link(&self, app: &str) -> String {
         match &self.apps {
-            Some(c) => format!("live at {}{}/", c.space_url, crate::appserver::encode(app)),
+            Some(ctx) => {
+                match ctx.registry.resolve(&ctx.space_name, app) {
+                    Some(uuid) => format!("live at http://127.0.0.1:{}/{}/", ctx.server_port, uuid),
+                    None => format!("live at http://127.0.0.1:{}/{}/", ctx.server_port, crate::appserver::encode(app)),
+                }
+            }
             None => String::new(),
         }
     }
@@ -3138,6 +3149,7 @@ mod tests {
 
     fn apps_toolbox() -> (ToolBox, PathBuf) {
         let dir = std::env::temp_dir().join(format!("nexus-apps-{}", uuid::Uuid::new_v4()));
+        let registry = crate::appserver::AppRegistry::load(&PathBuf::from("/tmp"));
         let tb = ToolBox::new(
             PathBuf::new(),
             None,
@@ -3148,7 +3160,12 @@ mod tests {
             None,
             Some(AppsCtx {
                 dir: dir.clone(),
-                space_url: "http://127.0.0.1:9999/default/".to_string(),
+                server_port: 9999,
+                registry,
+                space_name: "default".to_string(),
+                space_db_path: PathBuf::from("/tmp/test.db"),
+                images_dir: dir.clone(),
+                session_id: String::new(),
             }),
         );
         (tb, dir)
@@ -3186,7 +3203,7 @@ mod tests {
             .await;
         assert!(result.contains("wrote deck/index.html"), "{result}");
         assert!(
-            result.contains("http://127.0.0.1:9999/default/deck/"),
+            result.contains("http://127.0.0.1:9999/deck/"),
             "{result}"
         );
         assert_eq!(

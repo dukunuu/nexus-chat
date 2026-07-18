@@ -1116,7 +1116,12 @@ impl App {
             // link can never load is worse than no tool.
             self.app_server.as_ref().map(|s| crate::tools::AppsCtx {
                 dir: self.space.apps_dir(&self.active_space.name),
-                space_url: format!("http://127.0.0.1:{}/{}/", s.port(), crate::appserver::encode(&self.active_space.name)),
+                server_port: s.port(),
+                registry: s.registry().clone(),
+                space_name: self.active_space.name.clone(),
+                space_db_path: self.space.db_path(),
+                images_dir: self.space.images_dir(&self.active_space.name),
+                session_id: self.session.as_ref().map(|s| s.id.clone()).unwrap_or_default(),
             }),
         );
         if self.is_research_session() {
