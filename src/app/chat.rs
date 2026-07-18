@@ -148,6 +148,162 @@ impl App {
         self.start_stream()
     }
 
+    /// `/gen <prompt>`: generate an image, save it, and show it as an assistant
+    /// message with the image attached.
+    pub(crate) fn cmd_generate_image(&mut self, prompt: &str) -> Result<()> {
+        if prompt.is_empty() {
+            self.status = "usage: /gen <description of image to create>".to_string();
+            return Ok(());
+        }
+        let model = self.image_gen_model.trim().to_string();
+        if model.is_empty() {
+            self.status = "no image generation model configured — set one in /config".to_string();
+            return Ok(());
+        }
+        let Some((provider, raw_model)) = self.resolve_model_backend(&model) else {
+            self.status = format!("image gen model backend unavailable: {model}");
+            return Ok(());
+        };
+        if self.is_streaming() {
+            self.status = "wait for the current response to finish first".to_string();
+            return Ok(());
+        }
+        if self.session.is_none() {
+            if self.incognito {
+                self.session = Some(crate::db::Session {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    title: "Generate Image".to_string(),
+                    model: model.clone(),
+                    slug: None,
+                    created_at: Utc::now().to_rfc3339(),
+                    compact_summary: None,
+                    compact_through: 0,
+                    web_mode: false,
+                    swarm_mode: false,
+                });
+            } else {
+                let s = self.db.create_session("Generate Image", &model, &self.active_space.id)?;
+                self.session = Some(s);
+            }
+            return self.cmd_generate_image(prompt);
+        };
+        let session_id = self.session.as_ref().unwrap().id.clone();
+
+        self.status = "Generating image…".to_string();
+        self.scroll = 0;
+
+        let png_bytes = match tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                provider.generate_image(&raw_model, prompt, "1024x1024").await
+            })
+        }) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.status = format!("image generation failed: {e}");
+                return Ok(());
+            }
+        };
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let filename = format!("{id}.png");
+        let img_path = if self.incognito {
+            let d = self.incognito_img_dir.get_or_insert_with(|| {
+                let p = std::env::temp_dir().join(format!("nexus-incognito-{}", uuid::Uuid::new_v4()));
+                let _ = std::fs::create_dir_all(&p);
+                p
+            });
+            d.join(&filename)
+        } else {
+            let dir = self.space.images_dir(&self.active_space.name);
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                self.status = format!("cannot create images dir: {e}");
+                return Ok(());
+            }
+            dir.join(&filename)
+        };
+        if let Err(e) = std::fs::write(&img_path, &png_bytes) {
+            self.status = format!("cannot write image: {e}");
+            return Ok(());
+        }
+        // Also copy to space files dir for searchability (skipped in incognito).
+        if !self.incognito {
+            let files_dir = self.space.files_dir(&self.active_space.name);
+            let _ = std::fs::create_dir_all(&files_dir);
+            let _ = std::fs::write(files_dir.join(&filename), &png_bytes);
+        }
+
+        let description = format!("generated image of {prompt}");
+
+        // Push a user message with the prompt
+        let user_msg = format!("/gen {prompt}");
+        let user_msg_id = if self.incognito {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            self.db.add_user_message(&session_id, &user_msg)?
+        };
+        self.messages.push(Message {
+            id: user_msg_id,
+            role: "user".to_string(),
+            content: user_msg,
+            model: None,
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            phrase: None,
+            images: Vec::new(),
+            persona: None,
+        });
+
+        // Push an assistant message showing the generated image
+        let assistant_content = format!("Here's your generated image: **{prompt}**");
+        let msg_id = if self.incognito {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            self.db.insert_message(
+                &session_id,
+                "assistant",
+                &assistant_content,
+                Some(&model),
+                None,
+                None,
+                None,
+                Some("Generated"),
+            )?
+        };
+        let images = if self.incognito {
+            vec![crate::db::MessageImage {
+                id: id.clone(),
+                path: img_path.to_string_lossy().to_string(),
+                description: Some(description.clone()),
+            }]
+        } else {
+            let imgs = self.db.add_message_images(
+                &msg_id,
+                &[img_path.to_string_lossy().to_string()],
+            )?;
+            for img in &imgs {
+                let _ = self.db.set_image_description(&img.id, &description);
+            }
+            imgs
+        };
+        self.messages.push(Message {
+            id: msg_id,
+            role: "assistant".to_string(),
+            content: assistant_content,
+            model: Some(model),
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            phrase: Some("Generated".to_string()),
+            images,
+            persona: None,
+        });
+
+        self.status = "image generated ✓".to_string();
+        self.refresh_toolbox();
+        Ok(())
+    }
+
     /// The exact message list a completion request will carry: system prompt,
     /// compaction digest, forced skill, then the effective conversation tail.
     /// User messages with images become multimodal parts for vision models, or
@@ -589,26 +745,31 @@ impl App {
     /// empty — it's the app speaking, not per-space configuration.
     pub(super) fn system_prompt(&self) -> String {
         let mut parts: Vec<String> = vec![self.resolved_base_system_prompt()];
-        let instructions =
-            std::fs::read_to_string(self.space.instructions_path(&self.active_space.name))
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-        if let Some(i) = instructions {
-            parts.push(i);
+        if !self.incognito {
+            let instructions =
+                std::fs::read_to_string(self.space.instructions_path(&self.active_space.name))
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+            if let Some(i) = instructions {
+                parts.push(i);
+            }
+            if let Some(files) = self.files_section() {
+                parts.push(files);
+            }
+            if let Some(apps) = self.apps_section() {
+                parts.push(apps);
+            }
+            if let Some(scripts) = self.scripts_section() {
+                parts.push(scripts);
+            }
+            let memory = self.read_memory();
+            if !memory.trim().is_empty() {
+                parts.push(format!("## Memory\n{memory}"));
+            }
         }
         if let Some(skills) = self.skills_section() {
             parts.push(skills);
-        }
-        if let Some(files) = self.files_section() {
-            parts.push(files);
-        }
-        if let Some(apps) = self.apps_section() {
-            parts.push(apps);
-        }
-        let memory = self.read_memory();
-        if !memory.trim().is_empty() {
-            parts.push(format!("## Memory\n{memory}"));
         }
         if self.web_mode {
             let today = Utc::now().format("%Y-%m-%d").to_string();
@@ -654,6 +815,17 @@ impl App {
                 self.status = format!("opened [{n}]: {url}");
             }
             None => self.status = format!("no source [{n}] in this message"),
+        }
+    }
+
+    /// If the given rendered line index is an image line, open the image in
+    /// the default OS viewer. Returns true if it was an image line.
+    pub(crate) fn open_image_at_line(&self, line: usize) -> bool {
+        if let Some(Some(path)) = self.history_cache.image_at_line.get(line) {
+            let _ = open::that_detached(path);
+            true
+        } else {
+            false
         }
     }
 
@@ -725,6 +897,7 @@ impl App {
         self.messages.clear();
         self.context_total = None;
         self.scroll = 0;
+        self.set_input("");
         self.clear_image_state();
         self.incognito = !self.incognito;
         self.status = if self.incognito {
@@ -767,6 +940,26 @@ impl App {
         Some(s.trim_end().to_string())
     }
 
+    /// Scripts the model has written (or the user has placed) in the space,
+    /// listed so the model reuses them instead of rewriting from scratch.
+    fn scripts_section(&self) -> Option<String> {
+        if self.scripts_cache.is_empty() {
+            return None;
+        }
+        let mut s = "## Scripts\nThe user has reusable scripts in this space. \
+                     Call `read_script` to see one, `edit_script` to modify, or \
+                     `run_script` with space=true to execute.\n"
+            .to_string();
+        for script in &self.scripts_cache {
+            s.push_str(&format!(
+                "- {} ({})\n",
+                script.name,
+                human_size(script.size as i64),
+            ));
+        }
+        Some(s.trim_end().to_string())
+    }
+
     /// Names/types/sizes of the space's imported files — content stays off the
     /// wire until the model calls `search_files`/`read_file`.
     fn files_section(&self) -> Option<String> {
@@ -802,8 +995,11 @@ impl App {
         self.app_server.as_ref()?;
         let mut s = "## Apps\nYou can build apps served locally. \
                      ALWAYS use the KV store for persistence (not LocalStorage), the upload endpoint for file \
-                     uploads, and copy_images_to_app/copy_file_to_app to bring user data into the app. \
-                     Apps are served at UUID-based URLs.\n\n"
+                     uploads, and copy_images_to_app/copy_file_to_app to bring user data into the app.\n\n\
+                     **CRITICAL: URLs are UUID-based.** The UUID comes from `write_file`'s tool result \
+                     (\"live at http://...\"). Copy it from there — never invent or guess a UUID. \
+                     If you don't have the result, call `read_app_file` or `grep_app` on the app to \
+                     rediscover it.\n\n"
             .to_string();
 
         s.push_str("### Tools\n");
