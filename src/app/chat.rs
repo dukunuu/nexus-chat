@@ -64,11 +64,13 @@ impl App {
                     compact_through: 0,
                     web_mode: self.web_mode,
                     swarm_mode: false,
+                    kind: "chat".to_string(),
+                    research_parent_id: None,
                 }
             } else {
                 let mut s = self
                     .db
-                    .create_session(&title, &model, &self.active_space.id)?;
+                    .create_session(&title, &model, &self.active_space.id, "chat")?;
                 // Carry a pre-session `/web` toggle onto the session it creates.
                 if self.web_mode {
                     s.web_mode = true;
@@ -180,9 +182,11 @@ impl App {
                     compact_through: 0,
                     web_mode: false,
                     swarm_mode: false,
+                    kind: "chat".to_string(),
+                    research_parent_id: None,
                 });
             } else {
-                let s = self.db.create_session("Generate Image", &model, &self.active_space.id)?;
+                let s = self.db.create_session("Generate Image", &model, &self.active_space.id, "chat")?;
                 self.session = Some(s);
             }
             return self.cmd_generate_image(prompt);
@@ -861,6 +865,28 @@ impl App {
                 self.status = format!("opened [{n}]: {url}");
             }
             None => self.status = format!("no source [{n}] in this message"),
+        }
+    }
+
+    /// Ctrl+O: navigate to the session linked in a `session_link` message
+    /// under the text selection. Expects the message content's first line to
+    /// be the target session id.
+    pub(crate) fn open_session_link(&mut self) {
+        let idx = self.sel.owner_at_selection_start();
+        let Some(msg) = idx.and_then(|i| self.messages.get(i)) else {
+            self.status = "select text on a session link message, then press Ctrl+O".to_string();
+            return;
+        };
+        if msg.role != "session_link" {
+            self.status = "select text on a session link message, then press Ctrl+O".to_string();
+            return;
+        }
+        let Some(target) = msg.content.split_once('\n').map(|(s, _)| s.trim().to_string()) else {
+            self.status = "malformed session link".to_string();
+            return;
+        };
+        if let Err(e) = self.switch_to_session_by_id(&target) {
+            self.status = format!("session switch failed: {e}");
         }
     }
 
