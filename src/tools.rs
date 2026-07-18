@@ -382,7 +382,7 @@ impl ToolBox {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "app": { "type": "string", "description": "app name (directory), e.g. 'presentation'" },
+                        "app": { "type": "string", "description": "app name (directory) or app UUID, e.g. 'presentation'" },
                         "path": { "type": "string", "description": "file path inside the app, e.g. 'index.html' or 'js/deck.js'" },
                         "content": { "type": "string", "description": "full file content" },
                     },
@@ -395,7 +395,7 @@ impl ToolBox {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "app": { "type": "string", "description": "app name" },
+                        "app": { "type": "string", "description": "app name (directory) or app UUID" },
                         "path": { "type": "string", "description": "file path inside the app" },
                         "edits": {
                             "type": "array",
@@ -419,7 +419,7 @@ impl ToolBox {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "app": { "type": "string", "description": "app name" },
+                        "app": { "type": "string", "description": "app name (directory) or app UUID" },
                         "pattern": { "type": "string", "description": "text to search for" },
                     },
                     "required": ["app", "pattern"],
@@ -431,7 +431,7 @@ impl ToolBox {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "app": { "type": "string", "description": "app name" },
+                        "app": { "type": "string", "description": "app name (directory) or app UUID" },
                         "path": { "type": "string", "description": "file path inside the app" },
                         "offset": { "type": "integer", "description": "1-based first line to read (default 1)" },
                         "limit": { "type": "integer", "description": "lines to read, max 200 (default 200)" },
@@ -451,36 +451,50 @@ impl ToolBox {
         defs
     }
 
-    /// Resolve `<apps dir>/<app>/<rel>`, rejecting anything that could
-    /// escape the apps dir (absolute paths, `..`/`.` segments, backslashes).
-    fn app_path(&self, app: &str, rel: &str) -> Result<PathBuf, String> {
-        let Some(ctx) = &self.apps else {
-            return Err("apps are not available".to_string());
+/// Resolve an app name or UUID to `(uuid, app_dir)`. If a name is given and
+/// not yet registered, a new UUID is assigned. Returns Err if the app name
+/// is invalid (not allowed by `resolve_confined` constraints).
+fn resolve_app(&self, name_or_uuid: &str) -> Result<(String, PathBuf), String> {
+    let ctx = self.apps.as_ref().ok_or("apps are not available")?;
+    let (uuid, app_name) = if looks_like_uuid(name_or_uuid) {
+        let entry = ctx
+            .registry
+            .lookup(name_or_uuid)
+            .ok_or_else(|| format!("unknown app uuid: {name_or_uuid}"))?;
+        (name_or_uuid.to_string(), entry.name)
+    } else if name_or_uuid.is_empty()
+        || name_or_uuid.contains(['/', '\\'])
+        || name_or_uuid == "."
+        || name_or_uuid == ".."
+    {
+        return Err(format!("invalid app name: {name_or_uuid:?}"));
+    } else {
+        let uuid = match ctx.registry.resolve(&ctx.space_name, name_or_uuid) {
+            Some(u) => u,
+            None => ctx.registry.assign(&ctx.space_name, name_or_uuid),
         };
-        resolve_confined(&ctx.dir, app, rel)
-    }
+        (uuid, name_or_uuid.to_string())
+    };
+    let app_dir = ctx.dir.join(&app_name);
+    Ok((uuid, app_dir))
+}
 
-    /// The `run_python` scratch dir (venv + script), a sibling of the skills
-    /// dir: `<data>/python`. Persistent so installed packages survive.
-    fn python_dir(&self) -> PathBuf {
-        self.skills_dir
-            .parent()
-            .map(|p| p.join("python"))
-            .unwrap_or_else(|| PathBuf::from("python"))
-    }
+/// The `run_python` scratch dir (venv + script), a sibling of the skills
+/// dir: `<data>/python`. Persistent so installed packages survive.
+fn python_dir(&self) -> PathBuf {
+    self.skills_dir
+        .parent()
+        .map(|p| p.join("python"))
+        .unwrap_or_else(|| PathBuf::from("python"))
+}
 
-    /// The live URL for an app.
-    fn app_link(&self, app: &str) -> String {
-        match &self.apps {
-            Some(ctx) => {
-                match ctx.registry.resolve(&ctx.space_name, app) {
-                    Some(uuid) => format!("live at http://127.0.0.1:{}/{}/", ctx.server_port, uuid),
-                    None => format!("live at http://127.0.0.1:{}/{}/", ctx.server_port, crate::appserver::encode(app)),
-                }
-            }
-            None => String::new(),
-        }
+/// The live URL for an app (accepts a UUID).
+fn app_link(&self, uuid: &str) -> String {
+    match &self.apps {
+        Some(ctx) => format!("live at http://127.0.0.1:{}/{}/", ctx.server_port, uuid),
+        None => String::new(),
     }
+}
 
     /// Run a tool by name. Returns `(result text sent back to the model,
     /// status label shown in the UI while it runs)`.
@@ -648,11 +662,11 @@ impl ToolBox {
                             }
                         }
                     }
-                    Ok(()) if !app.is_empty() => match self.app_path(&app, "package.json") {
+                    Ok(()) if !app.is_empty() => match self.resolve_app(&app) {
                         Err(e) => e,
-                        Ok(pkg_json) => {
-                            let dir = pkg_json.parent().unwrap().to_path_buf();
-                            let prep = std::fs::create_dir_all(&dir).and_then(|()| {
+                        Ok((uuid, app_dir)) => {
+                            let pkg_json = app_dir.join("package.json");
+                            let prep = std::fs::create_dir_all(&app_dir).and_then(|()| {
                                 if pkg_json.exists() {
                                     Ok(())
                                 } else {
@@ -675,11 +689,11 @@ impl ToolBox {
                                     argv.extend(pkgs.iter().map(std::ffi::OsString::from));
                                     let refs: Vec<&std::ffi::OsStr> =
                                         argv.iter().map(|s| s.as_os_str()).collect();
-                                    match run_cmd("npm".as_ref(), &refs, &dir, 300).await {
+                                    match run_cmd("npm".as_ref(), &refs, &app_dir, 300).await {
                                         Ok(out) if out.status.success() => format!(
                                             "installed {} into {app}/node_modules — reference files as node_modules/<pkg>/… ; {}",
                                             pkgs.join(" "),
-                                            self.app_link(&app),
+                                            self.app_link(&uuid),
                                         ),
                                         Ok(out) => {
                                             format!("npm install failed:\n{}", format_output(&out))
@@ -1010,21 +1024,26 @@ impl ToolBox {
                 };
                 let (app, path, content) = (field("app"), field("path"), field("content"));
                 let status = format!("Writing {app}/{path}…");
-                let result = match self.app_path(&app, &path) {
+                let result = match self.resolve_app(&app) {
                     Err(e) => e,
-                    Ok(file) => {
-                        let write = file
-                            .parent()
-                            .map(std::fs::create_dir_all)
-                            .unwrap_or(Ok(()))
-                            .and_then(|()| std::fs::write(&file, &content));
-                        match write {
-                            Ok(()) => format!(
-                                "wrote {app}/{path} ({} bytes) — {}",
-                                content.len(),
-                                self.app_link(&app),
-                            ),
-                            Err(e) => format!("write failed: {e}"),
+                    Ok((uuid, app_dir)) => {
+                        let file = app_dir.join(&path);
+                        if path.is_empty() || path.starts_with('/') || path.contains("..") {
+                            format!("invalid path: {path:?}")
+                        } else {
+                            let write = file
+                                .parent()
+                                .map(std::fs::create_dir_all)
+                                .unwrap_or(Ok(()))
+                                .and_then(|()| std::fs::write(&file, &content));
+                            match write {
+                                Ok(()) => format!(
+                                    "wrote {app}/{path} ({} bytes) — {}",
+                                    content.len(),
+                                    self.app_link(&uuid),
+                                ),
+                                Err(e) => format!("write failed: {e}"),
+                            }
                         }
                     }
                 };
@@ -1053,20 +1072,27 @@ impl ToolBox {
                     })
                     .unwrap_or_default();
                 let status = format!("Editing {app}/{path}…");
-                let result = match self.app_path(&app, &path) {
+                let result = match self.resolve_app(&app) {
                     Err(e) => e,
-                    Ok(file) => match std::fs::read_to_string(&file) {
-                        Err(e) => format!("cannot read {app}/{path}: {e}"),
-                        Ok(text) => match apply_hashline_edits(&text, &edits) {
-                            Err(e) => e,
-                            Ok((new_text, diff)) => match std::fs::write(&file, new_text) {
-                                Ok(()) => {
-                                    format!("edited {app}/{path} — {}{diff}", self.app_link(&app))
-                                }
-                                Err(e) => format!("write failed: {e}"),
-                            },
-                        },
-                    },
+                    Ok((uuid, app_dir)) => {
+                        let file = app_dir.join(&path);
+                        if path.is_empty() || path.starts_with('/') || path.contains("..") {
+                            format!("invalid path: {path:?}")
+                        } else {
+                            match std::fs::read_to_string(&file) {
+                                Err(e) => format!("cannot read {app}/{path}: {e}"),
+                                Ok(text) => match apply_hashline_edits(&text, &edits) {
+                                    Err(e) => e,
+                                    Ok((new_text, diff)) => match std::fs::write(&file, new_text) {
+                                        Ok(()) => {
+                                            format!("edited {app}/{path} — {}{diff}", self.app_link(&uuid))
+                                        }
+                                        Err(e) => format!("write failed: {e}"),
+                                    },
+                                },
+                            }
+                        }
+                    }
                 };
                 (result, status)
             }
@@ -1080,25 +1106,26 @@ impl ToolBox {
                 };
                 let (app, pattern) = (field("app"), field("pattern"));
                 let status = format!("Searching {app}…");
-                let result = match self
-                    .app_path(&app, "index.html")
-                    .map(|p| p.parent().unwrap().to_path_buf())
-                {
+                let result = match self.resolve_app(&app) {
                     Err(e) => e,
-                    Ok(dir) if !dir.is_dir() => format!("unknown app: {app}"),
-                    Ok(_) if pattern.is_empty() => "pattern must not be empty".to_string(),
-                    Ok(dir) => {
-                        let mut hits = Vec::new();
-                        grep_dir(&dir, &dir, &pattern.to_lowercase(), &mut hits);
-                        if hits.is_empty() {
-                            format!("no matches for {pattern:?} in {app}")
+                    Ok((_uuid, app_dir)) => {
+                        if !app_dir.is_dir() {
+                            format!("unknown app: {app}")
+                        } else if pattern.is_empty() {
+                            "pattern must not be empty".to_string()
                         } else {
-                            let n = hits.len();
-                            hits.truncate(50);
-                            if n > 50 {
-                                hits.push(format!("… ({} more matches)", n - 50));
+                            let mut hits = Vec::new();
+                            grep_dir(&app_dir, &app_dir, &pattern.to_lowercase(), &mut hits);
+                            if hits.is_empty() {
+                                format!("no matches for {pattern:?} in {app}")
+                            } else {
+                                let n = hits.len();
+                                hits.truncate(50);
+                                if n > 50 {
+                                    hits.push(format!("… ({} more matches)", n - 50));
+                                }
+                                hits.join("\n")
                             }
-                            hits.join("\n")
                         }
                     }
                 };
@@ -1120,29 +1147,36 @@ impl ToolBox {
                     .unwrap_or(200)
                     .clamp(1, 200) as usize;
                 let status = format!("Reading {app}/{path}…");
-                let result = match self.app_path(&app, &path) {
+                let result = match self.resolve_app(&app) {
                     Err(e) => e,
-                    Ok(file) => match std::fs::read_to_string(&file) {
-                        Err(e) => format!("cannot read {app}/{path}: {e}"),
-                        Ok(text) => {
-                            let lines: Vec<&str> = text.lines().collect();
-                            let total = lines.len();
-                            let start = (offset - 1).min(total);
-                            let slice = &lines[start..(start + limit).min(total)];
-                            if slice.is_empty() {
-                                format!(
-                                    "{app}/{path}: offset {offset} is past the end ({total} lines)"
-                                )
-                            } else {
-                                format!(
-                                    "{app}/{path} (lines {}-{} of {total}):\n{}",
-                                    start + 1,
-                                    start + slice.len(),
-                                    number_lines_with_hash(slice, start),
-                                )
+                    Ok((_uuid, app_dir)) => {
+                        let file = app_dir.join(&path);
+                        if path.is_empty() || path.starts_with('/') || path.contains("..") {
+                            format!("invalid path: {path:?}")
+                        } else {
+                            match std::fs::read_to_string(&file) {
+                                Err(e) => format!("cannot read {app}/{path}: {e}"),
+                                Ok(text) => {
+                                    let lines: Vec<&str> = text.lines().collect();
+                                    let total = lines.len();
+                                    let start = (offset - 1).min(total);
+                                    let slice = &lines[start..(start + limit).min(total)];
+                                    if slice.is_empty() {
+                                        format!(
+                                            "{app}/{path}: offset {offset} is past the end ({total} lines)"
+                                        )
+                                    } else {
+                                        format!(
+                                            "{app}/{path} (lines {}-{} of {total}):\n{}",
+                                            start + 1,
+                                            start + slice.len(),
+                                            number_lines_with_hash(slice, start),
+                                        )
+                                    }
+                                }
                             }
                         }
-                    },
+                    }
                 };
                 (result, status)
             }
@@ -1152,6 +1186,11 @@ impl ToolBox {
             ),
         }
     }
+}
+
+/// Quick check: does a string look like a UUID (36 chars, 4 dashes)?
+fn looks_like_uuid(s: &str) -> bool {
+    s.len() == 36 && s.chars().filter(|c| *c == '-').count() == 4
 }
 
 /// `cat -n`-style numbering for ranged reads, matching what agent harnesses
@@ -3202,10 +3241,7 @@ mod tests {
             )
             .await;
         assert!(result.contains("wrote deck/index.html"), "{result}");
-        assert!(
-            result.contains("http://127.0.0.1:9999/deck/"),
-            "{result}"
-        );
+        assert!(result.contains("live at http://127.0.0.1:9999/"), "{result}");
         assert_eq!(
             std::fs::read_to_string(dir.join("deck/index.html")).unwrap(),
             "<h1>Hello</h1>"
