@@ -1,9 +1,9 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, List, ListItem, ListState};
+use ratatui::widgets::{ListItem, ListState};
 
 use crate::app::App;
 
@@ -13,7 +13,6 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     use crate::app::SpaceMode;
     use crate::db::DEFAULT_SPACE;
     let area = crate::ui::centered(f.area(), 50, 60);
-    f.render_widget(Clear, area);
 
     let dim = Style::default().fg(app.theme.fg_dim);
     let spaces = app.filtered_spaces();
@@ -46,43 +45,42 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         })
         .collect();
 
-    let title: Line = match app.space_mode {
-        SpaceMode::Create => Line::from(format!(
-            " new space: {}▏  (Enter create · Esc cancel) ",
-            app.space_edit
-        )),
-        SpaceMode::Rename => Line::from(format!(
-            " rename: {}▏  (Enter save · Esc cancel) ",
-            app.space_edit
-        )),
+    let title = match app.space_mode {
+        SpaceMode::Create => chrome::input_title(
+            app,
+            "new space",
+            &app.space_edit,
+            "Enter create · Esc cancel",
+        ),
+        SpaceMode::Rename => chrome::input_title(
+            app,
+            "rename space",
+            &app.space_edit,
+            "Enter save · Esc cancel",
+        ),
         SpaceMode::ConfirmDelete => {
             let name = app.selected_space().map(|s| s.name).unwrap_or_default();
-            Line::from(format!(
-                " delete \"{name}\"? sessions move to default. (Ctrl+D confirm · Esc cancel) "
-            ))
+            chrome::confirm_title(
+                app,
+                format!("delete \"{name}\"? sessions move to default."),
+                "Ctrl+D confirm · Esc cancel",
+            )
         }
-        SpaceMode::Browse => {
-            let keys = if app.settings.hide_hints {
-                ""
-            } else {
-                "  (Ctrl+N new · Ctrl+R rename · Ctrl+D delete · Ctrl+E instructions · Ctrl+K memory)"
-            };
-            let mut spans = vec![Span::raw(" space — search: ")];
-            spans.extend(app.space_filter.spans(&app.theme));
-            spans.push(Span::raw(format!("{keys} ")));
-            Line::from(spans)
-        }
+        SpaceMode::Browse => chrome::input_title(
+            app,
+            "space search",
+            &app.space_filter.to_string(),
+            "Ctrl+N new · Ctrl+R rename · Ctrl+D delete · Ctrl+E instructions · Ctrl+K memory",
+        ),
     };
 
-    let list = List::new(items)
-        .block(chrome::popup_block(title, &app.theme))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("▸ ");
+    let inner = chrome::render_frame(f, area, title, &app.theme, true);
+    let list = chrome::standard_list(items);
     let mut state = ListState::default();
     if !spaces.is_empty() {
         state.select(Some(app.space_selected.min(spaces.len() - 1)));
     }
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, inner, &mut state);
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {

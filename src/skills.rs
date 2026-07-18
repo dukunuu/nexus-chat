@@ -15,16 +15,32 @@ pub fn skills_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("skills")
 }
 
-const WEB_SEARCH_SKILL: &str = include_str!("../assets/web-search-SKILL.md");
 const FIND_SKILLS_SKILL: &str = include_str!("../assets/find-skills-SKILL.md");
+
+const LEGACY_WEB_SEARCH_SKILL: &str = r#"---
+name: web-search
+description: Search the web for current information and cite sources inline, Perplexity-style.
+---
+Call the `web_search` tool with a focused query. You may call it more than
+once with refined queries if the first results are insufficient.
+
+Each result comes back numbered `[1]`, `[2]`, ... with a title, URL, and
+snippet. When you use a fact from a result, cite it inline immediately after
+the sentence as `[n]` — do not bunch all citations at the end of a paragraph.
+
+Finish your answer with a `Sources:` section listing every citation you used,
+one per line, as `[n] title — url` (a bare URL, not a markdown link — this
+terminal can't follow markdown link targets, only plain URLs are clickable).
+
+Do not fabricate sources. If a claim isn't backed by a search result, don't
+cite it.
+"#;
 
 /// Write the built-in skills on first run. Never overwrites — once installed
 /// they're normal files the user can edit or delete like any other.
 pub fn install_builtin(dir: &Path) {
-    for (name, md) in [
-        ("web-search", WEB_SEARCH_SKILL),
-        ("find-skills", FIND_SKILLS_SKILL),
-    ] {
+    remove_legacy_web_search_skill(dir);
+    for (name, md) in [("find-skills", FIND_SKILLS_SKILL)] {
         let path = dir.join(name).join("SKILL.md");
         if path.exists() {
             continue;
@@ -33,6 +49,17 @@ pub fn install_builtin(dir: &Path) {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(path, md);
+    }
+}
+
+/// `web-search` used to be a bundled skill, but `/web` now injects those
+/// instructions directly into the system prompt. Remove only the exact bundled
+/// file; if the user edited/replaced it, leave it alone.
+fn remove_legacy_web_search_skill(dir: &Path) {
+    let skill_dir = dir.join("web-search");
+    let path = skill_dir.join("SKILL.md");
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(LEGACY_WEB_SEARCH_SKILL) {
+        let _ = std::fs::remove_dir_all(skill_dir);
     }
 }
 
@@ -235,11 +262,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn install_builtin_writes_both_skills_without_overwriting() {
+    fn install_builtin_writes_find_skills_without_overwriting() {
         let dir = std::env::temp_dir().join(format!("nexus-skills-{}", uuid::Uuid::new_v4()));
         install_builtin(&dir);
         let names: Vec<String> = load_skills(&dir).iter().map(|s| s.name.clone()).collect();
-        assert_eq!(names, vec!["find-skills", "web-search"]);
+        assert_eq!(names, vec!["find-skills"]);
+
+        // The old bundled web-search skill is removed on refresh; user-edited
+        // skills with the same name are left alone.
+        let legacy = dir.join("web-search/SKILL.md");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, LEGACY_WEB_SEARCH_SKILL).unwrap();
+        install_builtin(&dir);
+        assert!(!legacy.exists());
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy,
+            "---\nname: web-search\ndescription: mine\n---\ncustom",
+        )
+        .unwrap();
+        install_builtin(&dir);
+        assert!(legacy.exists());
+
         // never overwrites: user edits survive a re-run
         std::fs::write(
             dir.join("find-skills/SKILL.md"),

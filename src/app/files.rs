@@ -467,10 +467,10 @@ impl App {
             ));
         }
         if self.vlm_ocr_enabled() {
+            let model = self.ocr_model.trim().to_string();
             return self
-                .provider
-                .clone()
-                .map(|p| OcrBackend::Router(p, self.ocr_model.trim().to_string()));
+                .resolve_model_backend(&model)
+                .map(|(p, raw_model)| OcrBackend::Router(p, raw_model));
         }
         None
     }
@@ -575,13 +575,13 @@ impl App {
         if self.embed_rx.is_some() {
             return;
         }
-        let Some(provider) = self.provider.clone() else {
-            return;
-        };
         let model = self.embedding_model.trim().to_string();
         if model.is_empty() {
             return;
         }
+        let Some((provider, raw_model)) = self.resolve_model_backend(&model) else {
+            return;
+        };
         let space_id = self.active_space.id.clone();
         let Ok(missing) = self.db.files_missing_embeddings(&space_id) else {
             return;
@@ -609,7 +609,7 @@ impl App {
             let mut err = None;
             for batch in chunks.chunks(64) {
                 let inputs: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
-                match provider.embed(&model, inputs).await {
+                match provider.embed(&raw_model, inputs).await {
                     Ok(vecs) => out.extend(batch.iter().zip(vecs).map(|((seq, _), v)| (*seq, v))),
                     Err(e) => {
                         err = Some(e.to_string());
@@ -881,10 +881,11 @@ mod tests {
             .unwrap();
 
         // No provider → no-op.
-        let saved = a.provider.take();
+        let saved = a.backends.clone();
+        a.backends = crate::app::Backends::default();
         a.start_embedding();
         assert!(a.embed_rx.is_none());
-        a.provider = saved;
+        a.backends = saved;
 
         // Blank embedding model → no-op.
         let m = std::mem::take(&mut a.embedding_model);
@@ -968,7 +969,7 @@ mod tests {
         assert!(a.ocr_backend().is_none());
         // auto without provider → none (tesseract fallback).
         a.ocr_engine = "auto".to_string();
-        a.provider = None;
+        a.backends = crate::app::Backends::default();
         assert!(a.ocr_backend().is_none());
     }
 

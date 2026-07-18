@@ -1,23 +1,29 @@
 //! `/swarm`: a per-session roster of persona+model rows that, when swarm
 //! mode is on, turns a normal chat message into a live conversation between
-//! personas — each takes a turn in sequence, sees everything said before it,
-//! and a moderator checks after every turn whether they've reached a
-//! conclusion (bounded by a hard cap either way). A synthesis reply is then
-//! written as the turn's canonical assistant message.
+//! personas. Conversation proceeds in rounds: every persona gets a chance to
+//! respond before the moderator can decide whether the panel has converged.
+//! A synthesis reply is then written as the discussion's canonical assistant
+//! message.
+
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, timeout};
 
 use super::{App, Popup, SwarmPopupMode};
+use crate::app::backends::Backends;
 use crate::db::Persona;
-use crate::provider::ChatMessage;
 use crate::provider::openrouter::OpenRouter;
+use crate::provider::{ChatMessage, ChatParams, StreamEvent};
+use crate::tools::ToolBox;
 
-/// Bounds how many individual persona turns a conversation can run before
-/// stopping and synthesizing regardless of what the moderator says. Scales
-/// with roster size so a bigger panel isn't cut off after everyone's barely
-/// spoken.
-const MAX_TURNS_PER_PERSONA: usize = 4;
+/// Maximum complete panel rounds before synthesis. Every persona present at
+/// the start of a round gets one response opportunity in that round.
+const MAX_ROUNDS: usize = 4;
+/// Tool round-trips available to each persona response.
+const SWARM_PERSONA_MAX_TOOL_ITERS: usize = 8;
 
 /// Hard ceiling on how many personas a conversation can grow to via the
 /// moderator adding new voices mid-run.
@@ -77,53 +83,61 @@ impl App {
         Ok(())
     }
 
-    /// Add a blank row and go straight into naming it.
-    pub(crate) fn swarm_add_row(&mut self) {
-        let default_model = self.current_model.clone().unwrap_or_default();
-        self.swarm_cache.push(Persona {
-            name: String::new(),
-            model: default_model,
-            blurb: String::new(),
-        });
-        self.swarm_selected = self.swarm_cache.len() - 1;
-        self.swarm_edit.clear();
-        self.swarm_popup_mode = SwarmPopupMode::EditName;
-    }
-
-    pub(crate) fn swarm_start_edit_name(&mut self) {
-        if let Some(p) = self.swarm_cache.get(self.swarm_selected) {
-            self.swarm_edit = p.name.clone();
-            self.swarm_popup_mode = SwarmPopupMode::EditName;
+    /// Queue the selected persona (or a new row) as a small structured file
+    /// for `$EDITOR`. Format: `name`, `model`, `---`, then free-form blurb.
+    pub(crate) fn queue_swarm_persona_editor(&mut self, new: bool) -> Result<()> {
+        if new {
+            self.swarm_cache.push(Persona {
+                name: String::new(),
+                model: self.current_model.clone().unwrap_or_default(),
+                blurb: String::new(),
+            });
+            self.swarm_selected = self.swarm_cache.len() - 1;
         }
+        let Some(persona) = self.swarm_cache.get(self.swarm_selected) else {
+            return Ok(());
+        };
+        let path =
+            std::env::temp_dir().join(format!("nexus-chat-persona-{}.md", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            format!(
+                "name: {}\nmodel: {}\n---\n{}\n",
+                persona.name, persona.model, persona.blurb
+            ),
+        )?;
+        self.swarm_popup_mode = SwarmPopupMode::Browse;
+        self.pending_editor = Some(super::PendingEditor::Persona(path));
+        self.status = "opening persona in $EDITOR…".to_string();
+        Ok(())
     }
 
-    pub(crate) fn swarm_start_edit_blurb(&mut self) {
-        if let Some(p) = self.swarm_cache.get(self.swarm_selected) {
-            self.swarm_edit = p.blurb.clone();
-            self.swarm_popup_mode = SwarmPopupMode::EditBlurb;
-        }
-    }
-
-    pub(crate) fn swarm_confirm_edit(&mut self) -> Result<()> {
-        let text = std::mem::take(&mut self.swarm_edit).trim().to_string();
-        let mode = self.swarm_popup_mode;
-        if let Some(p) = self.swarm_cache.get_mut(self.swarm_selected) {
-            match mode {
-                SwarmPopupMode::EditName => p.name = text,
-                SwarmPopupMode::EditBlurb => p.blurb = text,
-                _ => {}
+    /// Apply a persona file after `$EDITOR` exits. Leaving a newly-created row
+    /// unnamed cancels it; malformed existing edits leave the roster intact.
+    pub(crate) fn apply_swarm_persona_editor(&mut self, path: &std::path::Path) -> Result<()> {
+        let text = std::fs::read_to_string(path)?;
+        let _ = std::fs::remove_file(path);
+        match parse_persona_editor(&text) {
+            Ok(persona) => {
+                if let Some(row) = self.swarm_cache.get_mut(self.swarm_selected) {
+                    *row = persona;
+                }
+                self.save_swarm_roster()?;
+                self.status = "persona saved".to_string();
+            }
+            Err(e) => {
+                if self
+                    .swarm_cache
+                    .get(self.swarm_selected)
+                    .is_some_and(|p| p.name.trim().is_empty())
+                {
+                    self.swarm_cache.remove(self.swarm_selected);
+                    self.save_swarm_roster()?;
+                }
+                self.status = format!("persona edit ignored: {e}");
             }
         }
-        self.swarm_popup_mode = SwarmPopupMode::Browse;
-        self.save_swarm_roster()
-    }
-
-    /// Esc out of an edit: a freshly-added, still-unnamed row gets dropped by
-    /// `save_swarm_roster`'s empty-name filter, same as confirming a blank name.
-    pub(crate) fn swarm_cancel_edit(&mut self) -> Result<()> {
-        self.swarm_edit.clear();
-        self.swarm_popup_mode = SwarmPopupMode::Browse;
-        self.save_swarm_roster()
+        Ok(())
     }
 
     pub(crate) fn swarm_remove_row(&mut self) -> Result<()> {
@@ -156,16 +170,16 @@ impl App {
             self.status = "a swarm turn is already running".to_string();
             return;
         }
-        let Some(provider) = self.provider.clone() else {
+        let default_model = self.current_model.clone().unwrap_or_default();
+        let Some((default_provider, raw_default_model)) =
+            self.resolve_model_backend(&default_model)
+        else {
             self.open_login_popup();
             return;
         };
-        let default_model = self.current_model.clone().unwrap_or_default();
-        let meta_model = if !self.research_model.trim().is_empty() {
-            self.research_model.trim().to_string()
-        } else {
-            default_model.clone()
-        };
+        let (meta_provider, raw_meta_model) = self
+            .resolve_feature_model_backend(&self.research_model, OpenRouter::default_research_model)
+            .unwrap_or_else(|| (default_provider.clone(), raw_default_model.clone()));
         let personas = self.db.list_swarm_personas(&session.id).unwrap_or_default();
         let user_message = self
             .messages
@@ -178,16 +192,42 @@ impl App {
         self.swarm_rx = Some(rx);
         self.status = "swarm: starting…".to_string();
 
-        tokio::spawn(run_swarm_turn(
-            provider,
-            meta_model,
+        let swarm_session_id = session.id.clone();
+        let task = tokio::spawn(run_swarm_turn(
+            self.backends.clone(),
+            meta_provider,
+            raw_meta_model,
             personas,
             default_model,
+            default_provider,
+            raw_default_model,
             base_history,
+            self.toolbox.clone(),
             user_message,
             session.id,
             tx,
         ));
+        self.swarm_abort = Some(task.abort_handle());
+        self.swarm_session = Some(swarm_session_id);
+    }
+
+    /// Stop the running swarm immediately. Persona model/tool streams are
+    /// children of the aborted orchestration task and are dropped with it.
+    pub(crate) fn stop_swarm(&mut self) {
+        if let Some(abort) = self.swarm_abort.take() {
+            abort.abort();
+        }
+        if self.swarm_rx.take().is_some() {
+            if let Some(id) = self.swarm_session.take() {
+                let _ = self
+                    .db
+                    .upsert_research_stage_message(&id, "swarm", "stopped by user");
+            }
+            self.status = "swarm stopped".to_string();
+            self.popup = Popup::None;
+        } else {
+            self.status = "no swarm is running".to_string();
+        }
     }
 
     /// A swarm turn update: persist it, and mirror it into the live
@@ -196,6 +236,8 @@ impl App {
     pub fn on_swarm_update(&mut self, r: Option<SwarmMsg>) {
         let Some((session_id, update)) = r else {
             self.swarm_rx = None;
+            self.swarm_abort = None;
+            self.swarm_session = None;
             return;
         };
         let viewing = self.session.as_ref().is_some_and(|s| s.id == session_id);
@@ -209,7 +251,31 @@ impl App {
                 }
             }
             SwarmUpdate::Progress(s) => {
+                let _ = self
+                    .db
+                    .upsert_research_stage_message(&session_id, "swarm", &s);
                 if viewing {
+                    let text = crate::db::stage_content("swarm", &s);
+                    if let Some(row) = self.messages.iter_mut().rev().find(|m| {
+                        m.role == "research_stage"
+                            && (m.content == "swarm" || m.content.starts_with("swarm:"))
+                    }) {
+                        row.content = text.clone();
+                        self.history_cache = Default::default();
+                    } else {
+                        self.messages.push(crate::db::Message {
+                            id: String::new(),
+                            role: "research_stage".to_string(),
+                            content: text.clone(),
+                            model: None,
+                            reasoning: None,
+                            tokens: None,
+                            secs: None,
+                            phrase: None,
+                            images: Vec::new(),
+                            persona: None,
+                        });
+                    }
                     self.status = format!("swarm: {s}");
                 }
             }
@@ -274,10 +340,30 @@ impl App {
                         persona: None,
                     });
                     self.status = "swarm turn complete".to_string();
+                    self.maybe_generate_title();
+                    self.maybe_extract_memory();
+                    self.maybe_compact();
                 }
             }
             SwarmUpdate::Error(e) => {
+                // Keep failures separate from the upserted progress row so a
+                // later round/tool update cannot overwrite and erase them.
+                let _ = self
+                    .db
+                    .add_error_message(&session_id, &format!("swarm: {e}"));
                 if viewing {
+                    self.messages.push(crate::db::Message {
+                        id: String::new(),
+                        role: "error".to_string(),
+                        content: format!("swarm: {e}"),
+                        model: None,
+                        reasoning: None,
+                        tokens: None,
+                        secs: None,
+                        phrase: None,
+                        images: Vec::new(),
+                        persona: None,
+                    });
                     self.status = format!("swarm error: {e}");
                 }
             }
@@ -285,13 +371,44 @@ impl App {
     }
 }
 
+fn parse_persona_editor(text: &str) -> Result<Persona, String> {
+    let mut lines = text.lines();
+    let name = lines
+        .next()
+        .and_then(|line| line.strip_prefix("name:"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "first line must be `name: <non-empty name>`".to_string())?;
+    let model = lines
+        .next()
+        .and_then(|line| line.strip_prefix("model:"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "second line must be `model: <model id>`".to_string())?;
+    let remaining: Vec<&str> = lines.collect();
+    let separator = remaining
+        .iter()
+        .position(|line| line.trim() == "---")
+        .ok_or_else(|| "missing `---` before the blurb".to_string())?;
+    let blurb = remaining[separator + 1..].join("\n").trim().to_string();
+    Ok(Persona {
+        name: name.to_string(),
+        model: model.to_string(),
+        blurb,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_swarm_turn(
-    provider: OpenRouter,
-    meta_model: String,
+    backends: Backends,
+    meta_provider: OpenRouter,
+    raw_meta_model: String,
     mut personas: Vec<Persona>,
     default_model: String,
+    default_provider: OpenRouter,
+    raw_default_model: String,
     base_history: Vec<ChatMessage>,
+    toolbox: Arc<ToolBox>,
     user_message: String,
     session_id: String,
     tx: mpsc::UnboundedSender<SwarmMsg>,
@@ -299,10 +416,16 @@ async fn run_swarm_turn(
     let send = |u: SwarmUpdate| {
         let _ = tx.send((session_id.clone(), u));
     };
-
     if personas.is_empty() {
         send(SwarmUpdate::Progress("suggesting personas…".to_string()));
-        match suggest_personas(&provider, &meta_model, &user_message, &default_model).await {
+        match suggest_personas(
+            &meta_provider,
+            &raw_meta_model,
+            &user_message,
+            &default_model,
+        )
+        .await
+        {
             Ok(p) => {
                 personas = p;
                 send(SwarmUpdate::RosterSuggested(personas.clone()));
@@ -320,82 +443,158 @@ async fn run_swarm_turn(
         return;
     }
 
-    // (persona name, reply content), in speaking order — a running
-    // transcript every persona actually converses through, turn by turn.
-    // `personas` can grow mid-conversation (the moderator can bring in a new
-    // voice), so turns are driven by index, wrapping, rather than an
-    // iterator over a fixed snapshot.
+    // (persona name, reply content), in speaking order — a running transcript
+    // every persona converses through. A successful reply marks that persona
+    // as having answered; the moderator is gated on every current persona
+    // having answered at least once and on the current round being complete.
     let mut discussion: Vec<(String, String)> = Vec::new();
-    let max_turns = personas.len().max(1) * MAX_TURNS_PER_PERSONA;
-    let mut turn = 0usize;
-    let mut idx = 0usize;
-    'convo: loop {
-        if idx >= personas.len() {
-            idx = 0;
-        }
-        let p = personas[idx].clone();
-        idx += 1;
-        turn += 1;
-        send(SwarmUpdate::Progress(format!(
-            "turn {turn}/{max_turns} — {} is responding",
-            p.name
-        )));
+    // Track roster positions, not names: users may configure duplicate names,
+    // but every row still deserves its own response opportunity.
+    let mut answered: HashSet<usize> = HashSet::new();
+    'convo: for round in 1..=MAX_ROUNDS {
+        // Snapshot the roster for this round. Personas can only be added by the
+        // moderator after the round, so everyone in this snapshot gets exactly
+        // one opportunity before moderation.
+        let round_personas = personas.clone();
+        let round_size = round_personas.len();
+        for (idx, p) in round_personas.into_iter().enumerate() {
+            send(SwarmUpdate::Progress(format!(
+                "round {round}/{MAX_ROUNDS} · persona {}/{} — {} is responding",
+                idx + 1,
+                round_size,
+                p.name
+            )));
 
-        let mut messages = base_history.clone();
-        messages.push(ChatMessage::text(
-            "system",
-            format!(
-                "You are {} in a live group conversation with the other personas below. \
-                 Your persona: {}. Speak naturally and briefly (a few sentences), stay in \
-                 character, and actually engage with what the last speaker said — agree, \
-                 push back, build on it, or ask a question, the way a real person would in \
-                 a discussion. Don't just restate your own opening position every time.",
-                p.name, p.blurb
-            ),
-        ));
-        match render_discussion(&discussion) {
-            Some(transcript) => messages.push(ChatMessage::text(
-                "user",
+            let mut messages = base_history.clone();
+            messages.push(ChatMessage::text(
+                "system",
                 format!(
-                    "Conversation so far:\n\n{transcript}\n\nIt's your turn, {}. Respond to \
-                     what was just said.",
-                    p.name
+                    "You are {} in a live group conversation with the other personas below. \
+                     Your persona: {}. This discussion proceeds in rounds and every persona \
+                     gets one response per round. Speak naturally and briefly (a few sentences), \
+                     stay in character, and actually engage with what the prior speakers said — \
+                     agree, push back, build on it, or ask a question. Use the available tools \
+                     when they would improve your answer. Don't just restate your opening \
+                     position every round.",
+                    p.name, p.blurb
                 ),
-            )),
-            None => messages.push(ChatMessage::text(
-                "user",
-                format!(
-                    "You're opening the discussion, {}. Give your first take.",
-                    p.name
-                ),
-            )),
-        }
-
-        match provider.complete(&p.model, messages).await {
-            Ok(content) => {
-                send(SwarmUpdate::Reply {
-                    persona: p.name.clone(),
-                    model: p.model.clone(),
-                    content: content.clone(),
-                });
-                discussion.push((p.name.clone(), content));
+            ));
+            match render_discussion(&discussion) {
+                Some(transcript) => messages.push(ChatMessage::text(
+                    "user",
+                    format!(
+                        "Conversation so far:\n\n{transcript}\n\nRound {round}: it's your chance \
+                         to respond, {}. Engage with what was said.",
+                        p.name
+                    ),
+                )),
+                None => messages.push(ChatMessage::text(
+                    "user",
+                    format!(
+                        "Round {round}: you're opening the discussion, {}. Give your first take.",
+                        p.name
+                    ),
+                )),
             }
-            Err(e) => send(SwarmUpdate::Error(format!("{} failed: {e}", p.name))),
+
+            let (persona_provider, raw_persona_model) =
+                backends.resolve(&p.model).unwrap_or_else(|| {
+                    send(SwarmUpdate::Error(format!(
+                        "{} model unavailable ({}); using session model",
+                        p.name, p.model
+                    )));
+                    (default_provider.clone(), raw_default_model.clone())
+                });
+            let persona_toolbox = toolbox.clone();
+            let tools = persona_toolbox.defs();
+            let (mut rx, abort) = persona_provider.stream_chat(
+                raw_persona_model,
+                messages,
+                ChatParams::default(),
+                tools,
+                persona_toolbox,
+                SWARM_PERSONA_MAX_TOOL_ITERS,
+            );
+            let abort = super::AbortOnDrop(abort);
+            let response = timeout(Duration::from_secs(120), async {
+                let mut content = String::new();
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        StreamEvent::Token(token) => content.push_str(&token),
+                        StreamEvent::Status(status) => send(SwarmUpdate::Progress(format!(
+                            "round {round}/{MAX_ROUNDS} — {}: {status}",
+                            p.name
+                        ))),
+                        StreamEvent::ToolCall {
+                            name,
+                            arguments,
+                            result,
+                        } => {
+                            let summary = crate::app::tool_call_summary(&name, &arguments, &result);
+                            send(SwarmUpdate::Progress(format!(
+                                "round {round}/{MAX_ROUNDS} — {}: {summary}",
+                                p.name
+                            )));
+                        }
+                        StreamEvent::Error(error) => return Err(anyhow::anyhow!(error)),
+                        StreamEvent::Done => break,
+                        _ => {}
+                    }
+                }
+                if content.trim().is_empty() {
+                    Err(anyhow::anyhow!("returned an empty response"))
+                } else {
+                    Ok(content)
+                }
+            })
+            .await;
+            let response = match response {
+                Ok(result) => result,
+                Err(_) => {
+                    abort.0.abort();
+                    Err(anyhow::anyhow!("timed out after 120s"))
+                }
+            };
+            match response {
+                Ok(content) => {
+                    send(SwarmUpdate::Reply {
+                        persona: p.name.clone(),
+                        model: p.model.clone(),
+                        content: content.clone(),
+                    });
+                    answered.insert(idx);
+                    discussion.push((p.name, content));
+                }
+                Err(e) => send(SwarmUpdate::Error(format!("{} failed: {e}", p.name))),
+            }
         }
 
-        if turn >= max_turns {
+        // The hard cap synthesizes after the final complete round. Never ask
+        // the moderator to add someone who would have no round left to speak.
+        if round == MAX_ROUNDS {
             break 'convo;
         }
-        send(SwarmUpdate::Progress(
-            "moderator checking for a conclusion…".to_string(),
-        ));
-        match moderator_check(&provider, &meta_model, &user_message, &discussion).await {
+        if !all_personas_answered(personas.len(), &answered) {
+            let missing = personas
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| !answered.contains(idx))
+                .map(|(_, p)| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            send(SwarmUpdate::Progress(format!(
+                "round {round} complete — waiting for replies from: {missing}"
+            )));
+            continue;
+        }
+
+        send(SwarmUpdate::Progress(format!(
+            "round {round} complete — moderator checking for a conclusion…"
+        )));
+        match moderator_check(&meta_provider, &raw_meta_model, &user_message, &discussion).await {
             Ok(ModeratorVerdict::Converged) => break 'convo,
             Ok(ModeratorVerdict::Continue) => {}
             Ok(ModeratorVerdict::AddPersona { name, blurb }) => {
-                // ponytail: fixed cap on dynamic growth, not configurable — a
-                // 3-persona chat that keeps spawning new voices would never
-                // converge and never hit MAX_TURNS_PER_PERSONA-driven synthesis.
                 if personas.len() >= MAX_PERSONAS
                     || personas.iter().any(|existing| existing.name == name)
                 {
@@ -409,15 +608,19 @@ async fn run_swarm_turn(
                 send(SwarmUpdate::PersonaJoined(new_persona.clone()));
                 personas.push(new_persona);
             }
-            Err(_) => break 'convo, // fail safe: stop and synthesize with what's gathered
+            Err(_) => break 'convo, // fail safe after a complete, answered round
         }
     }
 
     send(SwarmUpdate::Progress("writing synthesis…".to_string()));
-    match synthesize(&provider, &meta_model, &user_message, &discussion).await {
+    match synthesize(&meta_provider, &raw_meta_model, &user_message, &discussion).await {
         Ok(content) => send(SwarmUpdate::Synthesis(content)),
         Err(e) => send(SwarmUpdate::Error(format!("synthesis failed: {e}"))),
     }
+}
+
+fn all_personas_answered(persona_count: usize, answered: &HashSet<usize>) -> bool {
+    persona_count > 0 && (0..persona_count).all(|idx| answered.contains(&idx))
 }
 
 fn render_discussion(discussion: &[(String, String)]) -> Option<String> {
@@ -445,10 +648,13 @@ async fn suggest_personas(
          like: [{{\"name\": \"short persona name\", \"blurb\": \"one-sentence personality and \
          perspective\"}}, ...]\n\nMessage: {topic}"
     );
-    let raw = provider
-        .complete(meta_model, vec![ChatMessage::text("user", prompt)])
-        .await
-        .map_err(|e| e.to_string())?;
+    let raw = timeout(
+        Duration::from_secs(60),
+        provider.complete(meta_model, vec![ChatMessage::text("user", prompt)]),
+    )
+    .await
+    .map_err(|_| "timed out after 60s".to_string())?
+    .map_err(|e| e.to_string())?;
     parse_suggested_personas(&raw, default_model)
 }
 
@@ -506,10 +712,13 @@ async fn moderator_check(
          perspective>\n\
          - Otherwise, reply exactly: CONTINUE"
     );
-    let raw = provider
-        .complete(meta_model, vec![ChatMessage::text("user", prompt)])
-        .await
-        .map_err(|e| e.to_string())?;
+    let raw = timeout(
+        Duration::from_secs(30),
+        provider.complete(meta_model, vec![ChatMessage::text("user", prompt)]),
+    )
+    .await
+    .map_err(|_| "timed out after 30s".to_string())?
+    .map_err(|e| e.to_string())?;
     Ok(parse_moderator_verdict(&raw))
 }
 
@@ -547,14 +756,29 @@ async fn synthesize(
          to the end, say so and give the best-supported call. Markdown allowed. Don't mention \
          that this came from a panel — just answer well, informed by the conversation."
     );
-    provider
-        .complete(meta_model, vec![ChatMessage::text("user", prompt)])
-        .await
+    timeout(
+        Duration::from_secs(90),
+        provider.complete(meta_model, vec![ChatMessage::text("user", prompt)]),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("timed out after 90s"))?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persona_editor_round_trips_name_model_and_multiline_blurb() {
+        let persona = parse_persona_editor(
+            "name: Skeptic\nmodel: codex:gpt-5.4-mini\n---\npokes holes\nand checks evidence\n",
+        )
+        .unwrap();
+        assert_eq!(persona.name, "Skeptic");
+        assert_eq!(persona.model, "codex:gpt-5.4-mini");
+        assert_eq!(persona.blurb, "pokes holes\nand checks evidence");
+        assert!(parse_persona_editor("name: \nmodel: m\n---\n").is_err());
+    }
 
     #[test]
     fn parse_suggested_personas_tolerates_prose_and_fences() {
@@ -578,6 +802,19 @@ mod tests {
     #[test]
     fn parse_suggested_personas_errors_without_an_array() {
         assert!(parse_suggested_personas("no json here", "a/one").is_err());
+    }
+
+    #[test]
+    fn moderator_gate_requires_every_current_persona_row_to_have_answered() {
+        let mut answered = HashSet::from([0usize]);
+        assert!(!all_personas_answered(2, &answered));
+
+        answered.insert(1);
+        assert!(all_personas_answered(2, &answered));
+        assert!(
+            !all_personas_answered(3, &answered),
+            "a newly joined persona must get a round before moderation"
+        );
     }
 
     #[test]

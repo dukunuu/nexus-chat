@@ -127,6 +127,8 @@ fn sync_cache(app: &mut App, width: usize) {
             push_user(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_stage" {
             push_research_stage(&mut c.lines, &m.content, width, &theme);
+        } else if m.role == "error" {
+            push_error(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_plan" {
             push_research_plan(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "tool_call" {
@@ -275,6 +277,33 @@ fn push_research_stage(
         } else {
             out.push(Line::from(dim(format!("  {line}"), theme)));
         }
+    }
+    out.push(Line::from(""));
+}
+
+/// A persistent request failure, kept in the transcript after the status bar
+/// changes. Use the theme's error color and a hanging indent for long errors.
+fn push_error(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) {
+    let style = Style::default().fg(theme.error);
+    let mut first = true;
+    for line in wrap_plain(content, width.saturating_sub(2)) {
+        if first {
+            out.push(Line::from(vec![
+                Span::styled("! ", style.add_modifier(Modifier::BOLD)),
+                Span::styled(line, style),
+            ]));
+            first = false;
+        } else {
+            out.push(Line::from(Span::styled(format!("  {line}"), style)));
+        }
+    }
+    if first {
+        out.push(Line::from(Span::styled("! request failed", style)));
     }
     out.push(Line::from(""));
 }

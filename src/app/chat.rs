@@ -39,8 +39,8 @@ impl App {
             self.set_input(&text);
             return Ok(());
         }
-        if self.provider.is_none() {
-            self.status = "set your API key first with /key".to_string();
+        if !self.backends.any() {
+            self.status = "set your API key first with /login".to_string();
             self.set_input(&text);
             return Ok(());
         }
@@ -152,12 +152,16 @@ impl App {
             // the model remembers what it already tried (and got back) in
             // prior turns — dropping these caused it to repeat the same
             // mistakes on file-writing tools with no memory of the failure.
-            // Skip research_stage/research_plan rows — background job scratch
-            // work and UI-only prompts, never shown to the model. Skip
-            // per-persona swarm round replies too — supporting detail for
-            // that turn, not part of ongoing conversation context; only the
-            // turn's final synthesis reply (persona: None) carries forward.
-            if m.role == "research_stage" || m.role == "research_plan" || m.persona.is_some() {
+            // Skip research/progress/error rows — background job scratch,
+            // UI-only prompts, and transport failures are never shown to the
+            // model. Skip per-persona swarm round replies too — supporting
+            // detail for that turn, not part of ongoing conversation context;
+            // only the turn's final synthesis reply carries forward.
+            if m.role == "research_stage"
+                || m.role == "research_plan"
+                || m.role == "error"
+                || m.persona.is_some()
+            {
                 continue;
             }
             if m.role == "tool_call" {
@@ -217,10 +221,11 @@ impl App {
     /// Build history and fire the streaming request — the shared tail of
     /// `send_message` and `resume_deferred_send`.
     pub(super) fn start_stream(&mut self) -> Result<()> {
-        let Some(provider) = self.provider.clone() else {
+        let Some(model) = self.current_model.clone() else {
             return Ok(());
         };
-        let Some(model) = self.current_model.clone() else {
+        let Some((provider, raw_model)) = self.resolve_model_backend(&model) else {
+            self.status = format!("model backend unavailable: {model} — pick another with /model");
             return Ok(());
         };
         let history = self.build_history();
@@ -232,7 +237,7 @@ impl App {
         };
         let tools = self.toolbox.defs();
         let (rx, abort) = provider.stream_chat(
-            model,
+            raw_model,
             history,
             params,
             tools,
@@ -306,11 +311,40 @@ impl App {
             }
             StreamEvent::Done => self.finish_stream()?,
             StreamEvent::Error(e) => {
-                self.status = match (&self.stream_session, self.viewing_stream()) {
+                // Capture the origin before `finish_stream` clears it. Save any
+                // partial answer first, then append the failure so transcript
+                // order matches what the user saw.
+                let target = self
+                    .stream_session
+                    .as_ref()
+                    .map(|(id, _)| id.clone())
+                    .or_else(|| self.session.as_ref().map(|s| s.id.clone()));
+                let viewing = self.viewing_stream();
+                let status = match (&self.stream_session, viewing) {
                     (Some((_, title)), false) => format!("stream error in {title}: {e}"),
                     _ => format!("stream error: {e}"),
                 };
                 self.finish_stream()?;
+                if let Some(id) = &target {
+                    self.db.add_error_message(id, &e)?;
+                }
+                if viewing {
+                    self.messages.push(Message {
+                        id: String::new(),
+                        role: "error".to_string(),
+                        content: e,
+                        model: None,
+                        reasoning: None,
+                        tokens: None,
+                        secs: None,
+                        phrase: None,
+                        images: Vec::new(),
+                        persona: None,
+                    });
+                } else if let Some(id) = target {
+                    self.unread.insert(id);
+                }
+                self.status = status;
             }
         }
         Ok(())
@@ -438,12 +472,16 @@ impl App {
 
     /// After the first exchange of a session, ask the model for a short topic and
     /// slug in the background. Runs once per session (guarded by `slug.is_none()`).
-    fn maybe_generate_title(&mut self) {
-        let (Some(session), Some(provider), Some(model)) = (
-            self.session.as_ref(),
-            self.provider.clone(),
-            self.current_model.clone(),
-        ) else {
+    pub(super) fn maybe_generate_title(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let Some((provider, raw_model)) = self
+            .current_model
+            .as_deref()
+            .and_then(|model| self.resolve_model_backend(model))
+            .or_else(|| self.resolve_utility_model_backend(&self.memory_model))
+        else {
             return;
         };
         if session.slug.is_some() {
@@ -472,7 +510,7 @@ impl App {
                  no markdown, of the form {{\"topic\": \"<3-5 word title>\", \"id\": \"<short-kebab-slug>\"}}.\n\n{convo}"
             );
             let msgs = vec![ChatMessage::text("user", prompt)];
-            if let Ok(text) = provider.complete(&model, msgs).await
+            if let Ok(text) = provider.complete(&raw_model, msgs).await
                 && let Some((topic, slug)) = parse_topic(&text)
             {
                 let _ = tx.send((session_id, topic, slug));
@@ -788,10 +826,13 @@ pub(super) fn pick_flavor() -> (usize, Color) {
 pub(super) fn web_mode_clause(today: &str) -> String {
     format!(
         "Web answer mode is ON for this session. Today's date is {today}. Before answering, you \
-         MUST call web_search (and fetch_url on the most promising results) — never answer from \
-         memory alone. Cite every claim inline as [n], and end your reply with a line starting \
-         exactly with 'Sources:' followed by the numbered list of URLs you used, one per line, \
-         matching your [n] citations."
+         MUST call web_search with a focused query (and fetch_url on the most promising results) — \
+         never answer from memory alone. You may search more than once with refined queries if the \
+         first results are insufficient. Each search result is numbered [1], [2], ... with title, \
+         URL, and snippet. Cite every claim inline immediately as [n]; do not bunch citations at \
+         the end of a paragraph. End your reply with a line starting exactly with 'Sources:' \
+         followed by every citation you used, one per line, as [n] title — url. Do not fabricate \
+         sources; if a claim is not backed by a search/fetched source, do not cite it."
     )
 }
 

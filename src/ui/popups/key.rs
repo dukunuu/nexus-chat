@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::{App, Popup};
 
@@ -8,20 +8,15 @@ use super::chrome;
 
 pub(crate) fn render(f: &mut Frame, app: &App) {
     let outer = crate::ui::centered(f.area(), 60, 20);
-    f.render_widget(Clear, outer);
-    // Mask the key so it isn't shown in the clear.
     let masked = "*".repeat(app.key_input.chars().count());
-    let label = app.key_target_label();
-    let block = chrome::popup_block(
-        crate::ui::hint_title(
-            app,
-            " API key ",
-            &format!("{label} key — Enter to save, Esc to go back"),
-        ),
-        &app.theme,
+    let title = chrome::input_title(
+        app,
+        format!("{} key", app.key_target_label()),
+        masked.as_str(),
+        "Enter to save, Esc to go back",
     );
-    let para = Paragraph::new(format!("{masked}▏")).block(block);
-    f.render_widget(para, outer);
+    let inner = chrome::render_frame(f, outer, title, &app.theme, true);
+    f.render_widget(Paragraph::new(""), inner);
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {

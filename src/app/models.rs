@@ -3,29 +3,117 @@ use ratatui::widgets::ListState;
 
 use super::{App, KeyTarget, LoginMsg, ModelPanel, ModelPickTarget, Popup};
 use crate::config;
-use crate::provider::Model;
+use crate::provider::openrouter::OpenRouter;
+use crate::provider::{BackendTag, Model};
 use chrono::Utc;
 
 impl App {
-    /// Display name of the currently active backend, for the model picker's
-    /// title. `None` when nothing's configured yet.
-    pub(crate) fn provider_backend_name(&self) -> Option<&'static str> {
-        self.provider.as_ref().map(|p| p.backend_name())
+    /// Rebuild `self.backends` from `self.saved` — every credential on file
+    /// becomes a usable backend at once. Called after `self.saved` changes
+    /// wholesale (app startup); `/login` updates one slot directly instead.
+    pub(crate) fn rebuild_all_backends(&mut self) {
+        self.backends = super::Backends::default();
+        if let Some(k) = self.saved.openrouter_key.clone() {
+            self.backends
+                .set(BackendTag::OpenRouter, OpenRouter::openrouter(k));
+        }
+        if let Some(k) = self.saved.openai_key.clone() {
+            self.backends.set(BackendTag::OpenAi, OpenRouter::openai(k));
+        }
+        if let Some(k) = self.saved.opencode_key.clone() {
+            self.backends
+                .set(BackendTag::OpencodeGo, OpenRouter::opencode_go(k));
+        }
+        if let Some(c) = self.saved.codex.clone() {
+            self.backends
+                .set(BackendTag::Codex, OpenRouter::openai_codex(c.access));
+        }
     }
 
-    /// Force `self.provider`'s flavor to `tag`, keeping the same key/token.
-    /// Used once at startup: `App::new`'s internal key-shape guess can't
-    /// distinguish OpenAI from OpenCode Go, so main.rs corrects it using the
-    /// authoritative `active_backend` record.
-    pub(crate) fn set_provider_flavor(&mut self, tag: &str) {
-        let Some(key) = self.key.clone() else { return };
-        self.provider = Some(match tag {
-            "openrouter" => crate::provider::openrouter::OpenRouter::openrouter(key),
-            "openai" => crate::provider::openrouter::OpenRouter::openai(key),
-            "opencode" => crate::provider::openrouter::OpenRouter::opencode_go(key),
-            "codex" => crate::provider::openrouter::OpenRouter::openai_codex(key),
-            _ => return,
-        });
+    /// Resolve a persisted/composite model id to the backend and raw model id
+    /// to send on the wire.
+    pub(crate) fn resolve_model_backend(&self, id: &str) -> Option<(OpenRouter, String)> {
+        self.backends.resolve(id)
+    }
+
+    /// Resolve a background utility model setting. If an old bare OpenRouter
+    /// default would be misrouted to a non-OpenRouter backend, fall back to
+    /// that backend's own utility model instead of silently sending an invalid
+    /// model id (which breaks memory/title jobs after OpenAI/Codex/Go login).
+    pub(crate) fn resolve_utility_model_backend(
+        &self,
+        configured_id: &str,
+    ) -> Option<(OpenRouter, String)> {
+        self.resolve_feature_model_backend(configured_id, OpenRouter::default_utility_model)
+    }
+
+    pub(crate) fn resolve_feature_model_backend(
+        &self,
+        configured_id: &str,
+        default: fn(&OpenRouter) -> &'static str,
+    ) -> Option<(OpenRouter, String)> {
+        let configured_id = configured_id.trim();
+        if !configured_id.is_empty()
+            && let Some((provider, raw)) = self.resolve_model_backend(configured_id)
+            && self.resolved_model_looks_valid(configured_id, provider.backend_tag(), &raw)
+        {
+            return Some((provider, raw));
+        }
+
+        let provider = self
+            .current_model
+            .as_deref()
+            .and_then(|id| self.resolve_model_backend(id).map(|(provider, _)| provider))
+            .or_else(|| {
+                self.backends
+                    .configured_tags()
+                    .first()
+                    .and_then(|tag| self.backends.get(*tag).cloned())
+            })?;
+        Some((provider.clone(), default(&provider).to_string()))
+    }
+
+    fn resolved_model_looks_valid(
+        &self,
+        original_id: &str,
+        backend: BackendTag,
+        raw: &str,
+    ) -> bool {
+        if self.models.is_empty() {
+            // The classic bad state is a legacy OpenRouter id like
+            // `google/gemini-*` being resolved against OpenAI/Codex/Go because
+            // OpenRouter is not configured. Those backends' built-in defaults
+            // do not contain `/`, so treat slashy bare ids as OpenRouter-only.
+            return backend == BackendTag::OpenRouter || !original_id.contains('/');
+        }
+        self.models
+            .iter()
+            .any(|m| m.backend == backend && m.id == raw)
+    }
+
+    /// Label for the model picker's current backend filter.
+    pub(crate) fn model_backend_filter_label(&self) -> &'static str {
+        self.model_backend_filter
+            .map(BackendTag::display_name)
+            .unwrap_or("all backends")
+    }
+
+    /// Cycle the model picker's backend filter among whichever backends are
+    /// actually configured (`None` = show everything).
+    pub(crate) fn cycle_model_backend_filter(&mut self) {
+        let tags = self.backends.configured_tags();
+        if tags.is_empty() {
+            self.model_backend_filter = None;
+            return;
+        }
+        self.model_backend_filter = match self.model_backend_filter {
+            None => Some(tags[0]),
+            Some(cur) => {
+                let next = tags.iter().position(|t| *t == cur).map(|i| i + 1);
+                next.and_then(|i| tags.get(i).copied())
+            }
+        };
+        self.reset_model_selection();
     }
 
     pub(super) fn open_model_picker(&mut self) {
@@ -76,13 +164,14 @@ impl App {
     }
 
     fn open_model_picker_impl(&mut self) {
-        if self.provider.is_none() {
+        if !self.backends.any() {
             self.open_login_popup();
             return;
         }
         if self.models.is_empty() {
             self.status = "loading models…".to_string();
             self.fetch_models();
+            self.popup = Popup::Model;
             return;
         }
         self.model_filter.clear();
@@ -169,22 +258,17 @@ impl App {
         if let Err(e) = config::save_provider_key(tag, &key) {
             self.status = format!("could not save key: {e}");
         }
+        let (backend_tag, provider) = match target {
+            KeyTarget::OpenRouter => (BackendTag::OpenRouter, OpenRouter::openrouter(key.clone())),
+            KeyTarget::OpenAi => (BackendTag::OpenAi, OpenRouter::openai(key.clone())),
+            KeyTarget::OpencodeGo => (BackendTag::OpencodeGo, OpenRouter::opencode_go(key.clone())),
+        };
         match target {
-            KeyTarget::OpenRouter => self.saved.openrouter_key = Some(key.clone()),
-            KeyTarget::OpenAi => self.saved.openai_key = Some(key.clone()),
-            KeyTarget::OpencodeGo => self.saved.opencode_key = Some(key.clone()),
+            KeyTarget::OpenRouter => self.saved.openrouter_key = Some(key),
+            KeyTarget::OpenAi => self.saved.openai_key = Some(key),
+            KeyTarget::OpencodeGo => self.saved.opencode_key = Some(key),
         }
-        self.provider = Some(match target {
-            KeyTarget::OpenRouter => {
-                crate::provider::openrouter::OpenRouter::openrouter(key.clone())
-            }
-            KeyTarget::OpenAi => crate::provider::openrouter::OpenRouter::openai(key.clone()),
-            KeyTarget::OpencodeGo => {
-                crate::provider::openrouter::OpenRouter::opencode_go(key.clone())
-            }
-        });
-        self.key = Some(key);
-        self.models.clear();
+        self.backends.set(backend_tag, provider);
         self.popup = Popup::None;
         self.status = "key saved, loading models…".to_string();
         self.fetch_models();
@@ -218,13 +302,11 @@ impl App {
             Some(LoginMsg::Status(s)) => self.status = s,
             Some(LoginMsg::Done(Ok(creds))) => {
                 self.login_rx = None;
-                self.provider = Some(crate::provider::openrouter::OpenRouter::openai_codex(
-                    creds.access.clone(),
-                ));
-                self.key = Some(creds.access.clone());
+                self.backends.set(
+                    BackendTag::Codex,
+                    OpenRouter::openai_codex(creds.access.clone()),
+                );
                 self.saved.codex = Some(creds);
-                let _ = config::save_active_backend("codex");
-                self.models.clear();
                 self.status = "OpenAI Codex login saved, loading models…".to_string();
                 self.fetch_models();
                 self.refresh_toolbox();
@@ -255,49 +337,6 @@ impl App {
         self.activate_key(target, tag, key);
     }
 
-    /// Cycle the active backend among whichever of OpenRouter/OpenCode
-    /// Go/OpenAI/Codex are configured, without re-authenticating.
-    pub(crate) fn cycle_backend(&mut self) {
-        let slots: Vec<(&'static str, String)> = [
-            ("OpenRouter", self.saved.openrouter_key.clone()),
-            ("OpenCode Go", self.saved.opencode_key.clone()),
-            ("OpenAI", self.saved.openai_key.clone()),
-            ("Codex", self.saved.codex.as_ref().map(|c| c.access.clone())),
-        ]
-        .into_iter()
-        .filter_map(|(name, key)| key.map(|k| (name, k)))
-        .collect();
-
-        if slots.len() < 2 {
-            self.status = "only one backend configured — /login to add another".into();
-            return;
-        }
-
-        let current = slots
-            .iter()
-            .position(|(_, k)| self.key.as_deref() == Some(k.as_str()));
-        let next = current.map_or(0, |i| (i + 1) % slots.len());
-        let (name, key) = slots[next].clone();
-
-        self.provider = Some(match name {
-            "OpenRouter" => crate::provider::openrouter::OpenRouter::openrouter(key.clone()),
-            "OpenCode Go" => crate::provider::openrouter::OpenRouter::opencode_go(key.clone()),
-            "OpenAI" => crate::provider::openrouter::OpenRouter::openai(key.clone()),
-            _ => crate::provider::openrouter::OpenRouter::openai_codex(key.clone()),
-        });
-        let tag = match name {
-            "OpenRouter" => "openrouter",
-            "OpenCode Go" => "opencode",
-            "OpenAI" => "openai",
-            _ => "codex",
-        };
-        let _ = config::save_active_backend(tag);
-        self.key = Some(key);
-        self.models.clear();
-        self.status = format!("switched to {name} — loading models…");
-        self.fetch_models();
-    }
-
     /// Favorite models matching the search filter, most-recently-used first.
     pub(crate) fn favorite_models(&self) -> Vec<&Model> {
         self.filtered_panel(true)
@@ -313,7 +352,8 @@ impl App {
         let mut out: Vec<&Model> = self
             .models
             .iter()
-            .filter(|m| self.favorites.contains(&m.id) == want_fav)
+            .filter(|m| self.model_backend_filter.is_none_or(|t| m.backend == t))
+            .filter(|m| self.favorites.contains(&super::composite_id(m)) == want_fav)
             .filter(|m| {
                 f.is_empty()
                     || m.id.to_lowercase().contains(&f)
@@ -322,9 +362,10 @@ impl App {
             .collect();
         // Most-recently-used first, then alphabetical.
         out.sort_by(|a, b| {
-            let ra = self.last_used.get(&a.id).cloned().unwrap_or_default();
-            let rb = self.last_used.get(&b.id).cloned().unwrap_or_default();
-            rb.cmp(&ra).then_with(|| a.id.cmp(&b.id))
+            let (ca, cb) = (super::composite_id(a), super::composite_id(b));
+            let ra = self.last_used.get(&ca).cloned().unwrap_or_default();
+            let rb = self.last_used.get(&cb).cloned().unwrap_or_default();
+            rb.cmp(&ra).then_with(|| ca.cmp(&cb))
         });
         out
     }
@@ -343,12 +384,15 @@ impl App {
         }
     }
 
+    /// The composite id (see `composite_id`) of the model at this row —
+    /// what gets stored in `current_model`/favorites/last-used, not the raw
+    /// `Model.id` (which can collide across backends).
     fn id_at(&self, panel: ModelPanel, index: usize) -> Option<String> {
         let list = match panel {
             ModelPanel::Favorites => self.favorite_models(),
             ModelPanel::Available => self.available_models(),
         };
-        list.get(index).map(|m| m.id.clone())
+        list.get(index).map(|m| super::composite_id(m))
     }
 
     /// Context window of the active model, if known.
@@ -356,7 +400,7 @@ impl App {
         let id = self.current_model.as_deref()?;
         self.models
             .iter()
-            .find(|m| m.id == id)
+            .find(|m| super::composite_id(m) == id)
             .and_then(|m| m.context_length)
     }
 
@@ -401,14 +445,16 @@ impl App {
     fn model_supports_reasoning(&self, id: &str) -> bool {
         self.models
             .iter()
-            .any(|m| m.id == id && m.supports_reasoning)
+            .any(|m| super::composite_id(m) == id && m.supports_reasoning)
     }
 
     /// Whether the active model accepts image input (unknown model → false).
     pub(crate) fn current_model_supports_images(&self) -> bool {
-        self.current_model
-            .as_deref()
-            .is_some_and(|id| self.models.iter().any(|m| m.id == id && m.supports_images))
+        self.current_model.as_deref().is_some_and(|id| {
+            self.models
+                .iter()
+                .any(|m| super::composite_id(m) == id && m.supports_images)
+        })
     }
 
     pub(crate) fn reasoning_of(&self, id: &str) -> Option<&str> {

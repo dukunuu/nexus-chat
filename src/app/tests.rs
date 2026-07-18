@@ -71,6 +71,82 @@ fn delete_removes_session_and_clears_if_active() {
 }
 
 #[test]
+fn watch_picker_resets_confirm_mode_on_open() {
+    let db = Db::open_in_memory().unwrap();
+    let mut a = App::new(db, Some("k".into()), test_space());
+    let space = a.active_space.id.clone();
+    let session = a.db.create_session("watch", "a/b", &space).unwrap();
+    let _ =
+        a.db.create_watch(&space, "rust async", 24, &session.id)
+            .unwrap();
+
+    a.watch_mode = WatchMode::ConfirmDelete;
+    a.open_watch_picker().unwrap();
+
+    assert_eq!(a.popup, Popup::Watch);
+    assert_eq!(a.watch_mode, WatchMode::Browse);
+}
+
+#[test]
+fn watch_picker_ctrl_d_confirms_with_a_second_press() {
+    let db = Db::open_in_memory().unwrap();
+    let mut a = App::new(db, Some("k".into()), test_space());
+    let space = a.active_space.id.clone();
+    let session = a.db.create_session("watch", "a/b", &space).unwrap();
+    let _ =
+        a.db.create_watch(&space, "rust async", 24, &session.id)
+            .unwrap();
+    a.open_watch_picker().unwrap();
+
+    crate::ui::popups::watches::handle_key(
+        &mut a,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('d'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+    )
+    .unwrap();
+    assert_eq!(a.watch_mode, WatchMode::ConfirmDelete);
+
+    crate::ui::popups::watches::handle_key(
+        &mut a,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('d'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+    )
+    .unwrap();
+    assert_eq!(a.watch_mode, WatchMode::Browse);
+    assert!(a.watches_cache.is_empty());
+    assert!(a.db.list_watches(&space).unwrap().is_empty());
+}
+
+#[test]
+fn watch_picker_escape_cancels_delete_confirmation() {
+    let db = Db::open_in_memory().unwrap();
+    let mut a = App::new(db, Some("k".into()), test_space());
+    let space = a.active_space.id.clone();
+    let session = a.db.create_session("watch", "a/b", &space).unwrap();
+    let _ =
+        a.db.create_watch(&space, "rust async", 24, &session.id)
+            .unwrap();
+    a.open_watch_picker().unwrap();
+    a.watch_mode = WatchMode::ConfirmDelete;
+
+    crate::ui::popups::watches::handle_key(
+        &mut a,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::empty(),
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(a.watch_mode, WatchMode::Browse);
+    assert_eq!(a.watches_cache.len(), 1);
+}
+
+#[test]
 fn code_blocks_split_by_fence_with_lang() {
     let md = "intro\n```rust\nfn a() {}\n```\ntext\n```\nplain\n```";
     let blocks = code_blocks(md);
@@ -91,6 +167,7 @@ pub(super) fn app_with_key() -> App {
             supports_reasoning: false,
             context_length: None,
             supports_images: false,
+            backend: BackendTag::OpenRouter,
         },
         Model {
             id: "b/two".into(),
@@ -98,6 +175,7 @@ pub(super) fn app_with_key() -> App {
             supports_reasoning: false,
             context_length: None,
             supports_images: false,
+            backend: BackendTag::OpenRouter,
         },
     ];
     a
@@ -110,6 +188,7 @@ fn web_mode_clause_instructs_search_first_and_cites_inline() {
     assert!(c.contains("web_search"));
     assert!(c.contains("[n]"));
     assert!(c.contains("Sources:"));
+    assert!(c.contains("Do not fabricate"));
 }
 
 #[tokio::test]
@@ -168,13 +247,13 @@ fn open_citation_under_selection_resolves_against_the_owning_messages_sources() 
 }
 
 #[test]
-fn no_key_rejects_message_and_points_to_key_cmd() {
+fn no_key_rejects_message_and_points_to_login_cmd() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, None, test_space());
     a.set_input("hello");
     a.submit().unwrap();
     assert!(a.session.is_none());
-    assert!(a.status.contains("/key"));
+    assert!(a.status.contains("/login"));
 }
 
 #[test]
@@ -374,6 +453,7 @@ fn panels_split_favorites_from_available_by_recency() {
             supports_reasoning: false,
             context_length: None,
             supports_images: false,
+            backend: BackendTag::OpenRouter,
         },
         Model {
             id: "b/two".into(),
@@ -381,6 +461,7 @@ fn panels_split_favorites_from_available_by_recency() {
             supports_reasoning: false,
             context_length: None,
             supports_images: false,
+            backend: BackendTag::OpenRouter,
         },
         Model {
             id: "c/three".into(),
@@ -388,6 +469,7 @@ fn panels_split_favorites_from_available_by_recency() {
             supports_reasoning: false,
             context_length: None,
             supports_images: false,
+            backend: BackendTag::OpenRouter,
         },
     ];
     // three is favorite; two was used more recently than one.
@@ -413,6 +495,7 @@ fn toggle_favorite_persists_and_moves_panel() {
         supports_reasoning: false,
         context_length: None,
         supports_images: false,
+        backend: BackendTag::OpenRouter,
     }];
     a.model_focus = ModelPanel::Available;
     a.avail_state.select(Some(0));
@@ -446,6 +529,7 @@ fn reasoning_cycles_only_for_supporting_models() {
         supports_reasoning: true,
         context_length: Some(1000),
         supports_images: false,
+        backend: BackendTag::OpenRouter,
     }];
     a.model_focus = ModelPanel::Available;
     a.avail_state.select(Some(0));
@@ -595,7 +679,7 @@ fn searxng_url_setting_persists_and_enables_web_search_tool() {
         a.toolbox.searxng_url.as_deref(),
         Some("http://localhost:8080")
     );
-    assert!(a.skills.iter().any(|s| s.name == "web-search")); // built-in materialized
+    assert!(!a.skills.iter().any(|s| s.name == "web-search")); // /web injects prompt text directly
 
     let reloaded = a.db.load_settings().unwrap();
     assert!(
@@ -648,7 +732,7 @@ fn last_used_model_restored_on_startup() {
 #[test]
 fn context_used_and_limit() {
     let mut a = app_with_key();
-    a.skills.clear(); // isolate this test from the always-installed web-search skill
+    a.skills.clear(); // isolate this test from installed skills
     a.base_system_prompt = String::new(); // isolate from the base system prompt
     a.models[0].context_length = Some(1000);
     a.current_model = Some("a/one".into());
@@ -671,7 +755,7 @@ fn context_used_and_limit() {
 #[test]
 fn compaction_narrows_effective_messages_and_context_used() {
     let mut a = app_with_key();
-    a.skills.clear(); // isolate this test from the always-installed web-search skill
+    a.skills.clear(); // isolate this test from installed skills
     a.base_system_prompt = String::new(); // isolate from the base system prompt
     a.models[0].context_length = Some(1000);
     a.current_model = Some("a/one".into());
@@ -910,6 +994,41 @@ fn transcriber_model_defaults_and_persists() {
     );
 }
 
+#[test]
+fn utility_defaults_are_prefixed_for_non_openrouter_bootstrap_backend() {
+    let db = Db::open_in_memory().unwrap();
+    let a = App::new(db, Some("sk-openai-test-key".into()), test_space());
+
+    assert_eq!(a.memory_model, "openai:gpt-4.1-mini");
+    assert_eq!(a.transcriber_model, "openai:gpt-4.1-mini");
+    assert_eq!(a.ocr_model, "openai:gpt-4.1-mini");
+    assert_eq!(a.research_model, "openai:gpt-4.1");
+    assert_eq!(a.escalation_model, "openai:gpt-4.1");
+    assert_eq!(a.embedding_model, "openai:text-embedding-3-small");
+}
+
+#[test]
+fn utility_model_resolution_falls_back_from_legacy_openrouter_id_on_openai() {
+    let db = Db::open_in_memory().unwrap();
+    let mut a = App::new(db, Some("sk-openai-test-key".into()), test_space());
+    a.models = vec![Model {
+        id: "gpt-4.1-mini".into(),
+        name: "GPT-4.1 mini".into(),
+        supports_reasoning: false,
+        context_length: None,
+        supports_images: false,
+        backend: BackendTag::OpenAi,
+    }];
+    a.current_model = Some("openai:gpt-4.1-mini".into());
+
+    let (provider, raw) = a
+        .resolve_utility_model_backend("google/gemini-2.5-flash-lite")
+        .unwrap();
+
+    assert_eq!(provider.backend_tag(), BackendTag::OpenAi);
+    assert_eq!(raw, "gpt-4.1-mini");
+}
+
 #[tokio::test]
 async fn finish_stream_persists_assistant_message() {
     let mut a = app_with_key();
@@ -925,6 +1044,34 @@ async fn finish_stream_persists_assistant_message() {
     assert_eq!(a.db.load_messages(&sid).unwrap().len(), 2);
 }
 
+#[tokio::test]
+async fn stream_error_is_persisted_in_transcript_and_not_replayed() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("hi");
+    a.submit().unwrap();
+    a.on_stream_event(StreamEvent::Token("partial answer".into()))
+        .unwrap();
+    a.on_stream_event(StreamEvent::Error("backend unavailable".into()))
+        .unwrap();
+
+    assert!(!a.is_streaming());
+    assert_eq!(a.messages[a.messages.len() - 2].content, "partial answer");
+    assert_eq!(a.messages.last().unwrap().role, "error");
+    assert_eq!(a.messages.last().unwrap().content, "backend unavailable");
+    assert!(a.status.contains("backend unavailable"));
+
+    let sid = &a.session.as_ref().unwrap().id;
+    let stored = a.db.load_messages(sid).unwrap();
+    assert_eq!(stored.last().unwrap().role, "error");
+    assert_eq!(stored.last().unwrap().content, "backend unavailable");
+    assert!(
+        a.build_history()
+            .iter()
+            .all(|message| !message.content.contains("backend unavailable"))
+    );
+}
+
 #[test]
 fn model_picker_without_key_opens_login_popup() {
     let db = Db::open_in_memory().unwrap();
@@ -936,7 +1083,7 @@ fn model_picker_without_key_opens_login_popup() {
 #[test]
 fn command_autocomplete_fuzzy_matches_names_aliases_and_desc() {
     let mut a = app_with_key();
-    a.skills.clear(); // isolate this test from the always-installed web-search skill
+    a.skills.clear(); // isolate this test from installed skills
 
     // Bare "/" lists everything; a space closes the popup.
     a.set_input("/");
@@ -975,7 +1122,7 @@ fn install_test_skill(a: &mut App, name: &str, desc: &str, body: &str) {
 #[test]
 fn skills_are_merged_into_command_matches_and_ranked() {
     let mut a = app_with_key();
-    a.skills.clear(); // isolate this test from the always-installed web-search skill
+    a.skills.clear(); // isolate this test from installed skills
     install_test_skill(&mut a, "web-search", "Search the web", "instructions");
     a.set_input("/");
     let matches = a.command_matches();
@@ -1250,6 +1397,7 @@ fn history_carries_image_parts_for_vision_models_and_text_for_others() {
             supports_reasoning: false,
             context_length: None,
             supports_images: true,
+            backend: BackendTag::OpenRouter,
         },
         Model {
             id: "txt/model".into(),
@@ -1257,6 +1405,7 @@ fn history_carries_image_parts_for_vision_models_and_text_for_others() {
             supports_reasoning: false,
             context_length: None,
             supports_images: false,
+            backend: BackendTag::OpenRouter,
         },
     ];
 
@@ -1445,17 +1594,20 @@ async fn swarm_popup_add_edit_remove_and_toggle_persist_to_db() {
     assert!(a.popup == Popup::Swarm);
     assert!(a.swarm_cache.is_empty());
 
-    a.swarm_add_row();
-    assert!(a.swarm_popup_mode == SwarmPopupMode::EditName);
-    a.swarm_edit = "Skeptic".into();
-    a.swarm_confirm_edit().unwrap();
+    a.queue_swarm_persona_editor(true).unwrap();
+    let path = match a.pending_editor.take().unwrap() {
+        PendingEditor::Persona(path) => path,
+        _ => panic!("expected persona editor request"),
+    };
+    std::fs::write(
+        &path,
+        "name: Skeptic\nmodel: a/one\n---\npokes holes in every claim\n",
+    )
+    .unwrap();
+    a.apply_swarm_persona_editor(&path).unwrap();
     assert_eq!(a.swarm_cache.len(), 1);
     assert_eq!(a.swarm_cache[0].name, "Skeptic");
-    assert_eq!(a.swarm_cache[0].model, "a/one"); // defaults to current_model
-
-    a.swarm_start_edit_blurb();
-    a.swarm_edit = "pokes holes in every claim".into();
-    a.swarm_confirm_edit().unwrap();
+    assert_eq!(a.swarm_cache[0].model, "a/one");
     assert_eq!(a.swarm_cache[0].blurb, "pokes holes in every claim");
 
     // Persisted immediately, not just held in the popup's cache.
@@ -1481,10 +1633,175 @@ async fn swarm_add_row_then_cancel_without_naming_drops_the_blank_row() {
     a.submit().unwrap();
 
     a.run_command("swarm").unwrap();
-    a.swarm_add_row();
+    a.queue_swarm_persona_editor(true).unwrap();
     assert_eq!(a.swarm_cache.len(), 1);
-    a.swarm_cancel_edit().unwrap(); // never typed a name
+    let path = match a.pending_editor.take().unwrap() {
+        PendingEditor::Persona(path) => path,
+        _ => panic!("expected persona editor request"),
+    };
+    a.apply_swarm_persona_editor(&path).unwrap(); // unchanged blank name cancels
     assert!(a.swarm_cache.is_empty());
+}
+
+#[tokio::test]
+async fn swarm_persona_model_picker_stays_open_while_catalog_loads() {
+    let mut a = app_with_key();
+    a.models.clear();
+    a.popup = Popup::Swarm;
+    a.swarm_cache.push(crate::db::Persona {
+        name: "Skeptic".into(),
+        model: "a/one".into(),
+        blurb: "pokes holes".into(),
+    });
+
+    a.open_model_picker_for_swarm_persona(0);
+
+    assert_eq!(a.popup, Popup::Model);
+    assert!(matches!(
+        a.model_pick_target,
+        ModelPickTarget::SwarmPersona(0)
+    ));
+    assert!(a.status.contains("loading models"));
+}
+
+#[test]
+fn swarm_persona_round_trips_through_external_editor_file() {
+    let mut a = app_with_key();
+    let space = a.active_space.id.clone();
+    let session = a.db.create_session("swarm", "a/one", &space).unwrap();
+    a.session = Some(session);
+    a.swarm_cache = vec![crate::db::Persona {
+        name: "Skeptic".into(),
+        model: "a/one".into(),
+        blurb: "pokes holes".into(),
+    }];
+
+    a.queue_swarm_persona_editor(false).unwrap();
+    let path = match a.pending_editor.take().unwrap() {
+        PendingEditor::Persona(path) => path,
+        _ => panic!("expected persona editor request"),
+    };
+    let template = std::fs::read_to_string(&path).unwrap();
+    assert!(template.contains("name: Skeptic"));
+    assert!(template.contains("model: a/one"));
+    std::fs::write(
+        &path,
+        "name: Critic\nmodel: codex:gpt-5.4-mini\n---\nchecks evidence\n",
+    )
+    .unwrap();
+    a.apply_swarm_persona_editor(&path).unwrap();
+
+    assert_eq!(a.swarm_cache[0].name, "Critic");
+    assert_eq!(a.swarm_cache[0].model, "codex:gpt-5.4-mini");
+    assert_eq!(a.swarm_cache[0].blurb, "checks evidence");
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn stop_command_aborts_research_and_swarm_jobs() {
+    let mut a = app_with_key();
+    let (_research_tx, research_rx) = tokio::sync::mpsc::unbounded_channel();
+    let research_task = tokio::spawn(std::future::pending::<()>());
+    a.research_rx = Some(research_rx);
+    a.research_abort = Some(research_task.abort_handle());
+    a.research_running = Some(("session".into(), "topic".into()));
+
+    let (_swarm_tx, swarm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let swarm_task = tokio::spawn(std::future::pending::<()>());
+    a.swarm_rx = Some(swarm_rx);
+    a.swarm_abort = Some(swarm_task.abort_handle());
+
+    a.run_command("stop").unwrap();
+
+    assert!(a.research_rx.is_none());
+    assert!(a.research_abort.is_none());
+    assert!(a.research_running.is_none());
+    assert!(a.swarm_rx.is_none());
+    assert!(a.swarm_abort.is_none());
+    assert!(a.status.contains("stopped"));
+}
+
+#[test]
+fn swarm_progress_and_errors_are_visible_in_transcript() {
+    let mut a = app_with_key();
+    let space = a.active_space.id.clone();
+    let s = a.db.create_session("swarm", "a/one", &space).unwrap();
+    let sid = s.id.clone();
+    a.session = Some(s);
+
+    a.on_swarm_update(Some((
+        sid.clone(),
+        super::swarm::SwarmUpdate::Progress(
+            "round 1/4 · persona 1/3 — Skeptic is responding".into(),
+        ),
+    )));
+    assert!(
+        a.messages
+            .iter()
+            .any(|m| { m.role == "research_stage" && m.content.contains("Skeptic is responding") })
+    );
+
+    a.on_swarm_update(Some((
+        sid.clone(),
+        super::swarm::SwarmUpdate::Error("backend failed".into()),
+    )));
+    assert!(
+        a.messages
+            .iter()
+            .any(|m| { m.role == "error" && m.content.contains("backend failed") })
+    );
+
+    // Subsequent progress updates replace only the progress row, not the error.
+    a.on_swarm_update(Some((
+        sid.clone(),
+        super::swarm::SwarmUpdate::Progress("round 1 complete".into()),
+    )));
+    assert!(
+        a.messages
+            .iter()
+            .any(|m| { m.role == "error" && m.content.contains("backend failed") })
+    );
+    let stored = a.db.load_messages(&sid).unwrap();
+    assert!(
+        stored
+            .iter()
+            .any(|m| m.role == "error" && m.content.contains("backend failed"))
+    );
+}
+
+#[tokio::test]
+async fn swarm_synthesis_triggers_post_reply_jobs_like_normal_chat() {
+    let mut a = app_with_key();
+    a.memory_model.clear(); // isolate this test from memory extraction network work
+    a.settings.compact_threshold = 0;
+    a.current_model = Some("a/one".into());
+    let space = a.active_space.id.clone();
+    let s = a.db.create_session("hello", "a/one", &space).unwrap();
+    let sid = s.id.clone();
+    a.session = Some(s);
+    a.messages.push(Message {
+        id: "u1".into(),
+        role: "user".into(),
+        content: "what should we do?".into(),
+        model: None,
+        reasoning: None,
+        tokens: None,
+        secs: None,
+        phrase: None,
+        images: Vec::new(),
+        persona: None,
+    });
+
+    a.on_swarm_update(Some((
+        sid,
+        super::swarm::SwarmUpdate::Synthesis("balance speed and safety".into()),
+    )));
+
+    assert_eq!(
+        a.messages.last().unwrap().content,
+        "balance speed and safety"
+    );
+    assert!(a.title_rx.is_some());
 }
 
 #[test]

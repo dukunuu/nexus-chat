@@ -1,7 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Clear, List, ListItem, ListState};
+use ratatui::widgets::{ListItem, ListState};
 
 use crate::app::App;
 
@@ -9,26 +8,25 @@ use super::chrome;
 
 pub(crate) fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 50, 60);
-    f.render_widget(Clear, area);
+    let inner = chrome::render_frame(
+        f,
+        area,
+        chrome::hinted_title(app, "copy", "↑/↓, Enter, Esc"),
+        &app.theme,
+        true,
+    );
 
     let items: Vec<ListItem> = app
         .copy_options
         .iter()
         .map(|o| ListItem::new(o.label.clone()))
         .collect();
-    let block = chrome::popup_block(
-        crate::ui::hint_title(app, " copy ", "copy — ↑/↓, Enter, Esc"),
-        &app.theme,
-    );
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .highlight_symbol("› ");
+    let list = chrome::standard_list(items);
     let mut state = ListState::default();
     if !app.copy_options.is_empty() {
         state.select(Some(app.copy_selected.min(app.copy_options.len() - 1)));
     }
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, inner, &mut state);
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {

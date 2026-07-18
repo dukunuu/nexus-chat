@@ -1,0 +1,37 @@
+{
+  "runId": "f8ea5a94",
+  "agent": "reviewer",
+  "task": "Review the current git diff limited to src/app/research.rs, src/ui/popups/research_live.rs, and src/ui/popups/tests.rs. Look for correctness bugs, lifecycle rows left stuck, regressions in research orchestration, and Ratatui rendering issues. Do not edit files. Return only actionable findings with severity.",
+  "exitCode": 0,
+  "usage": {
+    "input": 82977,
+    "output": 7301,
+    "cacheRead": 562176,
+    "cacheWrite": 0,
+    "cost": 0.9150029999999999,
+    "turns": 12
+  },
+  "model": "openai-codex/gpt-5.6-sol:high",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 82977,
+        "output": 7301,
+        "cacheRead": 562176,
+        "cacheWrite": 0,
+        "cost": 0.9150029999999999,
+        "turns": 12
+      }
+    }
+  ],
+  "durationMs": 310195,
+  "toolCount": 23,
+  "transcriptPath": "/home/dukunuu/Work/nexus-chat/.pi-subagents/artifacts/f8ea5a94_reviewer_0_transcript.jsonl",
+  "timestamp": 1783652884099
+}

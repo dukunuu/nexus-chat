@@ -6,10 +6,6 @@
 //! `.is_empty()` call sites unchanged.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
-
-use crate::theme::Theme;
 
 #[derive(Default, Clone)]
 pub struct FilterInput {
@@ -184,38 +180,6 @@ impl FilterInput {
                 true
             }
             _ => false,
-        }
-    }
-
-    /// Styled spans for this field's current text: cursor marker (or
-    /// highlighted char) when there's no selection, a highlighted range when
-    /// there is one. Callers splice these into a popup title `Line` alongside
-    /// their own label/hint spans.
-    pub fn spans(&self, theme: &Theme) -> Vec<Span<'static>> {
-        let chars: Vec<char> = self.text.chars().collect();
-        let sel_style = Style::default().bg(theme.accent).fg(Color::Black);
-        if let Some((s, e)) = self.selection_range() {
-            vec![
-                Span::raw(chars[..s].iter().collect::<String>()),
-                Span::styled(chars[s..e].iter().collect::<String>(), sel_style),
-                Span::raw(chars[e..].iter().collect::<String>()),
-            ]
-        } else if self.cursor >= chars.len() {
-            vec![
-                Span::raw(self.text.clone()),
-                Span::styled(
-                    "▏",
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]
-        } else {
-            vec![
-                Span::raw(chars[..self.cursor].iter().collect::<String>()),
-                Span::styled(chars[self.cursor].to_string(), sel_style),
-                Span::raw(chars[self.cursor + 1..].iter().collect::<String>()),
-            ]
         }
     }
 }

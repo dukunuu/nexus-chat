@@ -304,15 +304,6 @@ fn fmt_created(rfc3339: &str) -> String {
         .unwrap_or_else(|_| rfc3339.to_string())
 }
 
-/// A popup title: `plain` when hints are hidden, otherwise `" {with_hint} "`.
-fn hint_title(app: &App, plain: &str, with_hint: &str) -> String {
-    if app.settings.hide_hints {
-        plain.to_string()
-    } else {
-        format!(" {with_hint} ")
-    }
-}
-
 /// A rect `pct_w` × `pct_h` percent of `area`, centered.
 fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
     let v = Layout::default()

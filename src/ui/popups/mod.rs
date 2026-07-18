@@ -14,6 +14,9 @@ pub(crate) mod space;
 pub(crate) mod swarm;
 pub(crate) mod watches;
 
+#[cfg(test)]
+mod tests;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // Shared state-machine helpers for the session/space/skills popups, which all

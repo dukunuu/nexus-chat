@@ -1,4 +1,5 @@
 use super::{App, MemoryOp};
+use crate::db::Message;
 use crate::provider::ChatMessage;
 use tokio::sync::mpsc;
 
@@ -21,15 +22,14 @@ impl App {
         if self.memory_model.trim().is_empty() {
             return;
         }
-        let Some(provider) = self.provider.clone() else {
+        let Some((provider, raw_model)) = self.resolve_utility_model_backend(&self.memory_model)
+        else {
             return;
         };
-        let [user_msg, assistant_msg] = match self.messages.as_slice() {
-            [.., u, a] if u.role == "user" && a.role == "assistant" => [u.clone(), a.clone()],
-            _ => return,
+        let Some((user_msg, assistant_msg)) = latest_memory_exchange(&self.messages) else {
+            return;
         };
         let facts = self.read_memory();
-        let model = self.memory_model.clone();
         let space = self.active_space.name.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         self.memory_rx = Some(rx);
@@ -51,7 +51,7 @@ impl App {
                 truncate(&assistant_msg.content),
             );
             let msgs = vec![ChatMessage::text("user", prompt)];
-            if let Ok(text) = provider.complete(&model, msgs).await {
+            if let Ok(text) = provider.complete(&raw_model, msgs).await {
                 let ops = parse_memory_ops(&text);
                 let _ = tx.send((space, ops));
             }
@@ -102,8 +102,22 @@ impl App {
             .enumerate()
             .map(|(i, f)| format!("{}. {f}\n", i + 1))
             .collect();
+        let _ = self.space.ensure_space_dir(&self.active_space.name);
         let _ = std::fs::write(self.space.memory_path(&self.active_space.name), body);
     }
+}
+
+/// Latest user→assistant exchange worth memory extraction. Tool results are
+/// stored as transcript messages between the user and final assistant answer,
+/// so don't require the final two visible rows to be exactly user/assistant.
+fn latest_memory_exchange(messages: &[Message]) -> Option<(Message, Message)> {
+    let assistant_idx = messages
+        .iter()
+        .rposition(|m| m.role == "assistant" && m.persona.is_none())?;
+    let user_idx = messages[..assistant_idx]
+        .iter()
+        .rposition(|m| m.role == "user")?;
+    Some((messages[user_idx].clone(), messages[assistant_idx].clone()))
 }
 
 /// Parse one numbered fact line (`"3. some fact"`) into `(id, text)`.
@@ -146,4 +160,51 @@ pub(super) fn parse_memory_ops(text: &str) -> Vec<MemoryOp> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(role: &str, content: &str) -> Message {
+        Message {
+            id: String::new(),
+            role: role.to_string(),
+            content: content.to_string(),
+            model: None,
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            phrase: None,
+            images: Vec::new(),
+            persona: None,
+        }
+    }
+
+    #[test]
+    fn latest_memory_exchange_skips_tool_rows_between_user_and_assistant() {
+        let messages = vec![
+            msg("user", "remember I prefer terse answers"),
+            msg("tool_call", "search result"),
+            msg("assistant", "Noted."),
+        ];
+
+        let (user, assistant) = latest_memory_exchange(&messages).unwrap();
+        assert_eq!(user.content, "remember I prefer terse answers");
+        assert_eq!(assistant.content, "Noted.");
+    }
+
+    #[test]
+    fn latest_memory_exchange_ignores_persona_round_replies() {
+        let mut persona = msg("assistant", "persona chatter");
+        persona.persona = Some("Skeptic".to_string());
+        let messages = vec![
+            msg("user", "remember x"),
+            persona,
+            msg("assistant", "final"),
+        ];
+
+        let (_, assistant) = latest_memory_exchange(&messages).unwrap();
+        assert_eq!(assistant.content, "final");
+    }
 }

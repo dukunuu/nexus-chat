@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::{App, Popup};
 
@@ -12,7 +12,6 @@ use super::chrome;
 /// instructions, memory, conversation, and (pending) skills.
 pub(crate) fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 56, 40);
-    f.render_widget(Clear, area);
     let b = app.context_breakdown();
     let dim = Style::default().fg(app.theme.fg_dim);
 
@@ -62,12 +61,18 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     ]));
 
     let hint = if b.compacted {
-        "context — v views digest, Ctrl+G toggles, Esc closes"
+        "v views digest, Ctrl+G toggles, Esc closes"
     } else {
-        "context — Ctrl+G toggles, Esc closes"
+        "Ctrl+G toggles, Esc closes"
     };
-    let block = chrome::popup_block(crate::ui::hint_title(app, " context ", hint), &app.theme);
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    let inner = chrome::render_frame(
+        f,
+        area,
+        chrome::hinted_title(app, "context", hint),
+        &app.theme,
+        true,
+    );
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {

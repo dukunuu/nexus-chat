@@ -76,10 +76,10 @@ impl App {
     /// Describe `todo` images ((message_images row id, png path)) with the image
     /// model, one at a time; results arrive as AppEvent::Described.
     pub(crate) fn start_describing(&mut self, todo: Vec<(String, String)>) {
-        let Some(provider) = self.provider.clone() else {
+        let model = self.transcriber_model.trim().to_string();
+        let Some((provider, raw_model)) = self.resolve_model_backend(&model) else {
             return;
         };
-        let model = self.transcriber_model.trim().to_string();
         let (tx, rx) = mpsc::unbounded_channel();
         self.describe_rx = Some(rx);
         self.status = "understanding image…".to_string();
@@ -89,7 +89,7 @@ impl App {
                     Ok(bytes) => {
                         let url = png_bytes_data_url(&bytes);
                         provider
-                            .describe_image(&model, &url)
+                            .describe_image(&raw_model, &url)
                             .await
                             .map_err(|e| e.to_string())
                     }

@@ -127,7 +127,6 @@ async fn handle(
     spaces_root: &Path,
     registry: &AppRegistry,
 ) -> std::io::Result<()> {
-    // Read until end of headers; requests are tiny GETs, cap at 8 KiB.
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
     while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 8192 {
@@ -137,23 +136,63 @@ async fn handle(
         }
         buf.extend_from_slice(&chunk[..n]);
     }
-    let request_line = std::str::from_utf8(&buf)
-        .ok()
-        .and_then(|s| s.lines().next())
-        .unwrap_or("")
-        .to_string();
+
+    let header_end = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(pos) => pos,
+        None => return respond(&mut stream, 400, "text/plain", b"bad request", false).await,
+    };
+    let header_str = match std::str::from_utf8(&buf[..header_end]) {
+        Ok(s) => s,
+        Err(_) => return respond(&mut stream, 400, "text/plain", b"bad request", false).await,
+    };
+
+    let request_line = header_str.lines().next().unwrap_or("");
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let raw_path = parts.next().unwrap_or("/");
     let head = method == "HEAD";
+
+    if method == "OPTIONS" {
+        return respond(&mut stream, 204, "text/plain", b"", false).await;
+    }
+
+    let content_length = parse_header_value(header_str, "content-length")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    if content_length > 10 * 1024 * 1024 {
+        return respond(&mut stream, 413, "text/plain", b"request entity too large", false).await;
+    }
+
+    let content_type = parse_header_value(header_str, "content-type").unwrap_or("").to_string();
+
+    let body: Vec<u8> = if content_length > 0 {
+        let body_start = header_end + 4;
+        let in_buf = &buf[body_start..];
+        let already = in_buf.len().min(content_length);
+        let mut body = in_buf[..already].to_vec();
+        if already < content_length {
+            body.resize(content_length, 0);
+            stream.read_exact(&mut body[already..]).await?;
+        }
+        body
+    } else {
+        Vec::new()
+    };
+
+    if raw_path.contains("/_api/") {
+        return handle_api(&mut stream, spaces_root, registry, method, raw_path, &body, &content_type).await;
+    }
+
     if method != "GET" && !head {
         return respond(&mut stream, 405, "text/plain", b"method not allowed", head).await;
     }
+
     match resolve(spaces_root, registry, raw_path) {
         Some(file) => {
             let mime = mime_for(&file);
             match tokio::fs::read(&file).await {
-                Ok(body) => respond(&mut stream, 200, mime, &body, head).await,
+                Ok(b) => respond(&mut stream, 200, mime, &b, head).await,
                 Err(_) => respond(&mut stream, 404, "text/plain", b"not found", head).await,
             }
         }
@@ -217,18 +256,89 @@ async fn respond(
 ) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        404 => "Not Found",
         405 => "Method Not Allowed",
+        413 => "Request Entity Too Large",
+        501 => "Not Implemented",
         _ => "Not Found",
     };
-    let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+    let mut header = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n",
         body.len(),
     );
+    if mime.starts_with("application/json") || status != 200 {
+        header.push_str("Access-Control-Allow-Origin: *\r\n");
+    }
+    header.push_str("\r\n");
     stream.write_all(header.as_bytes()).await?;
-    if !head {
+    if !head && !body.is_empty() {
         stream.write_all(body).await?;
     }
     stream.shutdown().await
+}
+
+fn parse_header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+    for line in headers.lines().skip(1) {
+        if let Some(pos) = line.find(':') {
+            let key = line[..pos].trim();
+            if key.eq_ignore_ascii_case(name) {
+                return Some(line[pos + 1..].trim());
+            }
+        }
+    }
+    None
+}
+
+async fn handle_api(
+    stream: &mut tokio::net::TcpStream,
+    spaces_root: &Path,
+    registry: &AppRegistry,
+    method: &str,
+    raw_path: &str,
+    body: &[u8],
+    content_type: &str,
+) -> std::io::Result<()> {
+    let path = raw_path.split(['?', '#']).next().unwrap_or("");
+    let decoded = percent_decode(path);
+    let segs: Vec<&str> = decoded.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.len() < 3 || segs[1] != "_api" {
+        return respond(stream, 404, "text/plain", b"not found", false).await;
+    }
+    let Some(entry) = registry.lookup(segs[0]) else {
+        return respond(stream, 404, "text/plain", b"unknown app", false).await;
+    };
+    let app_dir = spaces_root.join(&entry.space).join("apps").join(&entry.name);
+    if !app_dir.is_dir() {
+        return respond(stream, 404, "text/plain", b"app not found on disk", false).await;
+    }
+
+    match segs.get(2).copied() {
+        Some("kv") => handle_kv(stream, &app_dir, method, &segs[3..], body).await,
+        Some("upload") if method == "POST" => handle_upload(stream, &app_dir, &segs[0], body, content_type).await,
+        _ => respond(stream, 404, "text/plain", b"unknown api endpoint", false).await,
+    }
+}
+
+async fn handle_kv(
+    stream: &mut tokio::net::TcpStream,
+    _app_dir: &Path,
+    _method: &str,
+    _key: &[&str],
+    _body: &[u8],
+) -> std::io::Result<()> {
+    respond(stream, 501, "text/plain", b"kv not implemented", false).await
+}
+
+async fn handle_upload(
+    stream: &mut tokio::net::TcpStream,
+    _app_dir: &Path,
+    _uuid: &str,
+    _body: &[u8],
+    _content_type: &str,
+) -> std::io::Result<()> {
+    respond(stream, 501, "text/plain", b"upload not implemented", false).await
 }
 
 fn mime_for(path: &Path) -> &'static str {
@@ -392,5 +502,45 @@ mod tests {
         let reg = AppRegistry::load(&PathBuf::from("/tmp"));
         let s = AppServer { port: 9999, registry: reg, spaces_root: PathBuf::from("/tmp") };
         assert_eq!(s.app_url("some-uuid"), "http://127.0.0.1:9999/some-uuid/");
+    }
+
+    #[tokio::test]
+    async fn options_request_returns_204_with_cors() {
+        let srv = AppServer::start(setup()).await.unwrap();
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let c = reqwest::Client::new();
+
+        let r = c.request(reqwest::Method::OPTIONS, format!("{base}/default/deck/"))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 204);
+        assert_eq!(r.headers()["access-control-allow-origin"], "*");
+    }
+
+    #[tokio::test]
+    async fn put_outside_api_is_405() {
+        let srv = AppServer::start(setup()).await.unwrap();
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let c = reqwest::Client::new();
+
+        let r = c.put(format!("{base}/default/deck/index.html"))
+            .body("new content")
+            .send().await.unwrap();
+        assert_eq!(r.status(), 405);
+    }
+
+    #[tokio::test]
+    async fn api_methods_routed_to_handle_api() {
+        let srv = AppServer::start(setup()).await.unwrap();
+        let uuid = srv.registry().assign("default", "deck");
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let c = reqwest::Client::new();
+
+        let r = c.get(format!("{base}/{uuid}/_api/kv/foo"))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 501);
+
+        let r = c.post(format!("{base}/{uuid}/_api/upload"))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 501);
     }
 }

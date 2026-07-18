@@ -1,9 +1,9 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, List, ListItem, ListState};
+use ratatui::widgets::{ListItem, ListState};
 
 use crate::app::App;
 
@@ -12,7 +12,6 @@ use super::chrome;
 pub(crate) fn render(f: &mut Frame, app: &App) {
     use crate::app::SessionMode;
     let area = crate::ui::centered(f.area(), 64, 74);
-    f.render_widget(Clear, area);
 
     let sessions = app.filtered_sessions();
     let width = area.width.saturating_sub(4) as usize; // inside border + highlight symbol
@@ -71,40 +70,36 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         .collect();
 
     // Title bar doubles as the search box / rename field / delete prompt.
-    let title: Line = match app.session_mode {
-        SessionMode::Rename => Line::from(format!(
-            " rename: {}▏  (Enter save · Esc cancel) ",
-            app.session_edit
-        )),
+    let title = match app.session_mode {
+        SessionMode::Rename => chrome::input_title(
+            app,
+            "rename session",
+            &app.session_edit,
+            "Enter save · Esc cancel",
+        ),
         SessionMode::ConfirmDelete => {
             let name = app.selected_session().map(|s| s.title).unwrap_or_default();
-            Line::from(format!(
-                " delete \"{}\"? (Ctrl+D confirm · Esc cancel) ",
-                truncate(&name, 30)
-            ))
+            chrome::confirm_title(
+                app,
+                format!("delete \"{}\"?", truncate(&name, 30)),
+                "Ctrl+D confirm · Esc cancel",
+            )
         }
-        SessionMode::Browse => {
-            let keys = if app.settings.hide_hints {
-                ""
-            } else {
-                "  (Ctrl+R rename · Ctrl+D delete)"
-            };
-            let mut spans = vec![Span::raw(" session — search: ")];
-            spans.extend(app.session_filter.spans(&app.theme));
-            spans.push(Span::raw(format!("{keys} ")));
-            Line::from(spans)
-        }
+        SessionMode::Browse => chrome::input_title(
+            app,
+            "session search",
+            &app.session_filter.to_string(),
+            "Ctrl+R rename · Ctrl+D delete",
+        ),
     };
 
-    let list = List::new(items)
-        .block(chrome::popup_block(title, &app.theme))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("▸ ");
+    let inner = chrome::render_frame(f, area, title, &app.theme, true);
+    let list = chrome::standard_list(items);
     let mut state = ListState::default();
     if !sessions.is_empty() {
         state.select(Some(app.session_selected.min(sessions.len() - 1)));
     }
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, inner, &mut state);
 }
 
 /// Truncate `s` to `max` chars, appending `…` when it overflows.

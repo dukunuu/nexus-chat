@@ -1,28 +1,114 @@
-//! Shared popup chrome: the rounded, theme-colored border + bold title every
-//! popup now uses, plus an optional wrapped "description of the selected row"
-//! strip along the bottom (settings, skills) — no markdown, just wrapped
-//! plain text, so a long description doesn't get cut off mid-word.
+//! Shared popup chrome: rounded blocks, consistent list selection, and small
+//! title helpers for browse / edit / confirm modal states.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
+use crate::app::App;
 use crate::theme::Theme;
 
-/// The rounded border + bold accent title shared by every popup.
-pub(crate) fn popup_block<'a>(title: impl Into<Line<'a>>, theme: &Theme) -> Block<'a> {
-    let title = title.into().style(
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-    );
+/// The rounded border + title style shared by every popup.
+pub(crate) fn popup_block_focused<'a>(
+    title: impl Into<Line<'a>>,
+    theme: &Theme,
+    focused: bool,
+) -> Block<'a> {
+    let border = if focused {
+        theme.border
+    } else {
+        theme.border_dim
+    };
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(border))
         .title(title)
+}
+
+/// Clear a popup area and render its rounded frame, returning the inner rect.
+pub(crate) fn render_frame<'a>(
+    f: &mut Frame,
+    area: Rect,
+    title: impl Into<Line<'a>>,
+    theme: &Theme,
+    focused: bool,
+) -> Rect {
+    f.render_widget(Clear, area);
+    let block = popup_block_focused(title, theme, focused);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    inner
+}
+
+/// Standard popup list selection styling: `▸ ` marker + bold selection.
+pub(crate) fn standard_list<'a>(items: Vec<ListItem<'a>>) -> List<'a> {
+    List::new(items)
+        .highlight_symbol("▸ ")
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+}
+
+fn titled_line(app: &App, text: impl Into<String>, color: Color, hint: &str) -> Line<'static> {
+    let text = text.into();
+    let mut spans = vec![Span::styled(
+        format!(" {text} "),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )];
+    if !app.settings.hide_hints && !hint.trim().is_empty() {
+        spans.push(Span::styled(
+            format!("— {hint} "),
+            Style::default().fg(app.theme.fg_dim),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// A normal popup title with optional hint text.
+pub(crate) fn hinted_title(app: &App, text: impl Into<String>, hint: &str) -> Line<'static> {
+    titled_line(app, text, app.theme.accent, hint)
+}
+
+/// A title for text-entry popups: label + live value + trailing cursor.
+pub(crate) fn input_title(
+    app: &App,
+    label: impl Into<String>,
+    value: impl AsRef<str>,
+    hint: &str,
+) -> Line<'static> {
+    let label = label.into();
+    let mut spans = vec![Span::styled(
+        format!(" {label}: "),
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    spans.push(Span::styled(
+        format!("{}▏", value.as_ref()),
+        Style::default().fg(app.theme.fg),
+    ));
+    if !app.settings.hide_hints && !hint.trim().is_empty() {
+        spans.push(Span::styled(
+            format!("  ({hint}) "),
+            Style::default().fg(app.theme.fg_dim),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn confirmish_title(app: &App, text: impl Into<String>, color: Color, hint: &str) -> Line<'static> {
+    titled_line(app, text, color, hint)
+}
+
+/// Confirmation prompt title (warning color).
+pub(crate) fn confirm_title(app: &App, text: impl Into<String>, hint: &str) -> Line<'static> {
+    confirmish_title(app, text, app.theme.warning, hint)
+}
+
+/// Destructive prompt title (error color).
+pub(crate) fn danger_title(app: &App, text: impl Into<String>, hint: &str) -> Line<'static> {
+    confirmish_title(app, text, app.theme.error, hint)
 }
 
 /// Max rows the detail strip will grow to before truncating.

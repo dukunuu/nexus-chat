@@ -638,6 +638,12 @@ impl Db {
         )
     }
 
+    /// Insert a failed-response line. It remains visible in the transcript
+    /// after the status bar changes, but is never replayed to the model.
+    pub fn add_error_message(&self, session_id: &str, content: &str) -> Result<String> {
+        self.insert_message(session_id, "error", content, None, None, None, None, None)
+    }
+
     /// Insert a background-research stage/progress line: plain text, shown in
     /// the transcript but never sent back to the model (unlike `tool_call`
     /// rows, never replayed into build_history either — this is the job's
@@ -1317,7 +1323,11 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
         nb += y * y;
     }
     let denom = na.sqrt() * nb.sqrt();
-    if denom == 0.0 { 0.0 } else { dot / denom }
+    if denom == 0.0 {
+        0.0
+    } else {
+        dot / denom
+    }
 }
 
 /// Quote a query for FTS5 MATCH: each whitespace token becomes a quoted
@@ -1527,11 +1537,10 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert!(hits[0].1.contains("borrow checker"));
 
-        assert!(
-            db.search_session_sources(&s.id, "quantum")
-                .unwrap()
-                .is_empty()
-        );
+        assert!(db
+            .search_session_sources(&s.id, "quantum")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1705,12 +1714,11 @@ mod tests {
         assert_eq!(db.count_sessions(&work.id).unwrap(), 1);
 
         db.rename_space(&work.id, "work-renamed").unwrap();
-        assert!(
-            db.list_spaces()
-                .unwrap()
-                .iter()
-                .any(|s| s.name == "work-renamed")
-        );
+        assert!(db
+            .list_spaces()
+            .unwrap()
+            .iter()
+            .any(|s| s.name == "work-renamed"));
 
         db.delete_space(&work.id).unwrap();
         assert_eq!(db.list_spaces().unwrap().len(), 1); // work is gone
@@ -1745,11 +1753,9 @@ mod tests {
 
         db.set_chunk_embeddings(&id, &[(0, vec![1.0, 0.0]), (1, vec![0.0, 1.0])])
             .unwrap();
-        assert!(
-            files_missing_embeddings(&db.conn, &space)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(files_missing_embeddings(&db.conn, &space)
+            .unwrap()
+            .is_empty());
 
         // Query near the second chunk's vector ranks it first.
         let hits = semantic_chunks(&db.conn, &space, &[0.1, 0.9], 5).unwrap();
@@ -1833,11 +1839,9 @@ mod tests {
         .unwrap();
         let text = file_text(&db.conn, &space, "doc.txt").unwrap().unwrap();
         assert_eq!(text, "one\ntwo\nthree\nfour");
-        assert!(
-            file_text(&db.conn, &space, "missing.txt")
-                .unwrap()
-                .is_none()
-        );
+        assert!(file_text(&db.conn, &space, "missing.txt")
+            .unwrap()
+            .is_none());
         assert_eq!(count_files(&db.conn, &space).unwrap(), 1);
     }
 
@@ -1887,21 +1891,15 @@ mod tests {
         // list_all_watches should return watches from all spaces
         let all_watches = db.list_all_watches().unwrap();
         assert_eq!(all_watches.len(), 3);
-        assert!(
-            all_watches
-                .iter()
-                .any(|w| w.id == id1 && w.space_id == "space-a")
-        );
-        assert!(
-            all_watches
-                .iter()
-                .any(|w| w.id == id2 && w.space_id == "space-b")
-        );
-        assert!(
-            all_watches
-                .iter()
-                .any(|w| w.id == id3 && w.space_id == "space-a")
-        );
+        assert!(all_watches
+            .iter()
+            .any(|w| w.id == id1 && w.space_id == "space-a"));
+        assert!(all_watches
+            .iter()
+            .any(|w| w.id == id2 && w.space_id == "space-b"));
+        assert!(all_watches
+            .iter()
+            .any(|w| w.id == id3 && w.space_id == "space-a"));
 
         // list_watches for one space should only return that space's watches,
         // confirming list_all_watches is not space-scoped

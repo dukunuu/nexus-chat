@@ -1,9 +1,9 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, List, ListItem, ListState};
+use ratatui::widgets::{ListItem, ListState};
 
 use crate::app::App;
 
@@ -12,7 +12,6 @@ use super::chrome;
 pub(crate) fn render(f: &mut Frame, app: &App) {
     use crate::app::FilesMode;
     let area = crate::ui::centered(f.area(), 64, 60);
-    f.render_widget(Clear, area);
 
     if app.files_mode == FilesMode::Pick {
         let entries = app.filtered_picker_entries();
@@ -32,21 +31,24 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
                 }
             })
             .collect();
-        let title = format!(
-            " {} — filter: {}▏  (Enter open/import · Backspace up · Esc cancel) ",
-            app.picker_dir.display(),
-            app.picker_filter,
+        let inner = chrome::render_frame(
+            f,
+            area,
+            chrome::input_title(
+                app,
+                app.picker_dir.display().to_string(),
+                &app.picker_filter,
+                "Enter open/import · Backspace up · Esc cancel",
+            ),
+            &app.theme,
+            true,
         );
-        let block = chrome::popup_block(title, &app.theme);
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-            .highlight_symbol("▸ ");
+        let list = chrome::standard_list(items);
         let mut state = ListState::default();
         if !entries.is_empty() {
             state.select(Some(app.picker_selected.min(entries.len() - 1)));
         }
-        f.render_stateful_widget(list, area, &mut state);
+        f.render_stateful_widget(list, inner, &mut state);
         return;
     }
 
@@ -70,13 +72,17 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         .collect();
 
     let title = match app.files_mode {
-        FilesMode::Add => format!(
-            " import path: {}▏  (Enter import · Esc cancel) ",
-            app.files_edit
+        FilesMode::Add => chrome::input_title(
+            app,
+            "import path",
+            &app.files_edit,
+            "Enter import · Esc cancel",
         ),
-        FilesMode::Rename => format!(
-            " rename to: {}▏  (Enter rename · Esc cancel) ",
-            app.files_edit
+        FilesMode::Rename => chrome::input_title(
+            app,
+            "rename to",
+            &app.files_edit,
+            "Enter rename · Esc cancel",
         ),
         FilesMode::ConfirmDelete => {
             let name = app
@@ -84,27 +90,29 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
                 .get(app.files_selected)
                 .map(|f| f.name.clone())
                 .unwrap_or_default();
-            format!(" remove \"{name}\"? (Ctrl+D confirm · Esc cancel) ")
+            chrome::danger_title(
+                app,
+                format!("remove \"{name}\"?"),
+                "Ctrl+D confirm · Esc cancel",
+            )
         }
-        FilesMode::Browse => crate::ui::hint_title(
+        FilesMode::Browse => chrome::hinted_title(
             app,
-            " files ",
-            "files — Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+O re-extract · Ctrl+D remove",
+            "files",
+            "Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+O re-extract · Ctrl+D remove",
         ),
         // Pick short-circuits with an early return above; this arm only
         // keeps the match exhaustive (a panic here would kill the whole TUI).
-        FilesMode::Pick => String::new(),
+        FilesMode::Pick => Line::from(""),
     };
 
-    let list = List::new(items)
-        .block(chrome::popup_block(title, &app.theme))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("▸ ");
+    let inner = chrome::render_frame(f, area, title, &app.theme, true);
+    let list = chrome::standard_list(items);
     let mut state = ListState::default();
     if !app.files_cache.is_empty() {
         state.select(Some(app.files_selected.min(app.files_cache.len() - 1)));
     }
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, inner, &mut state);
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {

@@ -86,11 +86,6 @@ pub const COMMANDS: &[Command] = &[
         ],
     },
     Command {
-        name: "backend",
-        desc: "switch active model backend",
-        aliases: &["provider", "providers"],
-    },
-    Command {
         name: "swarm",
         desc: "multi-persona roundtable roster",
         aliases: &["swarms", "personas", "panel"],
@@ -139,6 +134,11 @@ pub const COMMANDS: &[Command] = &[
         name: "steer",
         desc: "inject a research instruction mid-flight",
         aliases: &["nudge"],
+    },
+    Command {
+        name: "stop",
+        desc: "stop active response, research, or swarm",
+        aliases: &["cancel", "abort"],
     },
     Command {
         name: "edit",
@@ -506,7 +506,7 @@ impl App {
 
     /// Fuzzy-ranked command suggestions for the current composer text. Empty
     /// unless the text is a bare `/token` still being typed (no space yet).
-    /// Merges built-in commands with installed skills, so `/web-search`
+    /// Merges built-in commands with installed skills, so `/some-skill`
     /// autocompletes and forces the skill exactly like a builtin.
     pub fn command_matches(&self) -> Vec<Match> {
         let text = self.input_text();

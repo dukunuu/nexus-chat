@@ -3,9 +3,9 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::Line;
-use ratatui::widgets::{Clear, List, ListItem, ListState};
+use ratatui::widgets::{ListItem, ListState};
 
 use crate::app::App;
 
@@ -20,7 +20,13 @@ const ROWS: [(&str, &str); 4] = [
 
 pub(crate) fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 60, 40);
-    f.render_widget(Clear, area);
+    let inner = chrome::render_frame(
+        f,
+        area,
+        chrome::hinted_title(app, "login", "pick a backend (Enter · Esc cancel)"),
+        &app.theme,
+        true,
+    );
 
     let items: Vec<ListItem> = ROWS
         .iter()
@@ -38,16 +44,10 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         })
         .collect();
 
-    let list = List::new(items)
-        .block(chrome::popup_block(
-            " login — pick a backend (Enter · Esc cancel) ".to_string(),
-            &app.theme,
-        ))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("▸ ");
+    let list = chrome::standard_list(items);
     let mut state = ListState::default();
     state.select(Some(app.login_selected));
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, inner, &mut state);
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {

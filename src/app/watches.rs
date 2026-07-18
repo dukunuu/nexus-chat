@@ -63,6 +63,7 @@ impl super::App {
     pub(crate) fn open_watch_picker(&mut self) -> anyhow::Result<()> {
         self.watches_cache = self.db.list_watches(&self.active_space.id)?;
         self.watch_selected = 0;
+        self.watch_mode = super::WatchMode::Browse;
         self.popup = super::Popup::Watch;
         Ok(())
     }

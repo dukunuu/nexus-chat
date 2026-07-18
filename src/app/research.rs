@@ -17,7 +17,7 @@ pub(crate) enum ResearchUpdate {
         detail: String,
     },
     /// The Planner finished; the pipeline is paused awaiting approve/edit
-    /// (or its 60s auto-continue timeout).
+    /// until the user approves/edits it or stops the research job.
     PlanReady {
         questions: Vec<String>,
     },
@@ -139,8 +139,8 @@ fn planner_messages_with_context(topic: &str, known: &[String]) -> Vec<ChatMessa
         topic.to_string()
     } else {
         format!(
-            "Topic: {topic}\n\nAlready known (from the user's own files) — plan sub-questions \
-             for the gaps, not what's already covered:\n{}",
+            "Topic: {topic}\n\nAlready known (from local files and/or a preliminary web survey) — \
+             plan sub-questions for the gaps, not what's already covered:\n{}",
             known.join("\n\n")
         )
     };
@@ -273,6 +273,25 @@ async fn complete_text(
         .map_err(|e| e.to_string())
 }
 
+/// Run a non-streaming pipeline agent and terminalize its activity row on
+/// failure. The caller owns the stage-specific success detail.
+async fn complete_agent(
+    provider: &OpenRouter,
+    model: &str,
+    messages: Vec<ChatMessage>,
+    tx: &mpsc::UnboundedSender<ResearchMsg>,
+    ids: &(String, String, String),
+    label: &str,
+) -> Result<String, String> {
+    match complete_text(provider, model, messages).await {
+        Ok(text) => Ok(text),
+        Err(e) => {
+            send_stage(tx, ids, label, format!("error — {e}"));
+            Err(e)
+        }
+    }
+}
+
 async fn plan(
     provider: &OpenRouter,
     model: &str,
@@ -308,23 +327,25 @@ async fn run_searcher(
     toolbox: Arc<ToolBox>,
     tx: &mpsc::UnboundedSender<ResearchMsg>,
     ids: &(String, String, String),
-    round: usize,
+    batch: &str,
     idx: usize,
     total: usize,
 ) -> String {
-    let label = format!("searcher {}/{total}", idx + 1);
+    // Include the batch in the identity so follow-up and steered agents never
+    // overwrite earlier activity rows that happen to have the same index.
+    let label = format!("searcher {batch} {}/{total}", idx + 1);
     send_stage(
         tx,
         ids,
         &label,
-        format!("round {round}: \"{sub_question}\" — starting…"),
+        format!("working — investigating \"{sub_question}\""),
     );
     let messages = vec![
         ChatMessage::text("system", SEARCHER_PROMPT),
         ChatMessage::text("user", sub_question),
     ];
     let tools = toolbox.defs();
-    let (mut rx, _abort) = provider.stream_chat(
+    let (mut rx, abort) = provider.stream_chat(
         model.to_string(),
         messages,
         ChatParams::default(),
@@ -332,30 +353,24 @@ async fn run_searcher(
         toolbox,
         RESEARCH_SEARCHER_MAX_ITERS,
     );
+    let _abort = super::AbortOnDrop(abort);
     let mut buf = String::new();
     while let Some(ev) = rx.recv().await {
         match ev {
             StreamEvent::Token(t) => buf.push_str(&t),
             StreamEvent::Status(s) => {
-                send_stage(
-                    tx,
-                    ids,
-                    &label,
-                    format!("round {round}: \"{sub_question}\" — {s}"),
-                );
+                send_stage(tx, ids, &label, format!("working — {s}"));
             }
             StreamEvent::ToolCall {
-                name, arguments, ..
+                name,
+                arguments,
+                result,
             } => {
-                let arg_summary: String = arguments.chars().take(80).collect();
-                send_stage(
-                    tx,
-                    ids,
-                    &label,
-                    format!("round {round}: \"{sub_question}\" — used {name}({arg_summary})"),
-                );
+                let summary = crate::app::tool_call_summary(&name, &arguments, &result);
+                send_stage(tx, ids, &label, format!("working — {summary}"));
             }
             StreamEvent::Error(e) => {
+                send_stage(tx, ids, &label, format!("error — {e}"));
                 return format!("[search agent error on \"{sub_question}\": {e}]");
             }
             StreamEvent::Done => break,
@@ -364,8 +379,15 @@ async fn run_searcher(
     }
     let text = buf.trim();
     if text.is_empty() {
+        send_stage(tx, ids, &label, "error — no findings returned");
         format!("[no findings for \"{sub_question}\"]")
     } else {
+        send_stage(
+            tx,
+            ids,
+            &label,
+            format!("done — answered \"{sub_question}\""),
+        );
         text.to_string()
     }
 }
@@ -382,9 +404,11 @@ async fn verify_with_quote_check(
     model: &str,
     messages: Vec<ChatMessage>,
     cache_only_toolbox: Arc<ToolBox>,
+    tx: &mpsc::UnboundedSender<ResearchMsg>,
+    ids: &(String, String, String),
 ) -> String {
     let tools = cache_only_toolbox.defs();
-    let (mut rx, _abort) = provider.stream_chat(
+    let (mut rx, abort) = provider.stream_chat(
         model.to_string(),
         messages,
         ChatParams::default(),
@@ -392,12 +416,40 @@ async fn verify_with_quote_check(
         cache_only_toolbox,
         RESEARCH_SEARCHER_MAX_ITERS,
     );
+    let _abort = super::AbortOnDrop(abort);
     let mut buf = String::new();
+    let mut failed = false;
     while let Some(ev) = rx.recv().await {
         match ev {
             StreamEvent::Token(t) => buf.push_str(&t),
-            StreamEvent::Done | StreamEvent::Error(_) => break,
+            StreamEvent::Status(s) => send_stage(tx, ids, "verifier", format!("working — {s}")),
+            StreamEvent::ToolCall {
+                name,
+                arguments,
+                result,
+            } => {
+                let summary = crate::app::tool_call_summary(&name, &arguments, &result);
+                send_stage(tx, ids, "verifier", format!("working — {summary}"));
+            }
+            StreamEvent::Error(e) => {
+                failed = true;
+                send_stage(tx, ids, "verifier", format!("error — {e}"));
+                break;
+            }
+            StreamEvent::Done => break,
             _ => {}
+        }
+    }
+    if !failed {
+        if buf.trim().is_empty() {
+            send_stage(
+                tx,
+                ids,
+                "verifier",
+                "error — no verification output returned",
+            );
+        } else {
+            send_stage(tx, ids, "verifier", "done — source checks complete");
         }
     }
     buf
@@ -414,9 +466,15 @@ async fn run_searchers(
     questions: &[String],
     tx: &mpsc::UnboundedSender<ResearchMsg>,
     ids: &(String, String, String),
-    round: usize,
+    batch: &str,
 ) -> Vec<String> {
     let total = questions.len();
+    send_stage(
+        tx,
+        ids,
+        format!("search {batch}"),
+        format!("working — 0/{total} agents complete"),
+    );
     let mut set = tokio::task::JoinSet::new();
     for (idx, q) in questions.iter().cloned().enumerate() {
         let provider = provider.clone();
@@ -424,8 +482,12 @@ async fn run_searchers(
         let toolbox = toolbox.clone();
         let tx = tx.clone();
         let ids = ids.clone();
+        let batch = batch.to_string();
         set.spawn(async move {
-            run_searcher(&provider, &model, &q, toolbox, &tx, &ids, round, idx, total).await
+            run_searcher(
+                &provider, &model, &q, toolbox, &tx, &ids, &batch, idx, total,
+            )
+            .await
         });
     }
     let mut done = 0usize;
@@ -435,11 +497,17 @@ async fn run_searchers(
         send_stage(
             tx,
             ids,
-            "searching",
-            format!("round {round}, {done}/{total} done"),
+            format!("search {batch}"),
+            format!("working — {done}/{total} agents complete"),
         );
         findings.push(res.unwrap_or_else(|e| format!("[search agent panicked: {e}]")));
     }
+    send_stage(
+        tx,
+        ids,
+        format!("search {batch}"),
+        format!("done — {done}/{total} agents complete"),
+    );
     findings
 }
 
@@ -447,9 +515,11 @@ async fn run_searchers(
 /// caller's channel then closes naturally when this function returns and
 /// `tx` is dropped).
 pub(crate) async fn run_research(
-    provider: OpenRouter,
+    research_provider: OpenRouter,
     research_model: String,
+    escalation_provider: OpenRouter,
     escalation_model: String,
+    embedding_provider: OpenRouter,
     embedding_model: String,
     db_path: std::path::PathBuf,
     topic: String,
@@ -461,11 +531,19 @@ pub(crate) async fn run_research(
     space_id: String,
     space_name: String,
 ) {
-    let known = local_known_chunks(&provider, &embedding_model, &db_path, &space_id, &topic).await;
+    let known = local_known_chunks(
+        &embedding_provider,
+        &embedding_model,
+        &db_path,
+        &space_id,
+        &topic,
+    )
+    .await;
     let ids = (session_id, space_id, space_name);
     let result = run_research_inner(
-        &provider,
+        &research_provider,
         &research_model,
+        &escalation_provider,
         &escalation_model,
         &topic,
         &known,
@@ -518,8 +596,9 @@ async fn local_known_chunks(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_research_inner(
-    provider: &OpenRouter,
+    research_provider: &OpenRouter,
     research_model: &str,
+    escalation_provider: &OpenRouter,
     escalation_model: &str,
     topic: &str,
     known: &[String],
@@ -530,11 +609,69 @@ async fn run_research_inner(
     tx: &mpsc::UnboundedSender<ResearchMsg>,
     ids: &(String, String, String),
 ) -> Result<String, String> {
-    send_stage(tx, ids, "planning", "");
-    let mut questions = plan(provider, research_model, topic, known).await?;
+    // Survey first instead of asking the planner to guess the landscape from
+    // the topic alone. Its cited overview becomes planning context, so the
+    // eventual plan targets real gaps and available evidence.
+    send_stage(
+        tx,
+        ids,
+        "survey",
+        "working — mapping the topic, debates, evidence, and source landscape",
+    );
+    let survey_question = format!(
+        "Conduct a broad preliminary survey of this research topic before planning: {topic}. \
+         Identify the major concepts, current debates, useful source types, and important \
+         evidence gaps."
+    );
+    let survey = run_searcher(
+        research_provider,
+        research_model,
+        &survey_question,
+        toolbox.clone(),
+        tx,
+        ids,
+        "survey",
+        0,
+        1,
+    )
+    .await;
+    persist_session_sources(db_path, &ids.0, std::slice::from_ref(&survey));
+    let mut planning_context = known.to_vec();
+    if !survey.starts_with('[') {
+        planning_context.push(format!("Preliminary web survey:\n{survey}"));
+        send_stage(tx, ids, "survey", "done — landscape mapped for planning");
+    } else {
+        send_stage(
+            tx,
+            ids,
+            "survey",
+            "error — survey failed; planning from local context only",
+        );
+    }
 
-    // Plan-approval gate: show the sub-questions and wait for approve/edit,
-    // auto-continuing after 60s so a backgrounded session never hangs.
+    send_stage(
+        tx,
+        ids,
+        "planner",
+        "working — decomposing the surveyed landscape into focused questions",
+    );
+    let mut questions =
+        match plan(research_provider, research_model, topic, &planning_context).await {
+            Ok(questions) => questions,
+            Err(e) => {
+                send_stage(tx, ids, "planner", format!("error — {e}"));
+                return Err(e);
+            }
+        };
+    send_stage(
+        tx,
+        ids,
+        "planner",
+        format!("done — proposed {} questions", questions.len()),
+    );
+
+    // Plan-approval gate: wait for approve/edit with no timeout. External
+    // editor sessions can be long; `/stop` is the explicit escape hatch.
     if let Some(gate_rx) = gate_rx {
         let _ = tx.send((
             ids.0.clone(),
@@ -544,9 +681,9 @@ async fn run_research_inner(
                 questions: questions.clone(),
             },
         ));
-        questions = match tokio::time::timeout(std::time::Duration::from_secs(60), gate_rx).await {
-            Ok(Ok(edited)) if !edited.is_empty() => edited,
-            // Timeout, dropped sender, or an empty edit — continue as planned.
+        questions = match gate_rx.await {
+            Ok(edited) if !edited.is_empty() => edited,
+            // Dropped sender or an empty edit — continue as planned.
             _ => questions,
         };
     }
@@ -556,8 +693,25 @@ async fn run_research_inner(
         .and_then(|conn| crate::db::pinned_urls(&conn, &ids.0).ok())
         .unwrap_or_default();
 
-    let mut findings =
-        run_searchers(provider, research_model, toolbox, &questions, tx, ids, 1).await;
+    let mut findings: Vec<String> = if !survey.starts_with('[') {
+        // Successful survey: seed it into the findings so synthesis can cite
+        // the landscape overview alongside each answer's own citations.
+        vec![format!("--- Survey overview ---\n{survey}")]
+    } else {
+        Vec::new()
+    };
+    findings.extend(
+        run_searchers(
+            research_provider,
+            research_model,
+            toolbox,
+            &questions,
+            tx,
+            ids,
+            "r1",
+        )
+        .await,
+    );
     persist_session_sources(db_path, &ids.0, &findings);
 
     let steers = drain_steers(&mut steer_rx).await;
@@ -565,26 +719,72 @@ async fn run_research_inner(
         for s in &steers {
             send_stage(tx, ids, "steer", s.clone());
         }
-        let steered = run_searchers(provider, research_model, toolbox, &steers, tx, ids, 1).await;
+        let steered = run_searchers(
+            research_provider,
+            research_model,
+            toolbox,
+            &steers,
+            tx,
+            ids,
+            "r1 steer",
+        )
+        .await;
         persist_session_sources(db_path, &ids.0, &steered);
         findings.extend(steered);
     }
 
-    send_stage(tx, ids, "synthesizing", "");
-    let mut draft = complete_text(
-        provider,
+    send_stage(
+        tx,
+        ids,
+        "synthesizer",
+        format!("working — combining {} agent findings", findings.len()),
+    );
+    let mut draft = complete_agent(
+        research_provider,
         research_model,
         synthesizer_messages(topic, &crate::tools::dedup_source_lines(&findings), &pinned),
+        tx,
+        ids,
+        "synthesizer",
     )
     .await?;
+    send_stage(tx, ids, "synthesizer", "done — draft assembled");
 
-    send_stage(tx, ids, "critiquing", "");
-    let mut critique = parse_critique(
-        &complete_text(provider, research_model, critic_messages(topic, &draft)).await?,
+    send_stage(
+        tx,
+        ids,
+        "critic",
+        "working — checking coverage and contradictions",
     );
+    let mut critique = parse_critique(
+        &complete_agent(
+            research_provider,
+            research_model,
+            critic_messages(topic, &draft),
+            tx,
+            ids,
+            "critic",
+        )
+        .await?,
+    );
+    let critic_detail = match &critique {
+        Critique::Satisfied => "done — draft is sufficiently complete".to_string(),
+        Critique::Gaps(gaps) => format!("done — found {} coverage gaps", gaps.len()),
+        Critique::Contradiction(_) => "done — found a source contradiction".to_string(),
+    };
+    send_stage(tx, ids, "critic", critic_detail);
 
     if let Critique::Gaps(gaps) = &critique {
-        let more = run_searchers(provider, research_model, toolbox, gaps, tx, ids, 2).await;
+        let more = run_searchers(
+            research_provider,
+            research_model,
+            toolbox,
+            gaps,
+            tx,
+            ids,
+            "r2",
+        )
+        .await;
         persist_session_sources(db_path, &ids.0, &more);
         findings.extend(more);
 
@@ -593,38 +793,88 @@ async fn run_research_inner(
             for s in &steers {
                 send_stage(tx, ids, "steer", s.clone());
             }
-            let steered =
-                run_searchers(provider, research_model, toolbox, &steers, tx, ids, 2).await;
+            let steered = run_searchers(
+                research_provider,
+                research_model,
+                toolbox,
+                &steers,
+                tx,
+                ids,
+                "r2 steer",
+            )
+            .await;
             persist_session_sources(db_path, &ids.0, &steered);
             findings.extend(steered);
         }
 
-        send_stage(tx, ids, "re-synthesizing", "");
-        draft = complete_text(
-            provider,
+        send_stage(
+            tx,
+            ids,
+            "synthesizer r2",
+            "working — merging follow-up findings",
+        );
+        draft = complete_agent(
+            research_provider,
             research_model,
             synthesizer_messages(topic, &crate::tools::dedup_source_lines(&findings), &pinned),
+            tx,
+            ids,
+            "synthesizer r2",
         )
         .await?;
-        send_stage(tx, ids, "critiquing", "round 2");
-        critique = parse_critique(
-            &complete_text(provider, research_model, critic_messages(topic, &draft)).await?,
+        send_stage(tx, ids, "synthesizer r2", "done — revised draft assembled");
+        send_stage(
+            tx,
+            ids,
+            "critic r2",
+            "working — reviewing the revised draft",
         );
+        critique = parse_critique(
+            &complete_agent(
+                research_provider,
+                research_model,
+                critic_messages(topic, &draft),
+                tx,
+                ids,
+                "critic r2",
+            )
+            .await?,
+        );
+        let detail = match &critique {
+            Critique::Satisfied => "done — revised draft is complete".to_string(),
+            Critique::Gaps(gaps) => format!("done — {} gaps remain", gaps.len()),
+            Critique::Contradiction(_) => "done — contradiction remains".to_string(),
+        };
+        send_stage(tx, ids, "critic r2", detail);
     }
 
     if let Critique::Contradiction(desc) = &critique {
-        send_stage(tx, ids, "resolving a contradiction", "");
-        let resolution = complete_text(
-            provider,
+        send_stage(
+            tx,
+            ids,
+            "resolver",
+            "working — reconciling conflicting source claims",
+        );
+        let resolution = complete_agent(
+            escalation_provider,
             escalation_model,
             escalation_messages(topic, &draft, &findings, desc),
+            tx,
+            ids,
+            "resolver",
         )
         .await?;
         draft.push_str("\n\n");
         draft.push_str(&resolution);
+        send_stage(tx, ids, "resolver", "done — contradiction reconciled");
     }
 
-    send_stage(tx, ids, "verifying", "");
+    send_stage(
+        tx,
+        ids,
+        "verifier",
+        "working — checking claims, citations, and direct quotes",
+    );
     let verify_toolbox = Arc::new(
         ToolBox::research(
             None,
@@ -636,10 +886,12 @@ async fn run_research_inner(
         .cache_only(),
     );
     let verified_raw = verify_with_quote_check(
-        provider,
+        research_provider,
         research_model,
         verifier_messages(topic, &draft, &findings),
         verify_toolbox,
+        tx,
+        ids,
     )
     .await;
     let verified = if verified_raw.trim().is_empty() {
@@ -648,13 +900,28 @@ async fn run_research_inner(
         verified_raw
     };
 
-    send_stage(tx, ids, "writing final report", "");
-    complete_text(
-        provider,
+    send_stage(
+        tx,
+        ids,
+        "writer",
+        "working — polishing structure and citations",
+    );
+    match complete_text(
+        research_provider,
         research_model,
         writer_messages(topic, &verified, &pinned),
     )
     .await
+    {
+        Ok(report) => {
+            send_stage(tx, ids, "writer", "done — final report ready");
+            Ok(report)
+        }
+        Err(e) => {
+            send_stage(tx, ids, "writer", format!("error — {e}"));
+            Err(e)
+        }
+    }
 }
 
 /// Link every URL cited in `findings` into the session's source bundle
@@ -708,9 +975,12 @@ impl super::App {
             self.status = "a research job is already running".to_string();
             return;
         }
-        let (Some(provider), Some(model)) = (self.provider.clone(), self.current_model.clone())
-        else {
-            self.status = "no model configured — set one in /key or /model".to_string();
+        let Some(model) = self.current_model.clone() else {
+            self.status = "no model configured — set one in /login or /model".to_string();
+            return;
+        };
+        let Some((provider, raw_model)) = self.resolve_model_backend(&model) else {
+            self.status = format!("model backend unavailable: {model} — pick another with /model");
             return;
         };
         let convo: String = self
@@ -746,7 +1016,7 @@ impl super::App {
             );
             let msgs = vec![ChatMessage::text("user", prompt)];
             let result = provider
-                .complete(&model, msgs)
+                .complete(&raw_model, msgs)
                 .await
                 .map(|s| s.trim().to_string())
                 .map_err(|e| e.to_string());
@@ -787,11 +1057,12 @@ impl super::App {
             self.status = "a research job is already running".to_string();
             return;
         }
-        let Some(provider) = self.provider.clone() else {
+        let research_model = self.research_model.trim().to_string();
+        let Some((provider, raw_research_model)) = self.resolve_model_backend(&research_model)
+        else {
             self.open_login_popup();
             return;
         };
-        let research_model = self.research_model.trim().to_string();
         let escalation_model = if self.escalation_model.trim().is_empty() {
             research_model.clone()
         } else {
@@ -827,7 +1098,7 @@ impl super::App {
         let (tx, rx) = mpsc::unbounded_channel();
         self.research_rx = Some(rx);
         self.research_running = Some((session.id.clone(), topic.clone()));
-        self.status = format!("researching: {topic}");
+        self.status = format!("researching: {topic} · Ctrl+Space agents");
 
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         self.research_steer_tx = Some(steer_tx);
@@ -848,11 +1119,21 @@ impl super::App {
         self.scroll = 0;
         self.refresh_toolbox();
 
-        tokio::spawn(run_research(
+        let (escalation_provider, raw_escalation_model) = self
+            .resolve_model_backend(&escalation_model)
+            .unwrap_or_else(|| (provider.clone(), escalation_model.clone()));
+        let embedding_model = self.embedding_model.trim().to_string();
+        let (embedding_provider, raw_embedding_model) = self
+            .resolve_model_backend(&embedding_model)
+            .unwrap_or_else(|| (provider.clone(), embedding_model.clone()));
+
+        let task = tokio::spawn(run_research(
             provider,
-            research_model,
-            escalation_model,
-            self.embedding_model.trim().to_string(),
+            raw_research_model,
+            escalation_provider,
+            raw_escalation_model,
+            embedding_provider,
+            raw_embedding_model,
             self.space.db_path(),
             topic,
             gate_rx,
@@ -863,6 +1144,30 @@ impl super::App {
             space_id,
             space_name,
         ));
+        self.research_abort = Some(task.abort_handle());
+    }
+
+    /// Abort the active research pipeline, including survey/searcher/tool
+    /// streams spawned under its orchestration task.
+    pub(crate) fn stop_research(&mut self) {
+        if let Some(abort) = self.research_abort.take() {
+            abort.abort();
+        }
+        if self.research_rx.take().is_some() {
+            if let Some((session_id, _)) = self.research_running.take() {
+                let _ = self.db.upsert_research_stage_message(
+                    &session_id,
+                    "research",
+                    "stopped by user",
+                );
+            }
+            self.research_plan_gate = None;
+            self.research_steer_tx = None;
+            self.status = "research stopped".to_string();
+            self.popup = super::Popup::None;
+        } else {
+            self.status = "no research job is running".to_string();
+        }
     }
 
     /// Enter on a pending plan gate: continue with the (possibly edited)
@@ -870,25 +1175,46 @@ impl super::App {
     pub(crate) fn approve_research_plan(&mut self) {
         if let Some((_, tx, cached)) = self.research_plan_gate.take() {
             let _ = tx.send(cached);
-            self.status = "continuing research…".to_string();
+            self.status = "continuing research… · Ctrl+Space agents".to_string();
         }
     }
 
-    /// `e` on a pending plan gate: prefill the composer with one question
-    /// per line so the user can edit it like any other message.
+    /// `e` on a pending plan gate: queue a one-question-per-line temporary
+    /// file for `$EDITOR`. The event loop applies it after the editor exits.
     pub(crate) fn edit_research_plan(&mut self) {
-        if let Some((_, _, cached)) = &self.research_plan_gate {
-            let text = cached.join("\n");
-            self.set_input(&text);
-            self.status = "edit the plan, one question per line — Enter to submit".to_string();
+        let Some((_, _, cached)) = &self.research_plan_gate else {
+            return;
+        };
+        let path = std::env::temp_dir().join(format!(
+            "nexus-chat-research-plan-{}.md",
+            uuid::Uuid::new_v4()
+        ));
+        match std::fs::write(&path, format!("{}\n", cached.join("\n"))) {
+            Ok(()) => {
+                self.pending_editor = Some(super::PendingEditor::ResearchPlan(path));
+                self.status = "opening research plan in $EDITOR…".to_string();
+            }
+            Err(e) => self.status = format!("could not prepare research plan editor: {e}"),
         }
     }
 
-    /// Submit an edited plan (composer contents). A no-op with a status
-    /// message if the gate already timed out and auto-continued.
+    /// Read a plan back after `$EDITOR` exits and continue the gated pipeline.
+    pub(crate) fn apply_research_plan_editor(
+        &mut self,
+        path: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let text = std::fs::read_to_string(path)?;
+        let _ = std::fs::remove_file(path);
+        self.submit_research_plan_edit(&text);
+        Ok(())
+    }
+
+    /// Submit an edited plan (editor contents). A no-op with a status
+    /// message if the gate was already approved or the job stopped.
     pub(crate) fn submit_research_plan_edit(&mut self, text: &str) {
         let Some((_, tx, _)) = self.research_plan_gate.take() else {
-            self.status = "plan gate already closed (timed out) — edit ignored".to_string();
+            self.status =
+                "plan gate already closed (sent or job stopped) — edit ignored".to_string();
             return;
         };
         let _ = tx.send(parse_plan_edit(text));
@@ -900,6 +1226,7 @@ impl super::App {
     pub fn on_research_done(&mut self, r: Option<ResearchMsg>) {
         let Some((session_id, space_id, space_name, update)) = r else {
             self.research_rx = None;
+            self.research_abort = None;
             self.research_running = None;
             self.research_plan_gate = None;
             self.research_steer_tx = None;
@@ -921,6 +1248,10 @@ impl super::App {
                             && (m.content == label || m.content.starts_with(&prefix))
                     }) {
                         row.content = text.clone();
+                        // Stage rows update in place, so message count does not
+                        // change and the wrapped transcript cache would otherwise
+                        // keep rendering stale progress.
+                        self.history_cache = Default::default();
                     } else {
                         self.messages.push(crate::db::Message {
                             id: String::new(),
@@ -935,7 +1266,7 @@ impl super::App {
                             persona: None,
                         });
                     }
-                    self.status = format!("research: {text}");
+                    self.status = format!("research: {text} · Ctrl+Space agents");
                 }
             }
             ResearchUpdate::PlanReady { questions } => {
@@ -951,7 +1282,7 @@ impl super::App {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let content = format!(
-                    "Research plan ready — [e]dit / Enter to continue (auto-continues in 60s):\n{plan_text}"
+                    "Research plan ready — [e]dit in $EDITOR / Enter to continue / /stop to cancel:\n{plan_text}"
                 );
                 let _ = self.db.add_research_plan_message(&session_id, &content);
                 if viewing {
@@ -1224,7 +1555,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_gate_edit_prefills_composer_and_submit_sends_parsed_questions() {
+    async fn plan_gate_edit_round_trips_through_external_editor_file() {
         let mut a = test_app();
         a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
@@ -1241,11 +1572,16 @@ mod tests {
         )));
 
         a.edit_research_plan();
-        assert_eq!(a.input_text(), "q1");
-        let text = "edited one\nedited two".to_string();
-        a.submit_research_plan_edit(&text);
+        let path = match a.pending_editor.take().unwrap() {
+            crate::app::PendingEditor::ResearchPlan(path) => path,
+            _ => panic!("expected research-plan editor request"),
+        };
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "q1\n");
+        std::fs::write(&path, "edited one\nedited two\n").unwrap();
+        a.apply_research_plan_editor(&path).unwrap();
         assert!(a.research_plan_gate.is_none());
         assert!(a.status.contains("plan updated"));
+        assert!(!path.exists());
     }
 
     #[tokio::test]
@@ -1258,7 +1594,7 @@ mod tests {
         // is `None` by the time a stray edit submission arrives.
         a.research_plan_gate = None;
         a.submit_research_plan_edit("whatever");
-        assert!(a.status.contains("timed out") || a.status.contains("ignored"));
+        assert!(a.status.contains("ignored"));
     }
 
     #[test]
@@ -1356,6 +1692,14 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 1, "one row per label, updated in place");
         assert_eq!(rows[0].content, "planning: revised");
+        let visible_rows: Vec<_> = a
+            .messages
+            .iter()
+            .filter(|m| m.role == "research_stage")
+            .collect();
+        assert_eq!(visible_rows.len(), 1);
+        assert_eq!(visible_rows[0].content, "planning: revised");
+        assert!(a.status.contains("Ctrl+Space agents"));
     }
 
     #[tokio::test]

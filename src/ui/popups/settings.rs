@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, List, ListItem, ListState};
+use ratatui::widgets::{ListItem, ListState};
 
 use crate::app::{App, SettingsRow};
 
@@ -20,7 +20,6 @@ fn split_label(label: &'static str) -> (String, String) {
 pub(crate) fn render(f: &mut Frame, app: &App) {
     use crate::app::{SETTINGS_GROUPS, SettingsField};
     let area = crate::ui::centered(f.area(), 64, 60);
-    f.render_widget(Clear, area);
 
     let dim = Style::default().fg(app.theme.fg_dim);
     let name_w = SettingsField::ALL
@@ -109,19 +108,20 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         SettingsRow::Group(_) => String::new(),
     };
 
-    let title = crate::ui::hint_title(
-        app,
-        " nerd config ",
-        "nerd config — Space toggles/collapses · type numbers · Esc saves",
+    let inner = chrome::render_frame(
+        f,
+        area,
+        chrome::hinted_title(
+            app,
+            "nerd config",
+            "Space toggles/collapses · type numbers · Esc saves",
+        ),
+        &app.theme,
+        true,
     );
-    let block = chrome::popup_block(title, &app.theme);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
     let (list_area, detail_area) = chrome::split_with_detail(inner, &desc);
 
-    let list = List::new(items)
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("▸ ");
+    let list = chrome::standard_list(items);
     let mut state = ListState::default();
     if !rows.is_empty() {
         state.select(Some(app.settings_selected.min(rows.len() - 1)));

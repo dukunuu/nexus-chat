@@ -78,10 +78,6 @@ impl App {
     /// back to the session model), same pattern as memory extraction.
     /// `before_pct` is only used to report the before/after status on completion.
     fn start_compaction(&mut self, before_pct: u64) {
-        let Some(provider) = self.provider.clone() else {
-            self.status = "set your API key first with /key".to_string();
-            return;
-        };
         let model = if !self.memory_model.trim().is_empty() {
             self.memory_model.clone()
         } else {
@@ -92,6 +88,10 @@ impl App {
                     return;
                 }
             }
+        };
+        let Some((provider, raw_model)) = self.resolve_model_backend(&model) else {
+            self.status = format!("model backend unavailable: {model} — pick another with /model");
+            return;
         };
         let Some(session) = self.session.as_ref() else {
             return;
@@ -129,7 +129,7 @@ impl App {
                  meta-commentary about summarizing. Reply with ONLY the digest.",
             );
             let msgs = vec![ChatMessage::text("user", prompt)];
-            if let Ok(summary) = provider.complete(&model, msgs).await {
+            if let Ok(summary) = provider.complete(&raw_model, msgs).await {
                 let summary = summary.trim().to_string();
                 if !summary.is_empty() {
                     let _ = tx.send((session_id, summary, new_through, before_pct));

@@ -1427,6 +1427,13 @@ async fn ensure_venv(skill_dir: &std::path::Path) -> Result<PathBuf, String> {
     if python.exists() {
         return Ok(python);
     }
+    std::fs::create_dir_all(skill_dir)
+        .map_err(|e| format!("cannot create {skill_dir:?}: {e}"))?;
+    // Corrupt venv from a system Python upgrade — nuke it and recreate.
+    if skill_dir.join(".venv").exists() {
+        std::fs::remove_dir_all(skill_dir.join(".venv"))
+            .map_err(|e| format!("cannot remove corrupt venv: {e}"))?;
+    }
     let out = run_cmd(
         "python3".as_ref(),
         &["-m".as_ref(), "venv".as_ref(), ".venv".as_ref()],

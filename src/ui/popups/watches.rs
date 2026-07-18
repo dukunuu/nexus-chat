@@ -1,18 +1,16 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, List, ListItem, ListState};
+use ratatui::widgets::{ListItem, ListState};
 
-use crate::app::App;
+use crate::app::{App, WatchMode};
 
 use super::chrome;
 
 pub(crate) fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 64, 60);
-    f.render_widget(Clear, area);
-
     let dim = Style::default().fg(app.theme.fg_dim);
     let items: Vec<ListItem> = if app.watches_cache.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
@@ -36,31 +34,63 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             .collect()
     };
 
-    let title = crate::ui::hint_title(
-        app,
-        " watches ",
-        "watches — Enter jump to session · d delete",
-    );
+    let title = match app.watch_mode {
+        WatchMode::ConfirmDelete => {
+            let topic = app
+                .watches_cache
+                .get(app.watch_selected)
+                .map(|w| w.topic.clone())
+                .unwrap_or_default();
+            chrome::confirm_title(
+                app,
+                format!("delete watch \"{topic}\"?"),
+                "Ctrl+D confirm · Esc cancel",
+            )
+        }
+        WatchMode::Browse => {
+            chrome::hinted_title(app, "watches", "Enter jump to session · Ctrl+D delete")
+        }
+    };
 
-    let list = List::new(items)
-        .block(chrome::popup_block(Line::from(title), &app.theme))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("▸ ");
+    let inner = chrome::render_frame(f, area, title, &app.theme, true);
+    let list = chrome::standard_list(items);
     let mut state = ListState::default();
     if !app.watches_cache.is_empty() {
         state.select(Some(app.watch_selected.min(app.watches_cache.len() - 1)));
     }
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, inner, &mut state);
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    match key.code {
-        KeyCode::Esc => app.popup = crate::app::Popup::None,
-        KeyCode::Up => app.move_watch_selection(-1),
-        KeyCode::Down => app.move_watch_selection(1),
-        KeyCode::Enter => app.confirm_watch_session()?,
-        KeyCode::Char('d') => app.delete_selected_watch(),
-        _ => {}
+    match app.watch_mode {
+        WatchMode::ConfirmDelete => match key.code {
+            KeyCode::Char('d')
+                if key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
+                app.delete_selected_watch();
+                app.watch_mode = WatchMode::Browse;
+            }
+            KeyCode::Esc => app.watch_mode = WatchMode::Browse,
+            _ => {}
+        },
+        WatchMode::Browse => match key.code {
+            KeyCode::Esc => app.popup = crate::app::Popup::None,
+            KeyCode::Up => app.move_watch_selection(-1),
+            KeyCode::Down => app.move_watch_selection(1),
+            KeyCode::Enter => app.confirm_watch_session()?,
+            KeyCode::Char('d')
+                if key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
+                if !app.watches_cache.is_empty() {
+                    app.watch_mode = WatchMode::ConfirmDelete;
+                }
+            }
+            _ => {}
+        },
     }
     Ok(())
 }

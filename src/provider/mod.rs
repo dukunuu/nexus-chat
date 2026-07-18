@@ -19,6 +19,41 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// Which configured backend a `Model` came from — every backend's models
+/// are merged into one list (`App::models`), so this is how a pick routes
+/// back to the right one at request time.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum BackendTag {
+    OpenRouter,
+    OpenAi,
+    OpencodeGo,
+    Codex,
+}
+
+impl BackendTag {
+    /// Prefix used to key favorites/last-used/current-model/etc. for this
+    /// backend's models — bare (no prefix) for OpenRouter so existing
+    /// users' saved data keeps working untouched; the other three are
+    /// visually tagged since their raw ids can collide (e.g. two "gpt-4.1"s).
+    pub fn key_prefix(self) -> &'static str {
+        match self {
+            BackendTag::OpenRouter => "",
+            BackendTag::OpenAi => "openai:",
+            BackendTag::OpencodeGo => "opencode:",
+            BackendTag::Codex => "codex:",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            BackendTag::OpenRouter => "OpenRouter",
+            BackendTag::OpenAi => "OpenAI",
+            BackendTag::OpencodeGo => "OpenCode Go",
+            BackendTag::Codex => "Codex",
+        }
+    }
+}
+
 /// A model offered by the provider, as shown in the picker.
 #[derive(Debug, Clone)]
 pub struct Model {
@@ -30,6 +65,8 @@ pub struct Model {
     pub context_length: Option<u64>,
     /// Whether the model accepts image input (`architecture.input_modalities`).
     pub supports_images: bool,
+    /// Which backend this model came from.
+    pub backend: BackendTag,
 }
 
 /// Sampling + reasoning parameters for a completion request.

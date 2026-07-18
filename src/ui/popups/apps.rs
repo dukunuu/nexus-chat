@@ -1,9 +1,9 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, List, ListItem, ListState};
+use ratatui::widgets::{ListItem, ListState};
 
 use crate::app::{App, AppsMode};
 
@@ -11,8 +11,6 @@ use super::chrome;
 
 pub(crate) fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 64, 60);
-    f.render_widget(Clear, area);
-
     let dim = Style::default().fg(app.theme.fg_dim);
     let items: Vec<ListItem> = if app.apps_cache.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
@@ -43,24 +41,26 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
                 .get(app.apps_selected)
                 .cloned()
                 .unwrap_or_default();
-            format!(" remove app \"{name}\" and all its files? (Ctrl+D confirm · Esc cancel) ")
+            chrome::danger_title(
+                app,
+                format!("remove app \"{name}\" and all its files?"),
+                "Ctrl+D confirm · Esc cancel",
+            )
         }
-        AppsMode::Browse => crate::ui::hint_title(
+        AppsMode::Browse => chrome::hinted_title(
             app,
-            " apps ",
-            "apps — Enter open in browser · Ctrl+D remove · /edit <app>/<file> to edit",
+            "apps",
+            "Enter open in browser · Ctrl+D remove · /edit <app>/<file> to edit",
         ),
     };
 
-    let list = List::new(items)
-        .block(chrome::popup_block(title, &app.theme))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("▸ ");
+    let inner = chrome::render_frame(f, area, title, &app.theme, true);
+    let list = chrome::standard_list(items);
     let mut state = ListState::default();
     if !app.apps_cache.is_empty() {
         state.select(Some(app.apps_selected.min(app.apps_cache.len() - 1)));
     }
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, inner, &mut state);
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {

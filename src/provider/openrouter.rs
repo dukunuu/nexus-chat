@@ -28,7 +28,7 @@ const OPENCODE_GO_PREFIX: &str = "go:";
 /// Hard cap on tool round-trips per response, so a model that keeps calling
 /// tools can't loop forever. The default for interactive chat; background
 /// jobs (e.g. deep-research searcher agents) pass their own smaller budget.
-pub(crate) const MAX_TOOL_ITERS: usize = 25;
+pub(crate) const MAX_TOOL_ITERS: usize = 50;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderFlavor {
@@ -213,13 +213,12 @@ impl OpenRouter {
         }
     }
 
-    /// Display name for the active backend, shown in the model picker.
-    pub fn backend_name(&self) -> &'static str {
+    pub fn backend_tag(&self) -> crate::provider::BackendTag {
         match self.flavor {
-            ProviderFlavor::OpenRouter => "OpenRouter",
-            ProviderFlavor::OpenAi => "OpenAI",
-            ProviderFlavor::OpenAiCodex => "Codex",
-            ProviderFlavor::OpencodeGo => "OpenCode Go",
+            ProviderFlavor::OpenRouter => crate::provider::BackendTag::OpenRouter,
+            ProviderFlavor::OpenAi => crate::provider::BackendTag::OpenAi,
+            ProviderFlavor::OpenAiCodex => crate::provider::BackendTag::Codex,
+            ProviderFlavor::OpencodeGo => crate::provider::BackendTag::OpencodeGo,
         }
     }
 
@@ -265,9 +264,8 @@ impl OpenRouter {
     pub async fn list_models(&self) -> Result<Vec<Model>> {
         if self.flavor == ProviderFlavor::OpenAiCodex {
             // Codex-only models — deliberately not merged with OpenRouter's
-            // catalog (switch backends with Ctrl+P / /backend to see that
-            // instead): a few hundred OpenRouter entries used to bury these
-            // 4 alphabetically, making it look like Codex had no models.
+            // catalog (switch backends with Ctrl+P to see that instead): a few hundred OpenRouter entries used to bury these
+            // 7 alphabetically, making it look like Codex had no models.
             return Ok(vec![
                 Model {
                     id: "gpt-5.3-codex-spark".into(),
@@ -275,6 +273,7 @@ impl OpenRouter {
                     supports_reasoning: true,
                     context_length: Some(128_000),
                     supports_images: false,
+                    backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
                     id: "gpt-5.4".into(),
@@ -282,6 +281,7 @@ impl OpenRouter {
                     supports_reasoning: true,
                     context_length: Some(272_000),
                     supports_images: true,
+                    backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
                     id: "gpt-5.4-mini".into(),
@@ -289,6 +289,7 @@ impl OpenRouter {
                     supports_reasoning: true,
                     context_length: Some(272_000),
                     supports_images: true,
+                    backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
                     id: "gpt-5.5".into(),
@@ -296,6 +297,31 @@ impl OpenRouter {
                     supports_reasoning: true,
                     context_length: Some(272_000),
                     supports_images: true,
+                    backend: crate::provider::BackendTag::Codex,
+                },
+                Model {
+                    id: "gpt-5.6-sol".into(),
+                    name: "GPT-5.6 Sol".into(),
+                    supports_reasoning: true,
+                    context_length: Some(1_000_000),
+                    supports_images: true,
+                    backend: crate::provider::BackendTag::Codex,
+                },
+                Model {
+                    id: "gpt-5.6-terra".into(),
+                    name: "GPT-5.6 Terra".into(),
+                    supports_reasoning: true,
+                    context_length: Some(1_000_000),
+                    supports_images: true,
+                    backend: crate::provider::BackendTag::Codex,
+                },
+                Model {
+                    id: "gpt-5.6-luna".into(),
+                    name: "GPT-5.6 Luna".into(),
+                    supports_reasoning: true,
+                    context_length: Some(1_000_000),
+                    supports_images: true,
+                    backend: crate::provider::BackendTag::Codex,
                 },
             ]);
         }
@@ -363,6 +389,7 @@ impl OpenRouter {
                     context_length: m.context_length,
                     id: m.id,
                     supports_images,
+                    backend: self.backend_tag(),
                 }
             })
             .collect();
@@ -373,6 +400,32 @@ impl OpenRouter {
     /// One-shot, non-streaming completion. Used for short utility calls like
     /// generating a session topic/slug. Returns the assistant's message text.
     pub async fn complete(&self, model: &str, messages: Vec<ChatMessage>) -> Result<String> {
+        // ChatGPT's Codex endpoint is stream-oriented: non-streaming requests
+        // are rejected or can return no usable output. Utility jobs (titles,
+        // memory, compaction, research metadata) still need a one-shot string,
+        // so collect the same proven SSE path used by interactive chat.
+        if self.flavor == ProviderFlavor::OpenAiCodex {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let finish = self
+                .run_codex_stream(model, &messages, &ChatParams::default(), &[], &tx)
+                .await?;
+            drop(tx);
+
+            let mut text = String::new();
+            let mut error = None;
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    StreamEvent::Token(token) => text.push_str(&token),
+                    StreamEvent::Error(message) => error = Some(message),
+                    _ => {}
+                }
+            }
+            if matches!(finish, Finish::Errored) {
+                anyhow::bail!(error.unwrap_or_else(|| "Codex completion failed".to_string()));
+            }
+            return Ok(text);
+        }
+
         let body = serde_json::json!({
             "model": model,
             "messages": messages,
@@ -430,9 +483,8 @@ impl OpenRouter {
             .and_then(|c| c.get(0))
             .and_then(|c| c.get("message"))
             .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string())
+            .and_then(wire_text)
+            .unwrap_or_default())
     }
 
     /// One-shot, non-streaming vision call: describe `image_data_url` with `model`.
@@ -955,22 +1007,33 @@ fn codex_input(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
     messages
         .iter()
         .filter(|m| m.role != "system")
-        .map(|m| match m.role.as_str() {
-            "assistant" if m.tool_calls.is_some() => serde_json::json!({
-                "type": "function_call",
-                "call_id": m.tool_calls.as_ref().unwrap()[0].id,
-                "name": m.tool_calls.as_ref().unwrap()[0].name,
-                "arguments": m.tool_calls.as_ref().unwrap()[0].arguments,
-            }),
-            "assistant" => serde_json::json!({
+        .flat_map(|m| match m.role.as_str() {
+            // A model may request several tools in parallel. Every subsequent
+            // function_call_output must have a matching function_call item;
+            // emitting only calls[0] makes Codex reject the other outputs.
+            "assistant" if m.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) => m
+                .tool_calls
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|call| {
+                    serde_json::json!({
+                        "type": "function_call",
+                        "call_id": call.id,
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "assistant" => vec![serde_json::json!({
                 "role": "assistant",
                 "content": [{ "type": "output_text", "text": m.content, "annotations": [] }],
-            }),
-            "tool" => serde_json::json!({
+            })],
+            "tool" => vec![serde_json::json!({
                 "type": "function_call_output",
                 "call_id": m.tool_call_id.as_deref().unwrap_or_default(),
                 "output": m.content,
-            }),
+            })],
             _ => {
                 let mut content = Vec::new();
                 if !m.content.is_empty() {
@@ -979,7 +1042,7 @@ fn codex_input(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
                 for image_url in &m.images {
                     content.push(serde_json::json!({ "type": "input_image", "detail": "auto", "image_url": image_url }));
                 }
-                serde_json::json!({ "role": "user", "content": content })
+                vec![serde_json::json!({ "role": "user", "content": content })]
             }
         })
         .collect()
@@ -1269,10 +1332,35 @@ fn vision_body(model: &str, image_data_url: &str) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn codex_catalog_matches_current_chatgpt_models() {
+        let models = OpenRouter::openai_codex("token".into())
+            .list_models()
+            .await
+            .unwrap();
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+
+        assert_eq!(
+            ids,
+            [
+                "gpt-5.3-codex-spark",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.5",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+            ]
+        );
+        assert!(models.iter().all(|model| {
+            model.backend == crate::provider::BackendTag::Codex && model.supports_reasoning
+        }));
+    }
+
     #[test]
-    fn opencode_go_reports_its_own_backend_name_base_and_defaults() {
+    fn opencode_go_reports_its_own_backend_base_and_defaults() {
         let p = OpenRouter::opencode_go("k".into());
-        assert_eq!(p.backend_name(), "OpenCode Go");
+        assert_eq!(p.backend_tag().display_name(), "OpenCode Go");
         assert_eq!(p.flavor.base(), "https://opencode.ai/zen/v1");
         assert!(!p.default_utility_model().is_empty());
         assert!(!p.default_research_model().is_empty());
@@ -1453,6 +1541,51 @@ mod tests {
         assert_eq!(acc.len(), 2);
         assert_eq!(acc[&0].name, "skill");
         assert_eq!(acc[&1].name, "web_search");
+    }
+
+    #[test]
+    fn codex_input_emits_every_parallel_function_call_before_outputs() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".into(),
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "call_a".into(),
+                        name: "first".into(),
+                        arguments: "{}".into(),
+                    },
+                    ToolCall {
+                        id: "call_b".into(),
+                        name: "second".into(),
+                        arguments: r#"{"value":2}"#.into(),
+                    },
+                ]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "first result".into(),
+                tool_call_id: Some("call_a".into()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "second result".into(),
+                tool_call_id: Some("call_b".into()),
+                ..Default::default()
+            },
+        ];
+
+        let input = codex_input(&messages);
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["call_id"], "call_a");
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["call_id"], "call_b");
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[2]["call_id"], "call_a");
+        assert_eq!(input[3]["type"], "function_call_output");
+        assert_eq!(input[3]["call_id"], "call_b");
     }
 
     #[test]

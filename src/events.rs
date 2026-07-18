@@ -90,8 +90,26 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                         handle_key(&mut app, k)?;
                         // /edit queued an app file — open it now (this loop
                         // owns the terminal, run_command doesn't).
-                        if let Some(path) = app.pending_editor.take() {
-                            edit_in_external_editor(terminal, &path)?;
+                        if let Some(edit) = app.pending_editor.take() {
+                            match edit {
+                                crate::app::PendingEditor::AppFile(path) => {
+                                    if let Err(e) = edit_in_external_editor(terminal, &path) {
+                                        app.status = format!("editor failed: {e}");
+                                    }
+                                }
+                                crate::app::PendingEditor::Persona(path) => {
+                                    match edit_in_external_editor(terminal, &path) {
+                                        Ok(()) => app.apply_swarm_persona_editor(&path)?,
+                                        Err(e) => app.status = format!("editor failed: {e}"),
+                                    }
+                                }
+                                crate::app::PendingEditor::ResearchPlan(path) => {
+                                    match edit_in_external_editor(terminal, &path) {
+                                        Ok(()) => app.apply_research_plan_editor(&path)?,
+                                        Err(e) => app.status = format!("editor failed: {e}"),
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -216,8 +234,13 @@ fn edit_in_external_editor(terminal: &mut DefaultTerminal, path: &std::path::Pat
         crossterm::event::DisableBracketedPaste
     );
     ratatui::restore();
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-    let _ = std::process::Command::new(editor).arg(path).status();
+    let editor_raw = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let mut parts = editor_raw.split_whitespace();
+    let editor = parts.next().unwrap_or("vi");
+    let status = std::process::Command::new(editor)
+        .args(parts)
+        .arg(path)
+        .status();
     *terminal = ratatui::init();
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -225,7 +248,18 @@ fn edit_in_external_editor(terminal: &mut DefaultTerminal, path: &std::path::Pat
         crossterm::event::EnableBracketedPaste
     );
     terminal.clear()?;
-    Ok(())
+    match status {
+        Ok(code) if code.success() => Ok(()),
+        Ok(code) => {
+            // Non-zero exit (vim `:cq`, user abort, etc.) — the terminal is
+            // restored but the caller should not consume the edited file.
+            Err(anyhow::anyhow!(
+                "editor exited with code {}",
+                code.code().unwrap_or(-1)
+            ))
+        }
+        Err(e) => Err(anyhow::anyhow!("could not launch editor: {e}")),
+    }
 }
 
 fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {

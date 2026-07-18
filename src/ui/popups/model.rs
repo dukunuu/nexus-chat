@@ -2,12 +2,13 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem};
 
 use crate::app::{App, ModelPanel, Popup};
 use crate::provider::Model;
+use crate::ui::popups::chrome;
 
 pub(crate) fn render(f: &mut Frame, app: &mut App) {
     let (fav_outer, avail_outer) = model_popup_areas(f.area());
@@ -16,36 +17,43 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
 
     let fav_focused = app.model_focus == ModelPanel::Favorites;
     let fav_title = match app.model_pick_target {
-        crate::app::ModelPickTarget::Memory => " ★ Favorites — picking memory model ",
-        crate::app::ModelPickTarget::Transcriber => " ★ Favorites — picking image model ",
-        crate::app::ModelPickTarget::Ocr => " ★ Favorites — picking OCR model ",
-        crate::app::ModelPickTarget::Research => " ★ Favorites — picking research model ",
-        crate::app::ModelPickTarget::Escalation => " ★ Favorites — picking escalation model ",
-        crate::app::ModelPickTarget::Session => " ★ Favorites ",
-        crate::app::ModelPickTarget::SwarmPersona(_) => " ★ Favorites — picking persona model ",
+        crate::app::ModelPickTarget::Memory => {
+            chrome::hinted_title(app, "★ Favorites — picking memory model", "")
+        }
+        crate::app::ModelPickTarget::Transcriber => {
+            chrome::hinted_title(app, "★ Favorites — picking image model", "")
+        }
+        crate::app::ModelPickTarget::Ocr => {
+            chrome::hinted_title(app, "★ Favorites — picking OCR model", "")
+        }
+        crate::app::ModelPickTarget::Research => {
+            chrome::hinted_title(app, "★ Favorites — picking research model", "")
+        }
+        crate::app::ModelPickTarget::Escalation => {
+            chrome::hinted_title(app, "★ Favorites — picking escalation model", "")
+        }
+        crate::app::ModelPickTarget::Session => chrome::hinted_title(app, "★ Favorites", ""),
+        crate::app::ModelPickTarget::SwarmPersona(_) => {
+            chrome::hinted_title(app, "★ Favorites — picking persona model", "")
+        }
     };
 
     // Favorites column.
     let fav_items = model_items(app, &app.favorite_models());
-    let fav_list = panel_list(fav_items, Line::from(fav_title), fav_focused, &app.theme);
+    let fav_list = panel_list(fav_items, fav_title, fav_focused, &app.theme);
     f.render_stateful_widget(fav_list, fav_outer, &mut app.fav_state);
 
     // Available column (with the search box in the title).
     let avail_items = model_items(app, &app.available_models());
-    let backend = app
-        .provider_backend_name()
-        .unwrap_or("no backend configured");
-    let hint = if app.settings.hide_hints {
-        ""
-    } else {
-        "  (Ctrl+P switch backend · Ctrl+S fav · Ctrl+T reason)"
-    };
-    let mut title_spans = vec![Span::raw(format!(" Available [{backend}] — search: "))];
-    title_spans.extend(app.model_filter.spans(&app.theme));
-    title_spans.push(Span::raw(format!("{hint} ")));
+    let backend = app.model_backend_filter_label();
     let avail_list = panel_list(
         avail_items,
-        Line::from(title_spans),
+        chrome::input_title(
+            app,
+            format!("Available [{backend}] search"),
+            &app.model_filter.to_string(),
+            "Ctrl+P switch backend · Ctrl+S fav · Ctrl+T reason",
+        ),
         !fav_focused,
         &app.theme,
     );
@@ -56,20 +64,21 @@ fn model_items(app: &App, models: &[&Model]) -> Vec<ListItem<'static>> {
     models
         .iter()
         .map(|m| {
-            let marker = if app.favorites.contains(&m.id) {
+            let id = crate::app::composite_id(m);
+            let marker = if app.favorites.contains(&id) {
                 "★ "
-            } else if app.last_used.contains_key(&m.id) {
+            } else if app.last_used.contains_key(&id) {
                 "• "
             } else {
                 "  "
             };
             // Reasoning badge: [r:high] if set, [r] if supported but off.
-            let badge = match app.reasoning_of(&m.id) {
+            let badge = match app.reasoning_of(&id) {
                 Some(effort) => format!("  [r:{effort}]"),
                 None if m.supports_reasoning => "  [r]".to_string(),
                 None => String::new(),
             };
-            let mut spans = vec![Span::raw(format!("{marker}{}{badge}", m.id))];
+            let mut spans = vec![Span::raw(format!("{marker}{id}{badge}"))];
             // Vision glyph (dim) for models with image support.
             if m.supports_images {
                 spans.push(Span::styled(" ⊡", Style::default().fg(app.theme.fg_dim)));
@@ -85,20 +94,7 @@ fn panel_list<'a>(
     focused: bool,
     theme: &crate::theme::Theme,
 ) -> List<'a> {
-    let border = if focused {
-        theme.border
-    } else {
-        theme.border_dim
-    };
-    List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border))
-                .title(title),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .highlight_symbol("› ")
+    chrome::standard_list(items).block(chrome::popup_block_focused(title, theme, focused))
 }
 
 /// Outer rects of the model picker's two columns (Favorites, Available).
@@ -119,7 +115,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         // Ctrl+P narrows noisy provider catalogs; Ctrl+S favorites; Ctrl+T cycles reasoning effort.
-        KeyCode::Char('p') if ctrl => app.cycle_backend(),
+        KeyCode::Char('p') if ctrl => app.cycle_model_backend_filter(),
         KeyCode::Char('s') if ctrl => app.toggle_favorite_focused()?,
         KeyCode::Char('t') if ctrl => app.cycle_reasoning_focused()?,
         // Cancelling a memory-model pick returns to /config, same as picking one.

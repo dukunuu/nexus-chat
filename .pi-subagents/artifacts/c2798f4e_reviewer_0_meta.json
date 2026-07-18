@@ -1,0 +1,37 @@
+{
+  "runId": "c2798f4e",
+  "agent": "reviewer",
+  "task": "Review only current src/app/swarm.rs diff for round-based swarm moderation plus persona tool-call support. Check that each roster row gets one chance per round, moderator waits for every row's nonempty successful response, added personas get a chance, stream tool loop is correctly collected/aborted, and tool progress works. Do not edit. Return actionable findings only.",
+  "exitCode": 0,
+  "usage": {
+    "input": 56483,
+    "output": 7265,
+    "cacheRead": 529920,
+    "cacheWrite": 0,
+    "cost": 0.7653249999999999,
+    "turns": 15
+  },
+  "model": "openai-codex/gpt-5.6-sol:high",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 56483,
+        "output": 7265,
+        "cacheRead": 529920,
+        "cacheWrite": 0,
+        "cost": 0.7653249999999999,
+        "turns": 15
+      }
+    }
+  ],
+  "durationMs": 345181,
+  "toolCount": 27,
+  "transcriptPath": "/home/dukunuu/Work/nexus-chat/.pi-subagents/artifacts/c2798f4e_reviewer_0_transcript.jsonl",
+  "timestamp": 1783698099659
+}
