@@ -71,6 +71,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             ),
             SettingsField::EmbeddingModel => numeric(&app.settings_inputs[6]),
             SettingsField::BlockedDomains => numeric(&app.settings_inputs[7]),
+            SettingsField::ImageGenModel => numeric(&app.image_gen_model),
         }
     };
 
@@ -141,6 +142,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             | Some(SettingsField::OcrModel)
             | Some(SettingsField::ResearchModel)
             | Some(SettingsField::EscalationModel)
+            | Some(SettingsField::ImageGenModel)
     );
     if picker {
         match key.code {
@@ -150,6 +152,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 Some(SettingsField::OcrModel) => app.open_model_picker_for_ocr(),
                 Some(SettingsField::ResearchModel) => app.open_model_picker_for_research(),
                 Some(SettingsField::EscalationModel) => app.open_model_picker_for_escalation(),
+                Some(SettingsField::ImageGenModel) => app.open_model_picker_for_image_gen(),
                 _ => app.open_model_picker_for_transcriber(),
             },
             KeyCode::Backspace => match app.settings_field() {
@@ -157,6 +160,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 Some(SettingsField::OcrModel) => app.clear_ocr_model()?,
                 Some(SettingsField::ResearchModel) => app.clear_research_model()?,
                 Some(SettingsField::EscalationModel) => app.clear_escalation_model()?,
+                Some(SettingsField::ImageGenModel) => app.clear_image_gen_model()?,
                 _ => app.clear_transcriber_model()?,
             },
             KeyCode::Up => app.move_settings_selection(-1),

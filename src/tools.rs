@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::provider::openrouter::OpenRouter;
 use crate::provider::ToolDef;
 use crate::skills::{load_skills, skill_body};
 
@@ -40,6 +41,17 @@ pub struct ToolBox {
     /// used for the Verifier stage's quote-checking pass, which must only
     /// ever see pages the searchers actually gathered, never fresh fetches.
     cache_only: bool,
+    /// Provider + model for AI image generation. `None` = tool disabled.
+    pub image_gen_backend: Option<(OpenRouter, String)>,
+    /// Directory to save generated images into.
+    pub space_images_dir: PathBuf,
+    /// Directory to also copy generated images into (for file search).
+    pub space_files_dir: PathBuf,
+    /// Directory holding space-local scripts (created by the model via
+    /// `write_script` / `run_python`).
+    pub space_scripts_dir: PathBuf,
+    /// Current session id — for attaching generated images to a message.
+    pub session_id: String,
 }
 
 /// Where the file tools read from: the shared db plus the space to scope to.
@@ -90,6 +102,11 @@ impl ToolBox {
             files,
             apps,
             cache_only: false,
+            image_gen_backend: None,
+            space_images_dir: PathBuf::new(),
+            space_files_dir: PathBuf::new(),
+            space_scripts_dir: PathBuf::new(),
+            session_id: String::new(),
         }
     }
 
@@ -225,34 +242,39 @@ impl ToolBox {
         if !load_skills(&self.skills_dir).is_empty() {
             defs.push(ToolDef {
                 name: "skill".to_string(),
-                description: "Load the full instructions for a named skill.".to_string(),
+                description: "Load the full instructions for a named skill — or a specific file within it (SKILL.md by default).".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
-                    "properties": { "name": { "type": "string", "description": "the skill's name" } },
+                    "properties": {
+                        "name": { "type": "string", "description": "the skill's name" },
+                        "file": { "type": "string", "description": "optional file path inside the skill, default SKILL.md" },
+                    },
                     "required": ["name"],
                 }),
             });
             defs.push(ToolDef {
                 name: "run_script".to_string(),
-                description: "Run a script that ships inside an installed skill. Python scripts run in the skill's own virtualenv (created on first use; the skill's requirements.txt is installed into it automatically). Returns stdout/stderr.".to_string(),
+                description: "Run a script. If space=true, runs from the space's scripts directory (see write_script). Otherwise runs from an installed skill's directory. Python scripts run in the skill's own virtualenv. Returns stdout/stderr.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "skill": { "type": "string", "description": "the skill's name" },
-                        "script": { "type": "string", "description": "script path inside the skill, e.g. 'scripts/convert.py'" },
+                        "skill": { "type": "string", "description": "the skill's name (required unless space=true)" },
+                        "path": { "type": "string", "description": "script path, e.g. 'scripts/convert.py' or 'analyze.py'" },
+                        "space": { "type": "boolean", "description": "if true, look up script in the space scripts dir instead of a skill" },
                         "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments" },
                     },
-                    "required": ["skill", "script"],
+                    "required": ["path"],
                 }),
             });
         }
         defs.push(ToolDef {
             name: "run_python".to_string(),
-            description: "Run a Python script and return its output. Use this for any nontrivial calculation, data processing, or exact math instead of computing mentally. Runs in a persistent scratch virtualenv; print() what you need back. Add packages to the venv with install_packages (no skill/app target).".to_string(),
+            description: "Run a Python script and return its output. Use this for any nontrivial calculation, data processing, or exact math instead of computing mentally. Runs in a persistent scratch virtualenv; print() what you need back. Add packages to the venv with install_packages (no skill/app target). If name is set, saves to <space>/scripts/<name> for reuse via run_script(space=true).".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "code": { "type": "string", "description": "the python source to run" },
+                    "name": { "type": "string", "description": "optional filename to persist in the space scripts dir (e.g. 'analyze.py')" },
                     "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments" },
                 },
                 "required": ["code"],
@@ -482,6 +504,76 @@ impl ToolBox {
                     "required": ["image_ids", "app"],
                 }),
             });
+            defs.push(ToolDef {
+                name: "generate_image".to_string(),
+                description: "Generate an AI image from a text prompt. Returns the image id, path, and a description the model can use to refer to it. The image is saved to the space and visible in the conversation.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": { "type": "string", "description": "detailed text description of the image to create" },
+                        "size": { "type": "string", "description": "image size, default 1024x1024 (also: 1024x1792, 1792x1024)", "default": "1024x1024" },
+                    },
+                    "required": ["prompt"],
+                }),
+            });
+        }
+        if !self.space_scripts_dir.as_os_str().is_empty() {
+            defs.push(ToolDef {
+                name: "list_scripts".to_string(),
+                description: "List scripts in the space's scripts directory (reusable, persist across sessions). Returns [{name, size, ext}].".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                }),
+            });
+            defs.push(ToolDef {
+                name: "write_script".to_string(),
+                description: "Create or overwrite a script file in the space's scripts directory. These scripts persist across sessions and can be run with run_script (set space=true) or edited with edit_script. Use instead of run_python when the logic should be reusable.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "file path relative to the scripts dir, e.g. 'analyze.py' or 'tools/parse.sh'" },
+                        "content": { "type": "string", "description": "full file content" },
+                    },
+                    "required": ["path", "content"],
+                }),
+            });
+            defs.push(ToolDef {
+                name: "read_script".to_string(),
+                description: "Read a space script with line numbers and hashes (same format as read_app_file) — call before edit_script. Lines come back as N:HASH<tab>content. HASH is what edit_script targets.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "file path relative to the scripts dir, e.g. 'analyze.py'" },
+                        "offset": { "type": "integer", "description": "1-based first line to read (default 1)" },
+                        "limit": { "type": "integer", "description": "lines to read, max 200 (default 200)" },
+                    },
+                    "required": ["path"],
+                }),
+            });
+            defs.push(ToolDef {
+                name: "edit_script".to_string(),
+                description: "Edit lines in a space script by hash (same format as edit_file). Call read_script first — each line returns with N:HASH<tab>content. Each edit replaces the ENTIRE line matched by hash. Omit \"new\" to delete the line.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "file path relative to the scripts dir" },
+                        "edits": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "hash": { "type": "string", "description": "the line's HASH from read_script" },
+                                    "new": { "type": ["string", "null"], "description": "replacement text (may contain \\n); null/omitted deletes the line" },
+                                },
+                                "required": ["hash"],
+                            },
+                        },
+                    },
+                    "required": ["path", "edits"],
+                }),
+            });
         }
         if self.research_only {
             defs.retain(|d| {
@@ -555,15 +647,24 @@ fn app_link(&self, uuid: &str) -> String {
         }
         match name {
             "skill" => {
-                let skill_name = serde_json::from_str::<serde_json::Value>(args)
-                    .ok()
-                    .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
-                    .unwrap_or_default();
-                let status = format!("Reading skill {skill_name}…");
-                let path = self.skills_dir.join(&skill_name).join("SKILL.md");
-                let result = match std::fs::read_to_string(&path) {
-                    Ok(md) => skill_body(&md).to_string(),
-                    Err(_) => format!("unknown skill: {skill_name}"),
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let skill_name = v.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string();
+                let file = v.get("file").and_then(|f| f.as_str()).filter(|f| !f.is_empty()).unwrap_or("SKILL.md");
+                let status = format!("Reading {skill_name}/{file}…");
+                let result = match resolve_confined(&self.skills_dir, &skill_name, file) {
+                    Err(e) => e,
+                    Ok(path) if !path.is_file() => format!("no such file: {skill_name}/{file}"),
+                    Ok(path) => {
+                        let text = match std::fs::read_to_string(&path) {
+                            Ok(t) => t,
+                            Err(e) => format!("error reading {skill_name}/{file}: {e}"),
+                        };
+                        if file == "SKILL.md" {
+                            skill_body(&text).to_string()
+                        } else {
+                            text
+                        }
+                    }
                 };
                 (result, status)
             }
@@ -602,7 +703,8 @@ fn app_link(&self, uuid: &str) -> String {
                         .unwrap_or_default()
                         .to_string()
                 };
-                let (skill, script) = (field("skill"), field("script"));
+                let is_space = v.get("space").and_then(|x| x.as_bool()).unwrap_or(false);
+                let (skill, script) = (field("skill"), field("path"));
                 let extra: Vec<String> = v
                     .get("args")
                     .and_then(|a| a.as_array())
@@ -612,12 +714,19 @@ fn app_link(&self, uuid: &str) -> String {
                             .collect()
                     })
                     .unwrap_or_default();
-                let status = format!("Running {skill}/{script}…");
-                let result = match resolve_confined(&self.skills_dir, &skill, &script) {
-                    Err(e) => e,
-                    Ok(file) if !file.is_file() => format!("no such script: {skill}/{script}"),
-                    Ok(file) => {
-                        let dir = self.skills_dir.join(&skill);
+                let status = if is_space {
+                    format!("Running space script {script}…")
+                } else {
+                    format!("Running {skill}/{script}…")
+                };
+                let result = if is_space {
+                    let file = self.space_scripts_dir.join(&script);
+                    if !file.starts_with(&self.space_scripts_dir) {
+                        format!("invalid path: {script}")
+                    } else if !file.is_file() {
+                        format!("no such script: {script}")
+                    } else {
+                        let dir = self.space_scripts_dir.clone();
                         let ext = file
                             .extension()
                             .and_then(|e| e.to_str())
@@ -644,11 +753,59 @@ fn app_link(&self, uuid: &str) -> String {
                             argv.extend(extra.iter().map(std::ffi::OsString::from));
                             let refs: Vec<&std::ffi::OsStr> =
                                 argv.iter().map(|s| s.as_os_str()).collect();
-                            run_cmd(&program, &refs, &dir, 120).await
+                            if ext == "py" {
+                                let scripts_dir = dir.join("scripts");
+                                let pp = scripts_dir.to_string_lossy().to_string();
+                                run_cmd_env(&program, &refs, &dir, 120, &[("PYTHONPATH", &pp)]).await
+                            } else {
+                                run_cmd(&program, &refs, &dir, 120).await
+                            }
                         };
                         match run.await {
                             Ok(out) => format_output(&out),
                             Err(e) => e,
+                        }
+                    }
+                } else {
+                    match resolve_confined(&self.skills_dir, &skill, &script) {
+                        Err(e) => e,
+                        Ok(file) if !file.is_file() => {
+                            format!("no such script: {skill}/{script}")
+                        }
+                        Ok(file) => {
+                            let dir = self.skills_dir.join(&skill);
+                            let ext = file
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .unwrap_or("")
+                                .to_lowercase();
+                            let run = async {
+                                let mut argv: Vec<std::ffi::OsString> = Vec::new();
+                                let program: std::ffi::OsString = match ext.as_str() {
+                                    "py" => {
+                                        let py = ensure_venv(&dir).await?;
+                                        argv.push(file.clone().into());
+                                        py.into()
+                                    }
+                                    "sh" | "bash" => {
+                                        argv.push(file.clone().into());
+                                        "bash".into()
+                                    }
+                                    "js" | "mjs" => {
+                                        argv.push(file.clone().into());
+                                        "node".into()
+                                    }
+                                    _ => file.clone().into(),
+                                };
+                                argv.extend(extra.iter().map(std::ffi::OsString::from));
+                                let refs: Vec<&std::ffi::OsStr> =
+                                    argv.iter().map(|s| s.as_os_str()).collect();
+                                run_cmd(&program, &refs, &dir, 120).await
+                            };
+                            match run.await {
+                                Ok(out) => format_output(&out),
+                                Err(e) => e,
+                            }
                         }
                     }
                 };
@@ -774,40 +931,56 @@ fn app_link(&self, uuid: &str) -> String {
             }
             "run_python" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let code = v
-                    .get("code")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let extra: Vec<String> = v
-                    .get("args")
-                    .and_then(|a| a.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(str::to_string))
-                            .collect()
-                    })
+                let code = v.get("code").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let name = v.get("name").and_then(|n| n.as_str()).filter(|n| !n.is_empty()).map(str::to_string);
+                let extra: Vec<String> = v.get("args").and_then(|a| a.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
                     .unwrap_or_default();
-                let status = "Running python…".to_string();
-                let dir = self.python_dir();
-                let run = async {
-                    if code.trim().is_empty() {
-                        return Err("code must not be empty".to_string());
+                let status = if name.is_some() { "Running script…".to_string() } else { "Running python…".to_string() };
+                let result = if let Some(ref name) = name {
+                    // Persist to space scripts dir and run
+                    let dir = self.space_scripts_dir.clone();
+                    let file = dir.join(name);
+                    let run = async {
+                        if code.trim().is_empty() {
+                            return Err("code must not be empty".to_string());
+                        }
+                        std::fs::create_dir_all(&dir)
+                            .map_err(|e| format!("cannot create scripts dir: {e}"))?;
+                        std::fs::write(&file, &code)
+                            .map_err(|e| format!("cannot write script: {e}"))?;
+                        let py = ensure_venv(&dir).await?;
+                        let mut argv: Vec<std::ffi::OsString> = vec![file.into()];
+                        argv.extend(extra.iter().map(std::ffi::OsString::from));
+                        let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
+                        run_cmd(py.as_os_str(), &refs, &dir, 120).await
+                    };
+                    match run.await {
+                        Ok(out) => format_output(&out),
+                        Err(e) => e,
                     }
-                    std::fs::create_dir_all(&dir)
-                        .map_err(|e| format!("cannot create {dir:?}: {e}"))?;
-                    let script = dir.join("script.py");
-                    std::fs::write(&script, &code)
-                        .map_err(|e| format!("cannot write script: {e}"))?;
-                    let py = ensure_venv(&dir).await?;
-                    let mut argv: Vec<std::ffi::OsString> = vec![script.into()];
-                    argv.extend(extra.iter().map(std::ffi::OsString::from));
-                    let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
-                    run_cmd(py.as_os_str(), &refs, &dir, 120).await
-                };
-                let result = match run.await {
-                    Ok(out) => format_output(&out),
-                    Err(e) => e,
+                } else {
+                    // Current scratch behavior
+                    let dir = self.python_dir();
+                    let run = async {
+                        if code.trim().is_empty() {
+                            return Err("code must not be empty".to_string());
+                        }
+                        std::fs::create_dir_all(&dir)
+                            .map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+                        let script = dir.join("script.py");
+                        std::fs::write(&script, &code)
+                            .map_err(|e| format!("cannot write script: {e}"))?;
+                        let py = ensure_venv(&dir).await?;
+                        let mut argv: Vec<std::ffi::OsString> = vec![script.into()];
+                        argv.extend(extra.iter().map(std::ffi::OsString::from));
+                        let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
+                        run_cmd(py.as_os_str(), &refs, &dir, 120).await
+                    };
+                    match run.await {
+                        Ok(out) => format_output(&out),
+                        Err(e) => e,
+                    }
                 };
                 (result, status)
             }
@@ -1384,6 +1557,156 @@ fn app_link(&self, uuid: &str) -> String {
                 };
                 (result, status)
             }
+            "generate_image" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let prompt = v.get("prompt").and_then(|x| x.as_str()).unwrap_or("");
+                let size = v.get("size").and_then(|x| x.as_str()).unwrap_or("1024x1024");
+                let status = "Generating image…".to_string();
+                let result = match &self.image_gen_backend {
+                    None => "no image generation model configured — set one in /config".to_string(),
+                    Some((provider, model)) => {
+                        if prompt.is_empty() {
+                            "prompt must not be empty".to_string()
+                        } else {
+                            match provider.generate_image(model, prompt, size).await {
+                                Err(e) => format!("image generation failed: {e}"),
+                                Ok(png_bytes) => {
+                                    let id = uuid::Uuid::new_v4().to_string();
+                                    let filename = format!("{id}.png");
+                                    let img_path = self.space_images_dir.join(&filename);
+                                    if let Err(e) = std::fs::create_dir_all(&self.space_images_dir) {
+                                        format!("cannot create images dir: {e}")
+                                    } else if let Err(e) = std::fs::write(&img_path, &png_bytes) {
+                                        format!("cannot write image: {e}")
+                                    } else {
+                                        let _ = std::fs::create_dir_all(&self.space_files_dir);
+                                        let _ = std::fs::write(self.space_files_dir.join(&filename), &png_bytes);
+                                        let description = format!("generated image of {prompt}");
+                                        serde_json::json!({
+                                            "id": id,
+                                            "path": img_path.to_string_lossy(),
+                                            "description": description,
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "list_scripts" => {
+                let status = "Listing scripts…".to_string();
+                let result = match std::fs::read_dir(&self.space_scripts_dir) {
+                    Err(_) => "[]".to_string(),
+                    Ok(entries) => {
+                        let scripts: Vec<serde_json::Value> = entries
+                            .flatten()
+                            .filter(|e| e.path().is_file())
+                            .filter_map(|e| {
+                                let meta = e.metadata().ok()?;
+                                let ext = e.path().extension().and_then(|x| x.to_str()).unwrap_or("").to_string();
+                                Some(serde_json::json!({
+                                    "name": e.file_name().to_string_lossy(),
+                                    "size": meta.len(),
+                                    "ext": ext,
+                                }))
+                            })
+                            .collect();
+                        serde_json::to_string(&scripts).unwrap_or_else(|_| "[]".to_string())
+                    }
+                };
+                (result, status)
+            }
+            "write_script" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let path = v.get("path").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let content = v.get("content").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let status = format!("Writing {path}…");
+                let result = {
+                    let file = self.space_scripts_dir.join(&path);
+                    if path.is_empty() || path.starts_with('/') || path.contains("..") {
+                        format!("invalid path: {path:?}")
+                    } else {
+                        let write = file.parent()
+                            .map(std::fs::create_dir_all)
+                            .unwrap_or(Ok(()))
+                            .and_then(|()| std::fs::write(&file, &content));
+                        match write {
+                            Ok(()) => format!("wrote {path} ({} bytes)", content.len()),
+                            Err(e) => format!("write failed: {e}"),
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "read_script" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let path = v.get("path").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let offset = v.get("offset").and_then(|o| o.as_u64()).unwrap_or(1).max(1) as usize;
+                let limit = v.get("limit").and_then(|l| l.as_u64()).unwrap_or(200).clamp(1, 200) as usize;
+                let status = format!("Reading {path}…");
+                let result = {
+                    let file = self.space_scripts_dir.join(&path);
+                    if path.is_empty() || path.starts_with('/') || path.contains("..") {
+                        format!("invalid path: {path:?}")
+                    } else {
+                        match std::fs::read_to_string(&file) {
+                            Err(e) => format!("cannot read {path}: {e}"),
+                            Ok(text) => {
+                                let lines: Vec<&str> = text.lines().collect();
+                                let total = lines.len();
+                                let start = (offset - 1).min(total);
+                                let slice = &lines[start..(start + limit).min(total)];
+                                if slice.is_empty() {
+                                    format!("{path}: offset {offset} is past the end ({total} lines)")
+                                } else {
+                                    format!(
+                                        "{path} (lines {}-{} of {total}):\n{}",
+                                        start + 1,
+                                        start + slice.len(),
+                                        number_lines_with_hash(slice, start),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "edit_script" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let path = v.get("path").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let edits: Vec<(String, Option<String>)> = v.get("edits")
+                    .and_then(|e| e.as_array())
+                    .map(|arr| {
+                        arr.iter().filter_map(|e| {
+                            let hash = e.get("hash")?.as_str()?.to_string();
+                            let new = e.get("new").and_then(|n| n.as_str()).map(str::to_string);
+                            Some((hash, new))
+                        }).collect()
+                    })
+                    .unwrap_or_default();
+                let status = format!("Editing {path}…");
+                let result = {
+                    let file = self.space_scripts_dir.join(&path);
+                    if path.is_empty() || path.starts_with('/') || path.contains("..") {
+                        format!("invalid path: {path:?}")
+                    } else {
+                        match std::fs::read_to_string(&file) {
+                            Err(e) => format!("cannot read {path}: {e}"),
+                            Ok(text) => match apply_hashline_edits(&text, &edits) {
+                                Err(e) => e,
+                                Ok((new_text, diff)) => match std::fs::write(&file, new_text) {
+                                    Ok(()) => format!("edited {path} — {diff}"),
+                                    Err(e) => format!("write failed: {e}"),
+                                },
+                            },
+                        }
+                    }
+                };
+                (result, status)
+            }
             other => (
                 format!("unknown tool: {other}"),
                 "Running tool…".to_string(),
@@ -1619,11 +1942,23 @@ async fn run_cmd(
     dir: &std::path::Path,
     secs: u64,
 ) -> Result<std::process::Output, String> {
-    let fut = tokio::process::Command::new(program)
-        .args(args)
-        .current_dir(dir)
-        .kill_on_drop(true)
-        .output();
+    run_cmd_env(program, args, dir, secs, &[]).await
+}
+
+/// Like run_cmd but with extra environment variables.
+async fn run_cmd_env(
+    program: &std::ffi::OsStr,
+    args: &[&std::ffi::OsStr],
+    dir: &std::path::Path,
+    secs: u64,
+    envs: &[(&str, &str)],
+) -> Result<std::process::Output, String> {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args).current_dir(dir).kill_on_drop(true);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let fut = cmd.output();
     match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
         Err(_) => Err(format!(
             "{} timed out after {secs}s",
@@ -3153,7 +3488,7 @@ mod tests {
         let (result, status) = tb
             .run(
                 "run_script",
-                r#"{"skill":"t","script":"go.sh","args":["there"]}"#,
+                r#"{"skill":"t","path":"go.sh","args":["there"]}"#,
             )
             .await;
         assert!(status.contains("Running t/go.sh"));
@@ -3165,11 +3500,11 @@ mod tests {
     async fn run_script_is_confined_and_names_missing_scripts() {
         let (tb, _) = skills_toolbox();
         let (result, _) = tb
-            .run("run_script", r#"{"skill":"t","script":"../evil.sh"}"#)
+            .run("run_script", r#"{"skill":"t","path":"../evil.sh"}"#)
             .await;
         assert!(result.contains("invalid"), "{result}");
         let (result, _) = tb
-            .run("run_script", r#"{"skill":"t","script":"nope.sh"}"#)
+            .run("run_script", r#"{"skill":"t","path":"nope.sh"}"#)
             .await;
         assert!(result.contains("no such script"), "{result}");
     }

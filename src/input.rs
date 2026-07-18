@@ -46,6 +46,11 @@ impl Match {
 
 pub const COMMANDS: &[Command] = &[
     Command {
+        name: "gen",
+        desc: "generate an AI image",
+        aliases: &["draw", "imagine", "generate"],
+    },
+    Command {
         name: "new",
         desc: "start new chat",
         aliases: &["chat", "clear"],
@@ -104,6 +109,16 @@ pub const COMMANDS: &[Command] = &[
         name: "files",
         desc: "space files",
         aliases: &["file", "attach", "upload", "docs"],
+    },
+    Command {
+        name: "image",
+        desc: "browse space images",
+        aliases: &["images", "img", "pictures"],
+    },
+    Command {
+        name: "script",
+        desc: "manage space scripts",
+        aliases: &["scripts"],
     },
     Command {
         name: "apps",
@@ -363,6 +378,9 @@ impl App {
             }
             Popup::Files if self.files_mode == crate::app::FilesMode::Add => {
                 self.files_edit.push_str(text)
+            }
+            Popup::Scripts if self.scripts_mode == crate::app::ScriptsMode::Create => {
+                self.scripts_edit.push_str(text)
             }
             Popup::Files if self.files_mode == crate::app::FilesMode::Pick => {
                 for c in text.chars().filter(|c| !c.is_control()) {

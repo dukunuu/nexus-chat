@@ -109,6 +109,12 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                                         Err(e) => app.status = format!("editor failed: {e}"),
                                     }
                                 }
+                                crate::app::PendingEditor::ScriptFile(path) => {
+                                    if let Err(e) = edit_in_external_editor(terminal, &path) {
+                                        app.status = format!("editor failed: {e}");
+                                    }
+                                    app.refresh_scripts();
+                                }
                             }
                         }
                     }
@@ -219,6 +225,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         Popup::ResearchLive => ui::popups::research_live::handle_key(app, key)?,
         Popup::Swarm => ui::popups::swarm::handle_key(app, key)?,
         Popup::Login => ui::popups::login::handle_key(app, key)?,
+        Popup::Images => ui::popups::images::handle_key(app, key)?,
+        Popup::Scripts => ui::popups::scripts::handle_key(app, key)?,
         Popup::None => handle_normal(app, key)?,
     }
     Ok(())
@@ -449,11 +457,15 @@ fn handle_input_mouse(app: &mut App, m: MouseEvent) {
             match app.mouse_target {
                 MouseTarget::History => {
                     let p = app.sel.pos_at(m.column, m.row);
+                    let was_image = p.is_some() && app.open_image_at_line(p.unwrap().0);
                     match app.sel.on_up(p) {
                         Some(crate::selection::Action::Copy(text)) => app.copy_text(text),
                         Some(crate::selection::Action::OpenUrl(url)) => {
                             let _ = open::that_detached(&url);
                             app.status = format!("opened {url}");
+                        }
+                        None if !was_image && p.is_some() => {
+                            // Click without drag on a non-image line: open URLs or start selection.
                         }
                         None => {}
                     }

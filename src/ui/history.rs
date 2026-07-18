@@ -3,6 +3,7 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use image::GenericImageView;
 
 use super::{dim, dot, line_text};
 use crate::app::App;
@@ -21,6 +22,8 @@ pub(crate) struct HistoryCache {
     code: Vec<Option<usize>>,
     blocks: Vec<String>,
     plain: Vec<String>,
+    /// Maps rendered line index -> image path for click-to-open.
+    pub image_at_line: Vec<Option<String>>,
 }
 
 pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
@@ -114,15 +117,25 @@ fn sync_cache(app: &mut App, width: usize) {
     for (i, m) in app.messages.iter().enumerate().skip(c.msg_count) {
         let start = c.lines.len();
         if m.role == "user" {
-            if !m.images.is_empty() {
-                c.lines.push(Line::from(dim(
-                    format!(
-                        "🖼 {} image{}",
-                        m.images.len(),
-                        if m.images.len() == 1 { "" } else { "s" }
-                    ),
-                    &theme,
-                )));
+            for img in &m.images {
+                let half = image_to_halfblock_lines(&img.path, width);
+                if half.len() <= 1 {
+                    // Fallback to text marker (image load failed or too narrow)
+                    c.lines.push(Line::from(dim(
+                        format!("🖼 {}", img.description.as_deref().unwrap_or("image")),
+                        &theme,
+                    )));
+                    c.image_at_line.push(Some(img.path.clone()));
+                } else {
+                    let img_start = c.lines.len();
+                    c.lines.extend(half);
+                    let img_end = c.lines.len();
+                    c.lines.push(Line::from(""));
+                    for _ in img_start..img_end {
+                        c.image_at_line.push(Some(img.path.clone()));
+                    }
+                    c.image_at_line.push(None); // blank line after image
+                }
             }
             push_user(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_stage" {
@@ -150,9 +163,20 @@ fn sync_cache(app: &mut App, width: usize) {
                 &mut c.blocks,
                 &theme,
             );
+            // Render attached images (generated images from /gen command).
+            for img in &m.images {
+                let img_start = c.lines.len();
+                let half = image_to_halfblock_lines(&img.path, width);
+                c.lines.extend(half);
+                c.lines.push(Line::from(""));
+                for _ in img_start..c.lines.len() {
+                    c.image_at_line.push(Some(img.path.clone()));
+                }
+            }
         }
         c.owner.resize(c.lines.len(), Some(i));
         c.code.resize(c.lines.len(), None);
+        c.image_at_line.resize(c.lines.len(), None);
         let new_plain: Vec<String> = c.lines[start..].iter().map(line_text).collect();
         c.plain.extend(new_plain);
     }
@@ -457,6 +481,62 @@ fn push_rendered(
     code.extend(r.code.iter().map(|c| c.map(|id| id + base)));
     blocks.extend(r.blocks);
     out.extend(r.lines);
+}
+
+/// Max cell-rows a rendered image occupies (click-to-open encourages viewing
+/// full size in an external viewer instead of eating the whole terminal).
+const MAX_IMAGE_ROWS: usize = 20;
+
+/// Render a PNG image as half-block ratatui lines for inline display in the
+/// terminal. Falls back to a text marker if the image can't be loaded.
+/// When the image is taller than `MAX_IMAGE_ROWS`, the last line says "🖼 image"
+/// so the user knows to click to open the full version.
+fn image_to_halfblock_lines(path: &str, max_width: usize) -> Vec<Line<'static>> {
+    let img = match image::open(path) {
+        Ok(img) => img,
+        Err(_) => {
+            return vec![Line::from(Span::raw("🖼 [image]"))];
+        }
+    };
+    if max_width < 4 {
+        return vec![Line::from(Span::raw("🖼"))];
+    }
+    let mut cell_w = max_width.min(img.width() as usize);
+    let aspect = img.width() as f64 / img.height() as f64;
+    let mut cell_h = (cell_w as f64 / aspect).round().max(1.0) as usize;
+    let truncated = cell_h > MAX_IMAGE_ROWS;
+    if truncated {
+        cell_h = MAX_IMAGE_ROWS;
+        // Recalculate width from capped height to maintain aspect
+        let capped_w = (cell_h as f64 * aspect).round().max(1.0) as usize;
+        cell_w = cell_w.min(capped_w);
+    }
+    let pixel_w = cell_w;
+    let pixel_h = (cell_h * 2).max(2);
+    let resized = img.resize_exact(pixel_w as u32, pixel_h as u32, image::imageops::FilterType::Lanczos3);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for y in (0..pixel_h).step_by(2) {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(pixel_w);
+        for x in 0..pixel_w {
+            let top = resized.get_pixel(x as u32, y as u32);
+            let bottom = if y + 1 < pixel_h {
+                resized.get_pixel(x as u32, (y + 1) as u32)
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            };
+            let fg = ratatui::style::Color::Rgb(top[0], top[1], top[2]);
+            let bg = ratatui::style::Color::Rgb(bottom[0], bottom[1], bottom[2]);
+            spans.push(Span::styled("▀", Style::default().fg(fg).bg(bg)));
+        }
+        lines.push(Line::from(spans));
+    }
+    if truncated {
+        lines.push(Line::from(Span::styled(
+            "🖼 click to open in viewer",
+            ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+        )));
+    }
+    lines
 }
 
 /// Wrap text to `width`, preserving explicit newlines.

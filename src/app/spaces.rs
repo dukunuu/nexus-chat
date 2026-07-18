@@ -79,11 +79,15 @@ impl App {
         if let (false, Some(s)) = (name.is_empty(), self.selected_space()) {
             self.db.rename_space(&s.id, &name)?;
             self.space.rename_space_dir(&s.name, &name)?;
+            if let Some(reg) = self.app_server.as_ref().map(|s| s.registry()) {
+                reg.rename_space(&s.name, &name);
+            }
             if let Some(cached) = self.spaces_cache.iter_mut().find(|c| c.id == s.id) {
                 cached.name = name.clone();
             }
             if self.active_space.id == s.id {
                 self.active_space.name = name;
+                self.refresh_toolbox();
             }
         }
         self.space_mode = SpaceMode::Browse;

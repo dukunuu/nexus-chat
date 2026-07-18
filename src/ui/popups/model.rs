@@ -36,6 +36,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
         crate::app::ModelPickTarget::SwarmPersona(_) => {
             chrome::hinted_title(app, "★ Favorites — picking persona model", "")
         }
+        crate::app::ModelPickTarget::ImageGen => {
+            chrome::hinted_title(app, "★ Favorites — picking image gen model", "")
+        }
     };
 
     // Favorites column.
@@ -125,7 +128,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 | crate::app::ModelPickTarget::Transcriber
                 | crate::app::ModelPickTarget::Ocr
                 | crate::app::ModelPickTarget::Research
-                | crate::app::ModelPickTarget::Escalation => Popup::Settings,
+                | crate::app::ModelPickTarget::Escalation
+                | crate::app::ModelPickTarget::ImageGen => Popup::Settings,
                 crate::app::ModelPickTarget::SwarmPersona(_) => Popup::Swarm,
                 crate::app::ModelPickTarget::Session => Popup::None,
             };

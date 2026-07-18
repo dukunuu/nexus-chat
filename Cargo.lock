@@ -1698,6 +1698,7 @@ dependencies = [
  "crossterm",
  "directories",
  "futures-util",
+ "image",
  "open",
  "pdf-extract",
  "png",

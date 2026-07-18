@@ -65,6 +65,8 @@ pub struct Model {
     pub context_length: Option<u64>,
     /// Whether the model accepts image input (`architecture.input_modalities`).
     pub supports_images: bool,
+    /// Whether the model generates image output (`architecture.output_modalities`).
+    pub supports_image_generation: bool,
     /// Which backend this model came from.
     pub backend: BackendTag,
 }

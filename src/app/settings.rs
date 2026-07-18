@@ -229,6 +229,9 @@ impl App {
         self.embedding_model = self.settings_inputs[6].trim().to_string();
         self.db
             .set_setting("embedding_model", &self.embedding_model)?;
+        self.image_gen_model = self.image_gen_model.trim().to_string();
+        self.db
+            .set_setting("image_gen_model", &self.image_gen_model)?;
         // Per-space (not a db setting): lives next to the space's other
         // config files so it travels with the space.
         let _ = std::fs::write(

@@ -135,6 +135,13 @@ impl App {
         self.open_model_picker_impl();
     }
 
+    /// Open the same model picker, but a confirmed pick sets the image
+    /// generation model (in `/config`) instead of the active session's model.
+    pub(crate) fn open_model_picker_for_image_gen(&mut self) {
+        self.model_pick_target = ModelPickTarget::ImageGen;
+        self.open_model_picker_impl();
+    }
+
     /// Open the same model picker, but a confirmed pick sets the OCR model
     /// (in `/config`) instead of the active session's model.
     pub(crate) fn open_model_picker_for_ocr(&mut self) {
@@ -338,6 +345,7 @@ impl App {
     }
 
     /// Favorite models matching the search filter, most-recently-used first.
+    /// When `image_gen_only` is true, only includes models that support image generation.
     pub(crate) fn favorite_models(&self) -> Vec<&Model> {
         self.filtered_panel(true)
     }
@@ -608,6 +616,12 @@ impl App {
                 self.status = format!("escalation model: {id}");
                 self.popup = Popup::Settings;
             }
+            ModelPickTarget::ImageGen => {
+                self.image_gen_model = id.clone();
+                self.db.set_setting("image_gen_model", &id)?;
+                self.status = format!("image gen model: {id}");
+                self.popup = Popup::Settings;
+            }
             ModelPickTarget::SwarmPersona(row) => {
                 if let Some(p) = self.swarm_cache.get_mut(row) {
                     p.model = id.clone();
@@ -645,6 +659,14 @@ impl App {
         self.ocr_model.clear();
         self.db.set_setting("ocr_model", "")?;
         self.status = "OCR model cleared — scanned PDFs use tesseract".to_string();
+        Ok(())
+    }
+
+    /// Disable image generation (Backspace on the image gen model row in `/config`).
+    pub(crate) fn clear_image_gen_model(&mut self) -> Result<()> {
+        self.image_gen_model.clear();
+        self.db.set_setting("image_gen_model", "")?;
+        self.status = "image gen model cleared — generation disabled".to_string();
         Ok(())
     }
 

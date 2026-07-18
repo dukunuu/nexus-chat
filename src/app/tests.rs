@@ -167,6 +167,7 @@ pub(super) fn app_with_key() -> App {
             supports_reasoning: false,
             context_length: None,
             supports_images: false,
+            supports_image_generation: false,
             backend: BackendTag::OpenRouter,
         },
         Model {
@@ -175,6 +176,7 @@ pub(super) fn app_with_key() -> App {
             supports_reasoning: false,
             context_length: None,
             supports_images: false,
+            supports_image_generation: false,
             backend: BackendTag::OpenRouter,
         },
     ];
@@ -453,6 +455,7 @@ fn panels_split_favorites_from_available_by_recency() {
             supports_reasoning: false,
             context_length: None,
             supports_images: false,
+            supports_image_generation: false,
             backend: BackendTag::OpenRouter,
         },
         Model {
@@ -461,6 +464,7 @@ fn panels_split_favorites_from_available_by_recency() {
             supports_reasoning: false,
             context_length: None,
             supports_images: false,
+            supports_image_generation: false,
             backend: BackendTag::OpenRouter,
         },
         Model {
@@ -469,6 +473,7 @@ fn panels_split_favorites_from_available_by_recency() {
             supports_reasoning: false,
             context_length: None,
             supports_images: false,
+            supports_image_generation: false,
             backend: BackendTag::OpenRouter,
         },
     ];
@@ -495,6 +500,7 @@ fn toggle_favorite_persists_and_moves_panel() {
         supports_reasoning: false,
         context_length: None,
         supports_images: false,
+        supports_image_generation: false,
         backend: BackendTag::OpenRouter,
     }];
     a.model_focus = ModelPanel::Available;
@@ -529,6 +535,7 @@ fn reasoning_cycles_only_for_supporting_models() {
         supports_reasoning: true,
         context_length: Some(1000),
         supports_images: false,
+        supports_image_generation: false,
         backend: BackendTag::OpenRouter,
     }];
     a.model_focus = ModelPanel::Available;
@@ -1017,6 +1024,7 @@ fn utility_model_resolution_falls_back_from_legacy_openrouter_id_on_openai() {
         supports_reasoning: false,
         context_length: None,
         supports_images: false,
+        supports_image_generation: false,
         backend: BackendTag::OpenAi,
     }];
     a.current_model = Some("openai:gpt-4.1-mini".into());
@@ -1397,6 +1405,7 @@ fn history_carries_image_parts_for_vision_models_and_text_for_others() {
             supports_reasoning: false,
             context_length: None,
             supports_images: true,
+            supports_image_generation: false,
             backend: BackendTag::OpenRouter,
         },
         Model {
@@ -1405,6 +1414,7 @@ fn history_carries_image_parts_for_vision_models_and_text_for_others() {
             supports_reasoning: false,
             context_length: None,
             supports_images: false,
+            supports_image_generation: false,
             backend: BackendTag::OpenRouter,
         },
     ];

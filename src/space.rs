@@ -91,6 +91,11 @@ impl Space {
         self.space_dir(name).join("apps")
     }
 
+    /// Directory holding a space's reusable scripts.
+    pub fn scripts_dir(&self, name: &str) -> PathBuf {
+        self.space_dir(name).join("scripts")
+    }
+
     /// Root of all spaces — what the app server serves from.
     pub fn spaces_root(&self) -> PathBuf {
         self.root.join("spaces")

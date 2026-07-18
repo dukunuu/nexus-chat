@@ -24,12 +24,14 @@ mod compaction;
 mod copy;
 mod export;
 mod files;
+mod images;
 mod memory;
 mod models;
 mod research;
 mod sessions;
 mod settings;
 mod skills_popup;
+mod scripts;
 mod spaces;
 mod swarm;
 #[cfg(test)]
@@ -38,6 +40,7 @@ mod transcribe;
 mod watches;
 pub(crate) use backends::{Backends, composite_id};
 pub(crate) use chat::human_size;
+
 #[cfg(test)]
 use chat::split_inline_reasoning;
 use chat::{code_blocks, pick_greeting};
@@ -89,6 +92,8 @@ pub enum Popup {
     Swarm,
     /// `/login`'s provider selector (OpenRouter / OpenCode Go / OpenAI / Codex).
     Login,
+    Images,
+    Scripts,
 }
 
 /// Which backend a pasted key in `Popup::Key` is for — set by whichever
@@ -142,6 +147,23 @@ pub enum FilesMode {
     Rename,
     ConfirmDelete,
     Pick,
+}
+
+/// What the images popup is doing: browsing or confirming removal.
+#[derive(PartialEq, Clone, Copy)]
+pub enum ImagesMode {
+    Browse,
+    ConfirmDelete,
+}
+
+/// What the scripts popup is doing: browsing, creating, renaming, or
+/// confirming removal of the highlighted script.
+#[derive(PartialEq, Clone, Copy)]
+pub enum ScriptsMode {
+    Browse,
+    Create,
+    Rename,
+    ConfirmDelete,
 }
 
 /// What the space picker is doing: browsing, naming a new space, renaming the
@@ -208,6 +230,8 @@ pub enum ModelPickTarget {
     Escalation,
     /// Picking the model for one row of the active session's `/swarm` roster.
     SwarmPersona(usize),
+    /// Model used for AI image generation.
+    ImageGen,
 }
 
 /// Editable rows in the nerd-config popup.
@@ -232,10 +256,11 @@ pub enum SettingsField {
     OcrEngine,
     EmbeddingModel,
     BlockedDomains,
+    ImageGenModel,
 }
 
 impl SettingsField {
-    pub const ALL: [SettingsField; 19] = [
+    pub const ALL: [SettingsField; 20] = [
         SettingsField::ShowStats,
         SettingsField::ShowReasoning,
         SettingsField::HideHints,
@@ -255,6 +280,7 @@ impl SettingsField {
         SettingsField::OcrEngine,
         SettingsField::EmbeddingModel,
         SettingsField::BlockedDomains,
+        SettingsField::ImageGenModel,
     ];
 
     pub fn label(self) -> &'static str {
@@ -285,6 +311,9 @@ impl SettingsField {
             SettingsField::EmbeddingModel => "embedding model (file search, blank disables)",
             SettingsField::BlockedDomains => {
                 "blocked domains (comma-separated, always excluded; per-space)"
+            }
+            SettingsField::ImageGenModel => {
+                "image gen model (Enter to pick, Backspace clears; blank = disabled)"
             }
         }
     }
@@ -345,6 +374,10 @@ pub const SETTINGS_GROUPS: &[SettingsGroup] = &[
             SettingsField::OcrModel,
             SettingsField::OcrEngine,
         ],
+    },
+    SettingsGroup {
+        name: "Image Generation",
+        fields: &[SettingsField::ImageGenModel],
     },
 ];
 
@@ -472,6 +505,22 @@ pub(crate) enum MemoryOp {
     Delete(usize),
 }
 
+/// One row in the `/image` popup: name, size in bytes, modified rfc3339.
+#[derive(Clone)]
+pub struct ImageMeta {
+    pub name: String,
+    pub size: u64,
+    pub modified: String,
+}
+
+/// One row in the `/script` popup: name, size in bytes, modified rfc3339.
+#[derive(Clone)]
+pub struct ScriptMeta {
+    pub name: String,
+    pub size: u64,
+    pub modified: String,
+}
+
 /// A background event surfaced to the event loop. `None` means that source's
 /// channel closed (task ended).
 /// One file's embedding result: (space id, file id, (seq, vector) pairs or error).
@@ -496,6 +545,7 @@ pub enum PendingEditor {
     AppFile(std::path::PathBuf),
     Persona(std::path::PathBuf),
     ResearchPlan(std::path::PathBuf),
+    ScriptFile(std::path::PathBuf),
 }
 
 /// Ensures a child stream spawned by `OpenRouter::stream_chat` is cancelled
@@ -576,6 +626,8 @@ pub struct App {
     pub local_ocr_model: String,
     /// Embedding model for semantic file search (empty = keyword FTS only).
     pub embedding_model: String,
+    /// Model used for AI image generation (empty = disabled).
+    pub image_gen_model: String,
     /// Base URL of a SearXNG instance for the web-search tool, or empty to
     /// disable it. Configured in-app (Ctrl+O settings), not a config file.
     pub searxng_url: String,
@@ -601,6 +653,8 @@ pub struct App {
     /// `/web` answer mode for the active session (or the next one created).
     pub web_mode: bool,
     pub incognito: bool,
+    /// Temp directory for incognito image files, cleaned up on toggle.
+    pub(crate) incognito_img_dir: Option<std::path::PathBuf>,
     /// A running `/research` job's plan-approval gate: the sender its
     /// pipeline awaits, keyed by session id, plus the sub-questions shown
     /// while the gate is open.
@@ -662,6 +716,17 @@ pub struct App {
     pub apps_cache: Vec<String>,
     pub apps_selected: usize,
     pub apps_mode: AppsMode,
+
+    /// The space's images (`/image` popup): cache and cursor.
+    pub images_cache: Vec<ImageMeta>,
+    pub images_selected: usize,
+    pub images_mode: ImagesMode,
+
+    /// The space's scripts (`/script` popup): cache, cursor, and edit buffer.
+    pub scripts_cache: Vec<ScriptMeta>,
+    pub scripts_selected: usize,
+    pub scripts_mode: ScriptsMode,
+    pub scripts_edit: String,
     /// The space's standing research watches (`/watch` picker): cache + cursor.
     pub watches_cache: Vec<crate::db::Watch>,
     pub watch_selected: usize,
@@ -865,6 +930,10 @@ impl App {
             OpenRouter::default_embedding_model,
             "openai/text-embedding-3-small",
         );
+        let image_gen_model = default_model_id(
+            OpenRouter::default_image_gen_model,
+            "black-forest-labs/flux-dev",
+        );
         let skills_dir = crate::skills::skills_dir(&space.root);
         let skills = crate::skills::load_skills(&skills_dir);
         // Built with search disabled; `load_settings()` below reads the
@@ -899,6 +968,7 @@ impl App {
             forced_skill: None,
             web_mode: false,
             incognito: false,
+            incognito_img_dir: None,
             research_plan_gate: None,
             research_steer_tx: None,
             research_topic_rx: None,
@@ -934,6 +1004,13 @@ impl App {
             watches_cache: Vec::new(),
             watch_selected: 0,
             watch_mode: WatchMode::Browse,
+            images_cache: Vec::new(),
+            images_selected: 0,
+            images_mode: ImagesMode::Browse,
+            scripts_cache: Vec::new(),
+            scripts_selected: 0,
+            scripts_mode: ScriptsMode::Browse,
+            scripts_edit: String::new(),
             files_edit: String::new(),
             picker_dir: std::env::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")),
             picker_entries: Vec::new(),
@@ -953,6 +1030,7 @@ impl App {
             ocr_engine: "auto".to_string(),
             local_ocr_model: "glm-ocr".to_string(),
             embedding_model,
+            image_gen_model,
             base_system_prompt: config::load_system_prompt().unwrap_or_default(),
             verbosity: "concise".to_string(),
             memory_rx: None,
@@ -1074,6 +1152,7 @@ impl App {
                 "ocr_engine" if OCR_ENGINES.contains(&v.as_str()) => self.ocr_engine = v,
                 "local_ocr_model" => self.local_ocr_model = v,
                 "embedding_model" => self.embedding_model = v,
+                "image_gen_model" => self.image_gen_model = v,
                 "compact_threshold" => {
                     if let Ok(t) = v.parse() {
                         self.settings.compact_threshold = t;
@@ -1130,6 +1209,17 @@ impl App {
         if self.is_research_session() {
             toolbox = toolbox.with_research_session(self.session.as_ref().unwrap().id.clone());
         }
+        toolbox.image_gen_backend = (!self.image_gen_model.trim().is_empty())
+            .then(|| self.backends.resolve(self.image_gen_model.trim()))
+            .flatten();
+        toolbox.space_images_dir = self.space.images_dir(&self.active_space.name);
+        toolbox.space_files_dir = self.space.files_dir(&self.active_space.name);
+        toolbox.space_scripts_dir = self.space.scripts_dir(&self.active_space.name);
+        toolbox.session_id = self
+            .session
+            .as_ref()
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
         self.toolbox = std::sync::Arc::new(toolbox);
         self.reload_skills();
     }
@@ -1393,6 +1483,7 @@ impl App {
             "quit" => self.should_quit = true,
             "new" => self.new_session()?,
             "compact" => self.force_compact(),
+            "gen" => self.cmd_generate_image(cmd[token.len()..].trim())?,
             "session" => self.open_session_picker()?,
             "space" => self.open_space_picker()?,
             "model" => self.open_model_picker(),
@@ -1410,6 +1501,20 @@ impl App {
             }
             "skills" => self.open_skills_popup(),
             "files" => self.open_files_popup(),
+            "image" => {
+                if self.incognito {
+                    self.status = "images not available in incognito mode".to_string();
+                } else {
+                    self.open_images_popup();
+                }
+            }
+            "script" => {
+                if self.incognito {
+                    self.status = "scripts not available in incognito mode".to_string();
+                } else {
+                    self.open_scripts_popup();
+                }
+            }
             "apps" => {
                 if self.incognito {
                     self.status = "apps not available in incognito mode".to_string();
@@ -1521,7 +1626,8 @@ impl App {
             | SettingsField::OcrModel
             | SettingsField::ResearchModel
             | SettingsField::EscalationModel
-            | SettingsField::OcrEngine => None,
+            | SettingsField::OcrEngine
+            | SettingsField::ImageGenModel => None,
             SettingsField::Temperature => Some(0),
             SettingsField::TopP => Some(1),
             SettingsField::MaxTokens => Some(2),
@@ -1603,6 +1709,7 @@ pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String 
             )
         }
         "edit_file" => format!("edit_file {}/{}", f("app"), f("path")),
+        "generate_image" => format!("generate_image \"{}\"", f("prompt")),
         _ => {
             let mut a: String = args.chars().take(60).collect();
             if args.chars().count() > 60 {

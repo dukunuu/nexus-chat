@@ -98,6 +98,17 @@ impl AppRegistry {
             .map(|(u, _)| u.clone())
     }
 
+    pub fn rename_space(&self, old: &str, new: &str) {
+        let mut map = self.inner.write().unwrap();
+        for entry in map.values_mut() {
+            if entry.space == old {
+                entry.space = new.to_string();
+            }
+        }
+        drop(map);
+        let _ = self.save();
+    }
+
     fn save(&self) -> Result<(), std::io::Error> {
         let json = serde_json::to_string_pretty(&*self.inner.read().unwrap())?;
         let tmp = self.path.with_extension("json.tmp");

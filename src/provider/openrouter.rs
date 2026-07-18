@@ -91,6 +91,18 @@ impl ProviderFlavor {
         }
     }
 
+    fn supports_image_generation(self, m: &ModelEntry) -> Option<bool> {
+        match self {
+            // OpenRouter reports output_modalities in the catalog — use that.
+            ProviderFlavor::OpenRouter => None,
+            // Only dall-e models on OpenAI.
+            ProviderFlavor::OpenAi => Some(m.id.contains("dall-e")),
+            // Codex and Go don't support image generation.
+            ProviderFlavor::OpenAiCodex => Some(false),
+            ProviderFlavor::OpencodeGo => Some(false),
+        }
+    }
+
     fn add_stream_usage(self, obj: &mut serde_json::Map<String, serde_json::Value>) {
         match self {
             // Ask OpenRouter for exact token accounting in the final chunk.
@@ -161,6 +173,8 @@ struct ModelEntry {
 struct Architecture {
     #[serde(default)]
     input_modalities: Vec<String>,
+    #[serde(default)]
+    output_modalities: Vec<String>,
 }
 
 /// Whether the catalog entry accepts image input.
@@ -168,6 +182,32 @@ fn entry_supports_images(e: &ModelEntry) -> bool {
     e.architecture
         .as_ref()
         .is_some_and(|a| a.input_modalities.iter().any(|m| m == "image"))
+}
+
+/// Whether the catalog entry generates image output.
+fn entry_supports_image_gen(e: &ModelEntry) -> bool {
+    // The API's output_modalities field is authoritative when populated.
+    if e.architecture
+        .as_ref()
+        .is_some_and(|a| a.output_modalities.iter().any(|m| m == "image"))
+    {
+        return true;
+    }
+    // Fallback: match known image-generation model name patterns.
+    // These are specific enough to avoid catching chat models from the same
+    // provider, unlike broad provider-prefix matching.
+    let id = &e.id;
+    id.contains("/flux")
+        || id.contains("dall-e")
+        || id.contains("/stable-diffusion")
+        || id == "recraft-20b" || id.starts_with("recraft-v")
+        || id.contains("/imagen")
+        || id.contains("/pixart")
+        || id.contains("/playground-v")
+        || id == "luma-photon" || id.starts_with("luma/")
+        || id.starts_with("ideogram/")
+        || id.contains("/sdxl")
+        || id.contains("hyper-sd")
 }
 
 impl OpenRouter {
@@ -259,6 +299,15 @@ impl OpenRouter {
         }
     }
 
+    pub fn default_image_gen_model(&self) -> &'static str {
+        match self.flavor {
+            ProviderFlavor::OpenRouter => "black-forest-labs/flux-dev",
+            ProviderFlavor::OpenAi => "dall-e-3",
+            ProviderFlavor::OpenAiCodex => "",
+            ProviderFlavor::OpencodeGo => "",
+        }
+    }
+
     /// Fetch the live model catalog. No hardcoded list except Codex, whose
     /// subscription endpoint does not expose the normal OpenAI models catalog.
     pub async fn list_models(&self) -> Result<Vec<Model>> {
@@ -273,6 +322,7 @@ impl OpenRouter {
                     supports_reasoning: true,
                     context_length: Some(128_000),
                     supports_images: false,
+                    supports_image_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
@@ -281,6 +331,7 @@ impl OpenRouter {
                     supports_reasoning: true,
                     context_length: Some(272_000),
                     supports_images: true,
+                    supports_image_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
@@ -289,6 +340,7 @@ impl OpenRouter {
                     supports_reasoning: true,
                     context_length: Some(272_000),
                     supports_images: true,
+                    supports_image_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
@@ -297,6 +349,7 @@ impl OpenRouter {
                     supports_reasoning: true,
                     context_length: Some(272_000),
                     supports_images: true,
+                    supports_image_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
@@ -305,6 +358,7 @@ impl OpenRouter {
                     supports_reasoning: true,
                     context_length: Some(1_000_000),
                     supports_images: true,
+                    supports_image_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
@@ -313,6 +367,7 @@ impl OpenRouter {
                     supports_reasoning: true,
                     context_length: Some(1_000_000),
                     supports_images: true,
+                    supports_image_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
@@ -321,6 +376,7 @@ impl OpenRouter {
                     supports_reasoning: true,
                     context_length: Some(1_000_000),
                     supports_images: true,
+                    supports_image_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
             ]);
@@ -383,12 +439,17 @@ impl OpenRouter {
                     .flavor
                     .supports_images(&m)
                     .unwrap_or_else(|| entry_supports_images(&m));
+                let supports_image_generation = self
+                    .flavor
+                    .supports_image_generation(&m)
+                    .unwrap_or_else(|| entry_supports_image_gen(&m));
                 Model {
                     name: m.name.unwrap_or_else(|| m.id.clone()),
                     supports_reasoning,
                     context_length: m.context_length,
                     id: m.id,
                     supports_images,
+                    supports_image_generation,
                     backend: self.backend_tag(),
                 }
             })
@@ -491,6 +552,51 @@ impl OpenRouter {
     pub async fn describe_image(&self, model: &str, image_data_url: &str) -> Result<String> {
         self.post_completion(vision_body(model, image_data_url))
             .await
+    }
+
+    /// Generate an image from a text prompt using OpenAI/OpenRouter's
+    /// `/images/generations` endpoint. Returns decoded PNG bytes.
+    pub async fn generate_image(&self, model: &str, prompt: &str, size: &str) -> Result<Vec<u8>> {
+        if let Some(delegate) = self.openrouter_delegate_for_model(model) {
+            return Box::pin(delegate.generate_image(model, prompt, size)).await;
+        }
+        if self.flavor == ProviderFlavor::OpenAiCodex {
+            anyhow::bail!("image generation not supported on Codex");
+        }
+        let (base, model) = self.opencode_route(model);
+        let v = self
+            .client
+            .post(format!("{base}/images/generations"))
+            .bearer_auth(&self.key)
+            .json(&serde_json::json!({
+                "model": model,
+                "prompt": prompt,
+                "n": 1,
+                "size": size,
+                "response_format": "b64_json",
+            }))
+            .send()
+            .await
+            .context("image generation request")?
+            .error_for_status()
+            .context("image generation failed")?
+            .json::<serde_json::Value>()
+            .await
+            .context("parsing image generation response")?;
+        let data = v
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first())
+            .context("no image data in response")?;
+        let b64 = data
+            .get("b64_json")
+            .and_then(|b| b.as_str())
+            .context("no b64_json field")?;
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .context("base64 decode")?;
+        Ok(bytes)
     }
 
     /// One-shot, non-streaming vision call: transcribe a scanned page image.

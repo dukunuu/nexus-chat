@@ -55,24 +55,33 @@ impl App {
                 return;
             }
         };
-        let dir = self.space.images_dir(&self.active_space.name);
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.status = format!("could not create {}: {e}", dir.display());
-            return;
-        }
-        let path = dir.join(format!("{}.png", uuid::Uuid::new_v4()));
+        let (_dir, path) = if self.incognito {
+            let d = self.incognito_img_dir.get_or_insert_with(|| {
+                let p = std::env::temp_dir().join(format!("nexus-incognito-{}", uuid::Uuid::new_v4()));
+                let _ = std::fs::create_dir_all(&p);
+                p
+            });
+            (d.clone(), d.join(format!("{}.png", uuid::Uuid::new_v4())))
+        } else {
+            let dir = self.space.images_dir(&self.active_space.name);
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                self.status = format!("could not create {}: {e}", dir.display());
+                return;
+            }
+            (dir.clone(), dir.join(format!("{}.png", uuid::Uuid::new_v4())))
+        };
         if let Err(e) = std::fs::write(&path, &bytes) {
             self.status = format!("could not write {}: {e}", path.display());
             return;
         }
-        // Also save as a space file so the model can see/OCR/search it.
-        {
+        if !self.incognito {
+            // Also save as a space file so the model can see/OCR/search it.
             let files_dir = self.space.files_dir(&self.active_space.name);
             if std::fs::create_dir_all(&files_dir).is_ok() {
                 let _ = std::fs::write(files_dir.join(path.file_name().unwrap()), &bytes);
             }
+            self.rescan_files();
         }
-        self.rescan_files();
         self.pending_images.push(PendingImage { path });
         let n = self.pending_images.len();
         self.status = format!(
@@ -146,6 +155,14 @@ impl App {
         self.pending_images.clear();
         self.deferred_send = None;
         self.describe_rx = None;
+        self.cleanup_incognito_images();
+    }
+
+    /// Remove the incognito temp image directory if it exists.
+    fn cleanup_incognito_images(&mut self) {
+        if let Some(d) = self.incognito_img_dir.take() {
+            let _ = std::fs::remove_dir_all(&d);
+        }
     }
 }
 

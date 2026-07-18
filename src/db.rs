@@ -800,7 +800,7 @@ impl Db {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn insert_message(
+    pub(crate) fn insert_message(
         &self,
         session_id: &str,
         role: &str,
