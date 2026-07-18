@@ -65,6 +65,14 @@ impl App {
             self.status = format!("could not write {}: {e}", path.display());
             return;
         }
+        // Also save as a space file so the model can see/OCR/search it.
+        {
+            let files_dir = self.space.files_dir(&self.active_space.name);
+            if std::fs::create_dir_all(&files_dir).is_ok() {
+                let _ = std::fs::write(files_dir.join(path.file_name().unwrap()), &bytes);
+            }
+        }
+        self.rescan_files();
         self.pending_images.push(PendingImage { path });
         let n = self.pending_images.len();
         self.status = format!(
@@ -162,8 +170,8 @@ mod tests {
         assert_eq!(reader.info().height, 1);
     }
 
-    #[test]
-    fn attach_saves_png_and_pushes_pending() {
+    #[tokio::test]
+    async fn attach_saves_png_and_pushes_pending() {
         let mut a = crate::app::tests::app_with_key();
         let img = arboard::ImageData {
             width: 2,
