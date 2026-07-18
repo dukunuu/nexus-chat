@@ -439,6 +439,34 @@ impl ToolBox {
                     "required": ["app", "path"],
                 }),
             });
+            defs.push(ToolDef {
+                name: "list_images".to_string(),
+                description: "List images the user has pasted in this conversation: [{id, description}]. Each image can be copied into an app with copy_images_to_app.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                }),
+            });
+            defs.push(ToolDef {
+                name: "copy_images_to_app".to_string(),
+                description: "Copy one or more conversation images into an app's _images/ directory so the app can display them. image_ids come from list_images. Returns [{id, url}] with URLs the app can use in <img> tags.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "image_ids": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "one or more image IDs from list_images",
+                        },
+                        "app": {
+                            "type": "string",
+                            "description": "app UUID or name to copy into",
+                        },
+                    },
+                    "required": ["image_ids", "app"],
+                }),
+            });
         }
         if self.research_only {
             defs.retain(|d| {
@@ -1011,6 +1039,94 @@ fn app_link(&self, uuid: &str) -> String {
                         Ok(None) => format!("unknown file: {name}"),
                         Err(e) => format!("file read failed: {e}"),
                     },
+                };
+                (result, status)
+            }
+            "list_images" => {
+                let status = "Listing images…".to_string();
+                let result = match &self.apps {
+                    None => "apps not available".to_string(),
+                    Some(ctx) => {
+                        match rusqlite::Connection::open(&ctx.space_db_path) {
+                            Err(e) => format!("db error: {e}"),
+                            Ok(conn) => {
+                                let mut stmt = match conn.prepare(
+                                    "SELECT mi.id, mi.description FROM message_images mi
+                                     JOIN messages m ON m.id = mi.message_id
+                                     WHERE m.session_id = ?1
+                                     ORDER BY m.created_at ASC, mi.created_at ASC"
+                                ) {
+                                    Ok(s) => s,
+                                    Err(e) => { return (format!("query error: {e}"), status); }
+                                };
+                                let images: Vec<serde_json::Value> = match stmt.query_map([&ctx.session_id], |r| {
+                                    let id: String = r.get(0)?;
+                                    let description: Option<String> = r.get(1)?;
+                                    Ok(serde_json::json!({"id": id, "description": description}))
+                                }) {
+                                    Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                                    Err(e) => return (format!("query error: {e}"), status),
+                                };
+                                serde_json::to_string(&images).unwrap_or_else(|_| "[]".to_string())
+                            }
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "copy_images_to_app" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let image_ids: Vec<String> = v.get("image_ids").and_then(|a| a.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                let app = v.get("app").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let status = format!("Copying {} images to {app}…", image_ids.len());
+                let result = match self.apps.as_ref() {
+                    None => "apps not available".to_string(),
+                    Some(ctx) => {
+                        let (uuid, app_dir) = match self.resolve_app(&app) {
+                            Err(e) => return (e, status),
+                            Ok(t) => t,
+                        };
+                        let images_dir = app_dir.join("_images");
+                        if let Err(e) = std::fs::create_dir_all(&images_dir) {
+                            return (format!("cannot create _images dir: {e}"), status);
+                        }
+                        let conn = match rusqlite::Connection::open(&ctx.space_db_path) {
+                            Ok(c) => c,
+                            Err(e) => return (format!("db error: {e}"), status),
+                        };
+                        let mut stmt = match conn.prepare("SELECT path FROM message_images WHERE id = ?1") {
+                            Ok(s) => s,
+                            Err(e) => return (format!("query error: {e}"), status),
+                        };
+                        let mut out: Vec<serde_json::Value> = Vec::new();
+                        for img_id in &image_ids {
+                            let src_path: Option<String> = stmt.query_row([img_id.as_str()], |r| r.get::<_, String>(0)).ok();
+                            match src_path {
+                                None => {
+                                    out.push(serde_json::json!({"id": img_id, "error": "not found in db"}));
+                                }
+                                Some(p) => {
+                                    let src = std::path::Path::new(&p);
+                                    let filename = src.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+                                    let dst = images_dir.join(filename);
+                                    match std::fs::copy(src, &dst) {
+                                        Ok(_) => {
+                                            out.push(serde_json::json!({
+                                                "id": img_id,
+                                                "url": format!("/{uuid}/_images/{filename}"),
+                                            }));
+                                        }
+                                        Err(e) => {
+                                            out.push(serde_json::json!({"id": img_id, "error": format!("{e}")}));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
+                    }
                 };
                 (result, status)
             }
