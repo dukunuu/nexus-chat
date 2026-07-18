@@ -598,10 +598,9 @@ impl App {
         let origin = self.stream_session.take();
         let started = self.stream_started.take();
         let mut reasoning = std::mem::take(&mut self.thinking_text);
-        let Some(buf) = self.streaming.take() else {
-            return Ok(());
-        };
-        if buf.is_empty() {
+        let has_pending = !self.pending_gen_images.is_empty();
+        let mut buf = self.streaming.take().unwrap_or_default();
+        if buf.is_empty() && !has_pending {
             return Ok(());
         }
         // Some reasoning models (routed without the separate `reasoning` delta

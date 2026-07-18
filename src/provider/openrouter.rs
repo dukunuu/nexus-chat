@@ -751,6 +751,7 @@ fn detect_image_mime(data: &[u8]) -> &'static str {
                         images: Vec::new(),
                     });
                     for call in &calls {
+                        let _ = tx.send(StreamEvent::Status("Running tool…".to_string()));
                         let (result, status) = toolbox.run(&call.name, &call.arguments).await;
                         let _ = tx.send(StreamEvent::Status(status));
                         let _ = tx.send(StreamEvent::ToolCall {

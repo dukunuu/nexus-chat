@@ -1127,21 +1127,6 @@ fn install_test_skill(a: &mut App, name: &str, desc: &str, body: &str) {
     });
 }
 
-#[test]
-fn skills_are_merged_into_command_matches_and_ranked() {
-    let mut a = app_with_key();
-    a.skills.clear(); // isolate this test from installed skills
-    install_test_skill(&mut a, "web-search", "Search the web", "instructions");
-    a.set_input("/");
-    let matches = a.command_matches();
-    assert_eq!(matches.len(), crate::input::COMMANDS.len() + 1);
-    assert!(matches.iter().any(|m| m.name() == "web-search"));
-
-    a.set_input("/web-search");
-    let matches = a.command_matches();
-    assert_eq!(matches[0].name(), "web-search");
-}
-
 #[tokio::test]
 async fn forced_skill_with_trailing_text_sends_immediately() {
     let mut a = app_with_key();

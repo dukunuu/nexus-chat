@@ -21,25 +21,21 @@ pub struct Command {
     pub aliases: &'static [&'static str],
 }
 
-/// One row of the slash-command autocomplete: either a static builtin or an
-/// installed skill (`/<skill-name>` forces it, same as `/model` etc.).
+/// One row of the slash-command autocomplete.
 pub enum Match {
     Builtin(&'static Command),
-    Skill { name: String, desc: String },
 }
 
 impl Match {
     pub fn name(&self) -> &str {
         match self {
             Match::Builtin(c) => c.name,
-            Match::Skill { name, .. } => name,
         }
     }
 
     pub fn desc(&self) -> &str {
         match self {
             Match::Builtin(c) => c.desc,
-            Match::Skill { desc, .. } => desc,
         }
     }
 }
@@ -517,8 +513,6 @@ impl App {
 
     /// Fuzzy-ranked command suggestions for the current composer text. Empty
     /// unless the text is a bare `/token` still being typed (no space yet).
-    /// Merges built-in commands with installed skills, so `/some-skill`
-    /// autocompletes and forces the skill exactly like a builtin.
     pub fn command_matches(&self) -> Vec<Match> {
         let text = self.input_text();
         let Some(rest) = text.strip_prefix('/') else {
@@ -531,28 +525,6 @@ impl App {
             .iter()
             .filter_map(|c| command_score(c, rest).map(|s| (s, Match::Builtin(c))))
             .collect();
-        scored.extend(self.skills.iter().filter_map(|s| {
-            if rest.is_empty() {
-                return Some((
-                    0,
-                    Match::Skill {
-                        name: s.name.clone(),
-                        desc: s.description.clone(),
-                    },
-                ));
-            }
-            let name_score = fuzzy_score(&s.name, rest).map(|sc| sc + 100);
-            let desc_score = fuzzy_score(&s.description, rest);
-            name_score.into_iter().chain(desc_score).max().map(|score| {
-                (
-                    score,
-                    Match::Skill {
-                        name: s.name.clone(),
-                        desc: s.description.clone(),
-                    },
-                )
-            })
-        }));
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name().cmp(b.1.name())));
         scored.into_iter().map(|(_, m)| m).collect()
     }
