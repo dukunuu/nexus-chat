@@ -328,14 +328,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         // Ctrl+T expands/collapses tool-call detail blocks in the transcript.
         KeyCode::Char('t') if ctrl => app.show_tool_detail = !app.show_tool_detail,
         // Ctrl+N toggles incognito mode (no persistence, no apps).
-        KeyCode::Char('n') if ctrl => {
-            app.incognito = !app.incognito;
-            app.status = if app.incognito {
-                "incognito mode — nothing persists, no apps".to_string()
-            } else {
-                "incognito mode off".to_string()
-            };
-        }
+        KeyCode::Char('n') if ctrl => app.toggle_incognito()?,
         // 'o' opens the [n] citation under the current history selection;
         // with no active selection it falls through and just types.
         KeyCode::Char('o') if !ctrl && !shift && app.sel.selected_text().is_some() => {

@@ -717,6 +717,24 @@ impl App {
         };
     }
 
+    pub(crate) fn toggle_incognito(&mut self) -> Result<()> {
+        if self.is_streaming() {
+            self.stop_stream()?;
+        }
+        self.session = None;
+        self.messages.clear();
+        self.context_total = None;
+        self.scroll = 0;
+        self.clear_image_state();
+        self.incognito = !self.incognito;
+        self.status = if self.incognito {
+            "incognito mode — nothing persists, no apps".to_string()
+        } else {
+            "incognito mode off".to_string()
+        };
+        Ok(())
+    }
+
     /// `base_system_prompt` (raw, as read from `system_prompt.md`) with the
     /// `{{verbosity}}` placeholder swapped for the level the user picked.
     pub(super) fn resolved_base_system_prompt(&self) -> String {
@@ -782,8 +800,10 @@ impl App {
             return None;
         }
         self.app_server.as_ref()?;
-        let mut s = "## Apps\nYou can build apps with persistent storage (KV store), file upload, \
-                     and access to user-uploaded images. Apps are served at UUID-based URLs.\n\n"
+        let mut s = "## Apps\nYou can build apps served locally. \
+                     ALWAYS use the KV store for persistence (not LocalStorage), the upload endpoint for file \
+                     uploads, and copy_images_to_app/copy_file_to_app to bring user data into the app. \
+                     Apps are served at UUID-based URLs.\n\n"
             .to_string();
 
         s.push_str("### Tools\n");

@@ -131,6 +131,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["websearch"],
     },
     Command {
+        name: "incognito",
+        desc: "toggle incognito (no persistence, no apps)",
+        aliases: &["private", "anon"],
+    },
+    Command {
         name: "steer",
         desc: "inject a research instruction mid-flight",
         aliases: &["nudge"],

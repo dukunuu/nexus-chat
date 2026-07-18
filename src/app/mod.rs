@@ -1427,14 +1427,7 @@ impl App {
             }
             "export" => self.export_report()?,
             "web" => self.toggle_web_mode(),
-            "incognito" => {
-                self.incognito = !self.incognito;
-                self.status = if self.incognito {
-                    "incognito mode — nothing persists, no apps".to_string()
-                } else {
-                    "incognito mode off".to_string()
-                };
-            }
+            "incognito" => self.toggle_incognito()?,
             "steer" => self.steer_research(cmd[token.len()..].trim()),
             "stop" => {
                 let had_research = self.research_rx.is_some();
