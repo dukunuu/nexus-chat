@@ -384,12 +384,82 @@ fn kv_op(db_path: &Path, method: &str, segs: &[&str], body: &[u8]) -> (u16, &'st
 
 async fn handle_upload(
     stream: &mut tokio::net::TcpStream,
-    _app_dir: &Path,
-    _uuid: &str,
-    _body: &[u8],
-    _content_type: &str,
+    app_dir: &Path,
+    app_uuid: &str,
+    body: &[u8],
+    content_type: &str,
 ) -> std::io::Result<()> {
-    respond(stream, 501, "text/plain", b"upload not implemented", false).await
+    let boundary = match content_type
+        .split(';')
+        .filter_map(|p| p.trim().strip_prefix("boundary="))
+        .next()
+    {
+        Some(b) => b.trim_matches('"').to_string(),
+        None => return respond(stream, 400, "text/plain", b"missing boundary in Content-Type", false).await,
+    };
+    if boundary.is_empty() {
+        return respond(stream, 400, "text/plain", b"empty boundary", false).await;
+    }
+
+    let body_str = match std::str::from_utf8(body) {
+        Ok(s) => s,
+        Err(_) => return respond(stream, 400, "text/plain", b"upload body is not valid UTF-8", false).await,
+    };
+
+    let part_header = format!("--{}\r\n", boundary);
+    let part_end = format!("\r\n--{}", boundary);
+
+    let Some(header_start) = body_str.find(&part_header) else {
+        return respond(stream, 400, "text/plain", b"no multipart part found", false).await;
+    };
+    let after_header_marker = header_start + part_header.len();
+
+    let Some(hdr_body_sep) = body_str[after_header_marker..].find("\r\n\r\n") else {
+        return respond(stream, 400, "text/plain", b"malformed multipart part: no header-body separator", false).await;
+    };
+    let hdr_end = after_header_marker + hdr_body_sep;
+    let part_headers = &body_str[after_header_marker..hdr_end];
+
+    let filename = part_headers
+        .split(';')
+        .filter_map(|p| p.trim().strip_prefix("filename="))
+        .next()
+        .map(|f| f.trim_matches('"').to_string())
+        .unwrap_or_else(|| "upload.bin".to_string());
+
+    let content_start = hdr_end + 4;
+    let content_end = body_str[content_start..]
+        .find(&part_end)
+        .map(|d| content_start + d)
+        .unwrap_or(body_str.len());
+
+    let mut file_body = &body[content_start..content_end];
+    if file_body.ends_with(b"\r\n") {
+        file_body = &file_body[..file_body.len() - 2];
+    }
+
+    let ext = std::path::Path::new(&filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .filter(|e| !e.is_empty() && e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or_else(|| "bin".to_string());
+
+    let uploads_dir = app_dir.join("_uploads");
+    if let Err(e) = std::fs::create_dir_all(&uploads_dir) {
+        return respond(stream, 500, "text/plain", format!("cannot create uploads dir: {e}").as_bytes(), false).await;
+    }
+
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let save_path = uploads_dir.join(format!("{file_id}.{ext}"));
+    if let Err(e) = std::fs::write(&save_path, file_body) {
+        return respond(stream, 500, "text/plain", format!("cannot save upload: {e}").as_bytes(), false).await;
+    }
+
+    let url = format!("/{app_uuid}/_uploads/{file_id}.{ext}");
+    let json = serde_json::json!({"name": filename, "url": url});
+    let body_out = serde_json::to_string(&json).unwrap_or_default();
+    respond(stream, 200, "application/json", body_out.as_bytes(), false).await
 }
 
 fn mime_for(path: &Path) -> &'static str {
@@ -588,7 +658,7 @@ mod tests {
 
         let r = c.post(format!("{base}/{uuid}/_api/upload"))
             .send().await.unwrap();
-        assert_eq!(r.status(), 501);
+        assert_eq!(r.status(), 400);
     }
 
     #[tokio::test]
@@ -636,5 +706,34 @@ mod tests {
         assert_eq!(r.status(), 200);
         let keys: Vec<String> = r.json().await.unwrap();
         assert_eq!(keys, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn file_upload_and_serve() {
+        let srv = AppServer::start(setup()).await.unwrap();
+        let uuid = srv.registry().assign("default", "deck");
+        let c = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{}", srv.port());
+
+        let boundary = "----TestBoundary123";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\n\r\nHello World!\r\n--{boundary}--\r\n"
+        );
+        let r = c
+            .post(format!("{base}/{uuid}/_api/upload"))
+            .header("Content-Type", format!("multipart/form-data; boundary={boundary}"))
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let resp: serde_json::Value = r.json().await.unwrap();
+        let url = resp["url"].as_str().unwrap().to_string();
+        assert!(url.starts_with(&format!("/{uuid}/_uploads/")), "url: {url}");
+        assert!(url.ends_with(".txt"), "url: {url}");
+
+        let r = c.get(format!("{base}{url}")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.text().await.unwrap(), "Hello World!");
     }
 }
