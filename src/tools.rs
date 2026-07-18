@@ -375,6 +375,20 @@ impl ToolBox {
                 }),
             });
         }
+        if self.files.is_some() && self.apps.is_some() {
+            defs.push(ToolDef {
+                name: "copy_file_to_app".to_string(),
+                description: "Copy an imported space file's text content into an app's KV store, accessible at /_api/kv/_file:<name>. The app's frontend reads it by GET /<app_uuid>/_api/kv/_file:<name>.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "file_name": { "type": "string", "description": "the file name as shown in the Files section" },
+                        "app": { "type": "string", "description": "app UUID or name" },
+                    },
+                    "required": ["file_name", "app"],
+                }),
+            });
+        }
         if self.apps.is_some() {
             defs.push(ToolDef {
                 name: "write_file".to_string(),
@@ -1039,6 +1053,46 @@ fn app_link(&self, uuid: &str) -> String {
                         Ok(None) => format!("unknown file: {name}"),
                         Err(e) => format!("file read failed: {e}"),
                     },
+                };
+                (result, status)
+            }
+            "copy_file_to_app" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let file_name = v.get("file_name").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let app = v.get("app").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let status = format!("Copying {file_name} to {app}…");
+                let result = match (&self.apps, &self.files) {
+                    (None, _) => "apps not available".to_string(),
+                    (_, None) => "files not available".to_string(),
+                    (Some(ctx), Some(fc)) => {
+                        let (uuid, app_dir) = match self.resolve_app(&app) {
+                            Err(e) => return (e, status),
+                            Ok(t) => t,
+                        };
+                        let conn = match rusqlite::Connection::open(&fc.db_path) {
+                            Err(e) => return (format!("db error: {e}"), status),
+                            Ok(c) => c,
+                        };
+                        let text = match crate::db::file_text(&conn, &fc.space_id, &file_name) {
+                            Err(e) => return (format!("file read error: {e}"), status),
+                            Ok(None) => return (format!("unknown file: {file_name}"), status),
+                            Ok(Some(t)) => t,
+                        };
+                        let store_path = app_dir.join("_store.db");
+                        let store = match rusqlite::Connection::open(&store_path) {
+                            Err(e) => return (format!("store error: {e}"), status),
+                            Ok(s) => s,
+                        };
+                        let _ = store.execute_batch("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)");
+                        let key = format!("_file:{file_name}");
+                        match store.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)", rusqlite::params![key, text]) {
+                            Ok(_) => {
+                                let url = format!("http://127.0.0.1:{}/{uuid}/", ctx.server_port);
+                                format!("copied {file_name} into {app}'s KV — read it at {url}_api/kv/_file:{file_name}")
+                            }
+                            Err(e) => format!("kv write error: {e}"),
+                        }
+                    }
                 };
                 (result, status)
             }
