@@ -555,34 +555,63 @@ impl OpenRouter {
     }
 
     /// Generate an image from a text prompt using OpenAI/OpenRouter's
-    /// `/images/generations` endpoint. Returns decoded PNG bytes.
-    pub async fn generate_image(&self, model: &str, prompt: &str, size: &str) -> Result<Vec<u8>> {
+    /// `/images/generations` endpoint. If `image_data` is provided, uses
+    /// `/images/edits` for img2img / editing. Returns decoded PNG bytes.
+    pub async fn generate_image(&self, model: &str, prompt: &str, size: &str, image_data: Option<&[u8]>) -> Result<Vec<u8>> {
         if let Some(delegate) = self.openrouter_delegate_for_model(model) {
-            return Box::pin(delegate.generate_image(model, prompt, size)).await;
+            return Box::pin(delegate.generate_image(model, prompt, size, image_data)).await;
         }
         if self.flavor == ProviderFlavor::OpenAiCodex {
             anyhow::bail!("image generation not supported on Codex");
         }
         let (base, model) = self.opencode_route(model);
-        let v = self
-            .client
-            .post(format!("{base}/images/generations"))
-            .bearer_auth(&self.key)
-            .json(&serde_json::json!({
-                "model": model,
-                "prompt": prompt,
-                "n": 1,
-                "size": size,
-                "response_format": "b64_json",
-            }))
-            .send()
-            .await
-            .context("image generation request")?
-            .error_for_status()
-            .context("image generation failed")?
-            .json::<serde_json::Value>()
-            .await
-            .context("parsing image generation response")?;
+
+        let v = if let Some(img) = image_data {
+            let mime = Self::detect_image_mime(img);
+            let ext = if mime == "image/png" { "png" } else if mime == "image/jpeg" { "jpg" } else { "png" };
+            let part = reqwest::multipart::Part::bytes(img.to_vec())
+                .file_name(format!("image.{ext}"))
+                .mime_str(mime)
+                .context("invalid mime")?;
+            let form = reqwest::multipart::Form::new()
+                .part("image", part)
+                .text("prompt", prompt.to_string())
+                .text("model", model.clone())
+                .text("n", "1")
+                .text("size", size.to_string())
+                .text("response_format", "b64_json");
+            self.client
+                .post(format!("{base}/images/edits"))
+                .bearer_auth(&self.key)
+                .multipart(form)
+                .send()
+                .await
+                .context("image edit request")?
+                .error_for_status()
+                .context("image editing not supported by this model")?
+                .json::<serde_json::Value>()
+                .await
+                .context("parsing image edit response")?
+        } else {
+            self.client
+                .post(format!("{base}/images/generations"))
+                .bearer_auth(&self.key)
+                .json(&serde_json::json!({
+                    "model": model,
+                    "prompt": prompt,
+                    "n": 1,
+                    "size": size,
+                    "response_format": "b64_json",
+                }))
+                .send()
+                .await
+                .context("image generation request")?
+                .error_for_status()
+                .context("image generation failed")?
+                .json::<serde_json::Value>()
+                .await
+                .context("parsing image generation response")?
+        };
         let data = v
             .get("data")
             .and_then(|d| d.as_array())
@@ -598,6 +627,16 @@ impl OpenRouter {
             .context("base64 decode")?;
         Ok(bytes)
     }
+
+/// Detect image MIME type from magic bytes.
+fn detect_image_mime(data: &[u8]) -> &'static str {
+    if data.len() < 4 { return "image/png"; }
+    if data[0] == 0x89 && data[1] == b'P' && data[2] == b'N' && data[3] == b'G' { "image/png" }
+    else if data[0] == 0xFF && data[1] == 0xD8 { "image/jpeg" }
+    else if data[0] == b'G' && data[1] == b'I' && data[2] == b'F' { "image/gif" }
+    else if data[0] == b'R' && data[1] == b'I' && data[2] == b'F' && data[3] == b'F' { "image/webp" }
+    else { "image/png" }
+}
 
     /// One-shot, non-streaming vision call: transcribe a scanned page image.
     pub async fn ocr_page(&self, model: &str, image_data_url: &str) -> Result<String> {

@@ -55,6 +55,18 @@ pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
     let height = inner.height as usize;
     let max_top = total.saturating_sub(height);
     app.max_scroll = max_top as u16; // let the event loop clamp scrolling
+
+    // When the user has scrolled up during streaming, new tokens grow the tail
+    // which pushes max_top up.  Keep the viewport pinned by raising scroll to
+    // cancel out the growth.
+    if app.scroll > 0 && app.viewing_stream() {
+        let delta = total.saturating_sub(app.prev_total);
+        if delta > 0 {
+            app.scroll = app.scroll.saturating_add(delta as u16);
+        }
+    }
+    app.prev_total = total;
+
     app.scroll = app.scroll.min(app.max_scroll);
     let top = max_top.saturating_sub(app.scroll as usize);
 

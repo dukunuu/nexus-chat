@@ -259,7 +259,7 @@ impl ToolBox {
                     "type": "object",
                     "properties": {
                         "skill": { "type": "string", "description": "the skill's name (required unless space=true)" },
-                        "path": { "type": "string", "description": "script path, e.g. 'scripts/convert.py' or 'analyze.py'" },
+                        "path": { "type": "string", "description": "script path. For skill scripts: 'scripts/convert.py' (relative to skill dir). For space scripts: just 'convert.py' (relative to space scripts dir, no prefixes)" },
                         "space": { "type": "boolean", "description": "if true, look up script in the space scripts dir instead of a skill" },
                         "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments" },
                     },
@@ -269,20 +269,20 @@ impl ToolBox {
         }
         defs.push(ToolDef {
             name: "run_python".to_string(),
-            description: "Run a Python script and return its output. Use this for any nontrivial calculation, data processing, or exact math instead of computing mentally. Runs in a persistent scratch virtualenv; print() what you need back. Add packages to the venv with install_packages (no skill/app target). If name is set, saves to <space>/scripts/<name> for reuse via run_script(space=true).".to_string(),
+            description: "Write and immediately run a Python script in the space's scripts directory. The script persists and shows up in list_scripts / scripts_section. Use run_script(space=true, path=...) to re-run later. Runs in the space's virtualenv; print() what you need back. Add packages with install_packages (no skill/app target).".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "code": { "type": "string", "description": "the python source to run" },
-                    "name": { "type": "string", "description": "optional filename to persist in the space scripts dir (e.g. 'analyze.py')" },
+                    "name": { "type": "string", "description": "filename for the scripts dir (e.g. 'analyze.py') — must end with .py" },
                     "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments" },
                 },
-                "required": ["code"],
+                "required": ["code", "name"],
             }),
         });
         defs.push(ToolDef {
             name: "install_packages".to_string(),
-            description: "Install packages into an isolated environment — pip packages into a skill's own virtualenv (pass skill), npm packages into an app's node_modules (pass app; reference files as node_modules/<pkg>/… in the app's HTML), or pip packages into the run_python scratch venv (pass neither). Never installs globally.".to_string(),
+            description: "Install packages into an isolated environment — pip packages into a skill's own virtualenv (pass skill), npm packages into an app's node_modules (pass app; reference files as node_modules/<pkg>/… in the app's HTML), or pip packages into the space scripts dir's venv (pass neither; shared with run_python). Never installs globally.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -506,11 +506,12 @@ impl ToolBox {
             });
             defs.push(ToolDef {
                 name: "generate_image".to_string(),
-                description: "Generate an AI image from a text prompt. Returns the image id, path, and a description the model can use to refer to it. The image is saved to the space and visible in the conversation.".to_string(),
+                description: "Generate an AI image from a text prompt. Optionally takes a pasted image id (from list_images) as reference for image-to-image editing. Returns the image id, path, and a description. The image is saved to the space and visible in the conversation.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "prompt": { "type": "string", "description": "detailed text description of the image to create" },
+                        "prompt": { "type": "string", "description": "detailed text description of the image to create or how to edit the reference image" },
+                        "image_id": { "type": "string", "description": "optional pasted image id from list_images to use as reference for editing" },
                         "size": { "type": "string", "description": "image size, default 1024x1024 (also: 1024x1792, 1792x1024)", "default": "1024x1024" },
                     },
                     "required": ["prompt"],
@@ -612,15 +613,6 @@ fn resolve_app(&self, name_or_uuid: &str) -> Result<(String, PathBuf), String> {
     };
     let app_dir = ctx.dir.join(&app_name);
     Ok((uuid, app_dir))
-}
-
-/// The `run_python` scratch dir (venv + script), a sibling of the skills
-/// dir: `<data>/python`. Persistent so installed packages survive.
-fn python_dir(&self) -> PathBuf {
-    self.skills_dir
-        .parent()
-        .map(|p| p.join("python"))
-        .unwrap_or_else(|| PathBuf::from("python"))
 }
 
 /// The live URL for an app (accepts a UUID).
@@ -905,11 +897,11 @@ fn app_link(&self, uuid: &str) -> String {
                         }
                     },
                     Ok(()) => {
-                        // No target: the run_python scratch venv.
-                        let dir = self.python_dir();
+                        // No target: the space scripts dir venv (shared with run_python).
+                        let dir = self.space_scripts_dir.clone();
                         let run = async {
                             std::fs::create_dir_all(&dir)
-                                .map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+                                .map_err(|e| format!("cannot create scripts dir: {e}"))?;
                             let py = ensure_venv(&dir).await?;
                             let mut argv: Vec<std::ffi::OsString> =
                                 vec!["-m".into(), "pip".into(), "install".into()];
@@ -920,7 +912,7 @@ fn app_link(&self, uuid: &str) -> String {
                         };
                         match run.await {
                             Ok(out) if out.status.success() => {
-                                format!("installed {} into the python scratch venv", pkgs.join(" "))
+                                format!("installed {} into the python scripts venv", pkgs.join(" "))
                             }
                             Ok(out) => format!("pip install failed:\n{}", format_output(&out)),
                             Err(e) => e,
@@ -936,53 +928,32 @@ fn app_link(&self, uuid: &str) -> String {
                 let extra: Vec<String> = v.get("args").and_then(|a| a.as_array())
                     .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
                     .unwrap_or_default();
-                let status = if name.is_some() { "Running script…".to_string() } else { "Running python…".to_string() };
-                let result = if let Some(ref name) = name {
-                    // Persist to space scripts dir and run
-                    let dir = self.space_scripts_dir.clone();
-                    let file = dir.join(name);
-                    let run = async {
-                        if code.trim().is_empty() {
-                            return Err("code must not be empty".to_string());
+                let result = match name {
+                    None => "run_python requires a `name` parameter".to_string(),
+                    Some(ref name) => {
+                        let dir = self.space_scripts_dir.clone();
+                        let file = dir.join(name);
+                        let run = async {
+                            if code.trim().is_empty() {
+                                return Err("code must not be empty".to_string());
+                            }
+                            std::fs::create_dir_all(&dir)
+                                .map_err(|e| format!("cannot create scripts dir: {e}"))?;
+                            std::fs::write(&file, &code)
+                                .map_err(|e| format!("cannot write script: {e}"))?;
+                            let py = ensure_venv(&dir).await?;
+                            let mut argv: Vec<std::ffi::OsString> = vec![file.into()];
+                            argv.extend(extra.iter().map(std::ffi::OsString::from));
+                            let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
+                            run_cmd(py.as_os_str(), &refs, &dir, 120).await
+                        };
+                        match run.await {
+                            Ok(out) => format_output(&out),
+                            Err(e) => e,
                         }
-                        std::fs::create_dir_all(&dir)
-                            .map_err(|e| format!("cannot create scripts dir: {e}"))?;
-                        std::fs::write(&file, &code)
-                            .map_err(|e| format!("cannot write script: {e}"))?;
-                        let py = ensure_venv(&dir).await?;
-                        let mut argv: Vec<std::ffi::OsString> = vec![file.into()];
-                        argv.extend(extra.iter().map(std::ffi::OsString::from));
-                        let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
-                        run_cmd(py.as_os_str(), &refs, &dir, 120).await
-                    };
-                    match run.await {
-                        Ok(out) => format_output(&out),
-                        Err(e) => e,
-                    }
-                } else {
-                    // Current scratch behavior
-                    let dir = self.python_dir();
-                    let run = async {
-                        if code.trim().is_empty() {
-                            return Err("code must not be empty".to_string());
-                        }
-                        std::fs::create_dir_all(&dir)
-                            .map_err(|e| format!("cannot create {dir:?}: {e}"))?;
-                        let script = dir.join("script.py");
-                        std::fs::write(&script, &code)
-                            .map_err(|e| format!("cannot write script: {e}"))?;
-                        let py = ensure_venv(&dir).await?;
-                        let mut argv: Vec<std::ffi::OsString> = vec![script.into()];
-                        argv.extend(extra.iter().map(std::ffi::OsString::from));
-                        let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
-                        run_cmd(py.as_os_str(), &refs, &dir, 120).await
-                    };
-                    match run.await {
-                        Ok(out) => format_output(&out),
-                        Err(e) => e,
                     }
                 };
-                (result, status)
+                (result, "Running script…".to_string())
             }
             "web_search" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
@@ -1560,33 +1531,49 @@ fn app_link(&self, uuid: &str) -> String {
             "generate_image" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
                 let prompt = v.get("prompt").and_then(|x| x.as_str()).unwrap_or("");
+                let image_id = v.get("image_id").and_then(|x| x.as_str()).filter(|x| !x.is_empty());
                 let size = v.get("size").and_then(|x| x.as_str()).unwrap_or("1024x1024");
-                let status = "Generating image…".to_string();
+                let status = if image_id.is_some() { "Editing image…".to_string() } else { "Generating image…".to_string() };
                 let result = match &self.image_gen_backend {
                     None => "no image generation model configured — set one in /config".to_string(),
                     Some((provider, model)) => {
                         if prompt.is_empty() {
                             "prompt must not be empty".to_string()
                         } else {
-                            match provider.generate_image(model, prompt, size).await {
-                                Err(e) => format!("image generation failed: {e}"),
-                                Ok(png_bytes) => {
-                                    let id = uuid::Uuid::new_v4().to_string();
-                                    let filename = format!("{id}.png");
-                                    let img_path = self.space_images_dir.join(&filename);
-                                    if let Err(e) = std::fs::create_dir_all(&self.space_images_dir) {
-                                        format!("cannot create images dir: {e}")
-                                    } else if let Err(e) = std::fs::write(&img_path, &png_bytes) {
-                                        format!("cannot write image: {e}")
-                                    } else {
-                                        let _ = std::fs::create_dir_all(&self.space_files_dir);
-                                        let _ = std::fs::write(self.space_files_dir.join(&filename), &png_bytes);
-                                        let description = format!("generated image of {prompt}");
-                                        serde_json::json!({
-                                            "id": id,
-                                            "path": img_path.to_string_lossy(),
-                                            "description": description,
-                                        }).to_string()
+                            let image_data = image_id.and_then(|id| {
+                                let png = self.space_images_dir.join(format!("{id}.png"));
+                                std::fs::read(&png).ok().or_else(|| {
+                                    let files = self.space_files_dir.as_path();
+                                    std::fs::read_dir(files).ok().and_then(|e| {
+                                        e.flatten().find(|e| {
+                                            e.path().file_stem().map(|s| s == id).unwrap_or(false)
+                                        }).and_then(|e| std::fs::read(e.path()).ok())
+                                    })
+                                })
+                            });
+                            if image_id.is_some() && image_data.is_none() {
+                                format!("image not found: {id}", id = image_id.unwrap())
+                            } else {
+                                match provider.generate_image(model, prompt, size, image_data.as_deref()).await {
+                                    Err(e) => format!("image generation failed: {e}"),
+                                    Ok(png_bytes) => {
+                                        let id = uuid::Uuid::new_v4().to_string();
+                                        let filename = format!("{id}.png");
+                                        let img_path = self.space_images_dir.join(&filename);
+                                        if let Err(e) = std::fs::create_dir_all(&self.space_images_dir) {
+                                            format!("cannot create images dir: {e}")
+                                        } else if let Err(e) = std::fs::write(&img_path, &png_bytes) {
+                                            format!("cannot write image: {e}")
+                                        } else {
+                                            let _ = std::fs::create_dir_all(&self.space_files_dir);
+                                            let _ = std::fs::write(self.space_files_dir.join(&filename), &png_bytes);
+                                            let description = format!("generated image of {prompt}");
+                                            serde_json::json!({
+                                                "id": id,
+                                                "path": img_path.to_string_lossy(),
+                                                "description": description,
+                                            }).to_string()
+                                        }
                                     }
                                 }
                             }
@@ -3539,9 +3526,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_python_computes_in_scratch_venv() {
+    async fn run_python_persists_and_runs() {
         let dir = std::env::temp_dir().join(format!("nexus-py-{}", uuid::Uuid::new_v4()));
-        let tb = ToolBox::new(
+        let scripts_dir = dir.join("scripts");
+        let mut tb = ToolBox::new(
             dir.join("skills"),
             None,
             None,
@@ -3551,10 +3539,12 @@ mod tests {
             None,
             None,
         );
-        let (result, status) = tb.run("run_python", r#"{"code":"print(2**32)"}"#).await;
-        assert!(status.contains("Running python"));
+        tb.space_scripts_dir = scripts_dir.clone();
+        let (result, status) = tb.run("run_python", r#"{"code":"print(2**32)","name":"test.py"}"#).await;
+        assert!(status.contains("Running script"), "status was {status:?}");
         assert!(result.contains("4294967296"), "{result}");
-        assert!(dir.join("python/.venv/bin/python").exists());
+        assert!(scripts_dir.join("test.py").exists());
+        assert!(scripts_dir.join(".venv/bin/python").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

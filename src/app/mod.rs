@@ -848,6 +848,9 @@ pub struct App {
     /// Max useful `scroll` (lines above the viewport), refreshed each render so
     /// scrolling can be clamped instead of running off into empty space.
     pub max_scroll: u16,
+    /// Total rendered lines from the previous render frame, used during streaming
+    /// to keep the viewport pinned when the user has scrolled up.
+    pub(super) prev_total: usize,
     /// Mouse text-selection over the history pane.
     pub sel: crate::selection::HistorySel,
     /// Which pane a mouse press is currently interacting with, so drag/release
@@ -1092,6 +1095,7 @@ impl App {
             greeting: pick_greeting(),
             scroll: 0,
             max_scroll: 0,
+            prev_total: 0,
             sel: crate::selection::HistorySel::default(),
             mouse_target: MouseTarget::None,
             composer_click: None,

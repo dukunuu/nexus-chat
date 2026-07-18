@@ -194,7 +194,7 @@ impl App {
 
         let png_bytes = match tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                provider.generate_image(&raw_model, prompt, "1024x1024").await
+                provider.generate_image(&raw_model, prompt, "1024x1024", None).await
             })
         }) {
             Ok(bytes) => bytes,
@@ -455,6 +455,7 @@ impl App {
         self.spinner_color = color;
         self.status.clear();
         self.scroll = 0;
+        self.prev_total = 0;
         Ok(())
     }
 
@@ -947,8 +948,9 @@ impl App {
             return None;
         }
         let mut s = "## Scripts\nThe user has reusable scripts in this space. \
-                     Call `read_script` to see one, `edit_script` to modify, or \
-                     `run_script` with space=true to execute.\n"
+                      Call `read_script(path)` to see one, `edit_script` to modify, or \
+                      `run_script(space=true, path=...)` to execute. \
+                      The `path` parameter is relative to the scripts dir — do NOT prefix `scripts/`.\n"
             .to_string();
         for script in &self.scripts_cache {
             s.push_str(&format!(
