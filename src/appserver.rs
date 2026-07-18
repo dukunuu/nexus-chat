@@ -323,12 +323,63 @@ async fn handle_api(
 
 async fn handle_kv(
     stream: &mut tokio::net::TcpStream,
-    _app_dir: &Path,
-    _method: &str,
-    _key: &[&str],
-    _body: &[u8],
+    app_dir: &Path,
+    method: &str,
+    segs: &[&str],
+    body: &[u8],
 ) -> std::io::Result<()> {
-    respond(stream, 501, "text/plain", b"kv not implemented", false).await
+    let db_path = app_dir.join("_store.db");
+    let (status, mime, body_bytes) = kv_op(&db_path, method, segs, body);
+    respond(stream, status, mime, &body_bytes, false).await
+}
+
+fn kv_op(db_path: &Path, method: &str, segs: &[&str], body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let conn = match rusqlite::Connection::open(db_path) {
+        Ok(c) => {
+            let _ = c.execute_batch("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)");
+            c
+        }
+        Err(e) => return (500, "text/plain", format!("db error: {e}").into_bytes()),
+    };
+
+    match method {
+        "GET" if segs.is_empty() => {
+            let keys: Vec<String> = match conn.prepare("SELECT key FROM kv ORDER BY key") {
+                Ok(mut stmt) => match stmt.query_map([], |r| r.get::<_, String>(0)) {
+                    Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                    Err(e) => return (500, "text/plain", format!("query error: {e}").into_bytes()),
+                },
+                Err(e) => return (500, "text/plain", format!("query error: {e}").into_bytes()),
+            };
+            let json = serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string());
+            (200, "application/json", json.into_bytes())
+        }
+        "GET" => {
+            let key = percent_decode(segs.join("/").as_str());
+            match conn.query_row("SELECT value FROM kv WHERE key = ?1", [&key], |r| r.get::<_, String>(0)) {
+                Ok(value) => (200, "text/plain", value.into_bytes()),
+                Err(rusqlite::Error::QueryReturnedNoRows) => (404, "text/plain", b"not found".to_vec()),
+                Err(e) => (500, "text/plain", format!("read error: {e}").into_bytes()),
+            }
+        }
+        "PUT" => {
+            let key = percent_decode(segs.join("/").as_str());
+            let value = std::str::from_utf8(body).unwrap_or("");
+            match conn.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)", rusqlite::params![key, value]) {
+                Ok(_) => (200, "text/plain", b"ok".to_vec()),
+                Err(e) => (500, "text/plain", format!("write error: {e}").into_bytes()),
+            }
+        }
+        "DELETE" => {
+            let key = percent_decode(segs.join("/").as_str());
+            match conn.execute("DELETE FROM kv WHERE key = ?1", [key]) {
+                Ok(0) => (404, "text/plain", b"not found".to_vec()),
+                Ok(_) => (200, "text/plain", b"deleted".to_vec()),
+                Err(e) => (500, "text/plain", format!("delete error: {e}").into_bytes()),
+            }
+        }
+        _ => (405, "text/plain", b"method not allowed".to_vec()),
+    }
 }
 
 async fn handle_upload(
@@ -535,12 +586,55 @@ mod tests {
         let base = format!("http://127.0.0.1:{}", srv.port());
         let c = reqwest::Client::new();
 
-        let r = c.get(format!("{base}/{uuid}/_api/kv/foo"))
-            .send().await.unwrap();
-        assert_eq!(r.status(), 501);
-
         let r = c.post(format!("{base}/{uuid}/_api/upload"))
             .send().await.unwrap();
         assert_eq!(r.status(), 501);
+    }
+
+    #[tokio::test]
+    async fn kv_roundtrip() {
+        let srv = AppServer::start(setup()).await.unwrap();
+        let uuid = srv.registry().assign("default", "deck");
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let c = reqwest::Client::new();
+
+        // PUT
+        let r = c.put(format!("{base}/{uuid}/_api/kv/hello"))
+            .body("world")
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200);
+
+        // GET
+        let r = c.get(format!("{base}/{uuid}/_api/kv/hello"))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.text().await.unwrap(), "world");
+
+        // DELETE
+        let r = c.delete(format!("{base}/{uuid}/_api/kv/hello"))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200);
+
+        // GET after delete = 404
+        let r = c.get(format!("{base}/{uuid}/_api/kv/hello"))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn kv_list_keys() {
+        let srv = AppServer::start(setup()).await.unwrap();
+        let uuid = srv.registry().assign("default", "deck");
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let c = reqwest::Client::new();
+
+        c.put(format!("{base}/{uuid}/_api/kv/a")).body("1").send().await.unwrap();
+        c.put(format!("{base}/{uuid}/_api/kv/b")).body("2").send().await.unwrap();
+        c.put(format!("{base}/{uuid}/_api/kv/c")).body("3").send().await.unwrap();
+
+        let r = c.get(format!("{base}/{uuid}/_api/kv")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let keys: Vec<String> = r.json().await.unwrap();
+        assert_eq!(keys, vec!["a", "b", "c"]);
     }
 }
