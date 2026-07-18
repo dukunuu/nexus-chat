@@ -60,6 +60,7 @@ pub struct AppsCtx {
     pub server_port: u16,
     pub registry: crate::appserver::AppRegistry,
     pub space_name: String,
+    pub space_id: String,
     pub space_db_path: PathBuf,
     pub images_dir: PathBuf,
     pub session_id: String,
@@ -1104,7 +1105,7 @@ fn app_link(&self, uuid: &str) -> String {
                         match rusqlite::Connection::open(&ctx.space_db_path) {
                             Err(e) => format!("db error: {e}"),
                             Ok(conn) => {
-                                let mut stmt = match conn.prepare(
+                                let mut conv = match conn.prepare(
                                     "SELECT mi.id, mi.description FROM message_images mi
                                      JOIN messages m ON m.id = mi.message_id
                                      WHERE m.session_id = ?1
@@ -1113,14 +1114,30 @@ fn app_link(&self, uuid: &str) -> String {
                                     Ok(s) => s,
                                     Err(e) => { return (format!("query error: {e}"), status); }
                                 };
-                                let images: Vec<serde_json::Value> = match stmt.query_map([&ctx.session_id], |r| {
+                                let mut images: Vec<serde_json::Value> = match conv.query_map([&ctx.session_id], |r| {
                                     let id: String = r.get(0)?;
                                     let description: Option<String> = r.get(1)?;
-                                    Ok(serde_json::json!({"id": id, "description": description}))
+                                    Ok(serde_json::json!({"id": id, "description": description, "source": "conversation"}))
                                 }) {
                                     Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
                                     Err(e) => return (format!("query error: {e}"), status),
                                 };
+                                // Include space-file images
+                                if let Ok(mut fstmt) = conn.prepare(
+                                    "SELECT f.name, f.status FROM files f
+                                     WHERE f.space_id = ?1
+                                     AND (f.name LIKE '%.jpg' OR f.name LIKE '%.jpeg'
+                                       OR f.name LIKE '%.png' OR f.name LIKE '%.gif'
+                                       OR f.name LIKE '%.webp' OR f.name LIKE '%.bmp')"
+                                ) {
+                                    if let Ok(rows) = fstmt.query_map([&ctx.space_id], |r| {
+                                        let name: String = r.get(0)?;
+                                        let status: String = r.get(1)?;
+                                        Ok(serde_json::json!({"id": name, "description": null, "source": "space", "status": status}))
+                                    }) {
+                                        images.extend(rows.filter_map(|r| r.ok()));
+                                    }
+                                }
                                 serde_json::to_string(&images).unwrap_or_else(|_| "[]".to_string())
                             }
                         }
@@ -1150,33 +1167,50 @@ fn app_link(&self, uuid: &str) -> String {
                             Ok(c) => c,
                             Err(e) => return (format!("db error: {e}"), status),
                         };
-                        let mut stmt = match conn.prepare("SELECT path FROM message_images WHERE id = ?1") {
-                            Ok(s) => s,
-                            Err(e) => return (format!("query error: {e}"), status),
-                        };
                         let mut out: Vec<serde_json::Value> = Vec::new();
+                        let space_files_dir = ctx.images_dir.parent().map(|p| p.join("files"));
                         for img_id in &image_ids {
-                            let src_path: Option<String> = stmt.query_row([img_id.as_str()], |r| r.get::<_, String>(0)).ok();
-                            match src_path {
-                                None => {
-                                    out.push(serde_json::json!({"id": img_id, "error": "not found in db"}));
-                                }
-                                Some(p) => {
-                                    let src = std::path::Path::new(&p);
-                                    let filename = src.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
-                                    let dst = images_dir.join(filename);
-                                    match std::fs::copy(src, &dst) {
-                                        Ok(_) => {
-                                            out.push(serde_json::json!({
-                                                "id": img_id,
-                                                "url": format!("/{uuid}/_images/{filename}"),
-                                            }));
-                                        }
-                                        Err(e) => {
-                                            out.push(serde_json::json!({"id": img_id, "error": format!("{e}")}));
-                                        }
+                            // Try conversation images first
+                            let src_path: Option<String> = conn.query_row(
+                                "SELECT path FROM message_images WHERE id = ?1",
+                                [img_id.as_str()],
+                                |r| r.get::<_, String>(0),
+                            ).ok();
+                            if let Some(p) = src_path {
+                                let src = std::path::Path::new(&p);
+                                let filename = src.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+                                let dst = images_dir.join(filename);
+                                match std::fs::copy(src, &dst) {
+                                    Ok(_) => {
+                                        out.push(serde_json::json!({
+                                            "id": img_id,
+                                            "url": format!("/{uuid}/_images/{filename}"),
+                                        }));
+                                    }
+                                    Err(e) => {
+                                        out.push(serde_json::json!({"id": img_id, "error": format!("{e}")}));
                                     }
                                 }
+                                continue;
+                            }
+                            // Fall back to space-file images (img_id is the file name)
+                            if let Some(ref files_dir) = space_files_dir {
+                                let src = files_dir.join(img_id);
+                                let filename = img_id.clone();
+                                let dst = images_dir.join(&filename);
+                                match std::fs::copy(&src, &dst) {
+                                    Ok(_) => {
+                                        out.push(serde_json::json!({
+                                            "id": img_id,
+                                            "url": format!("/{uuid}/_images/{filename}"),
+                                        }));
+                                    }
+                                    Err(_) => {
+                                        out.push(serde_json::json!({"id": img_id, "error": "not found as conversation image or space file"}));
+                                    }
+                                }
+                            } else {
+                                out.push(serde_json::json!({"id": img_id, "error": "not found in db"}));
                             }
                         }
                         serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
@@ -3372,6 +3406,7 @@ mod tests {
                 server_port: 9999,
                 registry,
                 space_name: "default".to_string(),
+                space_id: "default".to_string(),
                 space_db_path: PathBuf::from("/tmp/test.db"),
                 images_dir: dir.clone(),
                 session_id: String::new(),

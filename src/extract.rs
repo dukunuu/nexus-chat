@@ -25,6 +25,8 @@ pub(crate) fn extract_text(path: &Path) -> Result<String> {
         "docx" => office_text(path, OfficeKind::Docx),
         "pptx" => office_text(path, OfficeKind::Pptx),
         "xlsx" => office_text(path, OfficeKind::Xlsx),
+        // Images: return empty text so the OCR pipeline picks them up.
+        _ if is_image_ext(&ext) => Ok(String::new()),
         // Everything else: treat as text if it looks like text.
         _ => {
             let bytes =
@@ -183,6 +185,11 @@ pub(crate) fn chunk_lines(text: &str) -> Vec<(String, String)> {
             (format!("lines {first}-{last}"), chunk.join("\n"))
         })
         .collect()
+}
+
+/// Whether a lowercased file extension is a supported image type.
+pub(crate) fn is_image_ext(ext: &str) -> bool {
+    matches!(ext, "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp")
 }
 
 /// Why OCR failed: the tools aren't installed (user-fixable hint) vs a real

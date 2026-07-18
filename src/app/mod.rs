@@ -1119,6 +1119,7 @@ impl App {
                 server_port: s.port(),
                 registry: s.registry().clone(),
                 space_name: self.active_space.name.clone(),
+                space_id: self.active_space.id.clone(),
                 space_db_path: self.space.db_path(),
                 images_dir: self.space.images_dir(&self.active_space.name),
                 session_id: self.session.as_ref().map(|s| s.id.clone()).unwrap_or_default(),

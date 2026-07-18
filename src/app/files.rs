@@ -38,19 +38,24 @@ pub(crate) enum OcrBackend {
 
 impl OcrBackend {
     async fn transcribe(&self, png: &[u8]) -> anyhow::Result<String> {
+        self.transcribe_image(png, "image/png").await
+    }
+
+    /// Transcribe an image file with the given MIME type. For standalone images
+    /// (not PDF pages) that may be JPEG, PNG, etc.
+    async fn transcribe_image(&self, bytes: &[u8], mime: &str) -> anyhow::Result<String> {
         match self {
             OcrBackend::Router(provider, model) => {
-                let url = crate::app::transcribe::png_bytes_data_url(png);
+                use base64::Engine;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                let url = format!("data:{mime};base64,{b64}");
                 provider.ocr_page(model, &url).await
             }
             OcrBackend::Ollama(client, model) => {
                 use base64::Engine;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+                let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
                 let resp = client
                     .post("http://127.0.0.1:11434/api/generate")
-                    // CPU inference is legitimately minutes/page; anything past
-                    // this is a wedge and should fail into a page placeholder
-                    // rather than hanging the whole batch forever.
                     .timeout(std::time::Duration::from_secs(600))
                     .json(&ollama_ocr_body(model, &b64))
                     .send()
@@ -217,6 +222,54 @@ async fn ocr_pdf_vlm_in(
     Ok((crate::extract::join_pages(&results), errors))
 }
 
+/// OCR a standalone image file through a vision backend: read the file,
+/// transcribe it directly (no page rendering), return OCR text. Reuses the
+/// same OcrUpdate channel as pdf_vlm for status/progress.
+async fn ocr_image_vlm(
+    backend: &OcrBackend,
+    path: &Path,
+    tx: &tokio::sync::mpsc::UnboundedSender<(String, String, OcrUpdate)>,
+    space_id: &str,
+    name: &str,
+) -> std::result::Result<(String, Vec<(usize, String)>), String> {
+    let _ = tx.send((
+        space_id.to_string(),
+        name.to_string(),
+        OcrUpdate::Stage("transcribing image…".to_string()),
+    ));
+    let Ok(bytes) = std::fs::read(path) else {
+        return Err(format!("cannot read {name}"));
+    };
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let mime = match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => "image/png",
+    };
+    let _ = tx.send((
+        space_id.to_string(),
+        name.to_string(),
+        OcrUpdate::Progress(0, 1, 0),
+    ));
+    match backend.transcribe_image(&bytes, mime).await {
+        Ok(text) => {
+            let _ = tx.send((
+                space_id.to_string(),
+                name.to_string(),
+                OcrUpdate::Progress(1, 1, 0),
+            ));
+            Ok((text, Vec::new()))
+        }
+        Err(e) => {
+            let err = e.to_string();
+            Err(format!("error: ocr: {err}"))
+        }
+    }
+}
+
 impl App {
     /// Enter the picker at `picker_dir` (home on first open, remembered after).
     pub(crate) fn open_file_picker(&mut self) {
@@ -375,7 +428,12 @@ impl App {
             let size = bytes.len() as i64;
             let (status, chunks) = match crate::extract::extract_text(&path) {
                 Ok(text) if text.trim().is_empty() => {
-                    if name.to_lowercase().ends_with(".pdf") {
+                    let ext = std::path::Path::new(&name)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    if ext == "pdf" || crate::extract::is_image_ext(&ext) {
                         ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
                         ("ocr…".to_string(), Vec::new())
                     } else {
@@ -422,7 +480,16 @@ impl App {
         if let Some(backend) = backend {
             tokio::spawn(async move {
                 for (space_id, name, path) in jobs {
-                    let result = ocr_pdf_vlm(&backend, &path, &tx, &space_id, &name).await;
+                    let is_image = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| crate::extract::is_image_ext(e))
+                        .unwrap_or(false);
+                    let result = if is_image {
+                        ocr_image_vlm(&backend, &path, &tx, &space_id, &name).await
+                    } else {
+                        ocr_pdf_vlm(&backend, &path, &tx, &space_id, &name).await
+                    };
                     if tx.send((space_id, name, OcrUpdate::Done(result))).is_err() {
                         return;
                     }
@@ -432,6 +499,21 @@ impl App {
         }
         tokio::task::spawn_blocking(move || {
             for (space_id, name, path) in jobs {
+                let is_image = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| crate::extract::is_image_ext(e))
+                    .unwrap_or(false);
+                if is_image {
+                    // Images can't be OCR'd via tesseract — skip, it'll re-queue
+                    // on next rescan if a VLM backend is configured.
+                    let _ = tx.send((
+                        space_id,
+                        name,
+                        OcrUpdate::Done(Err("no vlm backend for image ocr".to_string())),
+                    ));
+                    continue;
+                }
                 let progress_tx = tx.clone();
                 let (sid, fname) = (space_id.clone(), name.clone());
                 let progress = move |done: usize, total: usize| {
