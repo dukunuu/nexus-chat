@@ -600,6 +600,7 @@ pub struct App {
     pub(crate) forced_skill: Option<String>,
     /// `/web` answer mode for the active session (or the next one created).
     pub web_mode: bool,
+    pub incognito: bool,
     /// A running `/research` job's plan-approval gate: the sender its
     /// pipeline awaits, keyed by session id, plus the sub-questions shown
     /// while the gate is open.
@@ -897,6 +898,7 @@ impl App {
             search_provider: "auto".to_string(),
             forced_skill: None,
             web_mode: false,
+            incognito: false,
             research_plan_gate: None,
             research_steer_tx: None,
             research_topic_rx: None,
@@ -1113,8 +1115,8 @@ impl App {
                     .flatten(),
             }),
             // App tools only exist while the server runs — a write_file whose
-            // link can never load is worse than no tool.
-            self.app_server.as_ref().map(|s| crate::tools::AppsCtx {
+            // link can never load is worse than no tool. Disabled in incognito.
+            self.app_server.as_ref().filter(|_| !self.incognito).map(|s| crate::tools::AppsCtx {
                 dir: self.space.apps_dir(&self.active_space.name),
                 server_port: s.port(),
                 registry: s.registry().clone(),
@@ -1408,7 +1410,13 @@ impl App {
             }
             "skills" => self.open_skills_popup(),
             "files" => self.open_files_popup(),
-            "apps" => self.open_apps_popup(),
+            "apps" => {
+                if self.incognito {
+                    self.status = "apps not available in incognito mode".to_string();
+                } else {
+                    self.open_apps_popup();
+                }
+            }
             "research" => {
                 let arg = cmd[token.len()..].trim();
                 if arg.is_empty() {
@@ -1419,6 +1427,14 @@ impl App {
             }
             "export" => self.export_report()?,
             "web" => self.toggle_web_mode(),
+            "incognito" => {
+                self.incognito = !self.incognito;
+                self.status = if self.incognito {
+                    "incognito mode — nothing persists, no apps".to_string()
+                } else {
+                    "incognito mode off".to_string()
+                };
+            }
             "steer" => self.steer_research(cmd[token.len()..].trim()),
             "stop" => {
                 let had_research = self.research_rx.is_some();
@@ -1439,7 +1455,13 @@ impl App {
                     self.status = "nothing is running".to_string();
                 }
             }
-            "edit" => self.request_app_file_edit(cmd[token.len()..].trim()),
+            "edit" => {
+                if self.incognito {
+                    self.status = "app editing not available in incognito mode".to_string();
+                } else {
+                    self.request_app_file_edit(cmd[token.len()..].trim());
+                }
+            }
             "watch" => {
                 let arg = cmd[token.len()..].trim();
                 if arg.is_empty() {

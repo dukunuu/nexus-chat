@@ -263,17 +263,18 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
         String::new()
     };
     let web_tag = if app.web_mode { "🌐 web " } else { "" };
+    let incog_tag = if app.incognito { "🕶️ " } else { "" };
     let show_bar = app.settings.show_stats && app.context_limit().is_some();
 
     if !show_bar {
-        let text = format!("{space_tag}{web_tag}{model}  |  {}", app.status);
+        let text = format!("{space_tag}{incog_tag}{web_tag}{model}  |  {}", app.status);
         let para = Paragraph::new(text).style(Style::default().fg(app.theme.fg_dim));
         f.render_widget(para, area);
         return;
     }
 
     // Model, then the gradient context bar beside it, then numbers + status.
-    let model = format!("{web_tag}{model}");
+    let model = format!("{incog_tag}{web_tag}{model}");
     let model_w = model.chars().count() as u16 + 2;
     let gauge_w = 18u16.min(area.width.saturating_sub(model_w + 4));
     let cols = Layout::horizontal([

@@ -53,19 +53,38 @@ impl App {
         // Auto-create a session on the first message.
         if self.session.is_none() {
             let title = title_from(&text);
-            let mut s = self
-                .db
-                .create_session(&title, &model, &self.active_space.id)?;
-            // Carry a pre-session `/web` toggle onto the session it creates.
-            if self.web_mode {
-                s.web_mode = true;
-                let _ = self.db.set_session_web_mode(&s.id, true);
-            }
+            let s = if self.incognito {
+                crate::db::Session {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    title: title.clone(),
+                    model: model.clone(),
+                    slug: None,
+                    created_at: Utc::now().to_rfc3339(),
+                    compact_summary: None,
+                    compact_through: 0,
+                    web_mode: self.web_mode,
+                    swarm_mode: false,
+                }
+            } else {
+                let mut s = self
+                    .db
+                    .create_session(&title, &model, &self.active_space.id)?;
+                // Carry a pre-session `/web` toggle onto the session it creates.
+                if self.web_mode {
+                    s.web_mode = true;
+                    let _ = self.db.set_session_web_mode(&s.id, true);
+                }
+                s
+            };
             self.session = Some(s);
         }
         let session_id = self.session.as_ref().unwrap().id.clone();
 
-        let message_id = self.db.add_user_message(&session_id, &text)?;
+        let message_id = if self.incognito {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            self.db.add_user_message(&session_id, &text)?
+        };
         let images = if self.pending_images.is_empty() {
             Vec::new()
         } else {
@@ -74,8 +93,21 @@ impl App {
                 .iter()
                 .map(|p| p.path.to_string_lossy().to_string())
                 .collect();
-            let images = self.db.add_message_images(&message_id, &paths)?;
-            self.pending_images.clear();
+            let images = if self.incognito {
+                self.pending_images.clear();
+                paths
+                    .iter()
+                    .map(|p| crate::db::MessageImage {
+                        id: String::new(),
+                        path: p.clone(),
+                        description: None,
+                    })
+                    .collect()
+            } else {
+                let images = self.db.add_message_images(&message_id, &paths)?;
+                self.pending_images.clear();
+                images
+            };
             images
         };
         self.messages.push(Message {
@@ -123,6 +155,12 @@ impl App {
     pub(crate) fn build_history(&mut self) -> Vec<ChatMessage> {
         let mut history: Vec<ChatMessage> = Vec::with_capacity(self.messages.len() + 3);
         history.push(ChatMessage::text("system", self.system_prompt()));
+        // Include space-file images inline for vision models.
+        if self.current_model_supports_images() {
+            if let Some(img_msg) = self.space_images_message() {
+                history.push(img_msg);
+            }
+        }
         // If this session has been auto-compacted, send the digest instead of
         // the raw messages it covers — only the tail after it goes verbatim.
         if let Some(summary) = self
@@ -292,7 +330,9 @@ impl App {
                     .map(|(id, _)| id.clone())
                     .or_else(|| self.session.as_ref().map(|s| s.id.clone()));
                 if let Some(id) = &target {
-                    let _ = self.db.add_tool_call_message(id, &content);
+                    if !self.incognito {
+                        let _ = self.db.add_tool_call_message(id, &content);
+                    }
                 }
                 if self.viewing_stream() {
                     self.messages.push(Message {
@@ -326,7 +366,9 @@ impl App {
                 };
                 self.finish_stream()?;
                 if let Some(id) = &target {
-                    self.db.add_error_message(id, &e)?;
+                    if !self.incognito {
+                        self.db.add_error_message(id, &e)?;
+                    }
                 }
                 if viewing {
                     self.messages.push(Message {
@@ -436,15 +478,17 @@ impl App {
             .map(|(id, _)| id.clone())
             .or_else(|| self.session.as_ref().map(|s| s.id.clone()));
         if let Some(id) = &target {
-            self.db.add_assistant_message(
-                id,
-                &buf,
-                model.as_deref(),
-                reasoning.as_deref(),
-                tokens,
-                secs,
-                phrase.as_deref(),
-            )?;
+            if !self.incognito {
+                self.db.add_assistant_message(
+                    id,
+                    &buf,
+                    model.as_deref(),
+                    reasoning.as_deref(),
+                    tokens,
+                    secs,
+                    phrase.as_deref(),
+                )?;
+            }
         }
         if viewing {
             self.messages.push(Message {
@@ -460,9 +504,11 @@ impl App {
                 persona: None,
             });
             // These read the *active* conversation, so they only make sense here.
-            self.maybe_generate_title();
-            self.maybe_extract_memory();
-            self.maybe_compact();
+            if !self.incognito {
+                self.maybe_generate_title();
+                self.maybe_extract_memory();
+                self.maybe_compact();
+            }
         } else if let Some((id, title)) = origin {
             self.unread.insert(id);
             self.status = format!("✓ response ready in: {title}");
@@ -730,8 +776,11 @@ impl App {
     }
 
     /// How to build/edit locally served web apps, plus the space's existing
-    /// apps. Present whenever the app server is running.
+    /// apps. Present whenever the app server is running. Hidden in incognito.
     fn apps_section(&self) -> Option<String> {
+        if self.incognito {
+            return None;
+        }
         self.app_server.as_ref()?;
         let mut s = "## Apps\nYou can build apps with persistent storage (KV store), file upload, \
                      and access to user-uploaded images. Apps are served at UUID-based URLs.\n\n"
@@ -778,6 +827,52 @@ impl App {
             }
         }
         Some(s.trim_end().to_string())
+    }
+
+    /// A system message with space-file images inline, for vision models.
+    /// Returns None when there are no image-type space files.
+    fn space_images_message(&self) -> Option<ChatMessage> {
+        let files_dir = self.space.files_dir(&self.active_space.name);
+        let mut urls: Vec<String> = Vec::new();
+        let mut names: Vec<&str> = Vec::new();
+        for f in &self.files_cache {
+            let ext = std::path::Path::new(&f.name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            if !crate::extract::is_image_ext(ext) {
+                continue;
+            }
+            let path = files_dir.join(&f.name);
+            if let Ok(bytes) = std::fs::read(&path) {
+                use base64::Engine;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let mime = match ext {
+                    "jpg" | "jpeg" => "image/jpeg",
+                    "png" => "image/png",
+                    "gif" => "image/gif",
+                    "webp" => "image/webp",
+                    "bmp" => "image/bmp",
+                    _ => "image/png",
+                };
+                urls.push(format!("data:{mime};base64,{b64}"));
+            }
+            names.push(f.name.as_str());
+        }
+        if urls.is_empty() {
+            return None;
+        }
+        let text = format!(
+            "The user has these image files in this space which you can see below: {}",
+            names.join(", ")
+        );
+        Some(ChatMessage {
+            role: "system".to_string(),
+            content: text,
+            tool_calls: None,
+            tool_call_id: None,
+            images: urls,
+        })
     }
 
     /// Names of the active space's existing apps (directory listing).
