@@ -43,9 +43,7 @@ pub struct ToolBox {
     cache_only: bool,
     /// Provider + model for AI image generation. `None` = tool disabled.
     pub image_gen_backend: Option<(OpenRouter, String)>,
-    /// Directory to save generated images into.
-    pub space_images_dir: PathBuf,
-    /// Directory to also copy generated images into (for file search).
+    /// Directory to save generated images into / search for reference images.
     pub space_files_dir: PathBuf,
     /// Directory holding space-local scripts (created by the model via
     /// `write_script` / `run_python`).
@@ -74,7 +72,7 @@ pub struct AppsCtx {
     pub space_name: String,
     pub space_id: String,
     pub space_db_path: PathBuf,
-    pub images_dir: PathBuf,
+    pub files_dir: PathBuf,
     pub session_id: String,
 }
 
@@ -103,7 +101,6 @@ impl ToolBox {
             apps,
             cache_only: false,
             image_gen_backend: None,
-            space_images_dir: PathBuf::new(),
             space_files_dir: PathBuf::new(),
             space_scripts_dir: PathBuf::new(),
             session_id: String::new(),
@@ -1319,50 +1316,23 @@ fn app_link(&self, uuid: &str) -> String {
                             return (format!("cannot create _images dir: {e}"), status);
                         }
                         let mut out: Vec<serde_json::Value> = Vec::new();
-                        let space_files_dir = ctx.images_dir.parent().map(|p| p.join("files"));
                         for img_id in &image_ids {
-                            let mut copied = false;
-                            // Try images dir first
-                            let src = ctx.images_dir.join(img_id);
-                            if src.exists() {
-                                let dst = images_dir.join(img_id);
-                                match std::fs::copy(&src, &dst) {
-                                    Ok(_) => {
-                                        out.push(serde_json::json!({
-                                            "id": img_id,
-                                            "url": format!("/{uuid}/_images/{img_id}"),
-                                        }));
-                                        copied = true;
-                                    }
-                                    Err(e) => {
-                                        out.push(serde_json::json!({"id": img_id, "error": format!("{e}")}));
-                                        copied = true;
-                                    }
-                                }
+                            let src = ctx.files_dir.join(img_id);
+                            if !src.exists() {
+                                out.push(serde_json::json!({"id": img_id, "error": "not found in space files"}));
+                                continue;
                             }
-                            if !copied {
-                                if let Some(ref fdir) = space_files_dir {
-                                    let src = fdir.join(img_id);
-                                    if src.exists() {
-                                        let dst = images_dir.join(img_id);
-                                        match std::fs::copy(&src, &dst) {
-                                            Ok(_) => {
-                                                out.push(serde_json::json!({
-                                                    "id": img_id,
-                                                    "url": format!("/{uuid}/_images/{img_id}"),
-                                                }));
-                                                copied = true;
-                                            }
-                                            Err(e) => {
-                                                out.push(serde_json::json!({"id": img_id, "error": format!("{e}")}));
-                                                copied = true;
-                                            }
-                                        }
-                                    }
+                            let dst = images_dir.join(img_id);
+                            match std::fs::copy(&src, &dst) {
+                                Ok(_) => {
+                                    out.push(serde_json::json!({
+                                        "id": img_id,
+                                        "url": format!("/{uuid}/_images/{img_id}"),
+                                    }));
                                 }
-                            }
-                            if !copied {
-                                out.push(serde_json::json!({"id": img_id, "error": "not found in images dir or space files"}));
+                                Err(e) => {
+                                    out.push(serde_json::json!({"id": img_id, "error": format!("{e}")}));
+                                }
                             }
                         }
                         serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
@@ -1549,7 +1519,7 @@ fn app_link(&self, uuid: &str) -> String {
                             "prompt must not be empty".to_string()
                         } else {
                             let image_data = image_id.and_then(|id| {
-                                let png = self.space_images_dir.join(format!("{id}.png"));
+                                let png = self.space_files_dir.join(format!("{id}.png"));
                                 std::fs::read(&png).ok().or_else(|| {
                                     let files = self.space_files_dir.as_path();
                                     std::fs::read_dir(files).ok().and_then(|e| {
@@ -1567,8 +1537,8 @@ fn app_link(&self, uuid: &str) -> String {
                                     Ok((png_bytes, ext)) => {
                                         let id = uuid::Uuid::new_v4().to_string();
                                         let filename = format!("{id}.{ext}");
-                                        let img_path = self.space_images_dir.join(&filename);
-                                        if let Err(e) = std::fs::create_dir_all(&self.space_images_dir) {
+                                        let img_path = self.space_files_dir.join(&filename);
+                                        if let Err(e) = std::fs::create_dir_all(&self.space_files_dir) {
                                             format!("cannot create images dir: {e}")
                                         } else if let Err(e) = std::fs::write(&img_path, &png_bytes) {
                                             format!("cannot write image: {e}")
@@ -3741,7 +3711,7 @@ mod tests {
                 space_name: "default".to_string(),
                 space_id: "default".to_string(),
                 space_db_path: PathBuf::from("/tmp/test.db"),
-                images_dir: dir.clone(),
+                files_dir: dir.clone(),
                 session_id: String::new(),
             }),
         );

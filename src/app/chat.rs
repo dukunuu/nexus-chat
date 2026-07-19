@@ -179,7 +179,7 @@ impl App {
             }
             let mut cm = ChatMessage::text(m.role.clone(), m.content.clone());
             if m.role == "user" && vision {
-                let images_dir = self.space.images_dir(&self.active_space.name);
+                let images_dir = self.space.files_dir(&self.active_space.name);
                 let mut images = Vec::new();
                 let mut rest = m.content.as_str();
                 while let Some(start) = rest.find("![") {

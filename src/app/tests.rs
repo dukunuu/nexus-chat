@@ -1359,7 +1359,7 @@ fn history_carries_markdown_images_as_data_urls_for_vision_models() {
         a.db.create_session("t", "vis/model", &a.active_space.id, "chat")
             .unwrap();
     // A real tiny png on disk, referenced via markdown in content.
-    let dir = a.space.images_dir(&a.active_space.name);
+    let dir = a.space.files_dir(&a.active_space.name);
     std::fs::create_dir_all(&dir).unwrap();
     let png_path = dir.join("t.png");
     std::fs::write(

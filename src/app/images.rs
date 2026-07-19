@@ -6,7 +6,7 @@ impl App {
     /// Read the space's images dir and populate `images_cache` (name, size,
     /// modified). A missing or empty dir produces an empty cache, never an error.
     pub(crate) fn refresh_images(&mut self) {
-        let dir = self.space.images_dir(&self.active_space.name);
+        let dir = self.space.files_dir(&self.active_space.name);
         let _ = std::fs::create_dir_all(&dir);
         self.images_cache = match std::fs::read_dir(&dir) {
             Err(_) => Vec::new(),
@@ -47,14 +47,14 @@ impl App {
         let Some(img) = self.images_cache.get(self.images_selected) else {
             return;
         };
-        let path = self.space.images_dir(&self.active_space.name).join(&img.name);
+        let path = self.space.files_dir(&self.active_space.name).join(&img.name);
         let _ = open::that_detached(&path);
         self.status = format!("opened {}", img.name);
     }
 
     /// Ctrl+D confirm: delete the image file from disk and refresh.
     pub fn confirm_images_delete(&mut self) -> Result<()> {
-        let dir = self.space.images_dir(&self.active_space.name);
+        let dir = self.space.files_dir(&self.active_space.name);
         if let Some(img) = self.images_cache.get(self.images_selected).cloned() {
             let path = dir.join(&img.name);
             if path.exists() {

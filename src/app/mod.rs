@@ -1205,7 +1205,7 @@ impl App {
                 space_name: self.active_space.name.clone(),
                 space_id: self.active_space.id.clone(),
                 space_db_path: self.space.db_path(),
-                images_dir: self.space.images_dir(&self.active_space.name),
+                files_dir: self.space.files_dir(&self.active_space.name),
                 session_id: self.session.as_ref().map(|s| s.id.clone()).unwrap_or_default(),
             }),
         );
@@ -1215,7 +1215,6 @@ impl App {
         toolbox.image_gen_backend = (!self.image_gen_model.trim().is_empty())
             .then(|| self.backends.resolve(self.image_gen_model.trim()))
             .flatten();
-        toolbox.space_images_dir = self.space.images_dir(&self.active_space.name);
         toolbox.space_files_dir = self.space.files_dir(&self.active_space.name);
         toolbox.space_scripts_dir = self.space.scripts_dir(&self.active_space.name);
         toolbox.session_id = self

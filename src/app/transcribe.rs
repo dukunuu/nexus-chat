@@ -55,7 +55,7 @@ impl super::App {
             });
             (d.clone(), format!("{}.png", uuid::Uuid::new_v4()))
         } else {
-            let dir = self.space.images_dir(&self.active_space.name);
+            let dir = self.space.files_dir(&self.active_space.name);
             if let Err(e) = std::fs::create_dir_all(&dir) {
                 self.status = format!("could not create {}: {e}", dir.display());
                 return None;

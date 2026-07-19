@@ -81,11 +81,6 @@ impl Space {
         self.space_dir(name).join("files")
     }
 
-    /// Directory holding a space's pasted conversation images.
-    pub fn images_dir(&self, name: &str) -> PathBuf {
-        self.space_dir(name).join("images")
-    }
-
     /// Directory holding a space's model-created apps (created on demand).
     pub fn apps_dir(&self, name: &str) -> PathBuf {
         self.space_dir(name).join("apps")

@@ -129,7 +129,7 @@ fn sync_cache(app: &mut App, width: usize) {
     for (i, m) in app.messages.iter().enumerate().skip(c.msg_count) {
         let start = c.lines.len();
         if m.role == "user" {
-            let images_dir = app.space.images_dir(&app.active_space.name);
+            let images_dir = app.space.files_dir(&app.active_space.name);
             render_markdown_images(
                 &mut c.lines, &m.content, width, &theme, &images_dir,
                 &mut c.image_at_line,
@@ -153,7 +153,7 @@ fn sync_cache(app: &mut App, width: usize) {
                 &theme,
             );
         } else {
-            let images_dir = app.space.images_dir(&app.active_space.name);
+            let images_dir = app.space.files_dir(&app.active_space.name);
             render_markdown_images(
                 &mut c.lines, &m.content, width, &theme, &images_dir,
                 &mut c.image_at_line,
