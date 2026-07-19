@@ -550,6 +550,101 @@ impl App {
         }
         Ok(())
     }
+
+    /// Find `@` before the cursor and match against space files.
+    /// Returns the query text after `@` (owned) and the byte offset of `@`.
+    fn at_query(&self) -> Option<(String, usize)> {
+        let text = self.input_text();
+        let cursor = self.input.cursor();
+        // tui-textarea cursor is (row, col). Single-line input → col is byte offset.
+        let pos = cursor.1;
+        let before = text.get(..pos)?;
+        let at = before.rfind('@')?;
+        let rest = &text[at + 1..pos];
+        // Only match if there's no whitespace or `/` between @ and cursor.
+        if rest.contains(char::is_whitespace) || rest.contains('/') {
+            return None;
+        }
+        Some((rest.to_string(), at))
+    }
+
+    /// Compute @-autocomplete matches from `files_cache`.
+    pub fn refresh_at_matches(&mut self) {
+        let Some((query, at_offset)) = self.at_query() else {
+            self.at_state = None;
+            return;
+        };
+        if query.is_empty() {
+            // Show all files when @ is typed with no query yet
+            let all = self.files_cache.clone();
+            if all.is_empty() {
+                self.at_state = None;
+                return;
+            }
+            self.at_state = Some((all, 0, at_offset));
+            return;
+        }
+        let lower = query.to_lowercase();
+        let mut scored: Vec<(i32, &crate::db::FileRow)> = self
+            .files_cache
+            .iter()
+            .filter_map(|f| {
+                let name_lower = f.name.to_lowercase();
+                let score = if name_lower.starts_with(&lower) {
+                    100 - (name_lower.len() as i32)
+                } else if let Some(idx) = name_lower.find(&lower) {
+                    50 - idx as i32
+                } else if crate::input::fuzzy_score(&query, &f.name).is_some() {
+                    10
+                } else {
+                    return None;
+                };
+                Some((score, f))
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0).then(a.1.name.cmp(&b.1.name))
+        });
+        let matches: Vec<crate::db::FileRow> = scored.into_iter().map(|(_, f)| f.clone()).collect();
+        if matches.is_empty() {
+            self.at_state = None;
+            return;
+        }
+        let selected = self
+            .at_state
+            .as_ref()
+            .map(|s| s.1.min(matches.len().saturating_sub(1)))
+            .unwrap_or(0);
+        self.at_state = Some((matches, selected, at_offset));
+    }
+
+    /// Accept the highlighted @-autocomplete match: replace `@<query>` with the filename.
+    pub fn accept_at_match(&mut self) {
+        let Some((ref matches, selected, at_offset)) = self.at_state.clone() else {
+            return;
+        };
+        let Some(f) = matches.get(selected) else {
+            return;
+        };
+        let text = self.input_text();
+        let cursor = self.input.cursor();
+        let pos = cursor.1;
+        let suffix = if pos < text.len() { &text[pos..] } else { "" };
+        self.set_input(&format!("{}{} {suffix}", &text[..at_offset], f.name));
+        self.at_state = None;
+    }
+
+    /// Move @-autocomplete selection.
+    pub fn move_at_selection(&mut self, delta: i32) {
+        let Some((ref matches, ref mut selected, _)) = self.at_state else {
+            return;
+        };
+        let n = matches.len() as i32;
+        if n == 0 {
+            return;
+        }
+        *selected = (*selected as i32 + delta).rem_euclid(n) as usize;
+    }
 }
 
 #[cfg(test)]

@@ -896,6 +896,26 @@ impl Db {
         Ok(())
     }
 
+    pub fn rename_file(&self, file_id: &str, new_name: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE files SET name = ?2 WHERE id = ?1",
+            (file_id, new_name),
+        )?;
+        Ok(())
+    }
+
+    /// Replace all occurrences of `old_name` with `new_name` in message content
+    /// within the given space. Used when OCR renames a pasted image to a
+    /// descriptive filename — updates `![alt](old_name)` → `![alt](new_name)`.
+    pub fn replace_file_ref_in_messages(&self, space_id: &str, old_name: &str, new_name: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE messages SET content = REPLACE(content, ?1, ?2)
+             WHERE session_id IN (SELECT id FROM sessions WHERE space_id = ?3)",
+            (old_name, new_name, space_id),
+        )?;
+        Ok(())
+    }
+
     /// Replace a file's indexed chunks. `chunks` are `(location, text)` in
     /// order. Any stored embeddings are dropped too — they described the old
     /// chunk texts, and the embedder backfills the new ones.

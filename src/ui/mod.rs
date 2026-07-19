@@ -34,6 +34,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Autocomplete floats above the input; only when no modal popup is open.
     if app.popup == Popup::None {
         render_command_popup(f, app, chunks[1]);
+        render_at_popup(f, app, chunks[1]);
     }
 
     match app.popup {
@@ -164,6 +165,44 @@ fn render_command_popup(f: &mut Frame, app: &App, input_area: Rect) {
     let mut state = ListState::default();
     state.select(Some(app.command_selected()));
     // Mark the selection by making its text bold + an arrow — no inverse/white bg.
+    let list = List::new(items)
+        .block(block)
+        .highlight_symbol("› ")
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+
+    f.render_widget(Clear, area);
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+/// `@` file autocomplete: space files matching the text after `@`.
+fn render_at_popup(f: &mut Frame, app: &App, input_area: Rect) {
+    let Some((ref matches, selected, _)) = app.at_state else {
+        return;
+    };
+    let n = matches.len() as u16;
+    let h = n.min(10) + 1; // max 10 rows + title
+    let w = input_area.width.min(60);
+    let x = input_area.x;
+    let y = input_area.y.saturating_sub(h);
+    let area = Rect { x, y, width: w, height: h };
+
+    let name_w = matches.iter().map(|f| f.name.chars().count()).max().unwrap_or(0) + 1;
+    let items: Vec<ListItem> = matches.iter().take(10).map(|f| {
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("{:<name_w$}", f.name),
+                Style::default().fg(app.theme.fg),
+            ),
+            Span::styled(format!("  {}  {}", crate::app::human_size(f.size), f.status), Style::default().fg(app.theme.fg_dim)),
+        ]))
+    }).collect();
+
+    let block = Block::default().title(Line::from(Span::styled(
+        "files (Tab insert · Esc cancel)",
+        Style::default().fg(app.theme.fg_dim),
+    )));
+    let mut state = ListState::default();
+    state.select(Some(selected.min(items.len().saturating_sub(1))));
     let list = List::new(items)
         .block(block)
         .highlight_symbol("› ")

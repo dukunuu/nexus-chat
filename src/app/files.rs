@@ -3,6 +3,8 @@
 
 use std::path::Path;
 
+use crate::db::FileRow;
+
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
@@ -136,6 +138,18 @@ impl OcrBackend {
 
 /// First ~90 chars of an error, so a page failure fits in the status column
 /// without swallowing the reason.
+/// A stem that looks like a UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).
+fn is_uuid_like(stem: &str) -> bool {
+    let hex = |s: &str| s.chars().all(|c| c.is_ascii_hexdigit());
+    let parts: Vec<&str> = stem.split('-').collect();
+    parts.len() == 5
+        && parts[0].len() == 8 && hex(parts[0])
+        && parts[1].len() == 4 && hex(parts[1])
+        && parts[2].len() == 4 && hex(parts[2])
+        && parts[3].len() == 4 && hex(parts[3])
+        && parts[4].len() == 12 && hex(parts[4])
+}
+
 fn clip_err(e: &str) -> String {
     let mut s: String = e.chars().take(90).collect();
     if s.len() < e.len() {
@@ -850,7 +864,23 @@ impl App {
                     ),
                 };
                 let _ = self.db.set_file_status(&f.id, &status);
-                if space_id == self.active_space.id {
+
+                // Rename pasted images (uuid.ext) to uuid-<slug>.ext for @-completion.
+                if let Some(new_name) = self.descriptive_paste_name(&f, &text) {
+                    let dir = self.space.files_dir(&self.active_space.name);
+                    let old_path = dir.join(&f.name);
+                    let new_path = dir.join(&new_name);
+                    if old_path.exists() && std::fs::rename(&old_path, &new_path).is_ok() {
+                        let _ = self.db.rename_file(&f.id, &new_name);
+                        let _ = self.db.replace_file_ref_in_messages(&space_id, &f.name, &new_name);
+                        if space_id == self.active_space.id {
+                            self.status = format!("ocr done: {new_name}");
+                        }
+                        // f.name needs the updated name for the message below.
+                    } else if space_id == self.active_space.id {
+                        self.status = format!("ocr done: {name}");
+                    }
+                } else if space_id == self.active_space.id {
                     self.status = format!("ocr done: {name}");
                 }
             }
@@ -995,6 +1025,44 @@ impl App {
             }
             self.status = format!("opened {}", f.name);
         }
+    }
+
+    /// If `f` is a pasted image (UUID.ext), generate a descriptive name
+    /// `uuid-<slug>.ext` from OCR text. Returns None for non-pasted files.
+    fn descriptive_paste_name(&self, f: &FileRow, ocr_text: &str) -> Option<String> {
+        let stem = std::path::Path::new(&f.name).file_stem()?.to_str()?;
+        let ext = std::path::Path::new(&f.name).extension()?.to_str()?;
+        // Only rename files whose stem is a UUID (pasted images).
+        if !is_uuid_like(stem) {
+            return None;
+        }
+        let slug = self.slug_from_ocr(ocr_text)?;
+        Some(format!("{stem}-{slug}.{ext}"))
+    }
+
+    /// Generate a snake_case name from OCR text. Takes first N meaningful words
+    /// and slugifies them. Returns None if text is empty or has no words.
+    fn slug_from_ocr(&self, text: &str) -> Option<String> {
+        let words: Vec<&str> = text
+            .split_whitespace()
+            .filter(|w| {
+                let w = w.trim_matches(|c: char| !c.is_alphanumeric());
+                w.len() > 2 && w.chars().any(|c| c.is_alphanumeric())
+            })
+            .collect();
+        if words.is_empty() {
+            return None;
+        }
+        let slug: String = words
+            .iter()
+            .take(5)
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
+            .collect::<Vec<_>>()
+            .join("_");
+        if slug.is_empty() { None } else { Some(slug) }
     }
 }
 

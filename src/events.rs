@@ -300,6 +300,17 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         }
     }
 
+    // @-file autocomplete — only when no slash command is showing.
+    if app.at_state.is_some() {
+        match key.code {
+            KeyCode::Up => { app.move_at_selection(-1); return Ok(()); }
+            KeyCode::Down => { app.move_at_selection(1); return Ok(()); }
+            KeyCode::Tab | KeyCode::Enter => { app.accept_at_match(); return Ok(()); }
+            KeyCode::Esc => { app.at_state = None; return Ok(()); }
+            _ => {}
+        }
+    }
+
     match key.code {
         // Shift+Enter and Ctrl+Enter insert a newline; plain Enter sends.
         KeyCode::Enter if shift || ctrl => app.input.insert_newline(),
@@ -358,6 +369,8 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         // also do this via the editor's default keymap.)
         KeyCode::Backspace if ctrl => {
             app.input.delete_word();
+            app.refresh_at_matches();
+            return Ok(());
         }
         // Up/Down move the composer cursor within a multi-row message first;
         // only once it's already at the top/bottom row do they scroll history.
@@ -369,6 +382,8 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
             if app.input.cursor() == before {
                 app.scroll = app.scroll.saturating_add(1).min(app.max_scroll);
             }
+            app.refresh_at_matches();
+            return Ok(());
         }
         KeyCode::Down if !shift => {
             let before = app.input.cursor();
@@ -376,6 +391,8 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
             if app.input.cursor() == before {
                 app.scroll = app.scroll.saturating_sub(1);
             }
+            app.refresh_at_matches();
+            return Ok(());
         }
         KeyCode::PageUp => app.scroll = app.scroll.saturating_add(10).min(app.max_scroll),
         KeyCode::PageDown => app.scroll = app.scroll.saturating_sub(10),
@@ -400,6 +417,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
             }
         }
     }
+    app.refresh_at_matches();
     Ok(())
 }
 

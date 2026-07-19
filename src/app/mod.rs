@@ -843,6 +843,8 @@ pub struct App {
 
     /// Highlighted row in the slash-command autocomplete popup.
     pub cmd_selected: usize,
+    /// `@` file autocomplete: (matches, selected, cursor byte offset of `@`).
+    pub at_state: Option<(Vec<crate::db::FileRow>, usize, usize)>,
 
     /// Start-screen banner (custom or built-in) and a greeting picked at launch.
     pub banner: String,
@@ -1094,6 +1096,7 @@ impl App {
             settings_inputs: Default::default(),
             settings_collapsed: HashSet::new(),
             cmd_selected: 0,
+            at_state: None,
             banner: config::load_banner().unwrap_or_else(|| BANNER.trim_matches('\n').to_string()),
             greeting: pick_greeting(),
             scroll: 0,
