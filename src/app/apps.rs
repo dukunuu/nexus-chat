@@ -21,12 +21,8 @@ impl App {
     /// An app's live URL, when the server is running.
     pub fn app_url(&self, name: &str) -> Option<String> {
         let s = self.app_server.as_ref()?;
-        Some(format!(
-            "http://127.0.0.1:{}/{}/{}/",
-            s.port(),
-            crate::appserver::encode(&self.active_space.name),
-            crate::appserver::encode(name)
-        ))
+        let uuid = s.registry().resolve(&self.active_space.name, name)?;
+        Some(s.app_url(&uuid))
     }
 
     /// Enter edit-file mode for the selected app (Ctrl+E in Browse).
