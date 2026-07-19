@@ -295,6 +295,12 @@ impl App {
                         persona: None,
                     });
                 }
+                // Generated images land on disk but aren't indexed until
+                // rescan_files picks them up. Without this, they'd be missing
+                // from files_cache and never OCR'd for descriptive naming.
+                if name == "generate_image" {
+                    self.rescan_files();
+                }
             }
             StreamEvent::Done => self.finish_stream()?,
             StreamEvent::Error(e) => {
