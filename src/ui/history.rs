@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
@@ -24,6 +25,9 @@ pub(crate) struct HistoryCache {
     plain: Vec<String>,
     /// Maps rendered line index -> image path for click-to-open.
     pub image_at_line: Vec<Option<String>>,
+    /// Cache of rendered half-block image lines by (path, width) — avoids
+    /// re-decoding image files every frame.
+    image_cache: HashMap<(String, usize), Vec<Line<'static>>>,
 }
 
 pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
@@ -132,7 +136,7 @@ fn sync_cache(app: &mut App, width: usize) {
             let images_dir = app.space.files_dir(&app.active_space.name);
             render_markdown_images(
                 &mut c.lines, &m.content, width, &theme, &images_dir,
-                &mut c.image_at_line,
+                &mut c.image_at_line, &mut c.image_cache,
             );
             push_user(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_stage" {
@@ -156,7 +160,7 @@ fn sync_cache(app: &mut App, width: usize) {
             let images_dir = app.space.files_dir(&app.active_space.name);
             render_markdown_images(
                 &mut c.lines, &m.content, width, &theme, &images_dir,
-                &mut c.image_at_line,
+                &mut c.image_at_line, &mut c.image_cache,
             );
             push_assistant_stored(
                 &mut c.lines,
@@ -524,6 +528,7 @@ fn push_rendered(
 /// Scan content for markdown image references `![alt](file)` and render them
 /// inline. For each match, resolve the file against `images_dir`, render it
 /// with `image_to_halfblock_lines`, and track the lines in `image_at_line`.
+/// Results are cached by (path, width) to avoid re-decoding every frame.
 fn render_markdown_images(
     out: &mut Vec<Line<'static>>,
     content: &str,
@@ -531,6 +536,7 @@ fn render_markdown_images(
     theme: &crate::theme::Theme,
     images_dir: &std::path::Path,
     image_at_line: &mut Vec<Option<String>>,
+    image_cache: &mut HashMap<(String, usize), Vec<Line<'static>>>,
 ) {
     let mut rest = content;
     while let Some(start) = rest.find("![") {
@@ -539,16 +545,16 @@ fn render_markdown_images(
             if let Some((_alt, file)) = inner.split_once("](") {
                 let path = images_dir.join(file);
                 let path_str = path.to_string_lossy().to_string();
-                let half = image_to_halfblock_lines(&path_str, width);
-                if half.len() <= 1 {
-                    out.push(Line::from(dim(
-                        format!("🖼 {_alt}"),
-                        theme,
-                    )));
+                let key = (path_str.clone(), width);
+                let half = image_cache.entry(key).or_insert_with(|| {
+                    image_to_halfblock_lines(&path_str, width)
+                });
+                if half.len() <= 1 && half.first().map(|l| l.to_string()).unwrap_or_default().contains("[image]") {
+                    out.push(Line::from(dim(format!("🖼 {_alt}"), theme)));
                     image_at_line.push(Some(path_str));
                 } else {
                     let img_start = out.len();
-                    out.extend(half);
+                    out.extend(half.clone());
                     let img_end = out.len();
                     out.push(Line::from(""));
                     for _ in img_start..img_end {
