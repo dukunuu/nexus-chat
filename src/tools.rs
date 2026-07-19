@@ -1519,12 +1519,17 @@ fn app_link(&self, uuid: &str) -> String {
                             "prompt must not be empty".to_string()
                         } else {
                             let image_data = image_id.and_then(|id| {
-                                let png = self.space_files_dir.join(format!("{id}.png"));
-                                std::fs::read(&png).ok().or_else(|| {
+                                // Try id as a full filename first, then as a stem + .png
+                                let direct = self.space_files_dir.join(id);
+                                std::fs::read(&direct).ok().or_else(|| {
+                                    let with_png = self.space_files_dir.join(format!("{id}.png"));
+                                    std::fs::read(&with_png).ok()
+                                }).or_else(|| {
+                                    let stem = std::path::Path::new(id).file_stem().and_then(|s| s.to_str()).unwrap_or(id);
                                     let files = self.space_files_dir.as_path();
                                     std::fs::read_dir(files).ok().and_then(|e| {
                                         e.flatten().find(|e| {
-                                            e.path().file_stem().map(|s| s == id).unwrap_or(false)
+                                            e.path().file_stem().map(|s| s == stem).unwrap_or(false)
                                         }).and_then(|e| std::fs::read(e.path()).ok())
                                     })
                                 })
