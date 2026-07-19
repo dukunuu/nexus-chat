@@ -124,10 +124,21 @@ fn sync_cache(app: &mut App, width: usize) {
     );
     let c = &mut app.history_cache;
     if c.key != key || app.messages.len() < c.msg_count {
-        *c = HistoryCache {
-            key,
-            ..Default::default()
-        };
+        if app.messages.len() < c.msg_count || c.key.0 != key.0 || c.key.1 != key.1 || c.key.6 != key.6 {
+            // Session, width, or theme changed — full reset (drops image cache too).
+            *c = HistoryCache {
+                key,
+                ..Default::default()
+            };
+        } else {
+            // Only display flags changed — keep image cache, re-wrap messages.
+            let ic = std::mem::take(&mut c.image_cache);
+            *c = HistoryCache {
+                key,
+                ..Default::default()
+            };
+            c.image_cache = ic;
+        }
     }
     let theme = app.theme;
     for (i, m) in app.messages.iter().enumerate().skip(c.msg_count) {
