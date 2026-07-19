@@ -601,6 +601,15 @@ impl App {
         }
     }
 
+    /// Force a full history cache rebuild on the next frame. Used when
+    /// in-place message edits would otherwise leave stale wrapped content.
+    pub(crate) fn invalidate_history_cache(&mut self) {
+        if let Some(sid) = self.session.as_ref().map(|s| s.id.clone()) {
+            self.session_caches.remove(&sid);
+        }
+        self.history_cache = Default::default();
+    }
+
     /// If the given rendered line index is an image line, open the image in
     /// the default OS viewer. Returns true if it was an image line.
     pub(crate) fn open_image_at_line(&self, line: usize) -> bool {

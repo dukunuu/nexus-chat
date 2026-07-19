@@ -124,19 +124,29 @@ fn sync_cache(app: &mut App, width: usize) {
     );
     let c = &mut app.history_cache;
     if c.key != key || app.messages.len() < c.msg_count {
-        if app.messages.len() < c.msg_count || c.key.0 != key.0 || c.key.1 != key.1 || c.key.6 != key.6 {
-            // Session, width, or theme changed — full reset (drops image cache too).
-            *c = HistoryCache {
-                key,
-                ..Default::default()
-            };
+        if c.key.0 != key.0 {
+            // Session changed — save old cache for later reuse.
+            if let Some(sid) = &c.key.0 {
+                app.session_caches.insert(sid.clone(), std::mem::take(c));
+            }
+            // Restore cache for the new session if available.
+            if let Some(sid) = &key.0 {
+                if let Some(cached) = app.session_caches.remove(sid) {
+                    if cached.key == key && cached.msg_count == app.messages.len() {
+                        *c = cached;
+                        return;
+                    }
+                }
+            }
+            // New session or stale cache — full reset.
+            *c = HistoryCache { key, ..Default::default() };
+        } else if app.messages.len() < c.msg_count || c.key.1 != key.1 || c.key.6 != key.6 {
+            // Width or theme changed — full reset (drops image cache too).
+            *c = HistoryCache { key, ..Default::default() };
         } else {
             // Only display flags changed — keep image cache, re-wrap messages.
             let ic = std::mem::take(&mut c.image_cache);
-            *c = HistoryCache {
-                key,
-                ..Default::default()
-            };
+            *c = HistoryCache { key, ..Default::default() };
             c.image_cache = ic;
         }
     }

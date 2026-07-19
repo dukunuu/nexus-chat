@@ -1316,7 +1316,7 @@ impl super::App {
                         // Stage rows update in place, so message count does not
                         // change and the wrapped transcript cache would otherwise
                         // keep rendering stale progress.
-                        self.history_cache = Default::default();
+                        self.invalidate_history_cache();
                     } else {
                         self.messages.push(crate::db::Message {
                             id: String::new(),

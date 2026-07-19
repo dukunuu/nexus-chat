@@ -772,6 +772,9 @@ pub struct App {
     /// Wrapped-line cache for the transcript, so redraws don't re-render
     /// markdown for the whole conversation every frame.
     pub(crate) history_cache: crate::ui::history::HistoryCache,
+    /// Per-session history caches preserved across session switches so
+    /// switching back doesn't re-wrap every message from scratch.
+    pub(crate) session_caches: std::collections::HashMap<String, crate::ui::history::HistoryCache>,
     /// External edit queued for the event loop, which owns terminal
     /// suspension and knows which app callback should consume the saved file.
     pub pending_editor: Option<PendingEditor>,
@@ -1053,6 +1056,7 @@ impl App {
             tool_status: None,
             show_tool_detail: false,
             history_cache: Default::default(),
+            session_caches: std::collections::HashMap::new(),
             pending_editor: None,
             stream_rx: None,
             stream_abort: None,

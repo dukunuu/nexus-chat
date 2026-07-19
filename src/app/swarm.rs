@@ -261,7 +261,7 @@ impl App {
                             && (m.content == "swarm" || m.content.starts_with("swarm:"))
                     }) {
                         row.content = text.clone();
-                        self.history_cache = Default::default();
+                        self.invalidate_history_cache();
                     } else {
                         self.messages.push(crate::db::Message {
                             id: String::new(),
