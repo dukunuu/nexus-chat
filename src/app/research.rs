@@ -1327,7 +1327,6 @@ impl super::App {
                             tokens: None,
                             secs: None,
                             phrase: None,
-                            images: Vec::new(),
                             persona: None,
                         });
                     }
@@ -1360,7 +1359,6 @@ impl super::App {
                         tokens: None,
                         secs: None,
                         phrase: None,
-                        images: Vec::new(),
                         persona: None,
                     });
                     self.status = "research plan ready — [e]dit / Enter to continue".to_string();
@@ -1407,7 +1405,6 @@ impl super::App {
                         tokens: None,
                         secs: None,
                         phrase: Some("Researched".to_string()),
-                        images: Vec::new(),
                         persona: None,
                     });
                     self.status = "research complete".to_string();
@@ -1433,7 +1430,6 @@ impl super::App {
                         tokens: None,
                         secs: None,
                         phrase: None,
-                        images: Vec::new(),
                         persona: None,
                     });
                 }

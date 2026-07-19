@@ -97,19 +97,9 @@ pub struct Message {
     pub secs: Option<f64>,
     /// Past-tense flavour phrase for the completion line, e.g. "Vibed".
     pub phrase: Option<String>,
-    pub images: Vec<MessageImage>,
     /// Which `/swarm` persona produced this reply, if any (`None` for
     /// ordinary messages and for a swarm turn's final synthesis reply).
     pub persona: Option<String>,
-}
-
-/// An image attached to a message: PNG on disk plus the one-time generated
-/// description used when the active model can't see images.
-#[derive(Debug, Clone)]
-pub struct MessageImage {
-    pub id: String,
-    pub path: String,
-    pub description: Option<String>,
 }
 
 /// Name of the always-present, undeletable space that sessions default into.
@@ -199,14 +189,6 @@ impl Db {
                 vec BLOB NOT NULL,
                 PRIMARY KEY (file_id, seq)
             );
-            CREATE TABLE IF NOT EXISTS message_images (
-                id TEXT PRIMARY KEY,
-                message_id TEXT NOT NULL,
-                path TEXT NOT NULL,
-                description TEXT,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_message_images_message ON message_images(message_id);
             CREATE TABLE IF NOT EXISTS web_cache (
                 url_norm   TEXT PRIMARY KEY,
                 url        TEXT NOT NULL,
@@ -267,6 +249,9 @@ impl Db {
         ] {
             let _ = self.conn.execute(stmt, []);
         }
+        // Migration: remove the message_images table — images are now embedded
+        // as markdown `![alt](file)` in message content.
+        let _ = self.conn.execute_batch("DROP TABLE IF EXISTS message_images;");
         // Ensure the default space exists, then backfill any session left
         // without a space (pre-spaces db, or a space that got deleted).
         let now = Utc::now().to_rfc3339();
@@ -587,10 +572,6 @@ impl Db {
 
     /// Delete a session and all its messages.
     pub fn delete_session(&self, id: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM message_images WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?1)",
-            [id],
-        )?;
         self.conn
             .execute("DELETE FROM messages WHERE session_id = ?1", [id])?;
         self.conn
@@ -603,7 +584,7 @@ impl Db {
             "SELECT id, role, content, model, reasoning, tokens, secs, phrase, persona FROM messages
              WHERE session_id = ?1 ORDER BY created_at ASC",
         )?;
-        let mut messages = stmt
+        let messages = stmt
             .query_map([session_id], |r| {
                 Ok(Message {
                     id: r.get(0)?,
@@ -614,39 +595,10 @@ impl Db {
                     tokens: r.get(5)?,
                     secs: r.get(6)?,
                     phrase: r.get(7)?,
-                    images: Vec::new(),
                     persona: r.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-
-        let mut images_by_message: std::collections::HashMap<String, Vec<MessageImage>> =
-            std::collections::HashMap::new();
-        let mut stmt = self.conn.prepare(
-            "SELECT m.id, mi.id, mi.path, mi.description FROM message_images mi
-             JOIN messages m ON m.id = mi.message_id
-             WHERE m.session_id = ?1 ORDER BY mi.created_at ASC",
-        )?;
-        let rows = stmt.query_map([session_id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                MessageImage {
-                    id: r.get(1)?,
-                    path: r.get(2)?,
-                    description: r.get(3)?,
-                },
-            ))
-        })?;
-        for row in rows {
-            let (message_id, image) = row?;
-            images_by_message.entry(message_id).or_default().push(image);
-        }
-
-        for message in &mut messages {
-            if let Some(images) = images_by_message.remove(&message.id) {
-                message.images = images;
-            }
-        }
         Ok(messages)
     }
 
@@ -857,39 +809,6 @@ impl Db {
             (session_id, &now),
         )?;
         Ok(id)
-    }
-
-    /// Attach images to a message; returns them with `description: None`.
-    pub fn add_message_images(
-        &self,
-        message_id: &str,
-        paths: &[String],
-    ) -> Result<Vec<MessageImage>> {
-        let now = Utc::now().to_rfc3339();
-        let mut images = Vec::with_capacity(paths.len());
-        for path in paths {
-            let id = Uuid::new_v4().to_string();
-            self.conn.execute(
-                "INSERT INTO message_images (id, message_id, path, description, created_at)
-                 VALUES (?1, ?2, ?3, NULL, ?4)",
-                (&id, message_id, path, &now),
-            )?;
-            images.push(MessageImage {
-                id,
-                path: path.clone(),
-                description: None,
-            });
-        }
-        Ok(images)
-    }
-
-    /// Backfill a generated description for an image once it's been analyzed.
-    pub fn set_image_description(&self, image_id: &str, description: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE message_images SET description = ?2 WHERE id = ?1",
-            (image_id, description),
-        )?;
-        Ok(())
     }
 
     pub fn set_session_model(&self, session_id: &str, model: &str) -> Result<()> {
@@ -1654,31 +1573,16 @@ mod tests {
     }
 
     #[test]
-    fn message_images_roundtrip_and_description_backfill() {
+    fn markdown_images_in_content_roundtrip() {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
         let s = db.create_session("t", "a/b", &space, "chat").unwrap();
-        let mid = db.add_user_message(&s.id, "look at this").unwrap();
-        let imgs = db
-            .add_message_images(&mid, &["/tmp/a.png".into(), "/tmp/b.png".into()])
-            .unwrap();
-        assert_eq!(imgs.len(), 2);
-        assert!(imgs[0].description.is_none());
-
-        db.set_image_description(&imgs[0].id, "a red square")
-            .unwrap();
+        let content = "look at ![this](img.png) and ![that](other.png)";
+        db.add_user_message(&s.id, content).unwrap();
         let msgs = db.load_messages(&s.id).unwrap();
-        assert_eq!(msgs[0].id, mid);
-        assert_eq!(msgs[0].images.len(), 2);
-        assert_eq!(
-            msgs[0].images[0].description.as_deref(),
-            Some("a red square")
-        );
-        assert!(msgs[0].images[1].description.is_none());
-        // Non-image messages stay empty.
-        db.add_user_message(&s.id, "plain").unwrap();
-        let msgs = db.load_messages(&s.id).unwrap();
-        assert!(msgs[1].images.is_empty());
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].content.contains("![this](img.png)"));
+        assert!(msgs[0].content.contains("![that](other.png)"));
     }
 
     #[test]

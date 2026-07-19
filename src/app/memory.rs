@@ -176,7 +176,6 @@ mod tests {
             tokens: None,
             secs: None,
             phrase: None,
-            images: Vec::new(),
             persona: None,
         }
     }

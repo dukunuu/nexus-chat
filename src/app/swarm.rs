@@ -272,7 +272,6 @@ impl App {
                             tokens: None,
                             secs: None,
                             phrase: None,
-                            images: Vec::new(),
                             persona: None,
                         });
                     }
@@ -298,7 +297,6 @@ impl App {
                         tokens: None,
                         secs: None,
                         phrase: None,
-                        images: Vec::new(),
                         persona: Some(persona),
                     });
                 }
@@ -336,7 +334,6 @@ impl App {
                         tokens: None,
                         secs: None,
                         phrase: Some("Discussed".to_string()),
-                        images: Vec::new(),
                         persona: None,
                     });
                     self.status = "swarm turn complete".to_string();
@@ -361,7 +358,6 @@ impl App {
                         tokens: None,
                         secs: None,
                         phrase: None,
-                        images: Vec::new(),
                         persona: None,
                     });
                     self.status = format!("swarm error: {e}");

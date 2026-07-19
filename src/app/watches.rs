@@ -111,7 +111,7 @@ impl super::App {
             self.refresh_toolbox();
             self.context_total = None;
             self.scroll = 0;
-            self.clear_image_state();
+            self.cleanup_incognito_images();
         }
         self.popup = super::Popup::None;
         Ok(())

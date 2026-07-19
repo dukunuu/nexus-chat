@@ -98,18 +98,6 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title_top(Line::from(hint));
-    // Attachment indicator (when pending images).
-    if !app.pending_images.is_empty() {
-        let n = app.pending_images.len();
-        block = block.title_top(Line::from(Span::styled(
-            format!(
-                " 📎 {} image{} — Esc clears ",
-                n,
-                if n == 1 { "" } else { "s" }
-            ),
-            Style::default().fg(app.theme.warning),
-        )));
-    }
     block = block.title_top(
         Line::from(Span::styled(
             format!(" {name} "),

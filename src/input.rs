@@ -383,7 +383,10 @@ impl App {
         if self.popup == crate::app::Popup::None
             && let Some(img) = self.clipboard.as_mut().and_then(|cb| cb.get_image().ok())
         {
-            self.attach_clipboard_image(img);
+            if let Some(md) = self.save_clipboard_image(img) {
+                self.input.insert_str(&md);
+                self.status = "image attached as markdown".to_string();
+            }
             return;
         }
         let Some(cb) = self.clipboard.as_mut() else {

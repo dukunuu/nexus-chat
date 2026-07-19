@@ -129,26 +129,11 @@ fn sync_cache(app: &mut App, width: usize) {
     for (i, m) in app.messages.iter().enumerate().skip(c.msg_count) {
         let start = c.lines.len();
         if m.role == "user" {
-            for img in &m.images {
-                let half = image_to_halfblock_lines(&img.path, width);
-                if half.len() <= 1 {
-                    // Fallback to text marker (image load failed or too narrow)
-                    c.lines.push(Line::from(dim(
-                        format!("🖼 {}", img.description.as_deref().unwrap_or("image")),
-                        &theme,
-                    )));
-                    c.image_at_line.push(Some(img.path.clone()));
-                } else {
-                    let img_start = c.lines.len();
-                    c.lines.extend(half);
-                    let img_end = c.lines.len();
-                    c.lines.push(Line::from(""));
-                    for _ in img_start..img_end {
-                        c.image_at_line.push(Some(img.path.clone()));
-                    }
-                    c.image_at_line.push(None); // blank line after image
-                }
-            }
+            let images_dir = app.space.images_dir(&app.active_space.name);
+            render_markdown_images(
+                &mut c.lines, &m.content, width, &theme, &images_dir,
+                &mut c.image_at_line,
+            );
             push_user(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_stage" {
             push_research_stage(&mut c.lines, &m.content, width, &theme);
@@ -168,6 +153,11 @@ fn sync_cache(app: &mut App, width: usize) {
                 &theme,
             );
         } else {
+            let images_dir = app.space.images_dir(&app.active_space.name);
+            render_markdown_images(
+                &mut c.lines, &m.content, width, &theme, &images_dir,
+                &mut c.image_at_line,
+            );
             push_assistant_stored(
                 &mut c.lines,
                 m,
@@ -177,16 +167,6 @@ fn sync_cache(app: &mut App, width: usize) {
                 &mut c.blocks,
                 &theme,
             );
-            // Render attached images (generated images from /gen command).
-            for img in &m.images {
-                let img_start = c.lines.len();
-                let half = image_to_halfblock_lines(&img.path, width);
-                c.lines.extend(half);
-                c.lines.push(Line::from(""));
-                for _ in img_start..c.lines.len() {
-                    c.image_at_line.push(Some(img.path.clone()));
-                }
-            }
         }
         c.owner.resize(c.lines.len(), Some(i));
         c.code.resize(c.lines.len(), None);
@@ -541,6 +521,49 @@ fn push_rendered(
     out.extend(r.lines);
 }
 
+/// Scan content for markdown image references `![alt](file)` and render them
+/// inline. For each match, resolve the file against `images_dir`, render it
+/// with `image_to_halfblock_lines`, and track the lines in `image_at_line`.
+fn render_markdown_images(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+    images_dir: &std::path::Path,
+    image_at_line: &mut Vec<Option<String>>,
+) {
+    let mut rest = content;
+    while let Some(start) = rest.find("![") {
+        if let Some(end) = rest[start..].find(')') {
+            let inner = &rest[start + 2..start + end];
+            if let Some((_alt, file)) = inner.split_once("](") {
+                let path = images_dir.join(file);
+                let path_str = path.to_string_lossy().to_string();
+                let half = image_to_halfblock_lines(&path_str, width);
+                if half.len() <= 1 {
+                    out.push(Line::from(dim(
+                        format!("🖼 {_alt}"),
+                        theme,
+                    )));
+                    image_at_line.push(Some(path_str));
+                } else {
+                    let img_start = out.len();
+                    out.extend(half);
+                    let img_end = out.len();
+                    out.push(Line::from(""));
+                    for _ in img_start..img_end {
+                        image_at_line.push(Some(path_str.clone()));
+                    }
+                    image_at_line.push(None);
+                }
+            }
+            rest = &rest[start + end + 1..];
+        } else {
+            break;
+        }
+    }
+}
+
 /// Max cell-rows a rendered image occupies (click-to-open encourages viewing
 /// full size in an external viewer instead of eating the whole terminal).
 const MAX_IMAGE_ROWS: usize = 20;
@@ -624,7 +647,6 @@ mod tests {
             tokens: None,
             secs: None,
             phrase: None,
-            images: Vec::new(),
             persona: None,
         }
     }

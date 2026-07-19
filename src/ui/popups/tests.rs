@@ -63,7 +63,6 @@ fn research_live_popup_shows_agent_lifecycle_and_activity() {
         tokens: None,
         secs: None,
         phrase: None,
-        images: Vec::new(),
         persona: None,
     };
     app.messages = vec![

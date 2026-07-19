@@ -34,11 +34,6 @@ impl App {
             self.set_input(&text);
             return Ok(());
         }
-        if self.deferred_send.is_some() || self.describe_rx.is_some() {
-            self.status = "wait — still understanding the attached image".to_string();
-            self.set_input(&text);
-            return Ok(());
-        }
         if !self.backends.any() {
             self.status = "set your API key first with /login".to_string();
             self.set_input(&text);
@@ -87,31 +82,6 @@ impl App {
         } else {
             self.db.add_user_message(&session_id, &text)?
         };
-        let images = if self.pending_images.is_empty() {
-            Vec::new()
-        } else {
-            let paths: Vec<String> = self
-                .pending_images
-                .iter()
-                .map(|p| p.path.to_string_lossy().to_string())
-                .collect();
-            let images = if self.incognito {
-                self.pending_images.clear();
-                paths
-                    .iter()
-                    .map(|p| crate::db::MessageImage {
-                        id: String::new(),
-                        path: p.clone(),
-                        description: None,
-                    })
-                    .collect()
-            } else {
-                let images = self.db.add_message_images(&message_id, &paths)?;
-                self.pending_images.clear();
-                images
-            };
-            images
-        };
         self.messages.push(Message {
             id: message_id,
             role: "user".to_string(),
@@ -121,27 +91,8 @@ impl App {
             tokens: None,
             secs: None,
             phrase: None,
-            images,
             persona: None,
         });
-
-        // Deferred-send gate: a non-vision model can't see the images just
-        // attached, so send a description request first and resume once every
-        // description lands (`resume_deferred_send`, driven by `on_described`).
-        if !self.current_model_supports_images() {
-            let missing = self.undescribed_images();
-            if !missing.is_empty() {
-                if self.transcriber_model.trim().is_empty() {
-                    self.status =
-                        "model can't see images — set an image model in /config or pick a vision model"
-                            .to_string();
-                    return Ok(());
-                }
-                self.deferred_send = Some(String::new()); // marker: resume streams the reply
-                self.start_describing(missing);
-                return Ok(());
-            }
-        }
 
         if self.session.as_ref().is_some_and(|s| s.swarm_mode) {
             self.start_swarm_turn();
@@ -227,38 +178,29 @@ impl App {
                 continue;
             }
             let mut cm = ChatMessage::text(m.role.clone(), m.content.clone());
-            if m.role == "user" && !m.images.is_empty() {
-                if vision {
-                    // ponytail: PNGs re-read from disk every send; cache in RAM
-                    // if large sessions ever make this noticeable.
-                    cm.images = m
-                        .images
-                        .iter()
-                        .filter_map(|img| std::fs::read(&img.path).ok())
-                        .map(|bytes| crate::app::transcribe::png_bytes_data_url(&bytes))
-                        .collect();
-                } else {
-                    for img in &m.images {
-                        if let Some(d) = &img.description {
-                            cm.content.push_str(&format!("\n\n[Image: {d}]"));
+            if m.role == "user" && vision {
+                let images_dir = self.space.images_dir(&self.active_space.name);
+                let mut images = Vec::new();
+                let mut rest = m.content.as_str();
+                while let Some(start) = rest.find("![") {
+                    if let Some(end) = rest[start..].find(')') {
+                        let inner = &rest[start + 2..start + end];
+                        if let Some((_alt, file)) = inner.split_once("](") {
+                            let path = images_dir.join(file);
+                            if let Ok(bytes) = std::fs::read(&path) {
+                                images.push(crate::app::transcribe::png_bytes_data_url(&bytes));
+                            }
                         }
+                        rest = &rest[start + end + 1..];
+                    } else {
+                        break;
                     }
                 }
+                cm.images = images;
             }
             history.push(cm);
         }
         history
-    }
-
-    /// (message_images row id, path) for every image in the effective range
-    /// that still has no description.
-    pub(crate) fn undescribed_images(&self) -> Vec<(String, String)> {
-        self.effective_messages()
-            .iter()
-            .flat_map(|m| m.images.iter())
-            .filter(|i| i.description.is_none())
-            .map(|i| (i.id.clone(), i.path.clone()))
-            .collect()
     }
 
     /// Build history and fire the streaming request — the shared tail of
@@ -350,52 +292,8 @@ impl App {
                         tokens: None,
                         secs: None,
                         phrase: None,
-                        images: Vec::new(),
                         persona: None,
                     });
-                }
-                // Generate-image tool: inject the result image immediately so it
-                // renders in the UI even if the AI produces no follow-up text.
-                if name == "generate_image" {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&result) {
-                        if let (Some(_id), Some(path), Some(desc)) =
-                            (v["id"].as_str(), v["path"].as_str(), v["description"].as_str())
-                        {
-                            let p = std::path::Path::new(path);
-                            if p.exists() {
-                                let desc = desc.to_string();
-                                let sid = target.clone().unwrap_or_default();
-                                if !sid.is_empty() && !self.incognito {
-                                    let mid = self.db.insert_message(
-                                        &sid, "assistant", "",
-                                        self.current_model.as_deref(), None, None, None, None,
-                                    ).unwrap_or_default();
-                                    if !mid.is_empty() {
-                                        let imgs = self.db.add_message_images(
-                                            &mid, &[path.to_string()],
-                                        ).unwrap_or_default();
-                                        for img in &imgs {
-                                            let _ = self.db.set_image_description(&img.id, &desc);
-                                        }
-                                        if self.viewing_stream() {
-                                            self.messages.push(Message {
-                                                id: mid,
-                                                role: "assistant".to_string(),
-                                                content: String::new(),
-                                                model: self.current_model.clone(),
-                                                reasoning: None,
-                                                tokens: None,
-                                                secs: None,
-                                                phrase: Some("Generated".to_string()),
-                                                images: imgs,
-                                                persona: None,
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
             StreamEvent::Done => self.finish_stream()?,
@@ -429,7 +327,6 @@ impl App {
                         tokens: None,
                         secs: None,
                         phrase: None,
-                        images: Vec::new(),
                         persona: None,
                     });
                 } else if let Some(id) = target {
@@ -540,7 +437,6 @@ impl App {
                 )?;
             }
         }
-        let images = Vec::new();
         if viewing {
             self.messages.push(Message {
                 id: msg_id,
@@ -551,7 +447,6 @@ impl App {
                 tokens,
                 secs,
                 phrase,
-                images,
                 persona: None,
             });
             // These read the *active* conversation, so they only make sense here.
@@ -815,7 +710,7 @@ impl App {
         self.context_total = None;
         self.scroll = 0;
         self.set_input("");
-        self.clear_image_state();
+        self.cleanup_incognito_images();
         self.incognito = !self.incognito;
         self.status = if self.incognito {
             "incognito mode — nothing persists, no apps".to_string()

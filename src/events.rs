@@ -141,7 +141,6 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                 AppEvent::Memory(m) => app.on_memory_result(m),
                 AppEvent::Compact(c) => app.on_compact_result(c),
                 AppEvent::SkillInstall(r) => app.on_skill_install_result(r),
-                AppEvent::Described(r) => app.on_described(r),
                 AppEvent::Ocr(r) => app.on_ocr_done(r),
                 AppEvent::Embed(r) => app.on_embed_done(r),
                 AppEvent::OcrPull(r) => app.on_ocr_pull(r),
@@ -394,7 +393,6 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Esc if app.viewing_stream() => app.stop_stream()?,
         KeyCode::Esc => {
             app.set_input("");
-            app.pending_images.clear();
         }
         // Everything else (chars, word-jump, selection, cut/copy/paste, undo)
         // goes to the editor via its default keymap. A keyboard (Shift+arrow)

@@ -59,7 +59,6 @@ fn delete_removes_session_and_clears_if_active() {
         tokens: None,
         secs: None,
         phrase: None,
-        images: Vec::new(),
         persona: None,
     });
     a.session_selected = 0;
@@ -229,7 +228,6 @@ fn open_citation_under_selection_resolves_against_the_owning_messages_sources() 
         tokens: None,
         secs: None,
         phrase: None,
-        images: Vec::new(),
         persona: None,
     });
     // Simulate a render + a selection covering "[2]" on message index 0.
@@ -753,7 +751,6 @@ fn context_used_and_limit() {
         tokens: None,
         secs: None,
         phrase: None,
-        images: Vec::new(),
         persona: None,
     });
     assert_eq!(a.context_used(), 10);
@@ -778,7 +775,6 @@ fn compaction_narrows_effective_messages_and_context_used() {
             tokens: None,
             secs: None,
             phrase: None,
-            images: Vec::new(),
             persona: None,
         });
     }
@@ -861,7 +857,6 @@ async fn force_compact_reports_why_it_no_ops() {
         tokens: None,
         secs: None,
         phrase: None,
-        images: Vec::new(),
         persona: None,
     });
     a.force_compact();
@@ -882,7 +877,6 @@ fn context_breakdown_reports_system_memory_conversation() {
         tokens: None,
         secs: None,
         phrase: None,
-        images: Vec::new(),
         persona: None,
     });
     let b = a.context_breakdown();
@@ -1322,7 +1316,6 @@ fn copy_message_uses_exact_original_content() {
         tokens: None,
         secs: None,
         phrase: None,
-        images: Vec::new(),
         persona: None,
     });
     a.messages.push(Message {
@@ -1334,7 +1327,6 @@ fn copy_message_uses_exact_original_content() {
         tokens: None,
         secs: None,
         phrase: None,
-        images: Vec::new(),
         persona: None,
     });
     // copy_message resolves *some* text at each index (clipboard availability
@@ -1361,13 +1353,12 @@ fn copy_message_uses_exact_original_content() {
 }
 
 #[test]
-fn history_carries_image_parts_for_vision_models_and_text_for_others() {
+fn history_carries_markdown_images_as_data_urls_for_vision_models() {
     let mut a = app_with_key();
     let s =
         a.db.create_session("t", "vis/model", &a.active_space.id, "chat")
             .unwrap();
-    let mid = a.db.add_user_message(&s.id, "what is this?").unwrap();
-    // A real tiny png on disk so the vision path can read it back.
+    // A real tiny png on disk, referenced via markdown in content.
     let dir = a.space.images_dir(&a.active_space.name);
     std::fs::create_dir_all(&dir).unwrap();
     let png_path = dir.join("t.png");
@@ -1376,11 +1367,8 @@ fn history_carries_image_parts_for_vision_models_and_text_for_others() {
         crate::app::transcribe::encode_png(1, 1, &[0, 0, 0, 255]).unwrap(),
     )
     .unwrap();
-    let imgs =
-        a.db.add_message_images(&mid, &[png_path.to_string_lossy().to_string()])
-            .unwrap();
-    a.db.set_image_description(&imgs[0].id, "a black pixel")
-        .unwrap();
+    let content = "what is ![this](t.png)?";
+    let mid = a.db.add_user_message(&s.id, content).unwrap();
     a.session = Some(s.clone());
     a.messages = a.db.load_messages(&s.id).unwrap();
     a.models = vec![
@@ -1409,54 +1397,13 @@ fn history_carries_image_parts_for_vision_models_and_text_for_others() {
     let user = h.iter().find(|m| m.role == "user").unwrap();
     assert_eq!(user.images.len(), 1);
     assert!(user.images[0].starts_with("data:image/png;base64,"));
-    assert_eq!(user.content, "what is this?");
 
+    // Non-vision model: markdown stays as text, no data URLs.
     a.current_model = Some("txt/model".into());
     let h = a.build_history();
     let user = h.iter().find(|m| m.role == "user").unwrap();
     assert!(user.images.is_empty());
-    assert!(user.content.contains("[Image: a black pixel]"));
-}
-
-#[test]
-fn missing_descriptions_are_collected_for_non_vision_sends() {
-    let mut a = app_with_key();
-    let s =
-        a.db.create_session("t", "txt/model", &a.active_space.id, "chat")
-            .unwrap();
-    let mid = a.db.add_user_message(&s.id, "see").unwrap();
-    a.db.add_message_images(&mid, &["/tmp/nope.png".into()])
-        .unwrap();
-    a.session = Some(s.clone());
-    a.messages = a.db.load_messages(&s.id).unwrap();
-    let missing = a.undescribed_images();
-    assert_eq!(missing.len(), 1);
-    assert_eq!(missing[0].1, "/tmp/nope.png");
-}
-
-#[tokio::test]
-async fn submit_during_deferred_send_is_rejected_and_preserved() {
-    let mut a = app_with_key();
-    a.current_model = Some("a/one".into());
-    let space = a.active_space.id.clone();
-    a.session = Some(a.db.create_session("test", "a/one", &space, "chat").unwrap());
-    a.deferred_send = Some(String::new());
-    a.send_message("second message".into()).unwrap();
-    assert!(a.status.contains("understanding"));
-    assert_eq!(a.input_text(), "second message"); // restored, not lost
-    assert!(a.messages.is_empty()); // nothing was stored
-}
-
-#[test]
-fn switching_context_cancels_deferred_image_send() {
-    let mut a = app_with_key();
-    a.deferred_send = Some(String::new());
-    a.pending_images.push(crate::app::transcribe::PendingImage {
-        path: std::path::PathBuf::from("/tmp/x.png"),
-    });
-    a.new_session().unwrap();
-    assert!(a.deferred_send.is_none());
-    assert!(a.pending_images.is_empty());
+    assert!(user.content.contains("![this](t.png)"));
 }
 
 #[test]
@@ -1759,7 +1706,6 @@ async fn swarm_synthesis_triggers_post_reply_jobs_like_normal_chat() {
         tokens: None,
         secs: None,
         phrase: None,
-        images: Vec::new(),
         persona: None,
     });
 
@@ -1788,7 +1734,6 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
         tokens: None,
         secs: None,
         phrase: None,
-        images: Vec::new(),
         persona: None,
     });
     a.messages.push(Message {
@@ -1800,7 +1745,6 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
         tokens: None,
         secs: None,
         phrase: None,
-        images: Vec::new(),
         persona: Some("Optimist".into()),
     });
     a.messages.push(Message {
@@ -1812,7 +1756,6 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
         tokens: None,
         secs: None,
         phrase: None,
-        images: Vec::new(),
         persona: None,
     });
     let history = a.build_history();

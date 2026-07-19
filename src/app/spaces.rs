@@ -133,7 +133,7 @@ impl App {
         self.messages.clear();
         self.context_total = None;
         self.scroll = 0;
-        self.clear_image_state();
+        self.cleanup_incognito_images();
         self.rescan_files();
         self.refresh_toolbox();
         self.status = format!("space: {}", self.active_space.name);
