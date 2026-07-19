@@ -37,12 +37,15 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
                 .research_running
                 .as_ref()
                 .is_some_and(|(id, _)| *id == s.id);
+            let is_research = s.kind == "research";
             let marker = if streaming_here {
                 Some(Span::styled("⟳ ", Style::default().fg(app.theme.accent)))
             } else if researching_here {
                 Some(Span::styled("🔎 ", Style::default().fg(app.theme.accent2)))
             } else if app.unread.contains(&s.id) {
                 Some(Span::styled("● ", Style::default().fg(app.theme.warning)))
+            } else if is_research {
+                Some(Span::styled("🔬 ", Style::default().fg(app.theme.accent2)))
             } else {
                 None
             };

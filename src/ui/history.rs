@@ -156,6 +156,8 @@ fn sync_cache(app: &mut App, width: usize) {
             push_error(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_plan" {
             push_research_plan(&mut c.lines, &m.content, width, &theme);
+        } else if m.role == "session_link" {
+            push_session_link(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "tool_call" {
             push_tool_call(
                 &mut c.lines,
@@ -442,6 +444,50 @@ fn push_assistant_stored(
         }
         out.push(Line::from(dim(footer, theme)));
     }
+    out.push(Line::from(""));
+}
+
+/// A session switch link: renders as a styled box with arrows and the
+/// linked session's name. Content format: `<target_sid>\n<label>`.
+fn push_session_link(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) {
+    let (sid, label) = match content.split_once('\n') {
+        Some((sid, rest)) => (sid.to_string(), rest.trim().to_string()),
+        None => (String::new(), content.to_string()),
+    };
+    let arrow = if label.starts_with("🔗") { "→" } else { "↩" };
+    let color = theme.accent;
+    let dim = Style::default().fg(theme.fg_dim);
+
+    let w = width.min(60);
+    let inner = w.saturating_sub(4);
+    out.push(Line::from(Span::styled(
+        format!("┌{}┐", "─".repeat(inner)),
+        dim,
+    )));
+    out.push(Line::from(vec![
+        Span::styled("│ ", dim),
+        Span::styled(label.clone(), Style::default().fg(color)),
+        Span::raw(" ".repeat(inner.saturating_sub(label.chars().count()))),
+        Span::styled(" │", dim),
+    ]));
+    if !sid.is_empty() {
+        let hint = format!("   {arrow} select text + Ctrl+O to switch");
+        out.push(Line::from(vec![
+            Span::styled("│ ", dim),
+            Span::styled(hint.clone(), dim),
+            Span::raw(" ".repeat(inner.saturating_sub(hint.chars().count().min(inner)))),
+            Span::styled(" │", dim),
+        ]));
+    }
+    out.push(Line::from(Span::styled(
+        format!("└{}┘", "─".repeat(inner)),
+        dim,
+    )));
     out.push(Line::from(""));
 }
 

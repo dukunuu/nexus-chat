@@ -1239,18 +1239,9 @@ impl App {
         self.reload_skills();
     }
 
-    /// Whether the active session originated from `/research` — its
-    /// transcript contains a `/research <topic>` user message. Drives both
-    /// `search_sources` tool availability and the system-prompt nudge to
-    /// prefer it over `web_search` for follow-ups.
+    /// Whether the active session is a research session.
     pub(crate) fn is_research_session(&self) -> bool {
-        self.session.as_ref().is_some_and(|s| {
-            self.db
-                .load_messages(&s.id)
-                .unwrap_or_default()
-                .iter()
-                .any(|m| m.content.starts_with("/research "))
-        })
+        self.session.as_ref().is_some_and(|s| s.kind == "research")
     }
 
     /// The active space's always-excluded search domains, from its
@@ -1498,7 +1489,6 @@ impl App {
             "quit" => self.should_quit = true,
             "new" => self.new_session()?,
             "compact" => self.force_compact(),
-            "gen" => self.cmd_generate_image(cmd[token.len()..].trim())?,
             "session" => self.open_session_picker()?,
             "space" => self.open_space_picker()?,
             "model" => self.open_model_picker(),
@@ -1537,13 +1527,16 @@ impl App {
             "export" => self.export_report()?,
             "web" => self.toggle_web_mode(),
             "incognito" => self.toggle_incognito()?,
-            "steer" => self.steer_research(cmd[token.len()..].trim()),
             "watch" => {
-                let arg = cmd[token.len()..].trim();
-                if arg.is_empty() {
-                    self.open_watch_picker()?;
+                if !self.is_research_session() {
+                    self.status = "watch is only available in research sessions — use /research first".to_string();
                 } else {
-                    self.create_watch(arg);
+                    let arg = cmd[token.len()..].trim();
+                    if arg.is_empty() {
+                        self.open_watch_picker()?;
+                    } else {
+                        self.create_watch(arg);
+                    }
                 }
             }
             other => {

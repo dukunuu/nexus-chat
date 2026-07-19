@@ -42,11 +42,6 @@ impl Match {
 
 pub const COMMANDS: &[Command] = &[
     Command {
-        name: "gen",
-        desc: "generate an AI image",
-        aliases: &["draw", "imagine", "generate"],
-    },
-    Command {
         name: "new",
         desc: "start new chat",
         aliases: &["chat", "clear"],
@@ -135,11 +130,6 @@ pub const COMMANDS: &[Command] = &[
         name: "incognito",
         desc: "toggle incognito (no persistence, no apps)",
         aliases: &["private", "anon"],
-    },
-    Command {
-        name: "steer",
-        desc: "inject a research instruction mid-flight",
-        aliases: &["nudge"],
     },
     Command {
         name: "copy",

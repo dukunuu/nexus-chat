@@ -341,6 +341,10 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('o') if !ctrl && !shift && app.sel.selected_text().is_some() => {
             app.open_citation_under_selection();
         }
+        // Ctrl+O navigates a session link message under the current selection.
+        KeyCode::Char('o') if ctrl && app.sel.selected_text().is_some() => {
+            app.open_session_link();
+        }
         // 'p' pins, 'x' discards the [n] source under the current selection —
         // same selection→citation resolution as 'o'.
         KeyCode::Char('p') if !ctrl && !shift && app.sel.selected_text().is_some() => {
@@ -349,9 +353,9 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('x') if !ctrl && !shift && app.sel.selected_text().is_some() => {
             app.flag_source_under_selection(Some("discarded"));
         }
-        // Ctrl+Space opens the live research-activity view (per-searcher
+        // Ctrl+↑ opens the live research-activity view (per-searcher
         // reasoning/tool calls) — only while a research job is running.
-        KeyCode::Char(' ') if ctrl && app.research_rx.is_some() => app.open_research_live(),
+        KeyCode::Up if ctrl && app.research_rx.is_some() => app.open_research_live(),
         // Ctrl+G opens the context breakdown (system/memory/conversation/skills).
         // (Not Ctrl+I: that's the same byte as Tab on terminals without the
         // Kitty keyboard protocol, so it'd be unreachable on many of them.)
@@ -381,8 +385,12 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::PageUp => app.scroll = app.scroll.saturating_add(10).min(app.max_scroll),
         KeyCode::PageDown => app.scroll = app.scroll.saturating_sub(10),
-        // Esc while viewing the streaming session stops the response (partial
-        // text is kept); otherwise it clears the composer.
+        // Esc cancels the research plan gate, stops the streaming response,
+        // or clears the composer.
+        KeyCode::Esc if app.research_plan_gate.is_some() => {
+            app.stop_research();
+            app.set_input("");
+        }
         KeyCode::Esc if app.viewing_stream() => app.stop_stream()?,
         KeyCode::Esc => {
             app.set_input("");

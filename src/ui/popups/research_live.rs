@@ -69,7 +69,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             app,
             "research agents · steer",
             &app.research_live_input,
-            "type instruction · Enter send · Ctrl+X stop · Esc close",
+            "type instruction · Enter send · Ctrl+↑ agents · Ctrl+X stop · Esc close",
         ),
         &app.theme,
         true,

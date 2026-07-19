@@ -26,9 +26,9 @@ fn session_filter_matches_title_and_slug() {
     let mut a = App::new(db, Some("k".into()), test_space());
     let space = a.active_space.id.clone();
     let s1 =
-        a.db.create_session("Rust async runtimes", "a/b", &space)
+        a.db.create_session("Rust async runtimes", "a/b", &space, "chat")
             .unwrap();
-    let s2 = a.db.create_session("Cooking pasta", "a/b", &space).unwrap();
+    let s2 = a.db.create_session("Cooking pasta", "a/b", &space, "chat").unwrap();
     a.db.set_session_title(&s1.id, "Rust async runtimes", Some("rust-async"))
         .unwrap();
     a.sessions_cache = a.db.list_sessions(&space).unwrap();
@@ -47,7 +47,7 @@ fn delete_removes_session_and_clears_if_active() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("k".into()), test_space());
     let space = a.active_space.id.clone();
-    let s = a.db.create_session("doomed", "a/b", &space).unwrap();
+    let s = a.db.create_session("doomed", "a/b", &space, "chat").unwrap();
     a.sessions_cache = a.db.list_sessions(&space).unwrap();
     a.session = Some(s.clone());
     a.messages.push(Message {
@@ -75,7 +75,7 @@ fn watch_picker_resets_confirm_mode_on_open() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("k".into()), test_space());
     let space = a.active_space.id.clone();
-    let session = a.db.create_session("watch", "a/b", &space).unwrap();
+    let session = a.db.create_session("watch", "a/b", &space, "chat").unwrap();
     let _ =
         a.db.create_watch(&space, "rust async", 24, &session.id)
             .unwrap();
@@ -92,7 +92,7 @@ fn watch_picker_ctrl_d_confirms_with_a_second_press() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("k".into()), test_space());
     let space = a.active_space.id.clone();
-    let session = a.db.create_session("watch", "a/b", &space).unwrap();
+    let session = a.db.create_session("watch", "a/b", &space, "chat").unwrap();
     let _ =
         a.db.create_watch(&space, "rust async", 24, &session.id)
             .unwrap();
@@ -126,7 +126,7 @@ fn watch_picker_escape_cancels_delete_confirmation() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("k".into()), test_space());
     let space = a.active_space.id.clone();
-    let session = a.db.create_session("watch", "a/b", &space).unwrap();
+    let session = a.db.create_session("watch", "a/b", &space, "chat").unwrap();
     let _ =
         a.db.create_watch(&space, "rust async", 24, &session.id)
             .unwrap();
@@ -767,7 +767,7 @@ fn compaction_narrows_effective_messages_and_context_used() {
     a.models[0].context_length = Some(1000);
     a.current_model = Some("a/one".into());
     let space = a.active_space.id.clone();
-    let mut s = a.db.create_session("t", "a/one", &space).unwrap();
+    let mut s = a.db.create_session("t", "a/one", &space, "chat").unwrap();
     for i in 0..4 {
         a.messages.push(Message {
             id: String::new(),
@@ -798,7 +798,7 @@ fn on_compact_result_persists_and_clears_stale_total() {
     a.models[0].context_length = Some(1000);
     a.current_model = Some("a/one".into());
     let space = a.active_space.id.clone();
-    let s = a.db.create_session("t", "a/one", &space).unwrap();
+    let s = a.db.create_session("t", "a/one", &space, "chat").unwrap();
     let sid = s.id.clone();
     a.session = Some(s);
     a.context_total = Some(999); // stale exact usage from before compaction
@@ -844,7 +844,7 @@ async fn force_compact_reports_why_it_no_ops() {
 
     // Session exists but everything in it is already covered.
     let space = a.active_space.id.clone();
-    let mut s = a.db.create_session("t", "a/one", &space).unwrap();
+    let mut s = a.db.create_session("t", "a/one", &space, "chat").unwrap();
     s.compact_through = 0;
     a.session = Some(s);
     a.force_compact();
@@ -898,7 +898,7 @@ fn compact_summary_view_and_edit_roundtrip() {
     assert!(a.compact_summary_path().is_none()); // not compacted yet
 
     let space = a.active_space.id.clone();
-    let mut s = a.db.create_session("t", "a/one", &space).unwrap();
+    let mut s = a.db.create_session("t", "a/one", &space, "chat").unwrap();
     s.compact_summary = Some("original digest".into());
     s.compact_through = 2;
     a.session = Some(s);
@@ -1171,7 +1171,7 @@ fn accept_command_fill_vs_run() {
     let mut b = app_with_key();
     b.current_model = Some("a/one".into());
     let space_id = b.active_space.id.clone();
-    b.session = Some(b.db.create_session("old chat", "a/one", &space_id).unwrap());
+    b.session = Some(b.db.create_session("old chat", "a/one", &space_id, "chat").unwrap());
     b.set_input("/clear");
     b.accept_command(true).unwrap();
     assert!(b.input_text().is_empty());
@@ -1364,7 +1364,7 @@ fn copy_message_uses_exact_original_content() {
 fn history_carries_image_parts_for_vision_models_and_text_for_others() {
     let mut a = app_with_key();
     let s =
-        a.db.create_session("t", "vis/model", &a.active_space.id)
+        a.db.create_session("t", "vis/model", &a.active_space.id, "chat")
             .unwrap();
     let mid = a.db.add_user_message(&s.id, "what is this?").unwrap();
     // A real tiny png on disk so the vision path can read it back.
@@ -1422,7 +1422,7 @@ fn history_carries_image_parts_for_vision_models_and_text_for_others() {
 fn missing_descriptions_are_collected_for_non_vision_sends() {
     let mut a = app_with_key();
     let s =
-        a.db.create_session("t", "txt/model", &a.active_space.id)
+        a.db.create_session("t", "txt/model", &a.active_space.id, "chat")
             .unwrap();
     let mid = a.db.add_user_message(&s.id, "see").unwrap();
     a.db.add_message_images(&mid, &["/tmp/nope.png".into()])
@@ -1439,7 +1439,7 @@ async fn submit_during_deferred_send_is_rejected_and_preserved() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());
     let space = a.active_space.id.clone();
-    a.session = Some(a.db.create_session("test", "a/one", &space).unwrap());
+    a.session = Some(a.db.create_session("test", "a/one", &space, "chat").unwrap());
     a.deferred_send = Some(String::new());
     a.send_message("second message".into()).unwrap();
     assert!(a.status.contains("understanding"));
@@ -1464,7 +1464,7 @@ fn tool_call_events_persist_and_replay_into_history() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());
     let space = a.active_space.id.clone();
-    let s = a.db.create_session("t", "a/one", &space).unwrap();
+    let s = a.db.create_session("t", "a/one", &space, "chat").unwrap();
     a.session = Some(s.clone());
     a.streaming = Some(String::new());
     a.on_stream_event(crate::provider::StreamEvent::ToolCall {
@@ -1504,7 +1504,7 @@ fn research_stage_rows_are_never_replayed_into_history() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());
     let space = a.active_space.id.clone();
-    let s = a.db.create_session("t", "a/one", &space).unwrap();
+    let s = a.db.create_session("t", "a/one", &space, "chat").unwrap();
     a.session = Some(s.clone());
     a.db.add_research_stage_message(&s.id, "planning…").unwrap();
     a.messages = a.db.load_messages(&s.id).unwrap();
@@ -1663,7 +1663,7 @@ async fn swarm_persona_model_picker_stays_open_while_catalog_loads() {
 fn swarm_persona_round_trips_through_external_editor_file() {
     let mut a = app_with_key();
     let space = a.active_space.id.clone();
-    let session = a.db.create_session("swarm", "a/one", &space).unwrap();
+    let session = a.db.create_session("swarm", "a/one", &space, "chat").unwrap();
     a.session = Some(session);
     a.swarm_cache = vec![crate::db::Persona {
         name: "Skeptic".into(),
@@ -1696,7 +1696,7 @@ fn swarm_persona_round_trips_through_external_editor_file() {
 fn swarm_progress_and_errors_are_visible_in_transcript() {
     let mut a = app_with_key();
     let space = a.active_space.id.clone();
-    let s = a.db.create_session("swarm", "a/one", &space).unwrap();
+    let s = a.db.create_session("swarm", "a/one", &space, "chat").unwrap();
     let sid = s.id.clone();
     a.session = Some(s);
 
@@ -1747,7 +1747,7 @@ async fn swarm_synthesis_triggers_post_reply_jobs_like_normal_chat() {
     a.settings.compact_threshold = 0;
     a.current_model = Some("a/one".into());
     let space = a.active_space.id.clone();
-    let s = a.db.create_session("hello", "a/one", &space).unwrap();
+    let s = a.db.create_session("hello", "a/one", &space, "chat").unwrap();
     let sid = s.id.clone();
     a.session = Some(s);
     a.messages.push(Message {

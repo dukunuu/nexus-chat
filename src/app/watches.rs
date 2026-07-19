@@ -253,7 +253,7 @@ mod tests {
 
         // The watch's original session, from some earlier run.
         let first_session =
-            a.db.create_session("first run", "openai/gpt-5-mini", &space_id)
+            a.db.create_session("first run", "openai/gpt-5-mini", &space_id, "chat")
                 .unwrap();
         let watch_id =
             a.db.create_watch(&space_id, "rust async runtimes", 24, &first_session.id)
@@ -282,10 +282,10 @@ mod tests {
         let space_id = a.active_space.id.clone();
 
         let first_session =
-            a.db.create_session("first run", "openai/gpt-5-mini", &space_id)
+            a.db.create_session("first run", "openai/gpt-5-mini", &space_id, "chat")
                 .unwrap();
         let second_session =
-            a.db.create_session("second run", "openai/gpt-5-mini", &space_id)
+            a.db.create_session("second run", "openai/gpt-5-mini", &space_id, "chat")
                 .unwrap();
         let watch_a =
             a.db.create_watch(&space_id, "rust async runtimes", 24, &first_session.id)
@@ -412,7 +412,7 @@ mod tests {
         let a = test_app();
         let space_id = a.active_space.id.clone();
         let session =
-            a.db.create_session("rust async runtimes", "openai/gpt-5-mini", &space_id)
+            a.db.create_session("rust async runtimes", "openai/gpt-5-mini", &space_id, "chat")
                 .unwrap();
         let watch_id =
             a.db.create_watch(&space_id, "rust async runtimes", 24, &session.id)
@@ -467,14 +467,14 @@ mod tests {
         // Two watches: one with topic "rust", another with "rust async".
         // Their slugs are "rust" and "rust-async" respectively.
         let session_rust =
-            a.db.create_session("rust", "openai/gpt-5-mini", &space_id)
+            a.db.create_session("rust", "openai/gpt-5-mini", &space_id, "chat")
                 .unwrap();
         let _watch_rust =
             a.db.create_watch(&space_id, "rust", 24, &session_rust.id)
                 .unwrap();
 
         let session_rust_async =
-            a.db.create_session("rust async", "openai/gpt-5-mini", &space_id)
+            a.db.create_session("rust async", "openai/gpt-5-mini", &space_id, "chat")
                 .unwrap();
         let _watch_rust_async =
             a.db.create_watch(&space_id, "rust async", 24, &session_rust_async.id)

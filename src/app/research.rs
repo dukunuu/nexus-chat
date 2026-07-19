@@ -1036,7 +1036,7 @@ impl super::App {
         }
     }
 
-    /// Ctrl+Space: open the live per-searcher activity view. Caller already
+    /// Ctrl+↑: open the live per-searcher activity view. Caller already
     /// gates this on a research job running.
     pub(crate) fn open_research_live(&mut self) {
         self.research_live_input.clear();
@@ -1069,9 +1069,22 @@ impl super::App {
             self.escalation_model.trim().to_string()
         };
         let title = super::chat::title_from(&topic);
+
+        // Check if there's a conversation to migrate to the research session.
+        let parent_id = self.session.as_ref().and_then(|s| {
+            let has_content = self
+                .messages
+                .iter()
+                .any(|m| m.role == "user" || m.role == "assistant");
+            if has_content { Some(s.id.clone()) } else { None }
+        });
+        let parent_title = parent_id.as_ref().and_then(|pid| {
+            self.db.get_session(pid).ok()?.map(|s| s.title)
+        });
+
         let session = match self
             .db
-            .create_session(&title, &research_model, &self.active_space.id)
+            .create_session(&title, &research_model, &self.active_space.id, "research")
         {
             Ok(s) => s,
             Err(e) => {
@@ -1079,9 +1092,61 @@ impl super::App {
                 return;
             }
         };
-        let _ = self
-            .db
-            .add_user_message(&session.id, &format!("/research {topic}"));
+
+        if let Some(ref pid) = parent_id {
+            let _ = self.db.set_research_parent(&session.id, pid);
+
+            // Build compacted context from the original conversation
+            let compact_summary = self.session.as_ref().and_then(|s| s.compact_summary.clone());
+            let compact_through = self.session.as_ref().map(|s| s.compact_through as usize).unwrap_or(0);
+            let mut ctx = String::new();
+            if let Some(ref summary) = compact_summary {
+                ctx.push_str("Previous conversation summary:\n");
+                ctx.push_str(summary);
+            }
+            let tail: Vec<&crate::db::Message> = self.messages[compact_through..]
+                .iter()
+                .filter(|m| m.role == "user" || m.role == "assistant")
+                .collect();
+            if !tail.is_empty() {
+                if !ctx.is_empty() {
+                    ctx.push_str("\n\n");
+                }
+                ctx.push_str("Recent messages:\n");
+                for m in tail {
+                    let t = m.content.chars().take(300).collect::<String>();
+                    ctx.push_str(&format!("{}: {t}\n", m.role));
+                }
+            }
+            let msg = if ctx.is_empty() {
+                format!("/research {topic}")
+            } else {
+                format!("/research {topic}\n\n{ctx}")
+            };
+            let _ = self.db.add_user_message(&session.id, &msg);
+
+            // Link message in the original session
+            let _ = self.db.insert_message(
+                pid, "session_link",
+                &format!("{}\n🔗 Research session started for: {topic}", session.id),
+                None, None, None, None, None,
+            );
+
+            // Link message in the research session back to the original
+            let back_title = parent_title.as_deref().unwrap_or("previous chat");
+            let _ = self.db.insert_message(
+                &session.id, "session_link",
+                &format!("{pid}\n↩ Originally from: {back_title}"),
+                None, None, None, None, None,
+            );
+
+            self.messages = self.db.load_messages(&session.id).unwrap_or_default();
+        } else {
+            let _ = self
+                .db
+                .add_user_message(&session.id, &format!("/research {topic}"));
+            self.messages = self.db.load_messages(&session.id).unwrap_or_default();
+        }
 
         let searxng_url =
             (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
@@ -1098,7 +1163,7 @@ impl super::App {
         let (tx, rx) = mpsc::unbounded_channel();
         self.research_rx = Some(rx);
         self.research_running = Some((session.id.clone(), topic.clone()));
-        self.status = format!("researching: {topic} · Ctrl+Space agents");
+        self.status = format!("researching: {topic} · Ctrl+↑ agents");
 
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         self.research_steer_tx = Some(steer_tx);
@@ -1113,7 +1178,6 @@ impl super::App {
 
         let space_id = self.active_space.id.clone();
         let space_name = self.active_space.name.clone();
-        self.messages = self.db.load_messages(&session.id).unwrap_or_default();
         self.session = Some(session.clone());
         self.context_total = None;
         self.scroll = 0;
@@ -1150,6 +1214,7 @@ impl super::App {
     /// Abort the active research pipeline, including survey/searcher/tool
     /// streams spawned under its orchestration task.
     pub(crate) fn stop_research(&mut self) {
+        self.research_plan_gate = None;
         if let Some(abort) = self.research_abort.take() {
             abort.abort();
         }
@@ -1175,7 +1240,7 @@ impl super::App {
     pub(crate) fn approve_research_plan(&mut self) {
         if let Some((_, tx, cached)) = self.research_plan_gate.take() {
             let _ = tx.send(cached);
-            self.status = "continuing research… · Ctrl+Space agents".to_string();
+            self.status = "continuing research… · Ctrl+↑ agents".to_string();
         }
     }
 
@@ -1266,7 +1331,7 @@ impl super::App {
                             persona: None,
                         });
                     }
-                    self.status = format!("research: {text} · Ctrl+Space agents");
+                    self.status = format!("research: {text} · Ctrl+↑ agents");
                 }
             }
             ResearchUpdate::PlanReady { questions } => {
@@ -1282,7 +1347,7 @@ impl super::App {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let content = format!(
-                    "Research plan ready — [e]dit in $EDITOR / Enter to continue / /stop to cancel:\n{plan_text}"
+                    "Research plan ready — [e]dit in $EDITOR / Enter to continue / Esc to cancel:\n{plan_text}"
                 );
                 let _ = self.db.add_research_plan_message(&session_id, &content);
                 if viewing {
@@ -1699,7 +1764,7 @@ mod tests {
             .collect();
         assert_eq!(visible_rows.len(), 1);
         assert_eq!(visible_rows[0].content, "planning: revised");
-        assert!(a.status.contains("Ctrl+Space agents"));
+        assert!(a.status.contains("Ctrl+↑ agents"));
     }
 
     #[tokio::test]

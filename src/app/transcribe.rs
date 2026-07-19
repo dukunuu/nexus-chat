@@ -205,7 +205,7 @@ mod tests {
     fn described_result_persists_description() {
         let mut a = crate::app::tests::app_with_key();
         // Seed one message with an image via the db layer.
-        let s = a.db.create_session("t", "a/b", &a.active_space.id).unwrap();
+        let s = a.db.create_session("t", "a/b", &a.active_space.id, "chat").unwrap();
         let mid = a.db.add_user_message(&s.id, "see").unwrap();
         let imgs =
             a.db.add_message_images(&mid, &["/tmp/x.png".into()])

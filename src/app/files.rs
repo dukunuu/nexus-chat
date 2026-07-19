@@ -987,7 +987,12 @@ impl App {
     pub fn open_selected_file(&mut self) {
         if let Some(f) = self.files_cache.get(self.files_selected) {
             let path = self.space.files_dir(&self.active_space.name).join(&f.name);
-            let _ = open::that_detached(&path);
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext == "md" {
+                self.pending_editor = Some(super::PendingEditor::ScriptFile(path));
+            } else {
+                let _ = open::that_detached(&path);
+            }
             self.status = format!("opened {}", f.name);
         }
     }

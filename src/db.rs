@@ -43,6 +43,11 @@ pub struct Session {
     /// `/swarm` mode: turns replace a single reply with a multi-persona
     /// roundtable (see `swarm_personas`).
     pub swarm_mode: bool,
+    /// `"chat"` or `"research"` — determines what's available.
+    pub kind: String,
+    /// If this is a research session spawned from an existing chat, the
+    /// original session's id.
+    pub research_parent_id: Option<String>,
 }
 
 /// One row of a session's `/swarm` roster: a model + a personality blurb.
@@ -257,6 +262,8 @@ impl Db {
             "ALTER TABLE session_sources ADD COLUMN flag TEXT",
             "ALTER TABLE sessions ADD COLUMN swarm_mode INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN persona TEXT",
+            "ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'",
+            "ALTER TABLE sessions ADD COLUMN research_parent_id TEXT",
         ] {
             let _ = self.conn.execute(stmt, []);
         }
@@ -415,13 +422,19 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn create_session(&self, title: &str, model: &str, space_id: &str) -> Result<Session> {
+    pub fn create_session(
+        &self,
+        title: &str,
+        model: &str,
+        space_id: &str,
+        kind: &str,
+    ) -> Result<Session> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO sessions (id, title, model, space_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            (&id, title, model, space_id, &now),
+            "INSERT INTO sessions (id, title, model, space_id, kind, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            (&id, title, model, space_id, kind, &now),
         )?;
         Ok(Session {
             id,
@@ -433,6 +446,8 @@ impl Db {
             compact_through: 0,
             web_mode: false,
             swarm_mode: false,
+            kind: kind.to_string(),
+            research_parent_id: None,
         })
     }
 
@@ -441,7 +456,8 @@ impl Db {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.conn
             .query_row(
-                "SELECT id, title, model, slug, created_at, compact_summary, compact_through, web_mode, swarm_mode
+                "SELECT id, title, model, slug, created_at, compact_summary, compact_through, \
+                 web_mode, swarm_mode, kind, research_parent_id
                  FROM sessions WHERE id = ?1",
                 [id],
                 |r| {
@@ -455,6 +471,8 @@ impl Db {
                         compact_through: r.get(6)?,
                         web_mode: r.get::<_, i64>(7)? != 0,
                         swarm_mode: r.get::<_, i64>(8)? != 0,
+                        kind: r.get(9)?,
+                        research_parent_id: r.get(10)?,
                     })
                 },
             )
@@ -465,7 +483,8 @@ impl Db {
     /// Sessions in `space_id`, most-recently-updated first.
     pub fn list_sessions(&self, space_id: &str) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, model, slug, created_at, compact_summary, compact_through, web_mode, swarm_mode
+            "SELECT id, title, model, slug, created_at, compact_summary, compact_through, \
+             web_mode, swarm_mode, kind, research_parent_id
              FROM sessions WHERE space_id = ?1 ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([space_id], |r| {
@@ -479,6 +498,8 @@ impl Db {
                 compact_through: r.get(6)?,
                 web_mode: r.get::<_, i64>(7)? != 0,
                 swarm_mode: r.get::<_, i64>(8)? != 0,
+                kind: r.get(9)?,
+                research_parent_id: r.get(10)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -541,6 +562,17 @@ impl Db {
                 (session_id, i as i64, &p.name, &p.model, &p.blurb),
             )?;
         }
+        Ok(())
+    }
+
+    /// Set a session's `research_parent_id` after creation (e.g. when
+    /// a regular chat is promoted to research and the original session is
+    /// created first).
+    pub fn set_research_parent(&self, id: &str, parent_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET research_parent_id = ?2 WHERE id = ?1",
+            (id, parent_id),
+        )?;
         Ok(())
     }
 
@@ -1435,7 +1467,7 @@ mod tests {
     fn web_mode_defaults_off_and_toggles() {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
-        let s = db.create_session("t", "a/b", &space).unwrap();
+        let s = db.create_session("t", "a/b", &space, "chat").unwrap();
         assert!(!s.web_mode);
         db.set_session_web_mode(&s.id, true).unwrap();
         assert!(db.list_sessions(&space).unwrap()[0].web_mode);
@@ -1445,7 +1477,7 @@ mod tests {
     fn swarm_mode_defaults_off_and_toggles() {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
-        let s = db.create_session("t", "a/b", &space).unwrap();
+        let s = db.create_session("t", "a/b", &space, "chat").unwrap();
         assert!(!s.swarm_mode);
         db.set_session_swarm_mode(&s.id, true).unwrap();
         assert!(db.list_sessions(&space).unwrap()[0].swarm_mode);
@@ -1456,7 +1488,7 @@ mod tests {
     fn swarm_personas_roundtrip_and_replace_all_on_save() {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
-        let s = db.create_session("t", "a/b", &space).unwrap();
+        let s = db.create_session("t", "a/b", &space, "chat").unwrap();
         assert!(db.list_swarm_personas(&s.id).unwrap().is_empty());
 
         let roster = vec![
@@ -1486,7 +1518,7 @@ mod tests {
     fn persona_message_tags_role_assistant_with_persona_and_model() {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
-        let s = db.create_session("t", "a/b", &space).unwrap();
+        let s = db.create_session("t", "a/b", &space, "chat").unwrap();
         db.add_persona_message(&s.id, "reply text", "Skeptic", "a/one")
             .unwrap();
         let msgs = db.load_messages(&s.id).unwrap();
@@ -1506,7 +1538,7 @@ mod tests {
     fn session_sources_link_to_the_web_cache_and_are_keyword_searchable() {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
-        let s = db.create_session("t", "a/b", &space).unwrap();
+        let s = db.create_session("t", "a/b", &space, "chat").unwrap();
         cache_put(
             db.raw(),
             "https://example.com/a",
@@ -1572,7 +1604,7 @@ mod tests {
     fn upsert_research_stage_message_replaces_the_same_labels_row() {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
-        let s = db.create_session("t", "a/b", &space).unwrap();
+        let s = db.create_session("t", "a/b", &space, "chat").unwrap();
         db.upsert_research_stage_message(&s.id, "searching", "round 1, 1/3")
             .unwrap();
         db.upsert_research_stage_message(&s.id, "searching", "round 1, 2/3")
@@ -1594,7 +1626,7 @@ mod tests {
     fn session_and_message_roundtrip() {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
-        let s = db.create_session("hello", "openai/gpt-4o", &space).unwrap();
+        let s = db.create_session("hello", "openai/gpt-4o", &space, "chat").unwrap();
 
         db.add_user_message(&s.id, "hi").unwrap();
         db.add_assistant_message(
@@ -1625,7 +1657,7 @@ mod tests {
     fn message_images_roundtrip_and_description_backfill() {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
-        let s = db.create_session("t", "a/b", &space).unwrap();
+        let s = db.create_session("t", "a/b", &space, "chat").unwrap();
         let mid = db.add_user_message(&s.id, "look at this").unwrap();
         let imgs = db
             .add_message_images(&mid, &["/tmp/a.png".into(), "/tmp/b.png".into()])
@@ -1678,7 +1710,7 @@ mod tests {
     fn set_model_updates_row() {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
-        let s = db.create_session("t", "a/b", &space).unwrap();
+        let s = db.create_session("t", "a/b", &space, "chat").unwrap();
         db.set_session_model(&s.id, "c/d").unwrap();
         assert_eq!(db.list_sessions(&space).unwrap()[0].model, "c/d");
     }
@@ -1687,7 +1719,7 @@ mod tests {
     fn compaction_persists_and_roundtrips() {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
-        let s = db.create_session("t", "a/b", &space).unwrap();
+        let s = db.create_session("t", "a/b", &space, "chat").unwrap();
         assert_eq!(s.compact_summary, None);
         assert_eq!(s.compact_through, 0);
 
@@ -1709,7 +1741,7 @@ mod tests {
         assert_eq!(spaces[0].name, DEFAULT_SPACE);
 
         let work = db.create_space("work").unwrap();
-        let s = db.create_session("hi", "a/b", &work.id).unwrap();
+        let s = db.create_session("hi", "a/b", &work.id, "chat").unwrap();
         assert_eq!(db.count_sessions(&work.id).unwrap(), 1);
 
         db.rename_space(&work.id, "work-renamed").unwrap();
@@ -1848,7 +1880,7 @@ mod tests {
     fn research_stage_messages_round_trip() {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
-        let s = db.create_session("t", "a/b", &space).unwrap();
+        let s = db.create_session("t", "a/b", &space, "chat").unwrap();
         db.add_research_stage_message(&s.id, "planning…").unwrap();
         let msgs = db.load_messages(&s.id).unwrap();
         assert_eq!(msgs.last().unwrap().role, "research_stage");
