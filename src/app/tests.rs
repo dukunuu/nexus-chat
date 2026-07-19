@@ -215,37 +215,6 @@ async fn web_mode_toggles_persists_and_shows_in_system_prompt() {
 }
 
 #[test]
-fn open_citation_under_selection_resolves_against_the_owning_messages_sources() {
-    let mut a = app_with_key();
-    a.messages.push(Message {
-        id: String::new(),
-        role: "assistant".into(),
-        content:
-            "claim [1] and another [2].\n\n## Sources\n1. https://a.example\n2. https://b.example\n"
-                .into(),
-        model: None,
-        reasoning: None,
-        tokens: None,
-        secs: None,
-        phrase: None,
-        persona: None,
-    });
-    // Simulate a render + a selection covering "[2]" on message index 0.
-    a.sel.record_render(
-        ratatui::layout::Rect::new(0, 0, 80, 10),
-        0,
-        vec!["claim [1] and another [2].".to_string()],
-        vec![Some(0)],
-        vec![None],
-        vec![],
-    );
-    a.sel.on_down((0, 22)); // inside "[2]"
-    a.sel.on_drag((0, 25));
-    assert_eq!(a.sel.selected_text().as_deref(), Some("[2]"));
-    a.open_citation_under_selection();
-    assert!(a.status.contains("https://b.example"), "{}", a.status);
-}
-
 #[test]
 fn no_key_rejects_message_and_points_to_login_cmd() {
     let db = Db::open_in_memory().unwrap();

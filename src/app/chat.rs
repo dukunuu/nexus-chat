@@ -579,35 +579,6 @@ impl App {
     /// text selection (via the `open` crate), resolved against the Sources
     /// list of the message the selection belongs to. Every miss surfaces as
     /// a status message rather than doing nothing silently.
-    pub(crate) fn open_citation_under_selection(&mut self) {
-        let Some(selected) = self.sel.selected_text() else {
-            self.status = "select a [n] citation, then press o".to_string();
-            return;
-        };
-        let Some(n) = crate::citations::citation_number_in(&selected) else {
-            self.status = "no [n] citation in the current selection".to_string();
-            return;
-        };
-        let Some(msg) = self
-            .sel
-            .owner_at_selection_start()
-            .and_then(|i| self.messages.get(i))
-        else {
-            self.status = "no [n] citation in the current selection".to_string();
-            return;
-        };
-        let citations = crate::citations::parse_citations(&msg.content);
-        match citations.iter().find(|(num, _)| *num == n) {
-            Some((_, url)) => {
-                // Don't actually launch a browser under `cargo test`.
-                #[cfg(not(test))]
-                let _ = open::that_detached(url);
-                self.status = format!("opened [{n}]: {url}");
-            }
-            None => self.status = format!("no source [{n}] in this message"),
-        }
-    }
-
     /// Ctrl+O: navigate to the session linked in a `session_link` message
     /// under the text selection. Expects the message content's first line to
     /// be the target session id.
