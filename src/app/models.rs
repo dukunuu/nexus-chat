@@ -361,6 +361,13 @@ impl App {
             .models
             .iter()
             .filter(|m| self.model_backend_filter.is_none_or(|t| m.backend == t))
+            .filter(|m| {
+                if self.model_pick_target == ModelPickTarget::ImageGen {
+                    m.supports_image_generation
+                } else {
+                    true
+                }
+            })
             .filter(|m| self.favorites.contains(&super::composite_id(m)) == want_fav)
             .filter(|m| {
                 f.is_empty()
