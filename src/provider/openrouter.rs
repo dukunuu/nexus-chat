@@ -554,10 +554,10 @@ impl OpenRouter {
             .await
     }
 
-    /// Generate an image from a text prompt using OpenAI/OpenRouter's
-    /// `/images/generations` endpoint. If `image_data` is provided, uses
-    /// `/images/edits` for img2img / editing. Returns decoded PNG bytes.
-    pub async fn generate_image(&self, model: &str, prompt: &str, size: &str, image_data: Option<&[u8]>) -> Result<Vec<u8>> {
+    /// Generate an image via OpenRouter's dedicated `/api/v1/images` endpoint.
+    /// Returns `(decoded_bytes, file_extension)` — the caller should use the
+    /// returned extension (e.g. `"png"`, `"jpg"`, `"webp"`) for the saved file.
+    pub async fn generate_image(&self, model: &str, prompt: &str, size: &str, image_data: Option<&[u8]>) -> Result<(Vec<u8>, String)> {
         if let Some(delegate) = self.openrouter_delegate_for_model(model) {
             return Box::pin(delegate.generate_image(model, prompt, size, image_data)).await;
         }
@@ -566,52 +566,32 @@ impl OpenRouter {
         }
         let (base, model) = self.opencode_route(model);
 
-        let v = if let Some(img) = image_data {
+        let mut body = serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "n": 1,
+            "size": size,
+        });
+        if let Some(img) = image_data {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(img);
             let mime = Self::detect_image_mime(img);
-            let ext = if mime == "image/png" { "png" } else if mime == "image/jpeg" { "jpg" } else { "png" };
-            let part = reqwest::multipart::Part::bytes(img.to_vec())
-                .file_name(format!("image.{ext}"))
-                .mime_str(mime)
-                .context("invalid mime")?;
-            let form = reqwest::multipart::Form::new()
-                .part("image", part)
-                .text("prompt", prompt.to_string())
-                .text("model", model.clone())
-                .text("n", "1")
-                .text("size", size.to_string())
-                .text("response_format", "b64_json");
-            self.client
-                .post(format!("{base}/images/edits"))
-                .bearer_auth(&self.key)
-                .multipart(form)
-                .send()
-                .await
-                .context("image edit request")?
-                .error_for_status()
-                .context("image editing not supported by this model")?
-                .json::<serde_json::Value>()
-                .await
-                .context("parsing image edit response")?
-        } else {
-            self.client
-                .post(format!("{base}/images/generations"))
-                .bearer_auth(&self.key)
-                .json(&serde_json::json!({
-                    "model": model,
-                    "prompt": prompt,
-                    "n": 1,
-                    "size": size,
-                    "response_format": "b64_json",
-                }))
-                .send()
-                .await
-                .context("image generation request")?
-                .error_for_status()
-                .context("image generation failed")?
-                .json::<serde_json::Value>()
-                .await
-                .context("parsing image generation response")?
-        };
+            body["input_references"] = serde_json::json!([{
+                "type": "image_url",
+                "image_url": { "url": format!("data:{mime};base64,{b64}") }
+            }]);
+        }
+        let v = self.client
+            .post(format!("{base}/images"))
+            .bearer_auth(&self.key)
+            .json(&body)
+            .send()
+            .await
+            .context("image generation request")?
+            .error_for_status()
+            .context("image generation failed")?
+            .json::<serde_json::Value>()
+            .await
+            .context("parsing image generation response")?;
         let data = v
             .get("data")
             .and_then(|d| d.as_array())
@@ -621,11 +601,19 @@ impl OpenRouter {
             .get("b64_json")
             .and_then(|b| b.as_str())
             .context("no b64_json field")?;
+        let media_type = data.get("media_type").and_then(|m| m.as_str()).unwrap_or("image/png");
+        let ext = match media_type {
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            "image/svg+xml" => "svg",
+            _ => "png",
+        };
         use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(b64)
             .context("base64 decode")?;
-        Ok(bytes)
+        Ok((bytes, ext.to_string()))
     }
 
 /// Detect image MIME type from magic bytes.

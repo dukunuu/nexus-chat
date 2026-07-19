@@ -196,12 +196,12 @@ impl App {
         self.status = "Generating image…".to_string();
         self.scroll = 0;
 
-        let png_bytes = match tokio::task::block_in_place(|| {
+        let (png_bytes, ext) = match tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 provider.generate_image(&raw_model, prompt, "1024x1024", None).await
             })
         }) {
-            Ok(bytes) => bytes,
+            Ok(r) => r,
             Err(e) => {
                 self.status = format!("image generation failed: {e}");
                 return Ok(());
@@ -209,7 +209,7 @@ impl App {
         };
 
         let id = uuid::Uuid::new_v4().to_string();
-        let filename = format!("{id}.png");
+        let filename = format!("{id}.{ext}");
         let img_path = if self.incognito {
             let d = self.incognito_img_dir.get_or_insert_with(|| {
                 let p = std::env::temp_dir().join(format!("nexus-incognito-{}", uuid::Uuid::new_v4()));
@@ -357,6 +357,7 @@ impl App {
             // only the turn's final synthesis reply carries forward.
             if m.role == "research_stage"
                 || m.role == "research_plan"
+                || m.role == "session_link"
                 || m.role == "error"
                 || m.persona.is_some()
             {

@@ -1556,9 +1556,9 @@ fn app_link(&self, uuid: &str) -> String {
                             } else {
                                 match provider.generate_image(model, prompt, size, image_data.as_deref()).await {
                                     Err(e) => format!("image generation failed: {e}"),
-                                    Ok(png_bytes) => {
+                                    Ok((png_bytes, ext)) => {
                                         let id = uuid::Uuid::new_v4().to_string();
-                                        let filename = format!("{id}.png");
+                                        let filename = format!("{id}.{ext}");
                                         let img_path = self.space_images_dir.join(&filename);
                                         if let Err(e) = std::fs::create_dir_all(&self.space_images_dir) {
                                             format!("cannot create images dir: {e}")
@@ -2912,7 +2912,7 @@ mod tests {
             std::env::temp_dir().join(format!("nexus-searchsrc-{}.db", uuid::Uuid::new_v4()));
         let db = crate::db::Db::open(&path).unwrap();
         let space = db.default_space_id().unwrap();
-        let s = db.create_session("t", "a/b", &space).unwrap();
+        let s = db.create_session("t", "a/b", &space, "chat").unwrap();
         crate::db::cache_put(
             db.raw(),
             "https://example.com/a",
