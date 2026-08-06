@@ -1,15 +1,18 @@
 //! Tools the model can call mid-response: `skill` (progressive-disclosure
-//! skill bodies) and, once configured, `web_search`. Concrete (no trait) —
+//! skill bodies) and `search`. Concrete (no trait) —
 //! there's exactly one implementation and no need for one yet.
 
 use std::path::PathBuf;
 
+use base64::Engine;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::provider::openrouter::OpenRouter;
 use crate::provider::ToolDef;
+use crate::provider::openrouter::{OpenRouter, normalize_video_params};
 use crate::skills::{load_skills, skill_body};
+
+const MAX_TOOL_RESULT_CHARS: usize = 8_000;
 
 pub struct ToolBox {
     pub skills_dir: PathBuf,
@@ -18,25 +21,29 @@ pub struct ToolBox {
     pub searxng_url: Option<String>,
     /// LangSearch API key (free tier, no card): https://langsearch.com/dashboard
     pub langsearch_key: Option<String>,
-    /// Which backend `web_search` prefers: "auto" (LangSearch, then SearXNG,
-    /// then DuckDuckGo), or an explicit "langsearch"/"searxng"/"duckduckgo".
+    /// Which backend `search(mode=web)` prefers: "auto" (LangSearch, then SearXNG,
+    /// DuckDuckGo, and Brave), or an explicit "langsearch"/"searxng"/"duckduckgo".
     pub search_provider: String,
-    /// When true, `defs()`/`run()` restrict to `web_search`/`fetch_url` only —
+    /// When true, `defs()`/`run()` restrict to `search`/`fetch_url` only —
     /// used for deep-research searcher agents, which must never reach
     /// run_python/install_packages/app tools even if hallucinated.
     research_only: bool,
-    /// Domains a per-space setting always excludes from `web_search` results
+    /// Domains a per-space setting always excludes from `search(mode=web)` results
     /// (appended to any exclude_domains the model passes).
     pub blocked_domains: Vec<String>,
     /// Db path for the (space-agnostic) fetched-page cache; None disables
     /// caching (some tests).
     web_cache_db: Option<PathBuf>,
     /// Set for follow-up turns inside a `/research` session: enables the
-    /// `search_sources` tool over that session's gathered source bundle.
+    /// `research_lookup(scope=session_sources)` over that session's gathered source bundle.
     research_session_id: Option<String>,
     client: reqwest::Client,
     files: Option<FilesCtx>,
     apps: Option<AppsCtx>,
+    /// Whether the current model supports image inputs. When false, tool
+    /// image results are returned as text references instead of being
+    /// injected as vision content (which would cause a 400).
+    pub supports_images: bool,
     /// When true, `fetch_cached` never hits the network on a cache miss —
     /// used for the Verifier stage's quote-checking pass, which must only
     /// ever see pages the searchers actually gathered, never fresh fetches.
@@ -45,11 +52,14 @@ pub struct ToolBox {
     pub image_gen_backend: Option<(OpenRouter, String)>,
     /// Directory to save generated images into / search for reference images.
     pub space_files_dir: PathBuf,
+    pub space_apps_dir: PathBuf,
     /// Directory holding space-local scripts (created by the model via
-    /// `write_script` / `run_python`).
+    /// `script_files` / `run_python`).
     pub space_scripts_dir: PathBuf,
     /// Current session id — for attaching generated images to a message.
     pub session_id: String,
+    /// Provider + model for video generation. `None` = tools hidden.
+    pub video_gen_backend: Option<(OpenRouter, String)>,
 }
 
 /// Where the file tools read from: the shared db plus the space to scope to.
@@ -74,6 +84,215 @@ pub struct AppsCtx {
     pub space_db_path: PathBuf,
     pub files_dir: PathBuf,
     pub session_id: String,
+}
+
+fn tool_def(name: &str, description: &str, parameters: serde_json::Value) -> ToolDef {
+    ToolDef {
+        name: name.to_string(),
+        description: description.to_string(),
+        parameters,
+    }
+}
+
+fn required_arg(v: &serde_json::Value, key: &str) -> Result<(), String> {
+    match v.get(key).and_then(|value| value.as_str()) {
+        Some(value) if !value.trim().is_empty() => Ok(()),
+        _ => Err(format!("missing required field: {key}")),
+    }
+}
+
+fn required_array(v: &serde_json::Value, key: &str) -> Result<(), String> {
+    match v.get(key).and_then(|value| value.as_array()) {
+        Some(values) if !values.is_empty() => Ok(()),
+        _ => Err(format!("missing required field: {key}")),
+    }
+}
+
+/// Normalize advertised consolidated calls onto the specialized implementations below.
+/// The old names are intentionally still accepted by `run()` for persisted/replayed calls,
+/// but never returned by `defs()`.
+fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
+    let public = matches!(
+        name,
+        "skill_admin"
+            | "search"
+            | "research_lookup"
+            | "files"
+            | "app_inspect"
+            | "app_modify"
+            | "app_assets"
+            | "script_files"
+            | "video_transform"
+            | "video_references"
+    );
+    if !public {
+        return Ok((name.to_string(), args.to_string()));
+    }
+    let value: serde_json::Value = serde_json::from_str(args)
+        .map_err(|e| format!("invalid tool arguments: {e}"))?;
+    let action = |key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| format!("missing required field: {key}"))
+    };
+    let mapped = match name {
+        "skill_admin" => match action("action")? {
+            "create" => {
+                required_arg(&value, "name")?;
+                required_arg(&value, "description")?;
+                "create_skill"
+            }
+            "install" => {
+                required_arg(&value, "source")?;
+                "install_skill"
+            }
+            other => return Err(format!("invalid action for skill_admin: {other}")),
+        },
+        "search" => match action("mode")? {
+            "web" => {
+                required_arg(&value, "query")?;
+                "web_search"
+            }
+            "academic" => {
+                required_arg(&value, "query")?;
+                "academic_search"
+            }
+            "discussion" => {
+                required_arg(&value, "query")?;
+                "discussion_search"
+            }
+            other => return Err(format!("invalid mode for search: {other}")),
+        },
+        "research_lookup" => match action("scope")? {
+            "session_sources" => {
+                required_arg(&value, "query")?;
+                "search_sources"
+            }
+            "citations" => "list_citations",
+            other => return Err(format!("invalid scope for research_lookup: {other}")),
+        },
+        "files" => match action("action")? {
+            "search" => {
+                required_arg(&value, "query")?;
+                "search_files"
+            }
+            "read" => {
+                required_arg(&value, "name")?;
+                "read_file"
+            }
+            "pdf_page" => {
+                required_arg(&value, "name")?;
+                if value.get("page").and_then(|v| v.as_u64()).is_none() {
+                    return Err("missing required field: page".to_string());
+                }
+                "read_pdf_page"
+            }
+            other => return Err(format!("invalid action for files: {other}")),
+        },
+        "app_inspect" => match action("action")? {
+            "read" => {
+                required_arg(&value, "app")?;
+                required_arg(&value, "path")?;
+                "read_app_file"
+            }
+            "search" => {
+                required_arg(&value, "app")?;
+                required_arg(&value, "pattern")?;
+                "grep_app"
+            }
+            other => return Err(format!("invalid action for app_inspect: {other}")),
+        },
+        "app_modify" => match action("action")? {
+            "write" => {
+                required_arg(&value, "app")?;
+                required_arg(&value, "path")?;
+                required_arg(&value, "content")?;
+                "write_file"
+            }
+            "patch" => {
+                required_arg(&value, "app")?;
+                required_arg(&value, "path")?;
+                required_array(&value, "edits")?;
+                "edit_file"
+            }
+            "diff" => {
+                required_arg(&value, "app")?;
+                required_arg(&value, "path")?;
+                if value.get("content").and_then(|v| v.as_str()).is_none() {
+                    return Err("missing required field: content".to_string());
+                }
+                "diff_app"
+            }
+            other => return Err(format!("invalid action for app_modify: {other}")),
+        },
+        "app_assets" => match action("action")? {
+            "list" => "list_images",
+            "copy_file" => {
+                required_arg(&value, "app")?;
+                required_arg(&value, "file_name")?;
+                "copy_file_to_app"
+            }
+            "copy_images" => {
+                required_arg(&value, "app")?;
+                required_array(&value, "image_ids")?;
+                "copy_images_to_app"
+            }
+            other => return Err(format!("invalid action for app_assets: {other}")),
+        },
+        "script_files" => match action("action")? {
+            "list" => "list_scripts",
+            "write" => {
+                required_arg(&value, "path")?;
+                if value.get("content").and_then(|v| v.as_str()).is_none() {
+                    return Err("missing required field: content".to_string());
+                }
+                "write_script"
+            }
+            "read" => {
+                required_arg(&value, "path")?;
+                "read_script"
+            }
+            "edit" => {
+                required_arg(&value, "path")?;
+                required_array(&value, "edits")?;
+                "edit_script"
+            }
+            other => return Err(format!("invalid action for script_files: {other}")),
+        },
+        "video_transform" => match action("action")? {
+            "edit" => {
+                required_arg(&value, "video_id")?;
+                "edit_video"
+            }
+            "extract_frame" => {
+                required_arg(&value, "video_id")?;
+                "extract_frame"
+            }
+            "stitch" => {
+                required_array(&value, "video_ids")?;
+                "stitch_videos"
+            }
+            other => return Err(format!("invalid action for video_transform: {other}")),
+        },
+        "video_references" => match action("action")? {
+            "save" => {
+                required_arg(&value, "name")?;
+                required_arg(&value, "image_id")?;
+                required_arg(&value, "description")?;
+                "save_reference"
+            }
+            "list" => "list_references",
+            "delete" => {
+                required_arg(&value, "name")?;
+                "delete_reference"
+            }
+            other => return Err(format!("invalid action for video_references: {other}")),
+        },
+        _ => unreachable!(),
+    };
+    Ok((mapped.to_string(), args.to_string()))
 }
 
 impl ToolBox {
@@ -101,13 +320,16 @@ impl ToolBox {
             apps,
             cache_only: false,
             image_gen_backend: None,
+            supports_images: false,
             space_files_dir: PathBuf::new(),
+            space_apps_dir: PathBuf::new(),
             space_scripts_dir: PathBuf::new(),
             session_id: String::new(),
+            video_gen_backend: None,
         }
     }
 
-    /// A toolbox restricted to `web_search`/`fetch_url` — for deep-research
+    /// A toolbox restricted to `search`/`fetch_url` — for deep-research
     /// searcher agents, which get no filesystem/app/script access.
     pub fn research(
         searxng_url: Option<String>,
@@ -130,10 +352,10 @@ impl ToolBox {
         tb
     }
 
-    /// Attach a research session id, enabling `search_sources` for follow-up
+    /// Attach a research session id, enabling `research_lookup` for follow-up
     /// turns in that session's chat. Also merges any domains the user has
     /// discarded in this session into `blocked_domains`, so a later
-    /// `web_search`/`fetch_url` call excludes them the same way the global
+    /// `search`/`fetch_url` call excludes them the same way the global
     /// setting does.
     pub fn with_research_session(mut self, session_id: String) -> Self {
         if let Some(db_path) = &self.web_cache_db
@@ -162,13 +384,28 @@ impl ToolBox {
             .unwrap_or(0)
     }
 
+    fn citation_count(&self) -> u64 {
+        let Some(ctx) = &self.files else { return 0 };
+        rusqlite::Connection::open(&ctx.db_path)
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM citations WHERE space_id = ?1",
+                    [&ctx.space_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .ok()
+            })
+            .unwrap_or(0)
+            .max(0) as u64
+    }
+
     /// Resolve which backend to actually use for this call. An explicit
     /// choice ("langsearch"/"searxng"/"duckduckgo") is used as-is — if it's
     /// not configured, that's a clear error rather than a silent swap to
-    /// something else the user didn't pick. "auto" (the default) picks the
-    /// best configured option: LangSearch, then SearXNG, then DuckDuckGo
-    /// scraping last — DuckDuckGo now routinely serves a CAPTCHA to automated
-    /// requests, so it's unreliable, not just unofficial.
+    /// something else the user didn't pick. "auto" (the default) tries
+    /// LangSearch, SearXNG, DuckDuckGo, and finally Brave, continuing past
+    /// transport errors, bot challenges, and empty result pages.
     async fn search(
         &self,
         query: &str,
@@ -187,13 +424,45 @@ impl ToolBox {
                 None => anyhow::bail!("SearXNG selected but no instance URL is configured"),
             },
             "duckduckgo" => duckduckgo_search(&self.client, &query).await,
+            // Auto mode is deliberately failover-based. A configured hosted
+            // backend can still be unavailable (for example, LangSearch's
+            // API host has occasionally had TLS/DNS problems), and a single
+            // outage should not turn an otherwise usable search tool into an
+            // error.
             _ => {
+                let mut failures = Vec::new();
+
                 if let Some(key) = &self.langsearch_key {
-                    langsearch_search(&self.client, key, &query, recency).await
-                } else if let Some(url) = &self.searxng_url {
-                    searxng_search(&self.client, url, &query, recency).await
-                } else {
-                    duckduckgo_search(&self.client, &query).await
+                    match langsearch_search(&self.client, key, &query, recency).await {
+                        Ok(hits) if !hits.is_empty() => return Ok(hits),
+                        Ok(_) => failures.push("LangSearch returned no results".to_string()),
+                        Err(error) => failures.push(format!("LangSearch: {error}")),
+                    }
+                }
+                if let Some(url) = &self.searxng_url {
+                    match searxng_search(&self.client, url, &query, recency).await {
+                        Ok(hits) if !hits.is_empty() => return Ok(hits),
+                        Ok(_) => failures.push("SearXNG returned no results".to_string()),
+                        Err(error) => failures.push(format!("SearXNG: {error}")),
+                    }
+                }
+
+                match duckduckgo_search(&self.client, &query).await {
+                    Ok(hits) if !hits.is_empty() => return Ok(hits),
+                    Ok(_) => failures.push("DuckDuckGo returned no results".to_string()),
+                    Err(error) => failures.push(format!("DuckDuckGo: {error}")),
+                }
+
+                // HTML search endpoints increasingly return bot-challenge
+                // pages with a successful HTTP status. Treat an empty parse as
+                // a backend failure and give auto mode one more independent,
+                // keyless search source before reporting no results.
+                match brave_search(&self.client, &query).await {
+                    Ok(hits) => Ok(hits),
+                    Err(error) => {
+                        failures.push(format!("Brave: {error}"));
+                        anyhow::bail!("all web search backends failed: {}", failures.join("; "))
+                    }
                 }
             }
         }
@@ -231,394 +500,325 @@ impl ToolBox {
 
     /// Tool definitions to attach to the request, or empty to send a request
     /// identical to one from before tool-calling existed (keeps models that
-    /// don't support tools working unchanged). `web_search` always works —
-    /// it prefers the configured SearXNG instance, falling back to scraping
-    /// DuckDuckGo's HTML search when none is set, so it needs no setup.
+    /// don't support tools working unchanged). `search` always works —
+    /// it prefers configured API backends, then uses keyless HTML fallbacks
+    /// when those are unavailable, so it needs no setup.
     pub fn defs(&self) -> Vec<ToolDef> {
         let mut defs = Vec::new();
         if !load_skills(&self.skills_dir).is_empty() {
-            defs.push(ToolDef {
-                name: "skill".to_string(),
-                description: "Load the full instructions for a named skill — or a specific file within it (SKILL.md by default).".to_string(),
-                parameters: serde_json::json!({
+            defs.push(tool_def(
+                "skill",
+                "Load a skill's full instructions, or a specific file within the skill (SKILL.md by default).",
+                serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "the skill's name" },
-                        "file": { "type": "string", "description": "optional file path inside the skill, default SKILL.md" },
+                        "name": { "type": "string", "description": "skill name" },
+                        "file": { "type": "string", "description": "optional path within the skill; defaults to SKILL.md" }
                     },
-                    "required": ["name"],
+                    "required": ["name"]
                 }),
-            });
-            defs.push(ToolDef {
-                name: "run_script".to_string(),
-                description: "Run a script. If space=true, runs from the space's scripts directory (see write_script). Otherwise runs from an installed skill's directory. Python scripts run in the skill's own virtualenv. Returns stdout/stderr.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "skill": { "type": "string", "description": "the skill's name (required unless space=true)" },
-                        "path": { "type": "string", "description": "script path. For skill scripts: 'scripts/convert.py' (relative to skill dir). For space scripts: just 'convert.py' (relative to space scripts dir, no prefixes)" },
-                        "space": { "type": "boolean", "description": "if true, look up script in the space scripts dir instead of a skill" },
-                        "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments" },
-                    },
-                    "required": ["path"],
-                }),
-            });
+            ));
         }
-        defs.push(ToolDef {
-            name: "run_python".to_string(),
-            description: "Write and immediately run a Python script in the space's scripts directory. The script persists and shows up in list_scripts / scripts_section. Use run_script(space=true, path=...) to re-run later. Runs in the space's virtualenv; print() what you need back. Add packages with install_packages (no skill/app target).".to_string(),
-            parameters: serde_json::json!({
+        defs.push(tool_def(
+            "skill_admin",
+            "Create or install a reusable skill. Set action to create or install.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "code": { "type": "string", "description": "the python source to run" },
-                    "name": { "type": "string", "description": "filename for the scripts dir (e.g. 'analyze.py') — must end with .py" },
+                    "action": { "type": "string", "enum": ["create", "install"] },
+                    "name": { "type": "string", "description": "skill name for create" },
+                    "description": { "type": "string", "description": "short description for create" },
+                    "body": { "type": "string", "description": "skill instructions for create" },
+                    "overwrite": { "type": "boolean", "description": "replace an existing skill (default false)" },
+                    "source": { "type": "string", "description": "GitHub owner/repo/path for install" }
+                },
+                "required": ["action"]
+            }),
+        ));
+        defs.push(tool_def(
+            "run_python",
+            "Write and run inline Python in the space scripts environment. It persists by default; set temporary=true for one-off execution.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "code": { "type": "string", "description": "Python source" },
+                    "name": { "type": "string", "description": "confined .py filename" },
                     "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments" },
+                    "temporary": { "type": "boolean", "description": "delete the script after running (default false)" }
                 },
-                "required": ["code", "name"],
+                "required": ["code", "name"]
             }),
-        });
-        defs.push(ToolDef {
-            name: "install_packages".to_string(),
-            description: "Install packages into an isolated environment — pip packages into a skill's own virtualenv (pass skill), npm packages into an app's node_modules (pass app; reference files as node_modules/<pkg>/… in the app's HTML), or pip packages into the space scripts dir's venv (pass neither; shared with run_python). Never installs globally.".to_string(),
-            parameters: serde_json::json!({
+        ));
+        defs.push(tool_def(
+            "run_script",
+            "Run an existing skill script or a script in the space scripts directory. Set space=true for a space script; paths are confined to their respective roots.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "packages": { "type": "array", "items": { "type": "string" }, "description": "package names" },
-                    "skill": { "type": "string", "description": "skill to pip-install into (mutually exclusive with app)" },
-                    "app": { "type": "string", "description": "app to npm-install into (mutually exclusive with skill)" },
+                    "skill": { "type": "string", "description": "skill name, unless space=true" },
+                    "path": { "type": "string", "description": "script path" },
+                    "space": { "type": "boolean", "description": "run from the space scripts directory" },
+                    "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments" }
                 },
-                "required": ["packages"],
+                "required": ["path"]
             }),
-        });
-        defs.push(ToolDef {
-            name: "install_skill".to_string(),
-            description: "Install a skill from GitHub. source is owner/repo/path pointing at a directory that contains SKILL.md (bare owner/repo for a skill at the repo root).".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": { "source": { "type": "string", "description": "owner/repo/path of the skill directory" } },
-                "required": ["source"],
-            }),
-        });
-        defs.push(ToolDef {
-            name: "web_search".to_string(),
-            description: "Search the web and return numbered results with title, url, and snippet. recency restricts to recent results (ignored by the DuckDuckGo fallback backend). include_domains/exclude_domains restrict or exclude specific sites.".to_string(),
-            parameters: serde_json::json!({
+        ));
+        defs.push(tool_def(
+            "install_packages",
+            "Install packages into a skill virtualenv, an app's npm dependencies, or the shared space-script Python virtualenv. Pass at most one target.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "the search query" },
-                    "recency": { "type": "string", "enum": ["day", "week", "month", "year"], "description": "restrict to results from this recent window" },
-                    "include_domains": { "type": "array", "items": { "type": "string" }, "description": "only these domains" },
-                    "exclude_domains": { "type": "array", "items": { "type": "string" }, "description": "never these domains" },
+                    "packages": { "type": "array", "items": { "type": "string" } },
+                    "skill": { "type": "string", "description": "skill pip target" },
+                    "app": { "type": "string", "description": "app npm target" }
                 },
-                "required": ["query"],
+                "required": ["packages"]
             }),
-        });
-        defs.push(ToolDef {
-            name: "fetch_url".to_string(),
-            description: "Fetch a web page and return its readable text (HTML stripped), up to 200 lines per call. Use offset to page through longer pages. Use after web_search to read a promising result in full.".to_string(),
-            parameters: serde_json::json!({
+        ));
+        defs.push(tool_def(
+            "search",
+            "Search the web, scholarly literature, or HN/Reddit discussions. mode=web uses the configured web backend; academic preserves Semantic Scholar metadata; discussion preserves HN and Reddit engagement metadata.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "url": { "type": "string", "description": "the page URL to fetch" },
-                    "offset": { "type": "integer", "description": "1-based first line to read (default 1)" },
-                    "limit": { "type": "integer", "description": "lines to read, max 200 (default 200)" },
-                    "fresh": { "type": "boolean", "description": "bypass the 24h page cache and re-fetch live" },
+                    "mode": { "type": "string", "enum": ["web", "academic", "discussion"] },
+                    "query": { "type": "string" },
+                    "recency": { "type": "string", "enum": ["day", "week", "month", "year"] },
+                    "include_domains": { "type": "array", "items": { "type": "string" } },
+                    "exclude_domains": { "type": "array", "items": { "type": "string" } },
+                    "limit": { "type": "integer", "description": "maximum academic results (default 10, max 20)" }
                 },
-                "required": ["url"],
+                "required": ["mode", "query"]
             }),
-        });
-        defs.push(ToolDef {
-            name: "academic_search".to_string(),
-            description: "Search scholarly literature (Semantic Scholar): title, authors, year, venue, abstract, citation count, and URL per paper. Use for research topics needing peer-reviewed sources.".to_string(),
-            parameters: serde_json::json!({
+        ));
+        defs.push(tool_def(
+            "fetch_url",
+            "Fetch an arbitrary URL as readable, paged text. Uses the 24-hour cache unless fresh=true; supports PDFs, YouTube transcripts, and research verifier cache-only mode.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "the search query" },
-                    "limit": { "type": "integer", "description": "max papers to return (default 10, max 20)" },
+                    "url": { "type": "string" },
+                    "offset": { "type": "integer" },
+                    "limit": { "type": "integer", "description": "maximum 200 lines" },
+                    "fresh": { "type": "boolean" }
                 },
-                "required": ["query"],
+                "required": ["url"]
             }),
-        });
-        defs.push(ToolDef {
-            name: "discussion_search".to_string(),
-            description: "Search Hacker News and Reddit discussions for a query: title, URL, and engagement metadata (points/comments or subreddit/upvotes) per hit. Use for community sentiment/opinion on a topic, not authoritative facts.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "the search query" },
-                },
-                "required": ["query"],
-            }),
-        });
-        if self.research_session_id.is_some() {
-            defs.push(ToolDef {
-                name: "search_sources".to_string(),
-                description: "Keyword-search this research session's already-gathered sources (fetched pages from its /research run). Prefer this over web_search for follow-up questions — only reach for web_search on a miss.".to_string(),
-                parameters: serde_json::json!({
+        ));
+        let has_session_sources = self.research_session_id.is_some();
+        let has_citations = self.citation_count() > 0;
+        if has_session_sources || has_citations {
+            let mut scopes = Vec::new();
+            if has_session_sources {
+                scopes.push("session_sources");
+            }
+            if has_citations {
+                scopes.push("citations");
+            }
+            defs.push(tool_def(
+                "research_lookup",
+                "Look up previously gathered research material. scope=session_sources searches this research session's source bundle; scope=citations searches citations saved across this space.",
+                serde_json::json!({
                     "type": "object",
-                    "properties": { "query": { "type": "string", "description": "keywords to search the session's cached sources for" } },
-                    "required": ["query"],
+                    "properties": {
+                        "scope": { "type": "string", "enum": scopes },
+                        "query": { "type": "string", "description": "keywords; optional for citations, required for session_sources" }
+                    },
+                    "required": ["scope"]
                 }),
-            });
-        }
-        if self.files.is_some() {
-            defs.push(ToolDef {
-                name: "list_citations".to_string(),
-                description: "List sources cited in past research reports in this space, optionally filtered by a substring match against url/title/report name. Use to answer 'what have we researched about X' or 'which reports cite <site>'.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": { "query": { "type": "string", "description": "substring to match (omit to list everything)" } },
-                }),
-            });
+            ));
         }
         if self.files_count() > 0 {
-            defs.push(ToolDef {
-                name: "search_files".to_string(),
-                description: "Search the space's imported files by meaning (semantic embedding search, any language); returns the most relevant passages with file name and location. Natural-language questions and keywords both work.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": { "query": { "type": "string", "description": "what to look for — a question, phrase, or keywords" } },
-                    "required": ["query"],
-                }),
-            });
-            defs.push(ToolDef {
-                name: "read_file".to_string(),
-                description: "Read the extracted text of an imported file, up to 200 lines per call. Use offset to page through longer files.".to_string(),
-                parameters: serde_json::json!({
+            defs.push(tool_def(
+                "files",
+                "Work with imported space files. action=search performs semantic/keyword search, read pages extracted text, and pdf_page returns an imported PDF page image when available.",
+                serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "the file's name as listed in the system prompt" },
-                        "offset": { "type": "integer", "description": "1-based first line to read (default 1)" },
-                        "limit": { "type": "integer", "description": "lines to read, max 200 (default 200)" },
+                        "action": { "type": "string", "enum": ["search", "read", "pdf_page"] },
+                        "query": { "type": "string", "description": "search query" },
+                        "name": { "type": "string", "description": "imported file name" },
+                        "offset": { "type": "integer" },
+                        "limit": { "type": "integer", "description": "maximum 200 lines" },
+                        "page": { "type": "integer", "description": "1-based PDF page" }
                     },
-                    "required": ["name"],
+                    "required": ["action"]
                 }),
-            });
-        }
-        if self.files.is_some() && self.apps.is_some() {
-            defs.push(ToolDef {
-                name: "copy_file_to_app".to_string(),
-                description: "Copy an imported space file's text content into an app's KV store, accessible at /_api/kv/_file:<name>. The app's frontend reads it by GET /<app_uuid>/_api/kv/_file:<name>.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "file_name": { "type": "string", "description": "the file name as shown in the Files section" },
-                        "app": { "type": "string", "description": "app UUID or name" },
-                    },
-                    "required": ["file_name", "app"],
-                }),
-            });
+            ));
         }
         if self.apps.is_some() {
-            defs.push(ToolDef {
-                name: "write_file".to_string(),
-                description: "Create or overwrite a file in a named app (a static web app served locally). Use it to build HTML/CSS/JS the user can open in a browser; the result includes the live URL.".to_string(),
-                parameters: serde_json::json!({
+            defs.push(tool_def(
+                "app_inspect",
+                "Inspect an app. action=read returns hash-lines for safe editing; action=search recursively searches non-ignored files and returns locations.",
+                serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "app": { "type": "string", "description": "app name (directory) or app UUID, e.g. 'presentation'" },
-                        "path": { "type": "string", "description": "file path inside the app, e.g. 'index.html' or 'js/deck.js'" },
-                        "content": { "type": "string", "description": "full file content" },
+                        "action": { "type": "string", "enum": ["read", "search"] },
+                        "app": { "type": "string", "description": "app name or UUID" },
+                        "path": { "type": "string", "description": "file path for read" },
+                        "pattern": { "type": "string", "description": "case-insensitive search text" },
+                        "offset": { "type": "integer" },
+                        "limit": { "type": "integer", "description": "maximum 200 lines" },
+                        "compact": { "type": "boolean", "description": "return locations only for search (default true)" }
                     },
-                    "required": ["app", "path", "content"],
+                    "required": ["action", "app"]
                 }),
-            });
-            defs.push(ToolDef {
-                name: "edit_file".to_string(),
-                description: "Edit lines in an app file by hash, not by string matching. Call read_app_file first — each line comes back as `N:HASH<tab>content`. Each edit is {\"hash\": \"<the HASH for a line you read>\", \"new\": \"<replacement>\"}; `new` replaces that ENTIRE line (include the parts you're keeping) and may contain \\n to turn one line into several — that's also how you insert (replace a line with itself plus the new lines). Omit \"new\" (or set it null) to delete the line. Hashes are recomputed against the file's current content each call, so a stale hash (someone/something else changed the file since you read it) is rejected instead of silently hitting the wrong line.".to_string(),
-                parameters: serde_json::json!({
+            ));
+            defs.push(tool_def(
+                "app_modify",
+                "Modify or preview an app file. write replaces complete content, patch applies hash-line edits with stale-hash rejection, and diff previews a complete candidate without writing.",
+                serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "app": { "type": "string", "description": "app name (directory) or app UUID" },
-                        "path": { "type": "string", "description": "file path inside the app" },
-                        "edits": {
-                            "type": "array",
-                            "description": "one or more line edits, from the HASH column of a prior read_app_file call",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "hash": { "type": "string", "description": "the line's HASH, from read_app_file's N:HASH prefix" },
-                                    "new": { "type": ["string", "null"], "description": "replacement text for the whole line (may contain \\n); null/omitted deletes the line" },
-                                },
-                                "required": ["hash"],
-                            },
-                        },
+                        "action": { "type": "string", "enum": ["write", "patch", "diff"] },
+                        "app": { "type": "string", "description": "app name or UUID" },
+                        "path": { "type": "string" },
+                        "content": { "type": "string", "description": "complete content for write or diff" },
+                        "edits": { "type": "array", "description": "hash-line edits for patch", "items": { "type": "object", "properties": { "hash": { "type": "string" }, "new": { "type": ["string", "null"] } }, "required": ["hash"] } }
                     },
-                    "required": ["app", "path", "edits"],
+                    "required": ["action", "app", "path"]
                 }),
-            });
-            defs.push(ToolDef {
-                name: "grep_app".to_string(),
-                description: "Search an app's files for a substring (case-insensitive). Returns path:line: text matches — use it to find where something lives before editing.".to_string(),
-                parameters: serde_json::json!({
+            ));
+            defs.push(tool_def(
+                "app_assets",
+                "List conversation/space images or copy imported files and images into an app. Use action to choose the operation; image copies go to _images/ and text files to the app KV store.",
+                serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "app": { "type": "string", "description": "app name (directory) or app UUID" },
-                        "pattern": { "type": "string", "description": "text to search for" },
+                        "action": { "type": "string", "enum": ["list", "copy_file", "copy_images"] },
+                        "app": { "type": "string", "description": "app name or UUID for copy operations" },
+                        "file_name": { "type": "string", "description": "imported file name for copy_file" },
+                        "image_ids": { "type": "array", "items": { "type": "string" }, "description": "image IDs for copy_images" }
                     },
-                    "required": ["app", "pattern"],
+                    "required": ["action"]
                 }),
-            });
-            defs.push(ToolDef {
-                name: "read_app_file".to_string(),
-                description: "Read a file from an app, up to 200 lines per call. Use offset to page through longer files. Lines come back as `N:HASH\tcontent` — HASH is what edit_file targets, and it changes if the line's content or position changes, so always re-read before editing something you read a while ago.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "app": { "type": "string", "description": "app name (directory) or app UUID" },
-                        "path": { "type": "string", "description": "file path inside the app" },
-                        "offset": { "type": "integer", "description": "1-based first line to read (default 1)" },
-                        "limit": { "type": "integer", "description": "lines to read, max 200 (default 200)" },
-                    },
-                    "required": ["app", "path"],
-                }),
-            });
-            defs.push(ToolDef {
-                name: "list_images".to_string(),
-                description: "List images in this session and space: [{id, description, source}]. Images embedded as markdown `![desc](file)` in message content, plus space-file images. Each image can be copied into an app with copy_images_to_app.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                }),
-            });
-            defs.push(ToolDef {
-                name: "copy_images_to_app".to_string(),
-                description: "Copy one or more conversation images into an app's _images/ directory so the app can display them. image_ids come from list_images. Returns [{id, url}] with URLs the app can use in <img> tags.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "image_ids": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "one or more image IDs from list_images",
-                        },
-                        "app": {
-                            "type": "string",
-                            "description": "app UUID or name to copy into",
-                        },
-                    },
-                    "required": ["image_ids", "app"],
-                }),
-            });
-            defs.push(ToolDef {
-                name: "generate_image".to_string(),
-                description: "Generate an AI image from a text prompt. Optionally takes a pasted image filename (from list_images) as reference for image-to-image editing. Returns the image id, path, and a description. The image is saved to the space and visible in the conversation. Include the result as `![description](id.ext)` in your reply text to render it inline.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "prompt": { "type": "string", "description": "detailed text description of the image to create or how to edit the reference image" },
-                        "image_id": { "type": "string", "description": "optional pasted image id from list_images to use as reference for editing" },
-                        "size": { "type": "string", "description": "image size, default 1024x1024 (also: 1024x1792, 1792x1024)", "default": "1024x1024" },
-                    },
-                    "required": ["prompt"],
-                }),
-            });
+            ));
         }
         if !self.space_scripts_dir.as_os_str().is_empty() {
-            defs.push(ToolDef {
-                name: "list_scripts".to_string(),
-                description: "List scripts in the space's scripts directory (reusable, persist across sessions). Returns [{name, size, ext}].".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                }),
-            });
-            defs.push(ToolDef {
-                name: "write_script".to_string(),
-                description: "Create or overwrite a script file in the space's scripts directory. These scripts persist across sessions and can be run with run_script (set space=true) or edited with edit_script. Use instead of run_python when the logic should be reusable.".to_string(),
-                parameters: serde_json::json!({
+            defs.push(tool_def(
+                "script_files",
+                "Manage files only inside the space scripts directory. action=list discovers scripts; write/read/edit preserve confined paths and hash-line editing.",
+                serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "file path relative to the scripts dir, e.g. 'analyze.py' or 'tools/parse.sh'" },
-                        "content": { "type": "string", "description": "full file content" },
+                        "action": { "type": "string", "enum": ["list", "write", "read", "edit"] },
+                        "path": { "type": "string" },
+                        "content": { "type": "string" },
+                        "offset": { "type": "integer" },
+                        "limit": { "type": "integer", "description": "maximum 200 lines" },
+                        "edits": { "type": "array", "items": { "type": "object", "properties": { "hash": { "type": "string" }, "new": { "type": ["string", "null"] } }, "required": ["hash"] } }
                     },
-                    "required": ["path", "content"],
+                    "required": ["action"]
                 }),
-            });
-            defs.push(ToolDef {
-                name: "read_script".to_string(),
-                description: "Read a space script with line numbers and hashes (same format as read_app_file) — call before edit_script. Lines come back as N:HASH<tab>content. HASH is what edit_script targets.".to_string(),
-                parameters: serde_json::json!({
+            ));
+        }
+        if self.image_gen_backend.is_some() {
+            defs.push(tool_def(
+                "generate_image",
+                "Generate an image from a prompt, optionally using a pasted image ID as a reference. The result is saved in the space.",
+                serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "file path relative to the scripts dir, e.g. 'analyze.py'" },
-                        "offset": { "type": "integer", "description": "1-based first line to read (default 1)" },
-                        "limit": { "type": "integer", "description": "lines to read, max 200 (default 200)" },
+                        "prompt": { "type": "string" },
+                        "image_id": { "type": "string", "description": "optional reference image ID" },
+                        "size": { "type": "string", "default": "1024x1024" }
                     },
-                    "required": ["path"],
+                    "required": ["prompt"]
                 }),
-            });
-            defs.push(ToolDef {
-                name: "edit_script".to_string(),
-                description: "Edit lines in a space script by hash (same format as edit_file). Call read_script first — each line returns with N:HASH<tab>content. Each edit replaces the ENTIRE line matched by hash. Omit \"new\" to delete the line.".to_string(),
-                parameters: serde_json::json!({
+            ));
+        }
+        if self.video_gen_backend.is_some() {
+            defs.push(tool_def(
+                "generate_video",
+                "Generate a video from text and optional frame/reference images using the configured video backend.",
+                serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "file path relative to the scripts dir" },
-                        "edits": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "hash": { "type": "string", "description": "the line's HASH from read_script" },
-                                    "new": { "type": ["string", "null"], "description": "replacement text (may contain \\n); null/omitted deletes the line" },
-                                },
-                                "required": ["hash"],
-                            },
-                        },
+                        "prompt": { "type": "string" }, "duration": { "type": "integer" },
+                        "resolution": { "type": "string" }, "aspect_ratio": { "type": "string" },
+                        "generate_audio": { "type": "boolean" }, "first_frame_id": { "type": "string" },
+                        "last_frame_id": { "type": "string" }, "ref_image_id": { "type": "string" },
+                        "character_refs": { "type": "array", "items": { "type": "string" } },
+                        "location_refs": { "type": "array", "items": { "type": "string" } },
+                        "seed": { "type": "integer" }, "source_video_id": { "type": "string" }
                     },
-                    "required": ["path", "edits"],
+                    "required": ["prompt"]
                 }),
-            });
+            ));
+            defs.push(tool_def(
+                "video_transform",
+                "Transform generated videos locally with ffmpeg. action=edit applies effects, extract_frame extracts an image, and stitch concatenates clips.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["edit", "extract_frame", "stitch"] },
+                        "video_id": { "type": "string" }, "video_ids": { "type": "array", "items": { "type": "string" } },
+                        "lighting": { "type": "string", "enum": ["noir", "warm", "cold", "vintage", "vivid", "bleach_bypass"] },
+                        "camera_move": { "type": "string", "enum": ["dolly_in", "dolly_out", "pan_left", "pan_right", "tilt_up", "tilt_down"] },
+                        "intensity": { "type": "number" }, "speed": { "type": "number" },
+                        "trim_start": { "type": "number" }, "trim_end": { "type": "number" },
+                        "remove_audio": { "type": "boolean" }, "time_sec": { "type": "number" },
+                        "format": { "type": "string", "enum": ["png", "jpg"] }
+                    },
+                    "required": ["action"]
+                }),
+            ));
+            defs.push(tool_def(
+                "video_references",
+                "Save, list, or delete named image references used for video consistency.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["save", "list", "delete"] },
+                        "name": { "type": "string" }, "type": { "type": "string" },
+                        "image_id": { "type": "string" }, "description": { "type": "string" }
+                    },
+                    "required": ["action"]
+                }),
+            ));
         }
         if self.research_only {
-            defs.retain(|d| {
-                matches!(
-                    d.name.as_str(),
-                    "web_search" | "fetch_url" | "academic_search" | "discussion_search"
-                )
-            });
+            defs.retain(|d| matches!(d.name.as_str(), "search" | "fetch_url"));
         }
         defs
     }
 
-/// Resolve an app name or UUID to `(uuid, app_dir)`. If a name is given and
-/// not yet registered, a new UUID is assigned. Returns Err if the app name
-/// is invalid (not allowed by `resolve_confined` constraints).
-fn resolve_app(&self, name_or_uuid: &str) -> Result<(String, PathBuf), String> {
-    let ctx = self.apps.as_ref().ok_or("apps are not available")?;
-    let (uuid, app_name) = if looks_like_uuid(name_or_uuid) {
-        let entry = ctx
-            .registry
-            .lookup(name_or_uuid)
-            .ok_or_else(|| format!("unknown app uuid: {name_or_uuid}"))?;
-        (name_or_uuid.to_string(), entry.name)
-    } else if name_or_uuid.is_empty()
-        || name_or_uuid.contains(['/', '\\'])
-        || name_or_uuid == "."
-        || name_or_uuid == ".."
-    {
-        return Err(format!("invalid app name: {name_or_uuid:?}"));
-    } else {
-        let uuid = match ctx.registry.resolve(&ctx.space_name, name_or_uuid) {
-            Some(u) => u,
-            None => ctx.registry.assign(&ctx.space_name, name_or_uuid),
+    /// Resolve an app name or UUID to `(uuid, app_dir)`. If a name is given and
+    /// not yet registered, a new UUID is assigned. Returns Err if the app name
+    /// is invalid (not allowed by `resolve_confined` constraints).
+    fn resolve_app(&self, name_or_uuid: &str) -> Result<(String, PathBuf), String> {
+        let ctx = self.apps.as_ref().ok_or("apps are not available")?;
+        let (uuid, app_name) = if looks_like_uuid(name_or_uuid) {
+            let entry = ctx
+                .registry
+                .lookup(name_or_uuid)
+                .ok_or_else(|| format!("unknown app uuid: {name_or_uuid}"))?;
+            (name_or_uuid.to_string(), entry.name)
+        } else if name_or_uuid.is_empty()
+            || name_or_uuid.contains(['/', '\\'])
+            || name_or_uuid == "."
+            || name_or_uuid == ".."
+        {
+            return Err(format!("invalid app name: {name_or_uuid:?}"));
+        } else {
+            let uuid = match ctx.registry.resolve(&ctx.space_name, name_or_uuid) {
+                Some(u) => u,
+                None => ctx.registry.assign(&ctx.space_name, name_or_uuid),
+            };
+            (uuid, name_or_uuid.to_string())
         };
-        (uuid, name_or_uuid.to_string())
-    };
-    let app_dir = ctx.dir.join(&app_name);
-    Ok((uuid, app_dir))
-}
-
-/// The live URL for an app (accepts a UUID).
-fn app_link(&self, uuid: &str) -> String {
-    match &self.apps {
-        Some(ctx) => format!("live at http://127.0.0.1:{}/{}/", ctx.server_port, uuid),
-        None => String::new(),
+        let app_dir = ctx.dir.join(&app_name);
+        Ok((uuid, app_dir))
     }
-}
+
+    /// The live URL for an app (accepts a UUID).
+    fn app_link(&self, uuid: &str) -> String {
+        match &self.apps {
+            Some(ctx) => format!("live at http://127.0.0.1:{}/{}/", ctx.server_port, uuid),
+            None => String::new(),
+        }
+    }
 
     /// Run a tool by name. Returns `(result text sent back to the model,
     /// status label shown in the UI while it runs)`.
@@ -626,7 +826,11 @@ fn app_link(&self, uuid: &str) -> String {
         if self.research_only
             && !matches!(
                 name,
-                "web_search" | "fetch_url" | "academic_search" | "discussion_search"
+                "search"
+                    | "fetch_url"
+                    | "web_search"
+                    | "academic_search"
+                    | "discussion_search"
             )
         {
             return (
@@ -634,11 +838,25 @@ fn app_link(&self, uuid: &str) -> String {
                 "blocked".to_string(),
             );
         }
-        match name {
+        let (dispatch_name, dispatch_args) = match public_call(name, args) {
+            Ok(call) => call,
+            Err(error) => return (cap_tool_result(error), "invalid arguments".to_string()),
+        };
+        let name = dispatch_name.as_str();
+        let args = dispatch_args.as_str();
+        let (result, status) = match name {
             "skill" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let skill_name = v.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string();
-                let file = v.get("file").and_then(|f| f.as_str()).filter(|f| !f.is_empty()).unwrap_or("SKILL.md");
+                let skill_name = v
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let file = v
+                    .get("file")
+                    .and_then(|f| f.as_str())
+                    .filter(|f| !f.is_empty())
+                    .unwrap_or("SKILL.md");
                 let status = format!("Reading {skill_name}/{file}…");
                 let result = match resolve_confined(&self.skills_dir, &skill_name, file) {
                     Err(e) => e,
@@ -684,6 +902,56 @@ fn app_link(&self, uuid: &str) -> String {
                 };
                 (result, status)
             }
+            "create_skill" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let name = v
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let description = v
+                    .get("description")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let body = v
+                    .get("body")
+                    .and_then(|x| x.as_str())
+                    .filter(|b| !b.is_empty());
+                let overwrite = v
+                    .get("overwrite")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
+                let status = format!("Creating skill {name}…");
+                let result = if name.is_empty() {
+                    "name must not be empty".to_string()
+                } else if name.contains('/') || name.contains('\\') || name.contains("..") {
+                    "name must not contain /, \\, or ..".to_string()
+                } else if description.is_empty() {
+                    "description must not be empty".to_string()
+                } else {
+                    let dir = self.skills_dir.join(&name);
+                    let existed = dir.exists();
+                    if existed && !overwrite {
+                        format!("skill '{name}' already exists — set overwrite=true to replace")
+                    } else if let Err(e) = std::fs::create_dir_all(&dir) {
+                        format!("cannot create skill dir: {e}")
+                    } else {
+                        let body = body.unwrap_or("Write the skill instructions here. The model sees this text when it loads the skill.");
+                        let md = format!(
+                            "---\nname: {name}\ndescription: {description}\n---\n\n{body}\n"
+                        );
+                        match std::fs::write(dir.join("SKILL.md"), &md) {
+                            Ok(()) => {
+                                let verb = if existed { "updated" } else { "created" };
+                                format!("{verb} skill '{name}' — load it with the skill tool")
+                            }
+                            Err(e) => format!("cannot write SKILL.md: {e}"),
+                        }
+                    }
+                };
+                (result, status)
+            }
             "run_script" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
                 let field = |k: &str| {
@@ -710,7 +978,7 @@ fn app_link(&self, uuid: &str) -> String {
                 };
                 let result = if is_space {
                     let file = self.space_scripts_dir.join(&script);
-                    if !file.starts_with(&self.space_scripts_dir) {
+                    if !valid_relative_path(&script) || !file.starts_with(&self.space_scripts_dir) {
                         format!("invalid path: {script}")
                     } else if !file.is_file() {
                         format!("no such script: {script}")
@@ -742,12 +1010,38 @@ fn app_link(&self, uuid: &str) -> String {
                             argv.extend(extra.iter().map(std::ffi::OsString::from));
                             let refs: Vec<&std::ffi::OsStr> =
                                 argv.iter().map(|s| s.as_os_str()).collect();
+                            let files_dir = self.space_files_dir.to_string_lossy().to_string();
+                            let apps_dir = self.space_apps_dir.to_string_lossy().to_string();
+                            let scripts_dir = self.space_scripts_dir.to_string_lossy().to_string();
                             if ext == "py" {
-                                let scripts_dir = dir.join("scripts");
-                                let pp = scripts_dir.to_string_lossy().to_string();
-                                run_cmd_env(&program, &refs, &dir, 120, &[("PYTHONPATH", &pp)]).await
+                                let pp_dir = dir.join("scripts");
+                                let pp = pp_dir.to_string_lossy().to_string();
+                                run_cmd_env(
+                                    &program,
+                                    &refs,
+                                    &dir,
+                                    120,
+                                    &[
+                                        ("SPACE_FILES_DIR", files_dir.as_str()),
+                                        ("SPACE_APPS_DIR", apps_dir.as_str()),
+                                        ("SPACE_SCRIPTS_DIR", scripts_dir.as_str()),
+                                        ("PYTHONPATH", pp.as_str()),
+                                    ],
+                                )
+                                .await
                             } else {
-                                run_cmd(&program, &refs, &dir, 120).await
+                                run_cmd_env(
+                                    &program,
+                                    &refs,
+                                    &dir,
+                                    120,
+                                    &[
+                                        ("SPACE_FILES_DIR", files_dir.as_str()),
+                                        ("SPACE_APPS_DIR", apps_dir.as_str()),
+                                        ("SPACE_SCRIPTS_DIR", scripts_dir.as_str()),
+                                    ],
+                                )
+                                .await
                             }
                         };
                         match run.await {
@@ -920,31 +1214,76 @@ fn app_link(&self, uuid: &str) -> String {
             }
             "run_python" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let code = v.get("code").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-                let name = v.get("name").and_then(|n| n.as_str()).filter(|n| !n.is_empty()).map(str::to_string);
-                let extra: Vec<String> = v.get("args").and_then(|a| a.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                let code = v
+                    .get("code")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let name = v
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .filter(|n| !n.is_empty())
+                    .map(str::to_string);
+                let temporary = v
+                    .get("temporary")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
+                let extra: Vec<String> = v
+                    .get("args")
+                    .and_then(|a| a.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let result = match name {
                     None => "run_python requires a `name` parameter".to_string(),
+                    Some(ref name) if !valid_relative_path(name) => {
+                        format!("invalid script path: {name}")
+                    }
+                    Some(ref name) if !name.to_lowercase().ends_with(".py") => {
+                        "run_python name must end with .py".to_string()
+                    }
                     Some(ref name) => {
-                        let dir = self.space_scripts_dir.clone();
-                        let file = dir.join(name);
+                        let (dir, file) = if temporary {
+                            let tmp = std::env::temp_dir()
+                                .join(format!("nexus-script-{}", uuid::Uuid::new_v4()));
+                            let f = tmp.join(name);
+                            (tmp, f)
+                        } else {
+                            let d = self.space_scripts_dir.clone();
+                            let f = d.join(name);
+                            (d, f)
+                        };
                         let run = async {
                             if code.trim().is_empty() {
                                 return Err("code must not be empty".to_string());
                             }
                             std::fs::create_dir_all(&dir)
-                                .map_err(|e| format!("cannot create scripts dir: {e}"))?;
+                                .map_err(|e| format!("cannot create dir: {e}"))?;
                             std::fs::write(&file, &code)
                                 .map_err(|e| format!("cannot write script: {e}"))?;
                             let py = ensure_venv(&dir).await?;
                             let mut argv: Vec<std::ffi::OsString> = vec![file.into()];
                             argv.extend(extra.iter().map(std::ffi::OsString::from));
-                            let refs: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
-                            run_cmd(py.as_os_str(), &refs, &dir, 120).await
+                            let refs: Vec<&std::ffi::OsStr> =
+                                argv.iter().map(|s| s.as_os_str()).collect();
+                            let files_dir = self.space_files_dir.to_string_lossy().to_string();
+                            let apps_dir = self.space_apps_dir.to_string_lossy().to_string();
+                            let scripts_dir = self.space_scripts_dir.to_string_lossy().to_string();
+                            let envs = &[
+                                ("SPACE_FILES_DIR", files_dir.as_str()),
+                                ("SPACE_APPS_DIR", apps_dir.as_str()),
+                                ("SPACE_SCRIPTS_DIR", scripts_dir.as_str()),
+                            ];
+                            run_cmd_env(py.as_os_str(), &refs, &dir, 120, envs).await
                         };
-                        match run.await {
+                        let output = run.await;
+                        if temporary {
+                            let _ = std::fs::remove_dir_all(&dir);
+                        }
+                        match output {
                             Ok(out) => format_output(&out),
                             Err(e) => e,
                         }
@@ -1055,7 +1394,12 @@ fn app_link(&self, uuid: &str) -> String {
                         .ok()
                         .and_then(|conn| crate::db::cache_get(&conn, &cache_key).ok().flatten())
                         .and_then(|(_, text, fetched_at)| {
-                            if crate::db::is_fresh(&fetched_at, chrono::Utc::now()) {
+                            // Do not preserve the old empty-result sentinel:
+                            // it may have been produced by a blocked backend,
+                            // and a later fallback can now recover results.
+                            if crate::db::is_fresh(&fetched_at, chrono::Utc::now())
+                                && text != "no results"
+                            {
                                 Some(text)
                             } else {
                                 None
@@ -1070,11 +1414,11 @@ fn app_link(&self, uuid: &str) -> String {
                 } else {
                     let text = discussion_search(&self.client, &query).await;
                     // Write through to cache if enabled
-                    if let Some(db_path) = &self.web_cache_db {
-                        if let Ok(conn) = rusqlite::Connection::open(db_path) {
-                            let _ =
-                                crate::db::cache_put(&conn, &cache_key, &cache_key, None, &text);
-                        }
+                    if text != "no results"
+                        && let Some(db_path) = &self.web_cache_db
+                        && let Ok(conn) = rusqlite::Connection::open(db_path)
+                    {
+                        let _ = crate::db::cache_put(&conn, &cache_key, &cache_key, None, &text);
                     }
                     text
                 };
@@ -1198,10 +1542,64 @@ fn app_link(&self, uuid: &str) -> String {
                 };
                 (result, status)
             }
+            "read_pdf_page" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let name = v
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let page = v.get("page").and_then(|p| p.as_u64()).unwrap_or(1).max(1);
+                let status = format!("Reading {name} page {page}…");
+                let result = match &self.files {
+                    None => "no files imported".to_string(),
+                    Some(ctx) => {
+                        // Verify the PDF is known via DB lookup
+                        let known = rusqlite::Connection::open(&ctx.db_path)
+                            .ok()
+                            .and_then(|conn| {
+                                crate::db::file_text(&conn, &ctx.space_id, &name)
+                                    .ok()
+                                    .flatten()
+                            })
+                            .is_some();
+                        if !known {
+                            format!("unknown file: {name}")
+                        } else if !name.to_lowercase().ends_with(".pdf") {
+                            format!("not a PDF: {name}")
+                        } else {
+                            let stem = std::path::Path::new(&name)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or(&name);
+                            let png_path = self
+                                .space_files_dir
+                                .join(stem)
+                                .join(format!("page-{page}.png"));
+                            if png_path.exists() {
+                                format!("![page {page}]({stem}/page-{page}.png)")
+                            } else {
+                                format!(
+                                    "page {page} image not available — the PDF was not imported through the vision OCR path. Use files with action=read to read its text content."
+                                )
+                            }
+                        }
+                    }
+                };
+                (result, status)
+            }
             "copy_file_to_app" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let file_name = v.get("file_name").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-                let app = v.get("app").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let file_name = v
+                    .get("file_name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let app = v
+                    .get("app")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let status = format!("Copying {file_name} to {app}…");
                 let result = match (&self.apps, &self.files) {
                     (None, _) => "apps not available".to_string(),
@@ -1225,12 +1623,19 @@ fn app_link(&self, uuid: &str) -> String {
                             Err(e) => return (format!("store error: {e}"), status),
                             Ok(s) => s,
                         };
-                        let _ = store.execute_batch("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)");
+                        let _ = store.execute_batch(
+                            "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)",
+                        );
                         let key = format!("_file:{file_name}");
-                        match store.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)", rusqlite::params![key, text]) {
+                        match store.execute(
+                            "INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)",
+                            rusqlite::params![key, text],
+                        ) {
                             Ok(_) => {
                                 let url = format!("http://127.0.0.1:{}/{uuid}/", ctx.server_port);
-                                format!("copied {file_name} into {app}'s KV — read it at {url}_api/kv/_file:{file_name}")
+                                format!(
+                                    "copied {file_name} into {app}'s KV — read it at {url}_api/kv/_file:{file_name}"
+                                )
                             }
                             Err(e) => format!("kv write error: {e}"),
                         }
@@ -1255,7 +1660,9 @@ fn app_link(&self, uuid: &str) -> String {
                             Ok(s) => s,
                             Err(e) => return (format!("query error: {e}"), status),
                         };
-                        if let Ok(rows) = stmt.query_map([&ctx.session_id], |r| r.get::<_, String>(0)) {
+                        if let Ok(rows) =
+                            stmt.query_map([&ctx.session_id], |r| r.get::<_, String>(0))
+                        {
                             for row in rows.flatten() {
                                 let mut rest = row.as_str();
                                 while let Some(start) = rest.find("![") {
@@ -1282,7 +1689,7 @@ fn app_link(&self, uuid: &str) -> String {
                              WHERE f.space_id = ?1
                              AND (f.name LIKE '%.jpg' OR f.name LIKE '%.jpeg'
                                OR f.name LIKE '%.png' OR f.name LIKE '%.gif'
-                               OR f.name LIKE '%.webp' OR f.name LIKE '%.bmp')"
+                               OR f.name LIKE '%.webp' OR f.name LIKE '%.bmp')",
                         ) {
                             if let Ok(rows) = fstmt.query_map([&ctx.space_id], |r| {
                                 let name: String = r.get(0)?;
@@ -1299,10 +1706,20 @@ fn app_link(&self, uuid: &str) -> String {
             }
             "copy_images_to_app" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let image_ids: Vec<String> = v.get("image_ids").and_then(|a| a.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                let image_ids: Vec<String> = v
+                    .get("image_ids")
+                    .and_then(|a| a.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let app = v.get("app").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let app = v
+                    .get("app")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let status = format!("Copying {} images to {app}…", image_ids.len());
                 let result = match self.apps.as_ref() {
                     None => "apps not available".to_string(),
@@ -1318,11 +1735,15 @@ fn app_link(&self, uuid: &str) -> String {
                         let mut out: Vec<serde_json::Value> = Vec::new();
                         for img_id in &image_ids {
                             let src = ctx.files_dir.join(img_id);
-                            if !src.exists() {
+                            let dst = images_dir.join(img_id);
+                            if !valid_relative_path(img_id)
+                                || !src.starts_with(&ctx.files_dir)
+                                || !dst.starts_with(&images_dir)
+                                || !src.exists()
+                            {
                                 out.push(serde_json::json!({"id": img_id, "error": "not found in space files"}));
                                 continue;
                             }
-                            let dst = images_dir.join(img_id);
                             match std::fs::copy(&src, &dst) {
                                 Ok(_) => {
                                     out.push(serde_json::json!({
@@ -1331,7 +1752,9 @@ fn app_link(&self, uuid: &str) -> String {
                                     }));
                                 }
                                 Err(e) => {
-                                    out.push(serde_json::json!({"id": img_id, "error": format!("{e}")}));
+                                    out.push(
+                                        serde_json::json!({"id": img_id, "error": format!("{e}")}),
+                                    );
                                 }
                             }
                         }
@@ -1404,6 +1827,8 @@ fn app_link(&self, uuid: &str) -> String {
                         let file = app_dir.join(&path);
                         if path.is_empty() || path.starts_with('/') || path.contains("..") {
                             format!("invalid path: {path:?}")
+                        } else if app_path_ignored(&app_dir, &file) {
+                            format!("{app}/{path} is ignored by .gitignore")
                         } else {
                             match std::fs::read_to_string(&file) {
                                 Err(e) => format!("cannot read {app}/{path}: {e}"),
@@ -1411,11 +1836,47 @@ fn app_link(&self, uuid: &str) -> String {
                                     Err(e) => e,
                                     Ok((new_text, diff)) => match std::fs::write(&file, new_text) {
                                         Ok(()) => {
-                                            format!("edited {app}/{path} — {}{diff}", self.app_link(&uuid))
+                                            format!(
+                                                "edited {app}/{path} — {}{diff}",
+                                                self.app_link(&uuid)
+                                            )
                                         }
                                         Err(e) => format!("write failed: {e}"),
                                     },
                                 },
+                            }
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "diff_app" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let field = |k: &str| {
+                    v.get(k)
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                let (app, path, content) = (field("app"), field("path"), field("content"));
+                let status = format!("Diffing {app}/{path}…");
+                let result = match self.resolve_app(&app) {
+                    Err(e) => e,
+                    Ok((_uuid, app_dir)) => {
+                        if path.is_empty() || path.starts_with('/') || path.contains("..") {
+                            format!("invalid path: {path:?}")
+                        } else {
+                            let file = app_dir.join(&path);
+                            if app_path_ignored(&app_dir, &file) {
+                                format!("{app}/{path} is ignored by .gitignore")
+                            } else {
+                                match std::fs::read_to_string(&file) {
+                                    Ok(current) => unified_diff(&app, &path, &current, &content),
+                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                        unified_diff(&app, &path, "", &content)
+                                    }
+                                    Err(e) => format!("cannot read {app}/{path}: {e}"),
+                                }
                             }
                         }
                     }
@@ -1431,6 +1892,7 @@ fn app_link(&self, uuid: &str) -> String {
                         .to_string()
                 };
                 let (app, pattern) = (field("app"), field("pattern"));
+                let compact = v.get("compact").and_then(|x| x.as_bool()).unwrap_or(true);
                 let status = format!("Searching {app}…");
                 let result = match self.resolve_app(&app) {
                     Err(e) => e,
@@ -1447,10 +1909,45 @@ fn app_link(&self, uuid: &str) -> String {
                             } else {
                                 let n = hits.len();
                                 hits.truncate(50);
-                                if n > 50 {
-                                    hits.push(format!("… ({} more matches)", n - 50));
+                                let mut by_file =
+                                    std::collections::BTreeMap::<String, Vec<(usize, String)>>::new();
+                                for (path, line) in hits {
+                                    let text = if compact {
+                                        String::new()
+                                    } else {
+                                        std::fs::read_to_string(app_dir.join(&path))
+                                            .ok()
+                                            .and_then(|contents| {
+                                                contents.lines().nth(line.saturating_sub(1)).map(str::to_string)
+                                            })
+                                            .unwrap_or_default()
+                                    };
+                                    by_file.entry(path).or_default().push((line, text));
                                 }
-                                hits.join("\n")
+                                let mut result = by_file
+                                    .into_iter()
+                                    .map(|(path, lines)| {
+                                        if compact {
+                                            let numbers = lines
+                                                .into_iter()
+                                                .map(|(line, _)| line.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join(",");
+                                            format!("{path}:{numbers}")
+                                        } else {
+                                            lines
+                                                .into_iter()
+                                                .map(|(line, text)| format!("{path}:{line}: {text}"))
+                                                .collect::<Vec<_>>()
+                                                .join("\n")
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                if n > 50 {
+                                    result.push_str(&format!("\n… ({} more matches)", n - 50));
+                                }
+                                result
                             }
                         }
                     }
@@ -1479,6 +1976,8 @@ fn app_link(&self, uuid: &str) -> String {
                         let file = app_dir.join(&path);
                         if path.is_empty() || path.starts_with('/') || path.contains("..") {
                             format!("invalid path: {path:?}")
+                        } else if app_path_ignored(&app_dir, &file) {
+                            format!("{app}/{path} is ignored by .gitignore")
                         } else {
                             match std::fs::read_to_string(&file) {
                                 Err(e) => format!("cannot read {app}/{path}: {e}"),
@@ -1509,9 +2008,19 @@ fn app_link(&self, uuid: &str) -> String {
             "generate_image" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
                 let prompt = v.get("prompt").and_then(|x| x.as_str()).unwrap_or("");
-                let image_id = v.get("image_id").and_then(|x| x.as_str()).filter(|x| !x.is_empty());
-                let size = v.get("size").and_then(|x| x.as_str()).unwrap_or("1024x1024");
-                let status = if image_id.is_some() { "Editing image…".to_string() } else { "Generating image…".to_string() };
+                let image_id = v
+                    .get("image_id")
+                    .and_then(|x| x.as_str())
+                    .filter(|x| !x.is_empty());
+                let size = v
+                    .get("size")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("1024x1024");
+                let status = if image_id.is_some() {
+                    "Editing image…".to_string()
+                } else {
+                    "Generating image…".to_string()
+                };
                 let result = match &self.image_gen_backend {
                     None => "no image generation model configured — set one in /config".to_string(),
                     Some((provider, model)) => {
@@ -1519,47 +2028,609 @@ fn app_link(&self, uuid: &str) -> String {
                             "prompt must not be empty".to_string()
                         } else {
                             let image_data = image_id.and_then(|id| {
-                                // Try id as a full filename first, then as a stem + .png
-                                let direct = self.space_files_dir.join(id);
-                                std::fs::read(&direct).ok().or_else(|| {
-                                    let with_png = self.space_files_dir.join(format!("{id}.png"));
-                                    std::fs::read(&with_png).ok()
-                                }).or_else(|| {
-                                    let stem = std::path::Path::new(id).file_stem().and_then(|s| s.to_str()).unwrap_or(id);
-                                    let files = self.space_files_dir.as_path();
-                                    std::fs::read_dir(files).ok().and_then(|e| {
-                                        e.flatten().find(|e| {
-                                            e.path().file_stem().map(|s| s == stem).unwrap_or(false)
-                                        }).and_then(|e| std::fs::read(e.path()).ok())
+                                // Try id as a full filename first, then as a stem + .png.
+                                resolve_image(&self.space_files_dir, id).or_else(|| {
+                                        let stem = std::path::Path::new(id)
+                                            .file_stem()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or(id);
+                                        let files = self.space_files_dir.as_path();
+                                        std::fs::read_dir(files).ok().and_then(|e| {
+                                            e.flatten()
+                                                .find(|e| {
+                                                    e.path()
+                                                        .file_stem()
+                                                        .map(|s| s == stem)
+                                                        .unwrap_or(false)
+                                                })
+                                                .and_then(|e| std::fs::read(e.path()).ok())
+                                        })
                                     })
-                                })
                             });
                             if image_id.is_some() && image_data.is_none() {
                                 format!("image not found: {id}", id = image_id.unwrap())
                             } else {
-                                match provider.generate_image(model, prompt, size, image_data.as_deref()).await {
+                                match provider
+                                    .generate_image(model, prompt, size, image_data.as_deref())
+                                    .await
+                                {
                                     Err(e) => format!("image generation failed: {e}"),
                                     Ok((png_bytes, ext)) => {
                                         let id = uuid::Uuid::new_v4().to_string();
                                         let filename = format!("{id}.{ext}");
                                         let img_path = self.space_files_dir.join(&filename);
-                                        if let Err(e) = std::fs::create_dir_all(&self.space_files_dir) {
+                                        if let Err(e) =
+                                            std::fs::create_dir_all(&self.space_files_dir)
+                                        {
                                             format!("cannot create images dir: {e}")
-                                        } else if let Err(e) = std::fs::write(&img_path, &png_bytes) {
+                                        } else if let Err(e) = std::fs::write(&img_path, &png_bytes)
+                                        {
                                             format!("cannot write image: {e}")
                                         } else {
                                             let _ = std::fs::create_dir_all(&self.space_files_dir);
-                                            let _ = std::fs::write(self.space_files_dir.join(&filename), &png_bytes);
-                                            let description = format!("generated image of {prompt}");
+                                            let _ = std::fs::write(
+                                                self.space_files_dir.join(&filename),
+                                                &png_bytes,
+                                            );
+                                            let description =
+                                                format!("generated image of {prompt}");
                                             serde_json::json!({
                                                 "id": id,
                                                 "path": img_path.to_string_lossy(),
                                                 "description": description,
-                                            }).to_string()
+                                            })
+                                            .to_string()
                                         }
                                     }
                                 }
                             }
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "generate_video" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let prompt = v.get("prompt").and_then(|x| x.as_str()).unwrap_or("");
+                let duration = v.get("duration").and_then(|x| x.as_u64()).unwrap_or(6) as u32;
+                let resolution = v
+                    .get("resolution")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("720p");
+                let aspect_ratio = v
+                    .get("aspect_ratio")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("16:9");
+                let generate_audio = v
+                    .get("generate_audio")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
+                let first_frame_id = v
+                    .get("first_frame_id")
+                    .and_then(|x| x.as_str())
+                    .filter(|x| !x.is_empty());
+                let last_frame_id = v
+                    .get("last_frame_id")
+                    .and_then(|x| x.as_str())
+                    .filter(|x| !x.is_empty());
+                let ref_image_id = v
+                    .get("ref_image_id")
+                    .and_then(|x| x.as_str())
+                    .filter(|x| !x.is_empty());
+                let character_refs: Vec<String> = v
+                    .get("character_refs")
+                    .and_then(|x| x.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let location_refs: Vec<String> = v
+                    .get("location_refs")
+                    .and_then(|x| x.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let seed = v.get("seed").and_then(|x| x.as_i64()).map(|x| x as i32);
+                let source_video_id = v
+                    .get("source_video_id")
+                    .and_then(|x| x.as_str())
+                    .filter(|x| !x.is_empty());
+                let status = "Generating video…".to_string();
+                let result = match &self.video_gen_backend {
+                    None => "no video generation model configured — set one in /config".to_string(),
+                    Some((provider, model)) => {
+                        let (duration, resolution, aspect_ratio) =
+                            normalize_video_params(model, duration, resolution, aspect_ratio);
+                        if prompt.is_empty() {
+                            "prompt must not be empty".to_string()
+                        } else {
+                            let first_frame = first_frame_id
+                                .and_then(|id| resolve_image(&self.space_files_dir, id));
+                            let last_frame = last_frame_id
+                                .and_then(|id| resolve_image(&self.space_files_dir, id));
+                            let ref_img = ref_image_id
+                                .and_then(|id| resolve_image(&self.space_files_dir, id));
+                            let named = resolve_named_references(
+                                &self.space_files_dir,
+                                &character_refs,
+                                &location_refs,
+                            );
+                            let mut all_refs = Vec::new();
+                            if let Some(d) = ref_img {
+                                all_refs.push(d);
+                            }
+                            all_refs.extend(named);
+                            let provider_options = source_video_id.and_then(|sid| {
+                                if !valid_relative_path(sid) {
+                                    return None;
+                                }
+                                let path = self.space_files_dir.join(format!("{sid}.mp4"));
+                                let data = std::fs::read(&path).ok()?;
+                                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                                Some(serde_json::json!({
+                                    "alibaba": {
+                                        "parameters": {
+                                            "video": format!("data:video/mp4;base64,{}", b64)
+                                        }
+                                    }
+                                }))
+                            });
+                            match provider
+                                .generate_video(
+                                    model,
+                                    prompt,
+                                    duration,
+                                    &resolution,
+                                    &aspect_ratio,
+                                    generate_audio,
+                                    first_frame,
+                                    last_frame,
+                                    all_refs,
+                                    seed,
+                                    provider_options,
+                                )
+                                .await
+                            {
+                                Err(e) => format!("video generation failed: {e}"),
+                                Ok((mp4_bytes, cost)) => {
+                                    let id = uuid::Uuid::new_v4().to_string();
+                                    let video_filename = format!("{id}.mp4");
+                                    let thumb_filename = format!("{id}_first.png");
+                                    let last_thumb_filename = format!("{id}_last.png");
+                                    let meta_filename = format!("{id}.json");
+                                    let video_path = self.space_files_dir.join(&video_filename);
+                                    if let Err(e) = std::fs::create_dir_all(&self.space_files_dir) {
+                                        format!("cannot create files dir: {e}")
+                                    } else if let Err(e) = std::fs::write(&video_path, &mp4_bytes) {
+                                        format!("cannot write video: {e}")
+                                    } else {
+                                        let thumb_path = self.space_files_dir.join(&thumb_filename);
+                                        let last_thumb_path =
+                                            self.space_files_dir.join(&last_thumb_filename);
+                                        let has_ffmpeg =
+                                            extract_ffmpeg_frame(&video_path, &thumb_path, false);
+                                        if has_ffmpeg {
+                                            extract_ffmpeg_frame(
+                                                &video_path,
+                                                &last_thumb_path,
+                                                true,
+                                            );
+                                        } else if let Some(fid) = first_frame_id
+                                            && let Some(data) = resolve_image(&self.space_files_dir, fid)
+                                        {
+                                            let _ = std::fs::write(&thumb_path, data);
+                                        }
+                                        let now = chrono::Utc::now().to_rfc3339();
+                                        let meta = serde_json::json!({
+                                            "type": "generated_video",
+                                            "video_id": id,
+                                            "prompt": prompt,
+                                            "model": model,
+                                            "duration_sec": duration,
+                                            "resolution": resolution,
+                                            "aspect_ratio": aspect_ratio,
+                                            "has_audio": generate_audio,
+                                            "character_refs": character_refs,
+                                            "location_refs": location_refs,
+                                            "seed": seed,
+                                            "cost_usd": cost,
+                                            "generated_at": now,
+                                        });
+                                        let _ = std::fs::write(
+                                            self.space_files_dir.join(&meta_filename),
+                                            serde_json::to_string_pretty(&meta).unwrap_or_default(),
+                                        );
+                                        let desc = format!("generated video of {prompt}");
+                                        serde_json::json!({
+                                            "id": id,
+                                            "video_path": video_path.to_string_lossy(),
+                                            "thumbnail_path": if thumb_path.exists() { thumb_path.to_string_lossy().to_string() } else { String::new() },
+                                            "metadata_path": self.space_files_dir.join(&meta_filename).to_string_lossy(),
+                                            "description": desc,
+                                            "last_thumb": if last_thumb_path.exists() { last_thumb_path.to_string_lossy().to_string() } else { String::new() },
+                                            "model": model,
+                                            "duration_sec": duration,
+                                            "cost_usd": cost,
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "edit_video" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let video_id = v
+                    .get("video_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let lighting = v
+                    .get("lighting")
+                    .and_then(|x| x.as_str())
+                    .filter(|x| !x.is_empty());
+                let camera_move = v
+                    .get("camera_move")
+                    .and_then(|x| x.as_str())
+                    .filter(|x| !x.is_empty());
+                let intensity = v
+                    .get("intensity")
+                    .and_then(|x| x.as_f64())
+                    .unwrap_or(0.5)
+                    .clamp(0.0, 1.0);
+                let speed = v.get("speed").and_then(|x| x.as_f64()).filter(|x| *x > 0.0);
+                let trim_start = v
+                    .get("trim_start")
+                    .and_then(|x| x.as_f64())
+                    .filter(|x| *x >= 0.0);
+                let trim_end = v
+                    .get("trim_end")
+                    .and_then(|x| x.as_f64())
+                    .filter(|x| *x >= 0.0);
+                let remove_audio = v
+                    .get("remove_audio")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
+                let status = "Editing video…".to_string();
+                let result = if video_id.is_empty() {
+                    "video_id is required".to_string()
+                } else if !valid_relative_path(&video_id) {
+                    "invalid video_id".to_string()
+                } else if !ffmpeg_available() {
+                    "ffmpeg not found — install ffmpeg to edit videos".to_string()
+                } else {
+                    let src_path = self.space_files_dir.join(format!("{video_id}.mp4"));
+                    if !src_path.exists() {
+                        format!("video '{video_id}' not found")
+                    } else {
+                        let id = uuid::Uuid::new_v4().to_string();
+                        let output_path = self.space_files_dir.join(format!("{id}.mp4"));
+                        let thumb_path = self.space_files_dir.join(format!("{id}_first.png"));
+                        let meta_path = self.space_files_dir.join(format!("{id}.json"));
+
+                        let mut cmd = std::process::Command::new("ffmpeg");
+                        cmd.arg("-y");
+                        if let Some(s) = trim_start {
+                            cmd.arg("-ss").arg(format!("{s}"));
+                        }
+                        if let Some(e) = trim_end {
+                            cmd.arg("-to").arg(format!("{e}"));
+                        }
+                        cmd.arg("-i").arg(&src_path);
+
+                        let mut filter_parts: Vec<String> = Vec::new();
+
+                        // Camera move (crop animation)
+                        if let Some(mv) = camera_move {
+                            let m = intensity * 0.2;
+                            let cf = build_camera_filter(mv, m);
+                            filter_parts.push(cf);
+                        }
+
+                        // Lighting preset
+                        if let Some(lt) = lighting {
+                            let lf = build_lighting_filter(lt, intensity);
+                            filter_parts.push(lf);
+                        }
+
+                        // Speed change
+                        if let Some(sp) = speed {
+                            filter_parts.push(format!("setpts={}*PTS", 1.0 / sp));
+                            let atempo = format!("atempo={}", (1.0 / sp).clamp(0.5, 2.0));
+                            cmd.arg("-af").arg(&atempo);
+                        }
+
+                        if !filter_parts.is_empty() {
+                            cmd.arg("-vf").arg(filter_parts.join(","));
+                        }
+
+                        if remove_audio {
+                            cmd.arg("-an");
+                        }
+
+                        cmd.arg(&output_path)
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null());
+
+                        match cmd.status() {
+                            Err(e) => format!("ffmpeg failed to start: {e}"),
+                            Ok(s) if !s.success() => format!("ffmpeg returned non-zero exit"),
+                            Ok(_) => {
+                                extract_ffmpeg_frame(&output_path, &thumb_path, false);
+                                let now = chrono::Utc::now().to_rfc3339();
+                                let meta = serde_json::json!({
+                                    "type": "edited_video",
+                                    "video_id": id,
+                                    "source_video_id": video_id,
+                                    "lighting": lighting,
+                                    "camera_move": camera_move,
+                                    "intensity": intensity,
+                                    "speed": speed,
+                                    "trim_start": trim_start,
+                                    "trim_end": trim_end,
+                                    "remove_audio": remove_audio,
+                                    "generated_at": now,
+                                });
+                                let _ = std::fs::write(
+                                    &meta_path,
+                                    serde_json::to_string_pretty(&meta).unwrap_or_default(),
+                                );
+                                serde_json::json!({
+                                    "id": id,
+                                    "video_path": output_path.to_string_lossy(),
+                                    "thumbnail_path": if thumb_path.exists() { thumb_path.to_string_lossy().to_string() } else { String::new() },
+                                    "metadata_path": meta_path.to_string_lossy(),
+                                    "description": format!("edited video from {video_id}"),
+                                }).to_string()
+                            }
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "extract_frame" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let video_id = v
+                    .get("video_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let time_sec = v.get("time_sec").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                let fmt = v.get("format").and_then(|x| x.as_str()).unwrap_or("png");
+                let status = "Extracting frame…".to_string();
+                let result = if video_id.is_empty() {
+                    "video_id is required".to_string()
+                } else if !valid_relative_path(&video_id) {
+                    "invalid video_id".to_string()
+                } else {
+                    let src_path = self.space_files_dir.join(format!("{video_id}.mp4"));
+                    if !src_path.exists() {
+                        format!("video '{video_id}' not found")
+                    } else if !ffmpeg_available() {
+                        "ffmpeg not found — install ffmpeg to extract frames".to_string()
+                    } else {
+                        let id = uuid::Uuid::new_v4().to_string();
+                        let ext = if fmt == "jpg" { "jpg" } else { "png" };
+                        let output = self.space_files_dir.join(format!("{id}.{ext}"));
+                        let status_code = std::process::Command::new("ffmpeg")
+                            .arg("-y")
+                            .arg("-ss")
+                            .arg(format!("{time_sec}"))
+                            .arg("-i")
+                            .arg(&src_path)
+                            .arg("-vframes")
+                            .arg("1")
+                            .arg("-f")
+                            .arg("image2")
+                            .arg(&output)
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                        match status_code {
+                            Err(_) => "ffmpeg execution failed".to_string(),
+                            Ok(s) if !s.success() => "ffmpeg failed to extract frame".to_string(),
+                            Ok(_) => {
+                                serde_json::json!({
+                                    "id": id,
+                                    "path": output.to_string_lossy(),
+                                    "description": format!("frame at {time_sec}s from video {video_id}"),
+                                }).to_string()
+                            }
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "stitch_videos" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let video_ids: Vec<String> = v
+                    .get("video_ids")
+                    .and_then(|x| x.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let status = "Stitching videos…".to_string();
+                let result = if video_ids.is_empty() {
+                    "video_ids must not be empty".to_string()
+                } else if !ffmpeg_available() {
+                    "ffmpeg not found — install ffmpeg to stitch videos".to_string()
+                } else {
+                    let mut video_files = Vec::new();
+                    let mut total_cost = 0.0_f64;
+                    for vid_id in &video_ids {
+                        if !valid_relative_path(vid_id) {
+                            break;
+                        }
+                        let mp4 = self.space_files_dir.join(format!("{vid_id}.mp4"));
+                        if !mp4.exists() {
+                            break;
+                        }
+                        let meta_path = self.space_files_dir.join(format!("{vid_id}.json"));
+                        if let Ok(json_str) = std::fs::read_to_string(&meta_path) {
+                            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                                total_cost +=
+                                    meta.get("cost_usd").and_then(|c| c.as_f64()).unwrap_or(0.0);
+                            }
+                        }
+                        video_files.push(mp4);
+                    }
+                    if video_files.len() != video_ids.len() {
+                        format!("some video files not found for IDs: {:?}", video_ids)
+                    } else {
+                        let id = uuid::Uuid::new_v4().to_string();
+                        let concat_name = format!("_stitch_concat_{id}.txt");
+                        let concat_path = self.space_files_dir.join(&concat_name);
+                        let output_name = format!("_stitch_{id}.mp4");
+                        let output_path = self.space_files_dir.join(&output_name);
+                        let thumb_name = format!("{}_first.png", id);
+                        let thumb_path = self.space_files_dir.join(&thumb_name);
+                        let concat_content: String = video_files
+                            .iter()
+                            .map(|p| format!("file '{}'\n", p.display()))
+                            .collect();
+                        if let Err(e) = std::fs::write(&concat_path, &concat_content) {
+                            format!("cannot write concat file: {e}")
+                        } else {
+                            let stitched = std::process::Command::new("ffmpeg")
+                                .arg("-y")
+                                .arg("-f")
+                                .arg("concat")
+                                .arg("-safe")
+                                .arg("0")
+                                .arg("-i")
+                                .arg(&concat_path)
+                                .arg("-c")
+                                .arg("copy")
+                                .arg(&output_path)
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .status();
+                            let _ = std::fs::remove_file(&concat_path);
+                            match stitched {
+                                Err(_) => "ffmpeg execution failed".to_string(),
+                                Ok(s) if !s.success() => "ffmpeg concat failed".to_string(),
+                                Ok(_) => {
+                                    if let Some(first) = video_files.first() {
+                                        extract_ffmpeg_frame(first, &thumb_path, false);
+                                    }
+                                    let now = chrono::Utc::now().to_rfc3339();
+                                    let seq_meta = serde_json::json!({
+                                        "type": "video_sequence",
+                                        "video_id": id,
+                                        "shot_ids": video_ids,
+                                        "total_cost_usd": total_cost,
+                                        "generated_at": now,
+                                    });
+                                    let _ = std::fs::write(
+                                        self.space_files_dir.join(format!("{id}.json")),
+                                        serde_json::to_string_pretty(&seq_meta).unwrap_or_default(),
+                                    );
+                                    serde_json::json!({
+                                        "id": id,
+                                        "video_path": output_path.to_string_lossy(),
+                                        "thumbnail_path": if thumb_path.exists() { thumb_path.to_string_lossy().to_string() } else { String::new() },
+                                        "metadata_path": self.space_files_dir.join(format!("{id}.json")).to_string_lossy(),
+                                        "description": format!("stitched sequence of {} clips", video_files.len()),
+                                        "cost_usd": total_cost,
+                                    }).to_string()
+                                }
+                            }
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "save_reference" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let name = v
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let ref_type = v
+                    .get("type")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("character")
+                    .to_string();
+                let image_id = v
+                    .get("image_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let description = v
+                    .get("description")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let status = format!("Saving reference '{name}'…");
+                let result = if name.is_empty() || image_id.is_empty() {
+                    "name and image_id are required".to_string()
+                } else {
+                    let mut refs = read_video_refs(&self.space_files_dir);
+                    if let Some(obj) = refs.as_object_mut() {
+                        obj.insert(
+                            name.clone(),
+                            serde_json::json!({
+                                "name": name,
+                                "type": ref_type,
+                                "description": description,
+                                "image_id": image_id,
+                                "created_at": chrono::Utc::now().to_rfc3339(),
+                            }),
+                        );
+                    }
+                    match write_video_refs(&self.space_files_dir, &refs) {
+                        Err(e) => format!("failed to save reference: {e}"),
+                        Ok(_) => format!(
+                            "saved reference '{name}' ({ref_type}) — use in generate_video with character_refs/location_refs"
+                        ),
+                    }
+                };
+                (result, status)
+            }
+            "list_references" => {
+                let status = "Listing references…".to_string();
+                let refs = read_video_refs(&self.space_files_dir);
+                let result = if refs.as_object().map_or(true, |o| o.is_empty()) {
+                    "no references saved yet — use video_references with action=save to create one".to_string()
+                } else {
+                    let pretty: Vec<serde_json::Value> = refs
+                        .as_object()
+                        .map(|o| o.values().cloned().collect())
+                        .unwrap_or_default();
+                    serde_json::to_string_pretty(&pretty).unwrap_or_default()
+                };
+                (result, status)
+            }
+            "delete_reference" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let name = v
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let status = format!("Deleting reference '{name}'…");
+                let result = if name.is_empty() {
+                    "name is required".to_string()
+                } else {
+                    let mut refs = read_video_refs(&self.space_files_dir);
+                    if refs.get(&name).is_none() {
+                        format!("reference '{name}' not found")
+                    } else {
+                        refs.as_object_mut().map(|o| o.remove(&name));
+                        match write_video_refs(&self.space_files_dir, &refs) {
+                            Err(e) => format!("failed to delete reference: {e}"),
+                            Ok(_) => format!("deleted reference '{name}'"),
                         }
                     }
                 };
@@ -1575,7 +2646,12 @@ fn app_link(&self, uuid: &str) -> String {
                             .filter(|e| e.path().is_file())
                             .filter_map(|e| {
                                 let meta = e.metadata().ok()?;
-                                let ext = e.path().extension().and_then(|x| x.to_str()).unwrap_or("").to_string();
+                                let ext = e
+                                    .path()
+                                    .extension()
+                                    .and_then(|x| x.to_str())
+                                    .unwrap_or("")
+                                    .to_string();
                                 Some(serde_json::json!({
                                     "name": e.file_name().to_string_lossy(),
                                     "size": meta.len(),
@@ -1590,15 +2666,24 @@ fn app_link(&self, uuid: &str) -> String {
             }
             "write_script" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let path = v.get("path").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-                let content = v.get("content").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let path = v
+                    .get("path")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let content = v
+                    .get("content")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let status = format!("Writing {path}…");
                 let result = {
                     let file = self.space_scripts_dir.join(&path);
-                    if path.is_empty() || path.starts_with('/') || path.contains("..") {
+                    if !valid_relative_path(&path) {
                         format!("invalid path: {path:?}")
                     } else {
-                        let write = file.parent()
+                        let write = file
+                            .parent()
                             .map(std::fs::create_dir_all)
                             .unwrap_or(Ok(()))
                             .and_then(|()| std::fs::write(&file, &content));
@@ -1612,13 +2697,21 @@ fn app_link(&self, uuid: &str) -> String {
             }
             "read_script" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let path = v.get("path").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let path = v
+                    .get("path")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let offset = v.get("offset").and_then(|o| o.as_u64()).unwrap_or(1).max(1) as usize;
-                let limit = v.get("limit").and_then(|l| l.as_u64()).unwrap_or(200).clamp(1, 200) as usize;
+                let limit = v
+                    .get("limit")
+                    .and_then(|l| l.as_u64())
+                    .unwrap_or(200)
+                    .clamp(1, 200) as usize;
                 let status = format!("Reading {path}…");
                 let result = {
                     let file = self.space_scripts_dir.join(&path);
-                    if path.is_empty() || path.starts_with('/') || path.contains("..") {
+                    if !valid_relative_path(&path) {
                         format!("invalid path: {path:?}")
                     } else {
                         match std::fs::read_to_string(&file) {
@@ -1629,7 +2722,9 @@ fn app_link(&self, uuid: &str) -> String {
                                 let start = (offset - 1).min(total);
                                 let slice = &lines[start..(start + limit).min(total)];
                                 if slice.is_empty() {
-                                    format!("{path}: offset {offset} is past the end ({total} lines)")
+                                    format!(
+                                        "{path}: offset {offset} is past the end ({total} lines)"
+                                    )
                                 } else {
                                     format!(
                                         "{path} (lines {}-{} of {total}):\n{}",
@@ -1646,21 +2741,28 @@ fn app_link(&self, uuid: &str) -> String {
             }
             "edit_script" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-                let path = v.get("path").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-                let edits: Vec<(String, Option<String>)> = v.get("edits")
+                let path = v
+                    .get("path")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let edits: Vec<(String, Option<String>)> = v
+                    .get("edits")
                     .and_then(|e| e.as_array())
                     .map(|arr| {
-                        arr.iter().filter_map(|e| {
-                            let hash = e.get("hash")?.as_str()?.to_string();
-                            let new = e.get("new").and_then(|n| n.as_str()).map(str::to_string);
-                            Some((hash, new))
-                        }).collect()
+                        arr.iter()
+                            .filter_map(|e| {
+                                let hash = e.get("hash")?.as_str()?.to_string();
+                                let new = e.get("new").and_then(|n| n.as_str()).map(str::to_string);
+                                Some((hash, new))
+                            })
+                            .collect()
                     })
                     .unwrap_or_default();
                 let status = format!("Editing {path}…");
                 let result = {
                     let file = self.space_scripts_dir.join(&path);
-                    if path.is_empty() || path.starts_with('/') || path.contains("..") {
+                    if !valid_relative_path(&path) {
                         format!("invalid path: {path:?}")
                     } else {
                         match std::fs::read_to_string(&file) {
@@ -1681,13 +2783,36 @@ fn app_link(&self, uuid: &str) -> String {
                 format!("unknown tool: {other}"),
                 "Running tool…".to_string(),
             ),
-        }
+        };
+        (cap_tool_result(result), status)
     }
+}
+
+/// Bound every tool result before it is sent back to the model and persisted.
+/// This is especially important for fetched web pages, which can otherwise
+/// consume the conversation context one tool call at a time.
+fn cap_tool_result(result: String) -> String {
+    const SUFFIX: &str = "\n... (tool result truncated)";
+    if result.chars().count() <= MAX_TOOL_RESULT_CHARS {
+        return result;
+    }
+    let keep = MAX_TOOL_RESULT_CHARS.saturating_sub(SUFFIX.chars().count());
+    let mut capped: String = result.chars().take(keep).collect();
+    capped.push_str(SUFFIX);
+    capped
 }
 
 /// Quick check: does a string look like a UUID (36 chars, 4 dashes)?
 fn looks_like_uuid(s: &str) -> bool {
     s.len() == 36 && s.chars().filter(|c| *c == '-').count() == 4
+}
+
+fn valid_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains('\\')
+        && std::path::Path::new(path)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 /// `cat -n`-style numbering for ranged reads, matching what agent harnesses
@@ -1856,9 +2981,134 @@ fn apply_hashline_edits(
     Ok((new_text, diff))
 }
 
-/// Recursively collect `relpath:line: text` matches for a lowercase substring
+/// Compare two complete file contents using git's unified-diff renderer. The
+/// app files are not Git worktrees, so `--no-index` gives the same useful diff
+/// without creating repository metadata or changing either file.
+fn unified_diff(app: &str, path: &str, current: &str, candidate: &str) -> String {
+    if current == candidate {
+        return "no changes".to_string();
+    }
+    let dir = std::env::temp_dir().join(format!("nexus-diff-{}", uuid::Uuid::new_v4()));
+    let before = dir.join("before");
+    let after = dir.join("after");
+    let result = (|| {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create diff workspace: {e}"))?;
+        std::fs::write(&before, current)
+            .map_err(|e| format!("cannot write current snapshot: {e}"))?;
+        std::fs::write(&after, candidate)
+            .map_err(|e| format!("cannot write candidate snapshot: {e}"))?;
+        let output = std::process::Command::new("git")
+            .arg("diff")
+            .arg("--no-index")
+            .arg("--no-ext-diff")
+            .arg("--unified=3")
+            .arg(&before)
+            .arg(&after)
+            .output()
+            .map_err(|e| format!("cannot run git diff: {e}"))?;
+        match output.status.code() {
+            Some(0) => Ok("no changes".to_string()),
+            Some(1) => {
+                let old_label = format!("a/{app}/{path}");
+                let new_label = format!("b/{app}/{path}");
+                let before_path = before.to_string_lossy();
+                let after_path = after.to_string_lossy();
+                let diff = String::from_utf8_lossy(&output.stdout)
+                    .replace(before_path.as_ref(), &old_label)
+                    .replace(after_path.as_ref(), &new_label);
+                Ok(diff)
+            }
+            _ => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+        }
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result.unwrap_or_else(|e| format!("diff failed: {e}"))
+}
+
+/// Apply the app root's `.gitignore` to reads and searches. Covers the common
+/// Git ignore forms without adding a dependency: comments, negation, directory
+/// rules, anchored paths, and `*`/`?` globs.
+fn app_path_ignored(root: &std::path::Path, path: &std::path::Path) -> bool {
+    if path.file_name().and_then(|n| n.to_str()) == Some(".gitignore") {
+        return true;
+    }
+    let Ok(rel) = path.strip_prefix(root) else {
+        return false;
+    };
+    let rel = rel
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let Ok(rules) = std::fs::read_to_string(root.join(".gitignore")) else {
+        return false;
+    };
+    let mut ignored = false;
+    for raw in rules.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (negated, pattern) = match line.strip_prefix('!') {
+            Some(pattern) => (true, pattern),
+            None => (false, line),
+        };
+        let directory_rule = pattern.ends_with('/');
+        let pattern = pattern.trim_start_matches('/').trim_end_matches('/');
+        let matches = if directory_rule {
+            let mut prefix = String::new();
+            let parts: Vec<&str> = rel.split('/').collect();
+            parts[..parts.len().saturating_sub(1)].iter().any(|part| {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(part);
+                gitignore_pattern_matches(pattern, &prefix)
+            })
+        } else {
+            gitignore_pattern_matches(pattern, &rel)
+        };
+        if matches {
+            ignored = !negated;
+        }
+    }
+    ignored
+}
+
+fn gitignore_pattern_matches(pattern: &str, relative_path: &str) -> bool {
+    if pattern.contains('/') {
+        wildcard_match(pattern, relative_path)
+    } else {
+        relative_path
+            .split('/')
+            .any(|part| wildcard_match(pattern, part))
+    }
+}
+
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let Some(p) = pattern.chars().next() else {
+        return text.is_empty();
+    };
+    let Some(t) = text.chars().next() else {
+        return p == '*';
+    };
+    match p {
+        '*' => {
+            wildcard_match(&pattern[p.len_utf8()..], text)
+                || wildcard_match(pattern, &text[t.len_utf8()..])
+        }
+        '?' => wildcard_match(&pattern[p.len_utf8()..], &text[t.len_utf8()..]),
+        _ if p == t => wildcard_match(&pattern[p.len_utf8()..], &text[t.len_utf8()..]),
+        _ => false,
+    }
+}
+
+/// Recursively collect `(relpath, line)` matches for a lowercase substring
 /// pattern, skipping dependency/venv dirs and unreadable (binary) files.
-fn grep_dir(root: &std::path::Path, dir: &std::path::Path, pattern: &str, out: &mut Vec<String>) {
+fn grep_dir(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    pattern: &str,
+    out: &mut Vec<(String, usize)>,
+) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -1866,6 +3116,9 @@ fn grep_dir(root: &std::path::Path, dir: &std::path::Path, pattern: &str, out: &
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let path = entry.path();
+        if app_path_ignored(root, &path) {
+            continue;
+        }
         let name = entry.file_name();
         if path.is_dir() {
             if name != "node_modules" && name != ".venv" && name != ".git" {
@@ -1875,7 +3128,7 @@ fn grep_dir(root: &std::path::Path, dir: &std::path::Path, pattern: &str, out: &
             let rel = path.strip_prefix(root).unwrap_or(&path).display();
             for (i, line) in text.lines().enumerate() {
                 if line.to_lowercase().contains(pattern) {
-                    out.push(format!("{rel}:{}: {}", i + 1, line.trim()));
+                    out.push((rel.to_string(), i + 1));
                 }
             }
         }
@@ -1986,8 +3239,7 @@ async fn ensure_venv(skill_dir: &std::path::Path) -> Result<PathBuf, String> {
     if python.exists() {
         return Ok(python);
     }
-    std::fs::create_dir_all(skill_dir)
-        .map_err(|e| format!("cannot create {skill_dir:?}: {e}"))?;
+    std::fs::create_dir_all(skill_dir).map_err(|e| format!("cannot create {skill_dir:?}: {e}"))?;
     // Corrupt venv from a system Python upgrade — nuke it and recreate.
     if skill_dir.join(".venv").exists() {
         std::fs::remove_dir_all(skill_dir.join(".venv"))
@@ -2131,8 +3383,8 @@ struct LangsearchResult {
 }
 
 /// LangSearch (https://langsearch.com): free-tier hosted search API, no card
-/// required. More reliable than scraping DuckDuckGo — recommended default
-/// once you have a key.
+/// required. More reliable than scraping DuckDuckGo when the service is
+/// reachable; auto mode falls back when its endpoint is unavailable.
 async fn langsearch_search(
     client: &reqwest::Client,
     key: &str,
@@ -2187,7 +3439,36 @@ async fn duckduckgo_search(
         .error_for_status()?
         .text()
         .await?;
+    if html.contains("anomaly-modal") || html.contains("challenge-form") {
+        anyhow::bail!("DuckDuckGo returned an anti-bot challenge")
+    }
     Ok(parse_ddg_html(&html).into_iter().take(8).collect())
+}
+
+/// Last-resort zero-setup fallback. Brave's HTML endpoint currently remains
+/// usable when DuckDuckGo serves its bot challenge, so keep this behind the
+/// configured/API backends and only use it in auto mode.
+async fn brave_search(client: &reqwest::Client, query: &str) -> anyhow::Result<Vec<SearchHit>> {
+    let response = client
+        .get("https://search.brave.com/search")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+        )
+        .query(&[("q", query)])
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await?;
+    let status = response.status();
+    let html = response.text().await?;
+    if !status.is_success() {
+        anyhow::bail!("Brave returned HTTP {status}")
+    }
+    let hits = parse_brave_html(&html);
+    if hits.is_empty() && html.to_ascii_lowercase().contains("captcha") {
+        anyhow::bail!("Brave returned an anti-bot challenge")
+    }
+    Ok(hits.into_iter().take(8).collect())
 }
 
 /// Extract readable text from a fetched body: PDF (by content-type or
@@ -2334,6 +3615,69 @@ fn parse_ddg_html(html: &str) -> Vec<SearchHit> {
                 snippet,
             });
         }
+    }
+    hits
+}
+
+/// Pull result cards from Brave's server-rendered HTML. This intentionally
+/// relies only on stable semantic class names and returns ordinary links, so
+/// callers can use the same formatter/citation path as API-backed results.
+fn parse_brave_html(html: &str) -> Vec<SearchHit> {
+    const TITLE_MARKER: &str = "<div class=\"title search-snippet-title";
+    let mut hits = Vec::new();
+    let mut pos = 0;
+    while let Some(rel) = html[pos..].find(TITLE_MARKER) {
+        let marker_at = pos + rel;
+        let Some(gt_rel) = html[marker_at..].find('>') else {
+            break;
+        };
+        let text_start = marker_at + gt_rel + 1;
+        let Some(close_rel) = html[text_start..].find("</div>") else {
+            break;
+        };
+        let title = strip_tags(&html[text_start..text_start + close_rel]);
+        let title_end = text_start + close_rel + "</div>".len();
+        let Some(anchor_start) = html[..marker_at].rfind("<a ") else {
+            pos = title_end;
+            continue;
+        };
+        let Some(anchor_gt_rel) = html[anchor_start..].find('>') else {
+            pos = title_end;
+            continue;
+        };
+        let anchor_tag = &html[anchor_start..anchor_start + anchor_gt_rel + 1];
+        let Some(url) = extract_attr(anchor_tag, "href") else {
+            pos = title_end;
+            continue;
+        };
+        let url = html_unescape(&url);
+        if !url.starts_with("http") || title.is_empty() {
+            pos = title_end;
+            continue;
+        }
+
+        let segment_end = html[title_end..]
+            .find(TITLE_MARKER)
+            .map(|end| title_end + end)
+            .unwrap_or(html.len());
+        let snippet = html[title_end..segment_end]
+            .find("generic-snippet")
+            .and_then(|generic| {
+                let start = title_end + generic;
+                let content = html[start..segment_end].find("class=\"content")?;
+                let content_start = start + content;
+                let gt = html[content_start..segment_end].find('>')?;
+                let text_start = content_start + gt + 1;
+                let close = html[text_start..segment_end].find("</div>")?;
+                Some(strip_tags(&html[text_start..text_start + close]))
+            })
+            .unwrap_or_default();
+        hits.push(SearchHit {
+            title,
+            url,
+            snippet,
+        });
+        pos = title_end;
     }
     hits
 }
@@ -2580,7 +3924,7 @@ struct SemanticScholarAuthor {
 
 /// Semantic Scholar Graph API (api.semanticscholar.org): free, keyless.
 /// A 429 (rate limited) surfaces as an error the caller turns into
-/// tool-result text — the model falls back to web_search.
+/// tool-result text — the model falls back to search(mode=web).
 async fn academic_search(
     client: &reqwest::Client,
     query: &str,
@@ -2739,6 +4083,13 @@ async fn reddit_search(
         .collect())
 }
 
+fn is_reddit_url(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "reddit.com" || host.ends_with(".reddit.com"))
+}
+
 /// Numbered discussion results, HN first then Reddit — same `[n]` citation
 /// convention as `format_results`/`format_papers`.
 fn format_discussion_hits(hn: &[DiscussionHit], reddit: &[DiscussionHit]) -> String {
@@ -2751,16 +4102,35 @@ fn format_discussion_hits(hn: &[DiscussionHit], reddit: &[DiscussionHit]) -> Str
 }
 
 /// HN (Algolia) + Reddit search run concurrently; either backend failing
-/// independently still returns the other's hits (never fails the whole
-/// tool call over one down API).
+/// independently still returns the other's hits. If both APIs are blocked,
+/// use Brave's HTML index for Reddit links rather than silently reporting no
+/// results.
 async fn discussion_search(client: &reqwest::Client, query: &str) -> String {
     let (hn, reddit) = tokio::join!(hn_search(client, query), reddit_search(client, query));
     let hn = hn.unwrap_or_default();
     let reddit = reddit.unwrap_or_default();
-    if hn.is_empty() && reddit.is_empty() {
+    if !hn.is_empty() || !reddit.is_empty() {
+        return format_discussion_hits(&hn, &reddit);
+    }
+
+    let fallback_query = format!("site:reddit.com {query}");
+    let fallback = brave_search(client, &fallback_query)
+        .await
+        .unwrap_or_default();
+    let reddit: Vec<DiscussionHit> = fallback
+        .into_iter()
+        .filter(|hit| is_reddit_url(&hit.url))
+        .take(8)
+        .map(|hit| DiscussionHit {
+            title: hit.title,
+            url: hit.url,
+            meta: "Reddit web result (API unavailable)".to_string(),
+        })
+        .collect();
+    if reddit.is_empty() {
         "no results".to_string()
     } else {
-        format_discussion_hits(&hn, &reddit)
+        format_discussion_hits(&[], &reddit)
     }
 }
 
@@ -2885,6 +4255,224 @@ fn format_results(hits: &[SearchHit]) -> String {
         .join("\n\n")
 }
 
+// ── Video generation helpers ──────────────────────────────────────────────────
+
+/// Try to read an image file from the files directory. Accepts the id as-is or
+/// with a `.png` extension appended.
+fn resolve_image(files_dir: &std::path::Path, id: &str) -> Option<Vec<u8>> {
+    if !valid_relative_path(id) {
+        return None;
+    }
+    let direct = files_dir.join(id);
+    std::fs::read(&direct)
+        .ok()
+        .or_else(|| std::fs::read(files_dir.join(format!("{id}.png"))).ok())
+}
+
+/// Extract a single frame from a video via ffmpeg subprocess. When `use_eof`
+/// is true, extracts the last frame (-sseof). Returns whether ffmpeg ran
+/// successfully.
+fn extract_ffmpeg_frame(
+    video_path: &std::path::Path,
+    output_path: &std::path::Path,
+    use_eof: bool,
+) -> bool {
+    let mut cmd = std::process::Command::new("ffmpeg");
+    cmd.arg("-y");
+    if use_eof {
+        cmd.arg("-sseof").arg("-0.1");
+    } else {
+        cmd.arg("-ss").arg("0");
+    }
+    cmd.arg("-i")
+        .arg(video_path)
+        .arg("-vframes")
+        .arg("1")
+        .arg("-f")
+        .arg("image2")
+        .arg(output_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Read the `_video_refs.json` reference registry from the files directory.
+/// Returns an empty JSON object `{}` if the file doesn't exist.
+fn read_video_refs(files_dir: &std::path::Path) -> serde_json::Value {
+    let path = files_dir.join("_video_refs.json");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({}))
+}
+
+/// Write the reference registry to `_video_refs.json` in the files directory.
+fn write_video_refs(files_dir: &std::path::Path, refs: &serde_json::Value) -> anyhow::Result<()> {
+    let path = files_dir.join("_video_refs.json");
+    let json = serde_json::to_string_pretty(refs)?;
+    std::fs::write(&path, json)?;
+    Ok(())
+}
+
+/// Check whether ffmpeg is available on $PATH.
+fn ffmpeg_available() -> bool {
+    std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Resolve named character and location references to image data from the
+/// `_video_refs.json` registry.
+fn resolve_named_references(
+    files_dir: &std::path::Path,
+    character_refs: &[String],
+    location_refs: &[String],
+) -> Vec<Vec<u8>> {
+    let refs = read_video_refs(files_dir);
+    let mut images = Vec::new();
+    for name in character_refs.iter().chain(location_refs.iter()) {
+        if let Some(entry) = refs.get(name) {
+            if let Some(image_id) = entry.get("image_id").and_then(|id| id.as_str()) {
+                if let Some(data) = resolve_image(files_dir, image_id) {
+                    images.push(data);
+                }
+            }
+        }
+    }
+    images
+}
+
+/// Build an ffmpeg `crop` + `scale` filter string for a camera move preset.
+/// `margin` (0–1) controls how much of the frame edge is revealed (pan) or
+/// how much the frame zooms in (dolly). 0.15 = 15% movement/zoom.
+fn build_camera_filter(move_type: &str, margin: f64) -> String {
+    // t = time in sec, du = input duration in sec, iw/ih = input width/height
+    match move_type {
+        "dolly_in" => {
+            // Start full frame, end zoomed in centered
+            let zoom = margin; // e.g. 0.15 → 15% zoom
+            format!(
+                "crop=w='iw-(iw*{zoom})*t/du':h='ih-(ih*{zoom})*t/du':x='(iw-w)/2':y='(ih-h)/2',scale=iw:ih",
+                zoom = zoom
+            )
+        }
+        "dolly_out" => {
+            let zoom = margin;
+            format!(
+                "crop=w='iw-(iw*{zoom})*(1-t/du)':h='ih-(ih*{zoom})*(1-t/du)':x='(iw-w)/2':y='(ih-h)/2',scale=iw:ih",
+                zoom = zoom
+            )
+        }
+        "pan_left" => {
+            // Crop window slides from right to left
+            let m = margin.max(0.05);
+            format!(
+                "crop=w='iw*(1-{m})':h='ih*(1-{m})':x='(iw-w)*(1-t/du)':y='(ih-h)/2',scale=iw:ih",
+                m = m
+            )
+        }
+        "pan_right" => {
+            let m = margin.max(0.05);
+            format!(
+                "crop=w='iw*(1-{m})':h='ih*(1-{m})':x='(iw-w)*t/du':y='(ih-h)/2',scale=iw:ih",
+                m = m
+            )
+        }
+        "tilt_up" => {
+            let m = margin.max(0.05);
+            format!(
+                "crop=w='iw*(1-{m})':h='ih*(1-{m})':x='(iw-w)/2':y='(ih-h)*(1-t/du)',scale=iw:ih",
+                m = m
+            )
+        }
+        "tilt_down" => {
+            let m = margin.max(0.05);
+            format!(
+                "crop=w='iw*(1-{m})':h='ih*(1-{m})':x='(iw-w)/2':y='(ih-h)*t/du',scale=iw:ih",
+                m = m
+            )
+        }
+        _ => String::new(),
+    }
+}
+
+/// Build an ffmpeg filter string for a lighting/color preset, scaled by
+/// intensity (0–1).
+fn build_lighting_filter(preset: &str, intensity: f64) -> String {
+    let i = intensity.clamp(0.0, 1.0);
+    match preset {
+        "noir" => {
+            let b = -0.05 * i;
+            let c = 1.0 + 0.3 * i;
+            let s = 1.0 - 0.8 * i;
+            format!(
+                "eq=brightness={b:.3}:contrast={c:.3}:saturation={s:.3},colorbalance=rh={rh:.3}:gh={gh:.3}:bh={bh:.3}",
+                b = b,
+                c = c,
+                s = s,
+                rh = -0.1 * i,
+                gh = -0.05 * i,
+                bh = 0.1 * i
+            )
+        }
+        "warm" => {
+            let s = 1.0 + 0.3 * i;
+            format!(
+                "eq=saturation={s:.3},colorbalance=rs={rs:.3}:gs={gs:.3}:bs={bs:.3}",
+                s = s,
+                rs = 0.1 * i,
+                gs = 0.05 * i,
+                bs = -0.05 * i
+            )
+        }
+        "cold" => {
+            let s = 1.0 - 0.1 * i;
+            format!(
+                "eq=saturation={s:.3},colorbalance=rs={rs:.3}:gs={gs:.3}:bs={bs:.3}",
+                s = s,
+                rs = -0.05 * i,
+                gs = -0.02 * i,
+                bs = 0.1 * i
+            )
+        }
+        "vintage" => {
+            let b = 0.03 * i;
+            let c = 1.0 - 0.1 * i;
+            let s = 1.0 - 0.3 * i;
+            format!(
+                "eq=brightness={b:.3}:contrast={c:.3}:saturation={s:.3},colorbalance=rh={rh:.3}:rm={rm:.3}:gs={gs:.3}",
+                b = b,
+                c = c,
+                s = s,
+                rh = 0.05 * i,
+                rm = 0.05 * i,
+                gs = -0.05 * i
+            )
+        }
+        "vivid" => {
+            let s = 1.0 + 0.5 * i;
+            format!("eq=saturation={s:.3}:contrast=1.1:brightness=0.02", s = s)
+        }
+        "bleach_bypass" => {
+            let c = 1.0 + 0.4 * i;
+            let s = 1.0 - 0.6 * i;
+            format!(
+                "eq=contrast={c:.3}:saturation={s:.3}:brightness=0.02:gamma={g:.3}",
+                c = c,
+                s = s,
+                g = 1.0 + 0.1 * i
+            )
+        }
+        _ => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2917,16 +4505,24 @@ mod tests {
             None,
             None,
         );
-        assert!(!tb.defs().iter().any(|d| d.name == "search_sources"));
+        assert!(!tb.defs().iter().any(|d| d.name == "research_lookup"));
 
         let tb = tb.with_research_session(s.id.clone());
-        assert!(tb.defs().iter().any(|d| d.name == "search_sources"));
+        assert!(tb.defs().iter().any(|d| d.name == "research_lookup"));
         let (result, _) = tb
-            .run("search_sources", r#"{"query":"borrow checker"}"#)
+            .run(
+                "research_lookup",
+                r#"{"scope":"session_sources","query":"borrow checker"}"#,
+            )
             .await;
         assert!(result.contains("borrow checker"), "{result}");
 
-        let (result, _) = tb.run("search_sources", r#"{"query":"quantum"}"#).await;
+        let (result, _) = tb
+            .run(
+                "research_lookup",
+                r#"{"scope":"session_sources","query":"quantum"}"#,
+            )
+            .await;
         assert!(result.contains("no matches"), "{result}");
     }
 
@@ -2939,11 +4535,18 @@ mod tests {
             &[("https://nature.com/x".to_string(), None)],
         )
         .unwrap();
-        let (result, _) = tb.run("list_citations", r#"{}"#).await;
+        let (result, _) = tb
+            .run("research_lookup", r#"{"scope":"citations"}"#)
+            .await;
         assert!(result.contains("research-a.md"), "{result}");
         assert!(result.contains("nature.com"), "{result}");
 
-        let (result, _) = tb.run("list_citations", r#"{"query":"nope"}"#).await;
+        let (result, _) = tb
+            .run(
+                "research_lookup",
+                r#"{"scope":"citations","query":"nope"}"#,
+            )
+            .await;
         assert!(result.contains("no citations"), "{result}");
     }
 
@@ -2951,12 +4554,13 @@ mod tests {
     async fn fetch_url_serves_from_cache_when_fresh() {
         let path = std::env::temp_dir().join(format!("nexus-webcache-{}.db", uuid::Uuid::new_v4()));
         let db = crate::db::Db::open(&path).unwrap();
+        let cached_body = "x".repeat(MAX_TOOL_RESULT_CHARS + 100);
         crate::db::cache_put(
             db.raw(),
             "https://example.com/a",
             "https://example.com/a",
             None,
-            "cached body",
+            &cached_body,
         )
         .unwrap();
         let tb = ToolBox::new(
@@ -2974,7 +4578,8 @@ mod tests {
         let (result, _) = tb
             .run("fetch_url", r#"{"url":"https://example.com/a"}"#)
             .await;
-        assert!(result.contains("cached body"), "{result}");
+        assert_eq!(result.chars().count(), MAX_TOOL_RESULT_CHARS);
+        assert!(result.ends_with("... (tool result truncated)"), "{result}");
     }
 
     #[test]
@@ -3109,7 +4714,10 @@ mod tests {
         // A cache hit must not attempt the network — the result is the cached
         // text, not a "no results" or "search failed" error.
         let (result, _) = tb
-            .run("discussion_search", r#"{"query":"rust performance"}"#)
+            .run(
+                "search",
+                r#"{"mode":"discussion","query":"rust performance"}"#,
+            )
             .await;
         assert!(result.contains("Rust is fast"), "{result}");
         assert!(
@@ -3146,6 +4754,14 @@ mod tests {
         let out = format_results(&hits);
         assert!(out.starts_with("[1] Rust 1.90\n    https://a\n    release notes"));
         assert!(out.contains("[2] Rust blog"));
+    }
+
+    #[test]
+    fn caps_tool_results_before_context_replay() {
+        let out = cap_tool_result("x".repeat(MAX_TOOL_RESULT_CHARS + 100));
+        assert_eq!(out.chars().count(), MAX_TOOL_RESULT_CHARS);
+        assert!(out.ends_with("... (tool result truncated)"));
+        assert_eq!(cap_tool_result("short result".to_string()), "short result");
     }
 
     #[test]
@@ -3232,10 +4848,14 @@ mod tests {
             None,
             None,
         );
-        let err = tb.search("test", None, &[], &[]).await.unwrap_err();
-        let msg = err.to_string();
-        assert!(!msg.contains("no search backend configured"));
-        assert!(!msg.contains("API key"));
+        // SearXNG is attempted first; if it is unavailable, auto mode may
+        // still succeed through the zero-setup DuckDuckGo fallback.
+        if let Err(err) = tb.search("test", None, &[], &[]).await {
+            let msg = err.to_string();
+            assert!(!msg.contains("no search backend configured"));
+            assert!(!msg.contains("API key"));
+            assert!(msg.contains("SearXNG"), "{msg}");
+        }
     }
 
     #[test]
@@ -3401,6 +5021,23 @@ mod tests {
         assert_eq!(hits[1].url, "https://example.com/blog");
     }
 
+    #[test]
+    fn parses_brave_html_result_card() {
+        let html = r#"
+            <div class="snippet" data-type="web">
+              <a href="https://example.com/project" class="svelte l1">
+                <div class="title search-snippet-title line-clamp-1">Example <strong>Project</strong></div>
+                <div class="generic-snippet"><div class="content desktop-default-regular">A useful <b>project</b>.</div></div>
+              </a>
+            </div>
+        "#;
+        let hits = parse_brave_html(html);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Example Project");
+        assert_eq!(hits[0].url, "https://example.com/project");
+        assert_eq!(hits[0].snippet, "A useful project.");
+    }
+
     fn files_toolbox() -> (ToolBox, crate::db::Db, String) {
         // A real temp-file db (the toolbox opens its own connection by path).
         let path = std::env::temp_dir().join(format!("nexus-tools-{}.db", uuid::Uuid::new_v4()));
@@ -3449,6 +5086,42 @@ mod tests {
             None,
         );
         (tb, dir)
+    }
+
+    #[tokio::test]
+    async fn public_script_files_actions_are_confined_and_hash_based() {
+        let (mut tb, dir) = skills_toolbox();
+        let scripts = dir.join("space-scripts");
+        tb.space_scripts_dir = scripts.clone();
+        let (result, _) = tb
+            .run(
+                "script_files",
+                r#"{"action":"write","path":"nested/tool.sh","content":"echo hi"}"#,
+            )
+            .await;
+        assert!(result.contains("wrote nested/tool.sh"), "{result}");
+        let (result, _) = tb
+            .run(
+                "script_files",
+                r#"{"action":"read","path":"nested/tool.sh"}"#,
+            )
+            .await;
+        assert!(result.contains("echo hi"), "{result}");
+        let hash = line_hash(1, "echo hi");
+        let (result, _) = tb
+            .run(
+                "script_files",
+                &format!(r#"{{"action":"edit","path":"nested/tool.sh","edits":[{{"hash":"{hash}","new":"echo bye"}}]}}"#),
+            )
+            .await;
+        assert!(result.contains("edited nested/tool.sh"), "{result}");
+        let (result, _) = tb
+            .run(
+                "script_files",
+                r#"{"action":"read","path":"../escape.sh"}"#,
+            )
+            .await;
+        assert!(result.contains("invalid path"), "{result}");
     }
 
     #[tokio::test]
@@ -3523,7 +5196,9 @@ mod tests {
             None,
         );
         tb.space_scripts_dir = scripts_dir.clone();
-        let (result, status) = tb.run("run_python", r#"{"code":"print(2**32)","name":"test.py"}"#).await;
+        let (result, status) = tb
+            .run("run_python", r#"{"code":"print(2**32)","name":"test.py"}"#)
+            .await;
         assert!(status.contains("Running script"), "status was {status:?}");
         assert!(result.contains("4294967296"), "{result}");
         assert!(scripts_dir.join("test.py").exists());
@@ -3534,7 +5209,7 @@ mod tests {
     #[tokio::test]
     async fn grep_app_finds_lines_and_skips_node_modules() {
         let (tb, dir) = apps_toolbox();
-        let _ = tb.run("write_file", r#"{"app":"deck","path":"index.html","content":"<h1>Title</h1>\n<p>slide two</p>"}"#).await;
+        let _ = tb.run("write_file", r#"{"app":"deck","path":"index.html","content":"<h1>slide one</h1>\n<p>quiet</p>\n<p>slide two</p>"}"#).await;
         let _ = tb
             .run(
                 "write_file",
@@ -3546,16 +5221,59 @@ mod tests {
         let (result, _) = tb
             .run("grep_app", r#"{"app":"deck","pattern":"SLIDE"}"#)
             .await;
-        assert!(
-            result.contains("index.html:2: <p>slide two</p>"),
-            "{result}"
-        );
-        assert!(result.contains("js/a.js:1: // slide logic"), "{result}");
+        assert!(result.contains("index.html:1,3"), "{result}");
+        assert!(result.contains("js/a.js:1"), "{result}");
+        assert!(!result.contains("<h1>slide one</h1>"), "{result}");
+        assert!(!result.contains("// slide logic"), "{result}");
         assert!(!result.contains("node_modules"), "{result}");
         let (result, _) = tb
             .run("grep_app", r#"{"app":"deck","pattern":"zzz"}"#)
             .await;
         assert!(result.contains("no matches"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn app_file_tools_respect_gitignore() {
+        let (tb, _) = apps_toolbox();
+        let _ = tb
+            .run(
+                "write_file",
+                r#"{"app":"deck","path":".gitignore","content":"secret.txt\nprivate/\n"}"#,
+            )
+            .await;
+        let _ = tb
+            .run(
+                "write_file",
+                r#"{"app":"deck","path":"public.txt","content":"visible"}"#,
+            )
+            .await;
+        let _ = tb
+            .run(
+                "write_file",
+                r#"{"app":"deck","path":"secret.txt","content":"hidden"}"#,
+            )
+            .await;
+        let _ = tb
+            .run(
+                "write_file",
+                r#"{"app":"deck","path":"private/data.txt","content":"hidden"}"#,
+            )
+            .await;
+
+        let (result, _) = tb
+            .run("grep_app", r#"{"app":"deck","pattern":"hidden"}"#)
+            .await;
+        assert!(result.contains("no matches"), "{result}");
+
+        let (result, _) = tb
+            .run("read_app_file", r#"{"app":"deck","path":"secret.txt"}"#)
+            .await;
+        assert!(result.contains("ignored by .gitignore"), "{result}");
+
+        let (result, _) = tb
+            .run("read_app_file", r#"{"app":"deck","path":".gitignore"}"#)
+            .await;
+        assert!(result.contains("ignored by .gitignore"), "{result}");
     }
 
     #[tokio::test]
@@ -3607,8 +5325,7 @@ mod tests {
     fn defs_include_file_tools_only_when_files_exist() {
         let (tb, ..) = files_toolbox();
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
-        assert!(names.contains(&"search_files".to_string()));
-        assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&"files".to_string()));
 
         let empty = ToolBox::new(
             PathBuf::new(),
@@ -3621,7 +5338,7 @@ mod tests {
             None,
         );
         let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
-        assert!(!names.contains(&"search_files".to_string()));
+        assert!(!names.contains(&"files".to_string()));
     }
 
     #[test]
@@ -3638,7 +5355,68 @@ mod tests {
         );
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
         assert!(names.contains(&"fetch_url".to_string()));
-        assert!(names.contains(&"web_search".to_string()));
+        assert!(names.contains(&"search".to_string()));
+    }
+
+    #[test]
+    fn public_definitions_have_only_consolidated_names() {
+        let tb = ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        let names: Vec<_> = tb.defs().into_iter().map(|def| def.name).collect();
+        assert!(names.len() <= 17, "too many public tools: {names:?}");
+        for old in [
+            "create_skill", "install_skill", "web_search", "academic_search", "discussion_search",
+            "search_sources", "list_citations", "search_files", "read_file", "read_pdf_page",
+            "read_app_file", "grep_app", "write_file", "edit_file", "diff_app", "list_images",
+            "copy_file_to_app", "copy_images_to_app", "list_scripts", "write_script", "read_script",
+            "edit_script", "edit_video", "extract_frame", "stitch_videos", "save_reference",
+            "list_references", "delete_reference",
+        ] {
+            assert!(!names.iter().any(|name| name == old), "deprecated tool advertised: {old}");
+        }
+        for required in [
+            "skill_admin", "run_python", "run_script", "install_packages", "search", "fetch_url",
+        ] {
+            assert!(names.iter().any(|name| name == required), "missing {required}");
+        }
+    }
+
+    #[tokio::test]
+    async fn consolidated_tools_reject_invalid_actions_and_missing_fields() {
+        let tb = ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        for (name, args, expected) in [
+            ("skill_admin", r#"{"action":"nope"}"#, "invalid action"),
+            ("search", r#"{"mode":"web"}"#, "missing required field: query"),
+            ("research_lookup", r#"{"scope":"session_sources"}"#, "missing required field: query"),
+            ("files", r#"{"action":"nope"}"#, "invalid action"),
+            ("app_inspect", r#"{"action":"nope","app":"a"}"#, "invalid action"),
+            ("app_modify", r#"{"action":"nope","app":"a","path":"x"}"#, "invalid action"),
+            ("app_assets", r#"{"action":"nope"}"#, "invalid action"),
+            ("script_files", r#"{"action":"nope"}"#, "invalid action"),
+            ("video_transform", r#"{"action":"nope"}"#, "invalid action"),
+            ("video_references", r#"{"action":"save","name":"x"}"#, "missing required field: image_id"),
+        ] {
+            let (result, status) = tb.run(name, args).await;
+            assert_eq!(status, "invalid arguments", "{name}: {result}");
+            assert!(result.contains(expected), "{name}: {result}");
+        }
     }
 
     #[tokio::test]
@@ -3650,6 +5428,20 @@ mod tests {
         assert!(result.contains("lines 41-80"));
         // No embedder configured → keyword search IS the primary, no fallback tag.
         assert!(!result.contains("keyword fallback"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn public_files_actions_preserve_search_and_paging() {
+        let (tb, ..) = files_toolbox();
+        let (result, _) = tb
+            .run("files", r#"{"action":"search","query":"line 42"}"#)
+            .await;
+        assert!(result.contains("report.md"), "{result}");
+        let (result, _) = tb
+            .run("files", r#"{"action":"read","name":"report.md","offset":201}"#)
+            .await;
+        assert!(result.contains("line 201"), "{result}");
+        assert!(!result.contains("line 1"), "{result}");
     }
 
     #[test]
@@ -3727,7 +5519,7 @@ mod tests {
     fn defs_include_app_tools_only_with_apps_ctx() {
         let (tb, _) = apps_toolbox();
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
-        for t in ["write_file", "edit_file", "read_app_file"] {
+        for t in ["app_modify", "app_inspect", "app_assets"] {
             assert!(names.contains(&t.to_string()), "missing {t}");
         }
         let empty = ToolBox::new(
@@ -3741,7 +5533,7 @@ mod tests {
             None,
         );
         let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
-        assert!(!names.contains(&"write_file".to_string()));
+        assert!(!names.contains(&"app_modify".to_string()));
     }
 
     #[tokio::test]
@@ -3754,7 +5546,10 @@ mod tests {
             )
             .await;
         assert!(result.contains("wrote deck/index.html"), "{result}");
-        assert!(result.contains("live at http://127.0.0.1:9999/"), "{result}");
+        assert!(
+            result.contains("live at http://127.0.0.1:9999/"),
+            "{result}"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("deck/index.html")).unwrap(),
             "<h1>Hello</h1>"
@@ -3787,6 +5582,70 @@ mod tests {
             .await;
         assert!(result.contains("<h1>Bye</h1>"), "{result}");
         assert!(result.contains("lines 1-1 of 1"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn public_app_modify_and_inspect_delegate_to_hashline_backend() {
+        let (tb, dir) = apps_toolbox();
+        let (result, _) = tb
+            .run(
+                "app_modify",
+                r#"{"action":"write","app":"public-deck","path":"index.html","content":"<h1>Hello</h1>"}"#,
+            )
+            .await;
+        assert!(result.contains("live at http://127.0.0.1:9999/"), "{result}");
+        let (result, _) = tb
+            .run(
+                "app_inspect",
+                r#"{"action":"read","app":"public-deck","path":"index.html"}"#,
+            )
+            .await;
+        assert!(result.contains("<h1>Hello</h1>"), "{result}");
+        let hash = line_hash(1, "<h1>Hello</h1>");
+        let (result, _) = tb
+            .run(
+                "app_modify",
+                &format!(r#"{{"action":"patch","app":"public-deck","path":"index.html","edits":[{{"hash":"{hash}","new":"<h1>Bye</h1>"}}]}}"#),
+            )
+            .await;
+        assert!(result.contains("edited public-deck/index.html"), "{result}");
+        let (result, _) = tb
+            .run(
+                "app_inspect",
+                r#"{"action":"search","app":"public-deck","pattern":"bye","compact":false}"#,
+            )
+            .await;
+        assert!(result.contains("index.html:1: <h1>Bye</h1>"), "{result}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("public-deck/index.html")).unwrap(),
+            "<h1>Bye</h1>"
+        );
+    }
+
+    #[tokio::test]
+    async fn diff_app_previews_candidate_changes_without_writing() {
+        let (tb, dir) = apps_toolbox();
+        let _ = tb
+            .run(
+                "write_file",
+                r#"{"app":"deck","path":"index.html","content":"<h1>Hello</h1>"}"#,
+            )
+            .await;
+
+        let (result, _) = tb
+            .run(
+                "diff_app",
+                r#"{"app":"deck","path":"index.html","content":"<h1>Bye</h1>\n<p>New</p>"}"#,
+            )
+            .await;
+
+        assert!(result.contains("-<h1>Hello</h1>"), "{result}");
+        assert!(result.contains("+<h1>Bye</h1>"), "{result}");
+        assert!(result.contains("+<p>New</p>"), "{result}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("deck/index.html")).unwrap(),
+            "<h1>Hello</h1>"
+        );
     }
 
     #[tokio::test]
@@ -3861,14 +5720,12 @@ mod tests {
     }
 
     #[test]
-    fn research_toolbox_offers_web_search_fetch_url_academic_search_and_discussion_search() {
+    fn research_toolbox_offers_search_modes_and_fetch_url() {
         let tb = ToolBox::research(None, None, "auto".to_string(), Vec::new(), None);
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
-        assert_eq!(names.len(), 4, "{names:?}");
-        assert!(names.contains(&"web_search".to_string()));
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names.contains(&"search".to_string()));
         assert!(names.contains(&"fetch_url".to_string()));
-        assert!(names.contains(&"academic_search".to_string()));
-        assert!(names.contains(&"discussion_search".to_string()));
     }
 
     #[tokio::test]

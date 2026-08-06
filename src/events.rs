@@ -10,7 +10,6 @@ use ratatui::layout::{Position, Rect};
 use tui_textarea::CursorMove;
 
 use crate::app::{App, AppEvent, ModelPanel, MouseTarget, Popup};
-use crate::provider::StreamEvent;
 use crate::ui;
 
 /// Ctrl+E/Ctrl+K in the space picker edit that space's instructions/memory
@@ -53,12 +52,18 @@ fn system_prompt_edit_target(app: &App, key: &KeyEvent) -> Option<std::path::Pat
 }
 
 pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
+    let result = run_loop(&mut app, terminal).await;
+    app.cancel_chat_tasks();
+    result
+}
+
+async fn run_loop(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
     let mut reader = EventStream::new();
     // Cheap poll for an omarchy theme switch (symlink target change) so a
     // `omarchy theme set` while nexus-chat is running takes effect live.
     let mut theme_poll = tokio::time::interval(std::time::Duration::from_secs(2));
     loop {
-        terminal.draw(|f| ui::render(f, &mut app))?;
+        terminal.draw(|f| ui::render(f, app))?;
         if app.should_quit {
             break;
         }
@@ -70,12 +75,12 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
         tokio::select! {
             maybe = reader.next() => match maybe {
                 Some(Ok(Event::Key(k))) if k.kind == KeyEventKind::Press => {
-                    if let Some(path) = edit_file_target(&app, &k) {
+                    if let Some(path) = edit_file_target(app, &k) {
                         edit_in_external_editor(terminal, &path)?;
-                    } else if let Some(path) = skill_edit_target(&app, &k) {
+                    } else if let Some(path) = skill_edit_target(app, &k) {
                         edit_in_external_editor(terminal, &path)?;
                         app.reload_skills();
-                    } else if let Some(path) = system_prompt_edit_target(&app, &k) {
+                    } else if let Some(path) = system_prompt_edit_target(app, &k) {
                         edit_in_external_editor(terminal, &path)?;
                         app.reload_base_system_prompt();
                     } else if app.popup == Popup::Context && k.code == KeyCode::Char('v') {
@@ -87,7 +92,7 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                             None => app.status = "session hasn't been compacted yet".to_string(),
                         }
                     } else {
-                        handle_key(&mut app, k)?;
+                        handle_key(app, k)?;
                         // /edit queued an app file — open it now (this loop
                         // owns the terminal, run_command doesn't).
                         if let Some(edit) = app.pending_editor.take() {
@@ -121,7 +126,7 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                 }
                 Some(Ok(Event::Mouse(m))) => {
                     let size = terminal.size()?;
-                    handle_mouse(&mut app, m, Rect::new(0, 0, size.width, size.height))?;
+                    handle_mouse(app, m, Rect::new(0, 0, size.width, size.height))?;
                 }
                 // Terminal-native paste (bracketed paste) — goes to whatever's
                 // focused: the composer, or a popup's text field.
@@ -133,9 +138,10 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
                 None => break,
             },
             event = app.next_event() => match event {
-                AppEvent::Stream(Some(e)) => app.on_stream_event(e)?,
-                // Channel closed without a Done sentinel (task ended): finalize.
-                AppEvent::Stream(None) => app.on_stream_event(StreamEvent::Done)?,
+                AppEvent::Stream(Some((task_id, e))) => app.on_chat_event(task_id, e)?,
+                // The central chat sender lives on App, so this only occurs
+                // during shutdown and must not finalize an unrelated task.
+                AppEvent::Stream(None) => {}
                 AppEvent::Models(r) => app.on_models_result(r),
                 AppEvent::Title(t) => app.on_title_result(t),
                 AppEvent::Memory(m) => app.on_memory_result(m),
@@ -303,10 +309,22 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
     // @-file autocomplete — only when no slash command is showing.
     if app.at_state.is_some() {
         match key.code {
-            KeyCode::Up => { app.move_at_selection(-1); return Ok(()); }
-            KeyCode::Down => { app.move_at_selection(1); return Ok(()); }
-            KeyCode::Tab | KeyCode::Enter => { app.accept_at_match(); return Ok(()); }
-            KeyCode::Esc => { app.at_state = None; return Ok(()); }
+            KeyCode::Up => {
+                app.move_at_selection(-1);
+                return Ok(());
+            }
+            KeyCode::Down => {
+                app.move_at_selection(1);
+                return Ok(());
+            }
+            KeyCode::Tab | KeyCode::Enter => {
+                app.accept_at_match();
+                return Ok(());
+            }
+            KeyCode::Esc => {
+                app.at_state = None;
+                return Ok(());
+            }
             _ => {}
         }
     }
@@ -519,6 +537,18 @@ fn composer_jump(app: &mut App, m: MouseEvent) {
 /// model picker (the only interactive popup).
 fn handle_mouse(app: &mut App, m: MouseEvent, screen: Rect) -> Result<()> {
     if app.popup == Popup::None {
+        if m.kind == MouseEventKind::Down(MouseButton::Left) {
+            let pos = Position::new(m.column, m.row);
+            if let Some((_, index)) = app
+                .notification_areas
+                .iter()
+                .find(|(area, _)| area.contains(pos))
+                .copied()
+            {
+                app.activate_notification(index)?;
+                return Ok(());
+            }
+        }
         handle_input_mouse(app, m);
         return Ok(());
     }

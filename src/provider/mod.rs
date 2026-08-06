@@ -67,6 +67,8 @@ pub struct Model {
     pub supports_images: bool,
     /// Whether the model generates image output (`architecture.output_modalities`).
     pub supports_image_generation: bool,
+    /// Whether the model is listed by OpenRouter's dedicated video catalog.
+    pub supports_video_generation: bool,
     /// Which backend this model came from.
     pub backend: BackendTag,
 }

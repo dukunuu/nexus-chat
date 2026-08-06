@@ -39,6 +39,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
         crate::app::ModelPickTarget::ImageGen => {
             chrome::hinted_title(app, "★ Favorites — picking image gen model", "")
         }
+        crate::app::ModelPickTarget::VideoGen => {
+            chrome::hinted_title(app, "★ Favorites — picking video gen model", "")
+        }
     };
 
     // Favorites column.
@@ -86,6 +89,14 @@ fn model_items(app: &App, models: &[&Model]) -> Vec<ListItem<'static>> {
             if m.supports_images {
                 spans.push(Span::styled(" ⊡", Style::default().fg(app.theme.fg_dim)));
             }
+            // Context window (dim, right-aligned) so the available size is
+            // visible before picking — OpenCode Zen models included.
+            if let Some(ctx) = m.context_length {
+                spans.push(Span::styled(
+                    format!(" {:>5}", crate::ui::humanize(ctx)),
+                    Style::default().fg(app.theme.fg_dim),
+                ));
+            }
             ListItem::new(Line::from(spans))
         })
         .collect()
@@ -129,7 +140,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 | crate::app::ModelPickTarget::Ocr
                 | crate::app::ModelPickTarget::Research
                 | crate::app::ModelPickTarget::Escalation
-                | crate::app::ModelPickTarget::ImageGen => Popup::Settings,
+                | crate::app::ModelPickTarget::ImageGen
+                | crate::app::ModelPickTarget::VideoGen => Popup::Settings,
                 crate::app::ModelPickTarget::SwarmPersona(_) => Popup::Swarm,
                 crate::app::ModelPickTarget::Session => Popup::None,
             };

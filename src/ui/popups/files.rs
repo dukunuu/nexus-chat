@@ -107,7 +107,7 @@ fn render_files(f: &mut Frame, app: &App) {
         FilesMode::Browse => chrome::hinted_title(
             app,
             "files",
-            "Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+O re-extract · Ctrl+D remove · Tab switch tab",
+            "Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+O re-extract · Ctrl+F ocr · Ctrl+D remove · Tab switch tab",
         ),
         FilesMode::Pick => Line::from(""),
     };
@@ -132,7 +132,10 @@ fn render_images(f: &mut Frame, app: &App) {
             let created = crate::ui::fmt_created(&img.modified);
             ListItem::new(Line::from(vec![
                 Span::styled(img.name.clone(), Style::default().fg(app.theme.fg)),
-                Span::styled(format!("  {}", crate::app::human_size(img.size as i64)), dim),
+                Span::styled(
+                    format!("  {}", crate::app::human_size(img.size as i64)),
+                    dim,
+                ),
                 Span::styled(format!("  {created}"), dim),
             ]))
         })
@@ -151,11 +154,9 @@ fn render_images(f: &mut Frame, app: &App) {
                 "Ctrl+D confirm · Esc cancel",
             )
         }
-        ImagesMode::Browse => chrome::hinted_title(
-            app,
-            "images",
-            "Enter open · Ctrl+D remove · Tab switch tab",
-        ),
+        ImagesMode::Browse => {
+            chrome::hinted_title(app, "images", "Enter open · Ctrl+D remove · Tab switch tab")
+        }
     };
 
     let inner = chrome::render_frame(f, area, title, &app.theme, true);
@@ -293,10 +294,12 @@ fn handle_files_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 app.open_selected_file();
                 return Ok(());
             }
-            if key.code == KeyCode::Char('o')
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-            {
+            if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 app.reextract_selected_file();
+                return Ok(());
+            }
+            if key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.reocr_selected_file();
                 return Ok(());
             }
             match classify_browse_key(key, true, true) {

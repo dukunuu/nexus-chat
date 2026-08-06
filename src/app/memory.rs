@@ -168,7 +168,6 @@ mod tests {
 
     fn msg(role: &str, content: &str) -> Message {
         Message {
-            id: String::new(),
             role: role.to_string(),
             content: content.to_string(),
             model: None,

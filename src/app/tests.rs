@@ -28,7 +28,9 @@ fn session_filter_matches_title_and_slug() {
     let s1 =
         a.db.create_session("Rust async runtimes", "a/b", &space, "chat")
             .unwrap();
-    let s2 = a.db.create_session("Cooking pasta", "a/b", &space, "chat").unwrap();
+    let s2 =
+        a.db.create_session("Cooking pasta", "a/b", &space, "chat")
+            .unwrap();
     a.db.set_session_title(&s1.id, "Rust async runtimes", Some("rust-async"))
         .unwrap();
     a.sessions_cache = a.db.list_sessions(&space).unwrap();
@@ -47,11 +49,12 @@ fn delete_removes_session_and_clears_if_active() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("k".into()), test_space());
     let space = a.active_space.id.clone();
-    let s = a.db.create_session("doomed", "a/b", &space, "chat").unwrap();
+    let s =
+        a.db.create_session("doomed", "a/b", &space, "chat")
+            .unwrap();
     a.sessions_cache = a.db.list_sessions(&space).unwrap();
     a.session = Some(s.clone());
     a.messages.push(Message {
-        id: String::new(),
         role: "user".into(),
         content: "hi".into(),
         model: None,
@@ -167,6 +170,7 @@ pub(super) fn app_with_key() -> App {
             context_length: None,
             supports_images: false,
             supports_image_generation: false,
+            supports_video_generation: false,
             backend: BackendTag::OpenRouter,
         },
         Model {
@@ -176,6 +180,7 @@ pub(super) fn app_with_key() -> App {
             context_length: None,
             supports_images: false,
             supports_image_generation: false,
+            supports_video_generation: false,
             backend: BackendTag::OpenRouter,
         },
     ];
@@ -186,7 +191,7 @@ pub(super) fn app_with_key() -> App {
 fn web_mode_clause_instructs_search_first_and_cites_inline() {
     let c = chat::web_mode_clause("2026-07-06");
     assert!(c.contains("2026-07-06"));
-    assert!(c.contains("web_search"));
+    assert!(c.contains("search with mode=web"));
     assert!(c.contains("[n]"));
     assert!(c.contains("Sources:"));
     assert!(c.contains("Do not fabricate"));
@@ -214,7 +219,6 @@ async fn web_mode_toggles_persists_and_shows_in_system_prompt() {
     assert!(!sessions.iter().find(|s| s.id == sid).unwrap().web_mode);
 }
 
-#[test]
 #[test]
 fn no_key_rejects_message_and_points_to_login_cmd() {
     let db = Db::open_in_memory().unwrap();
@@ -277,7 +281,7 @@ async fn stream_is_tagged_with_its_origin_session() {
     a.submit().unwrap();
     let sid = a.session.as_ref().unwrap().id.clone();
     assert_eq!(
-        a.stream_session.as_ref().map(|(id, _)| id.clone()),
+        a.active_chat_task().map(|task| task.session_id.clone()),
         Some(sid)
     );
     assert!(a.viewing_stream());
@@ -309,7 +313,7 @@ async fn background_finish_lands_in_origin_session_and_notifies() {
     assert_eq!(stored.last().unwrap().content, "late answer");
     assert!(a.unread.contains(&origin));
     assert!(a.status.contains("response ready in"));
-    assert!(a.stream_session.is_none());
+    assert!(a.chat_tasks.is_empty());
 }
 
 #[tokio::test]
@@ -334,7 +338,7 @@ async fn background_tool_call_persists_to_origin_session_only() {
 }
 
 #[tokio::test]
-async fn send_while_streaming_names_the_busy_session() {
+async fn send_in_another_session_is_allowed_while_one_streams() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());
     a.set_input("hello");
@@ -342,7 +346,107 @@ async fn send_while_streaming_names_the_busy_session() {
     a.new_session().unwrap();
     a.set_input("second message");
     a.submit().unwrap();
+    assert_eq!(a.chat_task_count(), 2);
+}
+
+#[tokio::test]
+async fn second_send_in_the_same_session_is_rejected() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("first");
+    a.submit().unwrap();
+    a.set_input("second");
+    a.submit().unwrap();
+
+    assert_eq!(a.chat_task_count(), 1);
     assert!(a.status.contains("still streaming in"));
+    assert_eq!(a.input_text(), "second");
+}
+
+#[tokio::test]
+async fn concurrent_chat_tasks_route_results_to_their_origin_sessions() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("first");
+    a.submit().unwrap();
+    let first_session = a.session.as_ref().unwrap().id.clone();
+    let first_task = a
+        .chat_task_for_session(&first_session)
+        .map(|task| task.id)
+        .unwrap();
+
+    a.new_session().unwrap();
+    a.current_model = Some("b/two".into());
+    a.set_input("second");
+    a.submit().unwrap();
+    let second_session = a.session.as_ref().unwrap().id.clone();
+    let second_task = a
+        .chat_task_for_session(&second_session)
+        .map(|task| task.id)
+        .unwrap();
+    assert_ne!(first_session, second_session);
+    assert_ne!(first_task, second_task);
+
+    a.on_chat_event(first_task, StreamEvent::Token("answer one".into()))
+        .unwrap();
+    a.on_chat_event(second_task, StreamEvent::Token("answer two".into()))
+        .unwrap();
+    a.on_chat_event(first_task, StreamEvent::Done).unwrap();
+    a.on_chat_event(second_task, StreamEvent::Done).unwrap();
+
+    let first = a.db.load_messages(&first_session).unwrap();
+    assert_eq!(first.last().unwrap().content, "answer one");
+    assert_eq!(first.last().unwrap().model.as_deref(), Some("a/one"));
+    assert_eq!(a.messages.last().unwrap().content, "answer two");
+    assert_eq!(a.messages.last().unwrap().model.as_deref(), Some("b/two"));
+    assert_eq!(a.notifications.len(), 1);
+    assert!(a.unread.contains(&first_session));
+}
+
+#[tokio::test]
+async fn chat_task_limit_rejects_the_eleventh_task() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    for index in 0..MAX_CHAT_TASKS {
+        if index > 0 {
+            a.new_session().unwrap();
+        }
+        let message = format!("message {index}");
+        a.set_input(&message);
+        a.submit().unwrap();
+    }
+    assert_eq!(a.chat_task_count(), MAX_CHAT_TASKS);
+
+    a.new_session().unwrap();
+    a.set_input("rejected");
+    a.submit().unwrap();
+    assert_eq!(a.chat_task_count(), MAX_CHAT_TASKS);
+    assert!(a.session.is_none());
+    assert!(a.status.contains("task limit reached"));
+    assert_eq!(a.input_text(), "rejected");
+}
+
+#[tokio::test]
+async fn clicking_a_completion_notification_opens_its_session() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.set_input("first");
+    a.submit().unwrap();
+    let first_session = a.session.as_ref().unwrap().id.clone();
+    let first_task = a
+        .chat_task_for_session(&first_session)
+        .map(|task| task.id)
+        .unwrap();
+    a.new_session().unwrap();
+    a.on_chat_event(first_task, StreamEvent::Token("done".into()))
+        .unwrap();
+    a.on_chat_event(first_task, StreamEvent::Done).unwrap();
+
+    assert_eq!(a.notifications.len(), 1);
+    a.activate_notification(0).unwrap();
+    assert_eq!(a.session.as_ref().unwrap().id, first_session);
+    assert!(a.notifications.is_empty());
+    assert!(!a.unread.contains(&first_session));
 }
 
 #[tokio::test]
@@ -379,7 +483,7 @@ async fn deleting_the_streaming_session_discards_the_stream() {
     a.open_session_picker().unwrap();
     a.confirm_delete().unwrap(); // deletes the only (streaming) session
     assert!(!a.is_streaming());
-    assert!(a.stream_session.is_none());
+    assert!(a.chat_tasks.is_empty());
     assert!(!a.unread.contains(&origin));
 }
 
@@ -404,7 +508,7 @@ async fn esc_stop_keeps_partial_response() {
         .unwrap();
     a.stop_stream().unwrap();
     assert!(!a.is_streaming());
-    assert!(a.stream_abort.is_none());
+    assert!(a.chat_tasks.is_empty());
     assert_eq!(a.messages.last().unwrap().content, "partial answer");
     assert_eq!(a.status, "response stopped");
     // No-op when nothing streams.
@@ -423,6 +527,7 @@ fn panels_split_favorites_from_available_by_recency() {
             context_length: None,
             supports_images: false,
             supports_image_generation: false,
+            supports_video_generation: false,
             backend: BackendTag::OpenRouter,
         },
         Model {
@@ -432,6 +537,7 @@ fn panels_split_favorites_from_available_by_recency() {
             context_length: None,
             supports_images: false,
             supports_image_generation: false,
+            supports_video_generation: false,
             backend: BackendTag::OpenRouter,
         },
         Model {
@@ -441,6 +547,7 @@ fn panels_split_favorites_from_available_by_recency() {
             context_length: None,
             supports_images: false,
             supports_image_generation: false,
+            supports_video_generation: false,
             backend: BackendTag::OpenRouter,
         },
     ];
@@ -468,6 +575,7 @@ fn toggle_favorite_persists_and_moves_panel() {
         context_length: None,
         supports_images: false,
         supports_image_generation: false,
+        supports_video_generation: false,
         backend: BackendTag::OpenRouter,
     }];
     a.model_focus = ModelPanel::Available;
@@ -503,6 +611,7 @@ fn reasoning_cycles_only_for_supporting_models() {
         context_length: Some(1000),
         supports_images: false,
         supports_image_generation: false,
+        supports_video_generation: false,
         backend: BackendTag::OpenRouter,
     }];
     a.model_focus = ModelPanel::Available;
@@ -633,12 +742,12 @@ fn verbosity_setting_persists_and_changes_the_prompt() {
 }
 
 #[test]
-fn searxng_url_setting_persists_and_enables_web_search_tool() {
+fn searxng_url_setting_persists_and_enables_search_tool() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("k".into()), test_space());
-    // web_search always works (DuckDuckGo fallback needs no config); only
+    // search always works (DuckDuckGo fallback needs no config); only
     // the backend it uses depends on this setting.
-    assert!(a.toolbox.defs().iter().any(|t| t.name == "web_search"));
+    assert!(a.toolbox.defs().iter().any(|t| t.name == "search"));
     assert!(a.toolbox.searxng_url.is_none());
 
     a.popup = Popup::Settings;
@@ -712,7 +821,6 @@ fn context_used_and_limit() {
     a.current_model = Some("a/one".into());
     assert_eq!(a.context_limit(), Some(1000));
     a.messages.push(Message {
-        id: String::new(),
         role: "user".into(),
         content: "x".repeat(40), // ~10 tokens
         model: None,
@@ -736,7 +844,6 @@ fn compaction_narrows_effective_messages_and_context_used() {
     let mut s = a.db.create_session("t", "a/one", &space, "chat").unwrap();
     for i in 0..4 {
         a.messages.push(Message {
-            id: String::new(),
             role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
             content: "x".repeat(40), // ~10 tokens each
             model: None,
@@ -818,7 +925,6 @@ async fn force_compact_reports_why_it_no_ops() {
 
     // Now there's an uncompacted message — should actually kick off a job.
     a.messages.push(Message {
-        id: String::new(),
         role: "user".into(),
         content: "hi".into(),
         model: None,
@@ -838,7 +944,6 @@ fn context_breakdown_reports_system_memory_conversation() {
     a.models[0].context_length = Some(1000);
     a.current_model = Some("a/one".into());
     a.messages.push(Message {
-        id: String::new(),
         role: "user".into(),
         content: "x".repeat(40),
         model: None,
@@ -895,7 +1000,7 @@ fn system_prompt_lists_files_but_not_their_content() {
     let sp = a.system_prompt();
     assert!(sp.contains("## Files"));
     assert!(sp.contains("plan.md"));
-    assert!(sp.contains("search_files"));
+    assert!(sp.contains("files(action=search"));
     assert!(!sp.contains("SECRET-CONTENT-MARKER")); // names only, never content
 
     // No files → no section.
@@ -988,6 +1093,7 @@ fn utility_model_resolution_falls_back_from_legacy_openrouter_id_on_openai() {
         context_length: None,
         supports_images: false,
         supports_image_generation: false,
+        supports_video_generation: false,
         backend: BackendTag::OpenAi,
     }];
     a.current_model = Some("openai:gpt-4.1-mini".into());
@@ -1134,7 +1240,10 @@ fn accept_command_fill_vs_run() {
     let mut b = app_with_key();
     b.current_model = Some("a/one".into());
     let space_id = b.active_space.id.clone();
-    b.session = Some(b.db.create_session("old chat", "a/one", &space_id, "chat").unwrap());
+    b.session = Some(
+        b.db.create_session("old chat", "a/one", &space_id, "chat")
+            .unwrap(),
+    );
     b.set_input("/clear");
     b.accept_command(true).unwrap();
     assert!(b.input_text().is_empty());
@@ -1277,7 +1386,6 @@ async fn switching_space_clears_open_conversation() {
 fn copy_message_uses_exact_original_content() {
     let mut a = app_with_key();
     a.messages.push(Message {
-        id: String::new(),
         role: "user".into(),
         content: "raw *user* text".into(),
         model: None,
@@ -1288,7 +1396,6 @@ fn copy_message_uses_exact_original_content() {
         persona: None,
     });
     a.messages.push(Message {
-        id: String::new(),
         role: "assistant".into(),
         content: "**bold** reply".into(),
         model: Some("a/one".into()),
@@ -1308,14 +1415,7 @@ fn copy_message_uses_exact_original_content() {
     a.copy_message(1); // assistant message: through markdown::to_plain
     assert_ne!(a.status, "sentinel");
 
-    // Streaming reply (not yet in `messages`) uses index == messages.len().
-    a.streaming = Some("live tokens".into());
-    a.status = "sentinel".into();
-    a.copy_message(2);
-    assert_ne!(a.status, "sentinel");
-
-    // An out-of-range index (no streaming either) is a no-op.
-    a.streaming = None;
+    // An out-of-range index is a no-op when no response is active.
     a.status = "sentinel".into();
     a.copy_message(2);
     assert_eq!(a.status, "sentinel");
@@ -1337,7 +1437,7 @@ fn history_carries_markdown_images_as_data_urls_for_vision_models() {
     )
     .unwrap();
     let content = "what is ![this](t.png)?";
-    let mid = a.db.add_user_message(&s.id, content).unwrap();
+    a.db.add_user_message(&s.id, content).unwrap();
     a.session = Some(s.clone());
     a.messages = a.db.load_messages(&s.id).unwrap();
     a.models = vec![
@@ -1348,6 +1448,7 @@ fn history_carries_markdown_images_as_data_urls_for_vision_models() {
             context_length: None,
             supports_images: true,
             supports_image_generation: false,
+            supports_video_generation: false,
             backend: BackendTag::OpenRouter,
         },
         Model {
@@ -1357,6 +1458,7 @@ fn history_carries_markdown_images_as_data_urls_for_vision_models() {
             context_length: None,
             supports_images: false,
             supports_image_generation: false,
+            supports_video_generation: false,
             backend: BackendTag::OpenRouter,
         },
     ];
@@ -1382,7 +1484,6 @@ fn tool_call_events_persist_and_replay_into_history() {
     let space = a.active_space.id.clone();
     let s = a.db.create_session("t", "a/one", &space, "chat").unwrap();
     a.session = Some(s.clone());
-    a.streaming = Some(String::new());
     a.on_stream_event(crate::provider::StreamEvent::ToolCall {
         name: "search_files".into(),
         arguments: r#"{"query":"q3 revenue"}"#.into(),
@@ -1579,7 +1680,9 @@ async fn swarm_persona_model_picker_stays_open_while_catalog_loads() {
 fn swarm_persona_round_trips_through_external_editor_file() {
     let mut a = app_with_key();
     let space = a.active_space.id.clone();
-    let session = a.db.create_session("swarm", "a/one", &space, "chat").unwrap();
+    let session =
+        a.db.create_session("swarm", "a/one", &space, "chat")
+            .unwrap();
     a.session = Some(session);
     a.swarm_cache = vec![crate::db::Persona {
         name: "Skeptic".into(),
@@ -1612,7 +1715,9 @@ fn swarm_persona_round_trips_through_external_editor_file() {
 fn swarm_progress_and_errors_are_visible_in_transcript() {
     let mut a = app_with_key();
     let space = a.active_space.id.clone();
-    let s = a.db.create_session("swarm", "a/one", &space, "chat").unwrap();
+    let s =
+        a.db.create_session("swarm", "a/one", &space, "chat")
+            .unwrap();
     let sid = s.id.clone();
     a.session = Some(s);
 
@@ -1663,11 +1768,12 @@ async fn swarm_synthesis_triggers_post_reply_jobs_like_normal_chat() {
     a.settings.compact_threshold = 0;
     a.current_model = Some("a/one".into());
     let space = a.active_space.id.clone();
-    let s = a.db.create_session("hello", "a/one", &space, "chat").unwrap();
+    let s =
+        a.db.create_session("hello", "a/one", &space, "chat")
+            .unwrap();
     let sid = s.id.clone();
     a.session = Some(s);
     a.messages.push(Message {
-        id: "u1".into(),
         role: "user".into(),
         content: "what should we do?".into(),
         model: None,
@@ -1695,7 +1801,6 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());
     a.messages.push(Message {
-        id: "m1".into(),
         role: "user".into(),
         content: "what should we do?".into(),
         model: None,
@@ -1706,7 +1811,6 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
         persona: None,
     });
     a.messages.push(Message {
-        id: "m2".into(),
         role: "assistant".into(),
         content: "ship it fast".into(),
         model: Some("a/one".into()),
@@ -1717,7 +1821,6 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
         persona: Some("Optimist".into()),
     });
     a.messages.push(Message {
-        id: "m3".into(),
         role: "assistant".into(),
         content: "balance speed and safety".into(),
         model: None,

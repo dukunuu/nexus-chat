@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -28,10 +28,10 @@ mod images;
 mod memory;
 mod models;
 mod research;
+mod scripts;
 mod sessions;
 mod settings;
 mod skills_popup;
-mod scripts;
 mod spaces;
 mod swarm;
 #[cfg(test)]
@@ -239,6 +239,8 @@ pub enum ModelPickTarget {
     SwarmPersona(usize),
     /// Model used for AI image generation.
     ImageGen,
+    /// Model used for AI video generation.
+    VideoGen,
 }
 
 /// Editable rows in the nerd-config popup.
@@ -264,10 +266,11 @@ pub enum SettingsField {
     EmbeddingModel,
     BlockedDomains,
     ImageGenModel,
+    VideoGenModel,
 }
 
 impl SettingsField {
-    pub const ALL: [SettingsField; 20] = [
+    pub const ALL: [SettingsField; 21] = [
         SettingsField::ShowStats,
         SettingsField::ShowReasoning,
         SettingsField::HideHints,
@@ -288,6 +291,7 @@ impl SettingsField {
         SettingsField::EmbeddingModel,
         SettingsField::BlockedDomains,
         SettingsField::ImageGenModel,
+        SettingsField::VideoGenModel,
     ];
 
     pub fn label(self) -> &'static str {
@@ -321,6 +325,9 @@ impl SettingsField {
             }
             SettingsField::ImageGenModel => {
                 "image gen model (Enter to pick, Backspace clears; blank = disabled)"
+            }
+            SettingsField::VideoGenModel => {
+                "video gen model (Enter to pick, Backspace clears; blank = disabled)"
             }
         }
     }
@@ -385,6 +392,10 @@ pub const SETTINGS_GROUPS: &[SettingsGroup] = &[
     SettingsGroup {
         name: "Image Generation",
         fields: &[SettingsField::ImageGenModel],
+    },
+    SettingsGroup {
+        name: "Video Generation",
+        fields: &[SettingsField::VideoGenModel],
     },
 ];
 
@@ -528,6 +539,44 @@ pub struct ScriptMeta {
     pub modified: String,
 }
 
+/// Maximum number of concurrent interactive chat responses.
+pub(crate) const MAX_CHAT_TASKS: usize = 10;
+
+pub(crate) type ChatTaskId = u64;
+
+/// One event routed from a provider stream to its originating chat task.
+pub(crate) struct ChatEvent {
+    pub task_id: ChatTaskId,
+    pub event: StreamEvent,
+}
+
+/// State owned by one in-flight chat response. Provider/toolbox values stay in
+/// the spawned task; this state is the UI/database-facing projection.
+pub(crate) struct ChatTask {
+    pub id: ChatTaskId,
+    pub session_id: String,
+    pub session_title: String,
+    pub space_id: String,
+    pub model: String,
+    pub incognito: bool,
+    pub buffer: String,
+    pub thinking: String,
+    pub tool_status: Option<String>,
+    pub usage: Option<Usage>,
+    pub started: std::time::Instant,
+    pub thinking_idx: usize,
+    pub spinner_color: Color,
+    pub abort: tokio::task::AbortHandle,
+}
+
+/// A completed chat task waiting for the user to open its session.
+pub(crate) struct ChatNotification {
+    pub session_id: String,
+    pub title: String,
+    pub text: String,
+    pub success: bool,
+}
+
 /// A background event surfaced to the event loop. `None` means that source's
 /// channel closed (task ended).
 /// One file's embedding result: (space id, file id, (seq, vector) pairs or error).
@@ -566,7 +615,7 @@ impl Drop for AbortOnDrop {
 }
 
 pub enum AppEvent {
-    Stream(Option<StreamEvent>),
+    Stream(Option<(ChatTaskId, StreamEvent)>),
     Models(Option<ModelsResult>),
     /// A generated session topic: (session id, title, slug).
     Title(Option<(String, String, String)>),
@@ -633,6 +682,8 @@ pub struct App {
     pub embedding_model: String,
     /// Model used for AI image generation (empty = disabled).
     pub image_gen_model: String,
+    /// Model used for AI video generation (empty = disabled).
+    pub video_gen_model: String,
     /// Base URL of a SearXNG instance for the web-search tool, or empty to
     /// disable it. Configured in-app (Ctrl+O settings), not a config file.
     pub searxng_url: String,
@@ -761,12 +812,6 @@ pub struct App {
     /// The composer's inner (inside-border) rect from the last render, so mouse
     /// clicks can be mapped to cursor positions.
     pub input_inner: Rect,
-    /// In-progress assistant response while a completion streams.
-    pub streaming: Option<String>,
-    /// In-progress reasoning/thinking tokens for the current stream (transient).
-    pub(crate) thinking_text: String,
-    /// Label for a tool currently running mid-stream (e.g. "Searching the web…").
-    pub tool_status: Option<String>,
     /// Whether tool-call blocks show full arguments/results (Ctrl+T).
     pub show_tool_detail: bool,
     /// Wrapped-line cache for the transcript, so redraws don't re-render
@@ -778,18 +823,17 @@ pub struct App {
     /// External edit queued for the event loop, which owns terminal
     /// suspension and knows which app callback should consume the saved file.
     pub pending_editor: Option<PendingEditor>,
-    pub(crate) stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
-    /// Abort handle for the in-flight chat task (Esc stops the response).
-    pub(crate) stream_abort: Option<tokio::task::AbortHandle>,
-    /// Origin of the in-flight stream as (session id, title) — the response
-    /// always lands there, even if the user switches away mid-stream.
-    pub(crate) stream_session: Option<(String, String)>,
+    /// Central event channel for all in-flight chat tasks.
+    pub(crate) chat_event_tx: mpsc::UnboundedSender<ChatEvent>,
+    pub(crate) chat_event_rx: mpsc::UnboundedReceiver<ChatEvent>,
+    pub(crate) chat_tasks: HashMap<ChatTaskId, ChatTask>,
+    pub(crate) next_chat_task_id: ChatTaskId,
+    /// Completed task notifications, kept independently of the one-line status.
+    pub(crate) notifications: VecDeque<ChatNotification>,
+    /// Screen rectangles for the currently rendered notification rows.
+    pub(crate) notification_areas: Vec<(Rect, usize)>,
     /// Sessions holding a response that finished while the user was elsewhere.
     pub(crate) unread: std::collections::HashSet<String>,
-    /// Wall-clock start of the current stream, for TPS.
-    pub(crate) stream_started: Option<std::time::Instant>,
-    /// Exact usage reported for the in-flight stream, if any.
-    pub(crate) stream_usage: Option<Usage>,
     /// Exact conversation token total from the last completed response.
     pub(crate) context_total: Option<u64>,
 
@@ -919,7 +963,14 @@ impl App {
         let default_model_id = |f: fn(&OpenRouter) -> &'static str, fallback: &'static str| {
             provider
                 .as_ref()
-                .map(|p| format!("{}{}", p.backend_tag().key_prefix(), f(p)))
+                .map(|p| {
+                    let model = f(p);
+                    if model.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{}{}", p.backend_tag().key_prefix(), model)
+                    }
+                })
                 .unwrap_or_else(|| fallback.to_string())
         };
         let utility_model = default_model_id(
@@ -938,12 +989,13 @@ impl App {
             OpenRouter::default_embedding_model,
             "openai/text-embedding-3-small",
         );
-        let image_gen_model = default_model_id(
-            OpenRouter::default_image_gen_model,
-            "black-forest-labs/flux-dev",
-        );
+        let image_gen_model =
+            default_model_id(OpenRouter::default_image_gen_model, "openai/gpt-image-2");
+        let video_gen_model =
+            default_model_id(OpenRouter::default_video_gen_model, "google/veo-3.1");
         let skills_dir = crate::skills::skills_dir(&space.root);
         let skills = crate::skills::load_skills(&skills_dir);
+        let (chat_event_tx, chat_event_rx) = mpsc::unbounded_channel();
         // Built with search disabled; `load_settings()` below reads the
         // persisted config (if any) and rebuilds this via `refresh_toolbox`.
         let toolbox = std::sync::Arc::new(crate::tools::ToolBox::new(
@@ -1038,6 +1090,7 @@ impl App {
             local_ocr_model: "glm-ocr".to_string(),
             embedding_model,
             image_gen_model,
+            video_gen_model,
             base_system_prompt: config::load_system_prompt().unwrap_or_default(),
             verbosity: "concise".to_string(),
             memory_rx: None,
@@ -1053,19 +1106,17 @@ impl App {
             input: new_textarea(),
             clipboard: arboard::Clipboard::new().ok(),
             input_inner: Rect::default(),
-            streaming: None,
-            thinking_text: String::new(),
-            tool_status: None,
             show_tool_detail: false,
             history_cache: Default::default(),
             session_caches: std::collections::HashMap::new(),
             pending_editor: None,
-            stream_rx: None,
-            stream_abort: None,
-            stream_session: None,
+            chat_event_tx,
+            chat_event_rx,
+            chat_tasks: HashMap::new(),
+            next_chat_task_id: 0,
+            notifications: VecDeque::new(),
+            notification_areas: Vec::new(),
             unread: std::collections::HashSet::new(),
-            stream_started: None,
-            stream_usage: None,
             context_total: None,
             settings: Settings::default(),
             spinner_frame: 0,
@@ -1162,7 +1213,21 @@ impl App {
                 "ocr_engine" if OCR_ENGINES.contains(&v.as_str()) => self.ocr_engine = v,
                 "local_ocr_model" => self.local_ocr_model = v,
                 "embedding_model" => self.embedding_model = v,
-                "image_gen_model" => self.image_gen_model = v,
+                // Migrate the old defaults: flux-dev is no longer in
+                // OpenRouter's image catalog, and Veo Lite is the lower
+                // quality tier.
+                "image_gen_model" => {
+                    self.image_gen_model = match v.as_str() {
+                        "black-forest-labs/flux-dev" => "openai/gpt-image-2".to_string(),
+                        _ => v,
+                    }
+                }
+                "video_gen_model" => {
+                    self.video_gen_model = match v.as_str() {
+                        "google/veo-3.1-lite" => "google/veo-3.1".to_string(),
+                        _ => v,
+                    }
+                }
                 "compact_threshold" => {
                     if let Ok(t) = v.parse() {
                         self.settings.compact_threshold = t;
@@ -1181,8 +1246,8 @@ impl App {
     }
 
     /// Rebuild the toolbox from the current `searxng_url`, so a settings
-    /// change takes effect immediately (no restart). Web search works either
-    /// way (SearXNG if configured, DuckDuckGo scraping otherwise).
+    /// change takes effect immediately (no restart). Web search tries the
+    /// configured backends first and has keyless HTML fallbacks.
     pub(crate) fn refresh_toolbox(&mut self) {
         let url =
             (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
@@ -1203,18 +1268,25 @@ impl App {
                     .then(|| self.backends.resolve(self.embedding_model.trim()))
                     .flatten(),
             }),
-            // App tools only exist while the server runs — a write_file whose
+            // App tools only exist while the server runs — an app_modify write whose
             // link can never load is worse than no tool. Disabled in incognito.
-            self.app_server.as_ref().filter(|_| !self.incognito).map(|s| crate::tools::AppsCtx {
-                dir: self.space.apps_dir(&self.active_space.name),
-                server_port: s.port(),
-                registry: s.registry().clone(),
-                space_name: self.active_space.name.clone(),
-                space_id: self.active_space.id.clone(),
-                space_db_path: self.space.db_path(),
-                files_dir: self.space.files_dir(&self.active_space.name),
-                session_id: self.session.as_ref().map(|s| s.id.clone()).unwrap_or_default(),
-            }),
+            self.app_server
+                .as_ref()
+                .filter(|_| !self.incognito)
+                .map(|s| crate::tools::AppsCtx {
+                    dir: self.space.apps_dir(&self.active_space.name),
+                    server_port: s.port(),
+                    registry: s.registry().clone(),
+                    space_name: self.active_space.name.clone(),
+                    space_id: self.active_space.id.clone(),
+                    space_db_path: self.space.db_path(),
+                    files_dir: self.space.files_dir(&self.active_space.name),
+                    session_id: self
+                        .session
+                        .as_ref()
+                        .map(|s| s.id.clone())
+                        .unwrap_or_default(),
+                }),
         );
         if self.is_research_session() {
             toolbox = toolbox.with_research_session(self.session.as_ref().unwrap().id.clone());
@@ -1222,8 +1294,13 @@ impl App {
         toolbox.image_gen_backend = (!self.image_gen_model.trim().is_empty())
             .then(|| self.backends.resolve(self.image_gen_model.trim()))
             .flatten();
+        toolbox.video_gen_backend = (!self.video_gen_model.trim().is_empty())
+            .then(|| self.backends.resolve(self.video_gen_model.trim()))
+            .flatten();
         toolbox.space_files_dir = self.space.files_dir(&self.active_space.name);
+        toolbox.space_apps_dir = self.space.apps_dir(&self.active_space.name);
         toolbox.space_scripts_dir = self.space.scripts_dir(&self.active_space.name);
+        toolbox.supports_images = self.current_model_supports_images();
         toolbox.session_id = self
             .session
             .as_ref()
@@ -1259,18 +1336,33 @@ impl App {
     }
 
     pub fn is_streaming(&self) -> bool {
-        self.streaming.is_some()
+        !self.chat_tasks.is_empty()
+    }
+
+    pub(crate) fn chat_task_count(&self) -> usize {
+        self.chat_tasks.len()
+    }
+
+    pub(crate) fn chat_task_for_session(&self, session_id: &str) -> Option<&ChatTask> {
+        self.chat_tasks
+            .values()
+            .find(|task| task.session_id == session_id)
+    }
+
+    pub(crate) fn active_chat_task(&self) -> Option<&ChatTask> {
+        self.session
+            .as_ref()
+            .and_then(|session| self.chat_task_for_session(&session.id))
+    }
+
+    pub(crate) fn active_streaming_text(&self) -> Option<&str> {
+        self.active_chat_task().map(|task| task.buffer.as_str())
     }
 
     /// True when the active session is the one the in-flight stream belongs
     /// to (untagged streams count as viewed — legacy/test paths).
     pub fn viewing_stream(&self) -> bool {
-        self.is_streaming()
-            && match (&self.stream_session, &self.session) {
-                (Some((id, _)), Some(s)) => *id == s.id,
-                (None, _) => true,
-                (Some(_), None) => false,
-            }
+        self.active_chat_task().is_some()
     }
 
     /// The empty start screen (banner + greeting + clock) shows when there's no
@@ -1291,17 +1383,22 @@ impl App {
 
     /// Randomly-chosen spinner colour for the current response.
     pub fn spinner_color(&self) -> Color {
-        self.spinner_color
+        self.active_chat_task()
+            .map(|task| task.spinner_color)
+            .unwrap_or(self.spinner_color)
     }
 
     /// Present-tense phrase for the in-progress response ("Vibing").
     pub fn thinking_phrase(&self) -> &'static str {
-        THINKING[self.thinking_idx].0
+        self.active_chat_task()
+            .map(|task| THINKING[task.thinking_idx].0)
+            .unwrap_or(THINKING[self.thinking_idx].0)
     }
 
     /// Reasoning tokens accumulated so far this stream, if any.
     pub fn thinking_text(&self) -> Option<&str> {
-        (!self.thinking_text.is_empty()).then_some(self.thinking_text.as_str())
+        self.active_chat_task()
+            .and_then(|task| (!task.thinking.is_empty()).then_some(task.thinking.as_str()))
     }
 
     // --- async event sources (drained by the event loop) ---
@@ -1310,12 +1407,9 @@ impl App {
     /// Pends on an idle source, so it only resolves when something happens.
     pub async fn next_event(&mut self) -> AppEvent {
         tokio::select! {
-            ev = async {
-                match self.stream_rx.as_mut() {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => AppEvent::Stream(ev),
+            ev = self.chat_event_rx.recv() => {
+                AppEvent::Stream(ev.map(|event| (event.task_id, event.event)))
+            },
             res = async {
                 match self.models_rx.as_mut() {
                     Some(rx) => rx.recv().await,
@@ -1485,12 +1579,15 @@ impl App {
             "config" => self.open_settings(),
             "copy" => self.open_copy_menu(),
             "skills" => self.open_skills_popup(),
+
             "files" => {
                 if self.incognito {
                     self.status = "not available in incognito mode".to_string();
                 } else {
                     let tab = match token {
-                        t if t == "image" || t == "images" || t == "img" || t == "pictures" => FilesTab::Images,
+                        t if t == "image" || t == "images" || t == "img" || t == "pictures" => {
+                            FilesTab::Images
+                        }
                         t if t == "script" || t == "scripts" => FilesTab::Scripts,
                         _ => FilesTab::Files,
                     };
@@ -1517,7 +1614,9 @@ impl App {
             "incognito" => self.toggle_incognito()?,
             "watch" => {
                 if !self.is_research_session() {
-                    self.status = "watch is only available in research sessions — use /research first".to_string();
+                    self.status =
+                        "watch is only available in research sessions — use /research first"
+                            .to_string();
                 } else {
                     let arg = cmd[token.len()..].trim();
                     if arg.is_empty() {
@@ -1561,7 +1660,8 @@ impl App {
             | SettingsField::ResearchModel
             | SettingsField::EscalationModel
             | SettingsField::OcrEngine
-            | SettingsField::ImageGenModel => None,
+            | SettingsField::ImageGenModel
+            | SettingsField::VideoGenModel => None,
             SettingsField::Temperature => Some(0),
             SettingsField::TopP => Some(1),
             SettingsField::MaxTokens => Some(2),
@@ -1581,6 +1681,38 @@ impl App {
     }
 }
 
+impl App {
+    /// Abort every interactive chat task before the TUI exits. Chat streams are
+    /// intentionally not persisted or resumed across process restarts.
+    pub(crate) fn cancel_chat_tasks(&mut self) {
+        for task in self.chat_tasks.values() {
+            task.abort.abort();
+        }
+        self.chat_tasks.clear();
+    }
+}
+
+/// Best-effort transient Linux desktop notification. The TUI notification
+/// remains the actionable one because `notify-send` cannot route a click back
+/// into this running process without a long-lived D-Bus action listener.
+pub(crate) fn send_system_notification(title: &str, body: &str) {
+    #[cfg(all(target_os = "linux", not(test)))]
+    {
+        let _ = std::process::Command::new("notify-send")
+            .args([
+                "--app-name=nexus-chat",
+                "--urgency=normal",
+                "--expire-time=5000",
+                "--hint=int:transient:1",
+                title,
+                body,
+            ])
+            .spawn();
+    }
+    #[cfg(any(not(target_os = "linux"), test))]
+    let _ = (title, body);
+}
+
 /// The one-line transcript summary for a tool-call block: the tool's name
 /// plus the argument (and result shape) a reader actually cares about.
 pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String {
@@ -1591,16 +1723,46 @@ pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String 
             .unwrap_or_default()
             .to_string()
     };
+    let f_or = |first: &str, second: &str| {
+        let value = f(first);
+        if value.is_empty() { f(second) } else { value }
+    };
     match name {
         "skill" => format!("skill {}", f("name")),
+        "skill_admin" => format!("skill_admin {} → {}", f("action"), first_line(result)),
+        "search" => {
+            let failed = result.starts_with("no results") || result.contains("failed");
+            let hits = if failed { "no hits" } else { "hits" };
+            format!("search/{} \"{}\" → {hits}", f("mode"), f("query"))
+        }
+        "research_lookup" => format!("research_lookup/{} \"{}\"", f("scope"), f("query")),
+        "fetch_url" => format!("fetch_url {} → {}", f("url"), first_line(result)),
+        "files" => format!("files/{} {} → {}", f("action"), f_or("name", "query"), first_line(result)),
+        "app_inspect" => format!("app_inspect/{} {}/{}", f("action"), f("app"), f_or("path", "pattern")),
+        "app_modify" => format!("app_modify/{} {}/{}", f("action"), f("app"), f("path")),
+        "app_assets" => format!("app_assets/{} {}", f("action"), f("app")),
+        "script_files" => format!("script_files/{} {}", f("action"), f("path")),
+        "video_transform" => format!("video_transform/{} {}", f("action"), f("video_id")),
+        "video_references" => format!("video_references/{} {}", f("action"), f("name")),
         "install_skill" => format!("install_skill {} → {}", f("source"), first_line(result)),
-        "run_script" => format!("run_script {}/{}", f("skill"), f("script")),
+        "create_skill" => format!("create_skill {} → {}", f("name"), first_line(result)),
+        "run_script" => {
+            let path = f_or("path", "script");
+            if v.get("space").and_then(|x| x.as_bool()).unwrap_or(false) {
+                format!("run_script space/{path}")
+            } else {
+                format!("run_script {}/{}", f("skill"), path)
+            }
+        }
         "run_python" => format!("run_python ({} lines)", f("code").lines().count().max(1)),
         "grep_app" => {
             let hits = if result.starts_with("no matches") {
                 "no hits".to_string()
             } else {
-                format!("{} hits", result.lines().count())
+                format!(
+                    "{} files",
+                    result.lines().filter(|line| !line.starts_with('…')).count()
+                )
             };
             format!("grep_app {} \"{}\" → {hits}", f("app"), f("pattern"))
         }
@@ -1634,6 +1796,7 @@ pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String 
         }
         "read_file" => format!("read_file {} → {}", f("name"), first_line(result)),
         "read_app_file" => format!("read_app_file {}/{}", f("app"), f("path")),
+        "diff_app" => format!("diff_app {}/{}", f("app"), f("path")),
         "write_file" => {
             format!(
                 "write_file {}/{} ({} bytes)",
@@ -1643,6 +1806,13 @@ pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String 
             )
         }
         "edit_file" => format!("edit_file {}/{}", f("app"), f("path")),
+        "generate_video" => format!("generate_video \"{}\"", f("prompt")),
+        "edit_video" => format!("edit_video {} {}", f("video_id"), f("lighting")),
+        "extract_frame" => format!("extract_frame {} @ {:.1}s", f("video_id"), f("time_sec")),
+        "stitch_videos" => format!("stitch_videos {}", f("video_ids")),
+        "save_reference" => format!("save_reference {}", f("name")),
+        "list_references" => "list_references".to_string(),
+        "delete_reference" => format!("delete_reference {}", f("name")),
         "generate_image" => format!("generate_image \"{}\"", f("prompt")),
         _ => {
             let mut a: String = args.chars().take(60).collect();

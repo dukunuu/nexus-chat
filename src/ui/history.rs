@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use image::GenericImageView;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use image::GenericImageView;
+use std::collections::HashMap;
 
 use super::{dim, dot, line_text};
 use crate::app::App;
@@ -139,14 +139,23 @@ fn sync_cache(app: &mut App, width: usize) {
                 }
             }
             // New session or stale cache — full reset.
-            *c = HistoryCache { key, ..Default::default() };
+            *c = HistoryCache {
+                key,
+                ..Default::default()
+            };
         } else if app.messages.len() < c.msg_count || c.key.1 != key.1 || c.key.6 != key.6 {
             // Width or theme changed — full reset (drops image cache too).
-            *c = HistoryCache { key, ..Default::default() };
+            *c = HistoryCache {
+                key,
+                ..Default::default()
+            };
         } else {
             // Only display flags changed — keep image cache, re-wrap messages.
             let ic = std::mem::take(&mut c.image_cache);
-            *c = HistoryCache { key, ..Default::default() };
+            *c = HistoryCache {
+                key,
+                ..Default::default()
+            };
             c.image_cache = ic;
         }
     }
@@ -156,8 +165,13 @@ fn sync_cache(app: &mut App, width: usize) {
         if m.role == "user" {
             let images_dir = app.space.files_dir(&app.active_space.name);
             render_markdown_images(
-                &mut c.lines, &m.content, width, &theme, &images_dir,
-                &mut c.image_at_line, &mut c.image_cache,
+                &mut c.lines,
+                &m.content,
+                width,
+                &theme,
+                &images_dir,
+                &mut c.image_at_line,
+                &mut c.image_cache,
             );
             push_user(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_stage" {
@@ -180,8 +194,13 @@ fn sync_cache(app: &mut App, width: usize) {
         } else {
             let images_dir = app.space.files_dir(&app.active_space.name);
             render_markdown_images(
-                &mut c.lines, &m.content, width, &theme, &images_dir,
-                &mut c.image_at_line, &mut c.image_cache,
+                &mut c.lines,
+                &m.content,
+                width,
+                &theme,
+                &images_dir,
+                &mut c.image_at_line,
+                &mut c.image_cache,
             );
             push_assistant_stored(
                 &mut c.lines,
@@ -464,7 +483,11 @@ fn push_session_link(
         Some((sid, rest)) => (sid.to_string(), rest.trim().to_string()),
         None => (String::new(), content.to_string()),
     };
-    let arrow = if label.starts_with("🔗") { "→" } else { "↩" };
+    let arrow = if label.starts_with("🔗") {
+        "→"
+    } else {
+        "↩"
+    };
     let color = theme.accent;
     let dim = Style::default().fg(theme.fg_dim);
 
@@ -523,7 +546,7 @@ fn push_assistant_streaming(
         }
     }
 
-    let buf = app.streaming.as_deref().unwrap_or("");
+    let buf = app.active_streaming_text().unwrap_or("");
     let mut rendered = crate::markdown::render(buf, width);
     rendered.lines = crate::citations::style_citations(rendered.lines, app.theme.accent);
     rendered.lines = crate::citations::style_confidence_tags(rendered.lines);
@@ -567,10 +590,16 @@ fn render_markdown_images(
                 let path = images_dir.join(file);
                 let path_str = path.to_string_lossy().to_string();
                 let key = (path_str.clone(), width);
-                let half = image_cache.entry(key).or_insert_with(|| {
-                    image_to_halfblock_lines(&path_str, width)
-                });
-                if half.len() <= 1 && half.first().map(|l| l.to_string()).unwrap_or_default().contains("[image]") {
+                let half = image_cache
+                    .entry(key)
+                    .or_insert_with(|| image_to_halfblock_lines(&path_str, width));
+                if half.len() <= 1
+                    && half
+                        .first()
+                        .map(|l| l.to_string())
+                        .unwrap_or_default()
+                        .contains("[image]")
+                {
                     out.push(Line::from(dim(format!("🖼 {_alt}"), theme)));
                     image_at_line.push(Some(path_str));
                 } else {
@@ -621,7 +650,11 @@ fn image_to_halfblock_lines(path: &str, max_width: usize) -> Vec<Line<'static>> 
     }
     let pixel_w = cell_w;
     let pixel_h = (cell_h * 2).max(2);
-    let resized = img.resize_exact(pixel_w as u32, pixel_h as u32, image::imageops::FilterType::Lanczos3);
+    let resized = img.resize_exact(
+        pixel_w as u32,
+        pixel_h as u32,
+        image::imageops::FilterType::Lanczos3,
+    );
     let mut lines: Vec<Line<'static>> = Vec::new();
     for y in (0..pixel_h).step_by(2) {
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(pixel_w);
@@ -666,7 +699,6 @@ mod tests {
 
     fn msg(role: &str, content: &str) -> Message {
         Message {
-            id: String::new(),
             role: role.into(),
             content: content.into(),
             model: None,

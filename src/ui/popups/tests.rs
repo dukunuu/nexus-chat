@@ -1,7 +1,7 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-use crate::app::{App, CopyOption, SettingsField, SettingsRow};
+use crate::app::{App, ChatNotification, CopyOption, SettingsField, SettingsRow};
 use crate::db::{Db, Message};
 use crate::space::Space;
 
@@ -55,7 +55,6 @@ fn hidden_hints_do_not_show_in_popup_titles() {
 fn research_live_popup_shows_agent_lifecycle_and_activity() {
     let mut app = test_app();
     let stage = |content: &str| Message {
-        id: String::new(),
         role: "research_stage".into(),
         content: content.into(),
         model: None,
@@ -91,4 +90,24 @@ fn settings_popup_renders_selected_field_detail() {
     let screen = render_to_string(100, 30, |f| super::settings::render(f, &app));
 
     assert!(screen.contains("model · TPS footer"), "{screen}");
+}
+
+#[test]
+fn completed_chat_notification_is_rendered_as_a_click_target() {
+    let mut app = test_app();
+    let session = app
+        .db
+        .create_session("background chat", "a/one", &app.active_space.id, "chat")
+        .unwrap();
+    app.notifications.push_back(ChatNotification {
+        session_id: session.id,
+        title: "background chat".into(),
+        text: "response complete".into(),
+        success: true,
+    });
+
+    let screen = render_to_string(100, 30, |f| crate::ui::render(f, &mut app));
+
+    assert!(screen.contains("background chat"), "{screen}");
+    assert_eq!(app.notification_areas.len(), 1);
 }

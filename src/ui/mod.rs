@@ -35,6 +35,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if app.popup == Popup::None {
         render_command_popup(f, app, chunks[1]);
         render_at_popup(f, app, chunks[1]);
+        render_notifications(f, app, chunks[0]);
+    } else {
+        app.notification_areas.clear();
     }
 
     match app.popup {
@@ -79,8 +82,12 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
         String::new()
     } else if app.viewing_stream() {
         " …working (Esc to stop) ".to_string()
-    } else if let Some((_, title)) = app.stream_session.as_ref().filter(|_| app.is_streaming()) {
-        format!(" ⟳ streaming in: {title} ")
+    } else if app.is_streaming() {
+        format!(
+            " ⟳ {} chat{} running ",
+            app.chat_task_count(),
+            if app.chat_task_count() == 1 { "" } else { "s" }
+        )
     } else if let Some((_, topic)) = app
         .research_running
         .as_ref()
@@ -184,18 +191,35 @@ fn render_at_popup(f: &mut Frame, app: &App, input_area: Rect) {
     let w = input_area.width.min(60);
     let x = input_area.x;
     let y = input_area.y.saturating_sub(h);
-    let area = Rect { x, y, width: w, height: h };
+    let area = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
 
-    let name_w = matches.iter().map(|f| f.name.chars().count()).max().unwrap_or(0) + 1;
-    let items: Vec<ListItem> = matches.iter().take(10).map(|f| {
-        ListItem::new(Line::from(vec![
-            Span::styled(
-                format!("{:<name_w$}", f.name),
-                Style::default().fg(app.theme.fg),
-            ),
-            Span::styled(format!("  {}  {}", crate::app::human_size(f.size), f.status), Style::default().fg(app.theme.fg_dim)),
-        ]))
-    }).collect();
+    let name_w = matches
+        .iter()
+        .map(|f| f.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let items: Vec<ListItem> = matches
+        .iter()
+        .take(10)
+        .map(|f| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:<name_w$}", f.name),
+                    Style::default().fg(app.theme.fg),
+                ),
+                Span::styled(
+                    format!("  {}  {}", crate::app::human_size(f.size), f.status),
+                    Style::default().fg(app.theme.fg_dim),
+                ),
+            ]))
+        })
+        .collect();
 
     let block = Block::default().title(Line::from(Span::styled(
         "files (Tab insert · Esc cancel)",
@@ -272,12 +296,14 @@ fn context_label(app: &App) -> Option<String> {
     Some(format!("{pct:.0}% {}/{}", humanize(used), humanize(limit)))
 }
 
-/// Compact token counts: 940, 1.2k, 128k.
+/// Compact token counts: 940, 1.2k, 128k, 1.0m.
 fn humanize(n: u64) -> String {
     if n < 1000 {
         n.to_string()
-    } else {
+    } else if n < 1_000_000 {
         format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        format!("{:.1}m", n as f64 / 1_000_000.0)
     }
 }
 
@@ -319,6 +345,47 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
         None => format!("  |  {}", app.status),
     };
     f.render_widget(Paragraph::new(tail).style(style), cols[2]);
+}
+
+/// Persistent, direct-click targets for completed chat tasks. The queue keeps
+/// every completion; only the newest five are painted to avoid covering a
+/// small terminal.
+fn render_notifications(f: &mut Frame, app: &mut App, area: Rect) {
+    app.notification_areas.clear();
+    let rows = app.notifications.len().min(5) as u16;
+    if rows == 0 || area.width == 0 || area.height == 0 {
+        return;
+    }
+    let width = area.width.min(64);
+    let x = area.x + area.width.saturating_sub(width);
+    let start = app.notifications.len().saturating_sub(rows as usize);
+    let y = area.y + area.height.saturating_sub(rows);
+    for (offset, index) in (start..app.notifications.len()).enumerate() {
+        let rect = Rect {
+            x,
+            y: y + offset as u16,
+            width,
+            height: 1,
+        };
+        let notification = &app.notifications[index];
+        let glyph = if notification.success { "✓ " } else { "× " };
+        let color = if notification.success {
+            app.theme.success
+        } else {
+            app.theme.error
+        };
+        let label = format!("{glyph}{} — {}", notification.title, notification.text);
+        let label: String = label.chars().take(width as usize).collect();
+        f.render_widget(Clear, rect);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                label,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))),
+            rect,
+        );
+        app.notification_areas.push((rect, index));
+    }
 }
 
 /// Short absolute timestamp from an rfc3339 string (falls back to the raw text).

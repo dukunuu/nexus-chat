@@ -26,11 +26,15 @@ impl App {
     }
 
     pub(super) fn send_message(&mut self, text: String) -> Result<()> {
-        if self.is_streaming() {
-            self.status = match &self.stream_session {
-                Some((_, title)) => format!("wait — response still streaming in: {title}"),
-                None => "wait for the current response to finish".to_string(),
-            };
+        if let Some(session) = self.session.as_ref()
+            && let Some(task) = self.chat_task_for_session(&session.id)
+        {
+            self.status = format!("wait — response still streaming in: {}", task.session_title);
+            self.set_input(&text);
+            return Ok(());
+        }
+        if self.chat_task_count() >= super::MAX_CHAT_TASKS {
+            self.status = format!("chat task limit reached ({})", super::MAX_CHAT_TASKS);
             self.set_input(&text);
             return Ok(());
         }
@@ -63,9 +67,9 @@ impl App {
                     research_parent_id: None,
                 }
             } else {
-                let mut s = self
-                    .db
-                    .create_session(&title, &model, &self.active_space.id, "chat")?;
+                let mut s =
+                    self.db
+                        .create_session(&title, &model, &self.active_space.id, "chat")?;
                 // Carry a pre-session `/web` toggle onto the session it creates.
                 if self.web_mode {
                     s.web_mode = true;
@@ -77,13 +81,10 @@ impl App {
         }
         let session_id = self.session.as_ref().unwrap().id.clone();
 
-        let message_id = if self.incognito {
-            uuid::Uuid::new_v4().to_string()
-        } else {
-            self.db.add_user_message(&session_id, &text)?
-        };
+        if !self.incognito {
+            self.db.add_user_message(&session_id, &text)?;
+        }
         self.messages.push(Message {
-            id: message_id,
             role: "user".to_string(),
             content: text,
             model: None,
@@ -100,8 +101,6 @@ impl App {
         }
         self.start_stream()
     }
-
-
 
     /// The exact message list a completion request will carry: system prompt,
     /// compaction digest, forced skill, then the effective conversation tail.
@@ -203,8 +202,7 @@ impl App {
         history
     }
 
-    /// Build history and fire the streaming request — the shared tail of
-    /// `send_message` and `resume_deferred_send`.
+    /// Build history and fire one independently-routed streaming request.
     pub(super) fn start_stream(&mut self) -> Result<()> {
         let Some(model) = self.current_model.clone() else {
             return Ok(());
@@ -229,62 +227,150 @@ impl App {
             self.toolbox.clone(),
             crate::provider::openrouter::MAX_TOOL_ITERS,
         );
-        self.stream_session = self
-            .session
-            .as_ref()
-            .map(|s| (s.id.clone(), s.title.clone()));
-        self.stream_rx = Some(rx);
-        self.stream_abort = Some(abort);
-        self.streaming = Some(String::new());
-        self.thinking_text.clear();
-        self.tool_status = None;
-        self.stream_usage = None;
-        self.stream_started = Some(std::time::Instant::now());
+        let Some(session) = self.session.as_ref().cloned() else {
+            return Ok(());
+        };
+        let (thinking_idx, spinner_color) = pick_flavor();
+        let task_id = self.next_chat_task_id;
+        self.next_chat_task_id = self.next_chat_task_id.wrapping_add(1);
+        let tx = self.chat_event_tx.clone();
+        tokio::spawn(async move {
+            let mut rx = rx;
+            while let Some(event) = rx.recv().await {
+                if tx.send(super::ChatEvent { task_id, event }).is_err() {
+                    break;
+                }
+            }
+            let _ = tx.send(super::ChatEvent {
+                task_id,
+                event: StreamEvent::Done,
+            });
+        });
+        self.chat_tasks.insert(
+            task_id,
+            super::ChatTask {
+                id: task_id,
+                session_id: session.id,
+                session_title: session.title,
+                space_id: self.active_space.id.clone(),
+                model,
+                incognito: self.incognito,
+                buffer: String::new(),
+                thinking: String::new(),
+                tool_status: None,
+                usage: None,
+                started: std::time::Instant::now(),
+                thinking_idx,
+                spinner_color,
+                abort,
+            },
+        );
         self.spinner_frame = 0;
-        let (idx, color) = pick_flavor();
-        self.thinking_idx = idx;
-        self.spinner_color = color;
+        self.thinking_idx = thinking_idx;
+        self.spinner_color = spinner_color;
         self.status.clear();
         self.scroll = 0;
         self.prev_total = 0;
         Ok(())
     }
 
+    /// Compatibility entry point for tests and synchronous callers. Runtime
+    /// events use `on_chat_event`, which always includes the task id.
+    #[cfg(test)]
     pub fn on_stream_event(&mut self, ev: StreamEvent) -> Result<()> {
+        let task_id = self
+            .active_chat_task()
+            .map(|task| task.id)
+            .or_else(|| self.chat_tasks.keys().next().copied());
+        if let Some(task_id) = task_id {
+            return self.on_chat_event(task_id, ev);
+        }
+        if let StreamEvent::ToolCall {
+            name,
+            arguments,
+            result,
+        } = ev
+        {
+            let content = serde_json::json!({
+                "name": name,
+                "arguments": arguments,
+                "result": result,
+            })
+            .to_string();
+            if let Some(session) = self.session.as_ref()
+                && !self.incognito
+            {
+                let _ = self.db.add_tool_call_message(&session.id, &content);
+            }
+            self.messages.push(Message {
+                role: "tool_call".to_string(),
+                content,
+                model: None,
+                reasoning: None,
+                tokens: None,
+                secs: None,
+                phrase: None,
+                persona: None,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn on_chat_event(&mut self, task_id: super::ChatTaskId, ev: StreamEvent) -> Result<()> {
         match ev {
             StreamEvent::Token(t) => {
-                if let Some(buf) = self.streaming.as_mut() {
-                    buf.push_str(&t);
+                if let Some(task) = self.chat_tasks.get_mut(&task_id) {
+                    task.buffer.push_str(&t);
                 }
             }
-            StreamEvent::Reasoning(t) => self.thinking_text.push_str(&t),
-            StreamEvent::Usage(u) => self.stream_usage = Some(u),
-            StreamEvent::Status(s) => self.tool_status = Some(s),
+            StreamEvent::Reasoning(t) => {
+                if let Some(task) = self.chat_tasks.get_mut(&task_id) {
+                    task.thinking.push_str(&t);
+                }
+            }
+            StreamEvent::Usage(u) => {
+                if let Some(task) = self.chat_tasks.get_mut(&task_id) {
+                    task.usage = Some(u);
+                }
+            }
+            StreamEvent::Status(s) => {
+                if let Some(task) = self.chat_tasks.get_mut(&task_id) {
+                    task.tool_status = Some(s);
+                }
+            }
             StreamEvent::ToolCall {
                 name,
                 arguments,
                 result,
             } => {
-                if name == "install_skill" && result.starts_with("installed") {
-                    self.reload_skills(); // new skill shows in the system prompt next turn
+                if ((name == "skill_admin")
+                    || (name == "install_skill" && result.starts_with("installed"))
+                    || (name == "create_skill"
+                        && (result.starts_with("created") || result.starts_with("updated"))))
+                    && (result.starts_with("installed")
+                        || result.starts_with("created")
+                        || result.starts_with("updated"))
+                {
+                    self.reload_skills();
                 }
+                let Some(task) = self.chat_tasks.get(&task_id) else {
+                    return Ok(());
+                };
                 let content =
                     serde_json::json!({ "name": name, "arguments": arguments, "result": result })
                         .to_string();
-                // Persist to the stream's origin session (may not be active).
-                let target = self
-                    .stream_session
+                let target = task.session_id.clone();
+                let incognito = task.incognito;
+                let in_active_space = task.space_id == self.active_space.id;
+                let viewing = self
+                    .session
                     .as_ref()
-                    .map(|(id, _)| id.clone())
-                    .or_else(|| self.session.as_ref().map(|s| s.id.clone()));
-                if let Some(id) = &target {
-                    if !self.incognito {
-                        let _ = self.db.add_tool_call_message(id, &content);
-                    }
+                    .is_some_and(|session| session.id == target);
+                if !incognito {
+                    let _ = self.db.add_tool_call_message(&target, &content);
                 }
-                if self.viewing_stream() {
+                if viewing {
                     self.messages.push(Message {
-                        id: String::new(),
                         role: "tool_call".to_string(),
                         content,
                         model: None,
@@ -298,47 +384,18 @@ impl App {
                 // Generated images land on disk but aren't indexed until
                 // rescan_files picks them up. Without this, they'd be missing
                 // from files_cache and never OCR'd for descriptive naming.
-                if name == "generate_image" {
+                if in_active_space
+                    && (name == "generate_image"
+                        || name == "generate_video"
+                        || name == "video_transform"
+                        || matches!(name.as_str(), "edit_video" | "extract_frame" | "stitch_videos"))
+                {
                     self.rescan_files();
                 }
             }
-            StreamEvent::Done => self.finish_stream()?,
+            StreamEvent::Done => self.finish_chat_task(task_id, None)?,
             StreamEvent::Error(e) => {
-                // Capture the origin before `finish_stream` clears it. Save any
-                // partial answer first, then append the failure so transcript
-                // order matches what the user saw.
-                let target = self
-                    .stream_session
-                    .as_ref()
-                    .map(|(id, _)| id.clone())
-                    .or_else(|| self.session.as_ref().map(|s| s.id.clone()));
-                let viewing = self.viewing_stream();
-                let status = match (&self.stream_session, viewing) {
-                    (Some((_, title)), false) => format!("stream error in {title}: {e}"),
-                    _ => format!("stream error: {e}"),
-                };
-                self.finish_stream()?;
-                if let Some(id) = &target {
-                    if !self.incognito {
-                        self.db.add_error_message(id, &e)?;
-                    }
-                }
-                if viewing {
-                    self.messages.push(Message {
-                        id: String::new(),
-                        role: "error".to_string(),
-                        content: e,
-                        model: None,
-                        reasoning: None,
-                        tokens: None,
-                        secs: None,
-                        phrase: None,
-                        persona: None,
-                    });
-                } else if let Some(id) = target {
-                    self.unread.insert(id);
-                }
-                self.status = status;
+                self.finish_chat_task(task_id, Some(e))?;
             }
         }
         Ok(())
@@ -347,43 +404,59 @@ impl App {
     /// Esc while a response streams: abort the background chat task (kills any
     /// in-flight request and tool loop) and keep whatever text already arrived.
     pub fn stop_stream(&mut self) -> Result<()> {
-        if !self.is_streaming() {
+        let Some(task_id) = self.active_chat_task().map(|task| task.id) else {
             return Ok(());
+        };
+        if let Some(task) = self.chat_tasks.remove(&task_id) {
+            task.abort.abort();
+            self.finish_chat_task_state(task, None, true)?;
         }
-        if let Some(h) = self.stream_abort.take() {
-            h.abort();
-        }
-        self.finish_stream()?;
-        self.status = "response stopped".to_string();
         Ok(())
     }
 
-    /// Kill the in-flight stream and throw its partial text away — used when
-    /// the origin session is deleted (nothing left to save into).
-    pub(crate) fn discard_stream(&mut self) {
-        if let Some(h) = self.stream_abort.take() {
-            h.abort();
+    pub(crate) fn discard_chat_task(&mut self, session_id: &str) {
+        if let Some(task) = self
+            .chat_tasks
+            .iter()
+            .find(|(_, task)| task.session_id == session_id)
+            .map(|(id, _)| *id)
+            .and_then(|id| self.chat_tasks.remove(&id))
+        {
+            task.abort.abort();
         }
-        self.stream_rx = None;
-        self.streaming = None;
-        self.stream_session = None;
-        self.thinking_text.clear();
-        self.stream_usage = None;
-        self.stream_started = None;
-        self.tool_status = None;
     }
 
-    fn finish_stream(&mut self) -> Result<()> {
-        self.stream_rx = None;
-        self.stream_abort = None;
-        self.tool_status = None;
-        let origin = self.stream_session.take();
-        let started = self.stream_started.take();
-        let mut reasoning = std::mem::take(&mut self.thinking_text);
-        let Some(buf) = self.streaming.take() else {
+    fn finish_chat_task(
+        &mut self,
+        task_id: super::ChatTaskId,
+        error: Option<String>,
+    ) -> Result<()> {
+        let Some(task) = self.chat_tasks.remove(&task_id) else {
             return Ok(());
         };
-        if buf.is_empty() {
+        self.finish_chat_task_state(task, error, false)
+    }
+
+    fn finish_chat_task_state(
+        &mut self,
+        task: super::ChatTask,
+        error: Option<String>,
+        stopped: bool,
+    ) -> Result<()> {
+        let mut reasoning = task.thinking;
+        let (buf, inline) = split_inline_reasoning(&task.buffer);
+        if let Some(inline) = inline {
+            if !reasoning.is_empty() {
+                reasoning.push('\n');
+            }
+            reasoning.push_str(&inline);
+        }
+        if buf.is_empty() && error.is_none() {
+            self.status = if stopped {
+                "response stopped".to_string()
+            } else {
+                "response finished without text".to_string()
+            };
             return Ok(());
         }
         // Some reasoning models (routed without the separate `reasoning` delta
@@ -391,22 +464,13 @@ impl App {
         // itself. Pull that out so the stored/displayed/copied message is just
         // the actual answer, not the thinking — same treatment as the explicit
         // reasoning channel above.
-        let (buf, inline) = split_inline_reasoning(&buf);
-        if let Some(inline) = inline {
-            if !reasoning.is_empty() {
-                reasoning.push('\n');
-            }
-            reasoning.push_str(&inline);
-        }
-        // Did the stream finish in the session the user is looking at?
-        let viewing = match (&origin, &self.session) {
-            (Some((id, _)), Some(s)) => *id == s.id,
-            (None, _) => true,
-            (Some(_), None) => false,
-        };
-        let model = self.current_model.clone();
+        let viewing = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.id == task.session_id);
+        let model = Some(task.model.clone());
         // Prefer the provider's exact usage; fall back to a ~4-chars/token estimate.
-        let usage = self.stream_usage.take();
+        let usage = task.usage;
         let tokens = Some(match usage {
             Some(u) => u.completion_tokens as i64,
             None => buf.chars().count().div_ceil(4) as i64,
@@ -420,34 +484,25 @@ impl App {
             };
             self.context_total = Some(total);
         }
-        let secs = started.map(|s| s.elapsed().as_secs_f64());
+        let secs = Some(task.started.elapsed().as_secs_f64());
         let reasoning = (!reasoning.is_empty()).then_some(reasoning);
-        let phrase = Some(THINKING[self.thinking_idx].1.to_string());
+        let phrase = Some(THINKING[task.thinking_idx].1.to_string());
 
-        // The response always lands in its origin session.
-        let target = origin
-            .as_ref()
-            .map(|(id, _)| id.clone())
-            .or_else(|| self.session.as_ref().map(|s| s.id.clone()));
-        let mut msg_id = String::new();
-        if let Some(id) = &target {
-            if !self.incognito {
-                msg_id = self.db.add_assistant_message(
-                    id,
-                    &buf,
-                    model.as_deref(),
-                    reasoning.as_deref(),
-                    tokens,
-                    secs,
-                    phrase.as_deref(),
-                )?;
-            }
+        if !task.incognito && !buf.is_empty() {
+            self.db.add_assistant_message(
+                &task.session_id,
+                &buf,
+                model.as_deref(),
+                reasoning.as_deref(),
+                tokens,
+                secs,
+                phrase.as_deref(),
+            )?;
         }
-        if viewing {
+        if viewing && !buf.is_empty() {
             self.messages.push(Message {
-                id: msg_id,
                 role: "assistant".to_string(),
-                content: buf,
+                content: buf.clone(),
                 model,
                 reasoning,
                 tokens,
@@ -455,15 +510,73 @@ impl App {
                 phrase,
                 persona: None,
             });
-            // These read the *active* conversation, so they only make sense here.
-            if !self.incognito {
+            // These jobs still use active-session state, so only launch them
+            // when the task's origin is the session currently being viewed.
+            if !task.incognito {
                 self.maybe_generate_title();
                 self.maybe_extract_memory();
                 self.maybe_compact();
             }
-        } else if let Some((id, title)) = origin {
-            self.unread.insert(id);
-            self.status = format!("✓ response ready in: {title}");
+        }
+        if let Some(error) = error {
+            if !task.incognito {
+                self.db.add_error_message(&task.session_id, &error)?;
+            }
+            let msg = format!("stream error: {error}");
+            if viewing {
+                self.messages.push(Message {
+                    role: "error".to_string(),
+                    content: error.clone(),
+                    model: None,
+                    reasoning: None,
+                    tokens: None,
+                    secs: None,
+                    phrase: None,
+                    persona: None,
+                });
+            } else if !task.incognito {
+                self.unread.insert(task.session_id.clone());
+            }
+            self.status = if viewing {
+                msg.clone()
+            } else {
+                format!("stream error in {}: {error}", task.session_title)
+            };
+            if !viewing && !task.incognito {
+                super::send_system_notification(
+                    &format!("Chat failed: {}", task.session_title),
+                    &msg,
+                );
+            }
+            if !viewing && !task.incognito {
+                self.notifications.push_back(super::ChatNotification {
+                    session_id: task.session_id,
+                    title: task.session_title,
+                    text: msg,
+                    success: false,
+                });
+            }
+        } else if stopped {
+            self.status = "response stopped".to_string();
+        } else {
+            if !viewing && !task.incognito {
+                self.unread.insert(task.session_id.clone());
+                self.status = format!("✓ response ready in: {}", task.session_title);
+                super::send_system_notification(
+                    &format!("Chat ready: {}", task.session_title),
+                    "response complete",
+                );
+            } else if viewing {
+                self.status = "response complete".to_string();
+            }
+            if !viewing && !task.incognito {
+                self.notifications.push_back(super::ChatNotification {
+                    session_id: task.session_id,
+                    title: task.session_title,
+                    text: "response complete".to_string(),
+                    success: true,
+                });
+            }
         }
         Ok(())
     }
@@ -573,8 +686,8 @@ impl App {
         }
         if self.is_research_session() {
             parts.push(
-                "This session came from /research — prefer search_sources over web_search for \
-                 follow-ups; only use web_search on a miss."
+                "This session came from /research — prefer research_lookup with scope=session_sources over search with mode=web for \
+                 follow-ups; only use web search on a miss."
                     .to_string(),
             );
         }
@@ -598,7 +711,11 @@ impl App {
             self.status = "select text on a session link message, then press Ctrl+O".to_string();
             return;
         }
-        let Some(target) = msg.content.split_once('\n').map(|(s, _)| s.trim().to_string()) else {
+        let Some(target) = msg
+            .content
+            .split_once('\n')
+            .map(|(s, _)| s.trim().to_string())
+        else {
             self.status = "malformed session link".to_string();
             return;
         };
@@ -616,11 +733,35 @@ impl App {
         self.history_cache = Default::default();
     }
 
-    /// If the given rendered line index is an image line, open the image in
-    /// the default OS viewer. Returns true if it was an image line.
+    /// If the given rendered line index is an image or video thumbnail line,
+    /// open it in the default OS viewer. For video thumbnails (`_first.png`),
+    /// opens the sibling `.mp4` instead.
     pub(crate) fn open_image_at_line(&self, line: usize) -> bool {
         if let Some(Some(path)) = self.history_cache.image_at_line.get(line) {
-            let _ = open::that_detached(path);
+            let p = std::path::Path::new(path);
+            let open_path = if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                // Check for sibling video: abc123_first.png → abc123.mp4 or _stitch_abc123.mp4
+                if let Some(base) = stem
+                    .strip_suffix("_first")
+                    .or_else(|| stem.strip_suffix("_last"))
+                {
+                    let dir = p.parent().unwrap_or(std::path::Path::new(""));
+                    let direct = dir.join(format!("{base}.mp4"));
+                    let stitched = dir.join(format!("_stitch_{base}.mp4"));
+                    if direct.exists() {
+                        direct.to_string_lossy().to_string()
+                    } else if stitched.exists() {
+                        stitched.to_string_lossy().to_string()
+                    } else {
+                        path.clone()
+                    }
+                } else {
+                    path.clone()
+                }
+            } else {
+                path.clone()
+            };
+            let _ = open::that_detached(&open_path);
             true
         } else {
             false
@@ -745,7 +886,8 @@ impl App {
             return None;
         }
         let mut s = "## Scripts\nThe user has reusable scripts in this space. \
-                      Call `read_script(path)` to see one, `edit_script` to modify, or \
+                      Call `script_files(action=read, path=...)` to see one, \
+                      `script_files(action=edit, path=..., edits=...)` to modify, or \
                       `run_script(space=true, path=...)` to execute. \
                       The `path` parameter is relative to the scripts dir — do NOT prefix `scripts/`.\n"
             .to_string();
@@ -760,14 +902,14 @@ impl App {
     }
 
     /// Names/types/sizes of the space's imported files — content stays off the
-    /// wire until the model calls `search_files`/`read_file`.
+    /// wire until the model calls `files` with the appropriate action.
     fn files_section(&self) -> Option<String> {
         if self.files_cache.is_empty() {
             return None;
         }
         let mut s = "## Files\nThe user has imported these files into this space. Do not guess \
-                     their contents: call `search_files` to find relevant passages, or \
-                     `read_file` to read one (200 lines per call, use offset to page).\n"
+                     their contents: call `files(action=search, query=...)` to find relevant passages, or \
+                     `files(action=read, name=...)` to read one (200 lines per call, use offset to page).\n"
             .to_string();
         for f in &self.files_cache {
             let kind = std::path::Path::new(&f.name)
@@ -794,21 +936,22 @@ impl App {
         self.app_server.as_ref()?;
         let mut s = "## Apps\nYou can build apps served locally. \
                      ALWAYS use the KV store for persistence (not LocalStorage), the upload endpoint for file \
-                     uploads, and copy_images_to_app/copy_file_to_app to bring user data into the app.\n\n\
-                     **CRITICAL: URLs are UUID-based.** The UUID comes from `write_file`'s tool result \
+                     uploads, and app_assets to bring user data into the app.\n\n\
+                     **CRITICAL: URLs are UUID-based.** The UUID comes from `app_modify(action=write)`'s result \
                      (\"live at http://...\"). Copy it from there — never invent or guess a UUID. \
-                     If you don't have the result, call `read_app_file` or `grep_app` on the app to \
+                     If you don't have the result, call `app_inspect(action=read)` or `app_inspect(action=search)` on the app to \
                      rediscover it.\n\n"
             .to_string();
 
         s.push_str("### Tools\n");
-        s.push_str("- `write_file(app, path, content)` — create/edit a file. App can be a name or its UUID. First write to a new app auto-generates a UUID.\n");
-        s.push_str("- `read_app_file(app, path)` / `edit_file(app, path, edits)` — read and edit by hashline.\n");
-        s.push_str("- `grep_app(app, pattern)` — search all files in an app.\n");
+        s.push_str("- `app_modify(action=write, app, path, content)` — create/replace a file. App can be a name or UUID; a new app gets a UUID.\n");
+        s.push_str("- `app_inspect(action=read, app, path)` / `app_modify(action=patch, app, path, edits)` — read and edit by hashline.\n");
+        s.push_str("- `app_modify(action=diff, app, path, content)` — preview a complete-file change without writing it.\n");
+        s.push_str("- `app_inspect(action=search, app, pattern)` — search non-ignored app files; respects `.gitignore`.\n");
         s.push_str("- `install_packages(app=..., packages=[...])` — npm-install into an app.\n");
-        s.push_str("- `list_images` — list pasted conversation images.\n");
-        s.push_str("- `copy_images_to_app(image_ids, app)` — copy images into `_images/` for `<img src=\"...\">`.\n");
-        s.push_str("- `copy_file_to_app(file_name, app)` — copy a space file's text into the app's KV store.\n\n");
+        s.push_str("- `app_assets(action=list)` — list pasted conversation images.\n");
+        s.push_str("- `app_assets(action=copy_images, image_ids, app)` — copy images into `_images/` for `<img src=\"...\">`.\n");
+        s.push_str("- `app_assets(action=copy_file, file_name, app)` — copy a space file's text into the app's KV store.\n\n");
 
         s.push_str("### KV Store (persistent key-value per app)\n");
         s.push_str("Each app has a SQLite-backed KV store. Call these from frontend JS:\n");
@@ -821,12 +964,12 @@ impl App {
         s.push_str("- `POST <app_url>/_api/upload` with `multipart/form-data` — upload a file. Returns `{\"name\", \"url\"}`. Files persist and are served via GET.\n\n");
 
         s.push_str("### Using User Images\n");
-        s.push_str("1. `list_images` to see conversation images.\n");
-        s.push_str("2. `copy_images_to_app(image_ids, app)` to copy them into `_images/`.\n");
+        s.push_str("1. `app_assets(action=list)` to see conversation images.\n");
+        s.push_str("2. `app_assets(action=copy_images, image_ids, app)` to copy them into `_images/`.\n");
         s.push_str("3. Use returned URLs in `<img src=\"...\">` tags.\n\n");
 
         s.push_str("### Using Space Files\n");
-        s.push_str("- `copy_file_to_app(file_name, app)` copies file text into KV under `_file:<name>`. Read it via `GET <app_url>/_api/kv/_file:<name>`.\n\n");
+        s.push_str("- `app_assets(action=copy_file, file_name, app)` copies file text into KV under `_file:<name>`. Read it via `GET <app_url>/_api/kv/_file:<name>`.\n\n");
 
         let apps = self.list_apps();
         if apps.is_empty() {
@@ -834,7 +977,11 @@ impl App {
         } else {
             s.push_str("Existing apps:\n");
             for a in &apps {
-                if let Some(uuid) = self.app_server.as_ref().and_then(|s| s.registry().resolve(&self.active_space.name, a)) {
+                if let Some(uuid) = self
+                    .app_server
+                    .as_ref()
+                    .and_then(|s| s.registry().resolve(&self.active_space.name, a))
+                {
                     s.push_str(&format!("- {a} (uuid {uuid})\n"));
                 } else {
                     s.push_str(&format!("- {a}\n"));
@@ -960,7 +1107,7 @@ pub(super) fn pick_flavor() -> (usize, Color) {
 pub(super) fn web_mode_clause(today: &str) -> String {
     format!(
         "Web answer mode is ON for this session. Today's date is {today}. Before answering, you \
-         MUST call web_search with a focused query (and fetch_url on the most promising results) — \
+         MUST call search with mode=web and a focused query (and fetch_url on the most promising results) — \
          never answer from memory alone. You may search more than once with refined queries if the \
          first results are insufficient. Each search result is numbered [1], [2], ... with title, \
          URL, and snippet. Cite every claim inline immediately as [n]; do not bunch citations at \

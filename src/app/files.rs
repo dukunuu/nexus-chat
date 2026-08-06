@@ -86,7 +86,10 @@ impl OcrBackend {
                     anyhow::bail!("model '{model}' not pulled");
                 }
                 let v = resp.error_for_status()?.json::<serde_json::Value>().await?;
-                Ok(v.get("response").and_then(|r| r.as_str()).unwrap_or("").to_string())
+                Ok(v.get("response")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("")
+                    .to_string())
             }
         }
     }
@@ -143,11 +146,16 @@ fn is_uuid_like(stem: &str) -> bool {
     let hex = |s: &str| s.chars().all(|c| c.is_ascii_hexdigit());
     let parts: Vec<&str> = stem.split('-').collect();
     parts.len() == 5
-        && parts[0].len() == 8 && hex(parts[0])
-        && parts[1].len() == 4 && hex(parts[1])
-        && parts[2].len() == 4 && hex(parts[2])
-        && parts[3].len() == 4 && hex(parts[3])
-        && parts[4].len() == 12 && hex(parts[4])
+        && parts[0].len() == 8
+        && hex(parts[0])
+        && parts[1].len() == 4
+        && hex(parts[1])
+        && parts[2].len() == 4
+        && hex(parts[2])
+        && parts[3].len() == 4
+        && hex(parts[3])
+        && parts[4].len() == 12
+        && hex(parts[4])
 }
 
 fn clip_err(e: &str) -> String {
@@ -176,38 +184,41 @@ fn ollama_ocr_body(model: &str, png_b64: &str) -> serde_json::Value {
 /// transcribe up to 4 pages concurrently (one retry each), and join with
 /// `[page N]` markers — a page that fails twice becomes a `[page N: ocr
 /// failed]` marker instead of sinking the document.
+/// Rendered page PNGs are saved permanently to `<files_dir>/<pdf_stem>/` so
+/// the model can fetch them later via `files(action=pdf_page)`.
 async fn ocr_pdf_vlm(
     backend: &OcrBackend,
     path: &Path,
     tx: &tokio::sync::mpsc::UnboundedSender<(String, String, OcrUpdate)>,
     space_id: &str,
     name: &str,
+    files_dir: &Path,
 ) -> std::result::Result<(String, Vec<(usize, String)>), String> {
-    let tmp = std::env::temp_dir().join(format!("nexus-vlm-ocr-{}", uuid::Uuid::new_v4()));
-    if let Err(e) = std::fs::create_dir_all(&tmp) {
+    let stem = std::path::Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    let page_dir = files_dir.join(stem);
+    if let Err(e) = std::fs::create_dir_all(&page_dir) {
         return Err(format!("error: ocr: {e}"));
     }
-    let result = ocr_pdf_vlm_in(backend, path, &tmp, tx, space_id, name).await;
-    let _ = std::fs::remove_dir_all(&tmp);
-    result
+    ocr_pdf_vlm_in(backend, path, &page_dir, tx, space_id, name).await
 }
 
 async fn ocr_pdf_vlm_in(
     backend: &OcrBackend,
     path: &Path,
-    tmp: &Path,
+    page_dir: &Path,
     tx: &tokio::sync::mpsc::UnboundedSender<(String, String, OcrUpdate)>,
     space_id: &str,
     name: &str,
 ) -> std::result::Result<(String, Vec<(usize, String)>), String> {
-    // Text glyphs (and furigana especially) need more resolution than the
-    // tesseract path's 200 DPI gray; VLMs also want the color signal.
     let _ = tx.send((
         space_id.to_string(),
         name.to_string(),
         OcrUpdate::Stage("rendering pages (300 dpi)…".to_string()),
     ));
-    let (pdf, dir) = (path.to_path_buf(), tmp.to_path_buf());
+    let (pdf, dir) = (path.to_path_buf(), page_dir.to_path_buf());
     let pages = tokio::task::spawn_blocking(move || {
         crate::extract::render_pdf_pages("pdftoppm", &pdf, &dir, 300, false)
     })
@@ -249,7 +260,10 @@ async fn ocr_pdf_vlm_in(
             });
         };
 
-    let window = 4.min(total);
+    // ponytail: 16 concurrent pages — the bottleneck is API latency, not
+    // local CPU, so a wider window reduces wall-clock time significantly.
+    // Tune this down if the backend rate-limits you.
+    let window = (16_usize).min(total);
     let mut next = 0;
     while next < window {
         spawn_page(&mut set, next);
@@ -275,6 +289,12 @@ async fn ocr_pdf_vlm_in(
             spawn_page(&mut set, next);
             next += 1;
         }
+    }
+    // Rename pdftoppm output to stable page-<N>.png names
+    let _ = std::fs::create_dir_all(page_dir);
+    for (i, p) in pages.iter().enumerate() {
+        let stable = page_dir.join(format!("page-{}.png", i + 1));
+        let _ = std::fs::rename(p, &stable);
     }
     let errors: Vec<(usize, String)> = results
         .iter()
@@ -302,7 +322,11 @@ async fn ocr_image_vlm(
     let Ok(bytes) = std::fs::read(path) else {
         return Err(format!("cannot read {name}"));
     };
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     let mime = match ext.as_str() {
         "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
@@ -537,6 +561,7 @@ impl App {
             return;
         }
         let backend = self.ocr_backend();
+        let files_dir = self.space.files_dir(&self.active_space.name);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.ocr_rx = Some(rx);
         if let Some(backend) = backend {
@@ -550,7 +575,7 @@ impl App {
                     let result = if is_image {
                         ocr_image_vlm(&backend, &path, &tx, &space_id, &name).await
                     } else {
-                        ocr_pdf_vlm(&backend, &path, &tx, &space_id, &name).await
+                        ocr_pdf_vlm(&backend, &path, &tx, &space_id, &name, &files_dir).await
                     };
                     if tx.send((space_id, name, OcrUpdate::Done(result))).is_err() {
                         return;
@@ -710,6 +735,34 @@ impl App {
             .upsert_file(&self.active_space.id, &f.name, "", 0, "re-extracting");
         self.status = format!("re-extracting: {}", f.name);
         self.rescan_files();
+    }
+
+    /// Force OCR on the selected file, bypassing text extraction entirely.
+    /// Useful when `pdf_extract` gives unreliable text and you want VLM OCR
+    /// output instead.
+    pub(crate) fn reocr_selected_file(&mut self) {
+        let Some(f) = self.files_cache.get(self.files_selected).cloned() else {
+            return;
+        };
+        let ext = std::path::Path::new(&f.name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if ext != "pdf" && !crate::extract::is_image_ext(&ext) {
+            self.status = format!("only PDFs and images support OCR: {}", f.name);
+            return;
+        }
+        let path = self.space.files_dir(&self.active_space.name).join(&f.name);
+        // Force-cancel any in-progress OCR batch so our job isn't silently dropped
+        self.ocr_rx = None;
+        let _ = self.db.set_file_status(&f.id, "ocr…");
+        self.start_ocr(vec![(self.active_space.id.clone(), f.name.clone(), path)]);
+        self.files_cache = self
+            .db
+            .list_files(&self.active_space.id)
+            .unwrap_or_default();
+        self.status = format!("ocr queued: {}", f.name);
     }
 
     /// Embed the next file whose chunks lack vectors, one file per job (the
@@ -872,7 +925,9 @@ impl App {
                     let new_path = dir.join(&new_name);
                     if old_path.exists() && std::fs::rename(&old_path, &new_path).is_ok() {
                         let _ = self.db.rename_file(&f.id, &new_name);
-                        let _ = self.db.replace_file_ref_in_messages(&space_id, &f.name, &new_name);
+                        let _ = self
+                            .db
+                            .replace_file_ref_in_messages(&space_id, &f.name, &new_name);
                         if space_id == self.active_space.id {
                             self.status = format!("ocr done: {new_name}");
                         }
@@ -935,9 +990,15 @@ impl App {
     pub(crate) fn open_files_popup(&mut self, tab: super::FilesTab) {
         self.files_tab = tab;
         match tab {
-            super::FilesTab::Images => { self.refresh_images(); }
-            super::FilesTab::Scripts => { self.refresh_scripts(); }
-            super::FilesTab::Files => { self.rescan_files(); }
+            super::FilesTab::Images => {
+                self.refresh_images();
+            }
+            super::FilesTab::Scripts => {
+                self.refresh_scripts();
+            }
+            super::FilesTab::Files => {
+                self.rescan_files();
+            }
         }
         self.files_mode = super::FilesMode::Browse;
         self.popup = super::Popup::Files;

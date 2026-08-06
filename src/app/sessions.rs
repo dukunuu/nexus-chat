@@ -4,6 +4,13 @@ use super::{App, Popup, SessionMode};
 use crate::db::Session;
 
 impl App {
+    pub(crate) fn activate_notification(&mut self, index: usize) -> Result<()> {
+        let Some(notification) = self.notifications.remove(index) else {
+            return Ok(());
+        };
+        self.switch_to_session_by_id(&notification.session_id)
+    }
+
     // --- commands ---
 
     /// Clear back to a blank conversation. Doesn't touch the db — a session
@@ -94,14 +101,9 @@ impl App {
     pub(crate) fn confirm_delete(&mut self) -> Result<()> {
         if let Some(s) = self.selected_session() {
             self.db.delete_session(&s.id)?;
-            if self
-                .stream_session
-                .as_ref()
-                .is_some_and(|(id, _)| *id == s.id)
-            {
-                self.discard_stream();
-            }
+            self.discard_chat_task(&s.id);
             self.unread.remove(&s.id);
+            self.notifications.retain(|n| n.session_id != s.id);
             self.sessions_cache.retain(|c| c.id != s.id);
             if self.session.as_ref().is_some_and(|c| c.id == s.id) {
                 self.session = None;
@@ -123,15 +125,19 @@ impl App {
 
     /// Switch to a session by its id. Used by session-link navigation (Ctrl+O).
     pub(crate) fn switch_to_session_by_id(&mut self, id: &str) -> Result<()> {
-        let Some(s) = self.db.get_session(id)?.or_else(|| {
-            self.sessions_cache.iter().find(|s| s.id == id).cloned()
-        }) else {
+        let Some(s) = self
+            .db
+            .get_session(id)?
+            .or_else(|| self.sessions_cache.iter().find(|s| s.id == id).cloned())
+        else {
             self.status = format!("session not found: {id}");
             return Ok(());
         };
         self.messages = self.db.load_messages(&s.id)?;
         self.unread.remove(&s.id);
+        self.notifications.retain(|n| n.session_id != s.id);
         self.status = format!("switched to: {}", s.title);
+        self.current_model = Some(s.model.clone());
         self.web_mode = s.web_mode;
         self.session = Some(s);
         self.refresh_toolbox();
@@ -145,7 +151,9 @@ impl App {
         if let Some(s) = self.selected_session() {
             self.messages = self.db.load_messages(&s.id)?;
             self.unread.remove(&s.id);
+            self.notifications.retain(|n| n.session_id != s.id);
             self.status = format!("switched to: {}", s.title);
+            self.current_model = Some(s.model.clone());
             self.web_mode = s.web_mode;
             self.session = Some(s);
             self.refresh_toolbox();

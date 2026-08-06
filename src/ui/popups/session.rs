@@ -29,21 +29,21 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             let when = crate::ui::fmt_created(&s.created_at);
             // ⟳ = a response is streaming here; 🔎 = a research job is running
             // here; ● = finished while unviewed.
-            let streaming_here = app
-                .stream_session
-                .as_ref()
-                .is_some_and(|(id, _)| *id == s.id);
+            let streaming_here = app.chat_task_for_session(&s.id).is_some();
             let researching_here = app
                 .research_running
                 .as_ref()
                 .is_some_and(|(id, _)| *id == s.id);
             let is_research = s.kind == "research";
+            let is_linked_research = s.research_parent_id.is_some();
             let marker = if streaming_here {
                 Some(Span::styled("⟳ ", Style::default().fg(app.theme.accent)))
             } else if researching_here {
                 Some(Span::styled("🔎 ", Style::default().fg(app.theme.accent2)))
             } else if app.unread.contains(&s.id) {
                 Some(Span::styled("● ", Style::default().fg(app.theme.warning)))
+            } else if is_linked_research {
+                Some(Span::styled("↪ ", dim))
             } else if is_research {
                 Some(Span::styled("🔬 ", Style::default().fg(app.theme.accent2)))
             } else {

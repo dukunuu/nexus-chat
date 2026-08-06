@@ -6,7 +6,7 @@ Skills are directories on GitHub containing a `SKILL.md` (frontmatter with
 `name` and `description`, then instructions). You can search for them and
 install them yourself.
 
-1. Search with the `web_search` tool. Good queries: `github SKILL.md <topic>`
+1. Search with the `search` tool using `mode=web`. Good queries: `github SKILL.md <topic>`
    or `github "claude skill" <topic>`. Known collections worth checking first:
    `anthropics/skills` (one skill per top-level directory, e.g.
    `anthropics/skills/pdf`).
@@ -14,7 +14,7 @@ install them yourself.
    into the install source `<owner>/<repo>/<path>` (drop `tree/<branch>`; a
    skill at the repo root is just `<owner>/<repo>`).
 3. Tell the user which skill you found and what it does, then call
-   `install_skill` with that source.
+   `skill_admin` with `action=install` and that source.
 4. On success the skill is immediately usable: load it with the `skill` tool.
 
 Installed skills may ship scripts — run them with the `run_script` tool.

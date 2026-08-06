@@ -142,6 +142,11 @@ impl App {
         self.open_model_picker_impl();
     }
 
+    pub(crate) fn open_model_picker_for_video_gen(&mut self) {
+        self.model_pick_target = ModelPickTarget::VideoGen;
+        self.open_model_picker_impl();
+    }
+
     /// Open the same model picker, but a confirmed pick sets the OCR model
     /// (in `/config`) instead of the active session's model.
     pub(crate) fn open_model_picker_for_ocr(&mut self) {
@@ -368,6 +373,13 @@ impl App {
                     true
                 }
             })
+            .filter(|m| {
+                if self.model_pick_target == ModelPickTarget::VideoGen {
+                    m.supports_video_generation
+                } else {
+                    true
+                }
+            })
             .filter(|m| self.favorites.contains(&super::composite_id(m)) == want_fav)
             .filter(|m| {
                 f.is_empty()
@@ -451,7 +463,7 @@ impl App {
             .iter()
             .map(|m| m.content.chars().count())
             .sum::<usize>();
-        if let Some(buf) = &self.streaming {
+        if let Some(buf) = self.active_streaming_text() {
             chars += buf.chars().count();
         }
         (chars / 4) as u64
@@ -629,6 +641,12 @@ impl App {
                 self.status = format!("image gen model: {id}");
                 self.popup = Popup::Settings;
             }
+            ModelPickTarget::VideoGen => {
+                self.video_gen_model = id.clone();
+                self.db.set_setting("video_gen_model", &id)?;
+                self.status = format!("video gen model: {id}");
+                self.popup = Popup::Settings;
+            }
             ModelPickTarget::SwarmPersona(row) => {
                 if let Some(p) = self.swarm_cache.get_mut(row) {
                     p.model = id.clone();
@@ -674,6 +692,14 @@ impl App {
         self.image_gen_model.clear();
         self.db.set_setting("image_gen_model", "")?;
         self.status = "image gen model cleared — generation disabled".to_string();
+        Ok(())
+    }
+
+    /// Disable video generation (Backspace on the video gen model row in `/config`).
+    pub(crate) fn clear_video_gen_model(&mut self) -> Result<()> {
+        self.video_gen_model.clear();
+        self.db.set_setting("video_gen_model", "")?;
+        self.status = "video gen model cleared — generation disabled".to_string();
         Ok(())
     }
 

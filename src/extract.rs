@@ -9,6 +9,99 @@ use anyhow::{Context, Result};
 
 const CHUNK_LINES: usize = 40;
 
+/// Extract the PDF outline/bookmarks tree as indented text, or empty string
+/// if the PDF has no outline (most scanned PDFs won't).
+fn pdf_toc(path: &Path) -> String {
+    use pdf_extract::{Document, Object};
+    let doc = match Document::load(path) {
+        Ok(d) => d,
+        Err(_) => return String::new(),
+    };
+    let catalog = match doc.catalog() {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+    let outlines_obj = match catalog.get(b"Outlines") {
+        Ok(o) => o,
+        Err(_) => return String::new(),
+    };
+    let first_id = match outlines_obj {
+        Object::Reference(id) => *id,
+        _ => return String::new(),
+    };
+    let outlines = match doc.get_object(first_id) {
+        Ok(o) => o,
+        Err(_) => return String::new(),
+    };
+    let dict = match outlines.as_dict() {
+        Ok(d) => d,
+        Err(_) => return String::new(),
+    };
+    let first = match dict.get(b"First") {
+        Ok(Object::Reference(id)) => *id,
+        _ => return String::new(),
+    };
+    let mut out = String::from("=== Table of Contents ===\n");
+    walk_outline(&doc, first, 0, &mut out);
+    if out == "=== Table of Contents ===\n" {
+        return String::new();
+    }
+    out
+}
+
+fn decode_pdf_string(bytes: &[u8]) -> String {
+    // UTF-16BE with BOM
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        if let Ok(s) = String::from_utf16(
+            &bytes[2..]
+                .chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect::<Vec<_>>(),
+        ) {
+            return s;
+        }
+    }
+    // Fallback: PDFDocEncoding / Latin-1
+    bytes.iter().map(|&b| b as char).collect()
+}
+
+fn walk_outline(
+    doc: &pdf_extract::Document,
+    id: pdf_extract::ObjectId,
+    depth: usize,
+    out: &mut String,
+) {
+    use pdf_extract::Object;
+    let item = match doc.get_object(id) {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    let dict = match item.as_dict() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    if let Ok(Object::String(title_bytes, _)) = dict.get(b"Title") {
+        let title = decode_pdf_string(title_bytes);
+        if !title.is_empty() {
+            let indent = "  ".repeat(depth);
+            // ponytail: no page number extraction from Dest — the PDF
+            // outline's Dest can be a named destination, an explicit
+            // page reference, or absent. Page numbers from the outline
+            // would require resolving the Dest against the page tree,
+            // which is complex and rarely critical.
+            out.push_str(&format!("{indent}{title}\n"));
+        }
+    }
+    // Children
+    if let Ok(Object::Reference(child_id)) = dict.get(b"First") {
+        walk_outline(doc, *child_id, depth + 1, out);
+    }
+    // Siblings
+    if let Ok(Object::Reference(next_id)) = dict.get(b"Next") {
+        walk_outline(doc, *next_id, depth, out);
+    }
+}
+
 /// Extract searchable text from `path`, dispatching on the (lowercased)
 /// extension. `Ok("")` means the file parsed but had no text (e.g. a scanned
 /// PDF); `Err` means it couldn't be read/parsed at all.
@@ -19,9 +112,19 @@ pub(crate) fn extract_text(path: &Path) -> Result<String> {
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
     match ext.as_str() {
-        "pdf" => pdf_extract::extract_text(path)
-            .map(|t| t.trim().to_string())
-            .with_context(|| format!("extracting pdf {}", path.display())),
+        "pdf" => {
+            let toc = pdf_toc(path);
+            let text = pdf_extract::extract_text(path)
+                .map(|t| t.trim().to_string())
+                .with_context(|| format!("extracting pdf {}", path.display()))?;
+            if toc.is_empty() {
+                Ok(text)
+            } else if text.is_empty() {
+                Ok(toc)
+            } else {
+                Ok(format!("{toc}\n\n{text}"))
+            }
+        }
         "docx" => office_text(path, OfficeKind::Docx),
         "pptx" => office_text(path, OfficeKind::Pptx),
         "xlsx" => office_text(path, OfficeKind::Xlsx),

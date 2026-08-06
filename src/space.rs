@@ -71,7 +71,7 @@ impl Space {
         self.space_dir(name).join("instructions.md")
     }
 
-    /// Comma-separated domains `web_search` always excludes in this space.
+    /// Comma-separated domains `search(mode=web)` always excludes in this space.
     pub fn blocked_domains_path(&self, name: &str) -> PathBuf {
         self.space_dir(name).join("blocked_domains.txt")
     }

@@ -30,9 +30,9 @@ const MAX_SUBQUESTIONS: usize = 6;
 /// not a whole interactive conversation's worth.
 pub(crate) const RESEARCH_SEARCHER_MAX_ITERS: usize = 6;
 
-const PLANNER_PROMPT: &str = "You are the planning stage of an automated research pipeline. Given a research topic, decompose it into 3 to 6 focused sub-questions that together cover the topic thoroughly (different angles: definitions, current state, evidence/data, controversies, practical implications — whichever apply). Respond with ONLY a JSON array of strings, no prose, no markdown fences. Example: [\"question one\", \"question two\"]. Note: searcher agents handling scholarly sub-questions can call academic_search (Semantic Scholar) in addition to web_search, so peer-reviewed angles are fair game.";
+const PLANNER_PROMPT: &str = "You are the planning stage of an automated research pipeline. Given a research topic, decompose it into 3 to 6 focused sub-questions that together cover the topic thoroughly (different angles: definitions, current state, evidence/data, controversies, practical implications — whichever apply). Respond with ONLY a JSON array of strings, no prose, no markdown fences. Example: [\"question one\", \"question two\"]. Note: searcher agents handling scholarly sub-questions can call search(mode=academic) in addition to search(mode=web), so peer-reviewed angles are fair game.";
 
-pub(crate) const SEARCHER_PROMPT: &str = "You are a research searcher agent. You will be given one focused sub-question. Use the web_search and fetch_url tools to investigate it thoroughly: search, then fetch and read the most promising pages, and search again with new terms you learn from them if needed. When you have enough to answer well, write a concise findings summary (a few paragraphs, prose, no headers) that directly answers the sub-question, citing sources inline as [n]. End your answer with a line starting exactly with 'Sources:' followed by the numbered list of URLs you used, one per line, matching your [n] citations. Prefer sources from domains you have not already cited — diverse sources make a stronger report.";
+pub(crate) const SEARCHER_PROMPT: &str = "You are a research searcher agent. You will be given one focused sub-question. Use search(mode=web) and fetch_url to investigate it thoroughly: search, then fetch and read the most promising pages, and search again with new terms you learn from them if needed. When you have enough to answer well, write a concise findings summary (a few paragraphs, prose, no headers) that directly answers the sub-question, citing sources inline as [n]. End your answer with a line starting exactly with 'Sources:' followed by the numbered list of URLs you used, one per line, matching your [n] citations. Prefer sources from domains you have not already cited — diverse sources make a stronger report.";
 
 const SYNTHESIZER_PROMPT: &str = "You are the synthesis stage of a research pipeline. You'll be given the original topic and findings from several searcher agents, each already citing their own sources. Combine them into a single coherent draft report on the topic: organize by theme (not by sub-question), resolve obvious overlaps, keep every citation but you may renumber them consistently as you merge. Do not invent facts not present in the findings. Output the draft report in markdown, no preamble.";
 
@@ -309,7 +309,7 @@ async fn plan(
 }
 
 /// One Searcher agent: given a single sub-question, runs the normal
-/// tool-loop (restricted to web_search/fetch_url/academic_search) and
+/// tool-loop (restricted to search/fetch_url) and
 /// returns its final prose findings (including its own "Sources:" citation
 /// list). Never returns an `Err` — a dead search/fetch/model call becomes a
 /// placeholder finding string so one bad sub-question can't sink the whole
@@ -1076,29 +1076,41 @@ impl super::App {
                 .messages
                 .iter()
                 .any(|m| m.role == "user" || m.role == "assistant");
-            if has_content { Some(s.id.clone()) } else { None }
-        });
-        let parent_title = parent_id.as_ref().and_then(|pid| {
-            self.db.get_session(pid).ok()?.map(|s| s.title)
-        });
-
-        let session = match self
-            .db
-            .create_session(&title, &research_model, &self.active_space.id, "research")
-        {
-            Ok(s) => s,
-            Err(e) => {
-                self.status = format!("could not start research session: {e}");
-                return;
+            if has_content {
+                Some(s.id.clone())
+            } else {
+                None
             }
-        };
+        });
+        let parent_title = parent_id
+            .as_ref()
+            .and_then(|pid| self.db.get_session(pid).ok()?.map(|s| s.title));
+
+        let session =
+            match self
+                .db
+                .create_session(&title, &research_model, &self.active_space.id, "research")
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    self.status = format!("could not start research session: {e}");
+                    return;
+                }
+            };
 
         if let Some(ref pid) = parent_id {
             let _ = self.db.set_research_parent(&session.id, pid);
 
             // Build compacted context from the original conversation
-            let compact_summary = self.session.as_ref().and_then(|s| s.compact_summary.clone());
-            let compact_through = self.session.as_ref().map(|s| s.compact_through as usize).unwrap_or(0);
+            let compact_summary = self
+                .session
+                .as_ref()
+                .and_then(|s| s.compact_summary.clone());
+            let compact_through = self
+                .session
+                .as_ref()
+                .map(|s| s.compact_through as usize)
+                .unwrap_or(0);
             let mut ctx = String::new();
             if let Some(ref summary) = compact_summary {
                 ctx.push_str("Previous conversation summary:\n");
@@ -1127,17 +1139,27 @@ impl super::App {
 
             // Link message in the original session
             let _ = self.db.insert_message(
-                pid, "session_link",
+                pid,
+                "session_link",
                 &format!("{}\n🔗 Research session started for: {topic}", session.id),
-                None, None, None, None, None,
+                None,
+                None,
+                None,
+                None,
+                None,
             );
 
             // Link message in the research session back to the original
             let back_title = parent_title.as_deref().unwrap_or("previous chat");
             let _ = self.db.insert_message(
-                &session.id, "session_link",
+                &session.id,
+                "session_link",
                 &format!("{pid}\n↩ Originally from: {back_title}"),
-                None, None, None, None, None,
+                None,
+                None,
+                None,
+                None,
+                None,
             );
 
             self.messages = self.db.load_messages(&session.id).unwrap_or_default();
@@ -1319,7 +1341,6 @@ impl super::App {
                         self.invalidate_history_cache();
                     } else {
                         self.messages.push(crate::db::Message {
-                            id: String::new(),
                             role: "research_stage".to_string(),
                             content: text.clone(),
                             model: None,
@@ -1351,7 +1372,6 @@ impl super::App {
                 let _ = self.db.add_research_plan_message(&session_id, &content);
                 if viewing {
                     self.messages.push(crate::db::Message {
-                        id: String::new(),
                         role: "research_plan".to_string(),
                         content,
                         model: None,
@@ -1397,7 +1417,6 @@ impl super::App {
                 self.save_research_report(&space_id, &space_name, &topic, &report);
                 if viewing {
                     self.messages.push(crate::db::Message {
-                        id: String::new(),
                         role: "assistant".to_string(),
                         content: report,
                         model: None,
@@ -1422,7 +1441,6 @@ impl super::App {
                         .add_assistant_message(&session_id, &msg, None, None, None, None, None);
                 if viewing {
                     self.messages.push(crate::db::Message {
-                        id: String::new(),
                         role: "assistant".to_string(),
                         content: msg.clone(),
                         model: None,
@@ -1461,7 +1479,7 @@ impl super::App {
         if std::fs::write(dir.join(&name), report).is_err() {
             return;
         }
-        // Index the report's cited sources for list_citations.
+        // Index the report's cited sources for research_lookup(scope=citations).
         let citations = crate::citations::parse_citations(report);
         if !citations.is_empty() {
             // Titles aren't in the Sources-list format; index url only.

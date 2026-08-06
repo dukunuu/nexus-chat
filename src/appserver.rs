@@ -61,19 +61,27 @@ impl AppRegistry {
                             Ok(n) => n,
                             Err(_) => continue,
                         };
-                        let already = map.values().any(|e| e.space == space_name && e.name == app_name);
+                        let already = map
+                            .values()
+                            .any(|e| e.space == space_name && e.name == app_name);
                         if !already {
                             let uuid = uuid::Uuid::new_v4().to_string();
                             map.insert(
                                 uuid,
-                                AppEntry { space: space_name.clone(), name: app_name },
+                                AppEntry {
+                                    space: space_name.clone(),
+                                    name: app_name,
+                                },
                             );
                         }
                     }
                 }
             }
         }
-        let registry = AppRegistry { inner: Arc::new(RwLock::new(map)), path: path.clone() };
+        let registry = AppRegistry {
+            inner: Arc::new(RwLock::new(map)),
+            path: path.clone(),
+        };
         let _ = registry.save();
         registry
     }
@@ -82,7 +90,13 @@ impl AppRegistry {
         let uuid = uuid::Uuid::new_v4().to_string();
         {
             let mut map = self.inner.write().unwrap();
-            map.insert(uuid.clone(), AppEntry { space: space.to_string(), name: name.to_string() });
+            map.insert(
+                uuid.clone(),
+                AppEntry {
+                    space: space.to_string(),
+                    name: name.to_string(),
+                },
+            );
         }
         let _ = self.save();
         uuid
@@ -93,7 +107,10 @@ impl AppRegistry {
     }
 
     pub fn resolve(&self, space: &str, name: &str) -> Option<String> {
-        self.inner.read().unwrap().iter()
+        self.inner
+            .read()
+            .unwrap()
+            .iter()
             .find(|(_, e)| e.space == space && e.name == name)
             .map(|(u, _)| u.clone())
     }
@@ -126,7 +143,6 @@ impl AppRegistry {
 pub struct AppServer {
     port: u16,
     registry: AppRegistry,
-    spaces_root: PathBuf,
 }
 
 impl AppServer {
@@ -139,7 +155,10 @@ impl AppServer {
         };
         let port = listener.local_addr().ok()?.port();
         let registry = AppRegistry::load(&spaces_root);
-        let srv = AppServer { port, registry: registry.clone(), spaces_root: spaces_root.clone() };
+        let srv = AppServer {
+            port,
+            registry: registry.clone(),
+        };
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
@@ -165,10 +184,6 @@ impl AppServer {
 
     pub fn registry(&self) -> &AppRegistry {
         &self.registry
-    }
-
-    pub fn spaces_root(&self) -> &Path {
-        &self.spaces_root
     }
 }
 
@@ -211,10 +226,19 @@ async fn handle(
         .unwrap_or(0);
 
     if content_length > 10 * 1024 * 1024 {
-        return respond(&mut stream, 413, "text/plain", b"request entity too large", false).await;
+        return respond(
+            &mut stream,
+            413,
+            "text/plain",
+            b"request entity too large",
+            false,
+        )
+        .await;
     }
 
-    let content_type = parse_header_value(header_str, "content-type").unwrap_or("").to_string();
+    let content_type = parse_header_value(header_str, "content-type")
+        .unwrap_or("")
+        .to_string();
 
     let body: Vec<u8> = if content_length > 0 {
         let body_start = header_end + 4;
@@ -231,7 +255,16 @@ async fn handle(
     };
 
     if raw_path.contains("/_api/") {
-        return handle_api(&mut stream, spaces_root, registry, method, raw_path, &body, &content_type).await;
+        return handle_api(
+            &mut stream,
+            spaces_root,
+            registry,
+            method,
+            raw_path,
+            &body,
+            &content_type,
+        )
+        .await;
     }
 
     if method != "GET" && !head {
@@ -270,7 +303,10 @@ fn resolve(spaces_root: &Path, registry: &AppRegistry, raw_path: &str) -> Option
     // API route: /<uuid>/_api/...
     if segs.len() >= 2 && segs[1] == "_api" {
         let entry = registry.lookup(segs[0])?;
-        let app_dir = spaces_root.join(&entry.space).join("apps").join(&entry.name);
+        let app_dir = spaces_root
+            .join(&entry.space)
+            .join("apps")
+            .join(&entry.name);
         return app_dir.is_dir().then_some(app_dir);
     }
 
@@ -359,14 +395,19 @@ async fn handle_api(
     let Some(entry) = registry.lookup(segs[0]) else {
         return respond(stream, 404, "text/plain", b"unknown app", false).await;
     };
-    let app_dir = spaces_root.join(&entry.space).join("apps").join(&entry.name);
+    let app_dir = spaces_root
+        .join(&entry.space)
+        .join("apps")
+        .join(&entry.name);
     if !app_dir.is_dir() {
         return respond(stream, 404, "text/plain", b"app not found on disk", false).await;
     }
 
     match segs.get(2).copied() {
         Some("kv") => handle_kv(stream, &app_dir, method, &segs[3..], body).await,
-        Some("upload") if method == "POST" => handle_upload(stream, &app_dir, &segs[0], body, content_type).await,
+        Some("upload") if method == "POST" => {
+            handle_upload(stream, &app_dir, &segs[0], body, content_type).await
+        }
         _ => respond(stream, 404, "text/plain", b"unknown api endpoint", false).await,
     }
 }
@@ -386,7 +427,8 @@ async fn handle_kv(
 fn kv_op(db_path: &Path, method: &str, segs: &[&str], body: &[u8]) -> (u16, &'static str, Vec<u8>) {
     let conn = match rusqlite::Connection::open(db_path) {
         Ok(c) => {
-            let _ = c.execute_batch("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)");
+            let _ =
+                c.execute_batch("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)");
             c
         }
         Err(e) => return (500, "text/plain", format!("db error: {e}").into_bytes()),
@@ -406,16 +448,23 @@ fn kv_op(db_path: &Path, method: &str, segs: &[&str], body: &[u8]) -> (u16, &'st
         }
         "GET" => {
             let key = percent_decode(segs.join("/").as_str());
-            match conn.query_row("SELECT value FROM kv WHERE key = ?1", [&key], |r| r.get::<_, String>(0)) {
+            match conn.query_row("SELECT value FROM kv WHERE key = ?1", [&key], |r| {
+                r.get::<_, String>(0)
+            }) {
                 Ok(value) => (200, "text/plain", value.into_bytes()),
-                Err(rusqlite::Error::QueryReturnedNoRows) => (404, "text/plain", b"not found".to_vec()),
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    (404, "text/plain", b"not found".to_vec())
+                }
                 Err(e) => (500, "text/plain", format!("read error: {e}").into_bytes()),
             }
         }
         "PUT" => {
             let key = percent_decode(segs.join("/").as_str());
             let value = std::str::from_utf8(body).unwrap_or("");
-            match conn.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)", rusqlite::params![key, value]) {
+            match conn.execute(
+                "INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)",
+                rusqlite::params![key, value],
+            ) {
                 Ok(_) => (200, "text/plain", b"ok".to_vec()),
                 Err(e) => (500, "text/plain", format!("write error: {e}").into_bytes()),
             }
@@ -445,7 +494,16 @@ async fn handle_upload(
         .next()
     {
         Some(b) => b.trim_matches('"').to_string(),
-        None => return respond(stream, 400, "text/plain", b"missing boundary in Content-Type", false).await,
+        None => {
+            return respond(
+                stream,
+                400,
+                "text/plain",
+                b"missing boundary in Content-Type",
+                false,
+            )
+            .await;
+        }
     };
     if boundary.is_empty() {
         return respond(stream, 400, "text/plain", b"empty boundary", false).await;
@@ -453,7 +511,16 @@ async fn handle_upload(
 
     let body_str = match std::str::from_utf8(body) {
         Ok(s) => s,
-        Err(_) => return respond(stream, 400, "text/plain", b"upload body is not valid UTF-8", false).await,
+        Err(_) => {
+            return respond(
+                stream,
+                400,
+                "text/plain",
+                b"upload body is not valid UTF-8",
+                false,
+            )
+            .await;
+        }
     };
 
     let part_header = format!("--{}\r\n", boundary);
@@ -465,7 +532,14 @@ async fn handle_upload(
     let after_header_marker = header_start + part_header.len();
 
     let Some(hdr_body_sep) = body_str[after_header_marker..].find("\r\n\r\n") else {
-        return respond(stream, 400, "text/plain", b"malformed multipart part: no header-body separator", false).await;
+        return respond(
+            stream,
+            400,
+            "text/plain",
+            b"malformed multipart part: no header-body separator",
+            false,
+        )
+        .await;
     };
     let hdr_end = after_header_marker + hdr_body_sep;
     let part_headers = &body_str[after_header_marker..hdr_end];
@@ -497,13 +571,27 @@ async fn handle_upload(
 
     let uploads_dir = app_dir.join("_uploads");
     if let Err(e) = std::fs::create_dir_all(&uploads_dir) {
-        return respond(stream, 500, "text/plain", format!("cannot create uploads dir: {e}").as_bytes(), false).await;
+        return respond(
+            stream,
+            500,
+            "text/plain",
+            format!("cannot create uploads dir: {e}").as_bytes(),
+            false,
+        )
+        .await;
     }
 
     let file_id = uuid::Uuid::new_v4().to_string();
     let save_path = uploads_dir.join(format!("{file_id}.{ext}"));
     if let Err(e) = std::fs::write(&save_path, file_body) {
-        return respond(stream, 500, "text/plain", format!("cannot save upload: {e}").as_bytes(), false).await;
+        return respond(
+            stream,
+            500,
+            "text/plain",
+            format!("cannot save upload: {e}").as_bytes(),
+            false,
+        )
+        .await;
     }
 
     let url = format!("/{app_uuid}/_uploads/{file_id}.{ext}");
@@ -558,6 +646,7 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// Encode a path segment for a URL (space names may contain spaces).
+#[cfg(test)]
 pub(crate) fn encode(seg: &str) -> String {
     seg.bytes()
         .map(|b| match b {
@@ -671,7 +760,10 @@ mod tests {
     #[test]
     fn app_url_format() {
         let reg = AppRegistry::load(&PathBuf::from("/tmp"));
-        let s = AppServer { port: 9999, registry: reg, spaces_root: PathBuf::from("/tmp") };
+        let s = AppServer {
+            port: 9999,
+            registry: reg,
+        };
         assert_eq!(s.app_url("some-uuid"), "http://127.0.0.1:9999/some-uuid/");
     }
 
@@ -681,8 +773,11 @@ mod tests {
         let base = format!("http://127.0.0.1:{}", srv.port());
         let c = reqwest::Client::new();
 
-        let r = c.request(reqwest::Method::OPTIONS, format!("{base}/default/deck/"))
-            .send().await.unwrap();
+        let r = c
+            .request(reqwest::Method::OPTIONS, format!("{base}/default/deck/"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status(), 204);
         assert_eq!(r.headers()["access-control-allow-origin"], "*");
     }
@@ -693,9 +788,12 @@ mod tests {
         let base = format!("http://127.0.0.1:{}", srv.port());
         let c = reqwest::Client::new();
 
-        let r = c.put(format!("{base}/default/deck/index.html"))
+        let r = c
+            .put(format!("{base}/default/deck/index.html"))
             .body("new content")
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status(), 405);
     }
 
@@ -706,8 +804,11 @@ mod tests {
         let base = format!("http://127.0.0.1:{}", srv.port());
         let c = reqwest::Client::new();
 
-        let r = c.post(format!("{base}/{uuid}/_api/upload"))
-            .send().await.unwrap();
+        let r = c
+            .post(format!("{base}/{uuid}/_api/upload"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status(), 400);
     }
 
@@ -719,25 +820,37 @@ mod tests {
         let c = reqwest::Client::new();
 
         // PUT
-        let r = c.put(format!("{base}/{uuid}/_api/kv/hello"))
+        let r = c
+            .put(format!("{base}/{uuid}/_api/kv/hello"))
             .body("world")
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status(), 200);
 
         // GET
-        let r = c.get(format!("{base}/{uuid}/_api/kv/hello"))
-            .send().await.unwrap();
+        let r = c
+            .get(format!("{base}/{uuid}/_api/kv/hello"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(r.text().await.unwrap(), "world");
 
         // DELETE
-        let r = c.delete(format!("{base}/{uuid}/_api/kv/hello"))
-            .send().await.unwrap();
+        let r = c
+            .delete(format!("{base}/{uuid}/_api/kv/hello"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status(), 200);
 
         // GET after delete = 404
-        let r = c.get(format!("{base}/{uuid}/_api/kv/hello"))
-            .send().await.unwrap();
+        let r = c
+            .get(format!("{base}/{uuid}/_api/kv/hello"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status(), 404);
     }
 
@@ -748,11 +861,27 @@ mod tests {
         let base = format!("http://127.0.0.1:{}", srv.port());
         let c = reqwest::Client::new();
 
-        c.put(format!("{base}/{uuid}/_api/kv/a")).body("1").send().await.unwrap();
-        c.put(format!("{base}/{uuid}/_api/kv/b")).body("2").send().await.unwrap();
-        c.put(format!("{base}/{uuid}/_api/kv/c")).body("3").send().await.unwrap();
+        c.put(format!("{base}/{uuid}/_api/kv/a"))
+            .body("1")
+            .send()
+            .await
+            .unwrap();
+        c.put(format!("{base}/{uuid}/_api/kv/b"))
+            .body("2")
+            .send()
+            .await
+            .unwrap();
+        c.put(format!("{base}/{uuid}/_api/kv/c"))
+            .body("3")
+            .send()
+            .await
+            .unwrap();
 
-        let r = c.get(format!("{base}/{uuid}/_api/kv")).send().await.unwrap();
+        let r = c
+            .get(format!("{base}/{uuid}/_api/kv"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status(), 200);
         let keys: Vec<String> = r.json().await.unwrap();
         assert_eq!(keys, vec!["a", "b", "c"]);
@@ -771,7 +900,10 @@ mod tests {
         );
         let r = c
             .post(format!("{base}/{uuid}/_api/upload"))
-            .header("Content-Type", format!("multipart/form-data; boundary={boundary}"))
+            .header(
+                "Content-Type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
             .body(body)
             .send()
             .await

@@ -412,8 +412,13 @@ mod tests {
         let a = test_app();
         let space_id = a.active_space.id.clone();
         let session =
-            a.db.create_session("rust async runtimes", "openai/gpt-5-mini", &space_id, "chat")
-                .unwrap();
+            a.db.create_session(
+                "rust async runtimes",
+                "openai/gpt-5-mini",
+                &space_id,
+                "chat",
+            )
+            .unwrap();
         let watch_id =
             a.db.create_watch(&space_id, "rust async runtimes", 24, &session.id)
                 .unwrap();

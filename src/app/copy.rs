@@ -16,7 +16,7 @@ impl App {
         let text = match self.messages.get(idx) {
             Some(m) if m.role == "assistant" => Some(crate::markdown::to_plain(&m.content)),
             Some(m) => Some(m.content.clone()),
-            None if idx == self.messages.len() => self.streaming.clone(),
+            None if idx == self.messages.len() => self.active_streaming_text().map(str::to_string),
             None => None,
         };
         if let Some(t) = text {

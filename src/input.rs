@@ -99,7 +99,10 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "files",
         desc: "browse space files / images / scripts",
-        aliases: &["file", "attach", "upload", "docs", "image", "images", "img", "pictures", "script", "scripts"],
+        aliases: &[
+            "file", "attach", "upload", "docs", "image", "images", "img", "pictures", "script",
+            "scripts",
+        ],
     },
     Command {
         name: "apps",
@@ -337,13 +340,14 @@ impl App {
             Popup::Skills if self.skills_mode == SkillsMode::Install => {
                 self.skills_edit.push_str(text)
             }
-            Popup::Apps if self.apps_mode == AppsMode::EditFile => {
-                self.apps_edit.push_str(text)
-            }
+            Popup::Apps if self.apps_mode == AppsMode::EditFile => self.apps_edit.push_str(text),
             Popup::Files if self.files_mode == crate::app::FilesMode::Add => {
                 self.files_edit.push_str(text)
             }
-            Popup::Files if self.files_tab == crate::app::FilesTab::Scripts && self.scripts_mode == crate::app::ScriptsMode::Create => {
+            Popup::Files
+                if self.files_tab == crate::app::FilesTab::Scripts
+                    && self.scripts_mode == crate::app::ScriptsMode::Create =>
+            {
                 self.scripts_edit.push_str(text)
             }
             Popup::Files if self.files_mode == crate::app::FilesMode::Pick => {
@@ -602,9 +606,7 @@ impl App {
                 Some((score, f))
             })
             .collect();
-        scored.sort_by(|a, b| {
-            b.0.cmp(&a.0).then(a.1.name.cmp(&b.1.name))
-        });
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name.cmp(&b.1.name)));
         let matches: Vec<crate::db::FileRow> = scored.into_iter().map(|(_, f)| f.clone()).collect();
         if matches.is_empty() {
             self.at_state = None;

@@ -88,7 +88,6 @@ pub struct FileRow {
 /// for assistant replies (None for user/system messages).
 #[derive(Debug, Clone)]
 pub struct Message {
-    pub id: String,
     pub role: String,
     pub content: String,
     pub model: Option<String>,
@@ -251,7 +250,9 @@ impl Db {
         }
         // Migration: remove the message_images table — images are now embedded
         // as markdown `![alt](file)` in message content.
-        let _ = self.conn.execute_batch("DROP TABLE IF EXISTS message_images;");
+        let _ = self
+            .conn
+            .execute_batch("DROP TABLE IF EXISTS message_images;");
         // Ensure the default space exists, then backfill any session left
         // without a space (pre-spaces db, or a space that got deleted).
         let now = Utc::now().to_rfc3339();
@@ -581,21 +582,20 @@ impl Db {
 
     pub fn load_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, role, content, model, reasoning, tokens, secs, phrase, persona FROM messages
+            "SELECT role, content, model, reasoning, tokens, secs, phrase, persona FROM messages
              WHERE session_id = ?1 ORDER BY created_at ASC",
         )?;
         let messages = stmt
             .query_map([session_id], |r| {
                 Ok(Message {
-                    id: r.get(0)?,
-                    role: r.get(1)?,
-                    content: r.get(2)?,
-                    model: r.get(3)?,
-                    reasoning: r.get(4)?,
-                    tokens: r.get(5)?,
-                    secs: r.get(6)?,
-                    phrase: r.get(7)?,
-                    persona: r.get(8)?,
+                    role: r.get(0)?,
+                    content: r.get(1)?,
+                    model: r.get(2)?,
+                    reasoning: r.get(3)?,
+                    tokens: r.get(4)?,
+                    secs: r.get(5)?,
+                    phrase: r.get(6)?,
+                    persona: r.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -907,7 +907,12 @@ impl Db {
     /// Replace all occurrences of `old_name` with `new_name` in message content
     /// within the given space. Used when OCR renames a pasted image to a
     /// descriptive filename — updates `![alt](old_name)` → `![alt](new_name)`.
-    pub fn replace_file_ref_in_messages(&self, space_id: &str, old_name: &str, new_name: &str) -> Result<()> {
+    pub fn replace_file_ref_in_messages(
+        &self,
+        space_id: &str,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<()> {
         self.conn.execute(
             "UPDATE messages SET content = REPLACE(content, ?1, ?2)
              WHERE session_id IN (SELECT id FROM sessions WHERE space_id = ?3)",
@@ -1293,11 +1298,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
         nb += y * y;
     }
     let denom = na.sqrt() * nb.sqrt();
-    if denom == 0.0 {
-        0.0
-    } else {
-        dot / denom
-    }
+    if denom == 0.0 { 0.0 } else { dot / denom }
 }
 
 /// Quote a query for FTS5 MATCH: each whitespace token becomes a quoted
@@ -1507,10 +1508,11 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert!(hits[0].1.contains("borrow checker"));
 
-        assert!(db
-            .search_session_sources(&s.id, "quantum")
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.search_session_sources(&s.id, "quantum")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1565,7 +1567,9 @@ mod tests {
     fn session_and_message_roundtrip() {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
-        let s = db.create_session("hello", "openai/gpt-4o", &space, "chat").unwrap();
+        let s = db
+            .create_session("hello", "openai/gpt-4o", &space, "chat")
+            .unwrap();
 
         db.add_user_message(&s.id, "hi").unwrap();
         db.add_assistant_message(
@@ -1669,11 +1673,12 @@ mod tests {
         assert_eq!(db.count_sessions(&work.id).unwrap(), 1);
 
         db.rename_space(&work.id, "work-renamed").unwrap();
-        assert!(db
-            .list_spaces()
-            .unwrap()
-            .iter()
-            .any(|s| s.name == "work-renamed"));
+        assert!(
+            db.list_spaces()
+                .unwrap()
+                .iter()
+                .any(|s| s.name == "work-renamed")
+        );
 
         db.delete_space(&work.id).unwrap();
         assert_eq!(db.list_spaces().unwrap().len(), 1); // work is gone
@@ -1708,9 +1713,11 @@ mod tests {
 
         db.set_chunk_embeddings(&id, &[(0, vec![1.0, 0.0]), (1, vec![0.0, 1.0])])
             .unwrap();
-        assert!(files_missing_embeddings(&db.conn, &space)
-            .unwrap()
-            .is_empty());
+        assert!(
+            files_missing_embeddings(&db.conn, &space)
+                .unwrap()
+                .is_empty()
+        );
 
         // Query near the second chunk's vector ranks it first.
         let hits = semantic_chunks(&db.conn, &space, &[0.1, 0.9], 5).unwrap();
@@ -1794,9 +1801,11 @@ mod tests {
         .unwrap();
         let text = file_text(&db.conn, &space, "doc.txt").unwrap().unwrap();
         assert_eq!(text, "one\ntwo\nthree\nfour");
-        assert!(file_text(&db.conn, &space, "missing.txt")
-            .unwrap()
-            .is_none());
+        assert!(
+            file_text(&db.conn, &space, "missing.txt")
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(count_files(&db.conn, &space).unwrap(), 1);
     }
 
@@ -1846,15 +1855,21 @@ mod tests {
         // list_all_watches should return watches from all spaces
         let all_watches = db.list_all_watches().unwrap();
         assert_eq!(all_watches.len(), 3);
-        assert!(all_watches
-            .iter()
-            .any(|w| w.id == id1 && w.space_id == "space-a"));
-        assert!(all_watches
-            .iter()
-            .any(|w| w.id == id2 && w.space_id == "space-b"));
-        assert!(all_watches
-            .iter()
-            .any(|w| w.id == id3 && w.space_id == "space-a"));
+        assert!(
+            all_watches
+                .iter()
+                .any(|w| w.id == id1 && w.space_id == "space-a")
+        );
+        assert!(
+            all_watches
+                .iter()
+                .any(|w| w.id == id2 && w.space_id == "space-b")
+        );
+        assert!(
+            all_watches
+                .iter()
+                .any(|w| w.id == id3 && w.space_id == "space-a")
+        );
 
         // list_watches for one space should only return that space's watches,
         // confirming list_all_watches is not space-scoped

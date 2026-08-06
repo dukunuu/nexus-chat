@@ -25,6 +25,107 @@ const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
 /// model rather than a general Zen one — stripped before it's ever sent to
 /// the API; only used to pick which of the two bases above to hit.
 const OPENCODE_GO_PREFIX: &str = "go:";
+
+/// Context windows for OpenCode Zen's general catalog (`/zen/v1/models`),
+/// keyed by raw model id. The Zen `/models` endpoint returns no context
+/// metadata (only id/created/owned_by), so without this table every OpenCode
+/// model would show no context size. Values mirror the models.dev catalog
+/// that opencode itself uses for these ids.
+const OPENCODE_ZEN_CONTEXT: &[(&str, u64)] = &[
+    ("big-pickle", 200_000),
+    ("claude-fable-5", 1_000_000),
+    ("claude-haiku-4-5", 200_000),
+    ("claude-opus-4-1", 200_000),
+    ("claude-opus-4-5", 200_000),
+    ("claude-opus-4-6", 1_000_000),
+    ("claude-opus-4-7", 1_000_000),
+    ("claude-opus-4-8", 1_000_000),
+    ("claude-opus-5", 1_000_000),
+    ("claude-sonnet-4", 1_000_000),
+    ("claude-sonnet-4-5", 1_000_000),
+    ("claude-sonnet-4-6", 1_000_000),
+    ("claude-sonnet-5", 1_000_000),
+    ("deepseek-v4-flash", 1_000_000),
+    ("deepseek-v4-flash-free", 200_000),
+    ("deepseek-v4-pro", 1_000_000),
+    ("gemini-3-flash", 1_048_576),
+    ("gemini-3.1-pro", 1_048_576),
+    ("gemini-3.5-flash", 1_048_576),
+    ("gemini-3.5-flash-lite", 1_048_576),
+    ("gemini-3.6-flash", 1_048_576),
+    ("glm-5", 204_800),
+    ("glm-5.1", 204_800),
+    ("glm-5.2", 1_000_000),
+    ("gpt-5", 400_000),
+    ("gpt-5-codex", 400_000),
+    ("gpt-5-nano", 400_000),
+    ("gpt-5.1", 400_000),
+    ("gpt-5.1-codex", 400_000),
+    ("gpt-5.1-codex-max", 400_000),
+    ("gpt-5.1-codex-mini", 400_000),
+    ("gpt-5.2", 400_000),
+    ("gpt-5.2-codex", 400_000),
+    ("gpt-5.3-codex", 400_000),
+    ("gpt-5.3-codex-spark", 128_000),
+    ("gpt-5.4", 1_050_000),
+    ("gpt-5.4-mini", 400_000),
+    ("gpt-5.4-nano", 400_000),
+    ("gpt-5.4-pro", 1_050_000),
+    ("gpt-5.5", 1_050_000),
+    ("gpt-5.5-pro", 1_050_000),
+    ("gpt-5.6-luna", 1_050_000),
+    ("gpt-5.6-sol", 1_050_000),
+    ("gpt-5.6-terra", 1_050_000),
+    ("grok-4.5", 500_000),
+    ("grok-build-0.1", 256_000),
+    ("kimi-k2.5", 262_144),
+    ("kimi-k2.6", 262_144),
+    ("kimi-k2.7-code", 262_144),
+    ("kimi-k3", 1_048_576),
+    ("laguna-s-2.1-free", 256_000),
+    ("ling-3.0-flash-free", 262_144),
+    ("longcat-2.0-free", 1_000_000),
+    ("minimax-m2.5", 204_800),
+    ("minimax-m2.7", 204_800),
+    ("minimax-m3", 512_000),
+    ("mimo-v2.5-free", 200_000),
+    ("nemotron-3-ultra-free", 1_000_000),
+    ("north-mini-code-free", 256_000),
+    ("qwen3.5-plus", 262_144),
+    ("qwen3.6-plus", 262_144),
+];
+
+/// Context windows for the flat-fee Go bundle (`/zen/go/v1/models`), keyed by
+/// raw model id. Kept separate from `OPENCODE_ZEN_CONTEXT` because the *same
+/// id* can have a different window on each endpoint (e.g. qwen3.6-plus:
+/// 262k on Zen general vs 1M on Go; minimax-m3: 512k vs 1M).
+const OPENCODE_GO_CONTEXT: &[(&str, u64)] = &[
+    ("deepseek-v4-flash", 1_000_000),
+    ("deepseek-v4-pro", 1_000_000),
+    ("glm-5", 202_752),
+    ("glm-5.1", 202_752),
+    ("glm-5.2", 1_000_000),
+    ("gpt-5.6-luna", 1_050_000),
+    ("grok-4.5", 500_000),
+    ("hy3", 256_000),
+    ("hy3-preview", 256_000),
+    ("kimi-k2.5", 262_144),
+    ("kimi-k2.6", 262_144),
+    ("kimi-k2.7-code", 262_144),
+    ("kimi-k3", 1_048_576),
+    ("mimo-v2-omni", 262_144),
+    ("mimo-v2-pro", 1_048_576),
+    ("mimo-v2.5", 1_000_000),
+    ("mimo-v2.5-pro", 1_048_576),
+    ("minimax-m2.5", 204_800),
+    ("minimax-m2.7", 204_800),
+    ("minimax-m3", 1_000_000),
+    ("qwen3.5-plus", 262_144),
+    ("qwen3.6-plus", 1_000_000),
+    ("qwen3.7-max", 1_000_000),
+    ("qwen3.7-plus", 1_000_000),
+    ("qwen3.8-max", 1_000_000),
+];
 /// Hard cap on tool round-trips per response, so a model that keeps calling
 /// tools can't loop forever. The default for interactive chat; background
 /// jobs (e.g. deep-research searcher agents) pass their own smaller budget.
@@ -87,7 +188,7 @@ impl ProviderFlavor {
                 )
             }
             ProviderFlavor::OpenAiCodex => Some(true),
-            ProviderFlavor::OpencodeGo => Some(false),
+            ProviderFlavor::OpencodeGo => None,
         }
     }
 
@@ -157,6 +258,32 @@ struct ModelsResponse {
 }
 
 #[derive(Deserialize)]
+struct ImageModelsResponse {
+    data: Vec<ImageModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct ImageModelEntry {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    architecture: Option<Architecture>,
+}
+
+#[derive(Deserialize)]
+struct VideoModelsResponse {
+    data: Vec<VideoModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct VideoModelEntry {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct ModelEntry {
     id: String,
     #[serde(default)]
@@ -200,14 +327,41 @@ fn entry_supports_image_gen(e: &ModelEntry) -> bool {
     id.contains("/flux")
         || id.contains("dall-e")
         || id.contains("/stable-diffusion")
-        || id == "recraft-20b" || id.starts_with("recraft-v")
+        || id == "recraft-20b"
+        || id.starts_with("recraft-v")
         || id.contains("/imagen")
         || id.contains("/pixart")
         || id.contains("/playground-v")
-        || id == "luma-photon" || id.starts_with("luma/")
+        || id == "luma-photon"
+        || id.starts_with("luma/")
         || id.starts_with("ideogram/")
         || id.contains("/sdxl")
         || id.contains("hyper-sd")
+}
+
+fn entry_supports_video_gen(e: &ModelEntry) -> bool {
+    e.architecture
+        .as_ref()
+        .is_some_and(|a| a.output_modalities.iter().any(|m| m == "video"))
+}
+
+fn merge_generation_models(models: &mut Vec<Model>, additions: Vec<Model>) {
+    for addition in additions {
+        if let Some(existing) = models
+            .iter_mut()
+            .find(|m| m.backend == addition.backend && m.id == addition.id)
+        {
+            existing.supports_images |= addition.supports_images;
+            existing.supports_image_generation |= addition.supports_image_generation;
+            existing.supports_video_generation |= addition.supports_video_generation;
+            if existing.name == existing.id && addition.name != addition.id {
+                existing.name = addition.name;
+            }
+        } else {
+            models.push(addition);
+        }
+    }
+    models.sort_by(|a, b| a.id.cmp(&b.id));
 }
 
 impl OpenRouter {
@@ -262,6 +416,179 @@ impl OpenRouter {
         }
     }
 
+    /// Video gen is OpenRouter-only (not OpenAI/Codex/OpenCode).
+    pub fn is_openrouter(&self) -> bool {
+        self.flavor == ProviderFlavor::OpenRouter
+    }
+
+    /// Generate a video via OpenRouter's `/api/v1/videos` endpoint.
+    /// Submits the job, polls every 10s (up to 6 min), downloads on completion.
+    /// Returns `(mp4_bytes, cost_in_usd)`.
+    pub async fn generate_video(
+        &self,
+        model: &str,
+        prompt: &str,
+        duration: u32,
+        resolution: &str,
+        aspect_ratio: &str,
+        generate_audio: bool,
+        first_frame: Option<Vec<u8>>,
+        last_frame: Option<Vec<u8>>,
+        input_references: Vec<Vec<u8>>,
+        seed: Option<i32>,
+        // Provider-specific options keyed by provider slug, e.g.
+        // {"alibaba": {"parameters": {"video": "data:..."}}}.
+        // Passed through as `provider.options` in the request body.
+        provider_options: Option<serde_json::Value>,
+    ) -> Result<(Vec<u8>, f64)> {
+        if !self.is_openrouter() {
+            anyhow::bail!("video generation only available on the OpenRouter backend");
+        }
+        let (base, model_id) = self.opencode_route(model);
+        let (duration, resolution, aspect_ratio) =
+            normalize_video_params(&model_id, duration, resolution, aspect_ratio);
+        check_video_params(&model_id, duration, &resolution, &aspect_ratio)?;
+
+        use base64::Engine;
+
+        let mut body = serde_json::json!({
+            "model": model_id,
+            "prompt": prompt,
+            "duration": duration,
+            "resolution": resolution,
+            "aspect_ratio": aspect_ratio,
+            "generate_audio": generate_audio,
+        });
+
+        let mut frames = Vec::new();
+        if let Some(data) = first_frame {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+            let mime = Self::detect_image_mime(&data);
+            frames.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:{mime};base64,{b64}") },
+                "frame_type": "first_frame",
+            }));
+        }
+        if let Some(data) = last_frame {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+            let mime = Self::detect_image_mime(&data);
+            frames.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:{mime};base64,{b64}") },
+                "frame_type": "last_frame",
+            }));
+        }
+        if !frames.is_empty() {
+            body["frame_images"] = serde_json::Value::Array(frames);
+        }
+
+        if !input_references.is_empty() {
+            let refs: Vec<serde_json::Value> = input_references
+                .iter()
+                .map(|data| {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+                    let mime = Self::detect_image_mime(data);
+                    serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": format!("data:{mime};base64,{b64}") }
+                    })
+                })
+                .collect();
+            body["input_references"] = serde_json::Value::Array(refs);
+        }
+
+        if let Some(s) = seed {
+            body["seed"] = serde_json::json!(s);
+        }
+
+        if let Some(po) = provider_options {
+            body["provider"] = serde_json::json!({ "options": po });
+        }
+
+        let raw_resp = self
+            .client
+            .post(format!("{base}/videos"))
+            .bearer_auth(&self.key)
+            .json(&body)
+            .send()
+            .await
+            .context("video generation request")?;
+        let resp: serde_json::Value = if !raw_resp.status().is_success() {
+            let status = raw_resp.status();
+            let body_text = raw_resp.text().await.unwrap_or_default();
+            anyhow::bail!("video generation submission failed (HTTP {status}): {body_text}");
+        } else {
+            raw_resp
+                .json::<serde_json::Value>()
+                .await
+                .context("parsing video submission response")?
+        };
+
+        let job_id = resp
+            .get("id")
+            .and_then(|i| i.as_str())
+            .context("no job id in video generation response")?
+            .to_string();
+
+        let poll_url = format!("{base}/videos/{job_id}");
+        for _attempt in 0..36 {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+            let status = self
+                .client
+                .get(&poll_url)
+                .bearer_auth(&self.key)
+                .send()
+                .await
+                .context("video status poll")?
+                .error_for_status()
+                .context("video status poll failed")?
+                .json::<serde_json::Value>()
+                .await
+                .context("parsing video status response")?;
+
+            match status.get("status").and_then(|s| s.as_str()) {
+                Some("completed") => {
+                    let cost = status
+                        .pointer("/usage/cost")
+                        .and_then(|c| c.as_f64())
+                        .unwrap_or(0.0);
+
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                    let content = self
+                        .client
+                        .get(format!("{base}/videos/{job_id}/content?index=0"))
+                        .bearer_auth(&self.key)
+                        .send()
+                        .await
+                        .context("video download request")?
+                        .error_for_status()
+                        .context("video download failed")?
+                        .bytes()
+                        .await
+                        .context("reading video content")?;
+
+                    return Ok((content.to_vec(), cost));
+                }
+                Some("failed") => {
+                    let err = status
+                        .get("error")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("unknown error");
+                    anyhow::bail!("video generation failed: {err}");
+                }
+                Some("cancelled") | Some("expired") => {
+                    anyhow::bail!("video generation was cancelled or expired");
+                }
+                _ => {}
+            }
+        }
+
+        anyhow::bail!("video generation timed out after 6 minutes");
+    }
+
     pub fn default_utility_model(&self) -> &'static str {
         match self.flavor {
             ProviderFlavor::OpenRouter => "google/gemini-2.5-flash-lite",
@@ -299,9 +626,16 @@ impl OpenRouter {
         }
     }
 
+    pub fn default_video_gen_model(&self) -> &'static str {
+        match self.flavor {
+            ProviderFlavor::OpenRouter => "google/veo-3.1",
+            _ => "",
+        }
+    }
+
     pub fn default_image_gen_model(&self) -> &'static str {
         match self.flavor {
-            ProviderFlavor::OpenRouter => "black-forest-labs/flux-dev",
+            ProviderFlavor::OpenRouter => "openai/gpt-image-2",
             ProviderFlavor::OpenAi => "dall-e-3",
             ProviderFlavor::OpenAiCodex => "",
             ProviderFlavor::OpencodeGo => "",
@@ -323,6 +657,7 @@ impl OpenRouter {
                     context_length: Some(128_000),
                     supports_images: false,
                     supports_image_generation: false,
+                    supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
@@ -332,6 +667,7 @@ impl OpenRouter {
                     context_length: Some(272_000),
                     supports_images: true,
                     supports_image_generation: false,
+                    supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
@@ -341,6 +677,7 @@ impl OpenRouter {
                     context_length: Some(272_000),
                     supports_images: true,
                     supports_image_generation: false,
+                    supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
@@ -350,6 +687,7 @@ impl OpenRouter {
                     context_length: Some(272_000),
                     supports_images: true,
                     supports_image_generation: false,
+                    supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
@@ -359,6 +697,7 @@ impl OpenRouter {
                     context_length: Some(1_000_000),
                     supports_images: true,
                     supports_image_generation: false,
+                    supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
@@ -368,6 +707,7 @@ impl OpenRouter {
                     context_length: Some(1_000_000),
                     supports_images: true,
                     supports_image_generation: false,
+                    supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
                 Model {
@@ -377,6 +717,7 @@ impl OpenRouter {
                     context_length: Some(1_000_000),
                     supports_images: true,
                     supports_image_generation: false,
+                    supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
                 },
             ]);
@@ -411,7 +752,85 @@ impl OpenRouter {
             models.sort_by(|a, b| a.id.cmp(&b.id));
             return Ok(models);
         }
-        self.fetch_models_from(self.flavor.base()).await
+        let mut models = self.fetch_models_from(self.flavor.base()).await?;
+        if self.flavor == ProviderFlavor::OpenRouter {
+            // The general catalog is not authoritative for generation models.
+            // Merge OpenRouter's dedicated catalogs into the existing picker.
+            let (images, videos) =
+                tokio::join!(self.fetch_image_models(), self.fetch_video_models(),);
+            merge_generation_models(&mut models, images.unwrap_or_default());
+            merge_generation_models(&mut models, videos.unwrap_or_default());
+        }
+        Ok(models)
+    }
+
+    async fn fetch_image_models(&self) -> Result<Vec<Model>> {
+        let response = self
+            .client
+            .get(format!("{OPENROUTER_BASE}/images/models"))
+            .bearer_auth(&self.key)
+            .send()
+            .await
+            .context("requesting image model list")?
+            .error_for_status()
+            .context("image model list request failed")?
+            .json::<ImageModelsResponse>()
+            .await
+            .context("parsing image model list")?;
+
+        Ok(response
+            .data
+            .into_iter()
+            .map(|m| {
+                let id = m.id;
+                Model {
+                    name: m.name.unwrap_or_else(|| id.clone()),
+                    supports_reasoning: false,
+                    context_length: None,
+                    supports_images: m
+                        .architecture
+                        .as_ref()
+                        .is_some_and(|a| a.input_modalities.iter().any(|v| v == "image")),
+                    supports_image_generation: true,
+                    supports_video_generation: false,
+                    backend: crate::provider::BackendTag::OpenRouter,
+                    id,
+                }
+            })
+            .collect())
+    }
+
+    async fn fetch_video_models(&self) -> Result<Vec<Model>> {
+        let response = self
+            .client
+            .get(format!("{OPENROUTER_BASE}/videos/models"))
+            .bearer_auth(&self.key)
+            .send()
+            .await
+            .context("requesting video model list")?
+            .error_for_status()
+            .context("video model list request failed")?
+            .json::<VideoModelsResponse>()
+            .await
+            .context("parsing video model list")?;
+
+        Ok(response
+            .data
+            .into_iter()
+            .map(|m| {
+                let id = m.id;
+                Model {
+                    name: m.name.unwrap_or_else(|| id.clone()),
+                    supports_reasoning: false,
+                    context_length: None,
+                    supports_images: false,
+                    supports_image_generation: false,
+                    supports_video_generation: true,
+                    backend: crate::provider::BackendTag::OpenRouter,
+                    id,
+                }
+            })
+            .collect())
     }
 
     /// GET `{base}/models` and map the response into our `Model` type using
@@ -443,6 +862,8 @@ impl OpenRouter {
                     .flavor
                     .supports_image_generation(&m)
                     .unwrap_or_else(|| entry_supports_image_gen(&m));
+                let supports_video_generation =
+                    self.flavor == ProviderFlavor::OpenRouter && entry_supports_video_gen(&m);
                 Model {
                     name: m.name.unwrap_or_else(|| m.id.clone()),
                     supports_reasoning,
@@ -450,12 +871,34 @@ impl OpenRouter {
                     id: m.id,
                     supports_images,
                     supports_image_generation,
+                    supports_video_generation,
                     backend: self.backend_tag(),
                 }
             })
             .collect();
+        // The OpenCode Zen endpoints return no context metadata at all; fill
+        // in the known windows per endpoint (the same id can differ between
+        // the general catalog and the Go bundle — see the table comments).
+        // An API-provided value always wins over the fallback table.
+        for m in &mut models {
+            if m.context_length.is_none() {
+                m.context_length = Self::opencode_context_fallback(base, &m.id);
+            }
+        }
         models.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(models)
+    }
+
+    /// Fallback context window for an OpenCode model id, keyed by endpoint
+    /// (Zen general vs Go bundle). `None` for non-OpenCode bases and for ids
+    /// not in the table.
+    fn opencode_context_fallback(base: &str, id: &str) -> Option<u64> {
+        let table = match base {
+            OPENCODE_ZEN_BASE => OPENCODE_ZEN_CONTEXT,
+            OPENCODE_GO_BASE => OPENCODE_GO_CONTEXT,
+            _ => return None,
+        };
+        table.iter().find(|(tid, _)| *tid == id).map(|(_, c)| *c)
     }
 
     /// One-shot, non-streaming completion. Used for short utility calls like
@@ -557,7 +1000,13 @@ impl OpenRouter {
     /// Generate an image via OpenRouter's dedicated `/api/v1/images` endpoint.
     /// Returns `(decoded_bytes, file_extension)` — the caller should use the
     /// returned extension (e.g. `"png"`, `"jpg"`, `"webp"`) for the saved file.
-    pub async fn generate_image(&self, model: &str, prompt: &str, size: &str, image_data: Option<&[u8]>) -> Result<(Vec<u8>, String)> {
+    pub async fn generate_image(
+        &self,
+        model: &str,
+        prompt: &str,
+        size: &str,
+        image_data: Option<&[u8]>,
+    ) -> Result<(Vec<u8>, String)> {
         if let Some(delegate) = self.openrouter_delegate_for_model(model) {
             return Box::pin(delegate.generate_image(model, prompt, size, image_data)).await;
         }
@@ -570,8 +1019,21 @@ impl OpenRouter {
             "model": model,
             "prompt": prompt,
             "n": 1,
-            "size": size,
         });
+        if self.flavor == ProviderFlavor::OpenAi {
+            // DALL-E uses OpenAI's legacy pixel-size parameter.
+            body["size"] = serde_json::json!(size);
+        } else {
+            // OpenRouter's image catalog uses normalized capabilities. The
+            // old 1024x1024 size is not accepted by several newer models.
+            body["aspect_ratio"] = serde_json::json!(Self::image_aspect_ratio(size));
+            if model.starts_with("google/gemini-3") {
+                body["resolution"] = serde_json::json!(Self::image_resolution(size));
+            }
+            if model.starts_with("openai/gpt-image") || model.starts_with("openai/gpt-5-image") {
+                body["quality"] = serde_json::json!("high");
+            }
+        }
         if let Some(img) = image_data {
             let b64 = base64::engine::general_purpose::STANDARD.encode(img);
             let mime = Self::detect_image_mime(img);
@@ -580,7 +1042,8 @@ impl OpenRouter {
                 "image_url": { "url": format!("data:{mime};base64,{b64}") }
             }]);
         }
-        let v = self.client
+        let v = self
+            .client
             .post(format!("{base}/images"))
             .bearer_auth(&self.key)
             .json(&body)
@@ -601,7 +1064,10 @@ impl OpenRouter {
             .get("b64_json")
             .and_then(|b| b.as_str())
             .context("no b64_json field")?;
-        let media_type = data.get("media_type").and_then(|m| m.as_str()).unwrap_or("image/png");
+        let media_type = data
+            .get("media_type")
+            .and_then(|m| m.as_str())
+            .unwrap_or("image/png");
         let ext = match media_type {
             "image/jpeg" => "jpg",
             "image/webp" => "webp",
@@ -616,15 +1082,46 @@ impl OpenRouter {
         Ok((bytes, ext.to_string()))
     }
 
-/// Detect image MIME type from magic bytes.
-fn detect_image_mime(data: &[u8]) -> &'static str {
-    if data.len() < 4 { return "image/png"; }
-    if data[0] == 0x89 && data[1] == b'P' && data[2] == b'N' && data[3] == b'G' { "image/png" }
-    else if data[0] == 0xFF && data[1] == 0xD8 { "image/jpeg" }
-    else if data[0] == b'G' && data[1] == b'I' && data[2] == b'F' { "image/gif" }
-    else if data[0] == b'R' && data[1] == b'I' && data[2] == b'F' && data[3] == b'F' { "image/webp" }
-    else { "image/png" }
-}
+    /// Detect image MIME type from magic bytes.
+    fn detect_image_mime(data: &[u8]) -> &'static str {
+        if data.len() < 4 {
+            return "image/png";
+        }
+        if data[0] == 0x89 && data[1] == b'P' && data[2] == b'N' && data[3] == b'G' {
+            "image/png"
+        } else if data[0] == 0xFF && data[1] == 0xD8 {
+            "image/jpeg"
+        } else if data[0] == b'G' && data[1] == b'I' && data[2] == b'F' {
+            "image/gif"
+        } else if data[0] == b'R' && data[1] == b'I' && data[2] == b'F' && data[3] == b'F' {
+            "image/webp"
+        } else {
+            "image/png"
+        }
+    }
+
+    fn image_aspect_ratio(size: &str) -> &'static str {
+        match size {
+            "1024x1792" => "9:16",
+            "1792x1024" => "16:9",
+            _ => "1:1",
+        }
+    }
+
+    fn image_resolution(size: &str) -> &'static str {
+        let max_dimension = size
+            .split('x')
+            .filter_map(|value| value.parse::<u32>().ok())
+            .max()
+            .unwrap_or(1024);
+        if max_dimension >= 3000 {
+            "4K"
+        } else if max_dimension >= 1800 {
+            "2K"
+        } else {
+            "1K"
+        }
+    }
 
     /// One-shot, non-streaming vision call: transcribe a scanned page image.
     pub async fn ocr_page(&self, model: &str, image_data_url: &str) -> Result<String> {
@@ -749,11 +1246,28 @@ fn detect_image_mime(data: &[u8]) -> &'static str {
                         });
                         messages.push(ChatMessage {
                             role: "tool".to_string(),
-                            content: result,
+                            content: result.clone(),
                             tool_calls: None,
                             tool_call_id: Some(call.id.clone()),
                             images: Vec::new(),
                         });
+                        // If the model supports images, load image references
+                        // from the tool result and inject them as a user
+                        // message so the vision model can see them on the
+                        // next stream request.
+                        if toolbox.supports_images {
+                            if let Some(imgs) =
+                                extract_tool_images(&result, &toolbox.space_files_dir)
+                            {
+                                messages.push(ChatMessage {
+                                    role: "user".to_string(),
+                                    content: imgs.description,
+                                    tool_calls: None,
+                                    tool_call_id: None,
+                                    images: imgs.urls,
+                                });
+                            }
+                        }
                     }
                     let remaining = max_tool_iters - (iter + 1);
                     if let Some(m) = messages.last_mut() {
@@ -1462,6 +1976,281 @@ fn vision_body(model: &str, image_data_url: &str) -> serde_json::Value {
     })
 }
 
+/// Validate basic video generation parameters against known model capabilities.
+/// Returns `Ok` if the params look valid, or a descriptive error message if not.
+/// This is a best-effort check — the API is the final authority.
+pub(crate) fn normalize_video_params(
+    model: &str,
+    duration: u32,
+    resolution: &str,
+    aspect_ratio: &str,
+) -> (u32, String, String) {
+    let mut duration = duration;
+    let mut resolution = resolution.to_string();
+    let mut aspect_ratio = aspect_ratio.to_string();
+
+    if model.starts_with("minimax/hailuo-3") {
+        resolution = "2K".to_string();
+    } else if model.starts_with("minimax/hailuo-2.3") {
+        resolution = "1080p".to_string();
+        aspect_ratio = "16:9".to_string();
+    } else if model.starts_with("runway/gen-4.5") {
+        resolution = "720p".to_string();
+        if !matches!(aspect_ratio.as_str(), "16:9" | "9:16") {
+            aspect_ratio = "16:9".to_string();
+        }
+    } else if model.starts_with("kwaivgi/kling-v3.0") || model.starts_with("kwaivgi/kling-video-o1")
+    {
+        resolution = "720p".to_string();
+        if !matches!(aspect_ratio.as_str(), "16:9" | "9:16" | "1:1") {
+            aspect_ratio = "16:9".to_string();
+        }
+    } else if model.starts_with("x-ai/grok-imagine-video") {
+        if !matches!(resolution.as_str(), "480p" | "720p" | "1080p") {
+            resolution = "720p".to_string();
+        }
+    } else if model.starts_with("openai/sora-2-pro") {
+        if !matches!(duration, 4 | 8 | 12 | 16 | 20) {
+            duration = nearest_duration(duration, &[4, 8, 12, 16, 20]);
+        }
+        if !matches!(resolution.as_str(), "720p" | "1080p") {
+            resolution = "1080p".to_string();
+        }
+        if !matches!(aspect_ratio.as_str(), "16:9" | "9:16") {
+            aspect_ratio = "16:9".to_string();
+        }
+    } else if model.starts_with("alibaba/wan-2.6") {
+        if !matches!(duration, 5 | 10) {
+            duration = nearest_duration(duration, &[5, 10]);
+        }
+        if !matches!(resolution.as_str(), "720p" | "1080p") {
+            resolution = "1080p".to_string();
+        }
+        if !matches!(aspect_ratio.as_str(), "16:9" | "9:16") {
+            aspect_ratio = "16:9".to_string();
+        }
+    } else if model.starts_with("google/veo-3.1") {
+        if !matches!(duration, 4 | 6 | 8) {
+            duration = nearest_duration(duration, &[4, 6, 8]);
+        }
+        if !matches!(resolution.as_str(), "720p" | "1080p" | "4K") {
+            resolution = "1080p".to_string();
+        }
+        if !matches!(aspect_ratio.as_str(), "16:9" | "9:16") {
+            aspect_ratio = "16:9".to_string();
+        }
+    }
+
+    (duration, resolution, aspect_ratio)
+}
+
+fn nearest_duration(requested: u32, allowed: &[u32]) -> u32 {
+    *allowed
+        .iter()
+        .min_by_key(|candidate| candidate.abs_diff(requested))
+        .unwrap_or(&requested)
+}
+
+fn check_video_params(
+    model: &str,
+    duration: u32,
+    resolution: &str,
+    aspect_ratio: &str,
+) -> anyhow::Result<()> {
+    // Model-specific duration limits. Keys are model slugs (or prefixes).
+    struct Cap {
+        max_dur: u32,
+        res_ok: bool,
+        ar_ok: bool,
+    }
+    let caps = |model: &str| -> Option<Cap> {
+        if model.starts_with("google/veo-3.1-lite")
+            || model.starts_with("google/veo-3.1-fast")
+            || model.starts_with("google/veo-3.1")
+        {
+            Some(Cap {
+                max_dur: 8,
+                res_ok: matches!(resolution, "720p" | "1080p" | "4K"),
+                ar_ok: matches!(aspect_ratio, "16:9" | "9:16"),
+            })
+        } else if model.starts_with("alibaba/wan-2.7") {
+            Some(Cap {
+                max_dur: 10,
+                res_ok: matches!(resolution, "720p" | "1080p"),
+                ar_ok: true,
+            })
+        } else if model.starts_with("bytedance/seedance-2.0") {
+            Some(Cap {
+                max_dur: 15,
+                res_ok: true,
+                ar_ok: true,
+            })
+        } else if model.starts_with("kwaivgi/kling-v3.0")
+            || model.starts_with("kwaivgi/kling-video-o1")
+        {
+            Some(Cap {
+                max_dur: 15,
+                res_ok: resolution == "720p",
+                ar_ok: matches!(aspect_ratio, "16:9" | "9:16" | "1:1"),
+            })
+        } else if model.starts_with("openai/sora-2-pro") {
+            Some(Cap {
+                max_dur: 20,
+                res_ok: matches!(resolution, "720p" | "1080p"),
+                ar_ok: matches!(aspect_ratio, "16:9" | "9:16"),
+            })
+        } else if model.starts_with("runway/gen-4.5") {
+            Some(Cap {
+                max_dur: 10,
+                res_ok: resolution == "720p",
+                ar_ok: matches!(aspect_ratio, "16:9" | "9:16"),
+            })
+        } else if model.starts_with("x-ai/grok-imagine-video-1.5") {
+            Some(Cap {
+                max_dur: 15,
+                res_ok: matches!(resolution, "480p" | "720p" | "1080p"),
+                ar_ok: true,
+            })
+        } else if model.starts_with("minimax/hailuo-3") {
+            Some(Cap {
+                max_dur: 15,
+                res_ok: resolution == "2K",
+                ar_ok: true,
+            })
+        } else if model.starts_with("bytedance/seedance-1-5-pro") {
+            Some(Cap {
+                max_dur: 12,
+                res_ok: matches!(resolution, "480p" | "720p" | "1080p"),
+                ar_ok: true,
+            })
+        } else if model.starts_with("minimax/hailuo-2.3") {
+            Some(Cap {
+                max_dur: 10,
+                res_ok: resolution == "1080p",
+                ar_ok: aspect_ratio == "16:9",
+            })
+        } else if model.starts_with("alibaba/happyhorse") {
+            Some(Cap {
+                max_dur: 15,
+                res_ok: matches!(resolution, "720p" | "1080p"),
+                ar_ok: true,
+            })
+        } else if model.starts_with("x-ai/grok-imagine-video") {
+            Some(Cap {
+                max_dur: 15,
+                res_ok: matches!(resolution, "480p" | "720p"),
+                ar_ok: true,
+            })
+        } else {
+            None // unknown model, skip validation
+        }
+    };
+    if let Some(c) = caps(model) {
+        if duration > c.max_dur {
+            anyhow::bail!(
+                "model {model} does not support duration {duration}s — max {max}s. Change the model in /config.",
+                max = c.max_dur
+            );
+        }
+        if !c.res_ok {
+            anyhow::bail!(
+                "model {model} may not support resolution {resolution}. Change the model in /config."
+            );
+        }
+        if !c.ar_ok {
+            anyhow::bail!(
+                "model {model} may not support aspect ratio {aspect_ratio}. Change the model in /config."
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Scan a tool result string for `![...](file)` image references, load the
+/// files from `files_dir`, resize large images to avoid hitting API size
+/// limits, and return data URLs for the synthetic user message.
+/// Returns `None` when no references found.
+fn extract_tool_images(result: &str, files_dir: &std::path::Path) -> Option<ImagesForTool> {
+    use base64::Engine;
+    let mut urls: Vec<String> = Vec::new();
+    let mut descs: Vec<String> = Vec::new();
+    let mut rest = result;
+    while let Some(start) = rest.find("![") {
+        if let Some(end) = rest[start..].find(')') {
+            let inner = &rest[start + 2..start + end];
+            if let Some((desc, file)) = inner.split_once("](") {
+                let path = files_dir.join(file);
+                if let Ok(bytes) = std::fs::read(&path) {
+                    let resized = resize_for_api(&bytes, files_dir);
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&resized);
+                    let ext = if resized.len() < bytes.len() {
+                        "jpg"
+                    } else {
+                        "png"
+                    };
+                    let mime = match ext {
+                        "jpg" | "jpeg" => "image/jpeg",
+                        "png" => "image/png",
+                        "gif" => "image/gif",
+                        "webp" => "image/webp",
+                        _ => "image/png",
+                    };
+                    urls.push(format!("data:{mime};base64,{b64}"));
+                    descs.push(desc.to_string());
+                }
+            }
+            rest = &rest[start + end + 1..];
+        } else {
+            break;
+        }
+    }
+    if urls.is_empty() {
+        return None;
+    }
+    let description = format!("The tool returned this image: {}", descs.join(", "));
+    Some(ImagesForTool { urls, description })
+}
+
+/// Return a JPEG-compressed version of the image if it exceeds 1 MB, so the
+/// API request doesn't get rejected for being too large. Keeps the original
+/// if it's already small enough.
+fn resize_for_api(bytes: &[u8], _files_dir: &std::path::Path) -> Vec<u8> {
+    // ponytail: 1 MB threshold — large enough for readable text, small
+    // enough to avoid 400s from provider byte limits.
+    if bytes.len() < 1_000_000 {
+        return bytes.to_vec();
+    }
+    if let Ok(img) = image::load_from_memory(bytes) {
+        let (w, h) = (img.width(), img.height());
+        let max_dim = 1024u32;
+        if w <= max_dim && h <= max_dim {
+            return bytes.to_vec();
+        }
+        let (nw, nh) = if w > h {
+            (max_dim, (h * max_dim / w).max(1))
+        } else {
+            ((w * max_dim / h).max(1), max_dim)
+        };
+        let small = img.resize(nw, nh, image::imageops::FilterType::Lanczos3);
+        let mut out = Vec::new();
+        if small
+            .write_to(
+                &mut std::io::Cursor::new(&mut out),
+                image::ImageFormat::Jpeg,
+            )
+            .is_ok()
+        {
+            return out;
+        }
+    }
+    bytes.to_vec()
+}
+
+struct ImagesForTool {
+    urls: Vec<String>,
+    description: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1489,6 +2278,142 @@ mod tests {
         assert!(models.iter().all(|model| {
             model.backend == crate::provider::BackendTag::Codex && model.supports_reasoning
         }));
+    }
+
+    #[test]
+    fn opencode_context_fallback_covers_every_live_catalog_id() {
+        // The live endpoints serve exactly these ids today; each must have a
+        // known context window, or that model silently shows no context size
+        // again. When opencode adds a model, add it to the table first.
+        let zen_ids = [
+            "big-pickle",
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-opus-4-5",
+            "claude-opus-4-1",
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-5",
+            "claude-sonnet-4",
+            "claude-haiku-4-5",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.1-pro",
+            "gemini-3-flash",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gpt-5.4",
+            "gpt-5.4-pro",
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
+            "gpt-5.3-codex-spark",
+            "gpt-5.3-codex",
+            "gpt-5.2",
+            "gpt-5.2-codex",
+            "gpt-5.1",
+            "gpt-5.1-codex-max",
+            "gpt-5.1-codex",
+            "gpt-5.1-codex-mini",
+            "gpt-5",
+            "gpt-5-codex",
+            "gpt-5-nano",
+            "grok-build-0.1",
+            "grok-4.5",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "glm-5.2",
+            "glm-5.1",
+            "glm-5",
+            "minimax-m3",
+            "minimax-m2.7",
+            "minimax-m2.5",
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "kimi-k2.6",
+            "kimi-k2.5",
+            "qwen3.6-plus",
+            "qwen3.5-plus",
+            "deepseek-v4-flash-free",
+            "mimo-v2.5-free",
+            "ling-3.0-flash-free",
+            "nemotron-3-ultra-free",
+            "north-mini-code-free",
+            "laguna-s-2.1-free",
+            "longcat-2.0-free",
+        ];
+        let go_ids = [
+            "minimax-m3",
+            "minimax-m2.7",
+            "minimax-m2.5",
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "kimi-k2.6",
+            "kimi-k2.5",
+            "glm-5.2",
+            "glm-5.1",
+            "glm-5",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "qwen3.7-max",
+            "qwen3.8-max",
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+            "qwen3.5-plus",
+            "mimo-v2-pro",
+            "mimo-v2-omni",
+            "mimo-v2.5-pro",
+            "mimo-v2.5",
+            "hy3",
+            "hy3-preview",
+            "gpt-5.6-luna",
+            "grok-4.5",
+        ];
+        for id in zen_ids {
+            assert!(
+                OpenRouter::opencode_context_fallback(OPENCODE_ZEN_BASE, id).is_some(),
+                "no context window for Zen general model {id}"
+            );
+        }
+        for id in go_ids {
+            assert!(
+                OpenRouter::opencode_context_fallback(OPENCODE_GO_BASE, id).is_some(),
+                "no context window for Go bundle model {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_context_fallback_differs_per_endpoint_and_ignores_other_flavors() {
+        // Same id, different window on each endpoint — the tables must stay
+        // separate or Go models get the wrong (smaller) limit.
+        assert_eq!(
+            OpenRouter::opencode_context_fallback(OPENCODE_ZEN_BASE, "qwen3.6-plus"),
+            Some(262_144)
+        );
+        assert_eq!(
+            OpenRouter::opencode_context_fallback(OPENCODE_GO_BASE, "qwen3.6-plus"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            OpenRouter::opencode_context_fallback(OPENCODE_ZEN_BASE, "minimax-m3"),
+            Some(512_000)
+        );
+        assert_eq!(
+            OpenRouter::opencode_context_fallback(OPENCODE_GO_BASE, "minimax-m3"),
+            Some(1_000_000)
+        );
+        // Fallback is OpenCode-only: no table for other bases, unknown ids
+        // yield nothing, and a go: tag is never part of the lookup.
+        assert_eq!(OpenRouter::opencode_context_fallback(OPENROUTER_BASE, "deepseek-v4-pro"), None);
+        assert_eq!(OpenRouter::opencode_context_fallback(OPENCODE_ZEN_BASE, "nope"), None);
+        assert_eq!(OpenRouter::opencode_context_fallback(OPENCODE_GO_BASE, "go:hy3"), None);
     }
 
     #[test]
@@ -1738,5 +2663,34 @@ mod tests {
         let resp: ModelsResponse = serde_json::from_str(json).unwrap();
         let flags: Vec<bool> = resp.data.iter().map(entry_supports_images).collect();
         assert_eq!(flags, vec![true, false, false]);
+    }
+
+    #[test]
+    fn defaults_use_current_quality_generation_models() {
+        let provider = OpenRouter::openrouter("key".into());
+        assert_eq!(provider.default_image_gen_model(), "openai/gpt-image-2");
+        assert_eq!(provider.default_video_gen_model(), "google/veo-3.1");
+    }
+
+    #[test]
+    fn image_size_maps_to_normalized_generation_capabilities() {
+        assert_eq!(OpenRouter::image_aspect_ratio("1024x1024"), "1:1");
+        assert_eq!(OpenRouter::image_aspect_ratio("1024x1792"), "9:16");
+        assert_eq!(OpenRouter::image_aspect_ratio("1792x1024"), "16:9");
+        assert_eq!(OpenRouter::image_resolution("1792x1024"), "1K");
+        assert_eq!(OpenRouter::image_resolution("2048x2048"), "2K");
+    }
+
+    #[test]
+    fn normalizes_model_specific_video_defaults() {
+        let (_, resolution, aspect_ratio) =
+            normalize_video_params("minimax/hailuo-3", 8, "720p", "16:9");
+        assert_eq!(resolution, "2K");
+        assert_eq!(aspect_ratio, "16:9");
+
+        let (duration, resolution, _) =
+            normalize_video_params("openai/sora-2-pro", 6, "720p", "16:9");
+        assert_eq!(duration, 4);
+        assert_eq!(resolution, "720p");
     }
 }

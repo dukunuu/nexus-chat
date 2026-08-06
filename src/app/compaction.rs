@@ -197,7 +197,7 @@ impl App {
         {
             conversation_chars += s.chars().count();
         }
-        if let Some(buf) = &self.streaming {
+        if let Some(buf) = self.active_streaming_text() {
             conversation_chars += buf.chars().count();
         }
         ContextBreakdown {

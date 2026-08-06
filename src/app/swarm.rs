@@ -264,7 +264,6 @@ impl App {
                         self.invalidate_history_cache();
                     } else {
                         self.messages.push(crate::db::Message {
-                            id: String::new(),
                             role: "research_stage".to_string(),
                             content: text.clone(),
                             model: None,
@@ -283,13 +282,13 @@ impl App {
                 model,
                 content,
             } => {
-                if let Ok(id) = self
+                if self
                     .db
                     .add_persona_message(&session_id, &content, &persona, &model)
+                    .is_ok()
                     && viewing
                 {
                     self.messages.push(crate::db::Message {
-                        id,
                         role: "assistant".to_string(),
                         content,
                         model: Some(model),
@@ -326,7 +325,6 @@ impl App {
                 );
                 if viewing {
                     self.messages.push(crate::db::Message {
-                        id: String::new(),
                         role: "assistant".to_string(),
                         content,
                         model: None,
@@ -350,7 +348,6 @@ impl App {
                     .add_error_message(&session_id, &format!("swarm: {e}"));
                 if viewing {
                     self.messages.push(crate::db::Message {
-                        id: String::new(),
                         role: "error".to_string(),
                         content: format!("swarm: {e}"),
                         model: None,
