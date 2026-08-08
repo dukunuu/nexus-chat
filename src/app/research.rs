@@ -652,24 +652,37 @@ async fn plan(
 /// UI shows what it's actually doing (searching, fetching a URL, etc.) in
 /// real time instead of going silent until it finishes.
 #[allow(clippy::too_many_arguments)]
+/// The execution plumbing a searcher agent shares with the rest of the
+/// research pipeline: the tool box, the job's stage-update channel, and the
+/// job's session/space identity.
+pub(crate) struct SearcherCtx<'a> {
+    pub toolbox: Arc<ToolBox>,
+    pub tx: &'a mpsc::UnboundedSender<ResearchMsg>,
+    pub ids: &'a (String, String, String),
+}
+
+/// Which slot in which batch a searcher agent occupies — its stage-row
+/// identity (`searcher {batch} {idx}/{total}`) in the live activity view.
+pub(crate) struct SearcherSlot {
+    pub batch: String,
+    pub idx: usize,
+    pub total: usize,
+}
+
 async fn run_searcher(
     provider: &OpenRouter,
     model: &str,
     prompt: &str,
     display: &str,
-    toolbox: Arc<ToolBox>,
-    tx: &mpsc::UnboundedSender<ResearchMsg>,
-    ids: &(String, String, String),
-    batch: &str,
-    idx: usize,
-    total: usize,
+    ctx: SearcherCtx<'_>,
+    slot: SearcherSlot,
 ) -> String {
     // Include the batch in the identity so follow-up and steered agents never
     // overwrite earlier activity rows that happen to have the same index.
-    let label = format!("searcher {batch} {}/{total}", idx + 1);
+    let label = format!("searcher {} {}/{}", slot.batch, slot.idx + 1, slot.total);
     send_stage(
-        tx,
-        ids,
+        ctx.tx,
+        ctx.ids,
         &label,
         format!("working — investigating \"{display}\""),
     );
@@ -677,13 +690,13 @@ async fn run_searcher(
         ChatMessage::text("system", SEARCHER_PROMPT),
         ChatMessage::text("user", prompt),
     ];
-    let tools = toolbox.defs();
+    let tools = ctx.toolbox.defs();
     let (mut rx, abort) = provider.stream_chat(
         model.to_string(),
         messages,
         ChatParams::default(),
         tools,
-        toolbox,
+        ctx.toolbox,
         RESEARCH_SEARCHER_MAX_ITERS,
     );
     let _abort = super::AbortOnDrop(abort);
@@ -692,7 +705,7 @@ async fn run_searcher(
         match ev {
             StreamEvent::Token(t) => buf.push_str(&t),
             StreamEvent::Status(s) => {
-                send_stage(tx, ids, &label, format!("working — {s}"));
+                send_stage(ctx.tx, ctx.ids, &label, format!("working — {s}"));
             }
             StreamEvent::ToolCall {
                 name,
@@ -700,10 +713,10 @@ async fn run_searcher(
                 result,
             } => {
                 let summary = crate::app::tool_call_summary(&name, &arguments, &result);
-                send_stage(tx, ids, &label, format!("working — {summary}"));
+                send_stage(ctx.tx, ctx.ids, &label, format!("working — {summary}"));
             }
             StreamEvent::Error(e) => {
-                send_stage(tx, ids, &label, format!("error — {e}"));
+                send_stage(ctx.tx, ctx.ids, &label, format!("error — {e}"));
                 return format!("[search agent error on \"{display}\": {e}]");
             }
             StreamEvent::Done => break,
@@ -712,10 +725,15 @@ async fn run_searcher(
     }
     let text = buf.trim();
     if text.is_empty() {
-        send_stage(tx, ids, &label, "error — no findings returned");
+        send_stage(ctx.tx, ctx.ids, &label, "error — no findings returned");
         format!("[no findings for \"{display}\"]")
     } else {
-        send_stage(tx, ids, &label, format!("done — answered \"{display}\""));
+        send_stage(
+            ctx.tx,
+            ctx.ids,
+            &label,
+            format!("done — answered \"{display}\""),
+        );
         text.to_string()
     }
 }
@@ -814,10 +832,13 @@ async fn run_searchers(
         let ids = ids.clone();
         let batch = batch.to_string();
         set.spawn(async move {
-            run_searcher(
-                &provider, &model, &prompt, &display, toolbox, &tx, &ids, &batch, idx, total,
-            )
-            .await
+            let ctx = SearcherCtx {
+                toolbox,
+                tx: &tx,
+                ids: &ids,
+            };
+            let slot = SearcherSlot { batch, idx, total };
+            run_searcher(&provider, &model, &prompt, &display, ctx, slot).await
         });
     }
     let mut done = 0usize;
@@ -863,42 +884,14 @@ pub(crate) struct ResearchOptions {
     pub space_name: String,
 }
 
-pub(crate) async fn run_research(opts: ResearchOptions) {
-    let ResearchOptions {
-        research_provider,
-        research_model,
-        escalation_provider,
-        escalation_model,
-        embedding_provider,
-        embedding_model,
-        db_path,
-        topic,
-        reply_rx,
-        steer_rx,
-        toolbox,
-        tx,
-        session_id,
-        space_id,
-        space_name,
-    } = opts;
-    let ids = (session_id, space_id, space_name);
-    let result = run_research_inner(
-        &research_provider,
-        &research_model,
-        &escalation_provider,
-        &escalation_model,
-        &embedding_provider,
-        &embedding_model,
-        &topic,
-        reply_rx,
-        steer_rx,
-        &db_path,
-        &toolbox,
-        &tx,
-        &ids,
-    )
-    .await;
-    let _ = tx.send((ids.0, ids.1, ids.2, ResearchUpdate::Done(result)));
+pub(crate) async fn run_research(mut opts: ResearchOptions) {
+    let result = run_research_inner(&mut opts).await;
+    let _ = opts.tx.send((
+        opts.session_id,
+        opts.space_id,
+        opts.space_name,
+        ResearchUpdate::Done(result),
+    ));
 }
 
 /// Top-k chunks from the space's files already relevant to `topic`, for the
@@ -969,7 +962,6 @@ async fn await_survey_reply(
 /// conversational flow, not an optional garnish, so it must not silently
 /// skip and still report success. Returns the (questions, answer) rounds
 /// for the planner's context.
-#[allow(clippy::too_many_arguments)]
 async fn run_user_survey(
     provider: &OpenRouter,
     model: &str,
@@ -1027,7 +1019,6 @@ async fn run_user_survey(
 /// call, malformed agent output, or a closed reply channel (job teardown
 /// racing the parked gate) fails visibly (`Err`) — searchers never run on a
 /// plan the user hasn't approved, and approval never fails open.
-#[allow(clippy::too_many_arguments)]
 async fn await_plan_approval(
     provider: &OpenRouter,
     model: &str,
@@ -1092,22 +1083,28 @@ async fn await_plan_approval(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_research_inner(
-    research_provider: &OpenRouter,
-    research_model: &str,
-    escalation_provider: &OpenRouter,
-    escalation_model: &str,
-    embedding_provider: &OpenRouter,
-    embedding_model: &str,
-    topic: &str,
-    reply_rx: Option<mpsc::UnboundedReceiver<String>>,
-    mut steer_rx: mpsc::UnboundedReceiver<String>,
-    db_path: &std::path::Path,
-    toolbox: &Arc<ToolBox>,
-    tx: &mpsc::UnboundedSender<ResearchMsg>,
-    ids: &(String, String, String),
-) -> Result<String, String> {
+async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String> {
+    let ids = &(
+        opts.session_id.clone(),
+        opts.space_id.clone(),
+        opts.space_name.clone(),
+    );
+    let ResearchOptions {
+        research_provider,
+        research_model,
+        escalation_provider,
+        escalation_model,
+        embedding_provider,
+        embedding_model,
+        db_path,
+        topic,
+        reply_rx,
+        steer_rx,
+        toolbox,
+        tx,
+        ..
+    } = &mut *opts;
+    let db_path = db_path.as_path();
     // Gather the planning context (local chunks + a web landscape survey)
     // concurrently with the conversational survey — the user answers while
     // the ground truth arrives, so the plan targets real gaps. The two
@@ -1138,17 +1135,23 @@ async fn run_research_inner(
                      Identify the major concepts, current debates, useful source types, and important \
                      evidence gaps."
                 );
+                let ctx = SearcherCtx {
+                    toolbox,
+                    tx: &tx,
+                    ids: &ids,
+                };
+                let slot = SearcherSlot {
+                    batch: "web survey".to_string(),
+                    idx: 0,
+                    total: 1,
+                };
                 let survey = run_searcher(
                     &research_provider,
                     &research_model,
                     &survey_question,
                     &survey_question,
-                    toolbox,
-                    &tx,
-                    &ids,
-                    "web survey",
-                    0,
-                    1,
+                    ctx,
+                    slot,
                 )
                 .await;
                 persist_session_sources(&db_path, &ids.0, std::slice::from_ref(&survey));
@@ -1168,7 +1171,6 @@ async fn run_research_inner(
     // Failures propagate visibly — the survey is a promised phase, and a
     // silent skip would report success without the user's scoping input.
     let mut answers: Vec<(String, String)> = Vec::new();
-    let mut reply_rx = reply_rx;
     if let Some(rx) = reply_rx.as_mut() {
         answers = run_user_survey(research_provider, research_model, topic, rx, tx, ids)
             .await
@@ -1293,7 +1295,7 @@ async fn run_research_inner(
     // steers looking queued (the live popup derives picked-up from the same
     // numbered keys).
     let mut steer_seq: usize = 0;
-    let steers = drain_steers(&mut steer_rx).await;
+    let steers = drain_steers(steer_rx).await;
     if !steers.is_empty() {
         let steer_items: Vec<(String, String)> =
             steers.iter().map(|s| (s.clone(), s.clone())).collect();
@@ -1383,7 +1385,7 @@ async fn run_research_inner(
         persist_session_sources(db_path, &ids.0, &more);
         findings.extend(more);
 
-        let steers = drain_steers(&mut steer_rx).await;
+        let steers = drain_steers(steer_rx).await;
         if !steers.is_empty() {
             let steer_items: Vec<(String, String)> =
                 steers.iter().map(|s| (s.clone(), s.clone())).collect();

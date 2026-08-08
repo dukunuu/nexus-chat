@@ -767,6 +767,8 @@ impl Db {
     }
 
     /// Insert an assistant reply with its model, reasoning trace, and stats.
+    /// Args mirror the messages table columns; ~25 call sites pass inline
+    /// `None`s for unused fields, so a struct would churn all of them.
     #[allow(clippy::too_many_arguments)]
     pub fn add_assistant_message(
         &self,
@@ -816,6 +818,8 @@ impl Db {
         Ok(id)
     }
 
+    /// Shared message-row insert; kept flat for the same reason as
+    /// `add_assistant_message` — column-shaped params, many inline callers.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn insert_message(
         &self,

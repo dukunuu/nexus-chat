@@ -193,8 +193,8 @@ impl App {
         self.status = "swarm: starting…".to_string();
 
         let swarm_session_id = session.id.clone();
-        let task = tokio::spawn(run_swarm_turn(
-            self.backends.clone(),
+        let task = tokio::spawn(run_swarm_turn(SwarmTurnOptions {
+            backends: self.backends.clone(),
             meta_provider,
             raw_meta_model,
             personas,
@@ -202,11 +202,11 @@ impl App {
             default_provider,
             raw_default_model,
             base_history,
-            self.toolbox.clone(),
+            toolbox: self.toolbox.clone(),
             user_message,
-            session.id,
+            session_id: session.id,
             tx,
-        ));
+        }));
         self.swarm_abort = Some(task.abort_handle());
         self.swarm_session = Some(swarm_session_id);
     }
@@ -392,20 +392,39 @@ fn parse_persona_editor(text: &str) -> Result<Persona, String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_swarm_turn(
-    backends: Backends,
-    meta_provider: OpenRouter,
-    raw_meta_model: String,
-    mut personas: Vec<Persona>,
-    default_model: String,
-    default_provider: OpenRouter,
-    raw_default_model: String,
-    base_history: Vec<ChatMessage>,
-    toolbox: Arc<ToolBox>,
-    user_message: String,
-    session_id: String,
-    tx: mpsc::UnboundedSender<SwarmMsg>,
-) {
+/// Everything needed to start one swarm conversation turn: the persona
+/// roster, the model/provider config, the conversation history, and the
+/// orchestration plumbing (toolbox, session identity, update channel).
+pub(crate) struct SwarmTurnOptions {
+    pub backends: Backends,
+    pub meta_provider: OpenRouter,
+    pub raw_meta_model: String,
+    pub personas: Vec<Persona>,
+    pub default_model: String,
+    pub default_provider: OpenRouter,
+    pub raw_default_model: String,
+    pub base_history: Vec<ChatMessage>,
+    pub toolbox: Arc<ToolBox>,
+    pub user_message: String,
+    pub session_id: String,
+    pub tx: mpsc::UnboundedSender<SwarmMsg>,
+}
+
+async fn run_swarm_turn(opts: SwarmTurnOptions) {
+    let SwarmTurnOptions {
+        backends,
+        meta_provider,
+        raw_meta_model,
+        mut personas,
+        default_model,
+        default_provider,
+        raw_default_model,
+        base_history,
+        toolbox,
+        user_message,
+        session_id,
+        tx,
+    } = opts;
     let send = |u: SwarmUpdate| {
         let _ = tx.send((session_id.clone(), u));
     };
