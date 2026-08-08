@@ -45,7 +45,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     };
 
     let inner = super::chrome::render_frame(f, area, title, &app.theme, true);
-    let list = super::chrome::standard_list(items);
+    let list = super::chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.images_cache.is_empty() {
         state.select(Some(app.images_selected.min(app.images_cache.len() - 1)));

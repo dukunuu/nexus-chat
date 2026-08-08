@@ -7,21 +7,29 @@ use crate::app::App;
 use super::chrome;
 
 pub fn render(f: &mut Frame, app: &App) {
-    let area = crate::ui::centered(f.area(), 50, 60);
-    let inner = chrome::render_frame(
+    let area = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
+    let hint = chrome::count_hint(app.copy_options.len(), "option");
+    let inner = chrome::render_hinted(
         f,
         area,
-        chrome::hinted_title(app, "copy", "↑/↓, Enter, Esc"),
-        &app.theme,
+        chrome::hinted_title(app, "copy", ""),
+        &format!("{hint}↑↓ move · Enter copy · Esc close"),
+        app,
         true,
     );
 
-    let items: Vec<ListItem> = app
-        .copy_options
-        .iter()
-        .map(|o| ListItem::new(o.label.clone()))
-        .collect();
-    let list = chrome::standard_list(items);
+    let items: Vec<ListItem> = if app.copy_options.is_empty() {
+        vec![chrome::empty_placeholder(
+            "nothing to copy here yet",
+            &app.theme,
+        )]
+    } else {
+        app.copy_options
+            .iter()
+            .map(|o| ListItem::new(o.label.clone()))
+            .collect()
+    };
+    let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.copy_options.is_empty() {
         state.select(Some(app.copy_selected.min(app.copy_options.len() - 1)));

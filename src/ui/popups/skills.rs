@@ -10,18 +10,24 @@ use super::chrome;
 
 pub fn render(f: &mut Frame, app: &App) {
     use crate::app::SkillsMode;
-    let area = crate::ui::centered(f.area(), 56, 50);
+    let area = crate::ui::centered(f.area(), chrome::STANDARD.0, chrome::STANDARD.1);
 
-    let items: Vec<ListItem> = app
-        .skills
-        .iter()
-        .map(|s| {
-            ListItem::new(Line::from(Span::styled(
-                s.name.clone(),
-                Style::default().fg(app.theme.fg),
-            )))
-        })
-        .collect();
+    let items: Vec<ListItem> = if app.skills.is_empty() {
+        vec![chrome::empty_placeholder(
+            "no skills yet — Ctrl+N installs one from GitHub",
+            &app.theme,
+        )]
+    } else {
+        app.skills
+            .iter()
+            .map(|s| {
+                ListItem::new(Line::from(Span::styled(
+                    s.name.clone(),
+                    Style::default().fg(app.theme.fg),
+                )))
+            })
+            .collect()
+    };
 
     let title = match app.skills_mode {
         SkillsMode::Install => chrome::input_title(
@@ -41,21 +47,24 @@ pub fn render(f: &mut Frame, app: &App) {
                 "Ctrl+D confirm · Esc cancel",
             )
         }
-        SkillsMode::Browse => chrome::hinted_title(
-            app,
-            "skills",
-            "Ctrl+N install from GitHub · Ctrl+D remove · Ctrl+E edit",
-        ),
+        SkillsMode::Browse => chrome::hinted_title(app, "skills", ""),
     };
-
-    let inner = chrome::render_frame(f, area, title, &app.theme, true);
+    let hint = match app.skills_mode {
+        SkillsMode::Browse => format!(
+            "{}Ctrl+N install · Ctrl+D remove · Ctrl+E edit",
+            chrome::count_hint(app.skills.len(), "skill")
+        ),
+        SkillsMode::Install => "owner/repo/path · Enter install · Esc cancel".to_string(),
+        SkillsMode::ConfirmRemove => "Ctrl+D confirm · Esc cancel".to_string(),
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
     let desc = app
         .skills
         .get(app.skills_selected)
         .map_or("", |s| s.description.as_str());
     let (list_area, detail_area) = chrome::split_with_detail(inner, desc);
 
-    let list = chrome::standard_list(items);
+    let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.skills.is_empty() {
         state.select(Some(app.skills_selected.min(app.skills.len() - 1)));

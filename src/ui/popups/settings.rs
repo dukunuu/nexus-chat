@@ -125,7 +125,7 @@ pub fn render(f: &mut Frame, app: &App) {
     );
     let (list_area, detail_area) = chrome::split_with_detail(inner, &desc);
 
-    let list = chrome::standard_list(items);
+    let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !rows.is_empty() {
         state.select(Some(app.settings_selected.min(rows.len() - 1)));

@@ -18,12 +18,13 @@ const ROWS: [(&str, &str); 4] = [
 ];
 
 pub fn render(f: &mut Frame, app: &App) {
-    let area = crate::ui::centered(f.area(), 60, 40);
-    let inner = chrome::render_frame(
+    let area = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
+    let inner = chrome::render_hinted(
         f,
         area,
-        chrome::hinted_title(app, "login", "pick a backend (Enter · Esc cancel)"),
-        &app.theme,
+        chrome::hinted_title(app, "login", ""),
+        "↑↓ move · Enter pick · Esc close",
+        app,
         true,
     );
 
@@ -43,7 +44,7 @@ pub fn render(f: &mut Frame, app: &App) {
         })
         .collect();
 
-    let list = chrome::standard_list(items);
+    let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     state.select(Some(app.login_selected));
     f.render_stateful_widget(list, inner, &mut state);

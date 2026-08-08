@@ -22,7 +22,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             "Enter create+edit · Esc cancel",
         );
         let inner = chrome::render_frame(f, area, title, &app.theme, true);
-        let list = chrome::standard_list(Vec::<ListItem>::new());
+        let list = chrome::standard_list(Vec::<ListItem>::new(), &app.theme);
         f.render_widget(list, inner);
         return;
     }
@@ -36,7 +36,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             "Enter rename · Esc cancel",
         );
         let inner = chrome::render_frame(f, area, title, &app.theme, true);
-        let list = chrome::standard_list(Vec::<ListItem>::new());
+        let list = chrome::standard_list(Vec::<ListItem>::new(), &app.theme);
         f.render_widget(list, inner);
         return;
     }
@@ -77,7 +77,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     };
 
     let inner = chrome::render_frame(f, area, title, &app.theme, true);
-    let list = chrome::standard_list(items);
+    let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.scripts_cache.is_empty() {
         state.select(Some(app.scripts_selected.min(app.scripts_cache.len() - 1)));

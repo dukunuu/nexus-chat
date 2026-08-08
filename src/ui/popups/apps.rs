@@ -27,7 +27,7 @@ pub fn render(f: &mut Frame, app: &App) {
             "Enter open in $EDITOR · Esc cancel",
         );
         let inner = chrome::render_frame(f, area, title, &app.theme, true);
-        let list = chrome::standard_list(Vec::<ListItem>::new());
+        let list = chrome::standard_list(Vec::<ListItem>::new(), &app.theme);
         f.render_widget(list, inner);
         return;
     }
@@ -68,13 +68,17 @@ pub fn render(f: &mut Frame, app: &App) {
                 "Ctrl+D confirm · Esc cancel",
             )
         }
-        AppsMode::Browse => {
-            chrome::hinted_title(app, "apps", "Enter open · Ctrl+E edit file · Ctrl+D remove")
-        }
+        AppsMode::Browse => chrome::hinted_title(app, "apps", ""),
     };
-
-    let inner = chrome::render_frame(f, area, title, &app.theme, true);
-    let list = chrome::standard_list(items);
+    let hint = match app.apps_mode {
+        AppsMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        _ => format!(
+            "{}Enter open · Ctrl+E edit file · Ctrl+D remove",
+            chrome::count_hint(app.apps_cache.len(), "app")
+        ),
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.apps_cache.is_empty() {
         state.select(Some(app.apps_selected.min(app.apps_cache.len() - 1)));

@@ -48,19 +48,20 @@ fn render_files(f: &mut Frame, app: &App) {
                 }
             })
             .collect();
-        let inner = chrome::render_frame(
+        let inner = chrome::render_hinted(
             f,
             area,
             chrome::input_title(
                 app,
                 app.picker_dir.display().to_string(),
                 &app.picker_filter,
-                "Enter open/import · Backspace up · Esc cancel",
+                "",
             ),
-            &app.theme,
+            "Enter open/import · Backspace up · Esc cancel",
+            app,
             true,
         );
-        let list = chrome::standard_list(items);
+        let list = chrome::standard_list(items, &app.theme);
         let mut state = ListState::default();
         if !entries.is_empty() {
             state.select(Some(app.picker_selected.min(entries.len() - 1)));
@@ -92,40 +93,31 @@ fn render_files(f: &mut Frame, app: &App) {
         .collect();
 
     let title = match app.files_mode {
-        FilesMode::Add => chrome::input_title(
-            app,
-            "import path",
-            &app.files_edit,
-            "Enter import · Esc cancel",
-        ),
-        FilesMode::Rename => chrome::input_title(
-            app,
-            "rename to",
-            &app.files_edit,
-            "Enter rename · Esc cancel",
-        ),
+        FilesMode::Add => chrome::input_title(app, "import path", &app.files_edit, ""),
+        FilesMode::Rename => chrome::input_title(app, "rename to", &app.files_edit, ""),
         FilesMode::ConfirmDelete => {
             let name = app
                 .files_cache
                 .get(app.files_selected)
                 .map(|f| f.name.clone())
                 .unwrap_or_default();
-            chrome::danger_title(
-                app,
-                format!("remove \"{name}\"?"),
-                "Ctrl+D confirm · Esc cancel",
-            )
+            chrome::danger_title(app, format!("remove \"{name}\"?"), "")
         }
-        FilesMode::Browse => chrome::hinted_title(
-            app,
-            "files",
-            "Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+O re-extract · Ctrl+F ocr · Ctrl+D remove · Tab switch tab",
-        ),
+        FilesMode::Browse => chrome::hinted_title(app, "files", ""),
         FilesMode::Pick => Line::from(""),
     };
-
-    let inner = chrome::render_frame(f, area, title, &app.theme, true);
-    let list = chrome::standard_list(items);
+    let hint = match app.files_mode {
+        FilesMode::Add => "Enter import · Esc cancel".to_string(),
+        FilesMode::Rename => "Enter rename · Esc cancel".to_string(),
+        FilesMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        FilesMode::Browse => format!(
+            "{}Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+D remove · Tab tab",
+            chrome::count_hint(app.files_cache.len(), "file")
+        ),
+        FilesMode::Pick => String::new(),
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.files_cache.is_empty() {
         state.select(Some(app.files_selected.min(app.files_cache.len() - 1)));
@@ -137,18 +129,24 @@ fn render_images(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 64, 60);
     let dim = Style::default().fg(app.theme.fg_dim);
 
-    let items: Vec<ListItem> = app
-        .images_cache
-        .iter()
-        .map(|img| {
-            let created = crate::ui::fmt_created(&img.modified);
-            ListItem::new(Line::from(vec![
-                Span::styled(img.name.clone(), Style::default().fg(app.theme.fg)),
-                Span::styled(format!("  {}", crate::app::human_size(img.size)), dim),
-                Span::styled(format!("  {created}"), dim),
-            ]))
-        })
-        .collect();
+    let items: Vec<ListItem> = if app.images_cache.is_empty() {
+        vec![chrome::empty_placeholder(
+            "no images yet — paste one, or have the model generate one",
+            &app.theme,
+        )]
+    } else {
+        app.images_cache
+            .iter()
+            .map(|img| {
+                let created = crate::ui::fmt_created(&img.modified);
+                ListItem::new(Line::from(vec![
+                    Span::styled(img.name.clone(), Style::default().fg(app.theme.fg)),
+                    Span::styled(format!("  {}", crate::app::human_size(img.size)), dim),
+                    Span::styled(format!("  {created}"), dim),
+                ]))
+            })
+            .collect()
+    };
 
     let title = match app.images_mode {
         ImagesMode::ConfirmDelete => {
@@ -157,19 +155,19 @@ fn render_images(f: &mut Frame, app: &App) {
                 .get(app.images_selected)
                 .map(|i| i.name.clone())
                 .unwrap_or_default();
-            chrome::danger_title(
-                app,
-                format!("remove \"{name}\"?"),
-                "Ctrl+D confirm · Esc cancel",
-            )
+            chrome::danger_title(app, format!("remove \"{name}\"?"), "")
         }
-        ImagesMode::Browse => {
-            chrome::hinted_title(app, "images", "Enter open · Ctrl+D remove · Tab switch tab")
-        }
+        ImagesMode::Browse => chrome::hinted_title(app, "images", ""),
     };
-
-    let inner = chrome::render_frame(f, area, title, &app.theme, true);
-    let list = chrome::standard_list(items);
+    let hint = match app.images_mode {
+        ImagesMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        ImagesMode::Browse => format!(
+            "{}Enter open · Ctrl+D remove · Tab switch tab",
+            chrome::count_hint(app.images_cache.len(), "image")
+        ),
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.images_cache.is_empty() {
         state.select(Some(app.images_selected.min(app.images_cache.len() - 1)));
@@ -182,27 +180,18 @@ fn render_scripts(f: &mut Frame, app: &App) {
     let dim = Style::default().fg(app.theme.fg_dim);
 
     if app.scripts_mode == ScriptsMode::Create {
-        let title = chrome::input_title(
-            app,
-            "script name",
-            &app.scripts_edit,
-            "Enter create+edit · Esc cancel",
-        );
-        let inner = chrome::render_frame(f, area, title, &app.theme, true);
-        let list = chrome::standard_list(Vec::<ListItem>::new());
+        let title = chrome::input_title(app, "script name", &app.scripts_edit, "");
+        let inner =
+            chrome::render_hinted(f, area, title, "Enter create+edit · Esc cancel", app, true);
+        let list = chrome::standard_list(Vec::<ListItem>::new(), &app.theme);
         f.render_widget(list, inner);
         return;
     }
 
     if app.scripts_mode == ScriptsMode::Rename {
-        let title = chrome::input_title(
-            app,
-            "rename to",
-            &app.scripts_edit,
-            "Enter rename · Esc cancel",
-        );
-        let inner = chrome::render_frame(f, area, title, &app.theme, true);
-        let list = chrome::standard_list(Vec::<ListItem>::new());
+        let title = chrome::input_title(app, "rename to", &app.scripts_edit, "");
+        let inner = chrome::render_hinted(f, area, title, "Enter rename · Esc cancel", app, true);
+        let list = chrome::standard_list(Vec::<ListItem>::new(), &app.theme);
         f.render_widget(list, inner);
         return;
     }
@@ -227,22 +216,20 @@ fn render_scripts(f: &mut Frame, app: &App) {
                 .get(app.scripts_selected)
                 .map(|s| s.name.clone())
                 .unwrap_or_default();
-            chrome::danger_title(
-                app,
-                format!("remove \"{name}\"?"),
-                "Ctrl+D confirm · Esc cancel",
-            )
+            chrome::danger_title(app, format!("remove \"{name}\"?"), "")
         }
-        ScriptsMode::Browse => chrome::hinted_title(
-            app,
-            "scripts",
-            "Enter edit · Ctrl+N create · Ctrl+R rename · Ctrl+D remove · Tab switch tab",
-        ),
+        ScriptsMode::Browse => chrome::hinted_title(app, "scripts", ""),
         _ => unreachable!(),
     };
-
-    let inner = chrome::render_frame(f, area, title, &app.theme, true);
-    let list = chrome::standard_list(items);
+    let hint = match app.scripts_mode {
+        ScriptsMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        _ => format!(
+            "{}Enter edit · Ctrl+N create · Ctrl+R rename · Ctrl+D remove · Tab switch tab",
+            chrome::count_hint(app.scripts_cache.len(), "script")
+        ),
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.scripts_cache.is_empty() {
         state.select(Some(app.scripts_selected.min(app.scripts_cache.len() - 1)));

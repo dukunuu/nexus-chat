@@ -10,14 +10,14 @@ use crate::app::{App, SwarmPopupMode};
 use super::chrome;
 
 pub fn render(f: &mut Frame, app: &App) {
-    let area = crate::ui::centered(f.area(), 78, 66);
+    let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::WIDE.1);
 
     let dim = Style::default().fg(app.theme.fg_dim);
     let items: Vec<ListItem> = if app.swarm_cache.is_empty() {
-        vec![ListItem::new(Line::from(Span::styled(
-            "no personas yet — press Ctrl+N to add one, or just send a message and 3 will be suggested for you",
-            dim,
-        )))]
+        vec![chrome::empty_placeholder(
+            "no personas yet — Ctrl+N to add one, or send a message and 3 will be suggested",
+            &app.theme,
+        )]
     } else {
         app.swarm_cache
             .iter()
@@ -49,12 +49,18 @@ pub fn render(f: &mut Frame, app: &App) {
         SwarmPopupMode::Browse => chrome::hinted_title(
             app,
             format!("swarm mode is {}", if on { "ON" } else { "OFF" }),
-            "Enter/Ctrl+E edit in $EDITOR · Ctrl+N add in $EDITOR · Ctrl+G toggle · Ctrl+M model picker · Ctrl+D remove · Ctrl+X stop",
+            "",
         ),
     };
-
-    let inner = chrome::render_frame(f, area, title, &app.theme, true);
-    let list = chrome::standard_list(items);
+    let hint = match app.swarm_popup_mode {
+        SwarmPopupMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        SwarmPopupMode::Browse => format!(
+            "{}Enter edit · Ctrl+N add · Ctrl+G toggle · Ctrl+M model · Ctrl+D remove · Ctrl+X stop",
+            chrome::count_hint(app.swarm_cache.len(), "persona")
+        ),
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.swarm_cache.is_empty() {
         state.select(Some(app.swarm_selected.min(app.swarm_cache.len() - 1)));

@@ -10,13 +10,13 @@ use crate::app::{App, WatchMode};
 use super::chrome;
 
 pub fn render(f: &mut Frame, app: &App) {
-    let area = crate::ui::centered(f.area(), 64, 60);
+    let area = crate::ui::centered(f.area(), chrome::STANDARD.0, chrome::STANDARD.1);
     let dim = Style::default().fg(app.theme.fg_dim);
     let items: Vec<ListItem> = if app.watches_cache.is_empty() {
-        vec![ListItem::new(Line::from(Span::styled(
+        vec![chrome::empty_placeholder(
             "no watches yet — /watch <topic> to start one",
-            dim,
-        )))]
+            &app.theme,
+        )]
     } else {
         app.watches_cache
             .iter()
@@ -41,19 +41,19 @@ pub fn render(f: &mut Frame, app: &App) {
                 .get(app.watch_selected)
                 .map(|w| w.topic.clone())
                 .unwrap_or_default();
-            chrome::confirm_title(
-                app,
-                format!("delete watch \"{topic}\"?"),
-                "Ctrl+D confirm · Esc cancel",
-            )
+            chrome::danger_title(app, format!("delete watch \"{topic}\"?"), "")
         }
-        WatchMode::Browse => {
-            chrome::hinted_title(app, "watches", "Enter jump to session · Ctrl+D delete")
-        }
+        WatchMode::Browse => chrome::hinted_title(app, "watches", ""),
     };
-
-    let inner = chrome::render_frame(f, area, title, &app.theme, true);
-    let list = chrome::standard_list(items);
+    let hint = match app.watch_mode {
+        WatchMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        WatchMode::Browse => format!(
+            "{}Enter jump to session · Ctrl+D delete",
+            chrome::count_hint(app.watches_cache.len(), "watch")
+        ),
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.watches_cache.is_empty() {
         state.select(Some(app.watch_selected.min(app.watches_cache.len() - 1)));
@@ -63,17 +63,13 @@ pub fn render(f: &mut Frame, app: &App) {
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     match app.watch_mode {
-        WatchMode::ConfirmDelete => match key.code {
-            KeyCode::Char('d')
-                if key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
-            {
+        WatchMode::ConfirmDelete => match super::classify_confirm_delete_key(key) {
+            Some(super::ConfirmDeleteAction::Yes) => {
                 app.delete_selected_watch();
                 app.watch_mode = WatchMode::Browse;
             }
-            KeyCode::Esc => app.watch_mode = WatchMode::Browse,
-            _ => {}
+            Some(super::ConfirmDeleteAction::No) => app.watch_mode = WatchMode::Browse,
+            None => {}
         },
         WatchMode::Browse => match key.code {
             KeyCode::Esc => app.popup = crate::app::Popup::None,

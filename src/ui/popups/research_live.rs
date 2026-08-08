@@ -14,7 +14,7 @@ use super::chrome;
 /// isolated into their own view plus a steer input line and a queued-steers
 /// section (steers not yet picked up at a round boundary).
 pub fn render(f: &mut Frame, app: &App) {
-    let area = crate::ui::centered(f.area(), 76, 70);
+    let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::WIDE.1);
 
     let dim = Style::default().fg(app.theme.fg_dim);
     // The stage rows come from the job-level mirror (`research_stage_rows`),
@@ -103,7 +103,7 @@ pub fn render(f: &mut Frame, app: &App) {
         &app.theme,
         true,
     );
-    let list = chrome::standard_list(items);
+    let list = chrome::standard_list(items, &app.theme);
     f.render_widget(list, inner);
 }
 

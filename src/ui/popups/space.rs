@@ -12,7 +12,7 @@ use super::chrome;
 pub fn render(f: &mut Frame, app: &App) {
     use crate::app::SpaceMode;
     use crate::db::DEFAULT_SPACE;
-    let area = crate::ui::centered(f.area(), 50, 60);
+    let area = crate::ui::centered(f.area(), chrome::STANDARD.0, chrome::STANDARD.1);
 
     let dim = Style::default().fg(app.theme.fg_dim);
     let spaces = app.filtered_spaces();
@@ -75,7 +75,7 @@ pub fn render(f: &mut Frame, app: &App) {
     };
 
     let inner = chrome::render_frame(f, area, title, &app.theme, true);
-    let list = chrome::standard_list(items);
+    let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !spaces.is_empty() {
         state.select(Some(app.space_selected.min(spaces.len() - 1)));

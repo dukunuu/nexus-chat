@@ -11,7 +11,7 @@ use super::chrome;
 
 pub fn render(f: &mut Frame, app: &App) {
     use crate::app::SessionMode;
-    let area = crate::ui::centered(f.area(), 64, 74);
+    let area = crate::ui::centered(f.area(), chrome::TALL.0, chrome::TALL.1);
 
     let sessions = app.filtered_sessions();
     let width = area.width.saturating_sub(4) as usize; // inside border + highlight symbol
@@ -72,32 +72,26 @@ pub fn render(f: &mut Frame, app: &App) {
         })
         .collect();
 
-    // Title bar doubles as the search box / rename field / delete prompt.
+    // Title bar doubles as the search box / rename field / delete prompt;
+    // the hint bar sits in the frame footer instead of crowding the title.
     let title = match app.session_mode {
-        SessionMode::Rename => chrome::input_title(
-            app,
-            "rename session",
-            &app.session_edit,
-            "Enter save · Esc cancel",
-        ),
+        SessionMode::Rename => chrome::input_title(app, "rename session", &app.session_edit, ""),
         SessionMode::ConfirmDelete => {
             let name = app.selected_session().map(|s| s.title).unwrap_or_default();
-            chrome::confirm_title(
-                app,
-                format!("delete \"{}\"?", truncate(&name, 30)),
-                "Ctrl+D confirm · Esc cancel",
-            )
+            chrome::danger_title(app, format!("delete \"{}\"?", truncate(&name, 30)), "")
         }
-        SessionMode::Browse => chrome::input_title(
-            app,
-            "session search",
-            app.session_filter.to_string(),
-            "Ctrl+R rename · Ctrl+D delete",
+        SessionMode::Browse => chrome::filter_title(app, "sessions", &app.session_filter),
+    };
+    let hint = match app.session_mode {
+        SessionMode::Rename => "Enter save · Esc cancel".to_string(),
+        SessionMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        SessionMode::Browse => format!(
+            "{}↑↓ move · Enter open · Ctrl+R rename · Ctrl+D delete",
+            chrome::count_hint(sessions.len(), "session")
         ),
     };
-
-    let inner = chrome::render_frame(f, area, title, &app.theme, true);
-    let list = chrome::standard_list(items);
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !sessions.is_empty() {
         state.select(Some(app.session_selected.min(sessions.len() - 1)));

@@ -11,7 +11,7 @@ use super::chrome;
 /// Context breakdown popup (Ctrl+I): estimated tokens spent on system
 /// instructions, memory, conversation, and (pending) skills.
 pub fn render(f: &mut Frame, app: &App) {
-    let area = crate::ui::centered(f.area(), 56, 40);
+    let area = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
     let b = app.context_breakdown();
     let dim = Style::default().fg(app.theme.fg_dim);
 
@@ -58,15 +58,16 @@ pub fn render(f: &mut Frame, app: &App) {
     ]));
 
     let hint = if b.compacted {
-        "v views digest, Ctrl+G toggles, Esc closes"
+        "v views digest · Esc close"
     } else {
-        "Ctrl+G toggles, Esc closes"
+        "Ctrl+G toggle · Esc close"
     };
-    let inner = chrome::render_frame(
+    let inner = chrome::render_hinted(
         f,
         area,
-        chrome::hinted_title(app, "context", hint),
-        &app.theme,
+        chrome::hinted_title(app, "context", ""),
+        hint,
+        app,
         true,
     );
     f.render_widget(Paragraph::new(lines), inner);

@@ -16,37 +16,35 @@ pub fn render(f: &mut Frame, app: &mut App) {
     f.render_widget(Clear, avail_outer);
 
     let fav_focused = app.model_focus == ModelPanel::Favorites;
-    let fav_title = match app.model_pick_target {
-        crate::app::ModelPickTarget::Memory => {
-            chrome::hinted_title(app, "★ Favorites — picking memory model", "")
-        }
-        crate::app::ModelPickTarget::Transcriber => {
-            chrome::hinted_title(app, "★ Favorites — picking image model", "")
-        }
-        crate::app::ModelPickTarget::Ocr => {
-            chrome::hinted_title(app, "★ Favorites — picking OCR model", "")
-        }
-        crate::app::ModelPickTarget::Research => {
-            chrome::hinted_title(app, "★ Favorites — picking research model", "")
-        }
-        crate::app::ModelPickTarget::Escalation => {
-            chrome::hinted_title(app, "★ Favorites — picking escalation model", "")
-        }
-        crate::app::ModelPickTarget::Session => chrome::hinted_title(app, "★ Favorites", ""),
-        crate::app::ModelPickTarget::SwarmPersona(_) => {
-            chrome::hinted_title(app, "★ Favorites — picking persona model", "")
-        }
-        crate::app::ModelPickTarget::ImageGen => {
-            chrome::hinted_title(app, "★ Favorites — picking image gen model", "")
-        }
-        crate::app::ModelPickTarget::VideoGen => {
-            chrome::hinted_title(app, "★ Favorites — picking video gen model", "")
-        }
+    // Short title + the pick target as a footer hint, so the model picker
+    // reads the same from any feature that opens it.
+    let picking = match app.model_pick_target {
+        crate::app::ModelPickTarget::Memory => "picking memory model",
+        crate::app::ModelPickTarget::Transcriber => "picking image model",
+        crate::app::ModelPickTarget::Ocr => "picking OCR model",
+        crate::app::ModelPickTarget::Research => "picking research model",
+        crate::app::ModelPickTarget::Escalation => "picking escalation model",
+        crate::app::ModelPickTarget::Session => "picking chat model",
+        crate::app::ModelPickTarget::SwarmPersona(_) => "picking persona model",
+        crate::app::ModelPickTarget::ImageGen => "picking image gen model",
+        crate::app::ModelPickTarget::VideoGen => "picking video gen model",
     };
+    let fav_title = chrome::hinted_title(app, "★ favorites", picking);
+    let fav_hint = format!(
+        "{}Ctrl+S unfav · Ctrl+T reason · →",
+        chrome::count_hint(app.favorite_models().len(), "favorite")
+    );
 
     // Favorites column.
     let fav_items = model_items(app, &app.favorite_models());
-    let fav_list = panel_list(fav_items, fav_title, fav_focused, &app.theme);
+    let fav_list = panel_list(
+        fav_items,
+        fav_title,
+        &fav_hint,
+        fav_focused,
+        fav_outer.width,
+        app,
+    );
     f.render_stateful_widget(fav_list, fav_outer, &mut app.fav_state);
 
     // Available column (with the search box in the title).
@@ -55,19 +53,22 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Show which effort values the focused model accepts, so the Ctrl+T
     // cycle is predictable before pressing it (e.g. Claude's extra minimal).
     let hint = match app.focused_reasoning_hint() {
-        Some(accepts) => format!("Ctrl+P switch backend · Ctrl+S fav · Ctrl+T reason · {accepts}"),
-        None => "Ctrl+P switch backend · Ctrl+S fav · Ctrl+T reason".to_string(),
+        Some(accepts) => accepts.clone(),
+        None => String::new(),
     };
+    let avail_hint = format!(
+        "{}type to search · Ctrl+P backend · Ctrl+S fav · Ctrl+T reason · {hint}",
+        chrome::count_hint(app.available_models().len(), "model")
+    );
+    let avail_title =
+        chrome::filter_title(app, format!("available [{backend}]"), &app.model_filter);
     let avail_list = panel_list(
         avail_items,
-        chrome::input_title(
-            app,
-            format!("Available [{backend}] search"),
-            app.model_filter.to_string(),
-            &hint,
-        ),
+        avail_title,
+        &avail_hint,
         !fav_focused,
-        &app.theme,
+        avail_outer.width,
+        app,
     );
     f.render_stateful_widget(avail_list, avail_outer, &mut app.avail_state);
 }
@@ -112,10 +113,13 @@ fn model_items(app: &App, models: &[&Model]) -> Vec<ListItem<'static>> {
 fn panel_list<'a>(
     items: Vec<ListItem<'a>>,
     title: Line<'a>,
+    hint: &str,
     focused: bool,
-    theme: &crate::theme::Theme,
+    width: u16,
+    app: &App,
 ) -> List<'a> {
-    chrome::standard_list(items).block(chrome::popup_block_focused(title, theme, focused))
+    chrome::standard_list(items, &app.theme)
+        .block(chrome::hinted_block(title, hint, app, focused, width))
 }
 
 /// Outer rects of the model picker's two columns (Favorites, Available).

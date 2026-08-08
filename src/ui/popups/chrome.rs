@@ -19,6 +19,14 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragr
 use crate::app::App;
 use crate::theme::Theme;
 
+/// Canonical popup sizes — every popup picks one so the whole family reads
+/// as the same design: small prompts, standard lists, tall lists, wide
+/// workhorses (and the model picker's fixed dual-pane layout).
+pub const SMALL: (u16, u16) = (56, 40);
+pub const STANDARD: (u16, u16) = (64, 60);
+pub const TALL: (u16, u16) = (64, 74);
+pub const WIDE: (u16, u16) = (78, 66);
+
 /// The rounded border + title style shared by every popup.
 pub fn popup_block_focused<'a>(
     title: impl Into<Line<'a>>,
@@ -37,6 +45,37 @@ pub fn popup_block_focused<'a>(
         .title(title)
 }
 
+/// The popup frame plus the standard bottom-right hint bar (dim, hidden by
+/// `hide_hints`). Every list popup renders through this, so the hint lives
+/// in the same place everywhere instead of crowding the title. Long hints
+/// are truncated with `…` to the frame's inner width.
+pub fn hinted_block<'a>(
+    title: impl Into<Line<'a>>,
+    hint: &str,
+    app: &App,
+    focused: bool,
+    width: u16,
+) -> Block<'a> {
+    let mut block = popup_block_focused(title, &app.theme, focused);
+    if !app.settings.hide_hints && !hint.trim().is_empty() {
+        let max = (width.saturating_sub(4)) as usize; // +2 for the border, +2 for the hint padding
+        let text: String = if hint.chars().count() > max {
+            let keep = max.saturating_sub(1);
+            format!("{}…", hint.chars().take(keep).collect::<String>())
+        } else {
+            hint.to_string()
+        };
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                format!(" {text} "),
+                Style::default().fg(app.theme.fg_dim),
+            ))
+            .right_aligned(),
+        );
+    }
+    block
+}
+
 /// Clear a popup area and render its rounded frame, returning the inner rect.
 pub fn render_frame<'a>(
     f: &mut Frame,
@@ -52,11 +91,43 @@ pub fn render_frame<'a>(
     inner
 }
 
-/// Standard popup list selection styling: `▸ ` marker + bold selection.
-pub fn standard_list(items: Vec<ListItem<'_>>) -> List<'_> {
+/// Like [`render_frame`] but with the standard bottom hint bar.
+pub fn render_hinted<'a>(
+    f: &mut Frame,
+    area: Rect,
+    title: impl Into<Line<'a>>,
+    hint: &str,
+    app: &App,
+    focused: bool,
+) -> Rect {
+    f.render_widget(Clear, area);
+    let block = hinted_block(title, hint, app, focused, area.width);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    inner
+}
+
+/// Standard popup list selection: accent `▸ ` marker + bold selection.
+pub fn standard_list<'a>(items: Vec<ListItem<'a>>, theme: &Theme) -> List<'a> {
     List::new(items)
-        .highlight_symbol("▸ ")
+        .highlight_symbol(Span::styled("▸ ", Style::default().fg(theme.accent)))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+}
+
+/// A dim italic placeholder row for empty lists, so every popup's empty
+/// state looks intentional rather than blank.
+pub fn empty_placeholder(message: &str, theme: &Theme) -> ListItem<'static> {
+    ListItem::new(Line::from(Span::styled(
+        message.to_string(),
+        Style::default()
+            .fg(theme.fg_dim)
+            .add_modifier(Modifier::ITALIC),
+    )))
+}
+
+/// `"12 items · "`-style prefix for footer hints (singular-aware).
+pub fn count_hint(n: usize, label: &str) -> String {
+    format!("{n} {label}{} · ", if n == 1 { "" } else { "s" })
 }
 
 fn titled_line(app: &App, text: impl Into<String>, color: Color, hint: &str) -> Line<'static> {
@@ -69,6 +140,25 @@ fn titled_line(app: &App, text: impl Into<String>, color: Color, hint: &str) -> 
         spans.push(Span::styled(
             format!("— {hint} "),
             Style::default().fg(app.theme.fg_dim),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Browse-mode title for a filterable list popup: `label` alone when the
+/// filter is empty, `label: <filter>▏` (live cursor) while typing.
+pub fn filter_title(app: &App, label: impl Into<String>, filter: &str) -> Line<'static> {
+    let label = label.into();
+    let mut spans = vec![Span::styled(
+        format!(" {label}"),
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if !filter.is_empty() {
+        spans.push(Span::styled(
+            format!(": {filter}▏"),
+            Style::default().fg(app.theme.fg),
         ));
     }
     Line::from(spans)
