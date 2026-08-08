@@ -122,8 +122,8 @@ SQLite db, files, scripts, apps, and generated media.
 ## Development
 
 ```sh
-scripts/check.sh          # fmt + clippy -D warnings + full test suite
-cargo test --bin nexus-chat   # 414 tests, no network needed
+scripts/check.sh          # fmt + clippy (-D warnings, pedantic) + cargo-audit + tests
+cargo test --bin nexus-chat   # 428 tests, no network needed
 ```
 
 ## Known limitations
