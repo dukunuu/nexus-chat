@@ -1,0 +1,18 @@
+# cargo-audit config. Only ignore advisories that are provably unreachable:
+#
+# RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (quick-xml <0.41 DoS):
+#   quick-xml arrives via two paths, neither feeds untrusted XML:
+#   1. wayland-scanner (build-time proc-macro) parses wayland protocol XML
+#      bundled and trusted with the crate.
+#   2. plist (syntect's default features, used by tui-markdown) parses
+#      .tmTheme files — this app loads themes from alacritty.toml only, so
+#      the plist path is compiled but never exercised.
+#   Both upstreams still pin 0.39; there is no compatible upgrade.
+#
+# Unmaintained warnings (bincode/ttf-parser/yaml-rust) are informational —
+# transitive, no known vulnerability, no maintained replacement upstream.
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

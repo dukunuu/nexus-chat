@@ -183,3 +183,182 @@ impl App {
         self.popup = Popup::None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::space::Space;
+
+    fn test_space() -> Space {
+        Space {
+            root: std::env::temp_dir().join(format!("nexus-test-{}", uuid::Uuid::new_v4())),
+        }
+    }
+
+    fn app() -> App {
+        App::new(
+            crate::db::Db::open_in_memory().unwrap(),
+            Some("k"),
+            test_space(),
+        )
+    }
+
+    fn add_space(a: &mut App, name: &str) -> SpaceRow {
+        let s = a.db.create_space(name).unwrap();
+        a.spaces_cache.push(s.clone());
+        s
+    }
+
+    #[test]
+    fn open_space_picker_selects_the_active_space() {
+        let mut a = app();
+        let extra = add_space(&mut a, "other");
+        let active = a.active_space.id.clone();
+        a.open_space_picker().unwrap();
+        assert_eq!(a.popup, Popup::Space);
+        assert!(matches!(a.space_mode, SpaceMode::Browse));
+        assert_eq!(a.spaces_cache.len(), 2);
+        assert_eq!(a.selected_space().unwrap().id, active);
+        assert_ne!(extra.id, active);
+    }
+
+    #[test]
+    fn filtered_spaces_matches_by_fuzzy_name_and_keeps_db_order() {
+        let mut a = app();
+        let _docs = add_space(&mut a, "docs");
+        let _notes = add_space(&mut a, "notes");
+        a.open_space_picker().unwrap();
+
+        // Empty filter: db order (default first, then creation order).
+        let all = a.filtered_spaces();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].name, DEFAULT_SPACE);
+
+        a.space_filter_push('n');
+        let hits = a.filtered_spaces();
+        assert!(hits.iter().all(|s| s.name.contains('n')));
+        assert_eq!(a.space_selected, 0);
+    }
+
+    #[test]
+    fn move_space_selection_clamps_at_both_ends() {
+        let mut a = app();
+        let _docs = add_space(&mut a, "docs");
+        a.open_space_picker().unwrap();
+        a.move_space_selection(100);
+        assert_eq!(a.space_selected, a.spaces_cache.len() - 1);
+        a.move_space_selection(-100);
+        assert_eq!(a.space_selected, 0);
+    }
+
+    #[test]
+    fn rename_is_refused_for_the_default_space() {
+        let mut a = app();
+        a.open_space_picker().unwrap();
+        // Selection starts on the active (default) space.
+        a.start_space_rename();
+        assert!(matches!(a.space_mode, SpaceMode::Browse)); // unchanged — refused
+    }
+
+    #[test]
+    fn create_skips_empty_and_duplicate_names() {
+        let mut a = app();
+        add_space(&mut a, "docs");
+        a.open_space_picker().unwrap();
+
+        a.space_edit = "docs".into();
+        a.confirm_space_create().unwrap();
+        assert_eq!(a.spaces_cache.len(), 2); // duplicate refused
+
+        a.space_edit = "  ".into();
+        a.confirm_space_create().unwrap();
+        assert_eq!(a.spaces_cache.len(), 2); // blank refused
+
+        a.space_edit = "new-space".into();
+        a.confirm_space_create().unwrap();
+        assert_eq!(a.spaces_cache.len(), 3);
+        assert!(matches!(a.space_mode, SpaceMode::Browse));
+        assert!(
+            a.spaces_cache
+                .iter()
+                .any(|s| s.name == "new-space" && s.id == a.selected_space().unwrap().id)
+        );
+    }
+
+    #[test]
+    fn rename_updates_row_and_active_space_in_place() {
+        let mut a = app();
+        let s = add_space(&mut a, "old-name");
+        a.open_space_picker().unwrap();
+        a.space_selected = a.spaces_cache.iter().position(|c| c.id == s.id).unwrap();
+        a.start_space_rename();
+        assert!(matches!(a.space_mode, SpaceMode::Rename));
+        a.space_edit = "new-name".into();
+        a.confirm_space_rename().unwrap();
+        assert!(matches!(a.space_mode, SpaceMode::Browse));
+        assert!(a.spaces_cache.iter().any(|c| c.name == "new-name"));
+        assert!(!a.spaces_cache.iter().any(|c| c.name == "old-name"));
+    }
+
+    #[test]
+    fn deleting_the_active_space_switches_to_default() {
+        let mut a = app();
+        let extra = add_space(&mut a, "doomed");
+        // Make the extra space active.
+        a.confirm_space(); // confirm selected... selection is default; pick doomed
+        a.open_space_picker().unwrap();
+        a.space_selected = a
+            .spaces_cache
+            .iter()
+            .position(|c| c.id == extra.id)
+            .unwrap();
+        a.confirm_space();
+        assert_eq!(a.active_space.id, extra.id);
+
+        a.open_space_picker().unwrap();
+        a.space_selected = a
+            .spaces_cache
+            .iter()
+            .position(|c| c.id == extra.id)
+            .unwrap();
+        a.confirm_space_delete().unwrap();
+        assert_ne!(a.active_space.id, extra.id);
+        assert_eq!(a.active_space.name, DEFAULT_SPACE);
+        assert!(!a.spaces_cache.iter().any(|c| c.id == extra.id));
+    }
+
+    #[test]
+    fn delete_refuses_the_default_space() {
+        let mut a = app();
+        let extra = add_space(&mut a, "keep-me");
+        a.open_space_picker().unwrap();
+        a.space_selected = a
+            .spaces_cache
+            .iter()
+            .position(|c| c.id == extra.id)
+            .unwrap();
+        a.confirm_space_delete().unwrap();
+        assert_eq!(a.spaces_cache.len(), 1); // only the default remains
+
+        // Selecting the default and deleting it is a no-op.
+        a.space_selected = a
+            .spaces_cache
+            .iter()
+            .position(|c| c.name == DEFAULT_SPACE)
+            .unwrap();
+        a.confirm_space_delete().unwrap();
+        assert_eq!(a.spaces_cache.len(), 1);
+        assert!(a.spaces_cache.iter().any(|c| c.name == DEFAULT_SPACE));
+    }
+
+    #[test]
+    fn missing_default_space_is_an_error_not_a_panic() {
+        let mut a = app();
+        // Delete the default space row out from under the app (e.g. a stale
+        // default id after manual db edits) — switching must fail visibly,
+        // never panic.
+        let default_id = a.db.default_space_id().unwrap();
+        a.db.delete_space(&default_id).unwrap();
+        assert!(a.switch_to_default_space().is_err());
+    }
+}

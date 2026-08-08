@@ -815,3 +815,128 @@ impl App {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_space() -> crate::space::Space {
+        crate::space::Space {
+            root: std::env::temp_dir().join(format!("nexus-test-{}", uuid::Uuid::new_v4())),
+        }
+    }
+
+    fn model(id: &str, backend: BackendTag) -> Model {
+        Model {
+            id: id.into(),
+            name: id.into(),
+            reasoning_efforts: Vec::new(),
+            context_length: None,
+            supports_images: false,
+            supports_image_generation: false,
+            supports_video_generation: false,
+            backend,
+        }
+    }
+
+    fn app_with_two_backends() -> App {
+        let mut a = App::new(
+            crate::db::Db::open_in_memory().unwrap(),
+            Some("sk-or-test-key"),
+            test_space(),
+        );
+        a.backends
+            .set(BackendTag::OpenAi, OpenRouter::openai("oa".into()));
+        a.backends.set(
+            BackendTag::OpenRouter,
+            OpenRouter::openrouter_flavor("or".into()),
+        );
+        a
+    }
+
+    #[test]
+    fn resolve_model_backend_picks_the_backend_owning_the_model() {
+        let mut a = app_with_two_backends();
+        a.models = vec![
+            model("gpt-4.1-mini", BackendTag::OpenAi),
+            model("anthropic/claude-sonnet-4.5", BackendTag::OpenRouter),
+        ];
+        // OpenAI models are addressed by their composite `openai:` prefix; a
+        // bare id prefers OpenRouter for backwards compatibility.
+        let (p, raw) = a.resolve_model_backend("openai:gpt-4.1-mini").unwrap();
+        assert_eq!(p.backend_tag(), BackendTag::OpenAi);
+        assert_eq!(raw, "gpt-4.1-mini");
+        let (p, raw) = a
+            .resolve_model_backend("anthropic/claude-sonnet-4.5")
+            .unwrap();
+        assert_eq!(p.backend_tag(), BackendTag::OpenRouter);
+        assert_eq!(raw, "anthropic/claude-sonnet-4.5");
+    }
+
+    #[test]
+    fn resolve_model_backend_strips_the_backend_prefix() {
+        let mut a = app_with_two_backends();
+        a.models = vec![model("gpt-4.1-mini", BackendTag::OpenAi)];
+        let (p, raw) = a.resolve_model_backend("openai:gpt-4.1-mini").unwrap();
+        assert_eq!(p.backend_tag(), BackendTag::OpenAi);
+        assert_eq!(raw, "gpt-4.1-mini");
+    }
+
+    #[test]
+    fn resolved_model_looks_valid_restricts_slashy_bare_ids_to_openrouter() {
+        let a = App::new(
+            crate::db::Db::open_in_memory().unwrap(),
+            Some("k"),
+            test_space(),
+        );
+        // Empty catalog: a slashy bare id is only valid on OpenRouter (a
+        // legacy OpenRouter id must not silently resolve against OpenAI).
+        assert!(a.resolved_model_looks_valid(
+            "google/gemini-2.5-flash",
+            BackendTag::OpenRouter,
+            "google/gemini-2.5-flash"
+        ));
+        assert!(!a.resolved_model_looks_valid(
+            "google/gemini-2.5-flash",
+            BackendTag::OpenAi,
+            "google/gemini-2.5-flash"
+        ));
+        // Non-slashy bare ids are fine on any backend.
+        assert!(a.resolved_model_looks_valid("gpt-4.1-mini", BackendTag::OpenAi, "gpt-4.1-mini"));
+    }
+
+    #[test]
+    fn backend_filter_cycles_only_through_configured_backends() {
+        let mut a = app_with_two_backends();
+        assert_eq!(a.model_backend_filter_label(), "all backends");
+        a.cycle_model_backend_filter();
+        let first = a.model_backend_filter;
+        assert!(first.is_some());
+        assert!(!a.model_backend_filter_label().contains("all"));
+        a.cycle_model_backend_filter();
+        a.cycle_model_backend_filter();
+        a.cycle_model_backend_filter();
+        assert_eq!(a.model_backend_filter, first); // wraps, never leaves the configured set
+    }
+
+    #[test]
+    fn favorites_sort_first_in_available_models() {
+        let mut a = app_with_two_backends();
+        a.models = vec![
+            model("a/one", BackendTag::OpenRouter),
+            model("b/two", BackendTag::OpenRouter),
+            model("c/three", BackendTag::OpenRouter),
+        ];
+        a.db.toggle_favorite("b/two").unwrap();
+        a.load_prefs();
+        a.last_used
+            .insert("a/one".into(), "2026-01-01T00:00:00Z".into());
+        a.last_used
+            .insert("c/three".into(), "2026-01-02T00:00:00Z".into());
+        let favs: Vec<&str> = a.favorite_models().iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(favs, vec!["b/two"]);
+        // Available panel = non-favorites, most-recently-used first.
+        let avail: Vec<&str> = a.available_models().iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(avail, vec!["c/three", "a/one"]);
+    }
+}

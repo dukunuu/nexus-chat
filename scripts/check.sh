@@ -11,5 +11,6 @@ fi
 
 cargo fmt --check
 cargo clippy --bin nexus-chat -- -D warnings -W clippy::pedantic
+cargo audit
 cargo test --bin nexus-chat
 echo "check.sh: all green"
