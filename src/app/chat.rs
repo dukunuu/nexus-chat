@@ -110,10 +110,10 @@ impl App {
         let mut history: Vec<ChatMessage> = Vec::with_capacity(self.messages.len() + 3);
         history.push(ChatMessage::text("system", self.system_prompt()));
         // Include space-file images inline for vision models.
-        if self.current_model_supports_images() {
-            if let Some(img_msg) = self.space_images_message() {
-                history.push(img_msg);
-            }
+        if self.current_model_supports_images()
+            && let Some(img_msg) = self.space_images_message()
+        {
+            history.push(img_msg);
         }
         // If this session has been auto-compacted, send the digest instead of
         // the raw messages it covers — only the tail after it goes verbatim.
@@ -219,9 +219,7 @@ impl App {
                 self.reasoning.remove(&model);
                 (
                     None,
-                    Some(format!(
-                        "cleared unsupported reasoning {effort}: {model}"
-                    )),
+                    Some(format!("cleared unsupported reasoning {effort}: {model}")),
                 )
             }
             None => (None, None),
@@ -402,7 +400,10 @@ impl App {
                     && (name == "generate_image"
                         || name == "generate_video"
                         || name == "video_transform"
-                        || matches!(name.as_str(), "edit_video" | "extract_frame" | "stitch_videos"))
+                        || matches!(
+                            name.as_str(),
+                            "edit_video" | "extract_frame" | "stitch_videos"
+                        ))
                 {
                     self.rescan_files();
                 }
@@ -979,7 +980,9 @@ impl App {
 
         s.push_str("### Using User Images\n");
         s.push_str("1. `app_assets(action=list)` to see conversation images.\n");
-        s.push_str("2. `app_assets(action=copy_images, image_ids, app)` to copy them into `_images/`.\n");
+        s.push_str(
+            "2. `app_assets(action=copy_images, image_ids, app)` to copy them into `_images/`.\n",
+        );
         s.push_str("3. Use returned URLs in `<img src=\"...\">` tags.\n\n");
 
         s.push_str("### Using Space Files\n");

@@ -51,15 +51,17 @@ fn pdf_toc(path: &Path) -> String {
 
 fn decode_pdf_string(bytes: &[u8]) -> String {
     // UTF-16BE with BOM
-    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
-        if let Ok(s) = String::from_utf16(
+    if bytes.len() >= 2
+        && bytes[0] == 0xFE
+        && bytes[1] == 0xFF
+        && let Ok(s) = String::from_utf16(
             &bytes[2..]
                 .chunks_exact(2)
                 .map(|c| u16::from_be_bytes([c[0], c[1]]))
                 .collect::<Vec<_>>(),
-        ) {
-            return s;
-        }
+        )
+    {
+        return s;
     }
     // Fallback: PDFDocEncoding / Latin-1
     bytes.iter().map(|&b| b as char).collect()

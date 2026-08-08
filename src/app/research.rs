@@ -78,7 +78,10 @@ impl PlanQuestion {
     /// The Searcher's prompt: the topic plus this question's full block
     /// (why/angles/sources), so one focused agent answers one focused brief.
     pub(crate) fn prompt(&self, topic: &str) -> String {
-        let mut p = format!("Research topic: {topic}\n\nSub-question: {}\n", self.question);
+        let mut p = format!(
+            "Research topic: {topic}\n\nSub-question: {}\n",
+            self.question
+        );
         if !self.why.is_empty() {
             p.push_str(&format!("\nWhy this angle matters: {}\n", self.why));
         }
@@ -194,10 +197,10 @@ pub(crate) fn parse_subquestions(text: &str) -> Vec<String> {
 fn strip_list_prefix(line: &str) -> String {
     let s = line.trim().trim_start_matches(['-', '*']).trim();
     let digits_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(0);
-    if digits_end > 0 {
-        if let Some(rest) = s[digits_end..].strip_prefix(['.', ')']) {
-            return rest.trim().to_string();
-        }
+    if digits_end > 0
+        && let Some(rest) = s[digits_end..].strip_prefix(['.', ')'])
+    {
+        return rest.trim().to_string();
     }
     s.to_string()
 }
@@ -230,8 +233,8 @@ pub(crate) fn parse_survey_reply(text: &str) -> SurveyReply {
         }
         // Only list-marked or question-shaped lines count as questions;
         // bare prose (explanations, error messages) is a contract violation.
-        let marked = s.starts_with(['-', '*'])
-            || s.chars().next().is_some_and(|c| c.is_ascii_digit());
+        let marked =
+            s.starts_with(['-', '*']) || s.chars().next().is_some_and(|c| c.is_ascii_digit());
         let q = strip_list_prefix(s);
         if q.is_empty() {
             continue;
@@ -405,7 +408,11 @@ fn planner_messages_with_context(
     if !answers.is_empty() {
         user.push_str("The user answered clarifying questions before planning:\n");
         for (i, (qs, reply)) in answers.iter().enumerate() {
-            user.push_str(&format!("Round {} — asked: {}\nAnswered: {reply}\n", i + 1, qs));
+            user.push_str(&format!(
+                "Round {} — asked: {}\nAnswered: {reply}\n",
+                i + 1,
+                qs
+            ));
         }
         user.push('\n');
     }
@@ -457,7 +464,10 @@ fn plan_approval_messages(
         ChatMessage::text("system", PLAN_APPROVAL_PROMPT),
         ChatMessage::text(
             "user",
-            format!("Topic: {topic}\n\nPlan:\n{}\n\nUser reply: {user_reply}", plan_text(questions)),
+            format!(
+                "Topic: {topic}\n\nPlan:\n{}\n\nUser reply: {user_reply}",
+                plan_text(questions)
+            ),
         ),
     ]
 }
@@ -612,9 +622,12 @@ async fn plan(
     answers: &[(String, String)],
     known: &[String],
 ) -> Result<Vec<PlanQuestion>, String> {
-    let text =
-        complete_text(provider, model, planner_messages_with_context(topic, answers, known))
-            .await?;
+    let text = complete_text(
+        provider,
+        model,
+        planner_messages_with_context(topic, answers, known),
+    )
+    .await?;
     let qs = parse_plan_blocks(&text);
     if qs.is_empty() {
         return Err(format!(
@@ -702,12 +715,7 @@ async fn run_searcher(
         send_stage(tx, ids, &label, "error — no findings returned");
         format!("[no findings for \"{display}\"]")
     } else {
-        send_stage(
-            tx,
-            ids,
-            &label,
-            format!("done — answered \"{display}\""),
-        );
+        send_stage(tx, ids, &label, format!("done — answered \"{display}\""));
         text.to_string()
     }
 }
@@ -836,23 +844,43 @@ async fn run_searchers(
 /// Run the full pipeline and send exactly one final `Done` on `tx` (the
 /// caller's channel then closes naturally when this function returns and
 /// `tx` is dropped).
-pub(crate) async fn run_research(
-    research_provider: OpenRouter,
-    research_model: String,
-    escalation_provider: OpenRouter,
-    escalation_model: String,
-    embedding_provider: OpenRouter,
-    embedding_model: String,
-    db_path: std::path::PathBuf,
-    topic: String,
-    reply_rx: Option<mpsc::UnboundedReceiver<String>>,
-    steer_rx: mpsc::UnboundedReceiver<String>,
-    toolbox: Arc<ToolBox>,
-    tx: mpsc::UnboundedSender<ResearchMsg>,
-    session_id: String,
-    space_id: String,
-    space_name: String,
-) {
+/// Everything `run_research` needs to start a gated or ungated research job.
+pub(crate) struct ResearchOptions {
+    pub research_provider: OpenRouter,
+    pub research_model: String,
+    pub escalation_provider: OpenRouter,
+    pub escalation_model: String,
+    pub embedding_provider: OpenRouter,
+    pub embedding_model: String,
+    pub db_path: std::path::PathBuf,
+    pub topic: String,
+    pub reply_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub steer_rx: mpsc::UnboundedReceiver<String>,
+    pub toolbox: Arc<ToolBox>,
+    pub tx: mpsc::UnboundedSender<ResearchMsg>,
+    pub session_id: String,
+    pub space_id: String,
+    pub space_name: String,
+}
+
+pub(crate) async fn run_research(opts: ResearchOptions) {
+    let ResearchOptions {
+        research_provider,
+        research_model,
+        escalation_provider,
+        escalation_model,
+        embedding_provider,
+        embedding_model,
+        db_path,
+        topic,
+        reply_rx,
+        steer_rx,
+        toolbox,
+        tx,
+        session_id,
+        space_id,
+        space_name,
+    } = opts;
     let ids = (session_id, space_id, space_name);
     let result = run_research_inner(
         &research_provider,
@@ -1096,9 +1124,8 @@ async fn run_research_inner(
         let tx = tx.clone();
         let ids = ids.clone();
         tokio::spawn(async move {
-            let known = async {
-                local_known_chunks(&provider, &model, &db_path, &space_id, &topic).await
-            };
+            let known =
+                async { local_known_chunks(&provider, &model, &db_path, &space_id, &topic).await };
             let survey = async {
                 send_stage(
                     &tx,
@@ -1164,7 +1191,12 @@ async fn run_research_inner(
     let mut planning_context = known;
     if !web_survey.is_empty() && !web_survey.starts_with('[') {
         planning_context.push(format!("Preliminary web survey:\n{web_survey}"));
-        send_stage(tx, ids, "web survey", "done — landscape mapped for planning");
+        send_stage(
+            tx,
+            ids,
+            "web survey",
+            "done — landscape mapped for planning",
+        );
     } else {
         send_stage(
             tx,
@@ -1180,22 +1212,21 @@ async fn run_research_inner(
         "planner",
         "working — decomposing the surveyed landscape into focused questions",
     );
-    let mut questions =
-        match plan(
-            research_provider,
-            research_model,
-            topic,
-            &answers,
-            &planning_context,
-        )
-        .await
-        {
-            Ok(questions) => questions,
-            Err(e) => {
-                send_stage(tx, ids, "planner", format!("error — {e}"));
-                return Err(e);
-            }
-        };
+    let mut questions = match plan(
+        research_provider,
+        research_model,
+        topic,
+        &answers,
+        &planning_context,
+    )
+    .await
+    {
+        Ok(questions) => questions,
+        Err(e) => {
+            send_stage(tx, ids, "planner", format!("error — {e}"));
+            return Err(e);
+        }
+    };
     send_stage(
         tx,
         ids,
@@ -1264,10 +1295,8 @@ async fn run_research_inner(
     let mut steer_seq: usize = 0;
     let steers = drain_steers(&mut steer_rx).await;
     if !steers.is_empty() {
-        let steer_items: Vec<(String, String)> = steers
-            .iter()
-            .map(|s| (s.clone(), s.clone()))
-            .collect();
+        let steer_items: Vec<(String, String)> =
+            steers.iter().map(|s| (s.clone(), s.clone())).collect();
         for s in &steers {
             steer_seq += 1;
             send_stage(tx, ids, format!("steer #{steer_seq}"), s.clone());
@@ -1356,10 +1385,8 @@ async fn run_research_inner(
 
         let steers = drain_steers(&mut steer_rx).await;
         if !steers.is_empty() {
-            let steer_items: Vec<(String, String)> = steers
-                .iter()
-                .map(|s| (s.clone(), s.clone()))
-                .collect();
+            let steer_items: Vec<(String, String)> =
+                steers.iter().map(|s| (s.clone(), s.clone())).collect();
             for s in &steers {
                 steer_seq += 1;
                 send_stage(tx, ids, format!("steer #{steer_seq}"), s.clone());
@@ -1830,23 +1857,23 @@ impl super::App {
             .resolve_model_backend(&embedding_model)
             .unwrap_or_else(|| (provider.clone(), embedding_model.clone()));
 
-        let task = tokio::spawn(run_research(
-            provider,
-            raw_research_model,
+        let task = tokio::spawn(run_research(crate::app::research::ResearchOptions {
+            research_provider: provider,
+            research_model: raw_research_model,
             escalation_provider,
-            raw_escalation_model,
+            escalation_model: raw_escalation_model,
             embedding_provider,
-            raw_embedding_model,
-            self.space.db_path(),
+            embedding_model: raw_embedding_model,
+            db_path: self.space.db_path(),
             topic,
             reply_rx,
             steer_rx,
             toolbox,
             tx,
-            session.id,
+            session_id: session.id,
             space_id,
             space_name,
-        ));
+        }));
         self.research_abort = Some(task.abort_handle());
     }
 
@@ -1885,9 +1912,9 @@ impl super::App {
     /// A gate in another session must never swallow typing (the old
     /// cross-session hijack).
     pub(crate) fn survey_gate_targets_current_session(&self) -> bool {
-        self.survey_gate.as_ref().is_some_and(|g| {
-            self.session.as_ref().is_some_and(|s| s.id == g.session_id)
-        })
+        self.survey_gate
+            .as_ref()
+            .is_some_and(|g| self.session.as_ref().is_some_and(|s| s.id == g.session_id))
     }
 
     /// Restore an actionable gate row after loading its session. Normal jobs
@@ -1960,15 +1987,16 @@ impl super::App {
                 Some(e) => format!(
                     "the job stopped waiting and the saved reply could not be rolled back: {e} — text restored to the composer"
                 ),
-                None => {
-                    "the job is no longer waiting for a reply — text restored to the composer"
-                        .to_string()
-                }
+                None => "the job is no longer waiting for a reply — text restored to the composer"
+                    .to_string(),
             };
             return;
         }
         if !text.trim().is_empty()
-            && self.session.as_ref().is_some_and(|s| s.id == gate.session_id)
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.id == gate.session_id)
         {
             self.messages.push(crate::db::Message {
                 role: "gate_reply".to_string(),
@@ -1982,14 +2010,18 @@ impl super::App {
             });
         }
         match gate.phase {
-            SurveyPhase::Clarify { round } => self.status = format!(
-                "answer noted (round {round}) — checking for follow-ups… · Ctrl+↑ agents"
-            ),
-            SurveyPhase::Approve { rework } => self.status = if rework {
-                "revision folded in — continuing… · Ctrl+↑ agents".to_string()
-            } else {
-                "plan reply sent — continuing… · Ctrl+↑ agents".to_string()
-            },
+            SurveyPhase::Clarify { round } => {
+                self.status = format!(
+                    "answer noted (round {round}) — checking for follow-ups… · Ctrl+↑ agents"
+                )
+            }
+            SurveyPhase::Approve { rework } => {
+                self.status = if rework {
+                    "revision folded in — continuing… · Ctrl+↑ agents".to_string()
+                } else {
+                    "plan reply sent — continuing… · Ctrl+↑ agents".to_string()
+                }
+            }
         }
     }
 
@@ -2001,7 +2033,9 @@ impl super::App {
     /// record / report file) so a save failure is visible immediately,
     /// not only after a reload.
     fn mirror_stage(&mut self, session_id: &str, label: &str, detail: &str) {
-        let _ = self.db.upsert_research_stage_message(session_id, label, detail);
+        let _ = self
+            .db
+            .upsert_research_stage_message(session_id, label, detail);
         let text = crate::db::stage_content(label, detail);
         let prefix = format!("{label}:");
         // Job-level mirror: the live popup's single source of truth.
@@ -2017,8 +2051,7 @@ impl super::App {
         }
         if self.session.as_ref().is_some_and(|s| s.id == session_id) {
             if let Some(row) = self.messages.iter_mut().rev().find(|m| {
-                m.role == "research_stage"
-                    && (m.content == label || m.content.starts_with(&prefix))
+                m.role == "research_stage" && (m.content == label || m.content.starts_with(&prefix))
             }) {
                 row.content = text.clone();
                 // Stage rows update in place, so message count does not
@@ -2138,8 +2171,7 @@ impl super::App {
                         phrase: None,
                         persona: None,
                     });
-                    self.status =
-                        format!("survey round {round} — answer in chat · Ctrl+↑ agents");
+                    self.status = format!("survey round {round} — answer in chat · Ctrl+↑ agents");
                 } else {
                     // The gate is parked off-screen: mark the job's session
                     // unread and say where input is needed. In incognito the
@@ -2221,7 +2253,8 @@ impl super::App {
                     self.status = if rework {
                         "revised plan ready — reply to approve".to_string()
                     } else {
-                        "research plan ready — reply to approve or change · Ctrl+↑ agents".to_string()
+                        "research plan ready — reply to approve or change · Ctrl+↑ agents"
+                            .to_string()
                     };
                 } else {
                     // The gate is parked off-screen: mark the job's session
@@ -2267,8 +2300,7 @@ impl super::App {
                 // Failures surface as a transcript stage row (mirrored into
                 // the in-memory transcript and the live popup) instead of
                 // vanishing (incognito skips the write by design).
-                if let Err(e) = self.save_research_report(&space_id, &space_name, &topic, &report)
-                {
+                if let Err(e) = self.save_research_report(&space_id, &space_name, &topic, &report) {
                     self.mirror_stage(
                         &session_id,
                         "report file",
@@ -2537,7 +2569,10 @@ mod tests {
     fn parse_survey_reply_recognizes_complete_markers() {
         assert_eq!(parse_survey_reply("COMPLETE"), SurveyReply::Complete);
         assert_eq!(parse_survey_reply("  complete  "), SurveyReply::Complete);
-        assert_eq!(parse_survey_reply("COMPLETE: I have enough"), SurveyReply::Complete);
+        assert_eq!(
+            parse_survey_reply("COMPLETE: I have enough"),
+            SurveyReply::Complete
+        );
         assert_eq!(
             parse_survey_reply("COMPLETE — proceed"),
             SurveyReply::Complete
@@ -2685,11 +2720,8 @@ mod tests {
 
     #[test]
     fn plan_approval_messages_include_plan_and_user_reply() {
-        let msgs = plan_approval_messages(
-            "topic",
-            &[PlanQuestion::bare("q1".to_string())],
-            "drop q2",
-        );
+        let msgs =
+            plan_approval_messages("topic", &[PlanQuestion::bare("q1".to_string())], "drop q2");
         assert!(msgs[1].content.contains("topic"));
         assert!(msgs[1].content.contains("1. q1"));
         assert!(msgs[1].content.contains("drop q2"));
@@ -2844,11 +2876,7 @@ mod tests {
             },
         )));
         assert!(a.survey_gate_targets_current_session());
-        let survey = a
-            .messages
-            .iter()
-            .find(|m| m.role == "survey")
-            .unwrap();
+        let survey = a.messages.iter().find(|m| m.role == "survey").unwrap();
         assert!(survey.content.contains("For \"fine-tuning LLMs\":"));
         assert!(survey.content.contains("1. Depth or breadth?"));
         assert!(survey.content.contains("I approve"));
@@ -2881,10 +2909,9 @@ mod tests {
         assert!(a.survey_gate_targets_current_session());
 
         // Switch to a different session: the gate must not intercept typing.
-        let other = a
-            .db
-            .create_session("other", "m", &a.active_space.id, "chat")
-            .unwrap();
+        let other =
+            a.db.create_session("other", "m", &a.active_space.id, "chat")
+                .unwrap();
         a.session = Some(other);
         a.messages.clear();
         assert!(!a.survey_gate_targets_current_session());
@@ -2902,7 +2929,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel::<ResearchMsg>();
         let ids = ("s".to_string(), "sp".to_string(), "sn".to_string());
         let mut questions = vec![PlanQuestion::bare("q1".to_string())];
-        let provider = OpenRouter::openrouter("test-key".to_string());
+        let provider = OpenRouter::openrouter_flavor("test-key".to_string());
         let result = await_plan_approval(
             &provider,
             "a/b",
@@ -3048,7 +3075,10 @@ mod tests {
         }
         // The pipeline's acknowledgements are job-global: both steers must
         // no longer count as queued, and their rows persist for display.
-        assert_eq!(a.research_steer_acked, std::collections::HashSet::from([1, 2]));
+        assert_eq!(
+            a.research_steer_acked,
+            std::collections::HashSet::from([1, 2])
+        );
         let stored = a.db.load_messages(&session_id).unwrap();
         let steer_rows: Vec<_> = stored
             .iter()
@@ -3126,7 +3156,11 @@ mod tests {
         a.steer_research("third");
         assert_eq!(
             a.research_steer_log,
-            vec![(1, "first".into()), (2, "second".into()), (3, "third".into())]
+            vec![
+                (1, "first".into()),
+                (2, "second".into()),
+                (3, "third".into())
+            ]
         );
 
         // The pipeline drains 1 and 2: acknowledged entries are dropped on
@@ -3263,10 +3297,9 @@ mod tests {
         a.incognito = true;
         a.start_research("private topic");
         let session_id = a.session.as_ref().unwrap().id.clone();
-        let other = a
-            .db
-            .create_session("other", "m", &a.active_space.id, "chat")
-            .unwrap();
+        let other =
+            a.db.create_session("other", "m", &a.active_space.id, "chat")
+                .unwrap();
         a.session = Some(other);
         a.messages.clear();
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -3283,8 +3316,7 @@ mod tests {
         )));
         assert!(!a.survey_gate_targets_current_session());
         assert!(
-            a.db
-                .load_messages(&session_id)
+            a.db.load_messages(&session_id)
                 .unwrap()
                 .iter()
                 .all(|m| m.role != "research_plan")
@@ -3346,10 +3378,9 @@ mod tests {
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
         // Navigate away before the gate arrives.
-        let other = a
-            .db
-            .create_session("other", "m", &a.active_space.id, "chat")
-            .unwrap();
+        let other =
+            a.db.create_session("other", "m", &a.active_space.id, "chat")
+                .unwrap();
         a.session = Some(other);
         a.messages.clear();
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -3370,7 +3401,10 @@ mod tests {
         // research unnoticed.
         assert!(a.survey_gate.is_some());
         assert!(!a.survey_gate_targets_current_session());
-        assert!(a.unread.contains(&session_id), "session must be marked unread");
+        assert!(
+            a.unread.contains(&session_id),
+            "session must be marked unread"
+        );
         assert!(a.status.contains("waiting on you"), "{}", a.status);
         assert!(a.status.contains("survey round 1"), "{}", a.status);
     }

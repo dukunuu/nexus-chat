@@ -45,7 +45,11 @@ impl App {
             self.status = format!("invalid path: {file}");
             return;
         }
-        let path = self.space.apps_dir(&self.active_space.name).join(&name).join(&file);
+        let path = self
+            .space
+            .apps_dir(&self.active_space.name)
+            .join(&name)
+            .join(&file);
         if !path.is_file() {
             self.status = format!("no such file: {name}/{file}");
             return;

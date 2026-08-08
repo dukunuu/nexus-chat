@@ -49,7 +49,8 @@ impl super::App {
         };
         let (dir, filename) = if self.incognito {
             let d = self.incognito_img_dir.get_or_insert_with(|| {
-                let p = std::env::temp_dir().join(format!("nexus-incognito-{}", uuid::Uuid::new_v4()));
+                let p =
+                    std::env::temp_dir().join(format!("nexus-incognito-{}", uuid::Uuid::new_v4()));
                 let _ = std::fs::create_dir_all(&p);
                 p
             });

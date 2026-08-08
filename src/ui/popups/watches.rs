@@ -83,11 +83,10 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             KeyCode::Char('d')
                 if key
                     .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && !app.watches_cache.is_empty() =>
             {
-                if !app.watches_cache.is_empty() {
-                    app.watch_mode = WatchMode::ConfirmDelete;
-                }
+                app.watch_mode = WatchMode::ConfirmDelete;
             }
             _ => {}
         },

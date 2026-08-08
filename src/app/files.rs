@@ -570,7 +570,7 @@ impl App {
                     let is_image = path
                         .extension()
                         .and_then(|e| e.to_str())
-                        .map(|e| crate::extract::is_image_ext(e))
+                        .map(crate::extract::is_image_ext)
                         .unwrap_or(false);
                     let result = if is_image {
                         ocr_image_vlm(&backend, &path, &tx, &space_id, &name).await
@@ -589,7 +589,7 @@ impl App {
                 let is_image = path
                     .extension()
                     .and_then(|e| e.to_str())
-                    .map(|e| crate::extract::is_image_ext(e))
+                    .map(crate::extract::is_image_ext)
                     .unwrap_or(false);
                 if is_image {
                     // Images can't be OCR'd via tesseract — skip, it'll re-queue
@@ -919,7 +919,7 @@ impl App {
                 let _ = self.db.set_file_status(&f.id, &status);
 
                 // Rename pasted images (uuid.ext) to uuid-<slug>.ext for @-completion.
-                if let Some(new_name) = self.descriptive_paste_name(&f, &text) {
+                if let Some(new_name) = self.descriptive_paste_name(f, &text) {
                     let dir = self.space.files_dir(&self.active_space.name);
                     let old_path = dir.join(&f.name);
                     let new_path = dir.join(&new_name);

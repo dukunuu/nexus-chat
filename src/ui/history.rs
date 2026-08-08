@@ -130,13 +130,13 @@ fn sync_cache(app: &mut App, width: usize) {
                 app.session_caches.insert(sid.clone(), std::mem::take(c));
             }
             // Restore cache for the new session if available.
-            if let Some(sid) = &key.0 {
-                if let Some(cached) = app.session_caches.remove(sid) {
-                    if cached.key == key && cached.msg_count == app.messages.len() {
-                        *c = cached;
-                        return;
-                    }
-                }
+            if let Some(sid) = &key.0
+                && let Some(cached) = app.session_caches.remove(sid)
+                && cached.key == key
+                && cached.msg_count == app.messages.len()
+            {
+                *c = cached;
+                return;
             }
             // New session or stale cache — full reset.
             *c = HistoryCache {
@@ -799,7 +799,13 @@ mod tests {
             "For \"fine-tuning LLMs\":\n 1. Depth or breadth?\n\nAnswer in chat — then say \"I approve\".",
         ));
         sync_cache(&mut a, 80);
-        let text = a.history_cache.lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        let text = a
+            .history_cache
+            .lines
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(text.contains("❓"), "{text}");
         assert!(text.contains("fine-tuning LLMs"), "{text}");
         assert!(text.contains("1. Depth or breadth?"), "{text}");

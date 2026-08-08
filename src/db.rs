@@ -575,7 +575,8 @@ impl Db {
     /// `gate_reply` whose channel delivery failed, so a retry can't
     /// duplicate it in the transcript.
     pub fn delete_message(&self, id: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM messages WHERE id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM messages WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -621,7 +622,16 @@ impl Db {
     /// history too, so bare answers ("the second option", "drop Q2") must
     /// not reach the model without their context.
     pub fn add_gate_reply_message(&self, session_id: &str, content: &str) -> Result<String> {
-        self.insert_message(session_id, "gate_reply", content, None, None, None, None, None)
+        self.insert_message(
+            session_id,
+            "gate_reply",
+            content,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Insert a tool-call transcript block: `content` is JSON
@@ -681,16 +691,7 @@ impl Db {
     /// questions awaiting a chat answer. Rendered like a stage row but
     /// actionable, and never replayed to the model.
     pub fn add_survey_message(&self, session_id: &str, content: &str) -> Result<String> {
-        self.insert_message(
-            session_id,
-            "survey",
-            content,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        self.insert_message(session_id, "survey", content, None, None, None, None, None)
     }
 
     /// Update the most recent `research_stage` row for `session_id` whose
@@ -1858,7 +1859,8 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
         let s = db.create_session("t", "a/b", &space, "chat").unwrap();
-        db.add_survey_message(&s.id, "For \"topic\":\n 1. Depth or breadth?").unwrap();
+        db.add_survey_message(&s.id, "For \"topic\":\n 1. Depth or breadth?")
+            .unwrap();
         let msgs = db.load_messages(&s.id).unwrap();
         let last = msgs.last().unwrap();
         assert_eq!(last.role, "survey");
@@ -1870,7 +1872,8 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
         let s = db.create_session("t", "a/b", &space, "chat").unwrap();
-        db.add_gate_reply_message(&s.id, "the second option").unwrap();
+        db.add_gate_reply_message(&s.id, "the second option")
+            .unwrap();
         let msgs = db.load_messages(&s.id).unwrap();
         let last = msgs.last().unwrap();
         assert_eq!(last.role, "gate_reply");

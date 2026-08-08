@@ -128,8 +128,8 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
     if !public {
         return Ok((name.to_string(), args.to_string()));
     }
-    let value: serde_json::Value = serde_json::from_str(args)
-        .map_err(|e| format!("invalid tool arguments: {e}"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(args).map_err(|e| format!("invalid tool arguments: {e}"))?;
     let action = |key: &str| {
         value
             .get(key)
@@ -296,6 +296,10 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
 }
 
 impl ToolBox {
+    /// All config knobs; kept flat because ~17 test call sites construct
+    /// this with inline `None`/default args — a config struct would churn
+    /// every one of them for no readability gain.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         skills_dir: PathBuf,
         searxng_url: Option<String>,
@@ -826,11 +830,7 @@ impl ToolBox {
         if self.research_only
             && !matches!(
                 name,
-                "search"
-                    | "fetch_url"
-                    | "web_search"
-                    | "academic_search"
-                    | "discussion_search"
+                "search" | "fetch_url" | "web_search" | "academic_search" | "discussion_search"
             )
         {
             return (
@@ -1690,15 +1690,14 @@ impl ToolBox {
                              AND (f.name LIKE '%.jpg' OR f.name LIKE '%.jpeg'
                                OR f.name LIKE '%.png' OR f.name LIKE '%.gif'
                                OR f.name LIKE '%.webp' OR f.name LIKE '%.bmp')",
-                        ) {
-                            if let Ok(rows) = fstmt.query_map([&ctx.space_id], |r| {
+                        )
+                            && let Ok(rows) = fstmt.query_map([&ctx.space_id], |r| {
                                 let name: String = r.get(0)?;
                                 let status: String = r.get(1)?;
                                 Ok(serde_json::json!({"id": name, "description": null, "source": "space", "status": status}))
                             }) {
                                 images.extend(rows.filter_map(|r| r.ok()));
                             }
-                        }
                         serde_json::to_string(&images).unwrap_or_else(|_| "[]".to_string())
                     }
                 };
@@ -1909,8 +1908,10 @@ impl ToolBox {
                             } else {
                                 let n = hits.len();
                                 hits.truncate(50);
-                                let mut by_file =
-                                    std::collections::BTreeMap::<String, Vec<(usize, String)>>::new();
+                                let mut by_file = std::collections::BTreeMap::<
+                                    String,
+                                    Vec<(usize, String)>,
+                                >::new();
                                 for (path, line) in hits {
                                     let text = if compact {
                                         String::new()
@@ -1918,7 +1919,10 @@ impl ToolBox {
                                         std::fs::read_to_string(app_dir.join(&path))
                                             .ok()
                                             .and_then(|contents| {
-                                                contents.lines().nth(line.saturating_sub(1)).map(str::to_string)
+                                                contents
+                                                    .lines()
+                                                    .nth(line.saturating_sub(1))
+                                                    .map(str::to_string)
                                             })
                                             .unwrap_or_default()
                                     };
@@ -1937,7 +1941,9 @@ impl ToolBox {
                                         } else {
                                             lines
                                                 .into_iter()
-                                                .map(|(line, text)| format!("{path}:{line}: {text}"))
+                                                .map(|(line, text)| {
+                                                    format!("{path}:{line}: {text}")
+                                                })
                                                 .collect::<Vec<_>>()
                                                 .join("\n")
                                         }
@@ -2030,25 +2036,25 @@ impl ToolBox {
                             let image_data = image_id.and_then(|id| {
                                 // Try id as a full filename first, then as a stem + .png.
                                 resolve_image(&self.space_files_dir, id).or_else(|| {
-                                        let stem = std::path::Path::new(id)
-                                            .file_stem()
-                                            .and_then(|s| s.to_str())
-                                            .unwrap_or(id);
-                                        let files = self.space_files_dir.as_path();
-                                        std::fs::read_dir(files).ok().and_then(|e| {
-                                            e.flatten()
-                                                .find(|e| {
-                                                    e.path()
-                                                        .file_stem()
-                                                        .map(|s| s == stem)
-                                                        .unwrap_or(false)
-                                                })
-                                                .and_then(|e| std::fs::read(e.path()).ok())
-                                        })
+                                    let stem = std::path::Path::new(id)
+                                        .file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or(id);
+                                    let files = self.space_files_dir.as_path();
+                                    std::fs::read_dir(files).ok().and_then(|e| {
+                                        e.flatten()
+                                            .find(|e| {
+                                                e.path()
+                                                    .file_stem()
+                                                    .map(|s| s == stem)
+                                                    .unwrap_or(false)
+                                            })
+                                            .and_then(|e| std::fs::read(e.path()).ok())
                                     })
+                                })
                             });
-                            if image_id.is_some() && image_data.is_none() {
-                                format!("image not found: {id}", id = image_id.unwrap())
+                            if let Some(id) = image_id.filter(|_| image_data.is_none()) {
+                                format!("image not found: {id}")
                             } else {
                                 match provider
                                     .generate_image(model, prompt, size, image_data.as_deref())
@@ -2181,19 +2187,19 @@ impl ToolBox {
                                 }))
                             });
                             match provider
-                                .generate_video(
-                                    model,
-                                    prompt,
+                                .generate_video(crate::provider::openrouter::VideoRequest {
+                                    model: model.clone(),
+                                    prompt: prompt.to_string(),
                                     duration,
-                                    &resolution,
-                                    &aspect_ratio,
+                                    resolution: resolution.clone(),
+                                    aspect_ratio: aspect_ratio.clone(),
                                     generate_audio,
                                     first_frame,
                                     last_frame,
-                                    all_refs,
+                                    input_references: all_refs,
                                     seed,
                                     provider_options,
-                                )
+                                })
                                 .await
                             {
                                 Err(e) => format!("video generation failed: {e}"),
@@ -2221,7 +2227,8 @@ impl ToolBox {
                                                 true,
                                             );
                                         } else if let Some(fid) = first_frame_id
-                                            && let Some(data) = resolve_image(&self.space_files_dir, fid)
+                                            && let Some(data) =
+                                                resolve_image(&self.space_files_dir, fid)
                                         {
                                             let _ = std::fs::write(&thumb_path, data);
                                         }
@@ -2361,7 +2368,7 @@ impl ToolBox {
 
                         match cmd.status() {
                             Err(e) => format!("ffmpeg failed to start: {e}"),
-                            Ok(s) if !s.success() => format!("ffmpeg returned non-zero exit"),
+                            Ok(s) if !s.success() => "ffmpeg returned non-zero exit".to_string(),
                             Ok(_) => {
                                 extract_ffmpeg_frame(&output_path, &thumb_path, false);
                                 let now = chrono::Utc::now().to_rfc3339();
@@ -2476,11 +2483,11 @@ impl ToolBox {
                             break;
                         }
                         let meta_path = self.space_files_dir.join(format!("{vid_id}.json"));
-                        if let Ok(json_str) = std::fs::read_to_string(&meta_path) {
-                            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                                total_cost +=
-                                    meta.get("cost_usd").and_then(|c| c.as_f64()).unwrap_or(0.0);
-                            }
+                        if let Ok(json_str) = std::fs::read_to_string(&meta_path)
+                            && let Ok(meta) = serde_json::from_str::<serde_json::Value>(&json_str)
+                        {
+                            total_cost +=
+                                meta.get("cost_usd").and_then(|c| c.as_f64()).unwrap_or(0.0);
                         }
                         video_files.push(mp4);
                     }
@@ -2601,8 +2608,9 @@ impl ToolBox {
             "list_references" => {
                 let status = "Listing references…".to_string();
                 let refs = read_video_refs(&self.space_files_dir);
-                let result = if refs.as_object().map_or(true, |o| o.is_empty()) {
-                    "no references saved yet — use video_references with action=save to create one".to_string()
+                let result = if refs.as_object().is_none_or(|o| o.is_empty()) {
+                    "no references saved yet — use video_references with action=save to create one"
+                        .to_string()
                 } else {
                     let pretty: Vec<serde_json::Value> = refs
                         .as_object()
@@ -2961,7 +2969,7 @@ fn apply_hashline_edits(
     // Apply highest index first so earlier (lower) indices, still unprocessed,
     // stay valid regardless of how many lines an edit adds or removes.
     let mut apply_order = resolved;
-    apply_order.sort_by(|a, b| b.0.cmp(&a.0));
+    apply_order.sort_by_key(|b| std::cmp::Reverse(b.0));
     let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
     for (idx, new) in apply_order {
         match new {
@@ -4337,12 +4345,11 @@ fn resolve_named_references(
     let refs = read_video_refs(files_dir);
     let mut images = Vec::new();
     for name in character_refs.iter().chain(location_refs.iter()) {
-        if let Some(entry) = refs.get(name) {
-            if let Some(image_id) = entry.get("image_id").and_then(|id| id.as_str()) {
-                if let Some(data) = resolve_image(files_dir, image_id) {
-                    images.push(data);
-                }
-            }
+        if let Some(entry) = refs.get(name)
+            && let Some(image_id) = entry.get("image_id").and_then(|id| id.as_str())
+            && let Some(data) = resolve_image(files_dir, image_id)
+        {
+            images.push(data);
         }
     }
     images
@@ -4535,17 +4542,12 @@ mod tests {
             &[("https://nature.com/x".to_string(), None)],
         )
         .unwrap();
-        let (result, _) = tb
-            .run("research_lookup", r#"{"scope":"citations"}"#)
-            .await;
+        let (result, _) = tb.run("research_lookup", r#"{"scope":"citations"}"#).await;
         assert!(result.contains("research-a.md"), "{result}");
         assert!(result.contains("nature.com"), "{result}");
 
         let (result, _) = tb
-            .run(
-                "research_lookup",
-                r#"{"scope":"citations","query":"nope"}"#,
-            )
+            .run("research_lookup", r#"{"scope":"citations","query":"nope"}"#)
             .await;
         assert!(result.contains("no citations"), "{result}");
     }
@@ -5116,10 +5118,7 @@ mod tests {
             .await;
         assert!(result.contains("edited nested/tool.sh"), "{result}");
         let (result, _) = tb
-            .run(
-                "script_files",
-                r#"{"action":"read","path":"../escape.sh"}"#,
-            )
+            .run("script_files", r#"{"action":"read","path":"../escape.sh"}"#)
             .await;
         assert!(result.contains("invalid path"), "{result}");
     }
@@ -5373,19 +5372,52 @@ mod tests {
         let names: Vec<_> = tb.defs().into_iter().map(|def| def.name).collect();
         assert!(names.len() <= 17, "too many public tools: {names:?}");
         for old in [
-            "create_skill", "install_skill", "web_search", "academic_search", "discussion_search",
-            "search_sources", "list_citations", "search_files", "read_file", "read_pdf_page",
-            "read_app_file", "grep_app", "write_file", "edit_file", "diff_app", "list_images",
-            "copy_file_to_app", "copy_images_to_app", "list_scripts", "write_script", "read_script",
-            "edit_script", "edit_video", "extract_frame", "stitch_videos", "save_reference",
-            "list_references", "delete_reference",
+            "create_skill",
+            "install_skill",
+            "web_search",
+            "academic_search",
+            "discussion_search",
+            "search_sources",
+            "list_citations",
+            "search_files",
+            "read_file",
+            "read_pdf_page",
+            "read_app_file",
+            "grep_app",
+            "write_file",
+            "edit_file",
+            "diff_app",
+            "list_images",
+            "copy_file_to_app",
+            "copy_images_to_app",
+            "list_scripts",
+            "write_script",
+            "read_script",
+            "edit_script",
+            "edit_video",
+            "extract_frame",
+            "stitch_videos",
+            "save_reference",
+            "list_references",
+            "delete_reference",
         ] {
-            assert!(!names.iter().any(|name| name == old), "deprecated tool advertised: {old}");
+            assert!(
+                !names.iter().any(|name| name == old),
+                "deprecated tool advertised: {old}"
+            );
         }
         for required in [
-            "skill_admin", "run_python", "run_script", "install_packages", "search", "fetch_url",
+            "skill_admin",
+            "run_python",
+            "run_script",
+            "install_packages",
+            "search",
+            "fetch_url",
         ] {
-            assert!(names.iter().any(|name| name == required), "missing {required}");
+            assert!(
+                names.iter().any(|name| name == required),
+                "missing {required}"
+            );
         }
     }
 
@@ -5403,15 +5435,35 @@ mod tests {
         );
         for (name, args, expected) in [
             ("skill_admin", r#"{"action":"nope"}"#, "invalid action"),
-            ("search", r#"{"mode":"web"}"#, "missing required field: query"),
-            ("research_lookup", r#"{"scope":"session_sources"}"#, "missing required field: query"),
+            (
+                "search",
+                r#"{"mode":"web"}"#,
+                "missing required field: query",
+            ),
+            (
+                "research_lookup",
+                r#"{"scope":"session_sources"}"#,
+                "missing required field: query",
+            ),
             ("files", r#"{"action":"nope"}"#, "invalid action"),
-            ("app_inspect", r#"{"action":"nope","app":"a"}"#, "invalid action"),
-            ("app_modify", r#"{"action":"nope","app":"a","path":"x"}"#, "invalid action"),
+            (
+                "app_inspect",
+                r#"{"action":"nope","app":"a"}"#,
+                "invalid action",
+            ),
+            (
+                "app_modify",
+                r#"{"action":"nope","app":"a","path":"x"}"#,
+                "invalid action",
+            ),
             ("app_assets", r#"{"action":"nope"}"#, "invalid action"),
             ("script_files", r#"{"action":"nope"}"#, "invalid action"),
             ("video_transform", r#"{"action":"nope"}"#, "invalid action"),
-            ("video_references", r#"{"action":"save","name":"x"}"#, "missing required field: image_id"),
+            (
+                "video_references",
+                r#"{"action":"save","name":"x"}"#,
+                "missing required field: image_id",
+            ),
         ] {
             let (result, status) = tb.run(name, args).await;
             assert_eq!(status, "invalid arguments", "{name}: {result}");
@@ -5438,7 +5490,10 @@ mod tests {
             .await;
         assert!(result.contains("report.md"), "{result}");
         let (result, _) = tb
-            .run("files", r#"{"action":"read","name":"report.md","offset":201}"#)
+            .run(
+                "files",
+                r#"{"action":"read","name":"report.md","offset":201}"#,
+            )
             .await;
         assert!(result.contains("line 201"), "{result}");
         assert!(!result.contains("line 1"), "{result}");
@@ -5593,7 +5648,10 @@ mod tests {
                 r#"{"action":"write","app":"public-deck","path":"index.html","content":"<h1>Hello</h1>"}"#,
             )
             .await;
-        assert!(result.contains("live at http://127.0.0.1:9999/"), "{result}");
+        assert!(
+            result.contains("live at http://127.0.0.1:9999/"),
+            "{result}"
+        );
         let (result, _) = tb
             .run(
                 "app_inspect",

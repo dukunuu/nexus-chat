@@ -719,13 +719,13 @@ fn parse_moderator_verdict(raw: &str) -> ModeratorVerdict {
     // ASCII-only uppercasing so byte offsets stay valid for slicing `raw`
     // (full Unicode `to_uppercase` can change a string's byte length).
     let upper = raw.to_ascii_uppercase();
-    if let Some(rest) = upper.find("ADD:").map(|i| &raw[i + 4..]) {
-        if let Some((name, blurb)) = rest.split_once('|') {
-            let name = name.trim().trim_matches('*').to_string();
-            let blurb = blurb.lines().next().unwrap_or("").trim().to_string();
-            if !name.is_empty() && !blurb.is_empty() {
-                return ModeratorVerdict::AddPersona { name, blurb };
-            }
+    if let Some(rest) = upper.find("ADD:").map(|i| &raw[i + 4..])
+        && let Some((name, blurb)) = rest.split_once('|')
+    {
+        let name = name.trim().trim_matches('*').to_string();
+        let blurb = blurb.lines().next().unwrap_or("").trim().to_string();
+        if !name.is_empty() && !blurb.is_empty() {
+            return ModeratorVerdict::AddPersona { name, blurb };
         }
     }
     if upper.contains("CONVERGED") {

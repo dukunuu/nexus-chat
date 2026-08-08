@@ -5,8 +5,8 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState};
 
-use crossterm::event::KeyModifiers;
 use crate::app::{App, AppsMode};
+use crossterm::event::KeyModifiers;
 
 use super::chrome;
 
@@ -15,10 +15,14 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     let dim = Style::default().fg(app.theme.fg_dim);
 
     if app.apps_mode == AppsMode::EditFile {
-        let name = app.apps_cache.get(app.apps_selected).cloned().unwrap_or_default();
+        let name = app
+            .apps_cache
+            .get(app.apps_selected)
+            .cloned()
+            .unwrap_or_default();
         let title = chrome::input_title(
             app,
-            &format!("edit {name}/"),
+            format!("edit {name}/"),
             &app.apps_edit,
             "Enter open in $EDITOR · Esc cancel",
         );
@@ -64,11 +68,9 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
                 "Ctrl+D confirm · Esc cancel",
             )
         }
-        AppsMode::Browse => chrome::hinted_title(
-            app,
-            "apps",
-            "Enter open · Ctrl+E edit file · Ctrl+D remove",
-        ),
+        AppsMode::Browse => {
+            chrome::hinted_title(app, "apps", "Enter open · Ctrl+E edit file · Ctrl+D remove")
+        }
     };
 
     let inner = chrome::render_frame(f, area, title, &app.theme, true);
@@ -87,9 +89,13 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     };
     match app.apps_mode {
         AppsMode::EditFile => match classify_edit_key(key) {
-            Some(EditAction::Cancel) => { app.apps_mode = AppsMode::Browse; }
+            Some(EditAction::Cancel) => {
+                app.apps_mode = AppsMode::Browse;
+            }
             Some(EditAction::Save) => app.confirm_app_edit(),
-            Some(EditAction::Backspace) => { app.apps_edit.pop(); }
+            Some(EditAction::Backspace) => {
+                app.apps_edit.pop();
+            }
             Some(EditAction::Push(c)) => app.apps_edit.push(c),
             None => {}
         },

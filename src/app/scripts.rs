@@ -47,7 +47,10 @@ impl App {
         let Some(s) = self.scripts_cache.get(self.scripts_selected) else {
             return;
         };
-        let path = self.space.scripts_dir(&self.active_space.name).join(&s.name);
+        let path = self
+            .space
+            .scripts_dir(&self.active_space.name)
+            .join(&s.name);
         self.pending_editor = Some(super::PendingEditor::ScriptFile(path));
     }
 
@@ -65,12 +68,10 @@ impl App {
             return Ok(());
         }
         let dir = self.space.scripts_dir(&self.active_space.name);
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         let path = dir.join(&name);
         if !path.exists() {
-            std::fs::write(&path, "")
-                .with_context(|| format!("creating {}", path.display()))?;
+            std::fs::write(&path, "").with_context(|| format!("creating {}", path.display()))?;
         }
         self.refresh_scripts();
         self.pending_editor = Some(super::PendingEditor::ScriptFile(path));

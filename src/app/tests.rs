@@ -651,7 +651,10 @@ fn reasoning_cycles_models_own_effort_list() {
     a.model_focus = ModelPanel::Available;
     a.avail_state.select(Some(0));
     a.cycle_reasoning_focused().unwrap();
-    assert_eq!(a.reasoning_of("anthropic/claude-sonnet-4.5"), Some("minimal"));
+    assert_eq!(
+        a.reasoning_of("anthropic/claude-sonnet-4.5"),
+        Some("minimal")
+    );
     a.cycle_reasoning_focused().unwrap();
     assert_eq!(a.reasoning_of("anthropic/claude-sonnet-4.5"), Some("low"));
     a.cycle_reasoning_focused().unwrap();
@@ -701,9 +704,7 @@ fn reasoning_cycle_uses_explicit_none_and_clears_stale_preferences() {
 
     a.reasoning
         .insert("no-reasoning".to_string(), "low".to_string());
-    a.db
-        .set_reasoning("no-reasoning", Some("low"))
-        .unwrap();
+    a.db.set_reasoning("no-reasoning", Some("low")).unwrap();
     let no_reasoning_index = a
         .available_models()
         .iter()
@@ -716,8 +717,7 @@ fn reasoning_cycle_uses_explicit_none_and_clears_stale_preferences() {
     a.cycle_reasoning_focused().unwrap();
     assert!(!a.reasoning.contains_key("no-reasoning"));
     assert!(
-        a.db
-            .load_model_prefs()
+        a.db.load_model_prefs()
             .unwrap()
             .iter()
             .find(|pref| pref.id == "no-reasoning")
@@ -766,10 +766,9 @@ fn effort_accepted_follows_the_models_own_list() {
 async fn starting_a_request_clears_an_unsupported_reasoning_preference() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".to_string());
-    let session = a
-        .db
-        .create_session("t", "a/one", &a.active_space.id, "chat")
-        .unwrap();
+    let session =
+        a.db.create_session("t", "a/one", &a.active_space.id, "chat")
+            .unwrap();
     a.session = Some(session);
     a.reasoning.insert("a/one".to_string(), "high".to_string());
     a.db.set_reasoning("a/one", Some("high")).unwrap();
@@ -779,8 +778,7 @@ async fn starting_a_request_clears_an_unsupported_reasoning_preference() {
     assert!(!a.reasoning.contains_key("a/one"));
     assert!(a.status.contains("cleared unsupported reasoning"));
     assert!(
-        a.db
-            .load_model_prefs()
+        a.db.load_model_prefs()
             .unwrap()
             .iter()
             .find(|pref| pref.id == "a/one")

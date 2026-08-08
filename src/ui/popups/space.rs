@@ -69,7 +69,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         SpaceMode::Browse => chrome::input_title(
             app,
             "space search",
-            &app.space_filter.to_string(),
+            app.space_filter.to_string(),
             "Ctrl+N new · Ctrl+R rename · Ctrl+D delete · Ctrl+E instructions · Ctrl+K memory",
         ),
     };

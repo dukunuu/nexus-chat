@@ -74,8 +74,7 @@ fn research_live_popup_shows_agent_lifecycle_and_activity() {
 #[test]
 fn research_live_popup_shows_queued_steers_until_picked_up() {
     let mut app = test_app();
-    app.research_steer_log =
-        vec![(1, "look into X".to_string()), (2, "also Y".to_string())];
+    app.research_steer_log = vec![(1, "look into X".to_string()), (2, "also Y".to_string())];
     // Steer #1 was already picked up by the pipeline (acknowledged); steer
     // #2 is still queued and must show in the popup.
     app.research_steer_acked = std::collections::HashSet::from([1]);

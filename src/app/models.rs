@@ -15,7 +15,7 @@ impl App {
         self.backends = super::Backends::default();
         if let Some(k) = self.saved.openrouter_key.clone() {
             self.backends
-                .set(BackendTag::OpenRouter, OpenRouter::openrouter(k));
+                .set(BackendTag::OpenRouter, OpenRouter::openrouter_flavor(k));
         }
         if let Some(k) = self.saved.openai_key.clone() {
             self.backends.set(BackendTag::OpenAi, OpenRouter::openai(k));
@@ -271,7 +271,10 @@ impl App {
             self.status = format!("could not save key: {e}");
         }
         let (backend_tag, provider) = match target {
-            KeyTarget::OpenRouter => (BackendTag::OpenRouter, OpenRouter::openrouter(key.clone())),
+            KeyTarget::OpenRouter => (
+                BackendTag::OpenRouter,
+                OpenRouter::openrouter_flavor(key.clone()),
+            ),
             KeyTarget::OpenAi => (BackendTag::OpenAi, OpenRouter::openai(key.clone())),
             KeyTarget::OpencodeGo => (BackendTag::OpencodeGo, OpenRouter::opencode_go(key.clone())),
         };

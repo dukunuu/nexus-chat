@@ -7,7 +7,9 @@ use reqwest_eventsource::{Event, EventSource};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
-use super::{ChatMessage, ChatParams, Model, ReasoningEffort, StreamEvent, ToolCall, ToolDef, Usage};
+use super::{
+    ChatMessage, ChatParams, Model, ReasoningEffort, StreamEvent, ToolCall, ToolDef, Usage,
+};
 use crate::tools::ToolBox;
 
 const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
@@ -149,6 +151,24 @@ pub struct OpenRouter {
     flavor: ProviderFlavor,
 }
 
+/// Everything needed to generate a video: model, prompt, params, optional
+/// frame/reference images, and provider-specific options keyed by provider
+/// slug (e.g. `{"alibaba": {"parameters": {"video": "data:..."}}}`),
+/// passed through as `provider.options` in the request body.
+pub struct VideoRequest {
+    pub model: String,
+    pub prompt: String,
+    pub duration: u32,
+    pub resolution: String,
+    pub aspect_ratio: String,
+    pub generate_audio: bool,
+    pub first_frame: Option<Vec<u8>>,
+    pub last_frame: Option<Vec<u8>>,
+    pub input_references: Vec<Vec<u8>>,
+    pub seed: Option<i32>,
+    pub provider_options: Option<serde_json::Value>,
+}
+
 impl ProviderFlavor {
     fn base(self) -> &'static str {
         match self {
@@ -208,9 +228,10 @@ impl ProviderFlavor {
                     E::WITH_XHIGH_AND_NONE.to_vec()
                 } else if id.starts_with("gpt-5.6") {
                     E::WITH_MAX_XHIGH_AND_NONE.to_vec()
-                } else if id.strip_prefix('o').is_some_and(|rest| {
-                    rest.chars().next().is_some_and(|c| c.is_ascii_digit())
-                }) || id.starts_with("gpt-5")
+                } else if id
+                    .strip_prefix('o')
+                    .is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                    || id.starts_with("gpt-5")
                 {
                     E::STANDARD.to_vec()
                 } else {
@@ -425,7 +446,7 @@ fn merge_generation_models(models: &mut Vec<Model>, additions: Vec<Model>) {
 impl OpenRouter {
     pub fn from_key_auto(key: String) -> Self {
         if looks_like_openrouter_key(&key) {
-            Self::openrouter(key)
+            Self::openrouter_flavor(key)
         } else if looks_like_codex_token(&key) {
             Self::openai_codex(key)
         } else {
@@ -433,7 +454,7 @@ impl OpenRouter {
         }
     }
 
-    pub fn openrouter(key: String) -> Self {
+    pub fn openrouter_flavor(key: String) -> Self {
         OpenRouter {
             client: reqwest::Client::new(),
             key,
@@ -482,29 +503,26 @@ impl OpenRouter {
     /// Generate a video via OpenRouter's `/api/v1/videos` endpoint.
     /// Submits the job, polls every 10s (up to 6 min), downloads on completion.
     /// Returns `(mp4_bytes, cost_in_usd)`.
-    pub async fn generate_video(
-        &self,
-        model: &str,
-        prompt: &str,
-        duration: u32,
-        resolution: &str,
-        aspect_ratio: &str,
-        generate_audio: bool,
-        first_frame: Option<Vec<u8>>,
-        last_frame: Option<Vec<u8>>,
-        input_references: Vec<Vec<u8>>,
-        seed: Option<i32>,
-        // Provider-specific options keyed by provider slug, e.g.
-        // {"alibaba": {"parameters": {"video": "data:..."}}}.
-        // Passed through as `provider.options` in the request body.
-        provider_options: Option<serde_json::Value>,
-    ) -> Result<(Vec<u8>, f64)> {
+    pub async fn generate_video(&self, req: VideoRequest) -> Result<(Vec<u8>, f64)> {
+        let VideoRequest {
+            model,
+            prompt,
+            duration,
+            resolution,
+            aspect_ratio,
+            generate_audio,
+            first_frame,
+            last_frame,
+            input_references,
+            seed,
+            provider_options,
+        } = req;
         if !self.is_openrouter() {
             anyhow::bail!("video generation only available on the OpenRouter backend");
         }
-        let (base, model_id) = self.opencode_route(model);
+        let (base, model_id) = self.opencode_route(&model);
         let (duration, resolution, aspect_ratio) =
-            normalize_video_params(&model_id, duration, resolution, aspect_ratio);
+            normalize_video_params(&model_id, duration, &resolution, &aspect_ratio);
         check_video_params(&model_id, duration, &resolution, &aspect_ratio)?;
 
         use base64::Engine;
@@ -1255,6 +1273,10 @@ impl OpenRouter {
         (rx, task.abort_handle())
     }
 
+    /// One chat round-trip plus tool iterations. Args mix request data
+    /// (model/messages/params/tools) with execution plumbing (toolbox,
+    /// budget, event sink) — a struct would group unrelated concerns.
+    #[allow(clippy::too_many_arguments)]
     async fn run_chat_loop(
         &self,
         model: String,
@@ -1313,18 +1335,17 @@ impl OpenRouter {
                         // from the tool result and inject them as a user
                         // message so the vision model can see them on the
                         // next stream request.
-                        if toolbox.supports_images {
-                            if let Some(imgs) =
+                        if toolbox.supports_images
+                            && let Some(imgs) =
                                 extract_tool_images(&result, &toolbox.space_files_dir)
-                            {
-                                messages.push(ChatMessage {
-                                    role: "user".to_string(),
-                                    content: imgs.description,
-                                    tool_calls: None,
-                                    tool_call_id: None,
-                                    images: imgs.urls,
-                                });
-                            }
+                        {
+                            messages.push(ChatMessage {
+                                role: "user".to_string(),
+                                content: imgs.description,
+                                tool_calls: None,
+                                tool_call_id: None,
+                                images: imgs.urls,
+                            });
                         }
                     }
                     let remaining = max_tool_iters - (iter + 1);
@@ -1475,7 +1496,7 @@ impl OpenRouter {
 
     fn openrouter_delegate_for_model(&self, model: &str) -> Option<OpenRouter> {
         if self.flavor == ProviderFlavor::OpenAiCodex && model.contains('/') {
-            crate::config::load_openrouter_key_only().map(OpenRouter::openrouter)
+            crate::config::load_openrouter_key_only().map(OpenRouter::openrouter_flavor)
         } else {
             None
         }
@@ -2470,9 +2491,18 @@ mod tests {
         );
         // Fallback is OpenCode-only: no table for other bases, unknown ids
         // yield nothing, and a go: tag is never part of the lookup.
-        assert_eq!(OpenRouter::opencode_context_fallback(OPENROUTER_BASE, "deepseek-v4-pro"), None);
-        assert_eq!(OpenRouter::opencode_context_fallback(OPENCODE_ZEN_BASE, "nope"), None);
-        assert_eq!(OpenRouter::opencode_context_fallback(OPENCODE_GO_BASE, "go:hy3"), None);
+        assert_eq!(
+            OpenRouter::opencode_context_fallback(OPENROUTER_BASE, "deepseek-v4-pro"),
+            None
+        );
+        assert_eq!(
+            OpenRouter::opencode_context_fallback(OPENCODE_ZEN_BASE, "nope"),
+            None
+        );
+        assert_eq!(
+            OpenRouter::opencode_context_fallback(OPENCODE_GO_BASE, "go:hy3"),
+            None
+        );
     }
 
     #[test]
@@ -2488,7 +2518,7 @@ mod tests {
             architecture: None,
         };
 
-        let or = OpenRouter::openrouter("k".into());
+        let or = OpenRouter::openrouter_flavor("k".into());
         // Catalog metadata is authoritative, normalized into UI cycle order,
         // and can expose sparse sets plus explicit disable/max tiers.
         let sparse = entry("google/gemini", &[], &["high", "minimal"]);
@@ -2508,11 +2538,7 @@ mod tests {
 
         // Without an enumerated set, OpenRouter still uses the catalog's
         // supported-parameter gate and the conservative family fallback.
-        let claude = entry(
-            "anthropic/claude-sonnet-4.5",
-            &["reasoning"],
-            &[],
-        );
+        let claude = entry("anthropic/claude-sonnet-4.5", &["reasoning"], &[]);
         assert_eq!(
             or.flavor.reasoning_efforts(&claude),
             ReasoningEffort::WITH_MINIMAL.to_vec()
@@ -2533,8 +2559,7 @@ mod tests {
             ReasoningEffort::WITH_MINIMAL.to_vec()
         );
         assert_eq!(
-            oa.flavor
-                .reasoning_efforts(&entry("gpt-5-pro", &[], &[])),
+            oa.flavor.reasoning_efforts(&entry("gpt-5-pro", &[], &[])),
             ReasoningEffort::HIGH_ONLY.to_vec()
         );
         assert_eq!(
@@ -2594,7 +2619,7 @@ mod tests {
     fn opencode_route_is_a_no_op_for_other_flavors() {
         // A "go:"-prefixed id is meaningless outside OpenCode Go — must not
         // be stripped or rerouted for another flavor.
-        let p = OpenRouter::openrouter("k".into());
+        let p = OpenRouter::openrouter_flavor("k".into());
         let (base, model) = p.opencode_route("go:whatever");
         assert_eq!(base, "https://openrouter.ai/api/v1");
         assert_eq!(model, "go:whatever");
@@ -2813,7 +2838,7 @@ mod tests {
 
     #[test]
     fn defaults_use_current_quality_generation_models() {
-        let provider = OpenRouter::openrouter("key".into());
+        let provider = OpenRouter::openrouter_flavor("key".into());
         assert_eq!(provider.default_image_gen_model(), "openai/gpt-image-2");
         assert_eq!(provider.default_video_gen_model(), "google/veo-3.1");
     }

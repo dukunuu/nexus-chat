@@ -63,7 +63,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
         chrome::input_title(
             app,
             format!("Available [{backend}] search"),
-            &app.model_filter.to_string(),
+            app.model_filter.to_string(),
             &hint,
         ),
         !fav_focused,

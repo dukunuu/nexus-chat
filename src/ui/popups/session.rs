@@ -91,7 +91,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         SessionMode::Browse => chrome::input_title(
             app,
             "session search",
-            &app.session_filter.to_string(),
+            app.session_filter.to_string(),
             "Ctrl+R rename · Ctrl+D delete",
         ),
     };

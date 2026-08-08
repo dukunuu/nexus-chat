@@ -406,7 +406,7 @@ async fn handle_api(
     match segs.get(2).copied() {
         Some("kv") => handle_kv(stream, &app_dir, method, &segs[3..], body).await,
         Some("upload") if method == "POST" => {
-            handle_upload(stream, &app_dir, &segs[0], body, content_type).await
+            handle_upload(stream, &app_dir, segs[0], body, content_type).await
         }
         _ => respond(stream, 404, "text/plain", b"unknown api endpoint", false).await,
     }

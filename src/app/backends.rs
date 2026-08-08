@@ -95,7 +95,10 @@ mod tests {
     #[test]
     fn resolve_routes_prefixed_models_to_their_backend_even_with_openrouter_configured() {
         let mut backends = Backends::default();
-        backends.set(BackendTag::OpenRouter, OpenRouter::openrouter("or".into()));
+        backends.set(
+            BackendTag::OpenRouter,
+            OpenRouter::openrouter_flavor("or".into()),
+        );
         backends.set(BackendTag::OpenAi, OpenRouter::openai("oa".into()));
         backends.set(BackendTag::OpencodeGo, OpenRouter::opencode_go("go".into()));
         backends.set(BackendTag::Codex, OpenRouter::openai_codex("codex".into()));
@@ -116,7 +119,10 @@ mod tests {
     #[test]
     fn resolve_keeps_bare_ids_on_openrouter_for_legacy_settings() {
         let mut backends = Backends::default();
-        backends.set(BackendTag::OpenRouter, OpenRouter::openrouter("or".into()));
+        backends.set(
+            BackendTag::OpenRouter,
+            OpenRouter::openrouter_flavor("or".into()),
+        );
         backends.set(BackendTag::OpenAi, OpenRouter::openai("oa".into()));
 
         let (provider, raw) = backends.resolve("google/gemini-2.5-flash-lite").unwrap();

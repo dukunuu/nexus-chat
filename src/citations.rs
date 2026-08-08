@@ -46,9 +46,7 @@ pub(crate) fn citation_number_in(text: &str) -> Option<usize> {
     let mut rest = text;
     while let Some(start) = rest.find('[') {
         rest = &rest[start + 1..];
-        let Some(end) = rest.find(']') else {
-            return None;
-        };
+        let end = rest.find(']')?;
         let inner = &rest[..end];
         if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
             return inner.parse().ok();

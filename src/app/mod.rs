@@ -61,10 +61,7 @@ pub(super) fn clamp_cursor(current: usize, len: usize, delta: i32) -> usize {
 /// Filter `items` down to those `score_fn` returns `Some` for, sorted
 /// descending by score (best match first, stable on ties). Shared by the
 /// space and session pickers' fuzzy filters.
-pub(super) fn fuzzy_filter_sorted<'a, T>(
-    items: &'a [T],
-    score_fn: impl Fn(&T) -> Option<i32>,
-) -> Vec<&'a T> {
+pub(super) fn fuzzy_filter_sorted<T>(items: &[T], score_fn: impl Fn(&T) -> Option<i32>) -> Vec<&T> {
     let mut scored: Vec<(i32, &T)> = items
         .iter()
         .filter_map(|item| score_fn(item).map(|sc| (sc, item)))
@@ -1789,8 +1786,18 @@ pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String 
         }
         "research_lookup" => format!("research_lookup/{} \"{}\"", f("scope"), f("query")),
         "fetch_url" => format!("fetch_url {} → {}", f("url"), first_line(result)),
-        "files" => format!("files/{} {} → {}", f("action"), f_or("name", "query"), first_line(result)),
-        "app_inspect" => format!("app_inspect/{} {}/{}", f("action"), f("app"), f_or("path", "pattern")),
+        "files" => format!(
+            "files/{} {} → {}",
+            f("action"),
+            f_or("name", "query"),
+            first_line(result)
+        ),
+        "app_inspect" => format!(
+            "app_inspect/{} {}/{}",
+            f("action"),
+            f("app"),
+            f_or("path", "pattern")
+        ),
         "app_modify" => format!("app_modify/{} {}/{}", f("action"), f("app"), f("path")),
         "app_assets" => format!("app_assets/{} {}", f("action"), f("app")),
         "script_files" => format!("script_files/{} {}", f("action"), f("path")),

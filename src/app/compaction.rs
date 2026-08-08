@@ -325,7 +325,10 @@ mod tests {
             "round reply",
             "tool_call",
         ] {
-            assert!(!tail.contains(banned), "digest must not contain {banned:?}: {tail}");
+            assert!(
+                !tail.contains(banned),
+                "digest must not contain {banned:?}: {tail}"
+            );
         }
         // The compaction boundary still applies.
         let partial = compaction_tail(&msgs, 1);

@@ -47,7 +47,10 @@ impl App {
         let Some(img) = self.images_cache.get(self.images_selected) else {
             return;
         };
-        let path = self.space.files_dir(&self.active_space.name).join(&img.name);
+        let path = self
+            .space
+            .files_dir(&self.active_space.name)
+            .join(&img.name);
         let _ = open::that_detached(&path);
         self.status = format!("opened {}", img.name);
     }
