@@ -1,9 +1,0 @@
-## Review
-
-- **Blocker (high): `src/app/research.rs:673-688, 1203-1211`; `src/events.rs:286-293` — editor changes can be silently ignored after the 60-second plan timeout.** The timeout drops the receiver but does not clear `App::research_plan_gate`. After a long editor session, `submit_research_plan_edit` finds the stale sender, ignores `tx.send(...)` failure, and reports “plan updated.” The stale gate also intercepts normal Enter presses until research finishes. Clear the UI gate when timeout occurs—or suspend the timeout while editing—and handle send failure explicitly.
-
-- **Medium: `src/app/research.rs:142-144, 639-642, 696-705, 733-739` — the survey can suppress coverage that never reaches the report.** The planner is instructed not to plan questions for material covered by the survey, but synthesis receives only subsequent searcher findings, not the survey itself. Seed `findings` with the successful survey or revise the planner instruction so surveyed areas still receive coverage questions.
-
-- **Medium: `src/app/swarm.rs:195-209, 214-223` — swarm cancellation records against the currently viewed session, not the swarm’s origin session.** The task receives the origin `session.id`, but `stop_swarm` uses `self.session`. Switching sessions before `/stop` therefore leaves stale progress in the origin and writes “stopped by user” into an unrelated session. Track the running swarm’s session ID alongside its abort handle.
-
-- **Medium: `src/events.rs:93-105, 224-232` — failed `$EDITOR` launches are treated as successful edits.** `Command::new(editor)` does not support common values containing arguments such as `code --wait`, and spawn/exit status is discarded. Persona/research files are then applied unconditionally: a new persona may be deleted and a research plan may be auto-approved unchanged. Parse the editor command safely, propagate launch/non-zero-exit failures, and apply structured files only after successful completion.
