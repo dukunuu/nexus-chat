@@ -1,3 +1,12 @@
+// Casts here are on terminal-bounded values (u16/u32 dims, byte colors,
+// glyph counts) — never on unbounded user data. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -9,7 +18,7 @@ use crate::app::{App, FilesMode, FilesTab, ImagesMode, ScriptsMode};
 
 use super::chrome;
 
-pub(crate) fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &App) {
     match app.files_tab {
         FilesTab::Files => render_files(f, app),
         FilesTab::Images => render_images(f, app),
@@ -73,7 +82,10 @@ fn render_files(f: &mut Frame, app: &App) {
             };
             ListItem::new(Line::from(vec![
                 Span::styled(file.name.clone(), Style::default().fg(app.theme.fg)),
-                Span::styled(format!("  {}", crate::app::human_size(file.size)), dim),
+                Span::styled(
+                    format!("  {}", crate::app::human_size(file.size.unsigned_abs())),
+                    dim,
+                ),
                 Span::styled(format!("  {}", file.status), status_style),
             ]))
         })
@@ -132,10 +144,7 @@ fn render_images(f: &mut Frame, app: &App) {
             let created = crate::ui::fmt_created(&img.modified);
             ListItem::new(Line::from(vec![
                 Span::styled(img.name.clone(), Style::default().fg(app.theme.fg)),
-                Span::styled(
-                    format!("  {}", crate::app::human_size(img.size as i64)),
-                    dim,
-                ),
+                Span::styled(format!("  {}", crate::app::human_size(img.size)), dim),
                 Span::styled(format!("  {created}"), dim),
             ]))
         })
@@ -205,7 +214,7 @@ fn render_scripts(f: &mut Frame, app: &App) {
             let created = crate::ui::fmt_created(&s.modified);
             ListItem::new(Line::from(vec![
                 Span::styled(s.name.clone(), Style::default().fg(app.theme.fg)),
-                Span::styled(format!("  {}", crate::app::human_size(s.size as i64)), dim),
+                Span::styled(format!("  {}", crate::app::human_size(s.size)), dim),
                 Span::styled(format!("  {created}"), dim),
             ]))
         })
@@ -241,7 +250,7 @@ fn render_scripts(f: &mut Frame, app: &App) {
     f.render_stateful_widget(list, inner, &mut state);
 }
 
-pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     // Tab switches tab
     if key.code == KeyCode::Tab {
         app.files_tab = match app.files_tab {
@@ -275,7 +284,7 @@ fn handle_files_key(app: &mut App, key: KeyEvent) -> Result<()> {
         FilesMode::Add | FilesMode::Rename => match classify_edit_key(key) {
             Some(EditAction::Cancel) => app.files_mode = FilesMode::Browse,
             Some(EditAction::Save) if app.files_mode == FilesMode::Add => {
-                app.confirm_files_add()?
+                app.confirm_files_add();
             }
             Some(EditAction::Save) => app.confirm_files_rename()?,
             Some(EditAction::Backspace) => {
@@ -316,12 +325,12 @@ fn handle_files_key(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         FilesMode::Pick => match key.code {
             KeyCode::Esc => app.files_mode = FilesMode::Browse,
-            KeyCode::Enter => app.picker_enter()?,
+            KeyCode::Enter => app.picker_enter(),
             KeyCode::Backspace => app.picker_backspace(),
             KeyCode::Up => app.move_picker_selection(-1),
             KeyCode::Down => app.move_picker_selection(1),
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.picker_filter_push(c)
+                app.picker_filter_push(c);
             }
             _ => {}
         },
@@ -372,7 +381,7 @@ fn handle_scripts_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 app.scripts_mode = ScriptsMode::Browse;
             }
             Some(EditAction::Save) if app.scripts_mode == ScriptsMode::Create => {
-                app.confirm_script_create()?
+                app.confirm_script_create()?;
             }
             Some(EditAction::Save) => app.confirm_script_rename()?,
             Some(EditAction::Backspace) => {

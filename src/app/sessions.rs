@@ -17,14 +17,13 @@ impl App {
     /// row is only created lazily on the first message actually sent (same as
     /// the very first message of the app), so `/new` without typing anything
     /// doesn't leave an empty "new chat" behind in the session list.
-    pub(super) fn new_session(&mut self) -> Result<()> {
+    pub(super) fn new_session(&mut self) {
         self.session = None;
         self.messages.clear();
         self.context_total = None;
         self.scroll = 0;
         self.cleanup_incognito_images();
         self.status = "new chat — send a message to start it".to_string();
-        Ok(())
     }
 
     pub(super) fn open_session_picker(&mut self) -> Result<()> {
@@ -86,7 +85,7 @@ impl App {
         if let (false, Some(s)) = (title.is_empty(), self.selected_session()) {
             self.db.set_session_title(&s.id, &title, None)?;
             if let Some(cached) = self.sessions_cache.iter_mut().find(|c| c.id == s.id) {
-                cached.title = title.clone();
+                cached.title.clone_from(&title);
             }
             if let Some(cur) = self.session.as_mut().filter(|c| c.id == s.id) {
                 cur.title = title;

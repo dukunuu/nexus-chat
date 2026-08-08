@@ -1,3 +1,12 @@
+// Casts here are on terminal-bounded values (u16/u32 dims, byte colors,
+// glyph counts) — never on unbounded user data. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -6,9 +15,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::app::{App, Popup};
 
-pub(crate) mod filter_input;
-pub(crate) mod history;
-pub(crate) mod popups;
+pub mod filter_input;
+pub mod history;
+pub mod popups;
 use history::render_history;
 
 pub fn render(f: &mut Frame, app: &mut App) {
@@ -60,15 +69,15 @@ pub fn render(f: &mut Frame, app: &mut App) {
 }
 
 /// Plain text of a rendered line (span contents concatenated).
-pub(crate) fn line_text(line: &Line) -> String {
+pub fn line_text(line: &Line) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
-pub(super) fn dim(s: impl Into<String>, theme: &crate::theme::Theme) -> Span<'static> {
+pub fn dim(s: impl Into<String>, theme: &crate::theme::Theme) -> Span<'static> {
     Span::styled(s.into(), Style::default().fg(theme.fg_dim))
 }
 
-pub(super) fn dot(theme: &crate::theme::Theme) -> Line<'static> {
+pub fn dot(theme: &crate::theme::Theme) -> Line<'static> {
     Line::from(Span::styled(
         "⏺",
         Style::default()
@@ -122,13 +131,15 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
 
 /// Slash-command autocomplete: a fuzzy-ranked list floating just above the
 /// input box. `/name` in cyan, ≤20-char description dimmed alongside.
+// Terminal popup geometry — n/h/w/y/x are idiomatic for rect math.
+#[allow(clippy::many_single_char_names)]
 fn render_command_popup(f: &mut Frame, app: &App, input_area: Rect) {
     let matches = app.command_matches();
     if matches.is_empty() {
         return;
     }
     let hints = !app.settings.hide_hints;
-    let title_rows = if hints { 1 } else { 0 };
+    let title_rows = u16::from(hints);
     let n = matches.len() as u16;
     let h = n + title_rows;
     let w = input_area.width; // full width, no border
@@ -182,6 +193,8 @@ fn render_command_popup(f: &mut Frame, app: &App, input_area: Rect) {
 }
 
 /// `@` file autocomplete: space files matching the text after `@`.
+// Terminal popup geometry — n/h/w/y/x are idiomatic for rect math.
+#[allow(clippy::many_single_char_names)]
 fn render_at_popup(f: &mut Frame, app: &App, input_area: Rect) {
     let Some((ref matches, selected, _)) = app.at_state else {
         return;
@@ -214,7 +227,11 @@ fn render_at_popup(f: &mut Frame, app: &App, input_area: Rect) {
                     Style::default().fg(app.theme.fg),
                 ),
                 Span::styled(
-                    format!("  {}  {}", crate::app::human_size(f.size), f.status),
+                    format!(
+                        "  {}  {}",
+                        crate::app::human_size(f.size.unsigned_abs()),
+                        f.status
+                    ),
                     Style::default().fg(app.theme.fg_dim),
                 ),
             ]))
@@ -310,10 +327,10 @@ fn humanize(n: u64) -> String {
 fn render_status(f: &mut Frame, app: &App, area: Rect) {
     use crate::db::DEFAULT_SPACE;
     let model = app.current_model.as_deref().unwrap_or("(no model)");
-    let space_tag = if app.active_space.name != DEFAULT_SPACE {
-        format!("[{}] ", app.active_space.name)
-    } else {
+    let space_tag = if app.active_space.name == DEFAULT_SPACE {
         String::new()
+    } else {
+        format!("[{}] ", app.active_space.name)
     };
     let web_tag = if app.web_mode { "🌐 web " } else { "" };
     let incog_tag = if app.incognito { "🕶️ " } else { "" };
@@ -390,13 +407,14 @@ fn render_notifications(f: &mut Frame, app: &mut App, area: Rect) {
 
 /// Short absolute timestamp from an rfc3339 string (falls back to the raw text).
 fn fmt_created(rfc3339: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(rfc3339)
-        .map(|dt| {
+    chrono::DateTime::parse_from_rfc3339(rfc3339).map_or_else(
+        |_| rfc3339.to_string(),
+        |dt| {
             dt.with_timezone(&chrono::Local)
                 .format("%b %-d, %H:%M")
                 .to_string()
-        })
-        .unwrap_or_else(|_| rfc3339.to_string())
+        },
+    )
 }
 
 /// A rect `pct_w` × `pct_h` percent of `area`, centered.

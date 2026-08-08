@@ -9,7 +9,7 @@ use crate::app::App;
 
 use super::chrome;
 
-pub(crate) fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &App) {
     use crate::app::SpaceMode;
     use crate::db::DEFAULT_SPACE;
     let area = crate::ui::centered(f.area(), 50, 60);
@@ -83,7 +83,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     f.render_stateful_widget(list, inner, &mut state);
 }
 
-pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     use super::{
         ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key,
         classify_edit_key,
@@ -110,7 +110,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         },
         SpaceMode::Browse => {
             if key.code == KeyCode::Enter {
-                return app.confirm_space();
+                app.confirm_space();
+                return Ok(());
             }
             if app.space_filter.key(key, &mut app.clipboard) {
                 return Ok(());
@@ -129,10 +130,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 {
                     app.space_mode = SpaceMode::ConfirmDelete;
                 }
-                Some(super::BrowseAction::ConfirmDelete) => {}
+                Some(super::BrowseAction::ConfirmDelete) | None => {}
                 Some(super::BrowseAction::Backspace) => app.space_filter_pop(),
                 Some(super::BrowseAction::Filter(c)) => app.space_filter_push(c),
-                None => {}
             }
         }
     }

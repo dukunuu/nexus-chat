@@ -1,18 +1,18 @@
-pub(crate) mod apps;
-pub(crate) mod chrome;
-pub(crate) mod context;
-pub(crate) mod copy;
-pub(crate) mod files;
-pub(crate) mod key;
-pub(crate) mod login;
-pub(crate) mod model;
-pub(crate) mod research_live;
-pub(crate) mod session;
-pub(crate) mod settings;
-pub(crate) mod skills;
-pub(crate) mod space;
-pub(crate) mod swarm;
-pub(crate) mod watches;
+pub mod apps;
+pub mod chrome;
+pub mod context;
+pub mod copy;
+pub mod files;
+pub mod key;
+pub mod login;
+pub mod model;
+pub mod research_live;
+pub mod session;
+pub mod settings;
+pub mod skills;
+pub mod space;
+pub mod swarm;
+pub mod watches;
 
 #[cfg(test)]
 mod tests;
@@ -55,7 +55,7 @@ pub(super) enum BrowseAction {
 /// (`confirm_session`/`confirm_space`) and has no skills equivalent, so each
 /// `handle_key` still matches `KeyCode::Enter` itself before falling back to
 /// this classifier.
-pub(super) fn classify_browse_key(
+pub(super) const fn classify_browse_key(
     key: KeyEvent,
     supports_create: bool,
     supports_rename: bool,
@@ -84,7 +84,7 @@ pub(super) enum EditAction {
     Push(char),
 }
 
-pub(super) fn classify_edit_key(key: KeyEvent) -> Option<EditAction> {
+pub(super) const fn classify_edit_key(key: KeyEvent) -> Option<EditAction> {
     match key.code {
         KeyCode::Esc => Some(EditAction::Cancel),
         KeyCode::Enter => Some(EditAction::Save),
@@ -103,7 +103,7 @@ pub(super) enum ConfirmDeleteAction {
     No,
 }
 
-pub(super) fn classify_confirm_delete_key(key: KeyEvent) -> Option<ConfirmDeleteAction> {
+pub(super) const fn classify_confirm_delete_key(key: KeyEvent) -> Option<ConfirmDeleteAction> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Char('d') if ctrl => Some(ConfirmDeleteAction::Yes),

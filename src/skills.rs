@@ -17,7 +17,7 @@ pub fn skills_dir(data_dir: &Path) -> PathBuf {
 
 const FIND_SKILLS_SKILL: &str = include_str!("../assets/find-skills-SKILL.md");
 
-const LEGACY_WEB_SEARCH_SKILL: &str = r#"---
+const LEGACY_WEB_SEARCH_SKILL: &str = r"---
 name: web-search
 description: Search the web for current information and cite sources inline, Perplexity-style.
 ---
@@ -34,7 +34,7 @@ terminal can't follow markdown link targets, only plain URLs are clickable).
 
 Do not fabricate sources. If a claim isn't backed by a search result, don't
 cite it.
-"#;
+";
 
 /// Write the built-in skills on first run. Never overwrites — once installed
 /// they're normal files the user can edit or delete like any other.

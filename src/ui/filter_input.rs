@@ -23,7 +23,7 @@ impl std::ops::Deref for FilterInput {
 
 impl From<&str> for FilterInput {
     fn from(s: &str) -> Self {
-        let mut f = FilterInput::default();
+        let mut f = Self::default();
         f.set(s);
         f
     }

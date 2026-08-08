@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 /// order they're listed. Recognizes a `Sources:` line or a `Sources` heading
 /// (any level), then reads `N. url` / `N) url` lines until a non-matching
 /// line ends the section.
-pub(crate) fn parse_citations(content: &str) -> Vec<(usize, String)> {
+pub fn parse_citations(content: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut in_section = false;
     for line in content.lines() {
@@ -42,7 +42,7 @@ pub(crate) fn parse_citations(content: &str) -> Vec<(usize, String)> {
 }
 
 /// The first `[n]` (n = 1+ ascii digits) substring in `text`, if any.
-pub(crate) fn citation_number_in(text: &str) -> Option<usize> {
+pub fn citation_number_in(text: &str) -> Option<usize> {
     let mut rest = text;
     while let Some(start) = rest.find('[') {
         rest = &rest[start + 1..];
@@ -59,7 +59,7 @@ pub(crate) fn citation_number_in(text: &str) -> Option<usize> {
 /// Re-style every `[n]` citation marker across already-rendered `lines`
 /// with `accent`; everything else keeps its existing style. Splits spans as
 /// needed, so a citation embedded mid-span still gets its own styled piece.
-pub(crate) fn style_citations(lines: Vec<Line<'static>>, accent: Color) -> Vec<Line<'static>> {
+pub fn style_citations(lines: Vec<Line<'static>>, accent: Color) -> Vec<Line<'static>> {
     lines
         .into_iter()
         .map(|line| {
@@ -67,7 +67,7 @@ pub(crate) fn style_citations(lines: Vec<Line<'static>>, accent: Color) -> Vec<L
             let style = line.style;
             let mut spans = Vec::new();
             for span in line.spans {
-                spans.extend(split_citation_span(span, accent));
+                spans.extend(split_citation_span(&span, accent));
             }
             let mut out = Line::from(spans);
             out.alignment = alignment;
@@ -79,7 +79,7 @@ pub(crate) fn style_citations(lines: Vec<Line<'static>>, accent: Color) -> Vec<L
 
 /// Split one span so each `[n]` substring becomes its own accent-styled
 /// span; everything else keeps the original span's style.
-fn split_citation_span(span: Span<'static>, accent: Color) -> Vec<Span<'static>> {
+fn split_citation_span(span: &Span<'static>, accent: Color) -> Vec<Span<'static>> {
     let text = span.content.to_string();
     let mut out = Vec::new();
     let mut rest = text.as_str();
@@ -117,7 +117,7 @@ fn split_citation_span(span: Span<'static>, accent: Color) -> Vec<Span<'static>>
 /// (see `VERIFIER_PROMPT` in `app/research.rs`) with a dim modifier;
 /// everything else keeps its existing style. High confidence is the
 /// default (unmarked), so there's nothing to style for it.
-pub(crate) fn style_confidence_tags(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+pub fn style_confidence_tags(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     lines
         .into_iter()
         .map(|line| {
@@ -125,7 +125,7 @@ pub(crate) fn style_confidence_tags(lines: Vec<Line<'static>>) -> Vec<Line<'stat
             let style = line.style;
             let mut spans = Vec::new();
             for span in line.spans {
-                spans.extend(split_confidence_span(span));
+                spans.extend(split_confidence_span(&span));
             }
             let mut out = Line::from(spans);
             out.alignment = alignment;
@@ -137,7 +137,7 @@ pub(crate) fn style_confidence_tags(lines: Vec<Line<'static>>) -> Vec<Line<'stat
 
 /// Split one span so each `‹...›` confidence tag becomes its own
 /// dim-styled span; everything else keeps the original span's style.
-fn split_confidence_span(span: Span<'static>) -> Vec<Span<'static>> {
+fn split_confidence_span(span: &Span<'static>) -> Vec<Span<'static>> {
     let text = span.content.to_string();
     let mut out = Vec::new();
     let mut rest = text.as_str();

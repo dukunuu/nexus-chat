@@ -2,21 +2,20 @@
 //! interval, with no daemon — `due_watches` is checked once on app startup.
 
 use chrono::{DateTime, Utc};
+use std::fmt::Write as _;
 
 use crate::db::Watch;
 
 /// Watches whose interval has elapsed since their last run (or that have
 /// never run) as of `now`.
-pub(crate) fn due_watches(watches: &[Watch], now: DateTime<Utc>) -> Vec<Watch> {
+pub fn due_watches(watches: &[Watch], now: DateTime<Utc>) -> Vec<Watch> {
     watches
         .iter()
         .filter(|w| match &w.last_run_at {
             None => true,
-            Some(t) => DateTime::parse_from_rfc3339(t)
-                .map(|last| {
-                    now.signed_duration_since(last) >= chrono::Duration::hours(w.interval_hours)
-                })
-                .unwrap_or(true),
+            Some(t) => DateTime::parse_from_rfc3339(t).map_or(true, |last| {
+                now.signed_duration_since(last) >= chrono::Duration::hours(w.interval_hours)
+            }),
         })
         .cloned()
         .collect()
@@ -27,11 +26,7 @@ pub(crate) fn due_watches(watches: &[Watch], now: DateTime<Utc>) -> Vec<Watch> {
 /// report. Does not diff prose — an LLM-generated summary of what changed
 /// is out of scope for this pass (YAGNI: a source-level diff is what a
 /// user actually scans for first).
-pub(crate) fn diff_section(
-    previous_report: &str,
-    new_report: &str,
-    new_sources: &[String],
-) -> String {
+pub fn diff_section(previous_report: &str, new_report: &str, new_sources: &[String]) -> String {
     let _ = (previous_report, new_report); // reserved for a future prose diff; unused today
     let mut out = String::from("## What changed since last run\n\n");
     if new_sources.is_empty() {
@@ -39,7 +34,7 @@ pub(crate) fn diff_section(
     } else {
         out.push_str("New sources:\n");
         for s in new_sources {
-            out.push_str(&format!("- {s}\n"));
+            let _ = writeln!(out, "- {s}");
         }
     }
     out
@@ -47,7 +42,7 @@ pub(crate) fn diff_section(
 
 /// New (not-previously-cited) sources in `new_report` vs `previous_citations`
 /// — a plain set difference over normalized URLs.
-pub(crate) fn new_sources_since(new_report: &str, previous_citations: &[String]) -> Vec<String> {
+pub fn new_sources_since(new_report: &str, previous_citations: &[String]) -> Vec<String> {
     let previous: std::collections::HashSet<String> = previous_citations
         .iter()
         .map(|u| crate::tools::normalize_url(u))
@@ -243,7 +238,7 @@ mod tests {
             std::env::temp_dir().join(format!("nexus-watches-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("spaces")).unwrap();
         let space = Space { root };
-        App::new(db, Some("k".into()), space)
+        App::new(db, Some("k"), space)
     }
 
     #[tokio::test]

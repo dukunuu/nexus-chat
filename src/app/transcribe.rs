@@ -2,6 +2,15 @@
 //! `![alt](filename.ext)` in message content, and describe images for
 //! non-vision models.
 
+// Casts here are on bounded values: token counts, byte sizes, and
+// selection indices — never on unbounded input. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use anyhow::{Context, Result};
 use base64::Engine;
 
@@ -39,7 +48,7 @@ impl super::App {
     /// Save a clipboard image to the space's images dir and return a markdown
     /// snippet `![pasted image](filename.ext)` that can be inserted into the
     /// composer text.
-    pub fn save_clipboard_image(&mut self, img: arboard::ImageData) -> Option<String> {
+    pub fn save_clipboard_image(&mut self, img: &arboard::ImageData) -> Option<String> {
         let bytes = match encode_png(img.width, img.height, &img.bytes) {
             Ok(b) => b,
             Err(e) => {
@@ -117,7 +126,7 @@ mod tests {
             height: 1,
             bytes: std::borrow::Cow::Owned(vec![255, 0, 0, 255, 0, 0, 0, 0]),
         };
-        let result = a.save_clipboard_image(img);
+        let result = a.save_clipboard_image(&img);
         assert!(result.is_some());
         let md = result.unwrap();
         assert!(md.starts_with("![pasted image]("));

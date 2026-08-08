@@ -5,12 +5,22 @@
 //! manually, like every other network-calling background job in this
 //! codebase (`maybe_generate_title`, image description, embedding).
 
+// Casts here are on bounded values: token counts, byte sizes, and
+// selection indices — never on unbounded input. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use crate::provider::ChatMessage;
+use std::fmt::Write as _;
 
 /// A background research pipeline update: a phase label (+ progress detail),
 /// the survey's clarifying questions awaiting a chat reply, the Planner's
 /// sub-questions awaiting approval, or the final report/error.
-pub(crate) enum ResearchUpdate {
+pub enum ResearchUpdate {
     /// Successive updates within one stage share a `label` so the UI/db
     /// replace one row in place instead of appending per tick.
     Stage {
@@ -43,16 +53,16 @@ const MAX_QUEUED_STEERS: usize = 64;
 /// Cap on the scoping agent's clarifying questions per round.
 const MAX_SURVEY_QUESTIONS: usize = 4;
 /// Max survey rounds (initial + follow-ups) before the survey force-completes.
-pub(crate) const MAX_SURVEY_ROUNDS: u8 = 3;
+pub const MAX_SURVEY_ROUNDS: u8 = 3;
 /// Tool-call budget for a single Searcher agent — a few search→fetch hops,
 /// not a whole interactive conversation's worth.
-pub(crate) const RESEARCH_SEARCHER_MAX_ITERS: usize = 6;
+pub const RESEARCH_SEARCHER_MAX_ITERS: usize = 6;
 
 /// One Planner sub-question with its supporting brief: why it matters, the
 /// angles to cover, and promising source types/leads. The whole block is
 /// handed to its Searcher agent as the prompt — detail is functional.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-pub(crate) struct PlanQuestion {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct PlanQuestion {
     #[serde(default)]
     pub question: String,
     #[serde(default)]
@@ -66,8 +76,8 @@ pub(crate) struct PlanQuestion {
 impl PlanQuestion {
     /// A question with no brief — the fallback shape when the Planner didn't
     /// follow the JSON-object instructions.
-    pub(crate) fn bare(question: String) -> Self {
-        PlanQuestion {
+    pub(crate) const fn bare(question: String) -> Self {
+        Self {
             question,
             why: String::new(),
             angles: Vec::new(),
@@ -83,13 +93,13 @@ impl PlanQuestion {
             self.question
         );
         if !self.why.is_empty() {
-            p.push_str(&format!("\nWhy this angle matters: {}\n", self.why));
+            let _ = writeln!(p, "\nWhy this angle matters: {}", self.why);
         }
         if !self.angles.is_empty() {
-            p.push_str(&format!("\nAngles to cover: {}\n", self.angles.join("; ")));
+            let _ = write!(p, "\nAngles to cover: {}\n", self.angles.join("; "));
         }
         if !self.sources.is_empty() {
-            p.push_str(&format!("\nSource leads: {}\n", self.sources.join("; ")));
+            let _ = write!(p, "\nSource leads: {}\n", self.sources.join("; "));
         }
         p
     }
@@ -97,20 +107,20 @@ impl PlanQuestion {
 
 /// A plan rendered for the transcript / plan file: numbered questions, each
 /// with its Why/Angles/Sources brief indented under it.
-pub(crate) fn plan_text(questions: &[PlanQuestion]) -> String {
+pub fn plan_text(questions: &[PlanQuestion]) -> String {
     questions
         .iter()
         .enumerate()
         .map(|(i, q)| {
             let mut s = format!("{}. {}", i + 1, q.question);
             if !q.why.is_empty() {
-                s.push_str(&format!("\n   Why: {}", q.why));
+                let _ = write!(s, "\n   Why: {}", q.why);
             }
             if !q.angles.is_empty() {
-                s.push_str(&format!("\n   Angles: {}", q.angles.join("; ")));
+                let _ = write!(s, "\n   Angles: {}", q.angles.join("; "));
             }
             if !q.sources.is_empty() {
-                s.push_str(&format!("\n   Sources: {}", q.sources.join("; ")));
+                let _ = write!(s, "\n   Sources: {}", q.sources.join("; "));
             }
             s
         })
@@ -122,16 +132,16 @@ pub(crate) fn plan_text(questions: &[PlanQuestion]) -> String {
 /// list of clarifying questions, or output that violates the contract
 /// (`Malformed` — empty, explanatory prose, error text) which fails the
 /// survey visibly instead of silently dropping it.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum SurveyReply {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SurveyReply {
     Complete,
     Questions(Vec<String>),
     Malformed,
 }
 
 /// The approval agent's verdict on a user reply to the plan.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Approval {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Approval {
     Approved,
     Revised(Vec<PlanQuestion>),
     /// The agent produced output that is neither an approval nor a usable
@@ -146,7 +156,7 @@ const SURVEY_AGENT_PROMPT: &str = "You are the scoping stage of a research pipel
 
 const PLAN_APPROVAL_PROMPT: &str = "You are the approval stage of a research pipeline. The user was shown a plan of sub-questions (each with why/angles/sources). If the user's reply approves it — phrases like 'approve', 'looks good', 'go', 'ok', 'yes', or a bare affirmation — reply with exactly the single word APPROVED. Otherwise fold their feedback into the plan: apply the requested changes (drop questions, add angles, reword, add new questions up to 6 total) and reply with ONLY the revised JSON array of plan objects, no prose, no markdown fences. Example: [{\"question\": \"...\", \"why\": \"...\", \"angles\": [\"...\", \"...\"], \"sources\": [\"...\", \"...\"]}]";
 
-pub(crate) const SEARCHER_PROMPT: &str = "You are a research searcher agent. You will be given one focused sub-question. Use search(mode=web) and fetch_url to investigate it thoroughly: search, then fetch and read the most promising pages, and search again with new terms you learn from them if needed. When you have enough to answer well, write a concise findings summary (a few paragraphs, prose, no headers) that directly answers the sub-question, citing sources inline as [n]. End your answer with a line starting exactly with 'Sources:' followed by the numbered list of URLs you used, one per line, matching your [n] citations. Prefer sources from domains you have not already cited — diverse sources make a stronger report.";
+pub const SEARCHER_PROMPT: &str = "You are a research searcher agent. You will be given one focused sub-question. Use search(mode=web) and fetch_url to investigate it thoroughly: search, then fetch and read the most promising pages, and search again with new terms you learn from them if needed. When you have enough to answer well, write a concise findings summary (a few paragraphs, prose, no headers) that directly answers the sub-question, citing sources inline as [n]. End your answer with a line starting exactly with 'Sources:' followed by the numbered list of URLs you used, one per line, matching your [n] citations. Prefer sources from domains you have not already cited — diverse sources make a stronger report.";
 
 const SYNTHESIZER_PROMPT: &str = "You are the synthesis stage of a research pipeline. You'll be given the original topic and findings from several searcher agents, each already citing their own sources. Combine them into a single coherent draft report on the topic: organize by theme (not by sub-question), resolve obvious overlaps, keep every citation but you may renumber them consistently as you merge. Do not invent facts not present in the findings. Output the draft report in markdown, no preamble.";
 
@@ -159,8 +169,8 @@ const VERIFIER_PROMPT: &str = "You are the verifier stage. Given the topic, the 
 const WRITER_PROMPT: &str = "You are the final writer stage. Given the topic and a verified draft report (with inline [n] citations and prose from earlier stages, possibly including a contradiction-resolution paragraph to fold in), produce the final report: clean markdown, a short introductory paragraph, organized sections with headers, inline [n] citations preserved/renumbered consistently, and a trailing '## Sources' section listing every cited URL as 'n. url'. Output only the final report markdown, nothing else — it will be saved and shown to the user as-is.";
 
 /// The Critic stage's structured decision.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Critique {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Critique {
     Satisfied,
     Gaps(Vec<String>),
     Contradiction(String),
@@ -170,7 +180,7 @@ pub(crate) enum Critique {
 /// (if the model didn't follow instructions) a best-effort line-by-line
 /// fallback stripping bullet/number prefixes. Always capped at
 /// `MAX_SUBQUESTIONS`.
-pub(crate) fn parse_subquestions(text: &str) -> Vec<String> {
+pub fn parse_subquestions(text: &str) -> Vec<String> {
     let trimmed = text
         .trim()
         .trim_start_matches("```json")
@@ -213,7 +223,7 @@ fn strip_list_prefix(line: &str) -> String {
 /// questions, so a violation must fail the survey visibly — never be
 /// mistaken for completion, and never park the pipeline awaiting an answer
 /// for a non-question.
-pub(crate) fn parse_survey_reply(text: &str) -> SurveyReply {
+pub fn parse_survey_reply(text: &str) -> SurveyReply {
     let t = text.trim();
     // First word COMPLETE ends the survey, tolerating trailing punctuation
     // and prose: "COMPLETE", "COMPLETE.", "COMPLETE: proceed", "COMPLETE —".
@@ -272,7 +282,7 @@ fn json_start(s: &str) -> Option<usize> {
 /// all falls back to one bare question per line (the legacy line format),
 /// which also still accepts a legacy JSON array of strings. Always capped at
 /// `MAX_SUBQUESTIONS`.
-pub(crate) fn parse_plan_blocks(text: &str) -> Vec<PlanQuestion> {
+pub fn parse_plan_blocks(text: &str) -> Vec<PlanQuestion> {
     let trimmed = text
         .trim()
         .trim_start_matches("```json")
@@ -322,7 +332,7 @@ pub(crate) fn parse_plan_blocks(text: &str) -> Vec<PlanQuestion> {
 /// line-formatted revisions are only accepted when they look like a list
 /// (bullets or `N.`/`N)` prefixes). Anything else is `Malformed` — a garbled
 /// verdict must fail the phase visibly, never silently count as approval.
-pub(crate) fn parse_approval(text: &str) -> Approval {
+pub fn parse_approval(text: &str) -> Approval {
     let upper = text.trim().to_ascii_uppercase();
     if upper == "APPROVED"
         || upper.starts_with("APPROVED:")
@@ -368,7 +378,7 @@ pub(crate) fn parse_approval(text: &str) -> Approval {
 /// Parse the Critic's raw reply into a `Critique`. Anything that doesn't
 /// match one of the three expected shapes is treated as `Satisfied` — an
 /// unparseable critique shouldn't loop the pipeline forever on garbage.
-pub(crate) fn parse_critique(text: &str) -> Critique {
+pub fn parse_critique(text: &str) -> Critique {
     let t = text.trim();
     if t.eq_ignore_ascii_case("SATISFIED") {
         return Critique::Satisfied;
@@ -408,22 +418,19 @@ fn planner_messages_with_context(
     if !answers.is_empty() {
         user.push_str("The user answered clarifying questions before planning:\n");
         for (i, (qs, reply)) in answers.iter().enumerate() {
-            user.push_str(&format!(
-                "Round {} — asked: {}\nAnswered: {reply}\n",
-                i + 1,
-                qs
-            ));
+            let _ = write!(user, "Round {} — asked: {}\nAnswered: {reply}\n", i + 1, qs);
         }
         user.push('\n');
     }
     if known.is_empty() {
         user.push_str(topic);
     } else {
-        user.push_str(&format!(
+        let _ = write!(
+            user,
             "Topic: {topic}\n\nAlready known (from local files and/or a preliminary web survey) — \
              plan sub-questions for the gaps, not what's already covered:\n{}",
             known.join("\n\n")
-        ));
+        );
     }
     vec![
         ChatMessage::text("system", PLANNER_PROMPT),
@@ -440,10 +447,11 @@ fn survey_messages(topic: &str, rounds: &[(String, String)]) -> Vec<ChatMessage>
     if !rounds.is_empty() {
         user.push_str("\nSo far:\n");
         for (i, (qs, reply)) in rounds.iter().enumerate() {
-            user.push_str(&format!(
+            let _ = write!(
+                user,
                 "Round {} — I asked:\n{qs}\nThe user answered: {reply}\n",
                 i + 1
-            ));
+            );
         }
     }
     vec![
@@ -481,10 +489,11 @@ fn synthesizer_messages(topic: &str, findings: &[String], pinned: &[String]) -> 
         .join("\n\n");
     let mut user = format!("Topic: {topic}\n\n");
     if !pinned.is_empty() {
-        user.push_str(&format!(
+        let _ = write!(
+            user,
             "Prioritize these pinned sources in the synthesis if their content is present in the findings below:\n{}\n\n",
             pinned.join("\n")
-        ));
+        );
     }
     user.push_str(&body);
     vec![
@@ -532,12 +541,13 @@ fn verifier_messages(topic: &str, draft: &str, findings: &[String]) -> Vec<ChatM
 fn writer_messages(topic: &str, verified_draft: &str, pinned: &[String]) -> Vec<ChatMessage> {
     let mut user = format!("Topic: {topic}\n\n");
     if !pinned.is_empty() {
-        user.push_str(&format!(
+        let _ = write!(
+            user,
             "Prioritize these pinned sources in the final report if their content is present in the verified draft below:\n{}\n\n",
             pinned.join("\n")
-        ));
+        );
     }
-    user.push_str(&format!("Verified draft:\n{verified_draft}"));
+    let _ = write!(user, "Verified draft:\n{verified_draft}");
     vec![
         ChatMessage::text("system", WRITER_PROMPT),
         ChatMessage::text("user", user),
@@ -576,7 +586,7 @@ fn send_stage(
 /// Every steer instruction queued since the last drain, without blocking —
 /// `try_recv` until the channel is empty. Called at each round boundary so
 /// a user's mid-flight `/steer` gets picked up as an extra searcher round.
-pub(crate) async fn drain_steers(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<String> {
+pub fn drain_steers(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<String> {
     let mut out = Vec::new();
     while let Ok(s) = rx.try_recv() {
         out.push(s);
@@ -638,7 +648,7 @@ async fn plan(
 }
 
 /// One Searcher agent: given one focused sub-question prompt, runs the normal
-/// tool-loop (restricted to search/fetch_url) and returns its final prose
+/// tool-loop (restricted to `search/fetch_url`) and returns its final prose
 /// findings (including its own "Sources:" citation list). Never returns an
 /// `Err` — a dead search/fetch/model call becomes a placeholder finding
 /// string so one bad sub-question can't sink the whole pipeline.
@@ -655,7 +665,7 @@ async fn plan(
 /// The execution plumbing a searcher agent shares with the rest of the
 /// research pipeline: the tool box, the job's stage-update channel, and the
 /// job's session/space identity.
-pub(crate) struct SearcherCtx<'a> {
+pub struct SearcherCtx<'a> {
     pub toolbox: Arc<ToolBox>,
     pub tx: &'a mpsc::UnboundedSender<ResearchMsg>,
     pub ids: &'a (String, String, String),
@@ -663,7 +673,7 @@ pub(crate) struct SearcherCtx<'a> {
 
 /// Which slot in which batch a searcher agent occupies — its stage-row
 /// identity (`searcher {batch} {idx}/{total}`) in the live activity view.
-pub(crate) struct SearcherSlot {
+pub struct SearcherSlot {
     pub batch: String,
     pub idx: usize,
     pub total: usize,
@@ -866,7 +876,7 @@ async fn run_searchers(
 /// caller's channel then closes naturally when this function returns and
 /// `tx` is dropped).
 /// Everything `run_research` needs to start a gated or ungated research job.
-pub(crate) struct ResearchOptions {
+pub struct ResearchOptions {
     pub research_provider: OpenRouter,
     pub research_model: String,
     pub escalation_provider: OpenRouter,
@@ -884,7 +894,7 @@ pub(crate) struct ResearchOptions {
     pub space_name: String,
 }
 
-pub(crate) async fn run_research(mut opts: ResearchOptions) {
+pub async fn run_research(mut opts: ResearchOptions) {
     let result = run_research_inner(&mut opts).await;
     let _ = opts.tx.send((
         opts.session_id,
@@ -1083,6 +1093,8 @@ async fn await_plan_approval(
     }
 }
 
+// Long by design (pipeline orchestration).
+#[allow(clippy::too_many_lines)]
 async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String> {
     let ids = &(
         opts.session_id.clone(),
@@ -1111,12 +1123,12 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
     // gatherers also run concurrently with each other.
     let gather_task = {
         let provider = embedding_provider.clone();
-        let model = embedding_model.to_string();
+        let model = embedding_model.clone();
         let db_path = db_path.to_path_buf();
         let space_id = ids.1.clone();
-        let topic = topic.to_string();
+        let topic = topic.clone();
         let research_provider = research_provider.clone();
-        let research_model = research_model.to_string();
+        let research_model = research_model.clone();
         let toolbox = toolbox.clone();
         let tx = tx.clone();
         let ids = ids.clone();
@@ -1170,15 +1182,16 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
     // Phase 1: the conversational survey (skipped entirely for `/research!`).
     // Failures propagate visibly — the survey is a promised phase, and a
     // silent skip would report success without the user's scoping input.
-    let mut answers: Vec<(String, String)> = Vec::new();
-    if let Some(rx) = reply_rx.as_mut() {
-        answers = run_user_survey(research_provider, research_model, topic, rx, tx, ids)
+    let answers: Vec<(String, String)> = if let Some(rx) = reply_rx.as_mut() {
+        run_user_survey(research_provider, research_model, topic, rx, tx, ids)
             .await
             .map_err(|e| {
                 send_stage(tx, ids, "survey", format!("error — {e}"));
                 e
-            })?;
-    }
+            })?
+    } else {
+        Vec::new()
+    };
 
     // Join the concurrent gathering and fold it into planning context. A
     // panic (or cancellation) inside the gather task terminates the job with
@@ -1295,7 +1308,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
     // steers looking queued (the live popup derives picked-up from the same
     // numbered keys).
     let mut steer_seq: usize = 0;
-    let steers = drain_steers(steer_rx).await;
+    let steers = drain_steers(steer_rx);
     if !steers.is_empty() {
         let steer_items: Vec<(String, String)> =
             steers.iter().map(|s| (s.clone(), s.clone())).collect();
@@ -1385,7 +1398,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         persist_session_sources(db_path, &ids.0, &more);
         findings.extend(more);
 
-        let steers = drain_steers(steer_rx).await;
+        let steers = drain_steers(steer_rx);
         if !steers.is_empty() {
             let steer_items: Vec<(String, String)> =
                 steers.iter().map(|s| (s.clone(), s.clone())).collect();
@@ -1551,7 +1564,7 @@ impl super::App {
     /// background session. One job at a time. `/research! <topic>` skips the
     /// plan-approval gate.
     pub(crate) fn start_research(&mut self, topic: &str) {
-        self.start_research_with_gate(topic, true)
+        self.start_research_with_gate(topic, true);
     }
 
     /// `/steer <text>`: queue an extra instruction for the running research
@@ -1676,6 +1689,8 @@ impl super::App {
         self.popup = super::Popup::ResearchLive;
     }
 
+    // Long by design (gate setup + mirroring).
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn start_research_with_gate(&mut self, topic: &str, gated: bool) {
         let topic = topic.trim().to_string();
         if topic.is_empty() {
@@ -1745,8 +1760,7 @@ impl super::App {
             let compact_through = self
                 .session
                 .as_ref()
-                .map(|s| s.compact_through as usize)
-                .unwrap_or(0);
+                .map_or(0, |s| s.compact_through as usize);
             let mut ctx = String::new();
             if let Some(ref summary) = compact_summary {
                 ctx.push_str("Previous conversation summary:\n");
@@ -1763,7 +1777,7 @@ impl super::App {
                 ctx.push_str("Recent messages:\n");
                 for m in tail {
                     let t = m.content.chars().take(300).collect::<String>();
-                    ctx.push_str(&format!("{}: {t}\n", m.role));
+                    let _ = writeln!(ctx, "{}: {t}", m.role);
                 }
             }
             let msg = if ctx.is_empty() {
@@ -2015,7 +2029,7 @@ impl super::App {
             SurveyPhase::Clarify { round } => {
                 self.status = format!(
                     "answer noted (round {round}) — checking for follow-ups… · Ctrl+↑ agents"
-                )
+                );
             }
             SurveyPhase::Approve { rework } => {
                 self.status = if rework {
@@ -2047,7 +2061,7 @@ impl super::App {
             .rev()
             .find(|c| c.as_str() == label || c.starts_with(prefix.as_str()))
         {
-            *row = text.clone();
+            row.clone_from(&text);
         } else {
             self.research_stage_rows.push(text.clone());
         }
@@ -2055,7 +2069,7 @@ impl super::App {
             if let Some(row) = self.messages.iter_mut().rev().find(|m| {
                 m.role == "research_stage" && (m.content == label || m.content.starts_with(&prefix))
             }) {
-                row.content = text.clone();
+                row.content = text;
                 // Stage rows update in place, so message count does not
                 // change and the wrapped transcript cache would otherwise
                 // keep rendering stale progress.
@@ -2077,6 +2091,8 @@ impl super::App {
 
     /// A research pipeline update: a stage label, or the final report/error.
     /// `None` = the job's channel closed (fires once, right after `Done`).
+    // Long by design (event dispatch).
+    #[allow(clippy::too_many_lines)]
     pub fn on_research_done(&mut self, r: Option<ResearchMsg>) {
         let Some((session_id, space_id, space_name, update)) = r else {
             self.research_rx = None;
@@ -2434,7 +2450,7 @@ mod tests {
             std::env::temp_dir().join(format!("nexus-research-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("spaces")).unwrap();
         let space = Space { root };
-        App::new(db, Some("k".into()), space)
+        App::new(db, Some("k"), space)
     }
 
     #[tokio::test]
@@ -2442,13 +2458,13 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         tx.send("look into X".to_string()).unwrap();
         tx.send("also Y".to_string()).unwrap();
-        let drained = drain_steers(&mut rx).await;
+        let drained = drain_steers(&mut rx);
         assert_eq!(
             drained,
             vec!["look into X".to_string(), "also Y".to_string()]
         );
         // Second call with nothing queued returns empty immediately (no hang).
-        let empty = drain_steers(&mut rx).await;
+        let empty = drain_steers(&mut rx);
         assert!(empty.is_empty());
     }
 

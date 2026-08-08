@@ -8,7 +8,7 @@ use crate::app::App;
 
 use super::chrome;
 
-pub(crate) fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &App) {
     use crate::app::SkillsMode;
     let area = crate::ui::centered(f.area(), 56, 50);
 
@@ -34,8 +34,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             let name = app
                 .skills
                 .get(app.skills_selected)
-                .map(|s| s.name.as_str())
-                .unwrap_or("");
+                .map_or("", |s| s.name.as_str());
             chrome::confirm_title(
                 app,
                 format!("remove \"{name}\"?"),
@@ -53,8 +52,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     let desc = app
         .skills
         .get(app.skills_selected)
-        .map(|s| s.description.as_str())
-        .unwrap_or("");
+        .map_or("", |s| s.description.as_str());
     let (list_area, detail_area) = chrome::split_with_detail(inner, desc);
 
     let list = chrome::standard_list(items);
@@ -66,7 +64,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     chrome::render_detail(f, detail_area, desc, &app.theme);
 }
 
-pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
+pub fn handle_key(app: &mut App, key: KeyEvent) {
     use super::{
         ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key,
         classify_edit_key,

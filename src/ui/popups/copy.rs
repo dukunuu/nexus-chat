@@ -6,7 +6,7 @@ use crate::app::App;
 
 use super::chrome;
 
-pub(crate) fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 50, 60);
     let inner = chrome::render_frame(
         f,
@@ -29,7 +29,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     f.render_stateful_widget(list, inner, &mut state);
 }
 
-pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
+pub fn handle_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => app.popup = crate::app::Popup::None,
         KeyCode::Enter => app.confirm_copy(),

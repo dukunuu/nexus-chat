@@ -1,6 +1,16 @@
 //! Space filesets: importing files into `spaces/<name>/files/`, keeping the
 //! db index in sync with the directory, and extracting searchable text.
 
+// Casts here are on bounded values: token counts, byte sizes, and
+// selection indices — never on unbounded input. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::db::FileRow;
@@ -11,7 +21,7 @@ use sha2::{Digest, Sha256};
 use super::App;
 
 /// A message from the background OCR batch about one file.
-pub(crate) enum OcrUpdate {
+pub enum OcrUpdate {
     /// A human-readable phase ("rendering pages…") shown while nothing is
     /// countable yet.
     Stage(String),
@@ -30,8 +40,8 @@ pub struct PickerEntry {
 
 /// Which service transcribes a rendered page image.
 #[derive(Clone)]
-pub(crate) enum OcrBackend {
-    /// OpenRouter vision model (`ocr_model`).
+pub enum OcrBackend {
+    /// `OpenRouter` vision model (`ocr_model`).
     Router(crate::provider::openrouter::OpenRouter, String),
     /// Local Ollama model via its native /api/generate endpoint — the
     /// OpenAI-compatible route mishandles GLM-OCR's vision input.
@@ -47,18 +57,18 @@ impl OcrBackend {
     /// can reason about the image content). For standalone space-file images.
     async fn describe(&self, bytes: &[u8], mime: &str) -> anyhow::Result<String> {
         match self {
-            OcrBackend::Router(provider, model) => {
+            Self::Router(provider, model) => {
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
                 let url = format!("data:{mime};base64,{b64}");
                 provider.describe_image(model, &url).await
             }
-            OcrBackend::Ollama(client, model) => {
+            Self::Ollama(client, model) => {
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
                 let resp = client
                     .post("http://127.0.0.1:11434/api/generate")
-                    .timeout(std::time::Duration::from_secs(600))
+                    .timeout(std::time::Duration::from_mins(10))
                     .json(&serde_json::json!({
                         "model": model,
                         "prompt": "Describe this image so another AI model can reason about \
@@ -98,18 +108,18 @@ impl OcrBackend {
     /// (not PDF pages) that may be JPEG, PNG, etc.
     async fn transcribe_image(&self, bytes: &[u8], mime: &str) -> anyhow::Result<String> {
         match self {
-            OcrBackend::Router(provider, model) => {
+            Self::Router(provider, model) => {
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
                 let url = format!("data:{mime};base64,{b64}");
                 provider.ocr_page(model, &url).await
             }
-            OcrBackend::Ollama(client, model) => {
+            Self::Ollama(client, model) => {
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
                 let resp = client
                     .post("http://127.0.0.1:11434/api/generate")
-                    .timeout(std::time::Duration::from_secs(600))
+                    .timeout(std::time::Duration::from_mins(10))
                     .json(&ollama_ocr_body(model, &b64))
                     .send()
                     .await
@@ -272,7 +282,7 @@ async fn ocr_pdf_vlm_in(
     let mut done = 0;
     let mut failed = 0;
     while let Some(joined) = set.join_next().await {
-        let (i, r) = joined.unwrap_or((usize::MAX, Err("page task panicked".to_string())));
+        let (i, r) = joined.unwrap_or_else(|_| (usize::MAX, Err("page task panicked".to_string())));
         if r.is_err() {
             failed += 1;
         }
@@ -306,7 +316,7 @@ async fn ocr_pdf_vlm_in(
 
 /// OCR a standalone image file through a vision backend: read the file,
 /// transcribe it directly (no page rendering), return OCR text. Reuses the
-/// same OcrUpdate channel as pdf_vlm for status/progress.
+/// same `OcrUpdate` channel as `pdf_vlm` for status/progress.
 async fn ocr_image_vlm(
     backend: &OcrBackend,
     path: &Path,
@@ -329,7 +339,6 @@ async fn ocr_image_vlm(
         .to_lowercase();
     let mime = match ext.as_str() {
         "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
         "gif" => "image/gif",
         "webp" => "image/webp",
         "bmp" => "image/bmp",
@@ -388,11 +397,11 @@ impl App {
 
     /// Entries matching the fuzzy filter (all of them, dirs first, when empty).
     pub fn filtered_picker_entries(&self) -> Vec<&PickerEntry> {
+        use crate::input::fuzzy_score;
         let needle = self.picker_filter.trim();
         if needle.is_empty() {
             return self.picker_entries.iter().collect();
         }
-        use crate::input::fuzzy_score;
         super::fuzzy_filter_sorted(&self.picker_entries, |e| fuzzy_score(&e.name, needle))
     }
 
@@ -416,7 +425,7 @@ impl App {
             self.picker_selected = 0;
             return;
         }
-        if let Some(parent) = self.picker_dir.parent().map(|p| p.to_path_buf()) {
+        if let Some(parent) = self.picker_dir.parent().map(std::path::Path::to_path_buf) {
             self.picker_dir = parent;
             self.picker_selected = 0;
             self.reload_picker_entries();
@@ -424,10 +433,10 @@ impl App {
     }
 
     /// Enter descends into a directory, or imports the selected file.
-    pub fn picker_enter(&mut self) -> Result<()> {
+    pub fn picker_enter(&mut self) {
         let filtered = self.filtered_picker_entries();
         let Some(entry) = filtered.get(self.picker_selected) else {
-            return Ok(());
+            return;
         };
         let name = entry.name.clone();
         let is_dir = entry.is_dir;
@@ -437,14 +446,13 @@ impl App {
             self.picker_filter.clear();
             self.picker_selected = 0;
             self.reload_picker_entries();
-            return Ok(());
+            return;
         }
         match self.import_file(&path) {
             Ok(n) => self.status = format!("imported {n}"),
             Err(e) => self.status = format!("import failed: {e}"),
         }
         self.files_mode = super::FilesMode::Browse;
-        Ok(())
     }
 
     /// Sync the active space's files directory with the db: new or changed
@@ -477,9 +485,8 @@ impl App {
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            let disk_size = entry.metadata().map(|m| m.len() as i64).unwrap_or(0);
+                .map_or(0, |d| d.as_secs() as i64);
+            let disk_size = entry.metadata().map_or(0, |m| m.len() as i64);
             let existing = known.iter().find(|f| f.name == name);
             // Unchanged by stat: skip entirely — no read, no hash. This is what
             // keeps /files and space switches snappy with big filesets.
@@ -500,8 +507,10 @@ impl App {
             };
             let hash = Sha256::digest(&bytes)
                 .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>();
+                .fold(String::new(), |mut h, b| {
+                    let _ = write!(h, "{b:02x}");
+                    h
+                });
             if let Some(f) = existing.filter(|f| f.hash == hash) {
                 // Content unchanged (touched, or indexed before mtimes were
                 // tracked): just record the stat for next time.
@@ -570,8 +579,7 @@ impl App {
                     let is_image = path
                         .extension()
                         .and_then(|e| e.to_str())
-                        .map(crate::extract::is_image_ext)
-                        .unwrap_or(false);
+                        .is_some_and(crate::extract::is_image_ext);
                     let result = if is_image {
                         ocr_image_vlm(&backend, &path, &tx, &space_id, &name).await
                     } else {
@@ -589,8 +597,7 @@ impl App {
                 let is_image = path
                     .extension()
                     .and_then(|e| e.to_str())
-                    .map(crate::extract::is_image_ext)
-                    .unwrap_or(false);
+                    .is_some_and(crate::extract::is_image_ext);
                 if is_image {
                     // Images can't be OCR'd via tesseract — skip, it'll re-queue
                     // on next rescan if a VLM backend is configured.
@@ -625,7 +632,7 @@ impl App {
     }
 
     /// The vision backend scanned PDFs OCR through, or None for tesseract:
-    /// "local" → Ollama; "vlm"/"auto" with an OCR model + provider → OpenRouter.
+    /// "local" → Ollama; "vlm"/"auto" with an OCR model + provider → `OpenRouter`.
     pub(crate) fn ocr_backend(&self) -> Option<OcrBackend> {
         if self.ocr_engine == "local" {
             let model = self.local_ocr_model.trim();
@@ -658,7 +665,7 @@ impl App {
         } else {
             arg.to_string()
         };
-        self.local_ocr_model = model.clone();
+        self.local_ocr_model.clone_from(&model);
         let _ = self.db.set_setting("local_ocr_model", &model);
         // Under `cargo test` there's no reactor to spawn onto and no real
         // ollama to pull from — just take the switch synchronously so the
@@ -720,7 +727,7 @@ impl App {
     }
 
     /// Ctrl+O in /files: throw away the selected file's extracted text (and
-    /// vectors, via set_file_chunks) and re-index it from disk with the
+    /// vectors, via `set_file_chunks`) and re-index it from disk with the
     /// current OCR engine — how a tesseract-mangled book gets redone after
     /// configuring a VLM, without re-importing.
     pub(crate) fn reextract_selected_file(&mut self) {
@@ -919,7 +926,7 @@ impl App {
                 let _ = self.db.set_file_status(&f.id, &status);
 
                 // Rename pasted images (uuid.ext) to uuid-<slug>.ext for @-completion.
-                if let Some(new_name) = self.descriptive_paste_name(f, &text) {
+                if let Some(new_name) = Self::descriptive_paste_name(f, &text) {
                     let dir = self.space.files_dir(&self.active_space.name);
                     let old_path = dir.join(&f.name);
                     let new_path = dir.join(&new_name);
@@ -1016,22 +1023,21 @@ impl App {
 
     /// Import the path typed/pasted in Add mode. Bad paths report in the status
     /// line and return to Browse (nothing to roll back).
-    pub fn confirm_files_add(&mut self) -> Result<()> {
+    pub fn confirm_files_add(&mut self) {
         let raw = self.files_edit.trim().to_string();
         self.files_mode = super::FilesMode::Browse;
         if raw.is_empty() {
-            return Ok(());
+            return;
         }
         let path = std::path::PathBuf::from(&raw);
         if !path.is_file() {
             self.status = format!("not a file: {raw}");
-            return Ok(());
+            return;
         }
         match self.import_file(&path) {
             Ok(name) => self.status = format!("imported {name}"),
             Err(e) => self.status = format!("import failed: {e}"),
         }
-        Ok(())
     }
 
     /// Ctrl+R in Browse: pre-fill the edit line with the current name.
@@ -1090,25 +1096,25 @@ impl App {
 
     /// If `f` is a pasted image (UUID.ext), generate a descriptive name
     /// `uuid-<slug>.ext` from OCR text. Returns None for non-pasted files.
-    fn descriptive_paste_name(&self, f: &FileRow, ocr_text: &str) -> Option<String> {
+    fn descriptive_paste_name(f: &FileRow, ocr_text: &str) -> Option<String> {
         let stem = std::path::Path::new(&f.name).file_stem()?.to_str()?;
         let ext = std::path::Path::new(&f.name).extension()?.to_str()?;
         // Only rename files whose stem is a UUID (pasted images).
         if !is_uuid_like(stem) {
             return None;
         }
-        let slug = self.slug_from_ocr(ocr_text)?;
+        let slug = Self::slug_from_ocr(ocr_text)?;
         Some(format!("{stem}-{slug}.{ext}"))
     }
 
-    /// Generate a snake_case name from OCR text. Takes first N meaningful words
+    /// Generate a `snake_case` name from OCR text. Takes first N meaningful words
     /// and slugifies them. Returns None if text is empty or has no words.
-    fn slug_from_ocr(&self, text: &str) -> Option<String> {
+    fn slug_from_ocr(text: &str) -> Option<String> {
         let words: Vec<&str> = text
             .split_whitespace()
             .filter(|w| {
                 let w = w.trim_matches(|c: char| !c.is_alphanumeric());
-                w.len() > 2 && w.chars().any(|c| c.is_alphanumeric())
+                w.len() > 2 && w.chars().any(char::is_alphanumeric)
             })
             .collect();
         if words.is_empty() {
@@ -1138,7 +1144,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("nexus-files-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("spaces")).unwrap();
         let space = Space { root };
-        App::new(db, Some("k".into()), space)
+        App::new(db, Some("k"), space)
     }
 
     #[tokio::test]
@@ -1473,14 +1479,14 @@ mod tests {
         a.start_files_add();
         assert!(a.files_mode == crate::app::FilesMode::Add);
         a.files_edit = src.to_string_lossy().to_string();
-        a.confirm_files_add().unwrap();
+        a.confirm_files_add();
         assert!(a.files_mode == crate::app::FilesMode::Browse);
         assert_eq!(a.files_cache.len(), 1);
 
         // A bad path reports in status and stays recoverable.
         a.start_files_add();
         a.files_edit = "/definitely/not/a/file".to_string();
-        a.confirm_files_add().unwrap();
+        a.confirm_files_add();
         assert!(a.status.contains("not a file"));
         assert_eq!(a.files_cache.len(), 1);
     }
@@ -1505,7 +1511,7 @@ mod tests {
 
         // Enter on a dir descends and reloads.
         a.picker_selected = 0;
-        a.picker_enter().unwrap();
+        a.picker_enter();
         assert_eq!(a.picker_dir, root.join("subdir"));
         assert!(a.filtered_picker_entries().is_empty());
 
@@ -1520,7 +1526,7 @@ mod tests {
             .position(|e| e.name == "aaa.txt")
             .unwrap();
         a.picker_selected = idx;
-        a.picker_enter().unwrap();
+        a.picker_enter();
         assert!(a.files_mode == crate::app::FilesMode::Browse);
         assert!(a.files_cache.iter().any(|f| f.name == "aaa.txt"));
     }

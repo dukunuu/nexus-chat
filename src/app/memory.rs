@@ -1,6 +1,16 @@
+// Casts here are on bounded values: token counts, byte sizes, and
+// selection indices — never on unbounded input. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use super::{App, MemoryOp};
 use crate::db::Message;
 use crate::provider::ChatMessage;
+use std::fmt::Write as _;
 use tokio::sync::mpsc;
 
 impl App {
@@ -69,12 +79,6 @@ impl App {
         // Ids in `ops` refer to the *original* numbering, so resolve updates/
         // deletes against that fixed list before appending adds — mutating the
         // vector in place as ops are applied would shift later ids underfoot.
-        let original: Vec<String> = self
-            .read_memory()
-            .lines()
-            .filter_map(parse_fact_line)
-            .map(|(_, text)| text)
-            .collect();
         let mut updates: std::collections::HashMap<usize, String> =
             std::collections::HashMap::new();
         let mut deletes: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -90,8 +94,11 @@ impl App {
                 }
             }
         }
-        let mut facts: Vec<String> = original
-            .into_iter()
+        let mut facts: Vec<String> = self
+            .read_memory()
+            .lines()
+            .filter_map(parse_fact_line)
+            .map(|(_, text)| text)
             .enumerate()
             .filter(|(i, _)| !deletes.contains(&(i + 1)))
             .map(|(i, text)| updates.remove(&(i + 1)).unwrap_or(text))
@@ -100,8 +107,10 @@ impl App {
         let body: String = facts
             .iter()
             .enumerate()
-            .map(|(i, f)| format!("{}. {f}\n", i + 1))
-            .collect();
+            .fold(String::new(), |mut b, (i, f)| {
+                let _ = writeln!(b, "{}. {f}", i + 1);
+                b
+            });
         let _ = self.space.ensure_space_dir(&self.active_space.name);
         let _ = std::fs::write(self.space.memory_path(&self.active_space.name), body);
     }

@@ -57,6 +57,8 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
     result
 }
 
+// Long by design (event loop).
+#[allow(clippy::too_many_lines)]
 async fn run_loop(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
     let mut reader = EventStream::new();
     // Cheap poll for an omarchy theme switch (symlink target change) so a
@@ -149,33 +151,33 @@ async fn run_loop(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
                 AppEvent::Login(r) => app.on_login_result(r),
                 AppEvent::Swarm(r) => app.on_swarm_update(r),
             },
-            _ = async {
+            () = async {
                 if streaming {
                     tokio::time::sleep(std::time::Duration::from_millis(120)).await;
                 } else {
-                    std::future::pending::<()>().await
+                    std::future::pending::<()>().await;
                 }
             } => app.tick_spinner(),
             // Long-press (held, unmoved) selects the whole conversation.
-            _ = async {
+            () = async {
                 match long_deadline {
                     Some(d) => tokio::time::sleep(d.saturating_duration_since(std::time::Instant::now())).await,
                     None => std::future::pending::<()>().await,
                 }
             } => {
                 match app.sel.check_long_press() {
-                    Some(crate::selection::LongPress::Code(text)) => app.copy_text(text),
+                    Some(crate::selection::LongPress::Code(text)) => app.copy_text(&text),
                     Some(crate::selection::LongPress::Message(idx)) => app.copy_message(idx),
-                    Some(crate::selection::LongPress::Url(url)) => app.copy_text(url),
+                    Some(crate::selection::LongPress::Url(url)) => app.copy_text(&url),
                     None => {}
                 }
             }
             // Tick once a second on the start screen so the clock stays live.
-            _ = async {
+            () = async {
                 if welcome {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 } else {
-                    std::future::pending::<()>().await
+                    std::future::pending::<()>().await;
                 }
             } => {}
             _ = theme_poll.tick() => {
@@ -221,9 +223,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         Popup::Files => ui::popups::files::handle_key(app, key)?,
         Popup::Apps => ui::popups::apps::handle_key(app, key)?,
         Popup::Watch => ui::popups::watches::handle_key(app, key)?,
-        Popup::ResearchLive => ui::popups::research_live::handle_key(app, key)?,
+        Popup::ResearchLive => {
+            ui::popups::research_live::handle_key(app, key);
+        }
         Popup::Swarm => ui::popups::swarm::handle_key(app, key)?,
-        Popup::Login => ui::popups::login::handle_key(app, key)?,
+        Popup::Login => {
+            ui::popups::login::handle_key(app, key);
+        }
 
         Popup::None => handle_normal(app, key)?,
     }
@@ -268,6 +274,8 @@ fn edit_in_external_editor(terminal: &mut DefaultTerminal, path: &std::path::Pat
     }
 }
 
+// Long by design (key dispatch).
+#[allow(clippy::too_many_lines)]
 fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -342,7 +350,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         // terminals that forward it; otherwise the terminal's own copy works on
         // a mouse selection. Ctrl+X cuts.
         KeyCode::Char('a') if ctrl => app.input.select_all(),
-        KeyCode::Char('c') | KeyCode::Char('C') if ctrl && shift => app.copy_selection(),
+        KeyCode::Char('c' | 'C') if ctrl && shift => app.copy_selection(),
         KeyCode::Char('x') if ctrl => app.cut_selection(),
         // Ctrl+R expands/collapses stored reasoning traces (editor's redo is
         // shadowed here — the composer rarely needs it).
@@ -480,9 +488,9 @@ fn handle_input_mouse(app: &mut App, m: MouseEvent) {
             match app.mouse_target {
                 MouseTarget::History => {
                     let p = app.sel.pos_at(m.column, m.row);
-                    let was_image = p.is_some() && app.open_image_at_line(p.unwrap().0);
+                    let was_image = p.is_some_and(|p| app.open_image_at_line(p.0));
                     match app.sel.on_up(p) {
-                        Some(crate::selection::Action::Copy(text)) => app.copy_text(text),
+                        Some(crate::selection::Action::Copy(text)) => app.copy_text(&text),
                         Some(crate::selection::Action::OpenUrl(url)) => {
                             let _ = open::that_detached(&url);
                             app.status = format!("opened {url}");

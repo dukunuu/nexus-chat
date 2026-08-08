@@ -16,7 +16,7 @@ impl Space {
     /// "single global space" layout (`spaces/global/nexus.db`) if present.
     pub fn open() -> Result<Self> {
         let root = config::project_dirs()?.data_dir().to_path_buf();
-        let space = Space { root };
+        let space = Self { root };
         space.migrate_legacy_layout()?;
         std::fs::create_dir_all(space.root.join("spaces"))
             .with_context(|| format!("creating {}", space.root.join("spaces").display()))?;

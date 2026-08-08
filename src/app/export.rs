@@ -3,12 +3,13 @@
 //! so it stays a living document.
 
 use anyhow::Result;
+use std::fmt::Write as _;
 
 /// Append a numbered `## Sources` bibliography built from `citations`
 /// (`(report_file, url, title)` rows, as returned by `Db::search_citations`)
 /// to `report_body`. No section at all when `citations` is empty — an
 /// export with nothing to cite shouldn't show an empty heading.
-pub(crate) fn assemble_report(report_body: &str, citations: &[(String, String, String)]) -> String {
+pub fn assemble_report(report_body: &str, citations: &[(String, String, String)]) -> String {
     if citations.is_empty() {
         return report_body.to_string();
     }
@@ -16,9 +17,9 @@ pub(crate) fn assemble_report(report_body: &str, citations: &[(String, String, S
     out.push_str("\n\n## Sources\n\n");
     for (i, (_, url, title)) in citations.iter().enumerate() {
         if title.is_empty() {
-            out.push_str(&format!("{}. {url}\n", i + 1));
+            let _ = writeln!(out, "{}. {url}", i + 1);
         } else {
-            out.push_str(&format!("{}. {title} — {url}\n", i + 1));
+            let _ = writeln!(out, "{}. {title} — {url}", i + 1);
         }
     }
     out

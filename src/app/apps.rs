@@ -35,7 +35,7 @@ impl App {
         self.status = format!("edit {name}/ (type filename, Enter to open in $EDITOR)");
     }
 
-    /// Confirm in EditFile: open the typed path in $EDITOR.
+    /// Confirm in `EditFile`: open the typed path in $EDITOR.
     pub fn confirm_app_edit(&mut self) {
         let Some(name) = self.apps_cache.get(self.apps_selected).cloned() else {
             return;
@@ -87,7 +87,7 @@ impl App {
         Ok(())
     }
 
-    /// How many files an app holds (recursive; node_modules counted as one
+    /// How many files an app holds (recursive; `node_modules` counted as one
     /// "deps" marker would be noise, so it's skipped entirely).
     pub fn app_file_count(&self, name: &str) -> usize {
         fn count(dir: &std::path::Path) -> usize {
@@ -124,7 +124,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("nexus-apps-popup-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("spaces")).unwrap();
         let space = Space { root };
-        App::new(db, Some("k".into()), space)
+        App::new(db, Some("k"), space)
     }
 
     #[test]

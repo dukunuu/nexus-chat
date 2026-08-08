@@ -2,8 +2,8 @@ use super::{App, CopyOption, Popup, code_blocks};
 
 impl App {
     /// Copy arbitrary text to the clipboard and report it in the status line.
-    pub(crate) fn copy_text(&mut self, text: String) {
-        let msg = crate::input::copy_to_clipboard(&mut self.clipboard, &text);
+    pub(crate) fn copy_text(&mut self, text: &str) {
+        let msg = crate::input::copy_to_clipboard(&mut self.clipboard, text);
         if !msg.is_empty() {
             self.status = msg;
         }
@@ -20,7 +20,7 @@ impl App {
             None => None,
         };
         if let Some(t) = text {
-            self.copy_text(t);
+            self.copy_text(&t);
         }
     }
 
@@ -57,7 +57,7 @@ impl App {
             .get(self.copy_selected)
             .map(|o| o.text.clone())
         {
-            self.copy_text(text);
+            self.copy_text(&text);
         }
         self.popup = Popup::None;
     }

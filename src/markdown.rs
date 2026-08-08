@@ -15,7 +15,7 @@ fn char_width(c: char) -> usize {
     c.width().unwrap_or(0)
 }
 
-/// tui_markdown's default inline-code style is white-on-black, which is
+/// `tui_markdown`'s default inline-code style is white-on-black, which is
 /// invisible against the (very common) black-background terminal. Everything
 /// else defers to the library's own defaults.
 #[derive(Clone, Copy, Debug, Default)]
@@ -89,14 +89,14 @@ fn render_text(r: &mut Rendered, content: &str, width: usize) {
 
         // Fence line toggles a code block; the fence itself isn't shown.
         if unstyled && plain.trim_start().starts_with("```") {
-            if !in_code {
-                in_code = true;
-                raw.clear();
-                push_code_border(r, width, true);
-            } else {
+            if in_code {
                 in_code = false;
                 push_code_border(r, width, false);
                 r.blocks.push(raw.join("\n"));
+            } else {
+                in_code = true;
+                raw.clear();
+                push_code_border(r, width, true);
             }
             continue;
         }
@@ -110,9 +110,9 @@ fn render_text(r: &mut Rendered, content: &str, width: usize) {
         let id = None;
         match classify(line, &plain) {
             Block::Drop => {}
-            Block::Header(txt) => {
+            Block::Header(body) => {
                 let styled = Span::styled(
-                    txt,
+                    body,
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
@@ -121,8 +121,8 @@ fn render_text(r: &mut Rendered, content: &str, width: usize) {
                     r.push(l, id);
                 }
             }
-            Block::List(txt) => {
-                for l in wrap_styled_line(&Line::from(txt), width) {
+            Block::List(body) => {
+                for l in wrap_styled_line(&Line::from(body), width) {
                     r.push(l, id);
                 }
             }
@@ -380,7 +380,7 @@ fn push_table_row(
 ) {
     let wrapped: Vec<Vec<Line<'static>>> = (0..colw.len())
         .map(|i| {
-            let mut spans = styled_cell(row.get(i).map(String::as_str).unwrap_or(""));
+            let mut spans = styled_cell(row.get(i).map_or("", String::as_str));
             if is_header {
                 for s in &mut spans {
                     s.style = s.style.add_modifier(Modifier::BOLD);
@@ -395,9 +395,7 @@ fn push_table_row(
         let mut spans: Vec<Span<'static>> = vec![Span::styled("│", border_style())];
         for (i, w) in colw.iter().enumerate() {
             let cell = wrapped[i].get(li);
-            let used: usize = cell
-                .map(|l| l.spans.iter().map(|s| s.content.width()).sum())
-                .unwrap_or(0);
+            let used: usize = cell.map_or(0, |l| l.spans.iter().map(|s| s.content.width()).sum());
             let pad = w.saturating_sub(used);
             let (lpad, rpad) = match aligns.get(i).copied().unwrap_or(Align::Left) {
                 Align::Left => (0, pad),

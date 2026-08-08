@@ -9,7 +9,7 @@ use crate::app::{App, SwarmPopupMode};
 
 use super::chrome;
 
-pub(crate) fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 78, 66);
 
     let dim = Style::default().fg(app.theme.fg_dim);
@@ -62,7 +62,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     f.render_stateful_widget(list, inner, &mut state);
 }
 
-pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     use super::{ConfirmDeleteAction, classify_confirm_delete_key};
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -86,14 +86,14 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 KeyCode::Char('g') if ctrl => app.toggle_swarm_mode()?,
                 KeyCode::Char('n') if ctrl => app.queue_swarm_persona_editor(true)?,
                 KeyCode::Enter if !app.swarm_cache.is_empty() => {
-                    app.queue_swarm_persona_editor(false)?
+                    app.queue_swarm_persona_editor(false)?;
                 }
                 KeyCode::Char('e') if ctrl && !app.swarm_cache.is_empty() => {
-                    app.queue_swarm_persona_editor(false)?
+                    app.queue_swarm_persona_editor(false)?;
                 }
                 KeyCode::Char('x') if ctrl && app.swarm_rx.is_some() => app.stop_swarm(),
                 KeyCode::Char('d') if ctrl && !app.swarm_cache.is_empty() => {
-                    app.swarm_popup_mode = SwarmPopupMode::ConfirmDelete
+                    app.swarm_popup_mode = SwarmPopupMode::ConfirmDelete;
                 }
                 _ => {}
             }

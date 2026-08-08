@@ -1,3 +1,12 @@
+// Casts here are on bounded values: token counts, byte sizes, and
+// selection indices — never on unbounded input. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use anyhow::{Context, Result};
 
 use super::{App, ImageMeta, ImagesMode};

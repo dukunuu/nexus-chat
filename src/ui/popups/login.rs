@@ -1,6 +1,5 @@
-//! `/login`'s provider selector: OpenRouter, OpenCode Go, OpenAI, or Codex.
+//! `/login`'s provider selector: `OpenRouter`, `OpenCode` Go, `OpenAI`, or Codex.
 
-use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::style::Style;
@@ -18,7 +17,7 @@ const ROWS: [(&str, &str); 4] = [
     ("Codex", "ChatGPT subscription — device-code login"),
 ];
 
-pub(crate) fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 60, 40);
     let inner = chrome::render_frame(
         f,
@@ -50,7 +49,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     f.render_stateful_widget(list, inner, &mut state);
 }
 
-pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => app.popup = crate::app::Popup::None,
         KeyCode::Up => app.move_login_selection(-1),
@@ -58,5 +57,4 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Enter => app.confirm_login_selection(),
         _ => {}
     }
-    Ok(())
 }

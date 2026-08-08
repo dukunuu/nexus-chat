@@ -287,7 +287,7 @@ async fn stream_is_tagged_with_its_origin_session() {
     assert!(a.viewing_stream());
 
     // Switch to a blank chat: still streaming, but not viewing it.
-    a.new_session().unwrap();
+    a.new_session();
     assert!(a.is_streaming());
     assert!(!a.viewing_stream());
 }
@@ -300,7 +300,7 @@ async fn background_finish_lands_in_origin_session_and_notifies() {
     a.submit().unwrap();
     let origin = a.session.as_ref().unwrap().id.clone();
 
-    a.new_session().unwrap(); // switch away mid-stream
+    a.new_session(); // switch away mid-stream
     a.on_stream_event(crate::provider::StreamEvent::Token("late answer".into()))
         .unwrap();
     a.on_stream_event(crate::provider::StreamEvent::Done)
@@ -324,7 +324,7 @@ async fn background_tool_call_persists_to_origin_session_only() {
     a.submit().unwrap();
     let origin = a.session.as_ref().unwrap().id.clone();
 
-    a.new_session().unwrap();
+    a.new_session();
     a.on_stream_event(crate::provider::StreamEvent::ToolCall {
         name: "web_search".into(),
         arguments: "{}".into(),
@@ -343,7 +343,7 @@ async fn send_in_another_session_is_allowed_while_one_streams() {
     a.current_model = Some("a/one".into());
     a.set_input("hello");
     a.submit().unwrap();
-    a.new_session().unwrap();
+    a.new_session();
     a.set_input("second message");
     a.submit().unwrap();
     assert_eq!(a.chat_task_count(), 2);
@@ -375,7 +375,7 @@ async fn concurrent_chat_tasks_route_results_to_their_origin_sessions() {
         .map(|task| task.id)
         .unwrap();
 
-    a.new_session().unwrap();
+    a.new_session();
     a.current_model = Some("b/two".into());
     a.set_input("second");
     a.submit().unwrap();
@@ -409,7 +409,7 @@ async fn chat_task_limit_rejects_the_eleventh_task() {
     a.current_model = Some("a/one".into());
     for index in 0..MAX_CHAT_TASKS {
         if index > 0 {
-            a.new_session().unwrap();
+            a.new_session();
         }
         let message = format!("message {index}");
         a.set_input(&message);
@@ -417,7 +417,7 @@ async fn chat_task_limit_rejects_the_eleventh_task() {
     }
     assert_eq!(a.chat_task_count(), MAX_CHAT_TASKS);
 
-    a.new_session().unwrap();
+    a.new_session();
     a.set_input("rejected");
     a.submit().unwrap();
     assert_eq!(a.chat_task_count(), MAX_CHAT_TASKS);
@@ -437,7 +437,7 @@ async fn clicking_a_completion_notification_opens_its_session() {
         .chat_task_for_session(&first_session)
         .map(|task| task.id)
         .unwrap();
-    a.new_session().unwrap();
+    a.new_session();
     a.on_chat_event(first_task, StreamEvent::Token("done".into()))
         .unwrap();
     a.on_chat_event(first_task, StreamEvent::Done).unwrap();
@@ -456,7 +456,7 @@ async fn opening_a_session_clears_its_unread_marker() {
     a.set_input("hello");
     a.submit().unwrap();
     let origin = a.session.as_ref().unwrap().id.clone();
-    a.new_session().unwrap();
+    a.new_session();
     a.on_stream_event(crate::provider::StreamEvent::Token("done".into()))
         .unwrap();
     a.on_stream_event(crate::provider::StreamEvent::Done)
@@ -494,7 +494,7 @@ async fn welcome_screen_shows_while_a_stream_runs_elsewhere() {
     a.set_input("hello");
     a.submit().unwrap();
     assert!(!a.is_welcome()); // viewing the streaming session
-    a.new_session().unwrap();
+    a.new_session();
     assert!(a.is_welcome()); // blank chat, stream backgrounded
 }
 
@@ -1557,7 +1557,7 @@ async fn switching_space_clears_open_conversation() {
     let other = a.db.create_space("other").unwrap();
     a.spaces_cache = vec![other.clone()];
     a.space_selected = 0;
-    a.confirm_space().unwrap();
+    a.confirm_space();
 
     assert_eq!(a.active_space.id, other.id);
     assert!(a.session.is_none());

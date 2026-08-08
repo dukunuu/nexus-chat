@@ -10,6 +10,6 @@ if [[ "${1:-}" == "--fix" ]]; then
 fi
 
 cargo fmt --check
-cargo clippy --bin nexus-chat -- -D warnings
+cargo clippy --bin nexus-chat -- -D warnings -W clippy::pedantic
 cargo test --bin nexus-chat
 echo "check.sh: all green"

@@ -1,7 +1,18 @@
+// Casts here are on bounded values: token counts, byte sizes, and
+// selection indices — never on unbounded input. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use futures_util::StreamExt;
 use reqwest_eventsource::{Event, EventSource};
 use serde::Deserialize;
@@ -28,9 +39,9 @@ const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
 /// the API; only used to pick which of the two bases above to hit.
 const OPENCODE_GO_PREFIX: &str = "go:";
 
-/// Context windows for OpenCode Zen's general catalog (`/zen/v1/models`),
+/// Context windows for `OpenCode` Zen's general catalog (`/zen/v1/models`),
 /// keyed by raw model id. The Zen `/models` endpoint returns no context
-/// metadata (only id/created/owned_by), so without this table every OpenCode
+/// metadata (only `id/created/owned_by`), so without this table every `OpenCode`
 /// model would show no context size. Values mirror the models.dev catalog
 /// that opencode itself uses for these ids.
 const OPENCODE_ZEN_CONTEXT: &[(&str, u64)] = &[
@@ -131,14 +142,14 @@ const OPENCODE_GO_CONTEXT: &[(&str, u64)] = &[
 /// Hard cap on tool round-trips per response, so a model that keeps calling
 /// tools can't loop forever. The default for interactive chat; background
 /// jobs (e.g. deep-research searcher agents) pass their own smaller budget.
-pub(crate) const MAX_TOOL_ITERS: usize = 50;
+pub const MAX_TOOL_ITERS: usize = 50;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderFlavor {
     OpenRouter,
     OpenAi,
     OpenAiCodex,
-    /// OpenCode Go: a low-cost subscription bundling several open coding
+    /// `OpenCode` Go: a low-cost subscription bundling several open coding
     /// models behind a fully OpenAI-compatible endpoint — no special
     /// request/response handling needed, unlike Codex.
     OpencodeGo,
@@ -170,12 +181,12 @@ pub struct VideoRequest {
 }
 
 impl ProviderFlavor {
-    fn base(self) -> &'static str {
+    const fn base(self) -> &'static str {
         match self {
-            ProviderFlavor::OpenRouter => OPENROUTER_BASE,
-            ProviderFlavor::OpenAi => OPENAI_BASE,
-            ProviderFlavor::OpenAiCodex => CODEX_BASE,
-            ProviderFlavor::OpencodeGo => OPENCODE_ZEN_BASE,
+            Self::OpenRouter => OPENROUTER_BASE,
+            Self::OpenAi => OPENAI_BASE,
+            Self::OpenAiCodex => CODEX_BASE,
+            Self::OpencodeGo => OPENCODE_ZEN_BASE,
         }
     }
 
@@ -201,7 +212,7 @@ impl ProviderFlavor {
                 .collect();
         }
         match self {
-            ProviderFlavor::OpenRouter => {
+            Self::OpenRouter => {
                 if !m.supported_parameters.iter().any(|p| p == "reasoning") {
                     return Vec::new();
                 }
@@ -211,7 +222,7 @@ impl ProviderFlavor {
                     E::STANDARD.to_vec()
                 }
             }
-            ProviderFlavor::OpenAi => {
+            Self::OpenAi => {
                 let id = m.id.as_str();
                 if id == "gpt-5-pro" || id.starts_with("gpt-5-pro-") {
                     E::HIGH_ONLY.to_vec()
@@ -241,14 +252,14 @@ impl ProviderFlavor {
             // Codex and the Go bundle are reasoning-capable chat catalogs.
             // Their catalog metadata wins above when present; this standard
             // set is only for entries that expose no per-model detail.
-            ProviderFlavor::OpenAiCodex | ProviderFlavor::OpencodeGo => E::STANDARD.to_vec(),
+            Self::OpenAiCodex | Self::OpencodeGo => E::STANDARD.to_vec(),
         }
     }
 
     fn supports_images(self, m: &ModelEntry) -> Option<bool> {
         match self {
-            ProviderFlavor::OpenRouter => None,
-            ProviderFlavor::OpenAi => {
+            Self::OpenRouter | Self::OpencodeGo => None,
+            Self::OpenAi => {
                 let id = m.id.as_str();
                 Some(
                     id.contains("gpt-4o")
@@ -258,38 +269,36 @@ impl ProviderFlavor {
                         || id.starts_with("o4"),
                 )
             }
-            ProviderFlavor::OpenAiCodex => Some(true),
-            ProviderFlavor::OpencodeGo => None,
+            Self::OpenAiCodex => Some(true),
         }
     }
 
     fn supports_image_generation(self, m: &ModelEntry) -> Option<bool> {
         match self {
             // OpenRouter reports output_modalities in the catalog — use that.
-            ProviderFlavor::OpenRouter => None,
+            Self::OpenRouter => None,
             // Only dall-e models on OpenAI.
-            ProviderFlavor::OpenAi => Some(m.id.contains("dall-e")),
+            Self::OpenAi => Some(m.id.contains("dall-e")),
             // Codex and Go don't support image generation.
-            ProviderFlavor::OpenAiCodex => Some(false),
-            ProviderFlavor::OpencodeGo => Some(false),
+            Self::OpenAiCodex | Self::OpencodeGo => Some(false),
         }
     }
 
     fn add_stream_usage(self, obj: &mut serde_json::Map<String, serde_json::Value>) {
         match self {
             // Ask OpenRouter for exact token accounting in the final chunk.
-            ProviderFlavor::OpenRouter => {
+            Self::OpenRouter => {
                 obj.insert("usage".into(), serde_json::json!({ "include": true }));
             }
             // OpenAI (and OpenCode Go, which mirrors OpenAI's API shape)
             // put the equivalent switch under stream_options.
-            ProviderFlavor::OpenAi | ProviderFlavor::OpencodeGo => {
+            Self::OpenAi | Self::OpencodeGo => {
                 obj.insert(
                     "stream_options".into(),
                     serde_json::json!({ "include_usage": true }),
                 );
             }
-            ProviderFlavor::OpenAiCodex => {}
+            Self::OpenAiCodex => {}
         }
     }
 
@@ -299,13 +308,13 @@ impl ProviderFlavor {
         effort: &str,
     ) {
         match self {
-            ProviderFlavor::OpenRouter => {
+            Self::OpenRouter => {
                 obj.insert("reasoning".into(), serde_json::json!({ "effort": effort }));
             }
-            ProviderFlavor::OpenAi | ProviderFlavor::OpencodeGo => {
+            Self::OpenAi | Self::OpencodeGo => {
                 obj.insert("reasoning_effort".into(), serde_json::json!(effort));
             }
-            ProviderFlavor::OpenAiCodex => {
+            Self::OpenAiCodex => {
                 obj.insert(
                     "reasoning".into(),
                     serde_json::json!({ "effort": effort, "summary": "auto" }),
@@ -455,7 +464,7 @@ impl OpenRouter {
     }
 
     pub fn openrouter_flavor(key: String) -> Self {
-        OpenRouter {
+        Self {
             client: reqwest::Client::new(),
             key,
             flavor: ProviderFlavor::OpenRouter,
@@ -463,7 +472,7 @@ impl OpenRouter {
     }
 
     pub fn openai(key: String) -> Self {
-        OpenRouter {
+        Self {
             client: reqwest::Client::new(),
             key,
             flavor: ProviderFlavor::OpenAi,
@@ -471,7 +480,7 @@ impl OpenRouter {
     }
 
     pub fn opencode_go(key: String) -> Self {
-        OpenRouter {
+        Self {
             client: reqwest::Client::new(),
             key,
             flavor: ProviderFlavor::OpencodeGo,
@@ -479,14 +488,14 @@ impl OpenRouter {
     }
 
     pub fn openai_codex(key: String) -> Self {
-        OpenRouter {
+        Self {
             client: reqwest::Client::new(),
             key,
             flavor: ProviderFlavor::OpenAiCodex,
         }
     }
 
-    pub fn backend_tag(&self) -> crate::provider::BackendTag {
+    pub const fn backend_tag(&self) -> crate::provider::BackendTag {
         match self.flavor {
             ProviderFlavor::OpenRouter => crate::provider::BackendTag::OpenRouter,
             ProviderFlavor::OpenAi => crate::provider::BackendTag::OpenAi,
@@ -500,9 +509,11 @@ impl OpenRouter {
         self.flavor == ProviderFlavor::OpenRouter
     }
 
-    /// Generate a video via OpenRouter's `/api/v1/videos` endpoint.
+    /// Generate a video via `OpenRouter`'s `/api/v1/videos` endpoint.
     /// Submits the job, polls every 10s (up to 6 min), downloads on completion.
     /// Returns `(mp4_bytes, cost_in_usd)`.
+    // Long by design (request assembly + polling).
+    #[allow(clippy::too_many_lines)]
     pub async fn generate_video(&self, req: VideoRequest) -> Result<(Vec<u8>, f64)> {
         let VideoRequest {
             model,
@@ -524,8 +535,6 @@ impl OpenRouter {
         let (duration, resolution, aspect_ratio) =
             normalize_video_params(&model_id, duration, &resolution, &aspect_ratio);
         check_video_params(&model_id, duration, &resolution, &aspect_ratio)?;
-
-        use base64::Engine;
 
         let mut body = serde_json::json!({
             "model": model_id,
@@ -590,15 +599,15 @@ impl OpenRouter {
             .send()
             .await
             .context("video generation request")?;
-        let resp: serde_json::Value = if !raw_resp.status().is_success() {
-            let status = raw_resp.status();
-            let body_text = raw_resp.text().await.unwrap_or_default();
-            anyhow::bail!("video generation submission failed (HTTP {status}): {body_text}");
-        } else {
+        let resp: serde_json::Value = if raw_resp.status().is_success() {
             raw_resp
                 .json::<serde_json::Value>()
                 .await
                 .context("parsing video submission response")?
+        } else {
+            let status = raw_resp.status();
+            let body_text = raw_resp.text().await.unwrap_or_default();
+            anyhow::bail!("video generation submission failed (HTTP {status}): {body_text}");
         };
 
         let job_id = resp
@@ -628,7 +637,7 @@ impl OpenRouter {
                 Some("completed") => {
                     let cost = status
                         .pointer("/usage/cost")
-                        .and_then(|c| c.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
 
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -655,7 +664,7 @@ impl OpenRouter {
                         .unwrap_or("unknown error");
                     anyhow::bail!("video generation failed: {err}");
                 }
-                Some("cancelled") | Some("expired") => {
+                Some("cancelled" | "expired") => {
                     anyhow::bail!("video generation was cancelled or expired");
                 }
                 _ => {}
@@ -665,7 +674,7 @@ impl OpenRouter {
         anyhow::bail!("video generation timed out after 6 minutes");
     }
 
-    pub fn default_utility_model(&self) -> &'static str {
+    pub const fn default_utility_model(&self) -> &'static str {
         match self.flavor {
             ProviderFlavor::OpenRouter => "google/gemini-2.5-flash-lite",
             ProviderFlavor::OpenAi => "gpt-4.1-mini",
@@ -674,7 +683,7 @@ impl OpenRouter {
         }
     }
 
-    pub fn default_research_model(&self) -> &'static str {
+    pub const fn default_research_model(&self) -> &'static str {
         match self.flavor {
             ProviderFlavor::OpenRouter => "google/gemini-2.5-flash",
             ProviderFlavor::OpenAi => "gpt-4.1",
@@ -683,7 +692,7 @@ impl OpenRouter {
         }
     }
 
-    pub fn default_escalation_model(&self) -> &'static str {
+    pub const fn default_escalation_model(&self) -> &'static str {
         match self.flavor {
             ProviderFlavor::OpenRouter => "anthropic/claude-sonnet-4.5",
             ProviderFlavor::OpenAi => "gpt-4.1",
@@ -692,34 +701,34 @@ impl OpenRouter {
         }
     }
 
-    pub fn default_embedding_model(&self) -> &'static str {
+    pub const fn default_embedding_model(&self) -> &'static str {
         match self.flavor {
             ProviderFlavor::OpenRouter => "openai/text-embedding-3-small",
             ProviderFlavor::OpenAi => "text-embedding-3-small",
-            ProviderFlavor::OpenAiCodex => "",
-            // Go's bundled models are all chat/coding models, no embeddings.
-            ProviderFlavor::OpencodeGo => "",
+            // Codex and Go's bundled models are all chat/coding models, no embeddings.
+            ProviderFlavor::OpenAiCodex | ProviderFlavor::OpencodeGo => "",
         }
     }
 
-    pub fn default_video_gen_model(&self) -> &'static str {
+    pub const fn default_video_gen_model(&self) -> &'static str {
         match self.flavor {
             ProviderFlavor::OpenRouter => "google/veo-3.1",
             _ => "",
         }
     }
 
-    pub fn default_image_gen_model(&self) -> &'static str {
+    pub const fn default_image_gen_model(&self) -> &'static str {
         match self.flavor {
             ProviderFlavor::OpenRouter => "openai/gpt-image-2",
             ProviderFlavor::OpenAi => "dall-e-3",
-            ProviderFlavor::OpenAiCodex => "",
-            ProviderFlavor::OpencodeGo => "",
+            ProviderFlavor::OpenAiCodex | ProviderFlavor::OpencodeGo => "",
         }
     }
 
     /// Fetch the live model catalog. No hardcoded list except Codex, whose
-    /// subscription endpoint does not expose the normal OpenAI models catalog.
+    /// subscription endpoint does not expose the normal `OpenAI` models catalog.
+    // Long by design (catalog merge).
+    #[allow(clippy::too_many_lines)]
     pub async fn list_models(&self) -> Result<Vec<Model>> {
         if self.flavor == ProviderFlavor::OpenAiCodex {
             // Codex-only models — deliberately not merged with OpenRouter's
@@ -965,7 +974,7 @@ impl OpenRouter {
         Ok(models)
     }
 
-    /// Fallback context window for an OpenCode model id, keyed by endpoint
+    /// Fallback context window for an `OpenCode` model id, keyed by endpoint
     /// (Zen general vs Go bundle). `None` for non-OpenCode bases and for ids
     /// not in the table.
     fn opencode_context_fallback(base: &str, id: &str) -> Option<u64> {
@@ -1073,7 +1082,7 @@ impl OpenRouter {
             .await
     }
 
-    /// Generate an image via OpenRouter's dedicated `/api/v1/images` endpoint.
+    /// Generate an image via `OpenRouter`'s dedicated `/api/v1/images` endpoint.
     /// Returns `(decoded_bytes, file_extension)` — the caller should use the
     /// returned extension (e.g. `"png"`, `"jpg"`, `"webp"`) for the saved file.
     pub async fn generate_image(
@@ -1151,7 +1160,6 @@ impl OpenRouter {
             "image/svg+xml" => "svg",
             _ => "png",
         };
-        use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(b64)
             .context("base64 decode")?;
@@ -1236,7 +1244,7 @@ impl OpenRouter {
                 .context("embeddings item has no vector")?;
             out.push(
                 emb.iter()
-                    .filter_map(|x| x.as_f64())
+                    .filter_map(serde_json::Value::as_f64)
                     .map(|f| f as f32)
                     .collect(),
             );
@@ -1350,9 +1358,10 @@ impl OpenRouter {
                     }
                     let remaining = max_tool_iters - (iter + 1);
                     if let Some(m) = messages.last_mut() {
-                        m.content.push_str(&format!(
+                        let _ = write!(
+                            m.content,
                             "\n\n[{remaining} tool round-trips left this turn — plan accordingly]"
-                        ));
+                        );
                     }
                 }
             }
@@ -1363,6 +1372,8 @@ impl OpenRouter {
 
     /// One request/response over SSE. Doesn't send `Done` itself — the caller
     /// decides whether another tool round-trip follows.
+    // Long by design (stream processing).
+    #[allow(clippy::too_many_lines)]
     async fn run_stream(
         &self,
         model: &str,
@@ -1452,8 +1463,10 @@ impl OpenRouter {
                 // so the real reason (an auth/entitlement error page, a
                 // rate limit, etc.) reaches the user rather than a
                 // header-parsing artifact.
-                Err(reqwest_eventsource::Error::InvalidStatusCode(_, response))
-                | Err(reqwest_eventsource::Error::InvalidContentType(_, response)) => {
+                Err(
+                    reqwest_eventsource::Error::InvalidStatusCode(_, response)
+                    | reqwest_eventsource::Error::InvalidContentType(_, response),
+                ) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
                     let msg = format!("request failed ({status}): {}", truncate_error_body(&body));
@@ -1471,20 +1484,20 @@ impl OpenRouter {
         // Trust accumulated tool calls, not finish_reason: some providers
         // stream tool_calls but finish with "stop" (or no finish chunk at
         // all); dropping the calls there kills the turn silently.
-        if !tool_calls.is_empty() {
+        if tool_calls.is_empty() {
+            Ok(Finish::Done)
+        } else {
             Ok(Finish::ToolCalls(
                 tool_calls.into_values().collect(),
                 content_acc,
             ))
-        } else {
-            Ok(Finish::Done)
         }
     }
 
-    /// For OpenCode Go: pick the base to hit and the raw model id to send,
+    /// For `OpenCode` Go: pick the base to hit and the raw model id to send,
     /// stripping the `go:` tag `list_models` adds to flat-fee Go models. A
     /// no-op (returns the flavor's default base, id unchanged) for every
-    /// other flavor and for untagged (general Zen) OpenCode ids.
+    /// other flavor and for untagged (general Zen) `OpenCode` ids.
     fn opencode_route(&self, model: &str) -> (&'static str, String) {
         if self.flavor == ProviderFlavor::OpencodeGo
             && let Some(stripped) = model.strip_prefix(OPENCODE_GO_PREFIX)
@@ -1494,15 +1507,15 @@ impl OpenRouter {
         (self.flavor.base(), model.to_string())
     }
 
-    fn openrouter_delegate_for_model(&self, model: &str) -> Option<OpenRouter> {
+    fn openrouter_delegate_for_model(&self, model: &str) -> Option<Self> {
         if self.flavor == ProviderFlavor::OpenAiCodex && model.contains('/') {
-            crate::config::load_openrouter_key_only().map(OpenRouter::openrouter_flavor)
+            crate::config::load_openrouter_key_only().map(Self::openrouter_flavor)
         } else {
             None
         }
     }
 
-    fn openrouter_delegate_for_body(&self, body: &serde_json::Value) -> Option<OpenRouter> {
+    fn openrouter_delegate_for_body(&self, body: &serde_json::Value) -> Option<Self> {
         let model = body.get("model").and_then(|m| m.as_str())?;
         self.openrouter_delegate_for_model(model)
     }
@@ -1618,13 +1631,13 @@ impl OpenRouter {
                 }
             }
         }
-        if !tool_calls.is_empty() {
+        if tool_calls.is_empty() {
+            Ok(Finish::Done)
+        } else {
             Ok(Finish::ToolCalls(
                 tool_calls.into_values().collect(),
                 content_acc,
             ))
-        } else {
-            Ok(Finish::Done)
         }
     }
 }
@@ -1650,7 +1663,7 @@ fn truncate_error_body(body: &str) -> String {
     truncated
 }
 
-/// Pull `(content, reasoning)` deltas out of one SSE data chunk. OpenRouter puts
+/// Pull `(content, reasoning)` deltas out of one SSE data chunk. `OpenRouter` puts
 /// thinking tokens in `delta.reasoning`, separate from the visible `delta.content`.
 fn parse_delta(data: &str) -> (Option<String>, Option<String>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
@@ -1684,7 +1697,12 @@ fn accumulate_tool_calls(acc: &mut BTreeMap<usize, ToolCall>, data: &str) {
         return;
     };
     for call in calls {
-        let idx = call.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+        let idx = usize::try_from(
+            call.get("index")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        )
+        .unwrap_or(0);
         let entry = acc.entry(idx).or_default();
         if let Some(id) = call.get("id").and_then(|i| i.as_str())
             && !id.is_empty()
@@ -1708,7 +1726,7 @@ fn accumulate_tool_calls(acc: &mut BTreeMap<usize, ToolCall>, data: &str) {
 fn parse_usage(data: &str) -> Option<Usage> {
     let v: serde_json::Value = serde_json::from_str(data).ok()?;
     let u = v.get("usage")?;
-    let get = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    let get = |k: &str| u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
     Some(Usage {
         prompt_tokens: get("prompt_tokens"),
         completion_tokens: get("completion_tokens"),
@@ -1738,24 +1756,23 @@ fn codex_input(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
             // A model may request several tools in parallel. Every subsequent
             // function_call_output must have a matching function_call item;
             // emitting only calls[0] makes Codex reject the other outputs.
-            "assistant" if m.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) => m
-                .tool_calls
-                .as_ref()
-                .unwrap()
-                .iter()
-                .map(|call| {
-                    serde_json::json!({
-                        "type": "function_call",
-                        "call_id": call.id,
-                        "name": call.name,
-                        "arguments": call.arguments,
+            "assistant" => match m.tool_calls.as_ref().filter(|calls| !calls.is_empty()) {
+                Some(calls) => calls
+                    .iter()
+                    .map(|call| {
+                        serde_json::json!({
+                            "type": "function_call",
+                            "call_id": call.id,
+                            "name": call.name,
+                            "arguments": call.arguments,
+                        })
                     })
-                })
-                .collect::<Vec<_>>(),
-            "assistant" => vec![serde_json::json!({
-                "role": "assistant",
-                "content": [{ "type": "output_text", "text": m.content, "annotations": [] }],
-            })],
+                    .collect::<Vec<_>>(),
+                None => vec![serde_json::json!({
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": m.content, "annotations": [] }],
+                })],
+            },
             "tool" => vec![serde_json::json!({
                 "type": "function_call_output",
                 "call_id": m.tool_call_id.as_deref().unwrap_or_default(),
@@ -1935,7 +1952,12 @@ fn accumulate_codex_tool_calls(acc: &mut BTreeMap<usize, ToolCall>, data: &str) 
             if item.get("type").and_then(|t| t.as_str()) != Some("function_call") {
                 return;
             }
-            let idx = v.get("output_index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+            let idx = usize::try_from(
+                v.get("output_index")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            )
+            .unwrap_or(0);
             let entry = acc.entry(idx).or_default();
             entry.id = item
                 .get("call_id")
@@ -1954,14 +1976,24 @@ fn accumulate_codex_tool_calls(acc: &mut BTreeMap<usize, ToolCall>, data: &str) 
             );
         }
         Some("response.function_call_arguments.delta") => {
-            let idx = v.get("output_index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+            let idx = usize::try_from(
+                v.get("output_index")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            )
+            .unwrap_or(0);
             acc.entry(idx)
                 .or_default()
                 .arguments
                 .push_str(v.get("delta").and_then(|s| s.as_str()).unwrap_or_default());
         }
         Some("response.function_call_arguments.done") => {
-            let idx = v.get("output_index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+            let idx = usize::try_from(
+                v.get("output_index")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            )
+            .unwrap_or(0);
             if let Some(args) = v.get("arguments").and_then(|s| s.as_str()) {
                 acc.entry(idx).or_default().arguments = args.to_string();
             }
@@ -1971,7 +2003,12 @@ fn accumulate_codex_tool_calls(acc: &mut BTreeMap<usize, ToolCall>, data: &str) 
             if item.get("type").and_then(|t| t.as_str()) != Some("function_call") {
                 return;
             }
-            let idx = v.get("output_index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+            let idx = usize::try_from(
+                v.get("output_index")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            )
+            .unwrap_or(0);
             let entry = acc.entry(idx).or_default();
             entry.id = item
                 .get("call_id")
@@ -1997,22 +2034,28 @@ fn codex_usage(data: &str) -> Option<Usage> {
     let v: serde_json::Value = serde_json::from_str(data).ok()?;
     let response = v.get("response")?;
     let u = response.get("usage")?;
-    let prompt_tokens = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    let completion_tokens = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let prompt_tokens = u
+        .get("input_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let completion_tokens = u
+        .get("output_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     Some(Usage {
         prompt_tokens,
         completion_tokens,
         total_tokens: u
             .get("total_tokens")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(prompt_tokens + completion_tokens),
     })
 }
 
 /// Request body for a one-shot image-understanding call: a text part with the
-/// instruction plus the image as a data-URL content part (OpenAI vision shape).
-/// Shared page-transcription instructions (OpenRouter VLMs and local Ollama).
-pub(crate) const OCR_PROMPT: &str = "Transcribe this scanned page to plain text, faithfully and completely. \
+/// instruction plus the image as a data-URL content part (`OpenAI` vision shape).
+/// Shared page-transcription instructions (`OpenRouter` VLMs and local Ollama).
+pub const OCR_PROMPT: &str = "Transcribe this scanned page to plain text, faithfully and completely. \
      Output ONLY the transcription — no commentary, no markdown fences. \
      Preserve the natural reading order; vertical Japanese text reads in \
      columns from right to left. Transcribe the body text only: skip \
@@ -2058,7 +2101,7 @@ fn vision_body(model: &str, image_data_url: &str) -> serde_json::Value {
 /// Validate basic video generation parameters against known model capabilities.
 /// Returns `Ok` if the params look valid, or a descriptive error message if not.
 /// This is a best-effort check — the API is the final authority.
-pub(crate) fn normalize_video_params(
+pub fn normalize_video_params(
     model: &str,
     duration: u32,
     resolution: &str,
@@ -2130,6 +2173,8 @@ fn nearest_duration(requested: u32, allowed: &[u32]) -> u32 {
         .unwrap_or(&requested)
 }
 
+// Long by design (model param table).
+#[allow(clippy::too_many_lines)]
 fn check_video_params(
     model: &str,
     duration: u32,
@@ -2269,7 +2314,6 @@ fn extract_tool_images(result: &str, files_dir: &std::path::Path) -> Option<Imag
                     };
                     let mime = match ext {
                         "jpg" | "jpeg" => "image/jpeg",
-                        "png" => "image/png",
                         "gif" => "image/gif",
                         "webp" => "image/webp",
                         _ => "image/png",

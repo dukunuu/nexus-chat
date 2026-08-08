@@ -1,3 +1,12 @@
+// Casts here are on bounded values: token counts, byte sizes, and
+// selection indices — never on unbounded input. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::Result;
@@ -38,8 +47,8 @@ mod swarm;
 mod tests;
 mod transcribe;
 mod watches;
-pub(crate) use backends::{Backends, composite_id};
-pub(crate) use chat::human_size;
+pub use backends::{Backends, composite_id};
+pub use chat::human_size;
 
 #[cfg(test)]
 use chat::split_inline_reasoning;
@@ -51,7 +60,7 @@ use sessions::parse_topic;
 /// Nudge a bounded selection index by `delta`, hard-clamping to `[0, len-1]`
 /// (or `0` if `len` is `0`). Shared by the picker/list selection-movement
 /// methods that clamp at the ends rather than wrapping around.
-pub(super) fn clamp_cursor(current: usize, len: usize, delta: i32) -> usize {
+pub fn clamp_cursor(current: usize, len: usize, delta: i32) -> usize {
     if len == 0 {
         return 0;
     }
@@ -61,7 +70,7 @@ pub(super) fn clamp_cursor(current: usize, len: usize, delta: i32) -> usize {
 /// Filter `items` down to those `score_fn` returns `Some` for, sorted
 /// descending by score (best match first, stable on ties). Shared by the
 /// space and session pickers' fuzzy filters.
-pub(super) fn fuzzy_filter_sorted<T>(items: &[T], score_fn: impl Fn(&T) -> Option<i32>) -> Vec<&T> {
+pub fn fuzzy_filter_sorted<T>(items: &[T], score_fn: impl Fn(&T) -> Option<i32>) -> Vec<&T> {
     let mut scored: Vec<(i32, &T)> = items
         .iter()
         .filter_map(|item| score_fn(item).map(|sc| (sc, item)))
@@ -71,7 +80,7 @@ pub(super) fn fuzzy_filter_sorted<T>(items: &[T], score_fn: impl Fn(&T) -> Optio
 }
 
 /// Which tab in the `/files` popup is active.
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum FilesTab {
     Files,
     Images,
@@ -79,7 +88,7 @@ pub enum FilesTab {
 }
 
 /// Which modal popover, if any, is open.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Popup {
     None,
     Model,
@@ -95,14 +104,14 @@ pub enum Popup {
     Watch,
     ResearchLive,
     Swarm,
-    /// `/login`'s provider selector (OpenRouter / OpenCode Go / OpenAI / Codex).
+    /// `/login`'s provider selector (`OpenRouter` / `OpenCode` Go / `OpenAI` / Codex).
     Login,
 }
 
 /// Which backend a pasted key in `Popup::Key` is for — set by whichever
 /// `/login` row opened the prompt, since these keys aren't distinguishable
-/// by shape (unlike OpenRouter's `sk-or-` prefix).
-#[derive(PartialEq, Clone, Copy)]
+/// by shape (unlike `OpenRouter`'s `sk-or-` prefix).
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum KeyTarget {
     OpenRouter,
     OpenAi,
@@ -110,7 +119,7 @@ pub enum KeyTarget {
 }
 
 /// What the `/swarm` roster popup is doing.
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum SwarmPopupMode {
     Browse,
     ConfirmDelete,
@@ -118,7 +127,7 @@ pub enum SwarmPopupMode {
 
 /// What the apps popup is doing: browsing the space's apps or confirming
 /// removal of the highlighted one.
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum AppsMode {
     Browse,
     ConfirmDelete,
@@ -127,7 +136,7 @@ pub enum AppsMode {
 
 /// What the watch picker is doing: browsing or confirming removal of the
 /// highlighted watch.
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum WatchMode {
     Browse,
     ConfirmDelete,
@@ -135,7 +144,7 @@ pub enum WatchMode {
 
 /// What the skills popup is doing: browsing, typing a GitHub `owner/repo/path`
 /// to install, or confirming removal of the highlighted skill.
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum SkillsMode {
     Browse,
     Install,
@@ -144,7 +153,7 @@ pub enum SkillsMode {
 
 /// What the files popup is doing: browsing the fileset, typing a path to
 /// import, renaming the highlighted file, or confirming its removal.
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum FilesMode {
     Browse,
     Add,
@@ -154,7 +163,7 @@ pub enum FilesMode {
 }
 
 /// What the images popup is doing: browsing or confirming removal.
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum ImagesMode {
     Browse,
     ConfirmDelete,
@@ -162,7 +171,7 @@ pub enum ImagesMode {
 
 /// What the scripts popup is doing: browsing, creating, renaming, or
 /// confirming removal of the highlighted script.
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum ScriptsMode {
     Browse,
     Create,
@@ -172,7 +181,7 @@ pub enum ScriptsMode {
 
 /// What the space picker is doing: browsing, naming a new space, renaming the
 /// highlighted one, or confirming a delete.
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum SpaceMode {
     Browse,
     Create,
@@ -199,7 +208,7 @@ pub struct ContextBreakdown {
 
 /// What the session picker is doing: browsing, renaming the highlighted row, or
 /// confirming a delete.
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum SessionMode {
     Browse,
     Rename,
@@ -207,7 +216,7 @@ pub enum SessionMode {
 }
 
 /// Which pane an in-progress mouse press is driving.
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum MouseTarget {
     None,
     Input,
@@ -215,7 +224,7 @@ pub enum MouseTarget {
 }
 
 /// The two columns of the model picker.
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum ModelPanel {
     Favorites,
     Available,
@@ -223,7 +232,7 @@ pub enum ModelPanel {
 
 /// What a confirmed model picker selection is for: the active session's model,
 /// or the background memory-extraction model.
-#[derive(PartialEq, Clone, Copy, Default)]
+#[derive(PartialEq, Eq, Clone, Copy, Default)]
 pub enum ModelPickTarget {
     #[default]
     Session,
@@ -241,7 +250,7 @@ pub enum ModelPickTarget {
 }
 
 /// Editable rows in the nerd-config popup.
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum SettingsField {
     ShowStats,
     ShowReasoning,
@@ -267,63 +276,61 @@ pub enum SettingsField {
 }
 
 impl SettingsField {
-    pub const ALL: [SettingsField; 21] = [
-        SettingsField::ShowStats,
-        SettingsField::ShowReasoning,
-        SettingsField::HideHints,
-        SettingsField::Temperature,
-        SettingsField::TopP,
-        SettingsField::MaxTokens,
-        SettingsField::MemoryModel,
-        SettingsField::CompactThreshold,
-        SettingsField::SearxngUrl,
-        SettingsField::Verbosity,
-        SettingsField::LangsearchKey,
-        SettingsField::SearchProvider,
-        SettingsField::TranscriberModel,
-        SettingsField::OcrModel,
-        SettingsField::ResearchModel,
-        SettingsField::EscalationModel,
-        SettingsField::OcrEngine,
-        SettingsField::EmbeddingModel,
-        SettingsField::BlockedDomains,
-        SettingsField::ImageGenModel,
-        SettingsField::VideoGenModel,
+    pub const ALL: [Self; 21] = [
+        Self::ShowStats,
+        Self::ShowReasoning,
+        Self::HideHints,
+        Self::Temperature,
+        Self::TopP,
+        Self::MaxTokens,
+        Self::MemoryModel,
+        Self::CompactThreshold,
+        Self::SearxngUrl,
+        Self::Verbosity,
+        Self::LangsearchKey,
+        Self::SearchProvider,
+        Self::TranscriberModel,
+        Self::OcrModel,
+        Self::ResearchModel,
+        Self::EscalationModel,
+        Self::OcrEngine,
+        Self::EmbeddingModel,
+        Self::BlockedDomains,
+        Self::ImageGenModel,
+        Self::VideoGenModel,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
-            SettingsField::ShowStats => "show stats (model · TPS footer)",
-            SettingsField::ShowReasoning => "expand reasoning (Ctrl+R)",
-            SettingsField::HideHints => "hide hints (keybind labels)",
-            SettingsField::Temperature => "temperature",
-            SettingsField::TopP => "top_p",
-            SettingsField::MaxTokens => "max_tokens",
-            SettingsField::MemoryModel => "memory model (Enter to pick, Backspace clears)",
-            SettingsField::CompactThreshold => "auto-compact at (% of context, 0 disables)",
-            SettingsField::SearxngUrl => "web search URL (SearXNG instance, blank disables)",
-            SettingsField::Verbosity => "answer length (Space cycles normal/concise/caveman)",
-            SettingsField::LangsearchKey => "LangSearch API key (langsearch.com/dashboard, free)",
-            SettingsField::SearchProvider => {
+            Self::ShowStats => "show stats (model · TPS footer)",
+            Self::ShowReasoning => "expand reasoning (Ctrl+R)",
+            Self::HideHints => "hide hints (keybind labels)",
+            Self::Temperature => "temperature",
+            Self::TopP => "top_p",
+            Self::MaxTokens => "max_tokens",
+            Self::MemoryModel => "memory model (Enter to pick, Backspace clears)",
+            Self::CompactThreshold => "auto-compact at (% of context, 0 disables)",
+            Self::SearxngUrl => "web search URL (SearXNG instance, blank disables)",
+            Self::Verbosity => "answer length (Space cycles normal/concise/caveman)",
+            Self::LangsearchKey => "LangSearch API key (langsearch.com/dashboard, free)",
+            Self::SearchProvider => {
                 "search provider (Space cycles auto/langsearch/searxng/duckduckgo)"
             }
-            SettingsField::TranscriberModel => "image model (Enter to pick, Backspace clears)",
-            SettingsField::OcrModel => "OCR model (Enter to pick, Backspace clears)",
-            SettingsField::ResearchModel => "research model (Enter to pick, Backspace clears)",
-            SettingsField::EscalationModel => {
+            Self::TranscriberModel => "image model (Enter to pick, Backspace clears)",
+            Self::OcrModel => "OCR model (Enter to pick, Backspace clears)",
+            Self::ResearchModel => "research model (Enter to pick, Backspace clears)",
+            Self::EscalationModel => {
                 "escalation model (Enter to pick, Backspace clears; blank = same as research model)"
             }
-            SettingsField::OcrEngine => {
+            Self::OcrEngine => {
                 "OCR engine (Space cycles auto/tesseract/vlm/local; local pulls via ollama)"
             }
-            SettingsField::EmbeddingModel => "embedding model (file search, blank disables)",
-            SettingsField::BlockedDomains => {
-                "blocked domains (comma-separated, always excluded; per-space)"
-            }
-            SettingsField::ImageGenModel => {
+            Self::EmbeddingModel => "embedding model (file search, blank disables)",
+            Self::BlockedDomains => "blocked domains (comma-separated, always excluded; per-space)",
+            Self::ImageGenModel => {
                 "image gen model (Enter to pick, Backspace clears; blank = disabled)"
             }
-            SettingsField::VideoGenModel => {
+            Self::VideoGenModel => {
                 "video gen model (Enter to pick, Backspace clears; blank = disabled)"
             }
         }
@@ -398,18 +405,20 @@ pub const SETTINGS_GROUPS: &[SettingsGroup] = &[
 
 /// One visible row in the settings popup: a collapsible group header, or a
 /// field nested under one (only present when its group isn't collapsed).
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SettingsRow {
     Group(usize),
     Field(SettingsField),
 }
 
 const VERBOSITY_LEVELS: [&str; 3] = ["normal", "concise", "caveman"];
-pub(crate) const OCR_ENGINES: [&str; 4] = ["auto", "tesseract", "vlm", "local"];
+pub const OCR_ENGINES: [&str; 4] = ["auto", "tesseract", "vlm", "local"];
 const SEARCH_PROVIDERS: [&str; 4] = ["auto", "langsearch", "searxng", "duckduckgo"];
 
 /// Nerd config: footer toggles + core sampling parameters.
 #[derive(Debug, Clone)]
+// A settings struct is inherently many booleans; grouped by feature in the popup.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Settings {
     /// Show the per-message model · TPS footer.
     pub show_stats: bool,
@@ -427,7 +436,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings {
+        Self {
             show_stats: false,
             show_reasoning: false,
             hide_hints: false,
@@ -514,7 +523,7 @@ const SPINNER_COLORS: [Color; 6] = [
 type ModelsResult = std::result::Result<Vec<Model>, String>;
 
 /// One memory-extraction op, as emitted by the memory model.
-pub(crate) enum MemoryOp {
+pub enum MemoryOp {
     Add(String),
     Update(usize, String),
     Delete(usize),
@@ -537,19 +546,19 @@ pub struct ScriptMeta {
 }
 
 /// Maximum number of concurrent interactive chat responses.
-pub(crate) const MAX_CHAT_TASKS: usize = 10;
+pub const MAX_CHAT_TASKS: usize = 10;
 
-pub(crate) type ChatTaskId = u64;
+pub type ChatTaskId = u64;
 
 /// One event routed from a provider stream to its originating chat task.
-pub(crate) struct ChatEvent {
+pub struct ChatEvent {
     pub task_id: ChatTaskId,
     pub event: StreamEvent,
 }
 
 /// State owned by one in-flight chat response. Provider/toolbox values stay in
 /// the spawned task; this state is the UI/database-facing projection.
-pub(crate) struct ChatTask {
+pub struct ChatTask {
     pub id: ChatTaskId,
     pub session_id: String,
     pub session_title: String,
@@ -567,7 +576,7 @@ pub(crate) struct ChatTask {
 }
 
 /// A completed chat task waiting for the user to open its session.
-pub(crate) struct ChatNotification {
+pub struct ChatNotification {
     pub session_id: String,
     pub title: String,
     pub text: String,
@@ -593,7 +602,7 @@ pub type ResearchMsg = (String, String, String, research::ResearchUpdate);
 /// mode (swarm, watch setup, plain chat) can arm it the same way. Armed by
 /// the owning job's update handler on each pending section, cleared when
 /// the user replies or the job ends.
-pub(crate) struct SurveyGate {
+pub struct SurveyGate {
     pub session_id: String,
     pub reply_tx: mpsc::UnboundedSender<String>,
     pub phase: SurveyPhase,
@@ -607,7 +616,7 @@ pub(crate) struct SurveyGate {
 /// What a parked survey gate is waiting for — drives the status line and
 /// which phase's reply is routed. Mode-agnostic: `Clarify` is any
 /// clarifying-question round, `Approve` any presented-artifact approval.
-pub(crate) enum SurveyPhase {
+pub enum SurveyPhase {
     /// A clarifying-question round (1-based).
     Clarify { round: u8 },
     /// Approval of a presented artifact; `rework` is true on a
@@ -630,7 +639,7 @@ pub enum PendingEditor {
 
 /// Ensures a child stream spawned by `OpenRouter::stream_chat` is cancelled
 /// when its parent research/swarm task is aborted or otherwise dropped.
-pub(crate) struct AbortOnDrop(pub tokio::task::AbortHandle);
+pub struct AbortOnDrop(pub tokio::task::AbortHandle);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -662,12 +671,15 @@ pub enum AppEvent {
     Research(Option<ResearchMsg>),
     /// `/research` with no topic: a distilled topic from recent chat, or an error.
     ResearchTopic(Option<Result<String, String>>),
-    /// OpenAI Codex subscription login status or final result.
+    /// `OpenAI` Codex subscription login status or final result.
     Login(Option<LoginMsg>),
     /// A `/swarm` turn update, or `None` when its channel closed.
     Swarm(Option<swarm::SwarmMsg>),
 }
 
+// Channel/state fields share *_rx/*_tx postfixes by design — the postfix is the meaning.
+// App state is inherently many booleans (modes, toggles, dirty flags).
+#[allow(clippy::struct_field_names, clippy::struct_excessive_bools)]
 pub struct App {
     pub db: Db,
     pub(crate) space: Space,
@@ -697,7 +709,7 @@ pub struct App {
     /// Model used only for the deep-research escalation (contradiction
     /// resolution) stage; empty = falls back to `research_model`.
     pub escalation_model: String,
-    /// OCR engine choice: "auto" (vlm when ocr_model set), "tesseract",
+    /// OCR engine choice: "auto" (vlm when `ocr_model` set), "tesseract",
     /// "vlm", or "local" (Ollama on 127.0.0.1:11434, set up by cycling to it in /config).
     pub ocr_engine: String,
     /// Ollama model name for the "local" OCR engine.
@@ -708,10 +720,10 @@ pub struct App {
     pub image_gen_model: String,
     /// Model used for AI video generation (empty = disabled).
     pub video_gen_model: String,
-    /// Base URL of a SearXNG instance for the web-search tool, or empty to
+    /// Base URL of a `SearXNG` instance for the web-search tool, or empty to
     /// disable it. Configured in-app (Ctrl+O settings), not a config file.
     pub searxng_url: String,
-    /// LangSearch API key (free tier), or empty to disable it.
+    /// `LangSearch` API key (free tier), or empty to disable it.
     pub langsearch_key: String,
     /// Which web-search backend to prefer: "auto"/"langsearch"/"searxng"/"duckduckgo".
     pub search_provider: String,
@@ -777,7 +789,7 @@ pub struct App {
     /// GitHub `owner/repo/path` shorthand being typed in Install mode.
     pub skills_edit: String,
     pub(crate) skills_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
-    /// Background OCR updates: (space_id, file name, progress or final result).
+    /// Background OCR updates: (`space_id`, file name, progress or final result).
     pub(crate) ocr_rx: Option<mpsc::UnboundedReceiver<(String, String, files::OcrUpdate)>>,
     /// One in-flight chunk-embedding job: (space id, file id, vectors or error).
     pub(crate) embed_rx: Option<mpsc::UnboundedReceiver<EmbedMsg>>,
@@ -924,7 +936,7 @@ pub struct App {
     /// Highlighted row in the `/login` provider selector.
     pub login_selected: usize,
     pub settings_selected: usize,
-    /// Text edit buffers for the numeric settings (temperature, top_p, max_tokens).
+    /// Text edit buffers for the numeric settings (temperature, `top_p`, `max_tokens`).
     pub settings_inputs: [String; 8],
     /// Indices into `SETTINGS_GROUPS` currently collapsed (hidden fields).
     pub(crate) settings_collapsed: HashSet<usize>,
@@ -962,8 +974,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(db: Db, key: Option<String>, space: Space) -> Self {
-        let provider = key.clone().map(OpenRouter::from_key_auto);
+    // Long by design (app bootstrap).
+    #[allow(clippy::too_many_lines)]
+    pub fn new(db: Db, key: Option<&str>, space: Space) -> Self {
+        let provider = key.map(|k| OpenRouter::from_key_auto(k.to_string()));
         // A single bootstrap key (test convenience / a fresh single-backend
         // config): guess its flavor and seed both `backends` and `saved`
         // with it. Real app startup (main.rs) overwrites `saved` with the
@@ -975,9 +989,13 @@ impl App {
             let tag = p.backend_tag();
             backends.set(tag, p.clone());
             match tag {
-                crate::provider::BackendTag::OpenRouter => saved.openrouter_key = Some(k.clone()),
-                crate::provider::BackendTag::OpenAi => saved.openai_key = Some(k.clone()),
-                crate::provider::BackendTag::OpencodeGo => saved.opencode_key = Some(k.clone()),
+                crate::provider::BackendTag::OpenRouter => {
+                    saved.openrouter_key = Some((*k).to_string());
+                }
+                crate::provider::BackendTag::OpenAi => saved.openai_key = Some((*k).to_string()),
+                crate::provider::BackendTag::OpencodeGo => {
+                    saved.opencode_key = Some((*k).to_string());
+                }
                 // No full CodexCredentials from a bare key — fine for the
                 // bootstrap/test path, main.rs always has the real ones.
                 crate::provider::BackendTag::Codex => {}
@@ -1005,17 +1023,17 @@ impl App {
             });
         let _ = space.ensure_space_dir(&active_space.name);
         let default_model_id = |f: fn(&OpenRouter) -> &'static str, fallback: &'static str| {
-            provider
-                .as_ref()
-                .map(|p| {
+            provider.as_ref().map_or_else(
+                || fallback.to_string(),
+                |p| {
                     let model = f(p);
                     if model.is_empty() {
                         String::new()
                     } else {
                         format!("{}{}", p.backend_tag().key_prefix(), model)
                     }
-                })
-                .unwrap_or_else(|| fallback.to_string())
+                },
+            )
         };
         let utility_model = default_model_id(
             OpenRouter::default_utility_model,
@@ -1060,7 +1078,7 @@ impl App {
             // main() calls refresh_toolbox() once it's up.
             None,
         ));
-        let mut app = App {
+        let mut app = Self {
             db,
             space,
             backends,
@@ -1156,7 +1174,7 @@ impl App {
             clipboard: arboard::Clipboard::new().ok(),
             input_inner: Rect::default(),
             show_tool_detail: false,
-            history_cache: Default::default(),
+            history_cache: crate::ui::history::HistoryCache::default(),
             session_caches: std::collections::HashMap::new(),
             pending_editor: None,
             chat_event_tx,
@@ -1286,7 +1304,7 @@ impl App {
                 "verbosity" if VERBOSITY_LEVELS.contains(&v.as_str()) => self.verbosity = v,
                 "langsearch_key" => self.langsearch_key = v,
                 "search_provider" if SEARCH_PROVIDERS.contains(&v.as_str()) => {
-                    self.search_provider = v
+                    self.search_provider = v;
                 }
                 _ => {}
             }
@@ -1337,8 +1355,10 @@ impl App {
                         .unwrap_or_default(),
                 }),
         );
-        if self.is_research_session() {
-            toolbox = toolbox.with_research_session(self.session.as_ref().unwrap().id.clone());
+        if self.is_research_session()
+            && let Some(session_id) = self.session.as_ref().map(|s| s.id.clone())
+        {
+            toolbox = toolbox.with_research_session(session_id);
         }
         toolbox.image_gen_backend = (!self.image_gen_model.trim().is_empty())
             .then(|| self.backends.resolve(self.image_gen_model.trim()))
@@ -1421,27 +1441,27 @@ impl App {
     }
 
     /// Advance the spinner one frame (called on the animation tick).
-    pub fn tick_spinner(&mut self) {
+    pub const fn tick_spinner(&mut self) {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
     }
 
     /// Current spinner glyph.
-    pub fn spinner_char(&self) -> &'static str {
+    pub const fn spinner_char(&self) -> &'static str {
         SPINNER[self.spinner_frame % SPINNER.len()]
     }
 
     /// Randomly-chosen spinner colour for the current response.
     pub fn spinner_color(&self) -> Color {
         self.active_chat_task()
-            .map(|task| task.spinner_color)
-            .unwrap_or(self.spinner_color)
+            .map_or(self.spinner_color, |task| task.spinner_color)
     }
 
     /// Present-tense phrase for the in-progress response ("Vibing").
     pub fn thinking_phrase(&self) -> &'static str {
         self.active_chat_task()
-            .map(|task| THINKING[task.thinking_idx].0)
-            .unwrap_or(THINKING[self.thinking_idx].0)
+            .map_or(THINKING[self.thinking_idx].0, |task| {
+                THINKING[task.thinking_idx].0
+            })
     }
 
     /// Reasoning tokens accumulated so far this stream, if any.
@@ -1614,11 +1634,10 @@ impl App {
         let canonical = COMMANDS
             .iter()
             .find(|c| c.name == token || c.aliases.contains(&token))
-            .map(|c| c.name)
-            .unwrap_or(token);
+            .map_or(token, |c| c.name);
         match canonical {
             "quit" => self.should_quit = true,
-            "new" => self.new_session()?,
+            "new" => self.new_session(),
             "compact" => self.force_compact(),
             "session" => self.open_session_picker()?,
             "space" => self.open_space_picker()?,
@@ -1662,17 +1681,17 @@ impl App {
             "web" => self.toggle_web_mode(),
             "incognito" => self.toggle_incognito()?,
             "watch" => {
-                if !self.is_research_session() {
-                    self.status =
-                        "watch is only available in research sessions — use /research first"
-                            .to_string();
-                } else {
+                if self.is_research_session() {
                     let arg = cmd[token.len()..].trim();
                     if arg.is_empty() {
                         self.open_watch_picker()?;
                     } else {
                         self.create_watch(arg);
                     }
+                } else {
+                    self.status =
+                        "watch is only available in research sessions — use /research first"
+                            .to_string();
                 }
             }
             other => {
@@ -1722,7 +1741,7 @@ impl App {
         }
     }
 
-    /// Whether scanned PDFs should OCR through the OpenRouter vision model:
+    /// Whether scanned PDFs should OCR through the `OpenRouter` vision model:
     /// explicit "vlm", or "auto" with an OCR model configured. ("local" and
     /// "tesseract" route elsewhere.)
     pub(crate) fn vlm_ocr_enabled(&self) -> bool {
@@ -1744,7 +1763,7 @@ impl App {
 /// Best-effort transient Linux desktop notification. The TUI notification
 /// remains the actionable one because `notify-send` cannot route a click back
 /// into this running process without a long-lived D-Bus action listener.
-pub(crate) fn send_system_notification(title: &str, body: &str) {
+pub fn send_system_notification(title: &str, body: &str) {
     #[cfg(all(target_os = "linux", not(test)))]
     {
         let _ = std::process::Command::new("notify-send")
@@ -1762,9 +1781,11 @@ pub(crate) fn send_system_notification(title: &str, body: &str) {
     let _ = (title, body);
 }
 
+// Long by design (tool-summary table).
+#[allow(clippy::too_many_lines)]
 /// The one-line transcript summary for a tool-call block: the tool's name
 /// plus the argument (and result shape) a reader actually cares about.
-pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String {
+pub fn tool_call_summary(name: &str, args: &str, result: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
     let f = |k: &str| {
         v.get(k)
@@ -1807,7 +1828,10 @@ pub(crate) fn tool_call_summary(name: &str, args: &str, result: &str) -> String 
         "create_skill" => format!("create_skill {} → {}", f("name"), first_line(result)),
         "run_script" => {
             let path = f_or("path", "script");
-            if v.get("space").and_then(|x| x.as_bool()).unwrap_or(false) {
+            if v.get("space")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
                 format!("run_script space/{path}")
             } else {
                 format!("run_script {}/{}", f("skill"), path)

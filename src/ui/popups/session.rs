@@ -9,7 +9,7 @@ use crate::app::App;
 
 use super::chrome;
 
-pub(crate) fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &App) {
     use crate::app::SessionMode;
     let area = crate::ui::centered(f.area(), 64, 74);
 
@@ -115,7 +115,7 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}…", s.chars().take(keep).collect::<String>())
 }
 
-pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     use super::{
         ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key,
         classify_edit_key,
@@ -155,7 +155,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 Some(super::BrowseAction::MoveDown) => app.move_session_selection(1),
                 Some(super::BrowseAction::Rename) => app.start_rename(),
                 Some(super::BrowseAction::ConfirmDelete) => {
-                    app.session_mode = SessionMode::ConfirmDelete
+                    app.session_mode = SessionMode::ConfirmDelete;
                 }
                 Some(super::BrowseAction::Backspace) => app.session_filter_pop(),
                 Some(super::BrowseAction::Filter(c)) => app.session_filter_push(c),

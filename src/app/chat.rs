@@ -1,6 +1,16 @@
+// Casts here are on bounded values: token counts, byte sizes, and
+// selection indices — never on unbounded input. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use anyhow::Result;
 use chrono::Utc;
 use ratatui::style::Color;
+use std::fmt::Write as _;
 use tokio::sync::mpsc;
 
 use crate::db::Message;
@@ -55,8 +65,8 @@ impl App {
             let s = if self.incognito {
                 crate::db::Session {
                     id: uuid::Uuid::new_v4().to_string(),
-                    title: title.clone(),
-                    model: model.clone(),
+                    title,
+                    model,
                     slug: None,
                     created_at: Utc::now().to_rfc3339(),
                     compact_summary: None,
@@ -79,7 +89,9 @@ impl App {
             };
             self.session = Some(s);
         }
-        let session_id = self.session.as_ref().unwrap().id.clone();
+        let Some(session_id) = self.session.as_ref().map(|s| s.id.clone()) else {
+            return Ok(());
+        };
 
         if !self.incognito {
             self.db.add_user_message(&session_id, &text)?;
@@ -150,7 +162,7 @@ impl App {
             // per-persona swarm round replies, and gate replies (whose
             // survey/plan sections are excluded, so a bare "the second
             // option" or "drop Q2" must not reach the model without context).
-            if crate::app::App::excluded_from_model_history(m) {
+            if Self::excluded_from_model_history(m) {
                 continue;
             }
             if m.role == "tool_call" {
@@ -239,7 +251,7 @@ impl App {
             self.toolbox.clone(),
             crate::provider::openrouter::MAX_TOOL_ITERS,
         );
-        let Some(session) = self.session.as_ref().cloned() else {
+        let Some(session) = self.session.clone() else {
             return Ok(());
         };
         let (thinking_idx, spinner_color) = pick_flavor();
@@ -452,6 +464,8 @@ impl App {
         self.finish_chat_task_state(task, error, false)
     }
 
+    // Long by design (long state-transition fn).
+    #[allow(clippy::too_many_lines)]
     fn finish_chat_task_state(
         &mut self,
         task: super::ChatTask,
@@ -517,7 +531,7 @@ impl App {
         if viewing && !buf.is_empty() {
             self.messages.push(Message {
                 role: "assistant".to_string(),
-                content: buf.clone(),
+                content: buf,
                 model,
                 reasoning,
                 tokens,
@@ -652,7 +666,7 @@ impl App {
         };
         let _ = self.db.set_session_title(&id, &topic, Some(&slug));
         if let Some(s) = self.session.as_mut().filter(|s| s.id == id) {
-            s.title = topic.clone();
+            s.title.clone_from(&topic);
             s.slug = Some(slug.clone());
         }
         if let Some(s) = self.sessions_cache.iter_mut().find(|s| s.id == id) {
@@ -745,7 +759,7 @@ impl App {
         if let Some(sid) = self.session.as_ref().map(|s| s.id.clone()) {
             self.session_caches.remove(&sid);
         }
-        self.history_cache = Default::default();
+        self.history_cache = crate::ui::history::HistoryCache::default();
     }
 
     /// If the given rendered line index is an image or video thumbnail line,
@@ -760,7 +774,7 @@ impl App {
                     .strip_suffix("_first")
                     .or_else(|| stem.strip_suffix("_last"))
                 {
-                    let dir = p.parent().unwrap_or(std::path::Path::new(""));
+                    let dir = p.parent().unwrap_or_else(|| std::path::Path::new(""));
                     let direct = dir.join(format!("{base}.mp4"));
                     let stitched = dir.join(format!("_stitch_{base}.mp4"));
                     if direct.exists() {
@@ -889,7 +903,7 @@ impl App {
                      with its name; the full instructions will be returned.\n"
             .to_string();
         for skill in &self.skills {
-            s.push_str(&format!("- {}: {}\n", skill.name, skill.description));
+            let _ = writeln!(s, "- {}: {}", skill.name, skill.description);
         }
         Some(s.trim_end().to_string())
     }
@@ -907,11 +921,7 @@ impl App {
                       The `path` parameter is relative to the scripts dir — do NOT prefix `scripts/`.\n"
             .to_string();
         for script in &self.scripts_cache {
-            s.push_str(&format!(
-                "- {} ({})\n",
-                script.name,
-                human_size(script.size as i64),
-            ));
+            let _ = writeln!(s, "- {} ({})", script.name, human_size(script.size));
         }
         Some(s.trim_end().to_string())
     }
@@ -932,12 +942,13 @@ impl App {
                 .and_then(|e| e.to_str())
                 .unwrap_or("file")
                 .to_lowercase();
-            s.push_str(&format!(
-                "- {} ({kind}, {}, {})\n",
+            let _ = writeln!(
+                s,
+                "- {} ({kind}, {}, {})",
                 f.name,
-                human_size(f.size),
+                human_size(f.size.unsigned_abs()),
                 f.status
-            ));
+            );
         }
         Some(s.trim_end().to_string())
     }
@@ -999,9 +1010,9 @@ impl App {
                     .as_ref()
                     .and_then(|s| s.registry().resolve(&self.active_space.name, a))
                 {
-                    s.push_str(&format!("- {a} (uuid {uuid})\n"));
+                    let _ = writeln!(s, "- {a} (uuid {uuid})");
                 } else {
-                    s.push_str(&format!("- {a}\n"));
+                    let _ = writeln!(s, "- {a}");
                 }
             }
         }
@@ -1028,7 +1039,6 @@ impl App {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 let mime = match ext {
                     "jpg" | "jpeg" => "image/jpeg",
-                    "png" => "image/png",
                     "gif" => "image/gif",
                     "webp" => "image/webp",
                     "bmp" => "image/bmp",
@@ -1061,7 +1071,7 @@ impl App {
             return Vec::new();
         };
         let mut apps: Vec<String> = rd
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| e.path().is_dir())
             .filter_map(|e| e.file_name().into_string().ok())
             .collect();
@@ -1072,7 +1082,7 @@ impl App {
 
 /// Pick a thinking-phrase index and spinner colour pseudo-randomly (seeded from
 /// the clock; no rng dep).
-/// Each fenced ``` code block in `md` as `(language, code)`.
+/// Each fenced code block in `md` as `(language, code)`.
 pub(super) fn code_blocks(md: &str) -> Vec<(Option<String>, String)> {
     let mut out = Vec::new();
     let mut inside = false;
@@ -1104,16 +1114,14 @@ pub(super) fn code_blocks(md: &str) -> Vec<(Option<String>, String)> {
 pub(super) fn pick_greeting() -> &'static str {
     let n = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as usize)
-        .unwrap_or(0);
+        .map_or(0, |d| d.subsec_nanos() as usize);
     super::GREETINGS[n % super::GREETINGS.len()]
 }
 
 pub(super) fn pick_flavor() -> (usize, Color) {
     let n = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as usize)
-        .unwrap_or(0);
+        .map_or(0, |d| d.subsec_nanos() as usize);
     (n % THINKING.len(), SPINNER_COLORS[n % SPINNER_COLORS.len()])
 }
 
@@ -1163,7 +1171,7 @@ fn parse_tool_call_row(content: &str) -> Option<(ToolCall, String)> {
 }
 
 /// Compact byte counts: 940 B, 1.2 KB, 3.4 MB.
-pub(crate) fn human_size(bytes: i64) -> String {
+pub fn human_size(bytes: u64) -> String {
     match bytes {
         b if b < 1024 => format!("{b} B"),
         b if b < 1024 * 1024 => format!("{:.1} KB", b as f64 / 1024.0),

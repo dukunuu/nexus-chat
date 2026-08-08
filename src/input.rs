@@ -2,6 +2,15 @@
 //! slash-command autocomplete. `App` owns the `TextArea`; this module holds
 //! everything that operates on it.
 
+// Casts here are on terminal-bounded values (u16/u32 dims, byte colors,
+// glyph counts) — never on unbounded user data. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -27,15 +36,15 @@ pub enum Match {
 }
 
 impl Match {
-    pub fn name(&self) -> &str {
+    pub const fn name(&self) -> &str {
         match self {
-            Match::Builtin(c) => c.name,
+            Self::Builtin(c) => c.name,
         }
     }
 
-    pub fn desc(&self) -> &str {
+    pub const fn desc(&self) -> &str {
         match self {
-            Match::Builtin(c) => c.desc,
+            Self::Builtin(c) => c.desc,
         }
     }
 }
@@ -149,7 +158,7 @@ pub const COMMANDS: &[Command] = &[
 /// Subsequence fuzzy score, case-insensitive. `None` if `needle` isn't a
 /// subsequence of `hay`; higher is a better match (bonuses for contiguous runs
 /// and matching at the start).
-pub(crate) fn fuzzy_score(hay: &str, needle: &str) -> Option<i32> {
+pub fn fuzzy_score(hay: &str, needle: &str) -> Option<i32> {
     let hay = hay.to_lowercase();
     let needle = needle.to_lowercase();
     let mut chars = hay.chars();
@@ -199,9 +208,9 @@ fn command_score(c: &Command, needle: &str) -> Option<i32> {
     best
 }
 
-/// A composer TextArea with sane styling: no underlined cursor line, and a
+/// A composer `TextArea` with sane styling: no underlined cursor line, and a
 /// selection highlight that keeps the text readable (default is a blank white bg).
-pub(crate) fn new_textarea() -> TextArea<'static> {
+pub fn new_textarea() -> TextArea<'static> {
     let mut ta = TextArea::default();
     ta.set_cursor_line_style(Style::default());
     ta.set_selection_style(Style::default().bg(Color::Blue).fg(Color::White));
@@ -215,7 +224,7 @@ pub(crate) fn new_textarea() -> TextArea<'static> {
 /// it: `"copied {n} chars"` on success, `"clipboard unavailable"` if there's
 /// no clipboard or the set failed, or an empty string if `text` was empty
 /// (callers should leave the existing status untouched in that case).
-pub(crate) fn copy_to_clipboard(clipboard: &mut Option<arboard::Clipboard>, text: &str) -> String {
+pub fn copy_to_clipboard(clipboard: &mut Option<arboard::Clipboard>, text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
@@ -253,7 +262,7 @@ impl App {
     pub fn set_input(&mut self, text: &str) {
         let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
         let row = lines.len().saturating_sub(1);
-        let col = lines.last().map(|l| l.chars().count()).unwrap_or(0);
+        let col = lines.last().map_or(0, |l| l.chars().count());
         self.input.set_lines(lines, (row, col));
     }
 
@@ -314,10 +323,10 @@ impl App {
     /// bracketed paste and an explicit Ctrl+V (some terminals send neither
     /// reliably for every popup, so both paths funnel through here).
     pub fn paste(&mut self, text: &str) {
+        use crate::app::{AppsMode, Popup, SessionMode, SkillsMode, SpaceMode};
         if text.is_empty() {
             return;
         }
-        use crate::app::{AppsMode, Popup, SessionMode, SkillsMode, SpaceMode};
         match self.popup {
             Popup::None => {
                 // A dropped/pasted file path becomes an import offer instead of text.
@@ -332,23 +341,23 @@ impl App {
             }
             Popup::Key => self.key_input.push_str(text),
             Popup::Session if self.session_mode == SessionMode::Rename => {
-                self.session_edit.push_str(text)
+                self.session_edit.push_str(text);
             }
             Popup::Space if matches!(self.space_mode, SpaceMode::Create | SpaceMode::Rename) => {
                 self.space_edit.push_str(text);
             }
             Popup::Skills if self.skills_mode == SkillsMode::Install => {
-                self.skills_edit.push_str(text)
+                self.skills_edit.push_str(text);
             }
             Popup::Apps if self.apps_mode == AppsMode::EditFile => self.apps_edit.push_str(text),
             Popup::Files if self.files_mode == crate::app::FilesMode::Add => {
-                self.files_edit.push_str(text)
+                self.files_edit.push_str(text);
             }
             Popup::Files
                 if self.files_tab == crate::app::FilesTab::Scripts
                     && self.scripts_mode == crate::app::ScriptsMode::Create =>
             {
-                self.scripts_edit.push_str(text)
+                self.scripts_edit.push_str(text);
             }
             Popup::Files if self.files_mode == crate::app::FilesMode::Pick => {
                 for c in text.chars().filter(|c| !c.is_control()) {
@@ -360,10 +369,12 @@ impl App {
                     use crate::app::SettingsField;
                     let numeric = !matches!(
                         self.settings_field(),
-                        Some(SettingsField::SearxngUrl)
-                            | Some(SettingsField::LangsearchKey)
-                            | Some(SettingsField::EmbeddingModel)
-                            | Some(SettingsField::BlockedDomains)
+                        Some(
+                            SettingsField::SearxngUrl
+                                | SettingsField::LangsearchKey
+                                | SettingsField::EmbeddingModel
+                                | SettingsField::BlockedDomains
+                        )
                     );
                     let filtered: String = if numeric {
                         text.chars()
@@ -387,7 +398,7 @@ impl App {
         if self.popup == crate::app::Popup::None
             && let Some(img) = self.clipboard.as_mut().and_then(|cb| cb.get_image().ok())
         {
-            if let Some(md) = self.save_clipboard_image(img) {
+            if let Some(md) = self.save_clipboard_image(&img) {
                 self.input.insert_str(&md);
                 self.status = "image attached as markdown".to_string();
             }
@@ -449,19 +460,18 @@ impl App {
         };
         let cur = self.input.cursor();
         self.input.cancel_selection();
+        // `anchor` is already the exact start of its word (stored right
+        // after a `WordBack` in `select_composer_word`) — don't jump
+        // back again, or a boundary-aligned anchor would skip to the
+        // *previous* word's start (`WordBack` from an exact word-start
+        // lands on the prior word, matching typical vim `b` semantics).
+        self.jump_cursor(anchor);
         if cur >= anchor {
-            // `anchor` is already the exact start of its word (stored right
-            // after a `WordBack` in `select_composer_word`) — don't jump
-            // back again, or a boundary-aligned anchor would skip to the
-            // *previous* word's start (`WordBack` from an exact word-start
-            // lands on the prior word, matching typical vim `b` semantics).
-            self.jump_cursor(anchor);
             self.input.start_selection();
             self.jump_cursor(cur);
             self.input.move_cursor(CursorMove::WordEnd);
             self.input.move_cursor(CursorMove::Forward); // inclusive -> exclusive
         } else {
-            self.jump_cursor(anchor);
             self.input.move_cursor(CursorMove::WordEnd);
             self.input.move_cursor(CursorMove::Forward); // inclusive -> exclusive
             self.input.start_selection();
@@ -615,8 +625,7 @@ impl App {
         let selected = self
             .at_state
             .as_ref()
-            .map(|s| s.1.min(matches.len().saturating_sub(1)))
-            .unwrap_or(0);
+            .map_or(0, |s| s.1.min(matches.len().saturating_sub(1)));
         self.at_state = Some((matches, selected, at_offset));
     }
 
@@ -637,7 +646,7 @@ impl App {
     }
 
     /// Move @-autocomplete selection.
-    pub fn move_at_selection(&mut self, delta: i32) {
+    pub const fn move_at_selection(&mut self, delta: i32) {
         let Some((ref matches, ref mut selected, _)) = self.at_state else {
             return;
         };
@@ -660,7 +669,7 @@ mod tests {
         let space = Space {
             root: std::env::temp_dir().join(format!("nexus-input-test-{}", uuid::Uuid::new_v4())),
         };
-        App::new(db, Some("k".into()), space)
+        App::new(db, Some("k"), space)
     }
 
     #[test]

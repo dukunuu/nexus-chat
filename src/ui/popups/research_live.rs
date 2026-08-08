@@ -1,4 +1,3 @@
-use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::style::{Modifier, Style};
@@ -14,7 +13,7 @@ use super::chrome;
 /// Status/ToolCall events arrive — see `run_searcher` in `app/research.rs`),
 /// isolated into their own view plus a steer input line and a queued-steers
 /// section (steers not yet picked up at a round boundary).
-pub(crate) fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 76, 70);
 
     let dim = Style::default().fg(app.theme.fg_dim);
@@ -108,7 +107,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     f.render_widget(list, inner);
 }
 
-pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut App, key: KeyEvent) {
     let ctrl = key
         .modifiers
         .contains(crossterm::event::KeyModifiers::CONTROL);
@@ -126,5 +125,4 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char(c) => app.research_live_input.push(c),
         _ => {}
     }
-    Ok(())
 }

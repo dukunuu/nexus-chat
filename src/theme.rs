@@ -29,7 +29,7 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Theme {
+        Self {
             fg: Color::White,
             fg_dim: Color::DarkGray,
             accent: Color::Cyan,
@@ -86,11 +86,11 @@ fn hex_to_color(s: &str) -> Option<Color> {
 }
 
 impl Theme {
-    fn from_alacritty(a: Alacritty) -> Theme {
-        let fallback = Theme::default();
+    fn from_alacritty(a: &Alacritty) -> Self {
+        let fallback = Self::default();
         let n = &a.colors.normal;
         let b = &a.colors.bright;
-        Theme {
+        Self {
             fg: hex_to_color(&a.colors.primary.foreground).unwrap_or(fallback.fg),
             fg_dim: hex_to_color(&b.black).unwrap_or(fallback.fg_dim),
             accent: hex_to_color(&n.cyan).unwrap_or(fallback.accent),
@@ -126,7 +126,7 @@ pub fn load() -> Theme {
         .map(|d| d.join("theme/alacritty.toml"))
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| toml::from_str::<Alacritty>(&s).ok())
-        .map(Theme::from_alacritty)
+        .map(|a| Theme::from_alacritty(&a))
         .unwrap_or_default()
 }
 
@@ -162,7 +162,7 @@ cyan = "#d1fffe"
 white = "#ddf7ff"
 "##;
         let a: Alacritty = toml::from_str(toml).unwrap();
-        let theme = Theme::from_alacritty(a);
+        let theme = Theme::from_alacritty(&a);
         assert_eq!(theme.accent, Color::Rgb(0x7c, 0xf8, 0xf7));
         assert_eq!(theme.fg, Color::Rgb(0xdd, 0xf7, 0xff));
     }

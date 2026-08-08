@@ -1,3 +1,12 @@
+// Casts here are on terminal-bounded values (u16/u32 dims, byte colors,
+// glyph counts) — never on unbounded user data. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use image::GenericImageView;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -5,6 +14,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use super::{dim, dot, line_text};
 use crate::app::App;
@@ -15,7 +25,7 @@ use crate::db::Message;
 /// over every message. Invalidated when the width, display flags, or session
 /// change; new messages are appended incrementally.
 #[derive(Default)]
-pub(crate) struct HistoryCache {
+pub struct HistoryCache {
     key: (Option<String>, usize, bool, bool, bool, bool, usize),
     msg_count: usize,
     lines: Vec<Line<'static>>,
@@ -109,6 +119,8 @@ pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(visible), inner);
 }
 
+// Long by design (cache sync).
+#[allow(clippy::too_many_lines)]
 /// Bring the cached wrapped prefix up to date: reset on width/flag/session
 /// change, then wrap only messages not yet cached. Stored messages are
 /// append-only, so this is O(new messages) per frame instead of O(all).
@@ -322,7 +334,7 @@ fn push_tool_call(
 }
 
 /// A background-research progress line: a dim one-liner with a 🔎 marker,
-/// no expand/collapse (unlike tool_call — there's no arguments/result pair,
+/// no expand/collapse (unlike `tool_call` — there's no arguments/result pair,
 /// just a phase label).
 fn push_research_stage(
     out: &mut Vec<Line<'static>>,
@@ -429,7 +441,7 @@ fn push_research_plan(
 }
 
 /// A stored assistant reply: dot, collapsible reasoning, the answer, then a
-/// dim `· model · stats` footer (stats only when show_stats is on).
+/// dim `· model · stats` footer (stats only when `show_stats` is on).
 fn push_assistant_stored(
     out: &mut Vec<Line<'static>>,
     msg: &Message,
@@ -498,7 +510,7 @@ fn push_assistant_stored(
             && let (Some(tok), Some(secs)) = (msg.tokens, msg.secs)
         {
             let tps = if secs > 0.0 { tok as f64 / secs } else { 0.0 };
-            footer.push_str(&format!("  ·  {tps:.1} tok/s · ~{tok} tok · {secs:.2}s"));
+            let _ = write!(footer, "  ·  {tps:.1} tok/s · ~{tok} tok · {secs:.2}s");
         }
         out.push(Line::from(dim(footer, theme)));
     }
@@ -620,7 +632,7 @@ fn render_markdown_images(
     while let Some(start) = rest.find("![") {
         if let Some(end) = rest[start..].find(')') {
             let inner = &rest[start + 2..start + end];
-            if let Some((_alt, file)) = inner.split_once("](") {
+            if let Some((alt, file)) = inner.split_once("](") {
                 let path = images_dir.join(file);
                 let path_str = path.to_string_lossy().to_string();
                 let key = (path_str.clone(), width);
@@ -630,11 +642,11 @@ fn render_markdown_images(
                 if half.len() <= 1
                     && half
                         .first()
-                        .map(|l| l.to_string())
+                        .map(std::string::ToString::to_string)
                         .unwrap_or_default()
                         .contains("[image]")
                 {
-                    out.push(Line::from(dim(format!("🖼 {_alt}"), theme)));
+                    out.push(Line::from(dim(format!("🖼 {alt}"), theme)));
                     image_at_line.push(Some(path_str));
                 } else {
                     let img_start = out.len();
@@ -663,17 +675,14 @@ const MAX_IMAGE_ROWS: usize = 20;
 /// When the image is taller than `MAX_IMAGE_ROWS`, the last line says "🖼 image"
 /// so the user knows to click to open the full version.
 fn image_to_halfblock_lines(path: &str, max_width: usize) -> Vec<Line<'static>> {
-    let img = match image::open(path) {
-        Ok(img) => img,
-        Err(_) => {
-            return vec![Line::from(Span::raw("🖼 [image]"))];
-        }
+    let Ok(img) = image::open(path) else {
+        return vec![Line::from(Span::raw("🖼 [image]"))];
     };
     if max_width < 4 {
         return vec![Line::from(Span::raw("🖼"))];
     }
     let mut cell_w = max_width.min(img.width() as usize);
-    let aspect = img.width() as f64 / img.height() as f64;
+    let aspect = f64::from(img.width()) / f64::from(img.height());
     let mut cell_h = (cell_w as f64 / aspect).round().max(1.0) as usize;
     let truncated = cell_h > MAX_IMAGE_ROWS;
     if truncated {
@@ -749,7 +758,7 @@ mod tests {
         let space = crate::space::Space {
             root: std::env::temp_dir().join(format!("nexus-hist-{}", uuid::Uuid::new_v4())),
         };
-        App::new(db, Some("k".into()), space)
+        App::new(db, Some("k"), space)
     }
 
     #[test]

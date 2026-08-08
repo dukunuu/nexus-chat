@@ -9,7 +9,7 @@ use crate::app::{App, WatchMode};
 
 use super::chrome;
 
-pub(crate) fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 64, 60);
     let dim = Style::default().fg(app.theme.fg_dim);
     let items: Vec<ListItem> = if app.watches_cache.is_empty() {
@@ -61,7 +61,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     f.render_stateful_widget(list, inner, &mut state);
 }
 
-pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     match app.watch_mode {
         WatchMode::ConfirmDelete => match key.code {
             KeyCode::Char('d')

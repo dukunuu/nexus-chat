@@ -1,3 +1,12 @@
+// Casts here are on bounded values: token counts, byte sizes, and
+// selection indices — never on unbounded input. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use anyhow::Result;
 use tokio::sync::mpsc;
 
@@ -33,8 +42,7 @@ impl App {
         let through = self
             .session
             .as_ref()
-            .map(|s| s.compact_through as usize)
-            .unwrap_or(0)
+            .map_or(0, |s| s.compact_through as usize)
             .min(self.messages.len());
         &self.messages[through..]
     }
@@ -53,7 +61,7 @@ impl App {
             .checked_mul(100)
             .and_then(|v| v.checked_div(limit))
             .unwrap_or(0);
-        if pct < self.settings.compact_threshold as u64 {
+        if pct < u64::from(self.settings.compact_threshold) {
             return;
         }
         self.start_compaction(pct);
@@ -78,16 +86,12 @@ impl App {
             self.status = "nothing new to compact".to_string();
             return;
         }
-        let pct = self
-            .context_limit()
-            .filter(|&l| l > 0)
-            .map(|l| {
-                self.context_used()
-                    .checked_mul(100)
-                    .and_then(|v| v.checked_div(l))
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0);
+        let pct = self.context_limit().filter(|&l| l > 0).map_or(0, |l| {
+            self.context_used()
+                .checked_mul(100)
+                .and_then(|v| v.checked_div(l))
+                .unwrap_or(0)
+        });
         self.start_compaction(pct);
     }
 
@@ -95,16 +99,15 @@ impl App {
     /// back to the session model), same pattern as memory extraction.
     /// `before_pct` is only used to report the before/after status on completion.
     fn start_compaction(&mut self, before_pct: u64) {
-        let model = if !self.memory_model.trim().is_empty() {
-            self.memory_model.clone()
-        } else {
-            match self.current_model.clone() {
-                Some(m) => m,
-                None => {
-                    self.status = "pick a model first with /model".to_string();
-                    return;
-                }
+        let model = if self.memory_model.trim().is_empty() {
+            if let Some(m) = self.current_model.clone() {
+                m
+            } else {
+                self.status = "pick a model first with /model".to_string();
+                return;
             }
+        } else {
+            self.memory_model.clone()
         };
         let Some((provider, raw_model)) = self.resolve_model_backend(&model) else {
             self.status = format!("model backend unavailable: {model} — pick another with /model");
@@ -161,7 +164,7 @@ impl App {
         };
         let _ = self.db.set_compaction(&id, &summary, through);
         if let Some(s) = self.session.as_mut().filter(|s| s.id == id) {
-            s.compact_summary = Some(summary.clone());
+            s.compact_summary = Some(summary);
             s.compact_through = through;
         }
         self.context_total = None;
@@ -182,8 +185,7 @@ impl App {
         let mut instructions_chars = self.resolved_base_system_prompt().chars().count();
         instructions_chars +=
             std::fs::read_to_string(self.space.instructions_path(&self.active_space.name))
-                .map(|s| s.trim().chars().count())
-                .unwrap_or(0);
+                .map_or(0, |s| s.trim().chars().count());
         let memory_chars = self.read_memory().chars().count();
         let mut skills_chars: usize = self
             .skills
@@ -194,8 +196,7 @@ impl App {
             && let Some(skill) = self.skills.iter().find(|s| &s.name == name)
         {
             skills_chars += std::fs::read_to_string(skill.dir.join("SKILL.md"))
-                .map(|md| crate::skills::skill_body(&md).chars().count())
-                .unwrap_or(0);
+                .map_or(0, |md| crate::skills::skill_body(&md).chars().count());
         }
         let mut conversation_chars: usize = self
             .effective_messages()

@@ -1,3 +1,12 @@
+// Casts here are on bounded values: token counts, byte sizes, and
+// selection indices — never on unbounded input. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension};
@@ -115,7 +124,7 @@ impl Db {
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| format!("opening db {}", path.display()))?;
-        let db = Db { conn };
+        let db = Self { conn };
         db.migrate()?;
         Ok(db)
     }
@@ -134,6 +143,8 @@ impl Db {
         &self.conn
     }
 
+    // Long by design (schema migrations).
+    #[allow(clippy::too_many_lines)]
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
@@ -505,7 +516,7 @@ impl Db {
     pub fn set_session_web_mode(&self, session_id: &str, on: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET web_mode = ?2 WHERE id = ?1",
-            (session_id, on as i64),
+            (session_id, i64::from(on)),
         )?;
         Ok(())
     }
@@ -514,7 +525,7 @@ impl Db {
     pub fn set_session_swarm_mode(&self, session_id: &str, on: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET swarm_mode = ?2 WHERE id = ?1",
-            (session_id, on as i64),
+            (session_id, i64::from(on)),
         )?;
         Ok(())
     }
@@ -657,7 +668,7 @@ impl Db {
 
     /// Insert a background-research stage/progress line: plain text, shown in
     /// the transcript but never sent back to the model (unlike `tool_call`
-    /// rows, never replayed into build_history either — this is the job's
+    /// rows, never replayed into `build_history` either — this is the job's
     /// own scratch work, not something the chat model did).
     pub fn add_research_stage_message(&self, session_id: &str, content: &str) -> Result<String> {
         self.insert_message(
@@ -860,7 +871,7 @@ impl Db {
     // --- space filesets ---
 
     /// Insert or replace a file row (unique per space+name). Returns the row id;
-    /// an existing row keeps its id, so its chunks can be replaced by file_id.
+    /// an existing row keeps its id, so its chunks can be replaced by `file_id`.
     pub fn upsert_file(
         &self,
         space_id: &str,
@@ -1128,7 +1139,7 @@ pub fn blob_to_vec(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// Citations in `space_id` whose url/title/report_file contains `query`
+/// Citations in `space_id` whose `url/title/report_file` contains `query`
 /// (case-insensitive substring), or every row when `query` is None — as
 /// `(report_file, url, title)`, newest first. Free function so the toolbox
 /// can call it over its own short-lived connection.
@@ -1237,11 +1248,10 @@ pub fn discarded_domains(conn: &Connection, session_id: &str) -> Result<Vec<Stri
 /// the caller just re-fetches live.
 pub fn is_fresh(fetched_at: &str, now: chrono::DateTime<Utc>) -> bool {
     chrono::DateTime::parse_from_rfc3339(fetched_at)
-        .map(|dt| now.signed_duration_since(dt) < chrono::Duration::hours(24))
-        .unwrap_or(false)
+        .is_ok_and(|dt| now.signed_duration_since(dt) < chrono::Duration::hours(24))
 }
 
-/// A cached fetched page: (title, text, fetched_at rfc3339), or None on a
+/// A cached fetched page: (title, text, `fetched_at` rfc3339), or None on a
 /// cache miss. Free function — the toolbox opens its own short-lived
 /// connection by path, same as the file-search queries.
 pub fn cache_get(conn: &Connection, url_norm: &str) -> Result<Option<(String, String, String)>> {
@@ -1341,7 +1351,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 
 /// Quote a query for FTS5 MATCH: each whitespace token becomes a quoted
 /// phrase (inner quotes doubled), so model-supplied text can't be an FTS
-/// syntax error. Tokens are implicitly ANDed by FTS5.
+/// syntax error. Tokens are implicitly `ANDed` by FTS5.
 pub fn fts_quote(query: &str) -> String {
     query
         .split_whitespace()

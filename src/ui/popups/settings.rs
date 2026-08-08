@@ -17,7 +17,9 @@ fn split_label(label: &'static str) -> (String, String) {
     }
 }
 
-pub(crate) fn render(f: &mut Frame, app: &App) {
+// Long by design (settings renderer).
+#[allow(clippy::too_many_lines)]
+pub fn render(f: &mut Frame, app: &App) {
     use crate::app::{SETTINGS_GROUPS, SettingsField};
     let area = crate::ui::centered(f.area(), 64, 60);
 
@@ -132,19 +134,21 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     chrome::render_detail(f, detail_area, &desc, &app.theme);
 }
 
-pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     use crate::app::SettingsField;
     // The memory-model and transcriber-model rows are picked, not typed:
     // Enter opens the same model picker /model uses, Backspace clears it.
     let picker = matches!(
         app.settings_field(),
-        Some(SettingsField::MemoryModel)
-            | Some(SettingsField::TranscriberModel)
-            | Some(SettingsField::OcrModel)
-            | Some(SettingsField::ResearchModel)
-            | Some(SettingsField::EscalationModel)
-            | Some(SettingsField::ImageGenModel)
-            | Some(SettingsField::VideoGenModel)
+        Some(
+            SettingsField::MemoryModel
+                | SettingsField::TranscriberModel
+                | SettingsField::OcrModel
+                | SettingsField::ResearchModel
+                | SettingsField::EscalationModel
+                | SettingsField::ImageGenModel
+                | SettingsField::VideoGenModel
+        )
     );
     if picker {
         match key.code {
@@ -174,13 +178,12 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
     match key.code {
-        KeyCode::Esc => app.save_settings()?,
         // Enter on a group header toggles it; on a field it's a no-op here
         // (fields with an Enter action are handled by the `picker` branch above).
         KeyCode::Enter if matches!(app.settings_row(), SettingsRow::Group(_)) => {
-            app.toggle_settings_field()
+            app.toggle_settings_field();
         }
-        KeyCode::Enter => app.save_settings()?,
+        KeyCode::Esc | KeyCode::Enter => app.save_settings()?,
         KeyCode::Up => app.move_settings_selection(-1),
         KeyCode::Down | KeyCode::Tab => app.move_settings_selection(1),
         KeyCode::Char(' ') => app.toggle_settings_field(),

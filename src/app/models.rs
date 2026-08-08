@@ -1,3 +1,12 @@
+// Casts here are on bounded values: token counts, byte sizes, and
+// selection indices — never on unbounded input. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use anyhow::Result;
 use ratatui::widgets::ListState;
 
@@ -36,7 +45,7 @@ impl App {
         self.backends.resolve(id)
     }
 
-    /// Resolve a background utility model setting. If an old bare OpenRouter
+    /// Resolve a background utility model setting. If an old bare `OpenRouter`
     /// default would be misrouted to a non-OpenRouter backend, fall back to
     /// that backend's own utility model instead of silently sending an invalid
     /// model id (which breaks memory/title jobs after OpenAI/Codex/Go login).
@@ -94,8 +103,7 @@ impl App {
     /// Label for the model picker's current backend filter.
     pub(crate) fn model_backend_filter_label(&self) -> &'static str {
         self.model_backend_filter
-            .map(BackendTag::display_name)
-            .unwrap_or("all backends")
+            .map_or("all backends", BackendTag::display_name)
     }
 
     /// Cycle the model picker's backend filter among whichever backends are
@@ -206,7 +214,7 @@ impl App {
 
     /// `/login`: open the provider selector. Also what `open_model_picker`
     /// falls back to when nothing's configured yet.
-    pub(super) fn open_login_popup(&mut self) {
+    pub(super) const fn open_login_popup(&mut self) {
         self.login_selected = 0;
         self.popup = Popup::Login;
     }
@@ -258,7 +266,7 @@ impl App {
 
     /// Label for the key-entry popup's hint, matching whichever `/login`
     /// row opened it.
-    pub(crate) fn key_target_label(&self) -> &'static str {
+    pub(crate) const fn key_target_label(&self) -> &'static str {
         match self.key_target {
             KeyTarget::OpenRouter => "OpenRouter",
             KeyTarget::OpenAi => "OpenAI",
@@ -407,7 +415,7 @@ impl App {
         }
     }
 
-    fn state_mut(&mut self, panel: ModelPanel) -> &mut ListState {
+    const fn state_mut(&mut self, panel: ModelPanel) -> &mut ListState {
         match panel {
             ModelPanel::Favorites => &mut self.fav_state,
             ModelPanel::Available => &mut self.avail_state,
@@ -458,8 +466,7 @@ impl App {
             && let Some(skill) = self.skills.iter().find(|s| &s.name == name)
         {
             chars += std::fs::read_to_string(skill.dir.join("SKILL.md"))
-                .map(|md| crate::skills::skill_body(&md).chars().count())
-                .unwrap_or(0);
+                .map_or(0, |md| crate::skills::skill_body(&md).chars().count());
         }
         chars += self
             .effective_messages()
@@ -530,7 +537,7 @@ impl App {
             Some(_) => None,
             None => Some(enabled[0]),
         };
-        let next = next.map(|effort| effort.as_str());
+        let next = next.map(super::super::provider::ReasoningEffort::as_str);
         let accepted = efforts
             .iter()
             .map(|effort| {
@@ -616,7 +623,7 @@ impl App {
         state.select(Some(next));
     }
 
-    pub(crate) fn toggle_model_focus(&mut self) {
+    pub(crate) const fn toggle_model_focus(&mut self) {
         self.model_focus = match self.model_focus {
             ModelPanel::Favorites => ModelPanel::Available,
             ModelPanel::Available => ModelPanel::Favorites,
@@ -658,7 +665,7 @@ impl App {
     pub(crate) fn confirm_model(&mut self) -> Result<()> {
         let selected = self.state_mut(self.model_focus).selected().unwrap_or(0);
         if let Some(id) = self.id_at(self.model_focus, selected) {
-            self.pick_model(id)?;
+            self.pick_model(&id)?;
         }
         Ok(())
     }
@@ -672,69 +679,70 @@ impl App {
         }
         self.state_mut(panel).select(Some(index));
         if let Some(id) = self.id_at(panel, index) {
-            self.pick_model(id)?;
+            self.pick_model(&id)?;
         }
         Ok(())
     }
 
-    fn pick_model(&mut self, id: String) -> Result<()> {
+    fn pick_model(&mut self, id: &str) -> Result<()> {
         match self.model_pick_target {
             ModelPickTarget::Session => {
-                self.current_model = Some(id.clone());
+                self.current_model = Some(id.to_string());
                 if let Some(session) = &self.session {
-                    self.db.set_session_model(&session.id, &id)?;
+                    self.db.set_session_model(&session.id, id)?;
                 }
-                self.db.mark_model_used(&id)?;
-                self.last_used.insert(id.clone(), Utc::now().to_rfc3339());
+                self.db.mark_model_used(id)?;
+                self.last_used
+                    .insert(id.to_string(), Utc::now().to_rfc3339());
                 self.status = format!("model: {id}");
                 self.popup = Popup::None;
             }
             ModelPickTarget::Memory => {
-                self.memory_model = id.clone();
-                self.db.set_setting("memory_model", &id)?;
+                self.memory_model = id.to_string();
+                self.db.set_setting("memory_model", id)?;
                 self.status = format!("memory model: {id}");
                 // Picked from inside /config — return there rather than closing.
                 self.popup = Popup::Settings;
             }
             ModelPickTarget::Transcriber => {
-                self.transcriber_model = id.clone();
-                self.db.set_setting("transcriber_model", &id)?;
+                self.transcriber_model = id.to_string();
+                self.db.set_setting("transcriber_model", id)?;
                 self.status = format!("image model: {id}");
                 self.popup = Popup::Settings;
             }
             ModelPickTarget::Ocr => {
-                self.ocr_model = id.clone();
-                self.db.set_setting("ocr_model", &id)?;
+                self.ocr_model = id.to_string();
+                self.db.set_setting("ocr_model", id)?;
                 self.status = format!("OCR model: {id}");
                 self.popup = Popup::Settings;
             }
             ModelPickTarget::Research => {
-                self.research_model = id.clone();
-                self.db.set_setting("research_model", &id)?;
+                self.research_model = id.to_string();
+                self.db.set_setting("research_model", id)?;
                 self.status = format!("research model: {id}");
                 self.popup = Popup::Settings;
             }
             ModelPickTarget::Escalation => {
-                self.escalation_model = id.clone();
-                self.db.set_setting("escalation_model", &id)?;
+                self.escalation_model = id.to_string();
+                self.db.set_setting("escalation_model", id)?;
                 self.status = format!("escalation model: {id}");
                 self.popup = Popup::Settings;
             }
             ModelPickTarget::ImageGen => {
-                self.image_gen_model = id.clone();
-                self.db.set_setting("image_gen_model", &id)?;
+                self.image_gen_model = id.to_string();
+                self.db.set_setting("image_gen_model", id)?;
                 self.status = format!("image gen model: {id}");
                 self.popup = Popup::Settings;
             }
             ModelPickTarget::VideoGen => {
-                self.video_gen_model = id.clone();
-                self.db.set_setting("video_gen_model", &id)?;
+                self.video_gen_model = id.to_string();
+                self.db.set_setting("video_gen_model", id)?;
                 self.status = format!("video gen model: {id}");
                 self.popup = Popup::Settings;
             }
             ModelPickTarget::SwarmPersona(row) => {
                 if let Some(p) = self.swarm_cache.get_mut(row) {
-                    p.model = id.clone();
+                    p.model = id.to_string();
                 }
                 if let Some(session) = &self.session {
                     let _ = self.db.save_swarm_personas(&session.id, &self.swarm_cache);

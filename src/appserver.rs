@@ -39,7 +39,7 @@ impl AppRegistry {
         // Scan for orphan apps (app dirs not yet in the registry) and assign
         // UUIDs so old space-name URLs keep working.
         if let Ok(rd) = std::fs::read_dir(spaces_root) {
-            for entry in rd.filter_map(|e| e.ok()) {
+            for entry in rd.filter_map(std::result::Result::ok) {
                 let space_path = entry.path();
                 if !space_path.is_dir() {
                     continue;
@@ -53,13 +53,12 @@ impl AppRegistry {
                     continue;
                 }
                 if let Ok(ad) = std::fs::read_dir(&apps_dir) {
-                    for app_entry in ad.filter_map(|e| e.ok()) {
+                    for app_entry in ad.filter_map(std::result::Result::ok) {
                         if !app_entry.path().is_dir() {
                             continue;
                         }
-                        let app_name = match app_entry.file_name().into_string() {
-                            Ok(n) => n,
-                            Err(_) => continue,
+                        let Ok(app_name) = app_entry.file_name().into_string() else {
+                            continue;
                         };
                         let already = map
                             .values()
@@ -78,9 +77,9 @@ impl AppRegistry {
                 }
             }
         }
-        let registry = AppRegistry {
+        let registry = Self {
             inner: Arc::new(RwLock::new(map)),
-            path: path.clone(),
+            path,
         };
         let _ = registry.save();
         registry
@@ -148,14 +147,14 @@ pub struct AppServer {
 impl AppServer {
     /// Bind (preferring 8642, falling back to an ephemeral port) and start
     /// serving `spaces_root` in a background task. None if even `:0` fails.
-    pub async fn start(spaces_root: PathBuf) -> Option<AppServer> {
+    pub async fn start(spaces_root: PathBuf) -> Option<Self> {
         let listener = match TcpListener::bind(("127.0.0.1", PORT)).await {
             Ok(l) => l,
             Err(_) => TcpListener::bind(("127.0.0.1", 0)).await.ok()?,
         };
         let port = listener.local_addr().ok()?.port();
         let registry = AppRegistry::load(&spaces_root);
-        let srv = AppServer {
+        let srv = Self {
             port,
             registry: registry.clone(),
         };
@@ -174,7 +173,7 @@ impl AppServer {
         Some(srv)
     }
 
-    pub fn port(&self) -> u16 {
+    pub const fn port(&self) -> u16 {
         self.port
     }
 
@@ -182,7 +181,7 @@ impl AppServer {
         format!("http://127.0.0.1:{}/{}/", self.port(), uuid)
     }
 
-    pub fn registry(&self) -> &AppRegistry {
+    pub const fn registry(&self) -> &AppRegistry {
         &self.registry
     }
 }
@@ -202,13 +201,11 @@ async fn handle(
         buf.extend_from_slice(&chunk[..n]);
     }
 
-    let header_end = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
-        Some(pos) => pos,
-        None => return respond(&mut stream, 400, "text/plain", b"bad request", false).await,
+    let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return respond(&mut stream, 400, "text/plain", b"bad request", false).await;
     };
-    let header_str = match std::str::from_utf8(&buf[..header_end]) {
-        Ok(s) => s,
-        Err(_) => return respond(&mut stream, 400, "text/plain", b"bad request", false).await,
+    let Ok(header_str) = std::str::from_utf8(&buf[..header_end]) else {
+        return respond(&mut stream, 400, "text/plain", b"bad request", false).await;
     };
 
     let request_line = header_str.lines().next().unwrap_or("");
@@ -310,14 +307,13 @@ fn resolve(spaces_root: &Path, registry: &AppRegistry, raw_path: &str) -> Option
         return app_dir.is_dir().then_some(app_dir);
     }
 
-    let (space, app, path_start) = match registry.lookup(segs[0]) {
-        Some(entry) => (entry.space, entry.name, 1usize),
-        None => {
-            if segs.len() < 2 {
-                return None;
-            }
-            (segs[0].to_string(), segs[1].to_string(), 2)
+    let (space, app, path_start) = if let Some(entry) = registry.lookup(segs[0]) {
+        (entry.space, entry.name, 1usize)
+    } else {
+        if segs.len() < 2 {
+            return None;
         }
+        (segs[0].to_string(), segs[1].to_string(), 2)
     };
     let mut file = spaces_root.join(&space).join("apps").join(&app);
     for seg in &segs[path_start..] {
@@ -344,7 +340,6 @@ async fn respond(
         200 => "OK",
         204 => "No Content",
         400 => "Bad Request",
-        404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Request Entity Too Large",
         501 => "Not Implemented",
@@ -438,7 +433,7 @@ fn kv_op(db_path: &Path, method: &str, segs: &[&str], body: &[u8]) -> (u16, &'st
         "GET" if segs.is_empty() => {
             let keys: Vec<String> = match conn.prepare("SELECT key FROM kv ORDER BY key") {
                 Ok(mut stmt) => match stmt.query_map([], |r| r.get::<_, String>(0)) {
-                    Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                    Ok(rows) => rows.filter_map(std::result::Result::ok).collect(),
                     Err(e) => return (500, "text/plain", format!("query error: {e}").into_bytes()),
                 },
                 Err(e) => return (500, "text/plain", format!("query error: {e}").into_bytes()),
@@ -490,8 +485,7 @@ async fn handle_upload(
 ) -> std::io::Result<()> {
     let boundary = match content_type
         .split(';')
-        .filter_map(|p| p.trim().strip_prefix("boundary="))
-        .next()
+        .find_map(|p| p.trim().strip_prefix("boundary="))
     {
         Some(b) => b.trim_matches('"').to_string(),
         None => {
@@ -509,22 +503,19 @@ async fn handle_upload(
         return respond(stream, 400, "text/plain", b"empty boundary", false).await;
     }
 
-    let body_str = match std::str::from_utf8(body) {
-        Ok(s) => s,
-        Err(_) => {
-            return respond(
-                stream,
-                400,
-                "text/plain",
-                b"upload body is not valid UTF-8",
-                false,
-            )
-            .await;
-        }
+    let Ok(body_str) = std::str::from_utf8(body) else {
+        return respond(
+            stream,
+            400,
+            "text/plain",
+            b"upload body is not valid UTF-8",
+            false,
+        )
+        .await;
     };
 
-    let part_header = format!("--{}\r\n", boundary);
-    let part_end = format!("\r\n--{}", boundary);
+    let part_header = format!("--{boundary}\r\n");
+    let part_end = format!("\r\n--{boundary}");
 
     let Some(header_start) = body_str.find(&part_header) else {
         return respond(stream, 400, "text/plain", b"no multipart part found", false).await;
@@ -546,16 +537,16 @@ async fn handle_upload(
 
     let filename = part_headers
         .split(';')
-        .filter_map(|p| p.trim().strip_prefix("filename="))
-        .next()
-        .map(|f| f.trim_matches('"').to_string())
-        .unwrap_or_else(|| "upload.bin".to_string());
+        .find_map(|p| p.trim().strip_prefix("filename="))
+        .map_or_else(
+            || "upload.bin".to_string(),
+            |f| f.trim_matches('"').to_string(),
+        );
 
     let content_start = hdr_end + 4;
     let content_end = body_str[content_start..]
         .find(&part_end)
-        .map(|d| content_start + d)
-        .unwrap_or(body_str.len());
+        .map_or(body_str.len(), |d| content_start + d);
 
     let mut file_body = &body[content_start..content_end];
     if file_body.ends_with(b"\r\n") {
@@ -565,7 +556,7 @@ async fn handle_upload(
     let ext = std::path::Path::new(&filename)
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
+        .map(str::to_lowercase)
         .filter(|e| !e.is_empty() && e.chars().all(|c| c.is_ascii_alphanumeric()))
         .unwrap_or_else(|| "bin".to_string());
 

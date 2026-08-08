@@ -6,7 +6,7 @@ use crate::app::{App, Popup};
 
 use super::chrome;
 
-pub(crate) fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &App) {
     let outer = crate::ui::centered(f.area(), 60, 20);
     let masked = "*".repeat(app.key_input.chars().count());
     let title = chrome::input_title(
@@ -19,7 +19,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(""), inner);
 }
 
-pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
+pub fn handle_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => app.popup = Popup::Login,
         KeyCode::Enter => app.confirm_key(),

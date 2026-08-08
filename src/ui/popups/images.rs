@@ -18,7 +18,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             let created = crate::ui::fmt_created(&img.modified);
             ListItem::new(Line::from(vec![
                 Span::styled(img.name.clone(), Style::default().fg(app.theme.fg)),
-                Span::styled(format!("  {}", crate::app::human_size(img.size as i64)), dim),
+                Span::styled(format!("  {}", crate::app::human_size(img.size)), dim),
                 Span::styled(format!("  {created}"), dim),
             ]))
         })

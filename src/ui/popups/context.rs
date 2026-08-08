@@ -10,7 +10,7 @@ use super::chrome;
 
 /// Context breakdown popup (Ctrl+I): estimated tokens spent on system
 /// instructions, memory, conversation, and (pending) skills.
-pub(crate) fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), 56, 40);
     let b = app.context_breakdown();
     let dim = Style::default().fg(app.theme.fg_dim);
@@ -43,10 +43,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     }
     lines.push(Line::from(""));
     let total = b.system_tokens + b.memory_tokens + b.skills_tokens + b.conversation_tokens;
-    let limit_s = b
-        .limit
-        .map(crate::ui::humanize)
-        .unwrap_or_else(|| "?".to_string());
+    let limit_s = b.limit.map_or_else(|| "?".to_string(), crate::ui::humanize);
     lines.push(Line::from(vec![
         Span::styled(
             "Total        ",
@@ -75,7 +72,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
+pub fn handle_key(app: &mut App, key: KeyEvent) {
     if key.code == KeyCode::Esc {
         app.popup = Popup::None;
     }

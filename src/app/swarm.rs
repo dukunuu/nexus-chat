@@ -233,6 +233,8 @@ impl App {
     /// A swarm turn update: persist it, and mirror it into the live
     /// transcript if the session it belongs to is the one being viewed.
     /// `None` = the job's channel closed (fires once, right after the last update).
+    // Long by design (event dispatch).
+    #[allow(clippy::too_many_lines)]
     pub fn on_swarm_update(&mut self, r: Option<SwarmMsg>) {
         let Some((session_id, update)) = r else {
             self.swarm_rx = None;
@@ -260,12 +262,12 @@ impl App {
                         m.role == "research_stage"
                             && (m.content == "swarm" || m.content.starts_with("swarm:"))
                     }) {
-                        row.content = text.clone();
+                        row.content = text;
                         self.invalidate_history_cache();
                     } else {
                         self.messages.push(crate::db::Message {
                             role: "research_stage".to_string(),
-                            content: text.clone(),
+                            content: text,
                             model: None,
                             reasoning: None,
                             tokens: None,
@@ -395,7 +397,7 @@ fn parse_persona_editor(text: &str) -> Result<Persona, String> {
 /// Everything needed to start one swarm conversation turn: the persona
 /// roster, the model/provider config, the conversation history, and the
 /// orchestration plumbing (toolbox, session identity, update channel).
-pub(crate) struct SwarmTurnOptions {
+pub struct SwarmTurnOptions {
     pub backends: Backends,
     pub meta_provider: OpenRouter,
     pub raw_meta_model: String,
@@ -410,6 +412,8 @@ pub(crate) struct SwarmTurnOptions {
     pub tx: mpsc::UnboundedSender<SwarmMsg>,
 }
 
+// Long by design (roundtable orchestration).
+#[allow(clippy::too_many_lines)]
 async fn run_swarm_turn(opts: SwarmTurnOptions) {
     let SwarmTurnOptions {
         backends,
@@ -528,7 +532,7 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
                 SWARM_PERSONA_MAX_TOOL_ITERS,
             );
             let abort = super::AbortOnDrop(abort);
-            let response = timeout(Duration::from_secs(120), async {
+            let response = timeout(Duration::from_mins(2), async {
                 let mut content = String::new();
                 while let Some(event) = rx.recv().await {
                     match event {
@@ -560,12 +564,11 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
                 }
             })
             .await;
-            let response = match response {
-                Ok(result) => result,
-                Err(_) => {
-                    abort.0.abort();
-                    Err(anyhow::anyhow!("timed out after 120s"))
-                }
+            let response = if let Ok(result) = response {
+                result
+            } else {
+                abort.0.abort();
+                Err(anyhow::anyhow!("timed out after 120s"))
             };
             match response {
                 Ok(content) => {
@@ -604,7 +607,7 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
             "round {round} complete — moderator checking for a conclusion…"
         )));
         match moderator_check(&meta_provider, &raw_meta_model, &user_message, &discussion).await {
-            Ok(ModeratorVerdict::Converged) => break 'convo,
+            Ok(ModeratorVerdict::Converged) | Err(_) => break 'convo,
             Ok(ModeratorVerdict::Continue) => {}
             Ok(ModeratorVerdict::AddPersona { name, blurb }) => {
                 if personas.len() >= MAX_PERSONAS
@@ -620,7 +623,6 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
                 send(SwarmUpdate::PersonaJoined(new_persona.clone()));
                 personas.push(new_persona);
             }
-            Err(_) => break 'convo, // fail safe after a complete, answered round
         }
     }
 
@@ -648,6 +650,12 @@ fn render_discussion(discussion: &[(String, String)]) -> Option<String> {
     )
 }
 
+#[derive(serde::Deserialize)]
+struct Suggested {
+    name: String,
+    blurb: String,
+}
+
 async fn suggest_personas(
     provider: &OpenRouter,
     meta_model: &str,
@@ -661,7 +669,7 @@ async fn suggest_personas(
          perspective\"}}, ...]\n\nMessage: {topic}"
     );
     let raw = timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         provider.complete(meta_model, vec![ChatMessage::text("user", prompt)]),
     )
     .await
@@ -677,12 +685,6 @@ fn parse_suggested_personas(raw: &str, default_model: &str) -> Result<Vec<Person
     let start = raw.find('[').ok_or("no JSON array in response")?;
     let end = raw.rfind(']').ok_or("no JSON array in response")?;
     let json = raw.get(start..=end).ok_or("no JSON array in response")?;
-
-    #[derive(serde::Deserialize)]
-    struct Suggested {
-        name: String,
-        blurb: String,
-    }
     let parsed: Vec<Suggested> = serde_json::from_str(json).map_err(|e| e.to_string())?;
     Ok(parsed
         .into_iter()

@@ -1,3 +1,12 @@
+// Casts here are on bounded values: token counts, byte sizes, and
+// selection indices — never on unbounded input. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use anyhow::Result;
 
 use super::{
@@ -81,7 +90,7 @@ impl App {
             SettingsRow::Field(field) => match field {
                 SettingsField::ShowStats => self.settings.show_stats = !self.settings.show_stats,
                 SettingsField::ShowReasoning => {
-                    self.settings.show_reasoning = !self.settings.show_reasoning
+                    self.settings.show_reasoning = !self.settings.show_reasoning;
                 }
                 SettingsField::HideHints => self.settings.hide_hints = !self.settings.hide_hints,
                 SettingsField::Verbosity => {
@@ -153,10 +162,12 @@ impl App {
         let Some(i) = self.text_index() else { return };
         let numeric = !matches!(
             self.settings_field(),
-            Some(SettingsField::SearxngUrl)
-                | Some(SettingsField::LangsearchKey)
-                | Some(SettingsField::EmbeddingModel)
-                | Some(SettingsField::BlockedDomains)
+            Some(
+                SettingsField::SearxngUrl
+                    | SettingsField::LangsearchKey
+                    | SettingsField::EmbeddingModel
+                    | SettingsField::BlockedDomains
+            )
         );
         if numeric && !(c.is_ascii_digit() || c == '.') {
             return;

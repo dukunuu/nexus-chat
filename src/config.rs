@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -195,7 +196,7 @@ async fn refresh_codex_if_needed(creds: CodexCredentials) -> Result<CodexCredent
         .to_string();
     let expires_in = resp
         .get("expires_in")
-        .and_then(|v| v.as_i64())
+        .and_then(serde_json::Value::as_i64)
         .context("missing expires_in")?;
     Ok(CodexCredentials {
         account_id: codex_account_id(&access)?,
@@ -255,6 +256,8 @@ fn load_config_all() -> Result<(String, String, String, Option<CodexCredentials>
     ))
 }
 
+// Long by design (device-flow state machine).
+#[allow(clippy::too_many_lines)]
 pub async fn login_openai_codex_device(
     status: tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<CodexCredentials> {
@@ -295,7 +298,7 @@ pub async fn login_openai_codex_device(
     ));
     let _ = open::that(&prefilled_url);
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(15);
     let code = loop {
         if std::time::Instant::now() >= deadline {
             bail!("OpenAI Codex device login timed out");
@@ -364,7 +367,7 @@ pub async fn login_openai_codex_device(
         .to_string();
     let expires_in = token
         .get("expires_in")
-        .and_then(|v| v.as_i64())
+        .and_then(serde_json::Value::as_i64)
         .context("missing expires_in")?;
     let creds = CodexCredentials {
         account_id: codex_account_id(&access)?,
@@ -398,10 +401,10 @@ fn write_provider_config(
     );
     if let Some(c) = codex {
         body.push_str("\n[provider.openai_codex]\n");
-        body.push_str(&format!("access = \"{}\"\n", escape(&c.access)));
-        body.push_str(&format!("refresh = \"{}\"\n", escape(&c.refresh)));
-        body.push_str(&format!("expires = {}\n", c.expires));
-        body.push_str(&format!("account_id = \"{}\"\n", escape(&c.account_id)));
+        let _ = writeln!(body, "access = \"{}\"", escape(&c.access));
+        let _ = writeln!(body, "refresh = \"{}\"", escape(&c.refresh));
+        let _ = writeln!(body, "expires = {}", c.expires);
+        let _ = writeln!(body, "account_id = \"{}\"", escape(&c.account_id));
     }
     std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
     Ok(())

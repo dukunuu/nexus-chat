@@ -2,6 +2,7 @@
 //! pdf-extract, office formats (pptx/docx/xlsx) by scanning their zipped XML
 //! for text tags — same string-scanning style as tools.rs's DDG HTML parser.
 
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::Path;
 
@@ -13,29 +14,24 @@ const CHUNK_LINES: usize = 40;
 /// if the PDF has no outline (most scanned PDFs won't).
 fn pdf_toc(path: &Path) -> String {
     use pdf_extract::{Document, Object};
-    let doc = match Document::load(path) {
-        Ok(d) => d,
-        Err(_) => return String::new(),
+    let Ok(doc) = Document::load(path) else {
+        return String::new();
     };
-    let catalog = match doc.catalog() {
-        Ok(c) => c,
-        Err(_) => return String::new(),
+    let Ok(catalog) = doc.catalog() else {
+        return String::new();
     };
-    let outlines_obj = match catalog.get(b"Outlines") {
-        Ok(o) => o,
-        Err(_) => return String::new(),
+    let Ok(outlines_obj) = catalog.get(b"Outlines") else {
+        return String::new();
     };
     let first_id = match outlines_obj {
         Object::Reference(id) => *id,
         _ => return String::new(),
     };
-    let outlines = match doc.get_object(first_id) {
-        Ok(o) => o,
-        Err(_) => return String::new(),
+    let Ok(outlines) = doc.get_object(first_id) else {
+        return String::new();
     };
-    let dict = match outlines.as_dict() {
-        Ok(d) => d,
-        Err(_) => return String::new(),
+    let Ok(dict) = outlines.as_dict() else {
+        return String::new();
     };
     let first = match dict.get(b"First") {
         Ok(Object::Reference(id)) => *id,
@@ -74,13 +70,11 @@ fn walk_outline(
     out: &mut String,
 ) {
     use pdf_extract::Object;
-    let item = match doc.get_object(id) {
-        Ok(o) => o,
-        Err(_) => return,
+    let Ok(item) = doc.get_object(id) else {
+        return;
     };
-    let dict = match item.as_dict() {
-        Ok(d) => d,
-        Err(_) => return,
+    let Ok(dict) = item.as_dict() else {
+        return;
     };
     if let Ok(Object::String(title_bytes, _)) = dict.get(b"Title") {
         let title = decode_pdf_string(title_bytes);
@@ -91,7 +85,7 @@ fn walk_outline(
             // page reference, or absent. Page numbers from the outline
             // would require resolving the Dest against the page tree,
             // which is complex and rarely critical.
-            out.push_str(&format!("{indent}{title}\n"));
+            let _ = writeln!(out, "{indent}{title}");
         }
     }
     // Children
@@ -107,11 +101,11 @@ fn walk_outline(
 /// Extract searchable text from `path`, dispatching on the (lowercased)
 /// extension. `Ok("")` means the file parsed but had no text (e.g. a scanned
 /// PDF); `Err` means it couldn't be read/parsed at all.
-pub(crate) fn extract_text(path: &Path) -> Result<String> {
+pub fn extract_text(path: &Path) -> Result<String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
+        .map(str::to_lowercase)
         .unwrap_or_default();
     match ext.as_str() {
         "pdf" => {
@@ -127,9 +121,9 @@ pub(crate) fn extract_text(path: &Path) -> Result<String> {
                 Ok(format!("{toc}\n\n{text}"))
             }
         }
-        "docx" => office_text(path, OfficeKind::Docx),
-        "pptx" => office_text(path, OfficeKind::Pptx),
-        "xlsx" => office_text(path, OfficeKind::Xlsx),
+        "docx" => office_text(path, &OfficeKind::Docx),
+        "pptx" => office_text(path, &OfficeKind::Pptx),
+        "xlsx" => office_text(path, &OfficeKind::Xlsx),
         // Images: return empty text so the OCR pipeline picks them up.
         _ if is_image_ext(&ext) => Ok(String::new()),
         // Everything else: treat as text if it looks like text.
@@ -154,7 +148,10 @@ enum OfficeKind {
 /// Pull text out of an OOXML zip by scanning member XML for text tags.
 /// ponytail: tag scanning, not an XML parser — same approach as tools.rs's
 /// DDG HTML scraping; swap in a real parser only if a document breaks it.
-fn office_text(path: &Path, kind: OfficeKind) -> Result<String> {
+// ZIP entry names are case-sensitive by spec, so these prefix/extension
+// comparisons must stay exact (the lint targets display-extension matches).
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+fn office_text(path: &Path, kind: &OfficeKind) -> Result<String> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut zip = zip::ZipArchive::new(file).context("reading office zip")?;
     let mut out = String::new();
@@ -202,7 +199,7 @@ fn office_text(path: &Path, kind: OfficeKind) -> Result<String> {
                 if let Some(xml) = read_entry(name) {
                     let texts = xml_tag_texts(&xml, "a:t");
                     if !texts.is_empty() {
-                        out.push_str(&format!("[slide {n}]\n"));
+                        let _ = writeln!(out, "[slide {n}]");
                         out.push_str(&texts.join("\n"));
                         out.push('\n');
                     }
@@ -276,7 +273,7 @@ fn xml_unescape(s: &str) -> String {
 }
 
 /// Split extracted text into ~40-line chunks labeled with their line range.
-pub(crate) fn chunk_lines(text: &str) -> Vec<(String, String)> {
+pub fn chunk_lines(text: &str) -> Vec<(String, String)> {
     if text.trim().is_empty() {
         return Vec::new();
     }
@@ -293,14 +290,14 @@ pub(crate) fn chunk_lines(text: &str) -> Vec<(String, String)> {
 }
 
 /// Whether a lowercased file extension is a supported image type.
-pub(crate) fn is_image_ext(ext: &str) -> bool {
+pub fn is_image_ext(ext: &str) -> bool {
     matches!(ext, "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp")
 }
 
 /// Why OCR failed: the tools aren't installed (user-fixable hint) vs a real
 /// failure (surfaced as an error status).
 #[derive(Debug)]
-pub(crate) enum OcrError {
+pub enum OcrError {
     MissingTools,
     Failed(String),
 }
@@ -309,7 +306,7 @@ pub(crate) enum OcrError {
 /// marker lines — same inline-marker convention as pptx's `[slide N]`.
 /// `Ok("")` means the tools ran but found no text. `progress` is called after
 /// each finished page with (pages done, total pages).
-pub(crate) fn ocr_pdf(
+pub fn ocr_pdf(
     path: &Path,
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> std::result::Result<String, OcrError> {
@@ -355,7 +352,7 @@ fn run_ocr_cmd(
 
 /// Render a PDF's pages to PNGs in `tmp` with pdftoppm, returned in document
 /// order (pdftoppm zero-pads page numbers, so a lexical sort is page order).
-pub(crate) fn render_pdf_pages(
+pub fn render_pdf_pages(
     pdftoppm: &str,
     path: &Path,
     tmp: &Path,
@@ -381,13 +378,17 @@ pub(crate) fn render_pdf_pages(
 /// Join per-page OCR results with `[page N]` markers: blank pages are
 /// dropped, failed pages leave a `[page N: ocr failed]` marker so the rest
 /// of the document still lands.
-pub(crate) fn join_pages(results: &[std::result::Result<String, String>]) -> String {
+pub fn join_pages(results: &[std::result::Result<String, String>]) -> String {
     let mut text = String::new();
     for (i, r) in results.iter().enumerate() {
         match r {
             Ok(p) if p.trim().is_empty() => {}
-            Ok(p) => text.push_str(&format!("[page {}]\n{}\n", i + 1, p.trim())),
-            Err(_) => text.push_str(&format!("[page {}: ocr failed]\n", i + 1)),
+            Ok(p) => {
+                let _ = write!(text, "[page {}]\n{}\n", i + 1, p.trim());
+            }
+            Err(_) => {
+                let _ = writeln!(text, "[page {}: ocr failed]", i + 1);
+            }
         }
     }
     text.trim().to_string()
@@ -415,8 +416,7 @@ fn ocr_pdf_in(
     // OCR pages in parallel — one tesseract process per core, pulling page
     // indices off a shared counter; results re-ordered by index afterwards.
     let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
+        .map_or(4, std::num::NonZero::get)
         .min(pages.len().max(1));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results = std::sync::Mutex::new(Vec::with_capacity(pages.len()));
@@ -451,7 +451,7 @@ fn ocr_pdf_in(
         let page = String::from_utf8_lossy(&stdout);
         let page = page.trim();
         if !page.is_empty() {
-            text.push_str(&format!("[page {}]\n{page}\n", i + 1));
+            let _ = writeln!(text, "[page {}]\n{page}", i + 1);
         }
     }
     Ok(text.trim().to_string())

@@ -2,7 +2,7 @@ pub mod openrouter;
 
 use serde::{Deserialize, Serialize};
 
-/// A tool the model may call, in OpenAI function-calling shape.
+/// A tool the model may call, in `OpenAI` function-calling shape.
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDef {
     pub name: String,
@@ -32,24 +32,24 @@ pub enum BackendTag {
 
 impl BackendTag {
     /// Prefix used to key favorites/last-used/current-model/etc. for this
-    /// backend's models — bare (no prefix) for OpenRouter so existing
+    /// backend's models — bare (no prefix) for `OpenRouter` so existing
     /// users' saved data keeps working untouched; the other three are
     /// visually tagged since their raw ids can collide (e.g. two "gpt-4.1"s).
-    pub fn key_prefix(self) -> &'static str {
+    pub const fn key_prefix(self) -> &'static str {
         match self {
-            BackendTag::OpenRouter => "",
-            BackendTag::OpenAi => "openai:",
-            BackendTag::OpencodeGo => "opencode:",
-            BackendTag::Codex => "codex:",
+            Self::OpenRouter => "",
+            Self::OpenAi => "openai:",
+            Self::OpencodeGo => "opencode:",
+            Self::Codex => "codex:",
         }
     }
 
-    pub fn display_name(self) -> &'static str {
+    pub const fn display_name(self) -> &'static str {
         match self {
-            BackendTag::OpenRouter => "OpenRouter",
-            BackendTag::OpenAi => "OpenAI",
-            BackendTag::OpencodeGo => "OpenCode Go",
-            BackendTag::Codex => "Codex",
+            Self::OpenRouter => "OpenRouter",
+            Self::OpenAi => "OpenAI",
+            Self::OpencodeGo => "OpenCode Go",
+            Self::Codex => "Codex",
         }
     }
 }
@@ -71,67 +71,53 @@ pub enum ReasoningEffort {
 }
 
 impl ReasoningEffort {
-    /// Wire value sent to the provider (and stored in model_prefs).
-    pub fn as_str(self) -> &'static str {
+    /// Wire value sent to the provider (and stored in `model_prefs`).
+    pub const fn as_str(self) -> &'static str {
         match self {
-            ReasoningEffort::None => "none",
-            ReasoningEffort::Minimal => "minimal",
-            ReasoningEffort::Low => "low",
-            ReasoningEffort::Medium => "medium",
-            ReasoningEffort::High => "high",
-            ReasoningEffort::XHigh => "xhigh",
-            ReasoningEffort::Max => "max",
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
     /// Every known wire value in UI cycle order: enabled tiers from least to
     /// most thinking, then explicit disable when the model accepts it.
-    pub const CYCLE_ORDER: &'static [ReasoningEffort] = &[
-        ReasoningEffort::Minimal,
-        ReasoningEffort::Low,
-        ReasoningEffort::Medium,
-        ReasoningEffort::High,
-        ReasoningEffort::XHigh,
-        ReasoningEffort::Max,
-        ReasoningEffort::None,
+    pub const CYCLE_ORDER: &'static [Self] = &[
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+        Self::None,
     ];
 
     /// The values most reasoning models accept when no richer metadata exists.
-    pub const STANDARD: &'static [ReasoningEffort] = &[
-        ReasoningEffort::Low,
-        ReasoningEffort::Medium,
-        ReasoningEffort::High,
-    ];
+    pub const STANDARD: &'static [Self] = &[Self::Low, Self::Medium, Self::High];
 
     /// Models that add a `minimal` tier to the standard set.
-    pub const WITH_MINIMAL: &'static [ReasoningEffort] = &[
-        ReasoningEffort::Minimal,
-        ReasoningEffort::Low,
-        ReasoningEffort::Medium,
-        ReasoningEffort::High,
-    ];
+    pub const WITH_MINIMAL: &'static [Self] = &[Self::Minimal, Self::Low, Self::Medium, Self::High];
 
     /// Models that can be explicitly disabled and add an `xhigh` tier.
-    pub const WITH_XHIGH_AND_NONE: &'static [ReasoningEffort] = &[
-        ReasoningEffort::Low,
-        ReasoningEffort::Medium,
-        ReasoningEffort::High,
-        ReasoningEffort::XHigh,
-        ReasoningEffort::None,
-    ];
+    pub const WITH_XHIGH_AND_NONE: &'static [Self] =
+        &[Self::Low, Self::Medium, Self::High, Self::XHigh, Self::None];
 
     /// Models that additionally expose a top-level `max` tier.
-    pub const WITH_MAX_XHIGH_AND_NONE: &'static [ReasoningEffort] = &[
-        ReasoningEffort::Low,
-        ReasoningEffort::Medium,
-        ReasoningEffort::High,
-        ReasoningEffort::XHigh,
-        ReasoningEffort::Max,
-        ReasoningEffort::None,
+    pub const WITH_MAX_XHIGH_AND_NONE: &'static [Self] = &[
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+        Self::None,
     ];
 
     /// Models whose only configurable reasoning tier is `high`.
-    pub const HIGH_ONLY: &'static [ReasoningEffort] = &[ReasoningEffort::High];
+    pub const HIGH_ONLY: &'static [Self] = &[Self::High];
 }
 
 /// A model offered by the provider, as shown in the picker.
@@ -148,7 +134,7 @@ pub struct Model {
     pub supports_images: bool,
     /// Whether the model generates image output (`architecture.output_modalities`).
     pub supports_image_generation: bool,
-    /// Whether the model is listed by OpenRouter's dedicated video catalog.
+    /// Whether the model is listed by `OpenRouter`'s dedicated video catalog.
     pub supports_video_generation: bool,
     /// Which backend this model came from.
     pub backend: BackendTag,
@@ -168,10 +154,10 @@ pub struct ChatParams {
 
 /// A message sent to the completions API. `tool_calls` (assistant requesting
 /// tools) and `tool_call_id` (a tool's result) are only set on those two
-/// message shapes; wire format follows the OpenAI function-calling schema.
+/// message shapes; wire format follows the `OpenAI` function-calling schema.
 /// `images` (data URLs) are set for user messages with attachments when the
 /// active model supports vision; when non-empty, `content` serializes as an
-/// OpenAI vision parts array instead of a plain string.
+/// `OpenAI` vision parts array instead of a plain string.
 #[derive(Debug, Clone, Default)]
 pub struct ChatMessage {
     pub role: String,
@@ -183,7 +169,7 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
-        ChatMessage {
+        Self {
             role: role.into(),
             content: content.into(),
             ..Default::default()
@@ -247,6 +233,8 @@ impl Serialize for ChatMessage {
 /// the UI event loop can interleave them with keypresses.
 /// Exact token accounting reported by the provider at end of stream.
 #[derive(Debug, Clone, Copy)]
+// _tokens postfix is the unit — removing it would make the fields ambiguous.
+#[allow(clippy::struct_field_names)]
 pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,

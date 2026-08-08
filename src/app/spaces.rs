@@ -20,11 +20,11 @@ impl App {
     /// Spaces matching the current fuzzy filter, best match first. Empty filter
     /// keeps db order (default first, then creation order).
     pub fn filtered_spaces(&self) -> Vec<&SpaceRow> {
+        use crate::input::fuzzy_score;
         let needle = self.space_filter.trim();
         if needle.is_empty() {
             return self.spaces_cache.iter().collect();
         }
-        use crate::input::fuzzy_score;
         super::fuzzy_filter_sorted(&self.spaces_cache, |s| fuzzy_score(&s.name, needle))
     }
 
@@ -79,11 +79,15 @@ impl App {
         if let (false, Some(s)) = (name.is_empty(), self.selected_space()) {
             self.db.rename_space(&s.id, &name)?;
             self.space.rename_space_dir(&s.name, &name)?;
-            if let Some(reg) = self.app_server.as_ref().map(|s| s.registry()) {
+            if let Some(reg) = self
+                .app_server
+                .as_ref()
+                .map(super::super::appserver::AppServer::registry)
+            {
                 reg.rename_space(&s.name, &name);
             }
             if let Some(cached) = self.spaces_cache.iter_mut().find(|c| c.id == s.id) {
-                cached.name = name.clone();
+                cached.name.clone_from(&name);
             }
             if self.active_space.id == s.id {
                 self.active_space.name = name;
@@ -120,7 +124,7 @@ impl App {
             .list_spaces()?
             .into_iter()
             .find(|s| s.id == default_id)
-            .unwrap();
+            .ok_or_else(|| anyhow::anyhow!("default space {default_id:?} no longer exists"))?;
         self.set_active_space(row);
         Ok(())
     }
@@ -172,11 +176,10 @@ impl App {
         Some(path)
     }
 
-    pub fn confirm_space(&mut self) -> Result<()> {
+    pub fn confirm_space(&mut self) {
         if let Some(s) = self.selected_space() {
             self.set_active_space(s);
         }
         self.popup = Popup::None;
-        Ok(())
     }
 }

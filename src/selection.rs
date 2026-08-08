@@ -209,12 +209,12 @@ impl HistorySel {
         let first = self.code.iter().position(|c| *c == Some(id));
         let last = self.code.iter().rposition(|c| *c == Some(id));
         if let (Some(first), Some(last)) = (first, last) {
-            let len = self.lines.get(last).map(|l| l.chars().count()).unwrap_or(0);
+            let len = self.lines.get(last).map_or(0, |l| l.chars().count());
             self.sel = Some(((first, 0), (last, len)));
         }
     }
 
-    pub fn clear(&mut self) {
+    pub const fn clear(&mut self) {
         self.sel = None;
         self.anchor = None;
     }
@@ -243,7 +243,7 @@ impl HistorySel {
     }
 
     fn select_line(&mut self, (line, _): Pos) {
-        let len = self.lines.get(line).map(|l| l.chars().count()).unwrap_or(0);
+        let len = self.lines.get(line).map_or(0, |l| l.chars().count());
         self.sel = Some(((line, 0), (line, len)));
     }
 
@@ -259,11 +259,7 @@ impl HistorySel {
     /// Line-snapped range covering every line between `anchor` and `pos`.
     fn line_extend(&self, anchor: Pos, pos: Pos) -> (Pos, Pos) {
         let (lo_line, hi_line) = (anchor.0.min(pos.0), anchor.0.max(pos.0));
-        let len = self
-            .lines
-            .get(hi_line)
-            .map(|l| l.chars().count())
-            .unwrap_or(0);
+        let len = self.lines.get(hi_line).map_or(0, |l| l.chars().count());
         ((lo_line, 0), (hi_line, len))
     }
 
@@ -275,7 +271,7 @@ impl HistorySel {
         let first = self.owner.iter().position(|o| *o == Some(msg));
         let last = self.owner.iter().rposition(|o| *o == Some(msg));
         if let (Some(first), Some(last)) = (first, last) {
-            let len = self.lines.get(last).map(|l| l.chars().count()).unwrap_or(0);
+            let len = self.lines.get(last).map_or(0, |l| l.chars().count());
             self.sel = Some(((first, 0), (last, len)));
         }
     }

@@ -1,6 +1,15 @@
 //! Shared popup chrome: rounded blocks, consistent list selection, and small
 //! title helpers for browse / edit / confirm modal states.
 
+// Casts here are on terminal-bounded values (u16/u32 dims, byte colors,
+// glyph counts) — never on unbounded user data. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -11,7 +20,7 @@ use crate::app::App;
 use crate::theme::Theme;
 
 /// The rounded border + title style shared by every popup.
-pub(crate) fn popup_block_focused<'a>(
+pub fn popup_block_focused<'a>(
     title: impl Into<Line<'a>>,
     theme: &Theme,
     focused: bool,
@@ -29,7 +38,7 @@ pub(crate) fn popup_block_focused<'a>(
 }
 
 /// Clear a popup area and render its rounded frame, returning the inner rect.
-pub(crate) fn render_frame<'a>(
+pub fn render_frame<'a>(
     f: &mut Frame,
     area: Rect,
     title: impl Into<Line<'a>>,
@@ -44,7 +53,7 @@ pub(crate) fn render_frame<'a>(
 }
 
 /// Standard popup list selection styling: `▸ ` marker + bold selection.
-pub(crate) fn standard_list<'a>(items: Vec<ListItem<'a>>) -> List<'a> {
+pub fn standard_list(items: Vec<ListItem<'_>>) -> List<'_> {
     List::new(items)
         .highlight_symbol("▸ ")
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
@@ -66,12 +75,12 @@ fn titled_line(app: &App, text: impl Into<String>, color: Color, hint: &str) -> 
 }
 
 /// A normal popup title with optional hint text.
-pub(crate) fn hinted_title(app: &App, text: impl Into<String>, hint: &str) -> Line<'static> {
+pub fn hinted_title(app: &App, text: impl Into<String>, hint: &str) -> Line<'static> {
     titled_line(app, text, app.theme.accent, hint)
 }
 
 /// A title for text-entry popups: label + live value + trailing cursor.
-pub(crate) fn input_title(
+pub fn input_title(
     app: &App,
     label: impl Into<String>,
     value: impl AsRef<str>,
@@ -102,12 +111,12 @@ fn confirmish_title(app: &App, text: impl Into<String>, color: Color, hint: &str
 }
 
 /// Confirmation prompt title (warning color).
-pub(crate) fn confirm_title(app: &App, text: impl Into<String>, hint: &str) -> Line<'static> {
+pub fn confirm_title(app: &App, text: impl Into<String>, hint: &str) -> Line<'static> {
     confirmish_title(app, text, app.theme.warning, hint)
 }
 
 /// Destructive prompt title (error color).
-pub(crate) fn danger_title(app: &App, text: impl Into<String>, hint: &str) -> Line<'static> {
+pub fn danger_title(app: &App, text: impl Into<String>, hint: &str) -> Line<'static> {
     confirmish_title(app, text, app.theme.error, hint)
 }
 
@@ -117,7 +126,7 @@ const MAX_DETAIL_ROWS: u16 = 4;
 /// Split a popup's inner area into (list area, detail-strip area). The strip
 /// is sized to `desc`'s wrapped height (0 when `desc` is empty, so an
 /// item with no description doesn't waste a row).
-pub(crate) fn split_with_detail(area: Rect, desc: &str) -> (Rect, Rect) {
+pub fn split_with_detail(area: Rect, desc: &str) -> (Rect, Rect) {
     if desc.trim().is_empty() {
         return (area, Rect { height: 0, ..area });
     }
@@ -130,7 +139,7 @@ pub(crate) fn split_with_detail(area: Rect, desc: &str) -> (Rect, Rect) {
 
 /// Render the wrapped description strip: a dim divider rule, then plain
 /// wrapped text — no markdown, no per-word styling.
-pub(crate) fn render_detail(f: &mut Frame, area: Rect, desc: &str, theme: &Theme) {
+pub fn render_detail(f: &mut Frame, area: Rect, desc: &str, theme: &Theme) {
     if area.height == 0 || desc.trim().is_empty() {
         return;
     }

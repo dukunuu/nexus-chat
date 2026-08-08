@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
     let space_root = space.spaces_root();
     let db = db::Db::open(&space.db_path())?;
 
-    let mut app = app::App::new(db, key, space);
+    let mut app = app::App::new(db, key.as_deref(), space);
     app.saved = saved;
     app.rebuild_all_backends();
     app.app_server = appserver::AppServer::start(space_root).await;

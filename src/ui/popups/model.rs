@@ -10,7 +10,7 @@ use crate::app::{App, ModelPanel, Popup};
 use crate::provider::Model;
 use crate::ui::popups::chrome;
 
-pub(crate) fn render(f: &mut Frame, app: &mut App) {
+pub fn render(f: &mut Frame, app: &mut App) {
     let (fav_outer, avail_outer) = model_popup_areas(f.area());
     f.render_widget(Clear, fav_outer);
     f.render_widget(Clear, avail_outer);
@@ -120,7 +120,7 @@ fn panel_list<'a>(
 
 /// Outer rects of the model picker's two columns (Favorites, Available).
 /// Shared by the renderer and the mouse hit-tester so they always agree.
-pub(crate) fn model_popup_areas(screen: Rect) -> (Rect, Rect) {
+pub fn model_popup_areas(screen: Rect) -> (Rect, Rect) {
     let outer = crate::ui::centered(screen, 82, 74);
     let cols =
         Layout::horizontal([Constraint::Percentage(36), Constraint::Percentage(64)]).split(outer);
@@ -128,11 +128,11 @@ pub(crate) fn model_popup_areas(screen: Rect) -> (Rect, Rect) {
 }
 
 /// The clickable list area inside a bordered popup column.
-pub(crate) fn list_inner(outer: Rect) -> Rect {
+pub fn list_inner(outer: Rect) -> Rect {
     Block::default().borders(Borders::ALL).inner(outer)
 }
 
-pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         // Ctrl+P narrows noisy provider catalogs; Ctrl+S favorites; Ctrl+T cycles reasoning effort.

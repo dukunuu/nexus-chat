@@ -16,14 +16,14 @@ pub struct Backends {
 }
 
 impl Backends {
-    pub fn any(&self) -> bool {
+    pub const fn any(&self) -> bool {
         self.openrouter.is_some()
             || self.openai.is_some()
             || self.opencode.is_some()
             || self.codex.is_some()
     }
 
-    pub fn get(&self, tag: BackendTag) -> Option<&OpenRouter> {
+    pub const fn get(&self, tag: BackendTag) -> Option<&OpenRouter> {
         match tag {
             BackendTag::OpenRouter => self.openrouter.as_ref(),
             BackendTag::OpenAi => self.openai.as_ref(),
@@ -81,7 +81,7 @@ impl Backends {
 }
 
 /// The key used to persist/compare a model choice (favorites, last-used,
-/// current-model, per-feature model settings): bare id for OpenRouter
+/// current-model, per-feature model settings): bare id for `OpenRouter`
 /// (unprefixed, so existing users' saved data keeps working untouched),
 /// prefixed for the other three backends since their raw ids can collide.
 pub fn composite_id(m: &Model) -> String {

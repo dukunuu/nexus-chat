@@ -2,6 +2,7 @@
 //! skill bodies) and `search`. Concrete (no trait) —
 //! there's exactly one implementation and no need for one yet.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use base64::Engine;
@@ -16,20 +17,20 @@ const MAX_TOOL_RESULT_CHARS: usize = 8_000;
 
 pub struct ToolBox {
     pub skills_dir: PathBuf,
-    /// Base URL of a SearXNG instance (e.g. `http://localhost:8080`), no
+    /// Base URL of a `SearXNG` instance (e.g. `http://localhost:8080`), no
     /// trailing slash. Free and self-hosted — no API key needed.
     pub searxng_url: Option<String>,
-    /// LangSearch API key (free tier, no card): https://langsearch.com/dashboard
+    /// `LangSearch` API key (free tier, no card): <https://langsearch.com/dashboard>
     pub langsearch_key: Option<String>,
-    /// Which backend `search(mode=web)` prefers: "auto" (LangSearch, then SearXNG,
-    /// DuckDuckGo, and Brave), or an explicit "langsearch"/"searxng"/"duckduckgo".
+    /// Which backend `search(mode=web)` prefers: "auto" (`LangSearch`, then `SearXNG`,
+    /// `DuckDuckGo`, and Brave), or an explicit "langsearch"/"searxng"/"duckduckgo".
     pub search_provider: String,
     /// When true, `defs()`/`run()` restrict to `search`/`fetch_url` only —
     /// used for deep-research searcher agents, which must never reach
-    /// run_python/install_packages/app tools even if hallucinated.
+    /// `run_python/install_packages/app` tools even if hallucinated.
     research_only: bool,
     /// Domains a per-space setting always excludes from `search(mode=web)` results
-    /// (appended to any exclude_domains the model passes).
+    /// (appended to any `exclude_domains` the model passes).
     pub blocked_domains: Vec<String>,
     /// Db path for the (space-agnostic) fetched-page cache; None disables
     /// caching (some tests).
@@ -108,6 +109,8 @@ fn required_array(v: &serde_json::Value, key: &str) -> Result<(), String> {
     }
 }
 
+// Long by design (tool dispatch).
+#[allow(clippy::too_many_lines)]
 /// Normalize advertised consolidated calls onto the specialized implementations below.
 /// The old names are intentionally still accepted by `run()` for persisted/replayed calls,
 /// but never returned by `defs()`.
@@ -184,7 +187,11 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
             }
             "pdf_page" => {
                 required_arg(&value, "name")?;
-                if value.get("page").and_then(|v| v.as_u64()).is_none() {
+                if value
+                    .get("page")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_none()
+                {
                     return Err("missing required field: page".to_string());
                 }
                 "read_pdf_page"
@@ -310,7 +317,7 @@ impl ToolBox {
         files: Option<FilesCtx>,
         apps: Option<AppsCtx>,
     ) -> Self {
-        ToolBox {
+        Self {
             skills_dir,
             searxng_url,
             langsearch_key,
@@ -342,7 +349,7 @@ impl ToolBox {
         blocked_domains: Vec<String>,
         web_cache_db: Option<PathBuf>,
     ) -> Self {
-        let mut tb = ToolBox::new(
+        let mut tb = Self::new(
             PathBuf::new(),
             searxng_url,
             langsearch_key,
@@ -375,7 +382,7 @@ impl ToolBox {
     /// Restrict `fetch_url` to serving from `web_cache` only — a cache miss
     /// returns `[not cached]` instead of fetching. Used for the Verifier's
     /// quote-checking pass (Task 8).
-    pub fn cache_only(mut self) -> Self {
+    pub const fn cache_only(mut self) -> Self {
         self.cache_only = true;
         self
     }
@@ -401,14 +408,15 @@ impl ToolBox {
                 .ok()
             })
             .unwrap_or(0)
-            .max(0) as u64
+            .max(0)
+            .unsigned_abs()
     }
 
     /// Resolve which backend to actually use for this call. An explicit
     /// choice ("langsearch"/"searxng"/"duckduckgo") is used as-is — if it's
     /// not configured, that's a clear error rather than a silent swap to
     /// something else the user didn't pick. "auto" (the default) tries
-    /// LangSearch, SearXNG, DuckDuckGo, and finally Brave, continuing past
+    /// `LangSearch`, `SearXNG`, `DuckDuckGo`, and finally Brave, continuing past
     /// transport errors, bot challenges, and empty result pages.
     async fn search(
         &self,
@@ -507,6 +515,8 @@ impl ToolBox {
     /// don't support tools working unchanged). `search` always works —
     /// it prefers configured API backends, then uses keyless HTML fallbacks
     /// when those are unavailable, so it needs no setup.
+    // Long by design (tool-definition table).
+    #[allow(clippy::too_many_lines)]
     pub fn defs(&self) -> Vec<ToolDef> {
         let mut defs = Vec::new();
         if !load_skills(&self.skills_dir).is_empty() {
@@ -826,6 +836,8 @@ impl ToolBox {
 
     /// Run a tool by name. Returns `(result text sent back to the model,
     /// status label shown in the UI while it runs)`.
+    // Long by design: the model tool dispatch (each arm is one tool).
+    #[allow(clippy::too_many_lines)]
     pub async fn run(&self, name: &str, args: &str) -> (String, String) {
         if self.research_only
             && !matches!(
@@ -920,7 +932,7 @@ impl ToolBox {
                     .filter(|b| !b.is_empty());
                 let overwrite = v
                     .get("overwrite")
-                    .and_then(|x| x.as_bool())
+                    .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 let status = format!("Creating skill {name}…");
                 let result = if name.is_empty() {
@@ -960,7 +972,10 @@ impl ToolBox {
                         .unwrap_or_default()
                         .to_string()
                 };
-                let is_space = v.get("space").and_then(|x| x.as_bool()).unwrap_or(false);
+                let is_space = v
+                    .get("space")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
                 let (skill, script) = (field("skill"), field("path"));
                 let extra: Vec<String> = v
                     .get("args")
@@ -990,26 +1005,26 @@ impl ToolBox {
                             .unwrap_or("")
                             .to_lowercase();
                         let run = async {
-                            let mut argv: Vec<std::ffi::OsString> = Vec::new();
+                            let mut cmd: Vec<std::ffi::OsString> = Vec::new();
                             let program: std::ffi::OsString = match ext.as_str() {
                                 "py" => {
                                     let py = ensure_venv(&dir).await?;
-                                    argv.push(file.clone().into());
+                                    cmd.push(file.clone().into());
                                     py.into()
                                 }
                                 "sh" | "bash" => {
-                                    argv.push(file.clone().into());
+                                    cmd.push(file.clone().into());
                                     "bash".into()
                                 }
                                 "js" | "mjs" => {
-                                    argv.push(file.clone().into());
+                                    cmd.push(file.clone().into());
                                     "node".into()
                                 }
                                 _ => file.clone().into(),
                             };
-                            argv.extend(extra.iter().map(std::ffi::OsString::from));
+                            cmd.extend(extra.iter().map(std::ffi::OsString::from));
                             let refs: Vec<&std::ffi::OsStr> =
-                                argv.iter().map(|s| s.as_os_str()).collect();
+                                cmd.iter().map(std::ffi::OsString::as_os_str).collect();
                             let files_dir = self.space_files_dir.to_string_lossy().to_string();
                             let apps_dir = self.space_apps_dir.to_string_lossy().to_string();
                             let scripts_dir = self.space_scripts_dir.to_string_lossy().to_string();
@@ -1063,26 +1078,26 @@ impl ToolBox {
                                 .unwrap_or("")
                                 .to_lowercase();
                             let run = async {
-                                let mut argv: Vec<std::ffi::OsString> = Vec::new();
+                                let mut cmd: Vec<std::ffi::OsString> = Vec::new();
                                 let program: std::ffi::OsString = match ext.as_str() {
                                     "py" => {
                                         let py = ensure_venv(&dir).await?;
-                                        argv.push(file.clone().into());
+                                        cmd.push(file.clone().into());
                                         py.into()
                                     }
                                     "sh" | "bash" => {
-                                        argv.push(file.clone().into());
+                                        cmd.push(file.clone().into());
                                         "bash".into()
                                     }
                                     "js" | "mjs" => {
-                                        argv.push(file.clone().into());
+                                        cmd.push(file.clone().into());
                                         "node".into()
                                     }
                                     _ => file.clone().into(),
                                 };
-                                argv.extend(extra.iter().map(std::ffi::OsString::from));
+                                cmd.extend(extra.iter().map(std::ffi::OsString::from));
                                 let refs: Vec<&std::ffi::OsStr> =
-                                    argv.iter().map(|s| s.as_os_str()).collect();
+                                    cmd.iter().map(std::ffi::OsString::as_os_str).collect();
                                 run_cmd(&program, &refs, &dir, 120).await
                             };
                             match run.await {
@@ -1126,11 +1141,11 @@ impl ToolBox {
                                 let dir = self.skills_dir.join(&skill);
                                 let run = async {
                                     let py = ensure_venv(&dir).await?;
-                                    let mut argv: Vec<std::ffi::OsString> =
+                                    let mut cmd: Vec<std::ffi::OsString> =
                                         vec!["-m".into(), "pip".into(), "install".into()];
-                                    argv.extend(pkgs.iter().map(std::ffi::OsString::from));
+                                    cmd.extend(pkgs.iter().map(std::ffi::OsString::from));
                                     let refs: Vec<&std::ffi::OsStr> =
-                                        argv.iter().map(|s| s.as_os_str()).collect();
+                                        cmd.iter().map(std::ffi::OsString::as_os_str).collect();
                                     run_cmd(py.as_os_str(), &refs, &dir, 300).await
                                 };
                                 match run.await {
@@ -1157,32 +1172,28 @@ impl ToolBox {
                                     // the install to this app dir with a minimal one.
                                     std::fs::write(
                                         &pkg_json,
-                                        format!("{{\"name\":{:?},\"private\":true}}", app),
+                                        format!("{{\"name\":{app:?},\"private\":true}}"),
                                     )
                                 }
                             });
-                            match prep {
-                                Err(e) => format!("cannot prepare {app}: {e}"),
-                                Ok(()) => {
-                                    let mut argv: Vec<std::ffi::OsString> = vec![
-                                        "install".into(),
-                                        "--no-audit".into(),
-                                        "--no-fund".into(),
-                                    ];
-                                    argv.extend(pkgs.iter().map(std::ffi::OsString::from));
-                                    let refs: Vec<&std::ffi::OsStr> =
-                                        argv.iter().map(|s| s.as_os_str()).collect();
-                                    match run_cmd("npm".as_ref(), &refs, &app_dir, 300).await {
-                                        Ok(out) if out.status.success() => format!(
-                                            "installed {} into {app}/node_modules — reference files as node_modules/<pkg>/… ; {}",
-                                            pkgs.join(" "),
-                                            self.app_link(&uuid),
-                                        ),
-                                        Ok(out) => {
-                                            format!("npm install failed:\n{}", format_output(&out))
-                                        }
-                                        Err(e) => e,
+                            if let Err(e) = prep {
+                                format!("cannot prepare {app}: {e}")
+                            } else {
+                                let mut cmd: Vec<std::ffi::OsString> =
+                                    vec!["install".into(), "--no-audit".into(), "--no-fund".into()];
+                                cmd.extend(pkgs.iter().map(std::ffi::OsString::from));
+                                let refs: Vec<&std::ffi::OsStr> =
+                                    cmd.iter().map(std::ffi::OsString::as_os_str).collect();
+                                match run_cmd("npm".as_ref(), &refs, &app_dir, 300).await {
+                                    Ok(out) if out.status.success() => format!(
+                                        "installed {} into {app}/node_modules — reference files as node_modules/<pkg>/… ; {}",
+                                        pkgs.join(" "),
+                                        self.app_link(&uuid),
+                                    ),
+                                    Ok(out) => {
+                                        format!("npm install failed:\n{}", format_output(&out))
                                     }
+                                    Err(e) => e,
                                 }
                             }
                         }
@@ -1194,11 +1205,11 @@ impl ToolBox {
                             std::fs::create_dir_all(&dir)
                                 .map_err(|e| format!("cannot create scripts dir: {e}"))?;
                             let py = ensure_venv(&dir).await?;
-                            let mut argv: Vec<std::ffi::OsString> =
+                            let mut cmd: Vec<std::ffi::OsString> =
                                 vec!["-m".into(), "pip".into(), "install".into()];
-                            argv.extend(pkgs.iter().map(std::ffi::OsString::from));
+                            cmd.extend(pkgs.iter().map(std::ffi::OsString::from));
                             let refs: Vec<&std::ffi::OsStr> =
-                                argv.iter().map(|s| s.as_os_str()).collect();
+                                cmd.iter().map(std::ffi::OsString::as_os_str).collect();
                             run_cmd(py.as_os_str(), &refs, &dir, 300).await
                         };
                         match run.await {
@@ -1226,7 +1237,7 @@ impl ToolBox {
                     .map(str::to_string);
                 let temporary = v
                     .get("temporary")
-                    .and_then(|x| x.as_bool())
+                    .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 let extra: Vec<String> = v
                     .get("args")
@@ -1265,10 +1276,10 @@ impl ToolBox {
                             std::fs::write(&file, &code)
                                 .map_err(|e| format!("cannot write script: {e}"))?;
                             let py = ensure_venv(&dir).await?;
-                            let mut argv: Vec<std::ffi::OsString> = vec![file.into()];
-                            argv.extend(extra.iter().map(std::ffi::OsString::from));
+                            let mut cmd: Vec<std::ffi::OsString> = vec![file.into()];
+                            cmd.extend(extra.iter().map(std::ffi::OsString::from));
                             let refs: Vec<&std::ffi::OsStr> =
-                                argv.iter().map(|s| s.as_os_str()).collect();
+                                cmd.iter().map(std::ffi::OsString::as_os_str).collect();
                             let files_dir = self.space_files_dir.to_string_lossy().to_string();
                             let apps_dir = self.space_apps_dir.to_string_lossy().to_string();
                             let scripts_dir = self.space_scripts_dir.to_string_lossy().to_string();
@@ -1333,13 +1344,22 @@ impl ToolBox {
                     .and_then(|u| u.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let offset = v.get("offset").and_then(|o| o.as_u64()).unwrap_or(1).max(1) as usize;
+                let offset = usize::try_from(
+                    v.get("offset")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(1)
+                        .max(1),
+                )
+                .unwrap_or(1);
                 let limit = v
                     .get("limit")
-                    .and_then(|l| l.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .unwrap_or(200)
                     .clamp(1, 200) as usize;
-                let fresh = v.get("fresh").and_then(|f| f.as_bool()).unwrap_or(false);
+                let fresh = v
+                    .get("fresh")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
                 let status = format!("Fetching {url}…");
                 let result = match self.fetch_cached(&url, fresh).await {
                     Ok(text) => {
@@ -1369,7 +1389,12 @@ impl ToolBox {
                     .and_then(|q| q.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let limit = v.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
+                let limit = usize::try_from(
+                    v.get("limit")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(10),
+                )
+                .unwrap_or(10);
                 let status = "Searching academic literature…".to_string();
                 let result = match academic_search(&self.client, &query, limit).await {
                     Ok(papers) if papers.is_empty() => "no results".to_string(),
@@ -1507,10 +1532,16 @@ impl ToolBox {
                     .and_then(|n| n.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let offset = v.get("offset").and_then(|o| o.as_u64()).unwrap_or(1).max(1) as usize;
+                let offset = usize::try_from(
+                    v.get("offset")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(1)
+                        .max(1),
+                )
+                .unwrap_or(1);
                 let limit = v
                     .get("limit")
-                    .and_then(|l| l.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .unwrap_or(200)
                     .clamp(1, 200) as usize;
                 let status = format!("Reading {name}…");
@@ -1549,7 +1580,11 @@ impl ToolBox {
                     .and_then(|n| n.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let page = v.get("page").and_then(|p| p.as_u64()).unwrap_or(1).max(1);
+                let page = v
+                    .get("page")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(1)
+                    .max(1);
                 let status = format!("Reading {name} page {page}…");
                 let result = match &self.files {
                     None => "no files imported".to_string(),
@@ -1696,7 +1731,7 @@ impl ToolBox {
                                 let status: String = r.get(1)?;
                                 Ok(serde_json::json!({"id": name, "description": null, "source": "space", "status": status}))
                             }) {
-                                images.extend(rows.filter_map(|r| r.ok()));
+                                images.extend(rows.filter_map(std::result::Result::ok));
                             }
                         serde_json::to_string(&images).unwrap_or_else(|_| "[]".to_string())
                     }
@@ -1781,8 +1816,7 @@ impl ToolBox {
                         } else {
                             let write = file
                                 .parent()
-                                .map(std::fs::create_dir_all)
-                                .unwrap_or(Ok(()))
+                                .map_or(Ok(()), std::fs::create_dir_all)
                                 .and_then(|()| std::fs::write(&file, &content));
                             match write {
                                 Ok(()) => format!(
@@ -1891,7 +1925,10 @@ impl ToolBox {
                         .to_string()
                 };
                 let (app, pattern) = (field("app"), field("pattern"));
-                let compact = v.get("compact").and_then(|x| x.as_bool()).unwrap_or(true);
+                let compact = v
+                    .get("compact")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
                 let status = format!("Searching {app}…");
                 let result = match self.resolve_app(&app) {
                     Err(e) => e,
@@ -1951,7 +1988,7 @@ impl ToolBox {
                                     .collect::<Vec<_>>()
                                     .join("\n");
                                 if n > 50 {
-                                    result.push_str(&format!("\n… ({} more matches)", n - 50));
+                                    let _ = write!(result, "\n… ({} more matches)", n - 50);
                                 }
                                 result
                             }
@@ -1969,10 +2006,16 @@ impl ToolBox {
                         .to_string()
                 };
                 let (app, path) = (field("app"), field("path"));
-                let offset = v.get("offset").and_then(|o| o.as_u64()).unwrap_or(1).max(1) as usize;
+                let offset = usize::try_from(
+                    v.get("offset")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(1)
+                        .max(1),
+                )
+                .unwrap_or(1);
                 let limit = v
                     .get("limit")
-                    .and_then(|l| l.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .unwrap_or(200)
                     .clamp(1, 200) as usize;
                 let status = format!("Reading {app}/{path}…");
@@ -2044,10 +2087,7 @@ impl ToolBox {
                                     std::fs::read_dir(files).ok().and_then(|e| {
                                         e.flatten()
                                             .find(|e| {
-                                                e.path()
-                                                    .file_stem()
-                                                    .map(|s| s == stem)
-                                                    .unwrap_or(false)
+                                                e.path().file_stem().is_some_and(|s| s == stem)
                                             })
                                             .and_then(|e| std::fs::read(e.path()).ok())
                                     })
@@ -2098,7 +2138,12 @@ impl ToolBox {
             "generate_video" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
                 let prompt = v.get("prompt").and_then(|x| x.as_str()).unwrap_or("");
-                let duration = v.get("duration").and_then(|x| x.as_u64()).unwrap_or(6) as u32;
+                let duration = u32::try_from(
+                    v.get("duration")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(6),
+                )
+                .unwrap_or(6);
                 let resolution = v
                     .get("resolution")
                     .and_then(|x| x.as_str())
@@ -2109,7 +2154,7 @@ impl ToolBox {
                     .unwrap_or("16:9");
                 let generate_audio = v
                     .get("generate_audio")
-                    .and_then(|x| x.as_bool())
+                    .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 let first_frame_id = v
                     .get("first_frame_id")
@@ -2141,7 +2186,10 @@ impl ToolBox {
                             .collect()
                     })
                     .unwrap_or_default();
-                let seed = v.get("seed").and_then(|x| x.as_i64()).map(|x| x as i32);
+                let seed = v
+                    .get("seed")
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|x| i32::try_from(x).unwrap_or_default());
                 let source_video_id = v
                     .get("source_video_id")
                     .and_then(|x| x.as_str())
@@ -2289,21 +2337,24 @@ impl ToolBox {
                     .filter(|x| !x.is_empty());
                 let intensity = v
                     .get("intensity")
-                    .and_then(|x| x.as_f64())
+                    .and_then(serde_json::Value::as_f64)
                     .unwrap_or(0.5)
                     .clamp(0.0, 1.0);
-                let speed = v.get("speed").and_then(|x| x.as_f64()).filter(|x| *x > 0.0);
+                let speed = v
+                    .get("speed")
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|x| *x > 0.0);
                 let trim_start = v
                     .get("trim_start")
-                    .and_then(|x| x.as_f64())
+                    .and_then(serde_json::Value::as_f64)
                     .filter(|x| *x >= 0.0);
                 let trim_end = v
                     .get("trim_end")
-                    .and_then(|x| x.as_f64())
+                    .and_then(serde_json::Value::as_f64)
                     .filter(|x| *x >= 0.0);
                 let remove_audio = v
                     .get("remove_audio")
-                    .and_then(|x| x.as_bool())
+                    .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 let status = "Editing video…".to_string();
                 let result = if video_id.is_empty() {
@@ -2314,9 +2365,7 @@ impl ToolBox {
                     "ffmpeg not found — install ffmpeg to edit videos".to_string()
                 } else {
                     let src_path = self.space_files_dir.join(format!("{video_id}.mp4"));
-                    if !src_path.exists() {
-                        format!("video '{video_id}' not found")
-                    } else {
+                    if src_path.exists() {
                         let id = uuid::Uuid::new_v4().to_string();
                         let output_path = self.space_files_dir.join(format!("{id}.mp4"));
                         let thumb_path = self.space_files_dir.join(format!("{id}_first.png"));
@@ -2398,6 +2447,8 @@ impl ToolBox {
                                 }).to_string()
                             }
                         }
+                    } else {
+                        format!("video '{video_id}' not found")
                     }
                 };
                 (result, status)
@@ -2409,7 +2460,10 @@ impl ToolBox {
                     .and_then(|x| x.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let time_sec = v.get("time_sec").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                let time_sec = v
+                    .get("time_sec")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0);
                 let fmt = v.get("format").and_then(|x| x.as_str()).unwrap_or("png");
                 let status = "Extracting frame…".to_string();
                 let result = if video_id.is_empty() {
@@ -2486,25 +2540,26 @@ impl ToolBox {
                         if let Ok(json_str) = std::fs::read_to_string(&meta_path)
                             && let Ok(meta) = serde_json::from_str::<serde_json::Value>(&json_str)
                         {
-                            total_cost +=
-                                meta.get("cost_usd").and_then(|c| c.as_f64()).unwrap_or(0.0);
+                            total_cost += meta
+                                .get("cost_usd")
+                                .and_then(serde_json::Value::as_f64)
+                                .unwrap_or(0.0);
                         }
                         video_files.push(mp4);
                     }
-                    if video_files.len() != video_ids.len() {
-                        format!("some video files not found for IDs: {:?}", video_ids)
-                    } else {
+                    if video_files.len() == video_ids.len() {
                         let id = uuid::Uuid::new_v4().to_string();
                         let concat_name = format!("_stitch_concat_{id}.txt");
                         let concat_path = self.space_files_dir.join(&concat_name);
                         let output_name = format!("_stitch_{id}.mp4");
                         let output_path = self.space_files_dir.join(&output_name);
-                        let thumb_name = format!("{}_first.png", id);
+                        let thumb_name = format!("{id}_first.png");
                         let thumb_path = self.space_files_dir.join(&thumb_name);
-                        let concat_content: String = video_files
-                            .iter()
-                            .map(|p| format!("file '{}'\n", p.display()))
-                            .collect();
+                        let concat_content: String =
+                            video_files.iter().fold(String::new(), |mut c, p| {
+                                let _ = writeln!(c, "file '{}'", p.display());
+                                c
+                            });
                         if let Err(e) = std::fs::write(&concat_path, &concat_content) {
                             format!("cannot write concat file: {e}")
                         } else {
@@ -2553,6 +2608,8 @@ impl ToolBox {
                                 }
                             }
                         }
+                    } else {
+                        format!("some video files not found for IDs: {video_ids:?}")
                     }
                 };
                 (result, status)
@@ -2598,7 +2655,7 @@ impl ToolBox {
                     }
                     match write_video_refs(&self.space_files_dir, &refs) {
                         Err(e) => format!("failed to save reference: {e}"),
-                        Ok(_) => format!(
+                        Ok(()) => format!(
                             "saved reference '{name}' ({ref_type}) — use in generate_video with character_refs/location_refs"
                         ),
                     }
@@ -2608,7 +2665,7 @@ impl ToolBox {
             "list_references" => {
                 let status = "Listing references…".to_string();
                 let refs = read_video_refs(&self.space_files_dir);
-                let result = if refs.as_object().is_none_or(|o| o.is_empty()) {
+                let result = if refs.as_object().is_none_or(serde_json::Map::is_empty) {
                     "no references saved yet — use video_references with action=save to create one"
                         .to_string()
                 } else {
@@ -2638,7 +2695,7 @@ impl ToolBox {
                         refs.as_object_mut().map(|o| o.remove(&name));
                         match write_video_refs(&self.space_files_dir, &refs) {
                             Err(e) => format!("failed to delete reference: {e}"),
-                            Ok(_) => format!("deleted reference '{name}'"),
+                            Ok(()) => format!("deleted reference '{name}'"),
                         }
                     }
                 };
@@ -2687,18 +2744,17 @@ impl ToolBox {
                 let status = format!("Writing {path}…");
                 let result = {
                     let file = self.space_scripts_dir.join(&path);
-                    if !valid_relative_path(&path) {
-                        format!("invalid path: {path:?}")
-                    } else {
+                    if valid_relative_path(&path) {
                         let write = file
                             .parent()
-                            .map(std::fs::create_dir_all)
-                            .unwrap_or(Ok(()))
+                            .map_or(Ok(()), std::fs::create_dir_all)
                             .and_then(|()| std::fs::write(&file, &content));
                         match write {
                             Ok(()) => format!("wrote {path} ({} bytes)", content.len()),
                             Err(e) => format!("write failed: {e}"),
                         }
+                    } else {
+                        format!("invalid path: {path:?}")
                     }
                 };
                 (result, status)
@@ -2710,18 +2766,22 @@ impl ToolBox {
                     .and_then(|x| x.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let offset = v.get("offset").and_then(|o| o.as_u64()).unwrap_or(1).max(1) as usize;
+                let offset = usize::try_from(
+                    v.get("offset")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(1)
+                        .max(1),
+                )
+                .unwrap_or(1);
                 let limit = v
                     .get("limit")
-                    .and_then(|l| l.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .unwrap_or(200)
                     .clamp(1, 200) as usize;
                 let status = format!("Reading {path}…");
                 let result = {
                     let file = self.space_scripts_dir.join(&path);
-                    if !valid_relative_path(&path) {
-                        format!("invalid path: {path:?}")
-                    } else {
+                    if valid_relative_path(&path) {
                         match std::fs::read_to_string(&file) {
                             Err(e) => format!("cannot read {path}: {e}"),
                             Ok(text) => {
@@ -2743,6 +2803,8 @@ impl ToolBox {
                                 }
                             }
                         }
+                    } else {
+                        format!("invalid path: {path:?}")
                     }
                 };
                 (result, status)
@@ -2770,9 +2832,7 @@ impl ToolBox {
                 let status = format!("Editing {path}…");
                 let result = {
                     let file = self.space_scripts_dir.join(&path);
-                    if !valid_relative_path(&path) {
-                        format!("invalid path: {path:?}")
-                    } else {
+                    if valid_relative_path(&path) {
                         match std::fs::read_to_string(&file) {
                             Err(e) => format!("cannot read {path}: {e}"),
                             Ok(text) => match apply_hashline_edits(&text, &edits) {
@@ -2783,6 +2843,8 @@ impl ToolBox {
                                 },
                             },
                         }
+                    } else {
+                        format!("invalid path: {path:?}")
                     }
                 };
                 (result, status)
@@ -2904,8 +2966,10 @@ fn line_hash(line_no: usize, content: &str) -> String {
         .finalize()
         .iter()
         .take(4)
-        .map(|b| format!("{b:02x}"))
-        .collect()
+        .fold(String::new(), |mut h, b| {
+            let _ = write!(h, "{b:02x}");
+            h
+        })
 }
 
 /// `read_app_file`'s line prefix: `N:HASH<tab>content`, one hash per line so
@@ -2958,10 +3022,10 @@ fn apply_hashline_edits(
 
     let mut diff = String::new();
     for (idx, new) in &resolved {
-        diff.push_str(&format!("\n- {}", lines[*idx]));
+        let _ = write!(diff, "\n- {}", lines[*idx]);
         if let Some(t) = new {
             for l in t.lines() {
-                diff.push_str(&format!("\n+ {l}"));
+                let _ = write!(diff, "\n+ {l}");
             }
         }
     }
@@ -2970,7 +3034,7 @@ fn apply_hashline_edits(
     // stay valid regardless of how many lines an edit adds or removes.
     let mut apply_order = resolved;
     apply_order.sort_by_key(|b| std::cmp::Reverse(b.0));
-    let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    let mut out: Vec<String> = lines.iter().map(std::string::ToString::to_string).collect();
     for (idx, new) in apply_order {
         match new {
             None => {
@@ -2978,7 +3042,7 @@ fn apply_hashline_edits(
             }
             Some(t) => {
                 let replacement: Vec<String> = t.lines().map(str::to_string).collect();
-                out.splice(idx..idx + 1, replacement);
+                out.splice(idx..=idx, replacement);
             }
         }
     }
@@ -3120,8 +3184,8 @@ fn grep_dir(
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| e.file_name());
+    let mut entries: Vec<_> = rd.filter_map(std::result::Result::ok).collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
         if app_path_ignored(root, &path) {
@@ -3176,7 +3240,7 @@ async fn run_cmd(
     run_cmd_env(program, args, dir, secs, &[]).await
 }
 
-/// Like run_cmd but with extra environment variables.
+/// Like `run_cmd` but with extra environment variables.
 async fn run_cmd_env(
     program: &std::ffi::OsStr,
     args: &[&std::ffi::OsStr],
@@ -3226,12 +3290,11 @@ fn format_output(out: &std::process::Output) -> String {
         let code = out
             .status
             .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "killed".to_string());
+            .map_or_else(|| "killed".to_string(), |c| c.to_string());
         if !s.is_empty() {
             s.push('\n');
         }
-        s.push_str(&format!("exit code: {code}"));
+        let _ = write!(s, "exit code: {code}");
     }
     if s.is_empty() {
         s = "(no output)".to_string();
@@ -3247,7 +3310,8 @@ async fn ensure_venv(skill_dir: &std::path::Path) -> Result<PathBuf, String> {
     if python.exists() {
         return Ok(python);
     }
-    std::fs::create_dir_all(skill_dir).map_err(|e| format!("cannot create {skill_dir:?}: {e}"))?;
+    std::fs::create_dir_all(skill_dir)
+        .map_err(|e| format!("cannot create {}: {e}", skill_dir.display()))?;
     // Corrupt venv from a system Python upgrade — nuke it and recreate.
     if skill_dir.join(".venv").exists() {
         std::fs::remove_dir_all(skill_dir.join(".venv"))
@@ -3288,7 +3352,7 @@ async fn ensure_venv(skill_dir: &std::path::Path) -> Result<PathBuf, String> {
 }
 
 /// Package names an installer may see: no flags, no whitespace — they land
-/// in argv directly, so a leading `-` would become an option injection.
+/// in cmd directly, so a leading `-` would become an option injection.
 fn validate_packages(pkgs: &[String]) -> Result<(), String> {
     if pkgs.is_empty() {
         return Err("no packages given".to_string());
@@ -3323,7 +3387,7 @@ struct SearxngResult {
 }
 
 /// Shared by backends that send a request and expect a JSON body back: send,
-/// raise on a non-2xx status, then deserialize. DuckDuckGo scrapes HTML
+/// raise on a non-2xx status, then deserialize. `DuckDuckGo` scrapes HTML
 /// instead of parsing JSON, so it doesn't use this helper.
 async fn send_and_parse<T: serde::de::DeserializeOwned>(
     req: reqwest::RequestBuilder,
@@ -3336,7 +3400,7 @@ async fn send_and_parse<T: serde::de::DeserializeOwned>(
         .map_err(Into::into)
 }
 
-/// SearXNG's JSON API needs `search: formats: [html, json]` enabled in the
+/// `SearXNG`'s JSON API needs `search: formats: [html, json]` enabled in the
 /// instance's `settings.yml` — off by default. A misconfigured instance
 /// surfaces as an HTML/error response here, which `error_for_status`/`json`
 /// turns into a readable error for the model rather than a silent empty result.
@@ -3390,8 +3454,8 @@ struct LangsearchResult {
     snippet: String,
 }
 
-/// LangSearch (https://langsearch.com): free-tier hosted search API, no card
-/// required. More reliable than scraping DuckDuckGo when the service is
+/// `LangSearch` (<https://langsearch.com)>: free-tier hosted search API, no card
+/// required. More reliable than scraping `DuckDuckGo` when the service is
 /// reachable; auto mode falls back when its endpoint is unavailable.
 async fn langsearch_search(
     client: &reqwest::Client,
@@ -3429,10 +3493,10 @@ async fn langsearch_search(
         .collect())
 }
 
-/// Zero-setup fallback used when no SearXNG instance is configured: scrapes
-/// DuckDuckGo's plain HTML search page (no JS, no API, no key) the same way
-/// LM Studio/Open WebUI's built-in DuckDuckGo tools do. Unofficial — DuckDuckGo
-/// can change this markup or rate-limit it at any time; SearXNG is the more
+/// Zero-setup fallback used when no `SearXNG` instance is configured: scrapes
+/// `DuckDuckGo`'s plain HTML search page (no JS, no API, no key) the same way
+/// LM Studio/Open `WebUI`'s built-in `DuckDuckGo` tools do. Unofficial — `DuckDuckGo`
+/// can change this markup or rate-limit it at any time; `SearXNG` is the more
 /// durable option if this stops working for you.
 async fn duckduckgo_search(
     client: &reqwest::Client,
@@ -3454,7 +3518,7 @@ async fn duckduckgo_search(
 }
 
 /// Last-resort zero-setup fallback. Brave's HTML endpoint currently remains
-/// usable when DuckDuckGo serves its bot challenge, so keep this behind the
+/// usable when `DuckDuckGo` serves its bot challenge, so keep this behind the
 /// configured/API backends and only use it in auto mode.
 async fn brave_search(client: &reqwest::Client, query: &str) -> anyhow::Result<Vec<SearchHit>> {
     let response = client
@@ -3519,7 +3583,7 @@ async fn fetch_url_text(client: &reqwest::Client, url: &str) -> anyhow::Result<S
     Ok(extract_pdf_or_html(capped, &content_type))
 }
 
-/// Whether `url` points at a YouTube watch page (long or short form).
+/// Whether `url` points at a `YouTube` watch page (long or short form).
 fn is_youtube_url(url: &str) -> bool {
     let Ok(u) = reqwest::Url::parse(url) else {
         return false;
@@ -3527,7 +3591,7 @@ fn is_youtube_url(url: &str) -> bool {
     matches!(u.host_str(), Some(h) if h == "youtube.com" || h.ends_with(".youtube.com") || h == "youtu.be")
 }
 
-/// Pull the first caption track's `baseUrl` out of a YouTube watch page's
+/// Pull the first caption track's `baseUrl` out of a `YouTube` watch page's
 /// embedded JSON (`ytInitialData`/`ytInitialPlayerResponse`). The value is
 /// JSON-string-escaped (`\/` and `\uXXXX`); unescape just enough to get a
 /// usable URL — a full JSON parse isn't needed for one field.
@@ -3539,7 +3603,7 @@ fn parse_caption_track_url(watch_page_html: &str) -> Option<String> {
     Some(raw.replace("\\/", "/").replace("\\u0026", "&"))
 }
 
-/// Join a YouTube timedtext XML transcript's `<text>` cue contents with
+/// Join a `YouTube` timedtext XML transcript's `<text>` cue contents with
 /// spaces into one plain-text string (no timing/markup kept — this is fed
 /// to a research searcher, not rendered as captions).
 fn strip_timedtext_xml(xml: &str) -> String {
@@ -3561,7 +3625,7 @@ fn html_unescape_entities(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// Fetch a YouTube video's transcript via the keyless timedtext endpoint:
+/// Fetch a `YouTube` video's transcript via the keyless timedtext endpoint:
 /// scrape the watch page for a caption track URL, fetch it, and join the
 /// cue text. Falls back to the normal page scrape when no caption track is
 /// found (private/no-captions videos still return something searchable).
@@ -3589,7 +3653,7 @@ async fn fetch_youtube_transcript(client: &reqwest::Client, url: &str) -> anyhow
     Ok(strip_timedtext_xml(&xml))
 }
 
-/// Pull `(title, url, snippet)` hits out of a DuckDuckGo HTML results page.
+/// Pull `(title, url, snippet)` hits out of a `DuckDuckGo` HTML results page.
 /// Each result is `<a class="result__a" href="...uddg=<url>...">title</a>`
 /// followed by `<a class="result__snippet" ...>snippet</a>`.
 fn parse_ddg_html(html: &str) -> Vec<SearchHit> {
@@ -3653,7 +3717,7 @@ fn parse_brave_html(html: &str) -> Vec<SearchHit> {
             pos = title_end;
             continue;
         };
-        let anchor_tag = &html[anchor_start..anchor_start + anchor_gt_rel + 1];
+        let anchor_tag = &html[anchor_start..=(anchor_start + anchor_gt_rel)];
         let Some(url) = extract_attr(anchor_tag, "href") else {
             pos = title_end;
             continue;
@@ -3666,8 +3730,7 @@ fn parse_brave_html(html: &str) -> Vec<SearchHit> {
 
         let segment_end = html[title_end..]
             .find(TITLE_MARKER)
-            .map(|end| title_end + end)
-            .unwrap_or(html.len());
+            .map_or(html.len(), |end| title_end + end);
         let snippet = html[title_end..segment_end]
             .find("generic-snippet")
             .and_then(|generic| {
@@ -3707,7 +3770,7 @@ fn find_snippet(html: &str, from: usize) -> String {
     strip_tags(&html[text_start..text_start + close])
 }
 
-/// DuckDuckGo's result links redirect through `/l/?uddg=<percent-encoded-url>`.
+/// `DuckDuckGo`'s result links redirect through `/l/?uddg=<percent-encoded-url>`.
 fn resolve_ddg_href(href: &str) -> Option<String> {
     if href.contains("uddg=") {
         let absolute = if let Some(rest) = href.strip_prefix("//") {
@@ -3847,10 +3910,10 @@ fn table_to_markdown(table_html: &str) -> String {
     }
     let cols = rows[0].len();
     let mut out = String::from("\n");
-    out.push_str(&format!("| {} |\n", rows[0].join(" | ")));
-    out.push_str(&format!("| {} |\n", vec!["---"; cols].join(" | ")));
+    let _ = writeln!(out, "| {} |", rows[0].join(" | "));
+    let _ = writeln!(out, "| {} |", vec!["---"; cols].join(" | "));
     for row in &rows[1..] {
-        out.push_str(&format!("| {} |\n", row.join(" | ")));
+        let _ = writeln!(out, "| {} |", row.join(" | "));
     }
     out.push('\n');
     out
@@ -3998,7 +4061,7 @@ fn format_papers(papers: &[Paper]) -> String {
 }
 
 /// One discussion-forum hit (Hacker News story or Reddit post), flattened
-/// to what the model needs to decide whether to fetch_url it.
+/// to what the model needs to decide whether to `fetch_url` it.
 struct DiscussionHit {
     title: String,
     url: String,
@@ -4147,7 +4210,7 @@ async fn discussion_search(client: &reqwest::Client, query: &str) -> String {
 /// `utm_*`/`fbclid` query params, and drop a trailing `/` and any fragment.
 /// Unparseable input (not actually a URL) is returned unchanged so it still
 /// participates in a plain string-equality dedup.
-pub(crate) fn normalize_url(url: &str) -> String {
+pub fn normalize_url(url: &str) -> String {
     let Ok(mut u) = reqwest::Url::parse(url) else {
         return url.to_string();
     };
@@ -4187,7 +4250,7 @@ pub(crate) fn normalize_url(url: &str) -> String {
 /// already appeared in an earlier finding is dropped from later ones so
 /// the Synthesizer doesn't see the same source cited from every angle.
 /// Non-source lines are untouched.
-pub(crate) fn dedup_source_lines(findings: &[String]) -> Vec<String> {
+pub fn dedup_source_lines(findings: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     findings
         .iter()
@@ -4215,7 +4278,7 @@ pub(crate) fn dedup_source_lines(findings: &[String]) -> Vec<String> {
 
 /// Every normalized URL cited in a set of findings' `Sources:` blocks —
 /// what gets linked into a research session's source bundle.
-pub(crate) fn cited_url_norms(findings: &[String]) -> Vec<String> {
+pub fn cited_url_norms(findings: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for f in findings {
         let mut in_sources = false;
@@ -4239,17 +4302,13 @@ pub(crate) fn cited_url_norms(findings: &[String]) -> Vec<String> {
 /// engine this app talks to honors Google-style site filters), so
 /// `include_domains`/`exclude_domains`/`blocked_domains` need no per-backend
 /// plumbing beyond this string rewrite.
-pub(crate) fn rewrite_query_with_domains(
-    query: &str,
-    include: &[String],
-    exclude: &[String],
-) -> String {
+pub fn rewrite_query_with_domains(query: &str, include: &[String], exclude: &[String]) -> String {
     let mut q = query.to_string();
     for d in include {
-        q.push_str(&format!(" site:{d}"));
+        let _ = write!(q, " site:{d}");
     }
     for d in exclude {
-        q.push_str(&format!(" -site:{d}"));
+        let _ = write!(q, " -site:{d}");
     }
     q
 }
@@ -4302,8 +4361,7 @@ fn extract_ffmpeg_frame(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// Read the `_video_refs.json` reference registry from the files directory.
@@ -4313,7 +4371,7 @@ fn read_video_refs(files_dir: &std::path::Path) -> serde_json::Value {
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::json!({}))
+        .unwrap_or_else(|| serde_json::json!({}))
 }
 
 /// Write the reference registry to `_video_refs.json` in the files directory.
@@ -4331,8 +4389,7 @@ fn ffmpeg_available() -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// Resolve named character and location references to image data from the
@@ -4365,45 +4422,35 @@ fn build_camera_filter(move_type: &str, margin: f64) -> String {
             // Start full frame, end zoomed in centered
             let zoom = margin; // e.g. 0.15 → 15% zoom
             format!(
-                "crop=w='iw-(iw*{zoom})*t/du':h='ih-(ih*{zoom})*t/du':x='(iw-w)/2':y='(ih-h)/2',scale=iw:ih",
-                zoom = zoom
+                "crop=w='iw-(iw*{zoom})*t/du':h='ih-(ih*{zoom})*t/du':x='(iw-w)/2':y='(ih-h)/2',scale=iw:ih"
             )
         }
         "dolly_out" => {
             let zoom = margin;
             format!(
-                "crop=w='iw-(iw*{zoom})*(1-t/du)':h='ih-(ih*{zoom})*(1-t/du)':x='(iw-w)/2':y='(ih-h)/2',scale=iw:ih",
-                zoom = zoom
+                "crop=w='iw-(iw*{zoom})*(1-t/du)':h='ih-(ih*{zoom})*(1-t/du)':x='(iw-w)/2':y='(ih-h)/2',scale=iw:ih"
             )
         }
         "pan_left" => {
             // Crop window slides from right to left
             let m = margin.max(0.05);
             format!(
-                "crop=w='iw*(1-{m})':h='ih*(1-{m})':x='(iw-w)*(1-t/du)':y='(ih-h)/2',scale=iw:ih",
-                m = m
+                "crop=w='iw*(1-{m})':h='ih*(1-{m})':x='(iw-w)*(1-t/du)':y='(ih-h)/2',scale=iw:ih"
             )
         }
         "pan_right" => {
             let m = margin.max(0.05);
-            format!(
-                "crop=w='iw*(1-{m})':h='ih*(1-{m})':x='(iw-w)*t/du':y='(ih-h)/2',scale=iw:ih",
-                m = m
-            )
+            format!("crop=w='iw*(1-{m})':h='ih*(1-{m})':x='(iw-w)*t/du':y='(ih-h)/2',scale=iw:ih")
         }
         "tilt_up" => {
             let m = margin.max(0.05);
             format!(
-                "crop=w='iw*(1-{m})':h='ih*(1-{m})':x='(iw-w)/2':y='(ih-h)*(1-t/du)',scale=iw:ih",
-                m = m
+                "crop=w='iw*(1-{m})':h='ih*(1-{m})':x='(iw-w)/2':y='(ih-h)*(1-t/du)',scale=iw:ih"
             )
         }
         "tilt_down" => {
             let m = margin.max(0.05);
-            format!(
-                "crop=w='iw*(1-{m})':h='ih*(1-{m})':x='(iw-w)/2':y='(ih-h)*t/du',scale=iw:ih",
-                m = m
-            )
+            format!("crop=w='iw*(1-{m})':h='ih*(1-{m})':x='(iw-w)/2':y='(ih-h)*t/du',scale=iw:ih")
         }
         _ => String::new(),
     }
@@ -4416,8 +4463,8 @@ fn build_lighting_filter(preset: &str, intensity: f64) -> String {
     match preset {
         "noir" => {
             let b = -0.05 * i;
-            let c = 1.0 + 0.3 * i;
-            let s = 1.0 - 0.8 * i;
+            let c = 0.3f64.mul_add(i, 1.0);
+            let s = 0.8f64.mul_add(-i, 1.0);
             format!(
                 "eq=brightness={b:.3}:contrast={c:.3}:saturation={s:.3},colorbalance=rh={rh:.3}:gh={gh:.3}:bh={bh:.3}",
                 b = b,
@@ -4429,7 +4476,7 @@ fn build_lighting_filter(preset: &str, intensity: f64) -> String {
             )
         }
         "warm" => {
-            let s = 1.0 + 0.3 * i;
+            let s = 0.3f64.mul_add(i, 1.0);
             format!(
                 "eq=saturation={s:.3},colorbalance=rs={rs:.3}:gs={gs:.3}:bs={bs:.3}",
                 s = s,
@@ -4439,7 +4486,7 @@ fn build_lighting_filter(preset: &str, intensity: f64) -> String {
             )
         }
         "cold" => {
-            let s = 1.0 - 0.1 * i;
+            let s = 0.1f64.mul_add(-i, 1.0);
             format!(
                 "eq=saturation={s:.3},colorbalance=rs={rs:.3}:gs={gs:.3}:bs={bs:.3}",
                 s = s,
@@ -4450,8 +4497,8 @@ fn build_lighting_filter(preset: &str, intensity: f64) -> String {
         }
         "vintage" => {
             let b = 0.03 * i;
-            let c = 1.0 - 0.1 * i;
-            let s = 1.0 - 0.3 * i;
+            let c = 0.1f64.mul_add(-i, 1.0);
+            let s = 0.3f64.mul_add(-i, 1.0);
             format!(
                 "eq=brightness={b:.3}:contrast={c:.3}:saturation={s:.3},colorbalance=rh={rh:.3}:rm={rm:.3}:gs={gs:.3}",
                 b = b,
@@ -4463,17 +4510,17 @@ fn build_lighting_filter(preset: &str, intensity: f64) -> String {
             )
         }
         "vivid" => {
-            let s = 1.0 + 0.5 * i;
-            format!("eq=saturation={s:.3}:contrast=1.1:brightness=0.02", s = s)
+            let s = 0.5f64.mul_add(i, 1.0);
+            format!("eq=saturation={s:.3}:contrast=1.1:brightness=0.02")
         }
         "bleach_bypass" => {
-            let c = 1.0 + 0.4 * i;
-            let s = 1.0 - 0.6 * i;
+            let c = 0.4f64.mul_add(i, 1.0);
+            let s = 0.6f64.mul_add(-i, 1.0);
             format!(
                 "eq=contrast={c:.3}:saturation={s:.3}:brightness=0.02:gamma={g:.3}",
                 c = c,
                 s = s,
-                g = 1.0 + 0.1 * i
+                g = 0.1f64.mul_add(i, 1.0)
             )
         }
         _ => String::new(),
