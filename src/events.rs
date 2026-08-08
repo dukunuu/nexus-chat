@@ -108,12 +108,6 @@ async fn run_loop(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
                                         Err(e) => app.status = format!("editor failed: {e}"),
                                     }
                                 }
-                                crate::app::PendingEditor::ResearchPlan(path) => {
-                                    match edit_in_external_editor(terminal, &path) {
-                                        Ok(()) => app.apply_research_plan_editor(&path)?,
-                                        Err(e) => app.status = format!("editor failed: {e}"),
-                                    }
-                                }
                                 crate::app::PendingEditor::ScriptFile(path) => {
                                     if let Err(e) = edit_in_external_editor(terminal, &path) {
                                         app.status = format!("editor failed: {e}");
@@ -332,22 +326,15 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         // Shift+Enter and Ctrl+Enter insert a newline; plain Enter sends.
         KeyCode::Enter if shift || ctrl => app.input.insert_newline(),
-        // A pending research plan gate intercepts: 'e' (empty composer)
-        // prefills the plan for editing, Enter approves (empty composer) or
-        // submits the edit (composer text). Normal typing is untouched.
-        KeyCode::Char('e')
-            if app.research_plan_gate.is_some() && app.input_text().trim().is_empty() =>
-        {
-            app.edit_research_plan();
-        }
-        KeyCode::Enter if app.research_plan_gate.is_some() => {
+        // A parked survey gate (survey answer or plan approval) intercepts
+        // Enter — but only while the *viewed* session is the gated one, so a
+        // gate in another session can never swallow typing. The reply routes
+        // to the pipeline; an empty input means "approve" (plan) / "skip
+        // ahead" (survey). Normal typing is untouched.
+        KeyCode::Enter if app.survey_gate_targets_current_session() => {
             let text = app.input_text();
             app.set_input("");
-            if text.trim().is_empty() {
-                app.approve_research_plan();
-            } else {
-                app.submit_research_plan_edit(&text);
-            }
+            app.reply_to_survey_gate(&text);
         }
         KeyCode::Enter => app.submit()?,
         // Paste is handled by the terminal's bracketed paste (Event::Paste).
@@ -369,7 +356,9 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
             app.open_session_link();
         }
         // 'p' pins, 'x' discards the [n] source under the current selection —
-        // same selection→citation resolution as 'o'.
+        // same selection→citation resolution as 'o'. Both are plain letters
+        // guarded by an active mouse selection, so composer typing is
+        // untouched (the guard fires only while a selection exists).
         KeyCode::Char('p') if !ctrl && !shift && app.sel.selected_text().is_some() => {
             app.flag_source_under_selection(Some("pinned"));
         }
@@ -414,12 +403,10 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::PageUp => app.scroll = app.scroll.saturating_add(10).min(app.max_scroll),
         KeyCode::PageDown => app.scroll = app.scroll.saturating_sub(10),
-        // Esc cancels the research plan gate, stops the streaming response,
-        // or clears the composer.
-        KeyCode::Esc if app.research_plan_gate.is_some() => {
-            app.stop_research();
-            app.set_input("");
-        }
+        // Esc stops the streaming response or clears the composer. (The old
+        // Esc-stops-a-parked-plan-gate intercept is gone — approval is a chat
+        // reply now; stopping a parked job is Ctrl+↑ then Ctrl+X in the live
+        // view.)
         KeyCode::Esc if app.viewing_stream() => app.stop_stream()?,
         KeyCode::Esc => {
             app.set_input("");

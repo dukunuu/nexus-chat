@@ -571,6 +571,14 @@ impl Db {
         Ok(())
     }
 
+    /// Delete a single message row by id — used to roll back a persisted
+    /// `gate_reply` whose channel delivery failed, so a retry can't
+    /// duplicate it in the transcript.
+    pub fn delete_message(&self, id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM messages WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
     /// Delete a session and all its messages.
     pub fn delete_session(&self, id: &str) -> Result<()> {
         self.conn
@@ -605,6 +613,15 @@ impl Db {
     /// Insert a user message (no model/reasoning/stats). Returns its id.
     pub fn add_user_message(&self, session_id: &str, content: &str) -> Result<String> {
         self.insert_message(session_id, "user", content, None, None, None, None, None)
+    }
+
+    /// A user's reply to a survey/approval gate: rendered in the transcript
+    /// like a user message but never replayed to the model (`gate_reply`
+    /// role) — the survey/plan rows it answers are excluded from model
+    /// history too, so bare answers ("the second option", "drop Q2") must
+    /// not reach the model without their context.
+    pub fn add_gate_reply_message(&self, session_id: &str, content: &str) -> Result<String> {
+        self.insert_message(session_id, "gate_reply", content, None, None, None, None, None)
     }
 
     /// Insert a tool-call transcript block: `content` is JSON
@@ -651,6 +668,22 @@ impl Db {
         self.insert_message(
             session_id,
             "research_plan",
+            content,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// A research pipeline's clarifying-survey section: the scoping agent's
+    /// questions awaiting a chat answer. Rendered like a stage row but
+    /// actionable, and never replayed to the model.
+    pub fn add_survey_message(&self, session_id: &str, content: &str) -> Result<String> {
+        self.insert_message(
+            session_id,
+            "survey",
             content,
             None,
             None,
@@ -1818,6 +1851,30 @@ mod tests {
         let msgs = db.load_messages(&s.id).unwrap();
         assert_eq!(msgs.last().unwrap().role, "research_stage");
         assert_eq!(msgs.last().unwrap().content, "planning…");
+    }
+
+    #[test]
+    fn survey_messages_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let s = db.create_session("t", "a/b", &space, "chat").unwrap();
+        db.add_survey_message(&s.id, "For \"topic\":\n 1. Depth or breadth?").unwrap();
+        let msgs = db.load_messages(&s.id).unwrap();
+        let last = msgs.last().unwrap();
+        assert_eq!(last.role, "survey");
+        assert!(last.content.contains("Depth or breadth?"));
+    }
+
+    #[test]
+    fn gate_reply_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let s = db.create_session("t", "a/b", &space, "chat").unwrap();
+        db.add_gate_reply_message(&s.id, "the second option").unwrap();
+        let msgs = db.load_messages(&s.id).unwrap();
+        let last = msgs.last().unwrap();
+        assert_eq!(last.role, "gate_reply");
+        assert_eq!(last.content, "the second option");
     }
 
     #[test]

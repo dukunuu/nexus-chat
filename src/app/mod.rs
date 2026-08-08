@@ -590,6 +590,34 @@ pub type EmbedMsg = (
 /// stage update or final result).
 pub type ResearchMsg = (String, String, String, research::ResearchUpdate);
 
+/// A parked conversation awaiting a chat reply: which session the reply
+/// must come from, the channel to send it on, and which phase is waiting.
+/// Generic — the research survey/plan-approval gates ride it, and any other
+/// mode (swarm, watch setup, plain chat) can arm it the same way. Armed by
+/// the owning job's update handler on each pending section, cleared when
+/// the user replies or the job ends.
+pub(crate) struct SurveyGate {
+    pub session_id: String,
+    pub reply_tx: mpsc::UnboundedSender<String>,
+    pub phase: SurveyPhase,
+    /// The actionable transcript row for this gate. Keeping it with the gate
+    /// lets an incognito prompt be restored after the user switches away and
+    /// back without writing private content to the database.
+    pub prompt_role: String,
+    pub prompt_content: String,
+}
+
+/// What a parked survey gate is waiting for — drives the status line and
+/// which phase's reply is routed. Mode-agnostic: `Clarify` is any
+/// clarifying-question round, `Approve` any presented-artifact approval.
+pub(crate) enum SurveyPhase {
+    /// A clarifying-question round (1-based).
+    Clarify { round: u8 },
+    /// Approval of a presented artifact; `rework` is true on a
+    /// re-presentation after the user's edits were folded in.
+    Approve { rework: bool },
+}
+
 pub enum LoginMsg {
     Status(String),
     Done(Result<crate::config::CodexCredentials, String>),
@@ -600,7 +628,6 @@ pub enum LoginMsg {
 pub enum PendingEditor {
     AppFile(std::path::PathBuf),
     Persona(std::path::PathBuf),
-    ResearchPlan(std::path::PathBuf),
     ScriptFile(std::path::PathBuf),
 }
 
@@ -711,14 +738,33 @@ pub struct App {
     pub incognito: bool,
     /// Temp directory for incognito image files, cleaned up on toggle.
     pub(crate) incognito_img_dir: Option<std::path::PathBuf>,
-    /// A running `/research` job's plan-approval gate: the sender its
-    /// pipeline awaits, keyed by session id, plus the sub-questions shown
-    /// while the gate is open.
-    pub(crate) research_plan_gate: Option<(
-        String,
-        tokio::sync::oneshot::Sender<Vec<String>>,
-        Vec<String>,
-    )>,
+    /// A parked conversation's chat-reply gate (clarifying questions or an
+    /// approval) — armed only while a reply is actually pending, so a gate
+    /// in another session can never swallow typing.
+    pub(crate) survey_gate: Option<SurveyGate>,
+    /// Sender half of the reply channel into a parked gate. Created at the
+    /// owning job's start; the gate itself arms/disarms as pending-section
+    /// updates arrive.
+    pub(crate) survey_reply_tx: Option<mpsc::UnboundedSender<String>>,
+    /// Every `/steer` queued during the current job, as `(queue position,
+    /// text)` — position 1-based, assigned in queue order. Entries are
+    /// dropped once the pipeline acknowledges them (`research_steer_acked`),
+    /// and the whole log is cleared when the job stops or its channel
+    /// closes, so retained steer text stays bounded per job.
+    pub(crate) research_steer_log: Vec<(usize, String)>,
+    /// Steer positions (`steer #N`) the pipeline has drained and persisted —
+    /// parsed from `Stage` updates in `on_research_done`, so the live popup
+    /// knows what's picked up even when opened from another session, and the
+    /// retained log can drop acknowledged entries.
+    pub(crate) research_steer_acked: std::collections::HashSet<usize>,
+    /// The running job's stage rows (`label: detail` content strings), kept
+    /// in sync by `mirror_stage` regardless of which session is viewed — the
+    /// live popup renders from here instead of re-reading the db per frame.
+    pub(crate) research_stage_rows: Vec<String>,
+    /// Incognito mode captured when the job started: artifact persistence
+    /// (plan files, and the plan message itself, which folds in survey
+    /// replies) is decided by this, never by toggling `incognito` mid-job.
+    pub(crate) research_incognito: bool,
     /// Queues `/steer` instructions into the currently running research job's
     /// round-boundary check. `None` when no research job is running.
     pub(crate) research_steer_tx: Option<mpsc::UnboundedSender<String>>,
@@ -797,7 +843,8 @@ pub struct App {
     /// Model ids marked favorite, and when each model was last used (rfc3339).
     pub favorites: HashSet<String>,
     pub last_used: HashMap<String, String>,
-    /// Per-model reasoning effort ("low"/"medium"/"high").
+    /// Per-model reasoning effort (wire string from `ReasoningEffort::as_str`,
+    /// e.g. "minimal" / "low" / "high" / "xhigh" / "max" / "none").
     pub reasoning: HashMap<String, String>,
 
     pub session: Option<Session>,
@@ -1029,7 +1076,12 @@ impl App {
             web_mode: false,
             incognito: false,
             incognito_img_dir: None,
-            research_plan_gate: None,
+            survey_gate: None,
+            survey_reply_tx: None,
+            research_steer_log: Vec::new(),
+            research_steer_acked: std::collections::HashSet::new(),
+            research_stage_rows: Vec::new(),
+            research_incognito: false,
             research_steer_tx: None,
             research_topic_rx: None,
             research_live_input: String::new(),

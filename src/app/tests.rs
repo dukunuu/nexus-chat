@@ -166,7 +166,7 @@ pub(super) fn app_with_key() -> App {
         Model {
             id: "a/one".into(),
             name: "One".into(),
-            supports_reasoning: false,
+            reasoning_efforts: Vec::new(),
             context_length: None,
             supports_images: false,
             supports_image_generation: false,
@@ -176,7 +176,7 @@ pub(super) fn app_with_key() -> App {
         Model {
             id: "b/two".into(),
             name: "Two".into(),
-            supports_reasoning: false,
+            reasoning_efforts: Vec::new(),
             context_length: None,
             supports_images: false,
             supports_image_generation: false,
@@ -523,7 +523,7 @@ fn panels_split_favorites_from_available_by_recency() {
         Model {
             id: "a/one".into(),
             name: "One".into(),
-            supports_reasoning: false,
+            reasoning_efforts: Vec::new(),
             context_length: None,
             supports_images: false,
             supports_image_generation: false,
@@ -533,7 +533,7 @@ fn panels_split_favorites_from_available_by_recency() {
         Model {
             id: "b/two".into(),
             name: "Two".into(),
-            supports_reasoning: false,
+            reasoning_efforts: Vec::new(),
             context_length: None,
             supports_images: false,
             supports_image_generation: false,
@@ -543,7 +543,7 @@ fn panels_split_favorites_from_available_by_recency() {
         Model {
             id: "c/three".into(),
             name: "Three".into(),
-            supports_reasoning: false,
+            reasoning_efforts: Vec::new(),
             context_length: None,
             supports_images: false,
             supports_image_generation: false,
@@ -571,7 +571,7 @@ fn toggle_favorite_persists_and_moves_panel() {
     a.models = vec![Model {
         id: "a/one".into(),
         name: "One".into(),
-        supports_reasoning: false,
+        reasoning_efforts: Vec::new(),
         context_length: None,
         supports_images: false,
         supports_image_generation: false,
@@ -607,7 +607,7 @@ fn reasoning_cycles_only_for_supporting_models() {
     a.models = vec![Model {
         id: "r/model".into(),
         name: "R".into(),
-        supports_reasoning: true,
+        reasoning_efforts: crate::provider::ReasoningEffort::STANDARD.to_vec(),
         context_length: Some(1000),
         supports_images: false,
         supports_image_generation: false,
@@ -630,6 +630,190 @@ fn reasoning_cycles_only_for_supporting_models() {
             .iter()
             .any(|p| p.id == "r/model")
     );
+}
+
+#[test]
+fn reasoning_cycles_models_own_effort_list() {
+    // A Claude-like model accepts an extra `minimal` tier before `low`;
+    // the cycle must walk exactly the model's own list, not a global one.
+    let db = Db::open_in_memory().unwrap();
+    let mut a = App::new(db, Some("k".into()), test_space());
+    a.models = vec![Model {
+        id: "anthropic/claude-sonnet-4.5".into(),
+        name: "Sonnet".into(),
+        reasoning_efforts: crate::provider::ReasoningEffort::WITH_MINIMAL.to_vec(),
+        context_length: Some(1000),
+        supports_images: false,
+        supports_image_generation: false,
+        supports_video_generation: false,
+        backend: BackendTag::OpenRouter,
+    }];
+    a.model_focus = ModelPanel::Available;
+    a.avail_state.select(Some(0));
+    a.cycle_reasoning_focused().unwrap();
+    assert_eq!(a.reasoning_of("anthropic/claude-sonnet-4.5"), Some("minimal"));
+    a.cycle_reasoning_focused().unwrap();
+    assert_eq!(a.reasoning_of("anthropic/claude-sonnet-4.5"), Some("low"));
+    a.cycle_reasoning_focused().unwrap();
+    a.cycle_reasoning_focused().unwrap();
+    assert_eq!(a.reasoning_of("anthropic/claude-sonnet-4.5"), Some("high"));
+    a.cycle_reasoning_focused().unwrap(); // high -> off
+    assert_eq!(a.reasoning_of("anthropic/claude-sonnet-4.5"), None);
+}
+
+#[test]
+fn reasoning_cycle_uses_explicit_none_and_clears_stale_preferences() {
+    let db = Db::open_in_memory().unwrap();
+    let mut a = App::new(db, Some("k".into()), test_space());
+    a.models = vec![
+        Model {
+            id: "xhigh-model".into(),
+            name: "X".into(),
+            reasoning_efforts: crate::provider::ReasoningEffort::WITH_XHIGH_AND_NONE.to_vec(),
+            context_length: None,
+            supports_images: false,
+            supports_image_generation: false,
+            supports_video_generation: false,
+            backend: BackendTag::OpenRouter,
+        },
+        Model {
+            id: "no-reasoning".into(),
+            name: "N".into(),
+            reasoning_efforts: Vec::new(),
+            context_length: None,
+            supports_images: false,
+            supports_image_generation: false,
+            supports_video_generation: false,
+            backend: BackendTag::OpenRouter,
+        },
+    ];
+    a.model_focus = ModelPanel::Available;
+    let xhigh_index = a
+        .available_models()
+        .iter()
+        .position(|model| model.id == "xhigh-model")
+        .unwrap();
+    a.avail_state.select(Some(xhigh_index));
+    for expected in ["low", "medium", "high", "xhigh", "none", "low"] {
+        a.cycle_reasoning_focused().unwrap();
+        assert_eq!(a.reasoning_of("xhigh-model"), Some(expected));
+    }
+
+    a.reasoning
+        .insert("no-reasoning".to_string(), "low".to_string());
+    a.db
+        .set_reasoning("no-reasoning", Some("low"))
+        .unwrap();
+    let no_reasoning_index = a
+        .available_models()
+        .iter()
+        .position(|model| model.id == "no-reasoning")
+        .unwrap();
+    a.avail_state.select(Some(no_reasoning_index));
+    // Invalid stored values are hidden immediately and Ctrl+T removes the
+    // stale database preference rather than leaving an un-clearable badge.
+    assert_eq!(a.reasoning_of("no-reasoning"), None);
+    a.cycle_reasoning_focused().unwrap();
+    assert!(!a.reasoning.contains_key("no-reasoning"));
+    assert!(
+        a.db
+            .load_model_prefs()
+            .unwrap()
+            .iter()
+            .find(|pref| pref.id == "no-reasoning")
+            .is_some_and(|pref| pref.reasoning.is_none())
+    );
+}
+
+#[test]
+fn effort_accepted_follows_the_models_own_list() {
+    let db = Db::open_in_memory().unwrap();
+    let mut a = App::new(db, Some("k".into()), test_space());
+    a.models = vec![
+        Model {
+            id: "claude".into(),
+            name: "C".into(),
+            reasoning_efforts: crate::provider::ReasoningEffort::WITH_MINIMAL.to_vec(),
+            context_length: None,
+            supports_images: false,
+            supports_image_generation: false,
+            supports_video_generation: false,
+            backend: BackendTag::OpenRouter,
+        },
+        Model {
+            id: "dumb".into(),
+            name: "D".into(),
+            reasoning_efforts: Vec::new(),
+            context_length: None,
+            supports_images: false,
+            supports_image_generation: false,
+            supports_video_generation: false,
+            backend: BackendTag::OpenRouter,
+        },
+    ];
+    // Claude's own list: minimal/low/medium/high.
+    assert!(a.effort_accepted("claude", "minimal"));
+    assert!(a.effort_accepted("claude", "high"));
+    assert!(!a.effort_accepted("claude", "max")); // not in the accepted set
+    // No reasoning mode → nothing is accepted.
+    assert!(!a.effort_accepted("dumb", "low"));
+    // Unknown model → accept anything, so a stored value is never silently
+    // dropped just because the catalog isn't loaded.
+    assert!(a.effort_accepted("not-in-catalog", "high"));
+}
+
+#[tokio::test]
+async fn starting_a_request_clears_an_unsupported_reasoning_preference() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".to_string());
+    let session = a
+        .db
+        .create_session("t", "a/one", &a.active_space.id, "chat")
+        .unwrap();
+    a.session = Some(session);
+    a.reasoning.insert("a/one".to_string(), "high".to_string());
+    a.db.set_reasoning("a/one", Some("high")).unwrap();
+
+    a.start_stream().unwrap();
+
+    assert!(!a.reasoning.contains_key("a/one"));
+    assert!(a.status.contains("cleared unsupported reasoning"));
+    assert!(
+        a.db
+            .load_model_prefs()
+            .unwrap()
+            .iter()
+            .find(|pref| pref.id == "a/one")
+            .is_some_and(|pref| pref.reasoning.is_none())
+    );
+    for task in a.chat_tasks.values() {
+        task.abort.abort();
+    }
+}
+
+#[test]
+fn focused_reasoning_hint_lists_accepted_values() {
+    let db = Db::open_in_memory().unwrap();
+    let mut a = App::new(db, Some("k".into()), test_space());
+    a.models = vec![Model {
+        id: "claude".into(),
+        name: "C".into(),
+        reasoning_efforts: crate::provider::ReasoningEffort::WITH_MINIMAL.to_vec(),
+        context_length: None,
+        supports_images: false,
+        supports_image_generation: false,
+        supports_video_generation: false,
+        backend: BackendTag::OpenRouter,
+    }];
+    a.model_focus = ModelPanel::Available;
+    a.avail_state.select(Some(0));
+    assert_eq!(
+        a.focused_reasoning_hint().as_deref(),
+        Some("accepts minimal/low/medium/high")
+    );
+    // A model without reasoning gets no hint.
+    a.models[0].reasoning_efforts.clear();
+    assert_eq!(a.focused_reasoning_hint(), None);
 }
 
 #[test]
@@ -1089,7 +1273,7 @@ fn utility_model_resolution_falls_back_from_legacy_openrouter_id_on_openai() {
     a.models = vec![Model {
         id: "gpt-4.1-mini".into(),
         name: "GPT-4.1 mini".into(),
-        supports_reasoning: false,
+        reasoning_efforts: Vec::new(),
         context_length: None,
         supports_images: false,
         supports_image_generation: false,
@@ -1444,7 +1628,7 @@ fn history_carries_markdown_images_as_data_urls_for_vision_models() {
         Model {
             id: "vis/model".into(),
             name: "v".into(),
-            supports_reasoning: false,
+            reasoning_efforts: Vec::new(),
             context_length: None,
             supports_images: true,
             supports_image_generation: false,
@@ -1454,7 +1638,7 @@ fn history_carries_markdown_images_as_data_urls_for_vision_models() {
         Model {
             id: "txt/model".into(),
             name: "t".into(),
-            supports_reasoning: false,
+            reasoning_efforts: Vec::new(),
             context_length: None,
             supports_images: false,
             supports_image_generation: false,

@@ -7,7 +7,7 @@ use reqwest_eventsource::{Event, EventSource};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
-use super::{ChatMessage, ChatParams, Model, StreamEvent, ToolCall, ToolDef, Usage};
+use super::{ChatMessage, ChatParams, Model, ReasoningEffort, StreamEvent, ToolCall, ToolDef, Usage};
 use crate::tools::ToolBox;
 
 const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
@@ -159,18 +159,68 @@ impl ProviderFlavor {
         }
     }
 
-    fn supports_reasoning(self, m: &ModelEntry) -> bool {
+    /// The reasoning effort values this model accepts, in cycle order.
+    /// Empty = the model has no reasoning/thinking mode.
+    ///
+    /// A catalog-provided `reasoning.supported_efforts` list is authoritative
+    /// and wins for every backend that exposes it. Family rules are only
+    /// fallbacks for catalogs that report the `reasoning` parameter without
+    /// enumerating its accepted values.
+    fn reasoning_efforts(self, m: &ModelEntry) -> Vec<ReasoningEffort> {
+        use ReasoningEffort as E;
+        if let Some(supported) = m
+            .reasoning
+            .as_ref()
+            .map(|r| r.supported_efforts.as_slice())
+            .filter(|values| !values.is_empty())
+        {
+            return E::CYCLE_ORDER
+                .iter()
+                .copied()
+                .filter(|effort| supported.iter().any(|value| value == effort.as_str()))
+                .collect();
+        }
         match self {
-            ProviderFlavor::OpenRouter => m.supported_parameters.iter().any(|p| p == "reasoning"),
+            ProviderFlavor::OpenRouter => {
+                if !m.supported_parameters.iter().any(|p| p == "reasoning") {
+                    return Vec::new();
+                }
+                if m.id.starts_with("anthropic/") {
+                    E::WITH_MINIMAL.to_vec()
+                } else {
+                    E::STANDARD.to_vec()
+                }
+            }
             ProviderFlavor::OpenAi => {
                 let id = m.id.as_str();
-                id.starts_with("o") || id.starts_with("gpt-5")
+                if id == "gpt-5-pro" || id.starts_with("gpt-5-pro-") {
+                    E::HIGH_ONLY.to_vec()
+                } else if id == "gpt-5"
+                    || id.starts_with("gpt-5-20")
+                    || id.starts_with("gpt-5-mini")
+                    || id.starts_with("gpt-5-nano")
+                {
+                    E::WITH_MINIMAL.to_vec()
+                } else if ["gpt-5.2", "gpt-5.3", "gpt-5.4", "gpt-5.5"]
+                    .iter()
+                    .any(|prefix| id.starts_with(prefix))
+                {
+                    E::WITH_XHIGH_AND_NONE.to_vec()
+                } else if id.starts_with("gpt-5.6") {
+                    E::WITH_MAX_XHIGH_AND_NONE.to_vec()
+                } else if id.strip_prefix('o').is_some_and(|rest| {
+                    rest.chars().next().is_some_and(|c| c.is_ascii_digit())
+                }) || id.starts_with("gpt-5")
+                {
+                    E::STANDARD.to_vec()
+                } else {
+                    Vec::new()
+                }
             }
-            ProviderFlavor::OpenAiCodex => true,
-            // Several Go models (DeepSeek, Qwen, GLM) support a thinking
-            // mode; no catalog metadata to check, so offer the toggle on
-            // all of them rather than silently hiding it on ones that do.
-            ProviderFlavor::OpencodeGo => true,
+            // Codex and the Go bundle are reasoning-capable chat catalogs.
+            // Their catalog metadata wins above when present; this standard
+            // set is only for entries that expose no per-model detail.
+            ProviderFlavor::OpenAiCodex | ProviderFlavor::OpencodeGo => E::STANDARD.to_vec(),
         }
     }
 
@@ -283,7 +333,7 @@ struct VideoModelEntry {
     name: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct ModelEntry {
     id: String,
     #[serde(default)]
@@ -291,12 +341,20 @@ struct ModelEntry {
     #[serde(default)]
     supported_parameters: Vec<String>,
     #[serde(default)]
+    reasoning: Option<ModelReasoningEntry>,
+    #[serde(default)]
     context_length: Option<u64>,
     #[serde(default)]
     architecture: Option<Architecture>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
+struct ModelReasoningEntry {
+    #[serde(default)]
+    supported_efforts: Vec<String>,
+}
+
+#[derive(Deserialize, Clone)]
 struct Architecture {
     #[serde(default)]
     input_modalities: Vec<String>,
@@ -653,7 +711,7 @@ impl OpenRouter {
                 Model {
                     id: "gpt-5.3-codex-spark".into(),
                     name: "GPT-5.3 Codex Spark".into(),
-                    supports_reasoning: true,
+                    reasoning_efforts: ReasoningEffort::STANDARD.to_vec(),
                     context_length: Some(128_000),
                     supports_images: false,
                     supports_image_generation: false,
@@ -663,7 +721,7 @@ impl OpenRouter {
                 Model {
                     id: "gpt-5.4".into(),
                     name: "GPT-5.4".into(),
-                    supports_reasoning: true,
+                    reasoning_efforts: ReasoningEffort::WITH_XHIGH_AND_NONE.to_vec(),
                     context_length: Some(272_000),
                     supports_images: true,
                     supports_image_generation: false,
@@ -673,7 +731,7 @@ impl OpenRouter {
                 Model {
                     id: "gpt-5.4-mini".into(),
                     name: "GPT-5.4 mini".into(),
-                    supports_reasoning: true,
+                    reasoning_efforts: ReasoningEffort::WITH_XHIGH_AND_NONE.to_vec(),
                     context_length: Some(272_000),
                     supports_images: true,
                     supports_image_generation: false,
@@ -683,7 +741,7 @@ impl OpenRouter {
                 Model {
                     id: "gpt-5.5".into(),
                     name: "GPT-5.5".into(),
-                    supports_reasoning: true,
+                    reasoning_efforts: ReasoningEffort::WITH_XHIGH_AND_NONE.to_vec(),
                     context_length: Some(272_000),
                     supports_images: true,
                     supports_image_generation: false,
@@ -693,7 +751,7 @@ impl OpenRouter {
                 Model {
                     id: "gpt-5.6-sol".into(),
                     name: "GPT-5.6 Sol".into(),
-                    supports_reasoning: true,
+                    reasoning_efforts: ReasoningEffort::WITH_MAX_XHIGH_AND_NONE.to_vec(),
                     context_length: Some(1_000_000),
                     supports_images: true,
                     supports_image_generation: false,
@@ -703,7 +761,7 @@ impl OpenRouter {
                 Model {
                     id: "gpt-5.6-terra".into(),
                     name: "GPT-5.6 Terra".into(),
-                    supports_reasoning: true,
+                    reasoning_efforts: ReasoningEffort::WITH_MAX_XHIGH_AND_NONE.to_vec(),
                     context_length: Some(1_000_000),
                     supports_images: true,
                     supports_image_generation: false,
@@ -713,7 +771,7 @@ impl OpenRouter {
                 Model {
                     id: "gpt-5.6-luna".into(),
                     name: "GPT-5.6 Luna".into(),
-                    supports_reasoning: true,
+                    reasoning_efforts: ReasoningEffort::WITH_MAX_XHIGH_AND_NONE.to_vec(),
                     context_length: Some(1_000_000),
                     supports_images: true,
                     supports_image_generation: false,
@@ -785,7 +843,7 @@ impl OpenRouter {
                 let id = m.id;
                 Model {
                     name: m.name.unwrap_or_else(|| id.clone()),
-                    supports_reasoning: false,
+                    reasoning_efforts: Vec::new(),
                     context_length: None,
                     supports_images: m
                         .architecture
@@ -821,7 +879,7 @@ impl OpenRouter {
                 let id = m.id;
                 Model {
                     name: m.name.unwrap_or_else(|| id.clone()),
-                    supports_reasoning: false,
+                    reasoning_efforts: Vec::new(),
                     context_length: None,
                     supports_images: false,
                     supports_image_generation: false,
@@ -853,7 +911,7 @@ impl OpenRouter {
             .data
             .into_iter()
             .map(|m| {
-                let supports_reasoning = self.flavor.supports_reasoning(&m);
+                let reasoning_efforts = self.flavor.reasoning_efforts(&m);
                 let supports_images = self
                     .flavor
                     .supports_images(&m)
@@ -866,7 +924,7 @@ impl OpenRouter {
                     self.flavor == ProviderFlavor::OpenRouter && entry_supports_video_gen(&m);
                 Model {
                     name: m.name.unwrap_or_else(|| m.id.clone()),
-                    supports_reasoning,
+                    reasoning_efforts,
                     context_length: m.context_length,
                     id: m.id,
                     supports_images,
@@ -2276,7 +2334,8 @@ mod tests {
             ]
         );
         assert!(models.iter().all(|model| {
-            model.backend == crate::provider::BackendTag::Codex && model.supports_reasoning
+            model.backend == crate::provider::BackendTag::Codex
+                && !model.reasoning_efforts.is_empty()
         }));
     }
 
@@ -2414,6 +2473,93 @@ mod tests {
         assert_eq!(OpenRouter::opencode_context_fallback(OPENROUTER_BASE, "deepseek-v4-pro"), None);
         assert_eq!(OpenRouter::opencode_context_fallback(OPENCODE_ZEN_BASE, "nope"), None);
         assert_eq!(OpenRouter::opencode_context_fallback(OPENCODE_GO_BASE, "go:hy3"), None);
+    }
+
+    #[test]
+    fn reasoning_efforts_prefer_catalog_metadata_then_use_backend_fallbacks() {
+        let entry = |id: &str, parameters: &[&str], efforts: &[&str]| ModelEntry {
+            id: id.to_string(),
+            name: None,
+            supported_parameters: parameters.iter().map(|value| value.to_string()).collect(),
+            reasoning: (!efforts.is_empty()).then(|| ModelReasoningEntry {
+                supported_efforts: efforts.iter().map(|value| value.to_string()).collect(),
+            }),
+            context_length: None,
+            architecture: None,
+        };
+
+        let or = OpenRouter::openrouter("k".into());
+        // Catalog metadata is authoritative, normalized into UI cycle order,
+        // and can expose sparse sets plus explicit disable/max tiers.
+        let sparse = entry("google/gemini", &[], &["high", "minimal"]);
+        assert_eq!(
+            or.flavor.reasoning_efforts(&sparse),
+            vec![ReasoningEffort::Minimal, ReasoningEffort::High]
+        );
+        let full = entry(
+            "openai/gpt-next",
+            &["reasoning"],
+            &["max", "xhigh", "high", "medium", "low", "none"],
+        );
+        assert_eq!(
+            or.flavor.reasoning_efforts(&full),
+            ReasoningEffort::WITH_MAX_XHIGH_AND_NONE.to_vec()
+        );
+
+        // Without an enumerated set, OpenRouter still uses the catalog's
+        // supported-parameter gate and the conservative family fallback.
+        let claude = entry(
+            "anthropic/claude-sonnet-4.5",
+            &["reasoning"],
+            &[],
+        );
+        assert_eq!(
+            or.flavor.reasoning_efforts(&claude),
+            ReasoningEffort::WITH_MINIMAL.to_vec()
+        );
+        let claude_no_param = entry("anthropic/claude-sonnet-4.5", &[], &[]);
+        assert!(or.flavor.reasoning_efforts(&claude_no_param).is_empty());
+        let generic = entry("deepseek/reasoner", &["reasoning"], &[]);
+        assert_eq!(
+            or.flavor.reasoning_efforts(&generic),
+            ReasoningEffort::STANDARD.to_vec()
+        );
+
+        // Direct OpenAI has no rich /models metadata, so known families use
+        // concrete fallbacks rather than assigning every GPT-5 the same set.
+        let oa = OpenRouter::openai("k".into());
+        assert_eq!(
+            oa.flavor.reasoning_efforts(&entry("gpt-5", &[], &[])),
+            ReasoningEffort::WITH_MINIMAL.to_vec()
+        );
+        assert_eq!(
+            oa.flavor
+                .reasoning_efforts(&entry("gpt-5-pro", &[], &[])),
+            ReasoningEffort::HIGH_ONLY.to_vec()
+        );
+        assert_eq!(
+            oa.flavor.reasoning_efforts(&entry("gpt-5.4", &[], &[])),
+            ReasoningEffort::WITH_XHIGH_AND_NONE.to_vec()
+        );
+        let o3 = entry("o3", &[], &[]);
+        assert_eq!(
+            oa.flavor.reasoning_efforts(&o3),
+            ReasoningEffort::STANDARD.to_vec()
+        );
+        let gpt41 = entry("gpt-4.1", &[], &[]);
+        assert!(oa.flavor.reasoning_efforts(&gpt41).is_empty());
+
+        // Metadata also wins on OpenCode; absent metadata retains its broad
+        // compatibility fallback because that catalog is not authoritative.
+        let go = OpenRouter::opencode_go("k".into());
+        assert_eq!(
+            go.flavor.reasoning_efforts(&sparse),
+            vec![ReasoningEffort::Minimal, ReasoningEffort::High]
+        );
+        assert_eq!(
+            go.flavor.reasoning_efforts(&gpt41),
+            ReasoningEffort::STANDARD.to_vec()
+        );
     }
 
     #[test]

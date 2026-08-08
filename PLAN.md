@@ -1,10 +1,10 @@
-# Research Flow UX Proposal (rev 4 — prompting section)
+# Research Flow UX — PLAN
 
-> The interaction is **conversational**: a dedicated survey section where the
-> AI asks the user what they want, the user answers in chat and approves in
-> plain language ("I approve"), and the AI generates the plan — questions with
-> suggestions, custom input folded in — for a final approval. No keybindings,
-> no file round-trip, no popup.
+> The research interaction becomes **conversational**: a dedicated survey
+> section where the AI asks the user what they want, the user answers in chat
+> and approves in plain language ("I approve"), and the AI generates the plan —
+> questions with suggestions, custom input folded in — for a final approval.
+> No keybindings, no file round-trip, no popup.
 
 ---
 
@@ -58,6 +58,7 @@ containing the AI's clarifying questions.
 
 **Reusability (the "other modes" part):** the section is generic, not
 research-specific:
+
 - `survey` message role + renderer in `ui/history.rs` (mirrors
   `push_research_stage` / `push_research_plan`).
 - App-level plumbing: `survey_reply_tx/rx` channel + a small `Clarification`
@@ -110,15 +111,15 @@ research-specific:
 
 - `ResearchUpdate` gains `SurveyReady { questions: Vec<String> }` (or the
   pipeline writes the survey message itself); replies flow through a new
-  `research_reply_tx` mpsc that the gate reuses for both survey and approval
+  `survey_reply_tx` mpsc that the gate reuses for both survey and approval
   phases.
 - `run_research_inner` order: user survey (parked wait) ∥ web survey + local
   chunks → planner (topic + answers + known) → PlanReady (parked wait) →
   searchers. Round caps: survey ≤3, plan rework ≤1.
 - Pure, tested functions: parse plan blocks (already specified), fold user
   reply into plan prompt. Gate tests adapt to the chat-reply shape.
-- `save_plan_file` mirrors `save_research_report` (slug + timestamp, same
-  files dir, no citation indexing).
+- `save_space_artifact` (shared with `save_research_report`) writes the plan
+  record (slug + timestamp, same files dir, no citation indexing).
 - Renderer: `push_survey_section` collapsible like reasoning blocks
   (existing `Ctrl+R`-style toggle or always-visible with dimmed questions —
   simplest first).

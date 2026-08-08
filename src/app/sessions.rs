@@ -140,6 +140,7 @@ impl App {
         self.current_model = Some(s.model.clone());
         self.web_mode = s.web_mode;
         self.session = Some(s);
+        self.restore_survey_gate_prompt();
         self.refresh_toolbox();
         self.context_total = None;
         self.scroll = 0;
@@ -156,6 +157,7 @@ impl App {
             self.current_model = Some(s.model.clone());
             self.web_mode = s.web_mode;
             self.session = Some(s);
+            self.restore_survey_gate_prompt();
             self.refresh_toolbox();
             // Estimate from history until the next response reports exact usage.
             self.context_total = None;

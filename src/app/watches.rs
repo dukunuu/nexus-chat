@@ -108,6 +108,7 @@ impl super::App {
             self.status = format!("switched to: {}", s.title);
             self.web_mode = s.web_mode;
             self.session = Some(s);
+            self.restore_survey_gate_prompt();
             self.refresh_toolbox();
             self.context_total = None;
             self.scroll = 0;

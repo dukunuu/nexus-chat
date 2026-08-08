@@ -8,7 +8,8 @@
 use crate::provider::ChatMessage;
 
 /// A background research pipeline update: a phase label (+ progress detail),
-/// the Planner's sub-questions awaiting approval, or the final report/error.
+/// the survey's clarifying questions awaiting a chat reply, the Planner's
+/// sub-questions awaiting approval, or the final report/error.
 pub(crate) enum ResearchUpdate {
     /// Successive updates within one stage share a `label` so the UI/db
     /// replace one row in place instead of appending per tick.
@@ -16,21 +17,131 @@ pub(crate) enum ResearchUpdate {
         label: String,
         detail: String,
     },
-    /// The Planner finished; the pipeline is paused awaiting approve/edit
-    /// until the user approves/edits it or stops the research job.
-    PlanReady {
+    /// The scoping agent's clarifying questions; the pipeline is parked
+    /// awaiting a chat reply (`reply_to_survey_gate`). `round` is 1-based
+    /// (max `MAX_SURVEY_ROUNDS`).
+    SurveyReady {
         questions: Vec<String>,
+        round: u8,
+    },
+    /// The Planner finished; the pipeline is parked awaiting a chat reply:
+    /// "approve" runs the questions, edits get folded in by the approval
+    /// agent and re-presented (`rework = true`) once, capped.
+    PlanReady {
+        questions: Vec<PlanQuestion>,
+        rework: bool,
     },
     Done(std::result::Result<String, String>),
 }
 
 /// Hard cap on Planner-generated sub-questions per outer round.
 const MAX_SUBQUESTIONS: usize = 6;
+/// Hard bound on queued `/steer` instructions (and thus on retained steer
+/// text and the unbounded channel) — beyond this, new steers are refused
+/// with a status message until the next round boundary drains the queue.
+const MAX_QUEUED_STEERS: usize = 64;
+/// Cap on the scoping agent's clarifying questions per round.
+const MAX_SURVEY_QUESTIONS: usize = 4;
+/// Max survey rounds (initial + follow-ups) before the survey force-completes.
+pub(crate) const MAX_SURVEY_ROUNDS: u8 = 3;
 /// Tool-call budget for a single Searcher agent — a few search→fetch hops,
 /// not a whole interactive conversation's worth.
 pub(crate) const RESEARCH_SEARCHER_MAX_ITERS: usize = 6;
 
-const PLANNER_PROMPT: &str = "You are the planning stage of an automated research pipeline. Given a research topic, decompose it into 3 to 6 focused sub-questions that together cover the topic thoroughly (different angles: definitions, current state, evidence/data, controversies, practical implications — whichever apply). Respond with ONLY a JSON array of strings, no prose, no markdown fences. Example: [\"question one\", \"question two\"]. Note: searcher agents handling scholarly sub-questions can call search(mode=academic) in addition to search(mode=web), so peer-reviewed angles are fair game.";
+/// One Planner sub-question with its supporting brief: why it matters, the
+/// angles to cover, and promising source types/leads. The whole block is
+/// handed to its Searcher agent as the prompt — detail is functional.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub(crate) struct PlanQuestion {
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub why: String,
+    #[serde(default)]
+    pub angles: Vec<String>,
+    #[serde(default)]
+    pub sources: Vec<String>,
+}
+
+impl PlanQuestion {
+    /// A question with no brief — the fallback shape when the Planner didn't
+    /// follow the JSON-object instructions.
+    pub(crate) fn bare(question: String) -> Self {
+        PlanQuestion {
+            question,
+            why: String::new(),
+            angles: Vec::new(),
+            sources: Vec::new(),
+        }
+    }
+
+    /// The Searcher's prompt: the topic plus this question's full block
+    /// (why/angles/sources), so one focused agent answers one focused brief.
+    pub(crate) fn prompt(&self, topic: &str) -> String {
+        let mut p = format!("Research topic: {topic}\n\nSub-question: {}\n", self.question);
+        if !self.why.is_empty() {
+            p.push_str(&format!("\nWhy this angle matters: {}\n", self.why));
+        }
+        if !self.angles.is_empty() {
+            p.push_str(&format!("\nAngles to cover: {}\n", self.angles.join("; ")));
+        }
+        if !self.sources.is_empty() {
+            p.push_str(&format!("\nSource leads: {}\n", self.sources.join("; ")));
+        }
+        p
+    }
+}
+
+/// A plan rendered for the transcript / plan file: numbered questions, each
+/// with its Why/Angles/Sources brief indented under it.
+pub(crate) fn plan_text(questions: &[PlanQuestion]) -> String {
+    questions
+        .iter()
+        .enumerate()
+        .map(|(i, q)| {
+            let mut s = format!("{}. {}", i + 1, q.question);
+            if !q.why.is_empty() {
+                s.push_str(&format!("\n   Why: {}", q.why));
+            }
+            if !q.angles.is_empty() {
+                s.push_str(&format!("\n   Angles: {}", q.angles.join("; ")));
+            }
+            if !q.sources.is_empty() {
+                s.push_str(&format!("\n   Sources: {}", q.sources.join("; ")));
+            }
+            s
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The scoping agent's reply: the single-word COMPLETE marker, a numbered
+/// list of clarifying questions, or output that violates the contract
+/// (`Malformed` — empty, explanatory prose, error text) which fails the
+/// survey visibly instead of silently dropping it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SurveyReply {
+    Complete,
+    Questions(Vec<String>),
+    Malformed,
+}
+
+/// The approval agent's verdict on a user reply to the plan.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Approval {
+    Approved,
+    Revised(Vec<PlanQuestion>),
+    /// The agent produced output that is neither an approval nor a usable
+    /// revision (bare prose, empty reply). Fails the phase visibly —
+    /// malformed output must never be mistaken for approval.
+    Malformed,
+}
+
+const PLANNER_PROMPT: &str = "You are the planning stage of an automated research pipeline. Given a research topic, decompose it into 3 to 6 focused sub-questions that together cover the topic thoroughly (different angles: definitions, current state, evidence/data, controversies, practical implications — whichever apply). For each sub-question include: 'question' (the sub-question itself), 'why' (one short sentence on the angle it covers), 'angles' (2-5 specific facets to investigate), and 'sources' (1-4 source types or leads likely to answer it). Respond with ONLY a JSON array of objects, no prose, no markdown fences. Example: [{\"question\": \"...\", \"why\": \"...\", \"angles\": [\"...\", \"...\"], \"sources\": [\"...\", \"...\"]}]. Note: searcher agents handling scholarly sub-questions can call search(mode=academic) in addition to search(mode=web), so peer-reviewed angles are fair game.";
+
+const SURVEY_AGENT_PROMPT: &str = "You are the scoping stage of a research pipeline. You'll be given a research topic and, on later rounds, the user's answers so far. Ask 1 to 4 focused clarifying questions that would meaningfully change the research plan — scope, depth, angles, constraints — and skip anything you can infer. When you have enough to plan, reply with exactly the single word COMPLETE. Otherwise reply with your numbered questions only, one per line, no preamble, no markdown.";
+
+const PLAN_APPROVAL_PROMPT: &str = "You are the approval stage of a research pipeline. The user was shown a plan of sub-questions (each with why/angles/sources). If the user's reply approves it — phrases like 'approve', 'looks good', 'go', 'ok', 'yes', or a bare affirmation — reply with exactly the single word APPROVED. Otherwise fold their feedback into the plan: apply the requested changes (drop questions, add angles, reword, add new questions up to 6 total) and reply with ONLY the revised JSON array of plan objects, no prose, no markdown fences. Example: [{\"question\": \"...\", \"why\": \"...\", \"angles\": [\"...\", \"...\"], \"sources\": [\"...\", \"...\"]}]";
 
 pub(crate) const SEARCHER_PROMPT: &str = "You are a research searcher agent. You will be given one focused sub-question. Use search(mode=web) and fetch_url to investigate it thoroughly: search, then fetch and read the most promising pages, and search again with new terms you learn from them if needed. When you have enough to answer well, write a concise findings summary (a few paragraphs, prose, no headers) that directly answers the sub-question, citing sources inline as [n]. End your answer with a line starting exactly with 'Sources:' followed by the numbered list of URLs you used, one per line, matching your [n] citations. Prefer sources from domains you have not already cited — diverse sources make a stronger report.";
 
@@ -91,14 +202,164 @@ fn strip_list_prefix(line: &str) -> String {
     s.to_string()
 }
 
-/// Parse the user-edited plan (one sub-question per line, same bullet/number
-/// tolerance as the Planner's own fallback parser) back into a list.
-pub(crate) fn parse_plan_edit(text: &str) -> Vec<String> {
-    text.lines()
-        .map(strip_list_prefix)
-        .filter(|l| !l.is_empty())
-        .take(MAX_SUBQUESTIONS)
+/// Parse the scoping agent's reply: `COMPLETE` (case-insensitive, optionally
+/// with trailing punctuation or prose) ends the survey. Otherwise only lines
+/// that look like questions — numbered/bulleted, or ending in `?` — are read
+/// as clarifying questions. Anything else (empty output, explanatory or
+/// error prose) is `Malformed`: the agent's output contract says COMPLETE or
+/// questions, so a violation must fail the survey visibly — never be
+/// mistaken for completion, and never park the pipeline awaiting an answer
+/// for a non-question.
+pub(crate) fn parse_survey_reply(text: &str) -> SurveyReply {
+    let t = text.trim();
+    // First word COMPLETE ends the survey, tolerating trailing punctuation
+    // and prose: "COMPLETE", "COMPLETE.", "COMPLETE: proceed", "COMPLETE —".
+    let head = t
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+    if head.eq_ignore_ascii_case("COMPLETE") {
+        return SurveyReply::Complete;
+    }
+    let mut qs: Vec<String> = Vec::new();
+    for line in t.lines() {
+        let s = line.trim();
+        if s.is_empty() {
+            continue;
+        }
+        // Only list-marked or question-shaped lines count as questions;
+        // bare prose (explanations, error messages) is a contract violation.
+        let marked = s.starts_with(['-', '*'])
+            || s.chars().next().is_some_and(|c| c.is_ascii_digit());
+        let q = strip_list_prefix(s);
+        if q.is_empty() {
+            continue;
+        }
+        if !marked && !q.ends_with('?') {
+            continue;
+        }
+        qs.push(q);
+        if qs.len() >= MAX_SURVEY_QUESTIONS {
+            break;
+        }
+    }
+    if qs.is_empty() {
+        SurveyReply::Malformed
+    } else {
+        SurveyReply::Questions(qs)
+    }
+}
+
+/// Byte offset of the first `[` or `{` in `s`, if any. Structured JSON the
+/// model wrapped in prose ("Here is the plan:\n[{\"question\":…}]") is
+/// still JSON and must be parsed as such — never re-read as bare lines.
+fn json_start(s: &str) -> Option<usize> {
+    s.find(['[', '{'])
+}
+
+/// Parse the Planner's reply into plan blocks: a JSON array of objects with
+/// `question`/`why`/`angles`/`sources` (missing fields default to empty).
+/// Structured JSON is unambiguous — malformed JSON (parse failure, wrong
+/// field types) or JSON with no usable questions yields an empty result and
+/// fails planning; the raw JSON lines are never reinterpreted as bare
+/// questions (`[{}]` must not become a plan whose question is literally
+/// `[{}]`, and prose-prefixed JSON like "Here is the plan:\n[…]" is still
+/// parsed as JSON, not as two raw lines). Only output with no JSON shape at
+/// all falls back to one bare question per line (the legacy line format),
+/// which also still accepts a legacy JSON array of strings. Always capped at
+/// `MAX_SUBQUESTIONS`.
+pub(crate) fn parse_plan_blocks(text: &str) -> Vec<PlanQuestion> {
+    let trimmed = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    if let Some(start) = json_start(trimmed) {
+        let candidate = &trimmed[start..];
+        if let Ok(v) = serde_json::from_str::<Vec<PlanQuestion>>(candidate) {
+            let qs: Vec<PlanQuestion> = v
+                .into_iter()
+                .map(|mut q| {
+                    q.question = q.question.trim().to_string();
+                    q
+                })
+                .filter(|q| !q.question.is_empty())
+                .take(MAX_SUBQUESTIONS)
+                .collect();
+            if !qs.is_empty() {
+                return qs;
+            }
+        }
+        // Legacy structured format: a JSON array of plain strings.
+        if let Ok(v) = serde_json::from_str::<Vec<String>>(candidate) {
+            let qs: Vec<PlanQuestion> = v
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(PlanQuestion::bare)
+                .take(MAX_SUBQUESTIONS)
+                .collect();
+            if !qs.is_empty() {
+                return qs;
+            }
+        }
+        // Malformed or unusable structured output: fail, no line fallback.
+        return Vec::new();
+    }
+    parse_subquestions(text)
+        .into_iter()
+        .map(PlanQuestion::bare)
         .collect()
+}
+
+/// Parse the approval agent's reply: `APPROVED` (case-insensitive, optionally
+/// with trailing prose) accepts the plan; a JSON plan array is a revision;
+/// line-formatted revisions are only accepted when they look like a list
+/// (bullets or `N.`/`N)` prefixes). Anything else is `Malformed` — a garbled
+/// verdict must fail the phase visibly, never silently count as approval.
+pub(crate) fn parse_approval(text: &str) -> Approval {
+    let upper = text.trim().to_ascii_uppercase();
+    if upper == "APPROVED"
+        || upper.starts_with("APPROVED:")
+        || upper.starts_with("APPROVED —")
+        || upper.starts_with("APPROVED\n")
+    {
+        return Approval::Approved;
+    }
+    // Structured JSON (possibly wrapped in prose) is unambiguous: parse it
+    // strictly through `parse_plan_blocks`, and treat malformed or unusable
+    // output as `Malformed` — never fall back to reading the raw JSON lines
+    // as bare plan questions.
+    let trimmed = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    if json_start(trimmed).is_some() {
+        let qs = parse_plan_blocks(text);
+        return if qs.is_empty() {
+            Approval::Malformed
+        } else {
+            Approval::Revised(qs)
+        };
+    }
+    // Line fallback: only when the output is recognizably a list.
+    let has_markers = trimmed.lines().any(|l| {
+        let s = l.trim();
+        s.starts_with(['-', '*']) || s.chars().next().is_some_and(|c| c.is_ascii_digit())
+    });
+    if !has_markers {
+        return Approval::Malformed;
+    }
+    let qs = parse_plan_blocks(text);
+    if qs.is_empty() {
+        Approval::Malformed
+    } else {
+        Approval::Revised(qs)
+    }
 }
 
 /// Parse the Critic's raw reply into a `Critique`. Anything that doesn't
@@ -131,22 +392,73 @@ pub(crate) fn parse_critique(text: &str) -> Critique {
     Critique::Satisfied
 }
 
-/// The Planner's request, with any locally-known context (chunks from the
-/// space's own files, semantically matched to the topic) framed as "already
-/// known — plan sub-questions for the gaps".
-fn planner_messages_with_context(topic: &str, known: &[String]) -> Vec<ChatMessage> {
-    let user = if known.is_empty() {
-        topic.to_string()
+/// The Planner's request: the topic, the user's survey answers ("what they
+/// said they want"), and any locally-known context (chunks from the space's
+/// own files plus a preliminary web survey, semantically matched to the
+/// topic) framed as "already known — plan sub-questions for the gaps".
+fn planner_messages_with_context(
+    topic: &str,
+    answers: &[(String, String)],
+    known: &[String],
+) -> Vec<ChatMessage> {
+    let mut user = String::new();
+    if !answers.is_empty() {
+        user.push_str("The user answered clarifying questions before planning:\n");
+        for (i, (qs, reply)) in answers.iter().enumerate() {
+            user.push_str(&format!("Round {} — asked: {}\nAnswered: {reply}\n", i + 1, qs));
+        }
+        user.push('\n');
+    }
+    if known.is_empty() {
+        user.push_str(topic);
     } else {
-        format!(
+        user.push_str(&format!(
             "Topic: {topic}\n\nAlready known (from local files and/or a preliminary web survey) — \
              plan sub-questions for the gaps, not what's already covered:\n{}",
             known.join("\n\n")
-        )
-    };
+        ));
+    }
     vec![
         ChatMessage::text("system", PLANNER_PROMPT),
         ChatMessage::text("user", user),
+    ]
+}
+
+/// The scoping agent's request: the topic, and on later rounds the questions
+/// asked + answers given so far. One prompt serves both the initial questions
+/// (empty rounds) and each follow-up round — the agent replies COMPLETE when
+/// it has enough.
+fn survey_messages(topic: &str, rounds: &[(String, String)]) -> Vec<ChatMessage> {
+    let mut user = format!("Research topic: {topic}\n");
+    if !rounds.is_empty() {
+        user.push_str("\nSo far:\n");
+        for (i, (qs, reply)) in rounds.iter().enumerate() {
+            user.push_str(&format!(
+                "Round {} — I asked:\n{qs}\nThe user answered: {reply}\n",
+                i + 1
+            ));
+        }
+    }
+    vec![
+        ChatMessage::text("system", SURVEY_AGENT_PROMPT),
+        ChatMessage::text("user", user),
+    ]
+}
+
+/// Fold the user's reply to the presented plan back into the pipeline: the
+/// approval agent either recognizes an approval (APPROVED) or returns a
+/// revised plan.
+fn plan_approval_messages(
+    topic: &str,
+    questions: &[PlanQuestion],
+    user_reply: &str,
+) -> Vec<ChatMessage> {
+    vec![
+        ChatMessage::text("system", PLAN_APPROVAL_PROMPT),
+        ChatMessage::text(
+            "user",
+            format!("Topic: {topic}\n\nPlan:\n{}\n\nUser reply: {user_reply}", plan_text(questions)),
+        ),
     ]
 }
 
@@ -231,6 +543,7 @@ use crate::provider::{ChatParams, StreamEvent};
 use crate::tools::ToolBox;
 
 use super::ResearchMsg;
+use super::{SurveyGate, SurveyPhase};
 
 /// Send the `(session_id, space_id, space_name)` triple's stage update.
 fn send_stage(
@@ -296,10 +609,13 @@ async fn plan(
     provider: &OpenRouter,
     model: &str,
     topic: &str,
+    answers: &[(String, String)],
     known: &[String],
-) -> Result<Vec<String>, String> {
-    let text = complete_text(provider, model, planner_messages_with_context(topic, known)).await?;
-    let qs = parse_subquestions(&text);
+) -> Result<Vec<PlanQuestion>, String> {
+    let text =
+        complete_text(provider, model, planner_messages_with_context(topic, answers, known))
+            .await?;
+    let qs = parse_plan_blocks(&text);
     if qs.is_empty() {
         return Err(format!(
             "planner returned no usable sub-questions (raw reply: {text:.200})"
@@ -308,12 +624,15 @@ async fn plan(
     Ok(qs)
 }
 
-/// One Searcher agent: given a single sub-question, runs the normal
-/// tool-loop (restricted to search/fetch_url) and
-/// returns its final prose findings (including its own "Sources:" citation
-/// list). Never returns an `Err` — a dead search/fetch/model call becomes a
-/// placeholder finding string so one bad sub-question can't sink the whole
-/// pipeline.
+/// One Searcher agent: given one focused sub-question prompt, runs the normal
+/// tool-loop (restricted to search/fetch_url) and returns its final prose
+/// findings (including its own "Sources:" citation list). Never returns an
+/// `Err` — a dead search/fetch/model call becomes a placeholder finding
+/// string so one bad sub-question can't sink the whole pipeline.
+///
+/// `prompt` is the full block handed to the model (topic + why/angles/sources
+/// brief — detail is functional); `display` is the short label used in the
+/// live activity rows, so a searcher's status never leaks the whole brief.
 ///
 /// Every `Status`/`ToolCall` event along the way is forwarded as a live
 /// stage update under this searcher's own label (`searcher N/total`), so the
@@ -323,7 +642,8 @@ async fn plan(
 async fn run_searcher(
     provider: &OpenRouter,
     model: &str,
-    sub_question: &str,
+    prompt: &str,
+    display: &str,
     toolbox: Arc<ToolBox>,
     tx: &mpsc::UnboundedSender<ResearchMsg>,
     ids: &(String, String, String),
@@ -338,11 +658,11 @@ async fn run_searcher(
         tx,
         ids,
         &label,
-        format!("working — investigating \"{sub_question}\""),
+        format!("working — investigating \"{display}\""),
     );
     let messages = vec![
         ChatMessage::text("system", SEARCHER_PROMPT),
-        ChatMessage::text("user", sub_question),
+        ChatMessage::text("user", prompt),
     ];
     let tools = toolbox.defs();
     let (mut rx, abort) = provider.stream_chat(
@@ -371,7 +691,7 @@ async fn run_searcher(
             }
             StreamEvent::Error(e) => {
                 send_stage(tx, ids, &label, format!("error — {e}"));
-                return format!("[search agent error on \"{sub_question}\": {e}]");
+                return format!("[search agent error on \"{display}\": {e}]");
             }
             StreamEvent::Done => break,
             _ => {}
@@ -380,13 +700,13 @@ async fn run_searcher(
     let text = buf.trim();
     if text.is_empty() {
         send_stage(tx, ids, &label, "error — no findings returned");
-        format!("[no findings for \"{sub_question}\"]")
+        format!("[no findings for \"{display}\"]")
     } else {
         send_stage(
             tx,
             ids,
             &label,
-            format!("done — answered \"{sub_question}\""),
+            format!("done — answered \"{display}\""),
         );
         text.to_string()
     }
@@ -458,17 +778,19 @@ async fn verify_with_quote_check(
 /// Fan out one Searcher per question in parallel, sending a running
 /// `{done}/{total}` stage update as each finishes (in addition to each
 /// searcher's own live per-tool-call feed). Order of the returned findings
-/// doesn't matter (synthesis treats them as an unordered set).
+/// doesn't matter (synthesis treats them as an unordered set). Each item is
+/// `(prompt, display)`: the full prompt goes to the agent, the short display
+/// label goes into the activity rows.
 async fn run_searchers(
     provider: &OpenRouter,
     model: &str,
     toolbox: &Arc<ToolBox>,
-    questions: &[String],
+    items: &[(String, String)],
     tx: &mpsc::UnboundedSender<ResearchMsg>,
     ids: &(String, String, String),
     batch: &str,
 ) -> Vec<String> {
-    let total = questions.len();
+    let total = items.len();
     send_stage(
         tx,
         ids,
@@ -476,7 +798,7 @@ async fn run_searchers(
         format!("working — 0/{total} agents complete"),
     );
     let mut set = tokio::task::JoinSet::new();
-    for (idx, q) in questions.iter().cloned().enumerate() {
+    for (idx, (prompt, display)) in items.iter().cloned().enumerate() {
         let provider = provider.clone();
         let model = model.to_string();
         let toolbox = toolbox.clone();
@@ -485,7 +807,7 @@ async fn run_searchers(
         let batch = batch.to_string();
         set.spawn(async move {
             run_searcher(
-                &provider, &model, &q, toolbox, &tx, &ids, &batch, idx, total,
+                &provider, &model, &prompt, &display, toolbox, &tx, &ids, &batch, idx, total,
             )
             .await
         });
@@ -523,7 +845,7 @@ pub(crate) async fn run_research(
     embedding_model: String,
     db_path: std::path::PathBuf,
     topic: String,
-    gate_rx: Option<tokio::sync::oneshot::Receiver<Vec<String>>>,
+    reply_rx: Option<mpsc::UnboundedReceiver<String>>,
     steer_rx: mpsc::UnboundedReceiver<String>,
     toolbox: Arc<ToolBox>,
     tx: mpsc::UnboundedSender<ResearchMsg>,
@@ -531,23 +853,16 @@ pub(crate) async fn run_research(
     space_id: String,
     space_name: String,
 ) {
-    let known = local_known_chunks(
-        &embedding_provider,
-        &embedding_model,
-        &db_path,
-        &space_id,
-        &topic,
-    )
-    .await;
     let ids = (session_id, space_id, space_name);
     let result = run_research_inner(
         &research_provider,
         &research_model,
         &escalation_provider,
         &escalation_model,
+        &embedding_provider,
+        &embedding_model,
         &topic,
-        &known,
-        gate_rx,
+        reply_rx,
         steer_rx,
         &db_path,
         &toolbox,
@@ -594,57 +909,267 @@ async fn local_known_chunks(
         .unwrap_or_default()
 }
 
+/// One survey round's questions, sent to the UI and awaited: park on
+/// `reply_rx` until the user answers (or the job is stopped and the channel
+/// drops). Returns the user's trimmed reply, or `None` when the channel
+/// closed.
+async fn await_survey_reply(
+    tx: &mpsc::UnboundedSender<ResearchMsg>,
+    ids: &(String, String, String),
+    reply_rx: &mut mpsc::UnboundedReceiver<String>,
+    questions: &[String],
+    round: u8,
+) -> Option<String> {
+    let _ = tx.send((
+        ids.0.clone(),
+        ids.1.clone(),
+        ids.2.clone(),
+        ResearchUpdate::SurveyReady {
+            questions: questions.to_vec(),
+            round,
+        },
+    ));
+    reply_rx.recv().await.map(|r| r.trim().to_string())
+}
+
+/// The conversational survey: the scoping agent asks what the user wants
+/// (1–3 rounds), the user answers in chat, and the agent declares the survey
+/// complete once it has enough — no phrase-matching in app code. An empty
+/// reply (Enter on an empty input) skips ahead. Request failures (auth,
+/// rate limits, network), malformed agent output, and a closed reply channel
+/// all propagate as `Err` — the survey is a promised phase of the
+/// conversational flow, not an optional garnish, so it must not silently
+/// skip and still report success. Returns the (questions, answer) rounds
+/// for the planner's context.
+#[allow(clippy::too_many_arguments)]
+async fn run_user_survey(
+    provider: &OpenRouter,
+    model: &str,
+    topic: &str,
+    reply_rx: &mut mpsc::UnboundedReceiver<String>,
+    tx: &mpsc::UnboundedSender<ResearchMsg>,
+    ids: &(String, String, String),
+) -> Result<Vec<(String, String)>, String> {
+    let mut rounds: Vec<(String, String)> = Vec::new();
+    let initial = complete_text(provider, model, survey_messages(topic, &[]))
+        .await
+        .map_err(|e| format!("survey agent failed: {e}"))?;
+    let mut questions = parse_survey_reply(&initial);
+    let mut raw = initial;
+    let mut round: u8 = 1;
+    loop {
+        match questions {
+            SurveyReply::Complete => return Ok(rounds),
+            SurveyReply::Malformed => {
+                return Err(format!(
+                    "survey agent returned unusable output (raw reply: {raw:.200})"
+                ));
+            }
+            SurveyReply::Questions(qs) if qs.is_empty() || round > MAX_SURVEY_ROUNDS => {
+                return Ok(rounds);
+            }
+            SurveyReply::Questions(qs) => {
+                let Some(reply) = await_survey_reply(tx, ids, reply_rx, &qs, round).await else {
+                    // The reply channel closed — the job is being torn down
+                    // (or a stop raced the parked gate). Don't keep planning
+                    // as if the scoping happened.
+                    return Err("survey cancelled — the reply channel closed".to_string());
+                };
+                if reply.is_empty() {
+                    return Ok(rounds); // Empty Enter = skip the rest.
+                }
+                rounds.push((qs.join("\n"), reply));
+                round += 1;
+                if round > MAX_SURVEY_ROUNDS {
+                    return Ok(rounds);
+                }
+                raw = complete_text(provider, model, survey_messages(topic, &rounds))
+                    .await
+                    .map_err(|e| format!("survey follow-up failed: {e}"))?;
+                questions = parse_survey_reply(&raw);
+            }
+        }
+    }
+}
+
+/// The plan-approval phase: present the plan, park for a chat reply, and fold
+/// edits back in via the approval agent. An empty reply (Enter) or an
+/// agent-recognized "approve" runs the questions as-is; edits are re-presented
+/// once (`rework` cap) for a final approval. A second edit, a failed approval
+/// call, malformed agent output, or a closed reply channel (job teardown
+/// racing the parked gate) fails visibly (`Err`) — searchers never run on a
+/// plan the user hasn't approved, and approval never fails open.
+#[allow(clippy::too_many_arguments)]
+async fn await_plan_approval(
+    provider: &OpenRouter,
+    model: &str,
+    topic: &str,
+    questions: &mut Vec<PlanQuestion>,
+    reply_rx: &mut mpsc::UnboundedReceiver<String>,
+    tx: &mpsc::UnboundedSender<ResearchMsg>,
+    ids: &(String, String, String),
+) -> Result<(), String> {
+    let mut rework = false;
+    loop {
+        let _ = tx.send((
+            ids.0.clone(),
+            ids.1.clone(),
+            ids.2.clone(),
+            ResearchUpdate::PlanReady {
+                questions: questions.clone(),
+                rework,
+            },
+        ));
+        let Some(reply) = reply_rx.recv().await else {
+            // The reply channel closed without an approval (job teardown, or
+            // a stop racing the parked gate). Fail visibly rather than
+            // running searchers on a plan the user hasn't approved.
+            return Err(
+                "plan approval cancelled — the reply channel closed before the plan was approved"
+                    .to_string(),
+            );
+        };
+        if reply.trim().is_empty() {
+            return Ok(()); // Enter on an empty input = approve.
+        }
+        let text = complete_text(
+            provider,
+            model,
+            plan_approval_messages(topic, questions, &reply),
+        )
+        .await
+        .map_err(|e| format!("plan approval agent failed: {e}"))?;
+        match parse_approval(&text) {
+            Approval::Approved => return Ok(()),
+            Approval::Revised(revised) if !revised.is_empty() => {
+                if rework {
+                    // Second edit: never silently folded in and run. The
+                    // rework cap is one re-presentation — fail visibly
+                    // rather than execute an unapproved revision.
+                    return Err(
+                        "plan was revised twice — rework cap reached; re-run /research \
+                         with the final plan"
+                            .to_string(),
+                    );
+                }
+                *questions = revised;
+                rework = true;
+            }
+            Approval::Revised(_) | Approval::Malformed => {
+                return Err(format!(
+                    "plan approval agent returned an unusable verdict (raw reply: {text:.200})"
+                ));
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_research_inner(
     research_provider: &OpenRouter,
     research_model: &str,
     escalation_provider: &OpenRouter,
     escalation_model: &str,
+    embedding_provider: &OpenRouter,
+    embedding_model: &str,
     topic: &str,
-    known: &[String],
-    gate_rx: Option<tokio::sync::oneshot::Receiver<Vec<String>>>,
+    reply_rx: Option<mpsc::UnboundedReceiver<String>>,
     mut steer_rx: mpsc::UnboundedReceiver<String>,
     db_path: &std::path::Path,
     toolbox: &Arc<ToolBox>,
     tx: &mpsc::UnboundedSender<ResearchMsg>,
     ids: &(String, String, String),
 ) -> Result<String, String> {
-    // Survey first instead of asking the planner to guess the landscape from
-    // the topic alone. Its cited overview becomes planning context, so the
-    // eventual plan targets real gaps and available evidence.
-    send_stage(
-        tx,
-        ids,
-        "survey",
-        "working — mapping the topic, debates, evidence, and source landscape",
-    );
-    let survey_question = format!(
-        "Conduct a broad preliminary survey of this research topic before planning: {topic}. \
-         Identify the major concepts, current debates, useful source types, and important \
-         evidence gaps."
-    );
-    let survey = run_searcher(
-        research_provider,
-        research_model,
-        &survey_question,
-        toolbox.clone(),
-        tx,
-        ids,
-        "survey",
-        0,
-        1,
-    )
-    .await;
-    persist_session_sources(db_path, &ids.0, std::slice::from_ref(&survey));
-    let mut planning_context = known.to_vec();
-    if !survey.starts_with('[') {
-        planning_context.push(format!("Preliminary web survey:\n{survey}"));
-        send_stage(tx, ids, "survey", "done — landscape mapped for planning");
+    // Gather the planning context (local chunks + a web landscape survey)
+    // concurrently with the conversational survey — the user answers while
+    // the ground truth arrives, so the plan targets real gaps. The two
+    // gatherers also run concurrently with each other.
+    let gather_task = {
+        let provider = embedding_provider.clone();
+        let model = embedding_model.to_string();
+        let db_path = db_path.to_path_buf();
+        let space_id = ids.1.clone();
+        let topic = topic.to_string();
+        let research_provider = research_provider.clone();
+        let research_model = research_model.to_string();
+        let toolbox = toolbox.clone();
+        let tx = tx.clone();
+        let ids = ids.clone();
+        tokio::spawn(async move {
+            let known = async {
+                local_known_chunks(&provider, &model, &db_path, &space_id, &topic).await
+            };
+            let survey = async {
+                send_stage(
+                    &tx,
+                    &ids,
+                    "web survey",
+                    "working — mapping the topic, debates, evidence, and source landscape",
+                );
+                let survey_question = format!(
+                    "Conduct a broad preliminary survey of this research topic before planning: {topic}. \
+                     Identify the major concepts, current debates, useful source types, and important \
+                     evidence gaps."
+                );
+                let survey = run_searcher(
+                    &research_provider,
+                    &research_model,
+                    &survey_question,
+                    &survey_question,
+                    toolbox,
+                    &tx,
+                    &ids,
+                    "web survey",
+                    0,
+                    1,
+                )
+                .await;
+                persist_session_sources(&db_path, &ids.0, std::slice::from_ref(&survey));
+                survey
+            };
+            let (known, survey) = tokio::join!(known, survey);
+            (known, survey)
+        })
+    };
+    // Abort-on-drop guard: dropping the JoinHandle alone would detach the
+    // gather task instead of cancelling it, so web calls and DB writes could
+    // keep running after the user stops research. Aborting the outer task
+    // drops this handle, which cancels the gather task.
+    let gather_guard = super::AbortOnDrop(gather_task.abort_handle());
+
+    // Phase 1: the conversational survey (skipped entirely for `/research!`).
+    // Failures propagate visibly — the survey is a promised phase, and a
+    // silent skip would report success without the user's scoping input.
+    let mut answers: Vec<(String, String)> = Vec::new();
+    let mut reply_rx = reply_rx;
+    if let Some(rx) = reply_rx.as_mut() {
+        answers = run_user_survey(research_provider, research_model, topic, rx, tx, ids)
+            .await
+            .map_err(|e| {
+                send_stage(tx, ids, "survey", format!("error — {e}"));
+                e
+            })?;
+    }
+
+    // Join the concurrent gathering and fold it into planning context. A
+    // panic (or cancellation) inside the gather task terminates the job with
+    // context — defaulting to empty context would mask a programming failure
+    // and let the pipeline report success on invented ground truth.
+    let (known, web_survey) = match gather_task.await {
+        Ok(v) => v,
+        Err(e) if e.is_panic() => return Err(format!("context gathering panicked: {e}")),
+        Err(e) => return Err(format!("context gathering was cancelled: {e}")),
+    };
+    drop(gather_guard);
+    let mut planning_context = known;
+    if !web_survey.is_empty() && !web_survey.starts_with('[') {
+        planning_context.push(format!("Preliminary web survey:\n{web_survey}"));
+        send_stage(tx, ids, "web survey", "done — landscape mapped for planning");
     } else {
         send_stage(
             tx,
             ids,
-            "survey",
+            "web survey",
             "error — survey failed; planning from local context only",
         );
     }
@@ -656,7 +1181,15 @@ async fn run_research_inner(
         "working — decomposing the surveyed landscape into focused questions",
     );
     let mut questions =
-        match plan(research_provider, research_model, topic, &planning_context).await {
+        match plan(
+            research_provider,
+            research_model,
+            topic,
+            &answers,
+            &planning_context,
+        )
+        .await
+        {
             Ok(questions) => questions,
             Err(e) => {
                 send_stage(tx, ids, "planner", format!("error — {e}"));
@@ -670,22 +1203,22 @@ async fn run_research_inner(
         format!("done — proposed {} questions", questions.len()),
     );
 
-    // Plan-approval gate: wait for approve/edit with no timeout. External
-    // editor sessions can be long; `/stop` is the explicit escape hatch.
-    if let Some(gate_rx) = gate_rx {
-        let _ = tx.send((
-            ids.0.clone(),
-            ids.1.clone(),
-            ids.2.clone(),
-            ResearchUpdate::PlanReady {
-                questions: questions.clone(),
-            },
-        ));
-        questions = match gate_rx.await {
-            Ok(edited) if !edited.is_empty() => edited,
-            // Dropped sender or an empty edit — continue as planned.
-            _ => questions,
-        };
+    // Phase 2: plan approval — reply in chat to approve or change it. The
+    // gate parks with no timeout; Ctrl+↑ then Ctrl+X (the live view's stop)
+    // is the escape hatch. Skipped entirely for `/research!`. Approval is
+    // fail-closed: any failure here returns `Err` and research stops rather
+    // than running searchers on an unapproved plan.
+    if let Some(rx) = reply_rx.as_mut() {
+        await_plan_approval(
+            research_provider,
+            research_model,
+            topic,
+            &mut questions,
+            rx,
+            tx,
+            ids,
+        )
+        .await?;
     }
 
     let pinned = rusqlite::Connection::open(db_path)
@@ -693,40 +1226,60 @@ async fn run_research_inner(
         .and_then(|conn| crate::db::pinned_urls(&conn, &ids.0).ok())
         .unwrap_or_default();
 
-    let mut findings: Vec<String> = if !survey.starts_with('[') {
-        // Successful survey: seed it into the findings so synthesis can cite
-        // the landscape overview alongside each answer's own citations.
-        vec![format!("--- Survey overview ---\n{survey}")]
+    let mut findings: Vec<String> = if !web_survey.is_empty() && !web_survey.starts_with('[') {
+        // Successful web survey: seed it into the findings so synthesis can
+        // cite the landscape overview alongside each answer's own citations.
+        vec![format!("--- Survey overview ---\n{web_survey}")]
     } else {
         Vec::new()
     };
+    // Each searcher gets the full question block as its prompt (detail is
+    // functional) but only the bare question as its live display label, so
+    // the activity rows stay short.
+    let searcher_items: Vec<(String, String)> = questions
+        .iter()
+        .map(|q| (q.prompt(topic), q.question.clone()))
+        .collect();
     findings.extend(
         run_searchers(
             research_provider,
             research_model,
             toolbox,
-            &questions,
+            &searcher_items,
             tx,
             ids,
-            "r1",
+            "round 1",
         )
         .await,
     );
     persist_session_sources(db_path, &ids.0, &findings);
 
+    // One stage row per drained steer, keyed by a job-global sequence number
+    // (`steer #N` — N = the steer's 1-based queue position, which equals its
+    // drain order). The stage upsert matches rows by label, so the key must
+    // never be user text: duplicate, prefix-of-each-other, or LIKE-wildcard
+    // (`%`/`_`) steer text would collapse or hijack rows and leave picked-up
+    // steers looking queued (the live popup derives picked-up from the same
+    // numbered keys).
+    let mut steer_seq: usize = 0;
     let steers = drain_steers(&mut steer_rx).await;
     if !steers.is_empty() {
+        let steer_items: Vec<(String, String)> = steers
+            .iter()
+            .map(|s| (s.clone(), s.clone()))
+            .collect();
         for s in &steers {
-            send_stage(tx, ids, "steer", s.clone());
+            steer_seq += 1;
+            send_stage(tx, ids, format!("steer #{steer_seq}"), s.clone());
         }
         let steered = run_searchers(
             research_provider,
             research_model,
             toolbox,
-            &steers,
+            &steer_items,
             tx,
             ids,
-            "r1 steer",
+            "round 1 steer",
         )
         .await;
         persist_session_sources(db_path, &ids.0, &steered);
@@ -769,7 +1322,17 @@ async fn run_research_inner(
     );
     let critic_detail = match &critique {
         Critique::Satisfied => "done — draft is sufficiently complete".to_string(),
-        Critique::Gaps(gaps) => format!("done — found {} coverage gaps", gaps.len()),
+        // Quick win: surface the actual gap questions, not just a count — the
+        // follow-up searchers are about to investigate exactly these.
+        Critique::Gaps(gaps) => {
+            let list = gaps
+                .iter()
+                .enumerate()
+                .map(|(i, g)| format!("{}. {g}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("done — found {} coverage gaps:\n{list}", gaps.len())
+        }
         Critique::Contradiction(_) => "done — found a source contradiction".to_string(),
     };
     send_stage(tx, ids, "critic", critic_detail);
@@ -779,10 +1342,13 @@ async fn run_research_inner(
             research_provider,
             research_model,
             toolbox,
-            gaps,
+            &gaps
+                .iter()
+                .map(|g| (g.clone(), g.clone()))
+                .collect::<Vec<_>>(),
             tx,
             ids,
-            "r2",
+            "round 2",
         )
         .await;
         persist_session_sources(db_path, &ids.0, &more);
@@ -790,17 +1356,22 @@ async fn run_research_inner(
 
         let steers = drain_steers(&mut steer_rx).await;
         if !steers.is_empty() {
+            let steer_items: Vec<(String, String)> = steers
+                .iter()
+                .map(|s| (s.clone(), s.clone()))
+                .collect();
             for s in &steers {
-                send_stage(tx, ids, "steer", s.clone());
+                steer_seq += 1;
+                send_stage(tx, ids, format!("steer #{steer_seq}"), s.clone());
             }
             let steered = run_searchers(
                 research_provider,
                 research_model,
                 toolbox,
-                &steers,
+                &steer_items,
                 tx,
                 ids,
-                "r2 steer",
+                "round 2 steer",
             )
             .await;
             persist_session_sources(db_path, &ids.0, &steered);
@@ -842,7 +1413,16 @@ async fn run_research_inner(
         );
         let detail = match &critique {
             Critique::Satisfied => "done — revised draft is complete".to_string(),
-            Critique::Gaps(gaps) => format!("done — {} gaps remain", gaps.len()),
+            // Same shape as round 1: the remaining gap questions, not a count.
+            Critique::Gaps(gaps) => {
+                let list = gaps
+                    .iter()
+                    .enumerate()
+                    .map(|(i, g)| format!("{}. {g}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("done — {} gaps remain:\n{list}", gaps.len())
+            }
             Critique::Contradiction(_) => "done — contradiction remains".to_string(),
         };
         send_stage(tx, ids, "critic r2", detail);
@@ -954,7 +1534,31 @@ impl super::App {
             return;
         }
         match &self.research_steer_tx {
+            // Hard bound: refuse once the queue is full — this also bounds
+            // the unbounded channel and the retained log.
+            Some(_) if self.research_steer_log.len() >= MAX_QUEUED_STEERS => {
+                self.status = format!(
+                    "steer queue full ({MAX_QUEUED_STEERS} pending) — wait for the next round"
+                );
+            }
             Some(tx) if tx.send(text.to_string()).is_ok() => {
+                // Keep a log so the live popup can show what's queued vs.
+                // already picked up by the pipeline. Entries carry their
+                // 1-based queue position (positions are never renumbered, so
+                // acknowledged entries can be dropped without shifting the
+                // popup's view), and entries the pipeline has drained are
+                // removed here — a long job can't retain unbounded steer
+                // text without backpressure.
+                let pos = self
+                    .research_steer_acked
+                    .iter()
+                    .chain(self.research_steer_log.iter().map(|(p, _)| p))
+                    .max()
+                    .map_or(0, |&p| p)
+                    + 1;
+                self.research_steer_log.push((pos, text.to_string()));
+                self.research_steer_log
+                    .retain(|(p, _)| !self.research_steer_acked.contains(p));
                 self.status = format!("queued steer: {text}");
             }
             _ => self.status = "no research job is running".to_string(),
@@ -1069,6 +1673,9 @@ impl super::App {
             self.escalation_model.trim().to_string()
         };
         let title = super::chat::title_from(&topic);
+        // Hygiene: no gate or reply channel from a previous job may linger.
+        self.survey_gate = None;
+        self.survey_reply_tx = None;
 
         // Check if there's a conversation to migrate to the research session.
         let parent_id = self.session.as_ref().and_then(|s| {
@@ -1189,11 +1796,21 @@ impl super::App {
 
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         self.research_steer_tx = Some(steer_tx);
+        self.research_steer_log.clear();
+        self.research_steer_acked.clear();
+        self.research_stage_rows.clear();
+        // Capture the mode at job start: plan-message and artifact
+        // persistence follow this, never a mid-job incognito toggle.
+        self.research_incognito = self.incognito;
 
-        let gate_rx = if gated {
-            let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
-            self.research_plan_gate = Some((session.id.clone(), gate_tx, Vec::new()));
-            Some(gate_rx)
+        // The conversational gates (survey + plan approval) ride one reply
+        // channel: the pipeline parks on `reply_rx`, the App arms a gate on
+        // each SurveyReady/PlanReady. Ungated (`/research!`, watches) skips
+        // both phases entirely.
+        let reply_rx = if gated {
+            let (reply_tx, reply_rx) = mpsc::unbounded_channel();
+            self.survey_reply_tx = Some(reply_tx);
+            Some(reply_rx)
         } else {
             None
         };
@@ -1222,7 +1839,7 @@ impl super::App {
             raw_embedding_model,
             self.space.db_path(),
             topic,
-            gate_rx,
+            reply_rx,
             steer_rx,
             toolbox,
             tx,
@@ -1236,7 +1853,7 @@ impl super::App {
     /// Abort the active research pipeline, including survey/searcher/tool
     /// streams spawned under its orchestration task.
     pub(crate) fn stop_research(&mut self) {
-        self.research_plan_gate = None;
+        self.survey_gate = None;
         if let Some(abort) = self.research_abort.take() {
             abort.abort();
         }
@@ -1248,8 +1865,13 @@ impl super::App {
                     "stopped by user",
                 );
             }
-            self.research_plan_gate = None;
+            self.survey_gate = None;
+            self.survey_reply_tx = None;
             self.research_steer_tx = None;
+            // Retained steer state belongs to the job: drop it so a long
+            // session can't keep unbounded text after research stops.
+            self.research_steer_log.clear();
+            self.research_steer_acked.clear();
             self.status = "research stopped".to_string();
             self.popup = super::Popup::None;
         } else {
@@ -1257,55 +1879,165 @@ impl super::App {
         }
     }
 
-    /// Enter on a pending plan gate: continue with the (possibly edited)
-    /// cached questions as-is.
-    pub(crate) fn approve_research_plan(&mut self) {
-        if let Some((_, tx, cached)) = self.research_plan_gate.take() {
-            let _ = tx.send(cached);
-            self.status = "continuing research… · Ctrl+↑ agents".to_string();
-        }
+    /// Whether the survey gate (clarifying questions or plan approval) is
+    /// armed for the currently viewed session — the only case where Enter is
+    /// intercepted and routed to the pipeline instead of a normal chat send.
+    /// A gate in another session must never swallow typing (the old
+    /// cross-session hijack).
+    pub(crate) fn survey_gate_targets_current_session(&self) -> bool {
+        self.survey_gate.as_ref().is_some_and(|g| {
+            self.session.as_ref().is_some_and(|s| s.id == g.session_id)
+        })
     }
 
-    /// `e` on a pending plan gate: queue a one-question-per-line temporary
-    /// file for `$EDITOR`. The event loop applies it after the editor exits.
-    pub(crate) fn edit_research_plan(&mut self) {
-        let Some((_, _, cached)) = &self.research_plan_gate else {
+    /// Restore an actionable gate row after loading its session. Normal jobs
+    /// already load the persisted row, while incognito jobs recover it from
+    /// `SurveyGate` without writing private content to the database.
+    pub(crate) fn restore_survey_gate_prompt(&mut self) {
+        let pending = self.survey_gate.as_ref().and_then(|gate| {
+            self.session
+                .as_ref()
+                .filter(|session| session.id == gate.session_id)
+                .map(|_| (gate.prompt_role.clone(), gate.prompt_content.clone()))
+        });
+        let Some((role, content)) = pending else {
             return;
         };
-        let path = std::env::temp_dir().join(format!(
-            "nexus-chat-research-plan-{}.md",
-            uuid::Uuid::new_v4()
-        ));
-        match std::fs::write(&path, format!("{}\n", cached.join("\n"))) {
-            Ok(()) => {
-                self.pending_editor = Some(super::PendingEditor::ResearchPlan(path));
-                self.status = "opening research plan in $EDITOR…".to_string();
+        if self
+            .messages
+            .iter()
+            .any(|message| message.role == role && message.content == content)
+        {
+            return;
+        }
+        self.messages.push(crate::db::Message {
+            role,
+            content,
+            model: None,
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            phrase: None,
+            persona: None,
+        });
+    }
+
+    /// Route a chat reply into the parked survey gate (survey answer or plan
+    /// approval/edit). Records the reply as a `gate_reply` in the session —
+    /// it renders in the transcript like a user message but is never replayed
+    /// to the model, since the survey/plan rows it answers are excluded too:
+    /// a bare "the second option" or "drop Q2" must not leak into model
+    /// history without its context.
+    pub(crate) fn reply_to_survey_gate(&mut self, text: &str) {
+        let Some(gate) = self.survey_gate.take() else {
+            return;
+        };
+        // Persist before acknowledging: the pipeline and the transcript must
+        // never incorporate a reply the database didn't record (a locked or
+        // full db would otherwise silently lose the answer on reload). On a
+        // persistence failure the gate stays armed and the composer is
+        // restored so the user can retry.
+        let saved_id = if !text.trim().is_empty() && !self.research_incognito {
+            match self.db.add_gate_reply_message(&gate.session_id, text) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    self.survey_gate = Some(gate);
+                    self.set_input(text);
+                    self.status = format!("couldn't save your reply — {e}");
+                    return;
+                }
             }
-            Err(e) => self.status = format!("could not prepare research plan editor: {e}"),
+        } else {
+            None
+        };
+        if gate.reply_tx.send(text.to_string()).is_err() {
+            // Delivery failed: roll back the persisted reply so a retry
+            // can't duplicate it in the transcript, then put the text back
+            // in the composer rather than eating the user's typing.
+            let rollback_error = saved_id.and_then(|id| self.db.delete_message(&id).err());
+            self.set_input(text);
+            self.status = match rollback_error {
+                Some(e) => format!(
+                    "the job stopped waiting and the saved reply could not be rolled back: {e} — text restored to the composer"
+                ),
+                None => {
+                    "the job is no longer waiting for a reply — text restored to the composer"
+                        .to_string()
+                }
+            };
+            return;
+        }
+        if !text.trim().is_empty()
+            && self.session.as_ref().is_some_and(|s| s.id == gate.session_id)
+        {
+            self.messages.push(crate::db::Message {
+                role: "gate_reply".to_string(),
+                content: text.to_string(),
+                model: None,
+                reasoning: None,
+                tokens: None,
+                secs: None,
+                phrase: None,
+                persona: None,
+            });
+        }
+        match gate.phase {
+            SurveyPhase::Clarify { round } => self.status = format!(
+                "answer noted (round {round}) — checking for follow-ups… · Ctrl+↑ agents"
+            ),
+            SurveyPhase::Approve { rework } => self.status = if rework {
+                "revision folded in — continuing… · Ctrl+↑ agents".to_string()
+            } else {
+                "plan reply sent — continuing… · Ctrl+↑ agents".to_string()
+            },
         }
     }
 
-    /// Read a plan back after `$EDITOR` exits and continue the gated pipeline.
-    pub(crate) fn apply_research_plan_editor(
-        &mut self,
-        path: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        let text = std::fs::read_to_string(path)?;
-        let _ = std::fs::remove_file(path);
-        self.submit_research_plan_edit(&text);
-        Ok(())
-    }
-
-    /// Submit an edited plan (editor contents). A no-op with a status
-    /// message if the gate was already approved or the job stopped.
-    pub(crate) fn submit_research_plan_edit(&mut self, text: &str) {
-        let Some((_, tx, _)) = self.research_plan_gate.take() else {
-            self.status =
-                "plan gate already closed (sent or job stopped) — edit ignored".to_string();
-            return;
-        };
-        let _ = tx.send(parse_plan_edit(text));
-        self.status = "plan updated — continuing research…".to_string();
+    /// Persist a stage row and keep both in-memory views in sync: the
+    /// viewed transcript (`self.messages`, only when the job's session is
+    /// viewed) and the job's stage-row mirror (`research_stage_rows`, always
+    /// — the live popup renders from it without a db read per frame). One
+    /// row per label, updated in place. Also used for error rows (plan
+    /// record / report file) so a save failure is visible immediately,
+    /// not only after a reload.
+    fn mirror_stage(&mut self, session_id: &str, label: &str, detail: &str) {
+        let _ = self.db.upsert_research_stage_message(session_id, label, detail);
+        let text = crate::db::stage_content(label, detail);
+        let prefix = format!("{label}:");
+        // Job-level mirror: the live popup's single source of truth.
+        if let Some(row) = self
+            .research_stage_rows
+            .iter_mut()
+            .rev()
+            .find(|c| c.as_str() == label || c.starts_with(prefix.as_str()))
+        {
+            *row = text.clone();
+        } else {
+            self.research_stage_rows.push(text.clone());
+        }
+        if self.session.as_ref().is_some_and(|s| s.id == session_id) {
+            if let Some(row) = self.messages.iter_mut().rev().find(|m| {
+                m.role == "research_stage"
+                    && (m.content == label || m.content.starts_with(&prefix))
+            }) {
+                row.content = text.clone();
+                // Stage rows update in place, so message count does not
+                // change and the wrapped transcript cache would otherwise
+                // keep rendering stale progress.
+                self.invalidate_history_cache();
+            } else {
+                self.messages.push(crate::db::Message {
+                    role: "research_stage".to_string(),
+                    content: text,
+                    model: None,
+                    reasoning: None,
+                    tokens: None,
+                    secs: None,
+                    phrase: None,
+                    persona: None,
+                });
+            }
+        }
     }
 
     /// A research pipeline update: a stage label, or the final report/error.
@@ -1315,61 +2047,166 @@ impl super::App {
             self.research_rx = None;
             self.research_abort = None;
             self.research_running = None;
-            self.research_plan_gate = None;
+            self.survey_gate = None;
+            self.survey_reply_tx = None;
             self.research_steer_tx = None;
+            // Retained steer state belongs to the job: drop it when the job
+            // ends so the next job starts from an empty queue view.
+            self.research_steer_log.clear();
+            self.research_steer_acked.clear();
+            self.research_stage_rows.clear();
+            self.research_incognito = false;
+            self.research_live_input.clear();
+            if self.popup == super::Popup::ResearchLive {
+                self.popup = super::Popup::None;
+            }
             return;
         };
         let viewing = self.session.as_ref().is_some_and(|s| s.id == session_id);
         match update {
             ResearchUpdate::Stage { label, detail } => {
-                let _ = self
-                    .db
-                    .upsert_research_stage_message(&session_id, &label, &detail);
+                // A `steer #N` stage row means the pipeline drained that
+                // steer: record the acknowledgment and prune the retained
+                // log immediately — acknowledged text must not linger in
+                // memory while the job is parked.
+                if let Some(n) = label.strip_prefix("steer #").and_then(|n| n.parse().ok()) {
+                    self.research_steer_acked.insert(n);
+                    self.research_steer_log
+                        .retain(|(p, _)| !self.research_steer_acked.contains(p));
+                }
+                self.mirror_stage(&session_id, &label, &detail);
                 if viewing {
-                    let text = crate::db::stage_content(&label, &detail);
-                    let prefix = format!("{label}:");
-                    // Mirror the db upsert in the in-memory transcript: one
-                    // row per label, updated in place.
-                    if let Some(row) = self.messages.iter_mut().rev().find(|m| {
-                        m.role == "research_stage"
-                            && (m.content == label || m.content.starts_with(&prefix))
-                    }) {
-                        row.content = text.clone();
-                        // Stage rows update in place, so message count does not
-                        // change and the wrapped transcript cache would otherwise
-                        // keep rendering stale progress.
-                        self.invalidate_history_cache();
-                    } else {
-                        self.messages.push(crate::db::Message {
-                            role: "research_stage".to_string(),
-                            content: text.clone(),
-                            model: None,
-                            reasoning: None,
-                            tokens: None,
-                            secs: None,
-                            phrase: None,
-                            persona: None,
-                        });
-                    }
-                    self.status = format!("research: {text} · Ctrl+↑ agents");
+                    self.status = format!(
+                        "research: {} · Ctrl+↑ agents",
+                        crate::db::stage_content(&label, &detail)
+                    );
                 }
             }
-            ResearchUpdate::PlanReady { questions } => {
-                if let Some((gate_session, _, cached)) = self.research_plan_gate.as_mut()
-                    && *gate_session == session_id
-                {
-                    *cached = questions.clone();
-                }
-                let plan_text = questions
+            ResearchUpdate::SurveyReady { questions, round } => {
+                let topic = self
+                    .research_running
+                    .as_ref()
+                    .map(|(_, t)| t.clone())
+                    .unwrap_or_default();
+                let header = if round <= 1 {
+                    format!("For \"{topic}\":")
+                } else {
+                    format!("Follow-up (round {round} of {MAX_SURVEY_ROUNDS}) for \"{topic}\":")
+                };
+                let qs = questions
                     .iter()
                     .enumerate()
-                    .map(|(i, q)| format!("{}. {q}", i + 1))
+                    .map(|(i, q)| format!(" {}. {q}", i + 1))
                     .collect::<Vec<_>>()
                     .join("\n");
                 let content = format!(
-                    "Research plan ready — [e]dit in $EDITOR / Enter to continue / Esc to cancel:\n{plan_text}"
+                    "{header}\n{qs}\n\nAnswer in chat — I may ask follow-ups (up to {MAX_SURVEY_ROUNDS} rounds), \
+                     then say \"I approve\". (Enter on an empty input skips ahead.)"
                 );
-                let _ = self.db.add_research_plan_message(&session_id, &content);
+
+                // A normal job must make the prompt durable before it can
+                // intercept Enter. Incognito deliberately keeps it only in
+                // SurveyGate, where session loading can restore it in memory.
+                if !self.research_incognito
+                    && let Err(e) = self.db.add_survey_message(&session_id, &content)
+                {
+                    self.stop_research();
+                    self.status = format!("couldn't persist the survey — research stopped: {e}");
+                    return;
+                }
+                let Some(tx) = self.survey_reply_tx.clone() else {
+                    self.stop_research();
+                    self.status = "survey reply channel unavailable — research stopped".to_string();
+                    return;
+                };
+                self.survey_gate = Some(SurveyGate {
+                    session_id: session_id.clone(),
+                    reply_tx: tx,
+                    phase: SurveyPhase::Clarify { round },
+                    prompt_role: "survey".to_string(),
+                    prompt_content: content.clone(),
+                });
+
+                if viewing {
+                    self.messages.push(crate::db::Message {
+                        role: "survey".to_string(),
+                        content,
+                        model: None,
+                        reasoning: None,
+                        tokens: None,
+                        secs: None,
+                        phrase: None,
+                        persona: None,
+                    });
+                    self.status =
+                        format!("survey round {round} — answer in chat · Ctrl+↑ agents");
+                } else {
+                    // The gate is parked off-screen: mark the job's session
+                    // unread and say where input is needed. In incognito the
+                    // prompt will be restored from SurveyGate when opened.
+                    self.unread.insert(session_id.clone());
+                    self.status = format!(
+                        "research is waiting on you — survey round {round} for \"{topic}\": \
+                         open that session and answer in chat"
+                    );
+                }
+            }
+            ResearchUpdate::PlanReady { questions, rework } => {
+                let topic = self
+                    .research_running
+                    .as_ref()
+                    .map(|(_, t)| t.clone())
+                    .unwrap_or_default();
+                let plan = plan_text(&questions);
+                let heading = if rework {
+                    "Research plan (revised with your feedback) — reply \"approve\" to continue:"
+                } else {
+                    "Research plan — reply to approve, or tell me what to change (\"drop Q2\", \"also look into X\"):"
+                };
+                let content = format!("{heading}\n{plan}");
+
+                // As with survey prompts, normal jobs persist before arming;
+                // incognito jobs retain the actionable row only in the gate.
+                if !self.research_incognito
+                    && let Err(e) = self.db.add_research_plan_message(&session_id, &content)
+                {
+                    self.stop_research();
+                    self.status = format!("couldn't persist the plan — research stopped: {e}");
+                    return;
+                }
+                let Some(tx) = self.survey_reply_tx.clone() else {
+                    self.stop_research();
+                    self.status =
+                        "plan approval channel unavailable — research stopped".to_string();
+                    return;
+                };
+                self.survey_gate = Some(SurveyGate {
+                    session_id: session_id.clone(),
+                    reply_tx: tx,
+                    phase: SurveyPhase::Approve { rework },
+                    prompt_role: "research_plan".to_string(),
+                    prompt_content: content.clone(),
+                });
+
+                // A byproduct record in the space's files, like the report:
+                // the conversation is the edit surface, the file is history.
+                // Skipped entirely in incognito — the plan folds in the user's
+                // survey replies, so "nothing persists" must not leave it on
+                // disk even if the job stops before any report. Failures
+                // surface as a transcript stage row instead of vanishing.
+                if let Err(e) = self.save_space_artifact(
+                    &space_id,
+                    &space_name,
+                    &topic,
+                    "plan",
+                    &format!("# Research plan: {topic}\n\n{plan}\n"),
+                ) {
+                    self.mirror_stage(
+                        &session_id,
+                        "plan record",
+                        &format!("error — could not save plan record: {e}"),
+                    );
+                }
                 if viewing {
                     self.messages.push(crate::db::Message {
                         role: "research_plan".to_string(),
@@ -1381,7 +2218,20 @@ impl super::App {
                         phrase: None,
                         persona: None,
                     });
-                    self.status = "research plan ready — [e]dit / Enter to continue".to_string();
+                    self.status = if rework {
+                        "revised plan ready — reply to approve".to_string()
+                    } else {
+                        "research plan ready — reply to approve or change · Ctrl+↑ agents".to_string()
+                    };
+                } else {
+                    // The gate is parked off-screen: mark the job's session
+                    // unread and say where input is needed. An incognito plan
+                    // is restored from SurveyGate rather than the database.
+                    self.unread.insert(session_id.clone());
+                    self.status = format!(
+                        "research is waiting on you — plan approval for \"{topic}\": \
+                         open that session and reply \"approve\""
+                    );
                 }
             }
             ResearchUpdate::Done(Ok(report)) => {
@@ -1414,7 +2264,17 @@ impl super::App {
                     .as_ref()
                     .map(|(_, t)| t.clone())
                     .unwrap_or_default();
-                self.save_research_report(&space_id, &space_name, &topic, &report);
+                // Failures surface as a transcript stage row (mirrored into
+                // the in-memory transcript and the live popup) instead of
+                // vanishing (incognito skips the write by design).
+                if let Err(e) = self.save_research_report(&space_id, &space_name, &topic, &report)
+                {
+                    self.mirror_stage(
+                        &session_id,
+                        "report file",
+                        &format!("error — could not save report file: {e}"),
+                    );
+                }
                 if viewing {
                     self.messages.push(crate::db::Message {
                         role: "assistant".to_string(),
@@ -1456,40 +2316,74 @@ impl super::App {
         }
     }
 
-    /// Save the finished report into the job's own space (not necessarily
-    /// the currently active one — the user may have switched spaces while
-    /// the job ran), named `research-<slug>-<timestamp>.md`. Only refreshes
-    /// the files cache / triggers a rescan if that space is still active;
-    /// otherwise the file sits on disk and gets picked up next time that
-    /// space's /files is opened, same as any externally-dropped file.
+    /// Write a space artifact (finished report or presented plan) into the
+    /// job's own space — not necessarily the currently active one, since the
+    /// user may have switched spaces while the job ran — named
+    /// `{prefix}-<slug>-<timestamp>.md`. Only refreshes the files cache /
+    /// triggers a rescan if that space is still active; otherwise the file
+    /// sits on disk and gets picked up next time that space's /files is
+    /// opened, same as any externally-dropped file. Returns the written path
+    /// so callers can surface failures at the update boundary instead of
+    /// dropping them. Never writes in incognito mode: the plan folds in the
+    /// user's survey replies, so "nothing persists" must not leave it on
+    /// disk even if the job stops before any report.
+    fn save_space_artifact(
+        &mut self,
+        space_id: &str,
+        space_name: &str,
+        topic: &str,
+        prefix: &str,
+        body: &str,
+    ) -> std::io::Result<Option<std::path::PathBuf>> {
+        // "Nothing persists" mode: no plan/report records on disk at all —
+        // plan files incorporate survey replies, so even a job stopped
+        // before its report must not leak user details. The mode is the one
+        // captured when the job started, not a mid-job toggle.
+        if self.research_incognito {
+            return Ok(None);
+        }
+        let dir = self.space.files_dir(space_name);
+        std::fs::create_dir_all(&dir)?;
+        let slug = super::sessions::slugify(topic);
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let name = format!("{prefix}-{slug}-{stamp}.md");
+        let path = dir.join(&name);
+        std::fs::write(&path, body)?;
+        if space_id == self.active_space.id {
+            self.rescan_files();
+        }
+        Ok(Some(path))
+    }
+
+    /// Save the finished report into the job's own space, named
+    /// `research-<slug>-<timestamp>.md`, via the shared artifact writer,
+    /// then index the report's cited sources for
+    /// `research_lookup(scope=citations)`. Failures propagate to the caller
+    /// (the `Done` handler surfaces them as a transcript stage row).
     fn save_research_report(
         &mut self,
         space_id: &str,
         space_name: &str,
         topic: &str,
         report: &str,
-    ) {
-        let dir = self.space.files_dir(space_name);
-        if std::fs::create_dir_all(&dir).is_err() {
-            return;
+    ) -> std::io::Result<Option<std::path::PathBuf>> {
+        let saved = self.save_space_artifact(space_id, space_name, topic, "research", report)?;
+        if let Some(path) = &saved {
+            // Index the report's cited sources for research_lookup(scope=citations).
+            let citations = crate::citations::parse_citations(report);
+            if !citations.is_empty() {
+                // Titles aren't in the Sources-list format; index url only.
+                let rows: Vec<(String, Option<String>)> =
+                    citations.into_iter().map(|(_, url)| (url, None)).collect();
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let _ = self.db.add_citations(space_id, &name, &rows);
+            }
         }
-        let slug = super::sessions::slugify(topic);
-        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-        let name = format!("research-{slug}-{stamp}.md");
-        if std::fs::write(dir.join(&name), report).is_err() {
-            return;
-        }
-        // Index the report's cited sources for research_lookup(scope=citations).
-        let citations = crate::citations::parse_citations(report);
-        if !citations.is_empty() {
-            // Titles aren't in the Sources-list format; index url only.
-            let rows: Vec<(String, Option<String>)> =
-                citations.into_iter().map(|(_, url)| (url, None)).collect();
-            let _ = self.db.add_citations(space_id, &name, &rows);
-        }
-        if space_id == self.active_space.id {
-            self.rescan_files();
-        }
+        Ok(saved)
     }
 }
 
@@ -1528,6 +2422,7 @@ mod tests {
     fn planner_messages_with_context_includes_known_chunks_as_gap_guidance() {
         let msgs = planner_messages_with_context(
             "rust async runtimes",
+            &[],
             &["Rust's async model uses a Future trait.".to_string()],
         );
         assert_eq!(msgs[0].role, "system");
@@ -1538,14 +2433,266 @@ mod tests {
 
     #[test]
     fn planner_messages_with_context_falls_back_to_plain_prompt_when_empty() {
-        let msgs = planner_messages_with_context("topic", &[]);
+        let msgs = planner_messages_with_context("topic", &[], &[]);
         assert!(!msgs[1].content.contains("Already known"));
         assert_eq!(msgs[1].content, "topic");
     }
 
     #[test]
+    fn planner_messages_with_context_folds_user_answers_into_the_prompt() {
+        let msgs = planner_messages_with_context(
+            "topic",
+            &[
+                ("q1".to_string(), "depth first".to_string()),
+                ("q2".to_string(), "current state only".to_string()),
+            ],
+            &[],
+        );
+        let user = &msgs[1].content;
+        assert!(user.contains("answered clarifying questions"));
+        assert!(user.contains("depth first"));
+        assert!(user.contains("current state only"));
+        assert!(user.contains("topic"));
+    }
+
+    #[test]
     fn verifier_prompt_mentions_quote_checking() {
         assert!(VERIFIER_PROMPT.to_lowercase().contains("quote"));
+    }
+
+    #[test]
+    fn parse_plan_blocks_reads_json_objects_with_all_fields() {
+        let qs = parse_plan_blocks(
+            r#"[{"question":"what is X","why":"definitions matter","angles":["a1","a2"],"sources":["s1","s2"]}]"#,
+        );
+        assert_eq!(qs.len(), 1);
+        assert_eq!(qs[0].question, "what is X");
+        assert_eq!(qs[0].why, "definitions matter");
+        assert_eq!(qs[0].angles, vec!["a1".to_string(), "a2".to_string()]);
+        assert_eq!(qs[0].sources, vec!["s1".to_string(), "s2".to_string()]);
+    }
+
+    #[test]
+    fn parse_plan_blocks_defaults_missing_fields_and_strips_fences() {
+        let qs = parse_plan_blocks("```json\n[{\"question\": \"what is X\"}]\n```");
+        assert_eq!(qs.len(), 1);
+        assert_eq!(qs[0].question, "what is X");
+        assert!(qs[0].why.is_empty());
+        assert!(qs[0].angles.is_empty());
+        assert!(qs[0].sources.is_empty());
+    }
+
+    #[test]
+    fn parse_plan_blocks_falls_back_to_bare_questions_on_non_json() {
+        let qs = parse_plan_blocks("- what is X\n2. how does Y work");
+        assert_eq!(qs.len(), 2);
+        assert_eq!(qs[0].question, "what is X");
+        assert!(qs[0].why.is_empty());
+        assert_eq!(qs[1].question, "how does Y work");
+    }
+
+    #[test]
+    fn parse_plan_blocks_filters_empty_questions_and_caps_at_max() {
+        let qs = parse_plan_blocks(
+            r#"[{"question":""},{"question":"q1"},{"question":"q2"},{"question":"q3"}]"#,
+        );
+        assert_eq!(qs.len(), 3);
+        assert_eq!(qs[0].question, "q1");
+        let lines: Vec<String> = (0..10).map(|i| format!("q{i}")).collect();
+        assert_eq!(parse_plan_blocks(&lines.join("\n")).len(), MAX_SUBQUESTIONS);
+    }
+
+    #[test]
+    fn parse_plan_blocks_rejects_malformed_json_without_line_fallback() {
+        // Structured JSON is unambiguous: malformed or unusable output must
+        // fail planning — the raw JSON lines are never reinterpreted as bare
+        // questions (`[{}]` must not become a plan whose question is
+        // literally `[{}]`).
+        assert!(parse_plan_blocks("[{}]").is_empty(), "[{{}}] must fail");
+        assert!(
+            parse_plan_blocks(r#"[{"question":""}]"#).is_empty(),
+            "empty questions must fail"
+        );
+        assert!(
+            parse_plan_blocks(r#"[{"question": 5}]"#).is_empty(),
+            "wrong field types must fail"
+        );
+        assert!(
+            parse_plan_blocks(r#"{"question":"q1"}"#).is_empty(),
+            "a bare object is not the required array and must fail"
+        );
+        // Non-JSON legacy line output still falls back to bare questions.
+        assert_eq!(parse_plan_blocks("- what is X").len(), 1);
+        // JSON wrapped in model prose is still JSON — never re-read as lines.
+        let prose = parse_plan_blocks("Here is the plan:\n[{\"question\":\"q1\"}]");
+        assert_eq!(prose.len(), 1, "prose-prefixed JSON must parse as JSON");
+        assert_eq!(prose[0].question, "q1");
+        // A legacy JSON array of strings still works.
+        let legacy = parse_plan_blocks(r#"["what is X", "how does Y work"]"#);
+        assert_eq!(legacy.len(), 2);
+        assert_eq!(legacy[0].question, "what is X");
+    }
+
+    #[test]
+    fn parse_survey_reply_recognizes_complete_markers() {
+        assert_eq!(parse_survey_reply("COMPLETE"), SurveyReply::Complete);
+        assert_eq!(parse_survey_reply("  complete  "), SurveyReply::Complete);
+        assert_eq!(parse_survey_reply("COMPLETE: I have enough"), SurveyReply::Complete);
+        assert_eq!(
+            parse_survey_reply("COMPLETE — proceed"),
+            SurveyReply::Complete
+        );
+        // Trailing punctuation counts too — the docs promise prose tolerance.
+        assert_eq!(parse_survey_reply("COMPLETE."), SurveyReply::Complete);
+        assert_eq!(parse_survey_reply("COMPLETE!"), SurveyReply::Complete);
+    }
+
+    #[test]
+    fn parse_survey_reply_reads_numbered_questions() {
+        assert_eq!(
+            parse_survey_reply("1. Depth or breadth?\n2. History too?"),
+            SurveyReply::Questions(vec![
+                "Depth or breadth?".to_string(),
+                "History too?".to_string()
+            ])
+        );
+        assert_eq!(
+            parse_survey_reply("- just one angle"),
+            SurveyReply::Questions(vec!["just one angle".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_survey_reply_marks_output_contract_violations_and_caps_questions() {
+        // Empty output and arbitrary prose violate the agent's contract
+        // (COMPLETE or numbered questions) — they must be `Malformed`, not
+        // silently indistinguishable from the required COMPLETE marker.
+        assert_eq!(parse_survey_reply(""), SurveyReply::Malformed);
+        assert_eq!(parse_survey_reply("\n\n"), SurveyReply::Malformed);
+        assert_eq!(
+            parse_survey_reply("I couldn't understand your last answer, please retry"),
+            SurveyReply::Malformed
+        );
+        assert_eq!(
+            parse_survey_reply("The model encountered an error processing the request."),
+            SurveyReply::Malformed
+        );
+        assert_eq!(
+            parse_survey_reply("No further questions are needed"),
+            SurveyReply::Malformed
+        );
+        // An unmarked line is only a question when it looks like one.
+        assert_eq!(
+            parse_survey_reply("Depth or breadth?"),
+            SurveyReply::Questions(vec!["Depth or breadth?".to_string()])
+        );
+        // Numbered lines are questions; prose mixed in is skipped.
+        let mixed = "1. Depth or breadth?\nPlease be specific.\n2. History too?";
+        assert_eq!(
+            parse_survey_reply(mixed),
+            SurveyReply::Questions(vec![
+                "Depth or breadth?".to_string(),
+                "History too?".to_string()
+            ])
+        );
+        let lines: Vec<String> = (0..8).map(|i| format!("{}. q{i}?", i + 1)).collect();
+        match parse_survey_reply(&lines.join("\n")) {
+            SurveyReply::Questions(qs) => assert_eq!(qs.len(), MAX_SURVEY_QUESTIONS),
+            _ => panic!("expected questions"),
+        }
+    }
+
+    #[test]
+    fn parse_approval_recognizes_approved_and_revised_plans() {
+        assert_eq!(parse_approval("APPROVED"), Approval::Approved);
+        assert_eq!(parse_approval("  approved  "), Approval::Approved);
+        assert_eq!(parse_approval("APPROVED: run it"), Approval::Approved);
+        let revised = parse_approval("[{\"question\": \"revised q\"}]");
+        assert_eq!(
+            revised,
+            Approval::Revised(vec![PlanQuestion::bare("revised q".to_string())])
+        );
+        // Malformed output is never treated as approval — the phase fails
+        // visibly instead of running an unapproved plan.
+        assert_eq!(parse_approval("huh?"), Approval::Malformed);
+        assert_eq!(parse_approval(""), Approval::Malformed);
+        assert_eq!(
+            parse_approval("Here is the revised plan I prepared for you"),
+            Approval::Malformed
+        );
+        // Structured JSON that parses but holds no usable questions, or that
+        // has wrong field types, is Malformed — never re-read as bare lines.
+        assert_eq!(parse_approval("[{}]"), Approval::Malformed);
+        assert_eq!(parse_approval("[{\"question\": 5}]"), Approval::Malformed);
+        // JSON wrapped in model prose is still JSON.
+        assert_eq!(
+            parse_approval("Here is my revised plan:\n[{\"question\":\"q\"}]\n"),
+            Approval::Revised(vec![PlanQuestion::bare("q".to_string())])
+        );
+        // A recognizably list-formatted revision still counts.
+        assert_eq!(
+            parse_approval("- drop q2"),
+            Approval::Revised(vec![PlanQuestion::bare("drop q2".to_string())])
+        );
+    }
+
+    #[test]
+    fn plan_question_prompt_includes_topic_and_full_brief() {
+        let q = PlanQuestion {
+            question: "how does X work".to_string(),
+            why: "mechanism matters".to_string(),
+            angles: vec!["internals".to_string(), "benchmarks".to_string()],
+            sources: vec!["papers".to_string()],
+        };
+        let p = q.prompt("rust async");
+        assert!(p.contains("rust async"));
+        assert!(p.contains("how does X work"));
+        assert!(p.contains("mechanism matters"));
+        assert!(p.contains("internals; benchmarks"));
+        assert!(p.contains("papers"));
+        // A bare question stays prompt-safe too.
+        assert!(PlanQuestion::bare("q".into()).prompt("t").contains("q"));
+    }
+
+    #[test]
+    fn plan_text_renders_numbered_questions_with_indented_briefs() {
+        let qs = vec![
+            PlanQuestion::bare("q1".to_string()),
+            PlanQuestion {
+                question: "q2".to_string(),
+                why: "why2".to_string(),
+                angles: vec!["a".to_string()],
+                sources: vec!["s".to_string()],
+            },
+        ];
+        let t = plan_text(&qs);
+        assert!(t.contains("1. q1"));
+        assert!(t.contains("2. q2"));
+        assert!(t.contains("\n   Why: why2"));
+        assert!(t.contains("\n   Angles: a"));
+        assert!(t.contains("\n   Sources: s"));
+    }
+
+    #[test]
+    fn survey_messages_include_topic_and_rounds() {
+        let msgs = survey_messages("t", &[]);
+        assert_eq!(msgs[0].role, "system");
+        assert!(msgs[1].content.contains("t"));
+        let msgs = survey_messages("t", &[("q".to_string(), "a".to_string())]);
+        assert!(msgs[1].content.contains("q"));
+        assert!(msgs[1].content.contains("a"));
+    }
+
+    #[test]
+    fn plan_approval_messages_include_plan_and_user_reply() {
+        let msgs = plan_approval_messages(
+            "topic",
+            &[PlanQuestion::bare("q1".to_string())],
+            "drop q2",
+        );
+        assert!(msgs[1].content.contains("topic"));
+        assert!(msgs[1].content.contains("1. q1"));
+        assert!(msgs[1].content.contains("drop q2"));
     }
 
     #[tokio::test]
@@ -1579,101 +2726,195 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_plan_edit_reads_one_question_per_line() {
-        let qs = parse_plan_edit("what is X\nhow does Y work\n\nis Z true");
-        assert_eq!(
-            qs,
-            vec![
-                "what is X".to_string(),
-                "how does Y work".to_string(),
-                "is Z true".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parse_plan_edit_strips_bullet_and_number_prefixes_like_the_planner_parser() {
-        let qs = parse_plan_edit("- what is X\n2. how does Y work");
-        assert_eq!(
-            qs,
-            vec!["what is X".to_string(), "how does Y work".to_string()]
-        );
-    }
-
-    #[test]
-    fn parse_plan_edit_caps_at_max_subquestions() {
-        let lines: Vec<String> = (0..10).map(|i| format!("q{i}")).collect();
-        assert_eq!(parse_plan_edit(&lines.join("\n")).len(), MAX_SUBQUESTIONS);
-    }
-
     #[tokio::test]
-    async fn plan_gate_pauses_then_approve_lets_the_cached_questions_through() {
+    async fn plan_ready_arms_the_gate_and_reply_routes_into_the_pipeline() {
         let mut a = test_app();
         a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
         let space_id = a.active_space.id.clone();
         let space_name = a.active_space.name.clone();
+
+        // The pipeline's reply sender must be reachable for the gate to arm.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        a.survey_reply_tx = Some(tx);
+        let q1 = PlanQuestion::bare("q1".to_string());
+        let q2 = PlanQuestion::bare("q2".to_string());
 
         a.on_research_done(Some((
             session_id.clone(),
             space_id,
             space_name,
             ResearchUpdate::PlanReady {
-                questions: vec!["q1".to_string(), "q2".to_string()],
+                questions: vec![q1.clone(), q2.clone()],
+                rework: false,
             },
         )));
-        assert!(a.research_plan_gate.is_some());
+        assert!(a.survey_gate.is_some());
+        assert!(a.survey_gate_targets_current_session());
         assert!(a.messages.iter().any(|m| m.role == "research_plan"));
         let stored = a.db.load_messages(&session_id).unwrap();
         assert!(stored.iter().any(|m| m.role == "research_plan"));
+        // The presented plan includes the block briefs.
+        let plan_msg = a
+            .messages
+            .iter()
+            .find(|m| m.role == "research_plan")
+            .unwrap();
+        assert!(plan_msg.content.contains("1. q1"));
 
-        a.approve_research_plan();
-        assert!(a.research_plan_gate.is_none());
+        // A chat reply (with an edit) routes into the pipeline and is
+        // recorded as a gate reply in the session transcript — rendered like
+        // a user message but never replayed to the model.
+        a.reply_to_survey_gate("drop q2");
+        assert!(a.survey_gate.is_none());
+        assert!(!a.survey_gate_targets_current_session());
+        assert_eq!(rx.recv().await.unwrap(), "drop q2");
+        assert!(
+            a.messages
+                .iter()
+                .any(|m| m.role == "gate_reply" && m.content == "drop q2")
+        );
+        let stored = a.db.load_messages(&session_id).unwrap();
+        assert!(
+            stored
+                .iter()
+                .any(|m| m.role == "gate_reply" && m.content == "drop q2")
+        );
+        // The gate reply must not leak into model history without context.
+        let history = a.build_history();
+        assert!(
+            !history.iter().any(|m| m.content == "drop q2"),
+            "gate replies must be excluded from model history"
+        );
     }
 
     #[tokio::test]
-    async fn plan_gate_edit_round_trips_through_external_editor_file() {
+    async fn plan_ready_saves_a_plan_file_record_in_the_space() {
         let mut a = test_app();
         a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
         let space_id = a.active_space.id.clone();
         let space_name = a.active_space.name.clone();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        a.survey_reply_tx = Some(tx);
+
         a.on_research_done(Some((
             session_id,
             space_id,
-            space_name,
+            space_name.clone(),
             ResearchUpdate::PlanReady {
-                questions: vec!["q1".to_string()],
+                questions: vec![PlanQuestion::bare("q1".to_string())],
+                rework: false,
             },
         )));
 
-        a.edit_research_plan();
-        let path = match a.pending_editor.take().unwrap() {
-            crate::app::PendingEditor::ResearchPlan(path) => path,
-            _ => panic!("expected research-plan editor request"),
-        };
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "q1\n");
-        std::fs::write(&path, "edited one\nedited two\n").unwrap();
-        a.apply_research_plan_editor(&path).unwrap();
-        assert!(a.research_plan_gate.is_none());
-        assert!(a.status.contains("plan updated"));
-        assert!(!path.exists());
+        let dir = a.space.files_dir(&space_name);
+        let saved: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("plan-") && n.ends_with(".md"))
+            .collect();
+        assert_eq!(saved.len(), 1, "expected one plan file in {dir:?}");
+        let body = std::fs::read_to_string(dir.join(&saved[0])).unwrap();
+        assert!(body.contains("Research plan: rust async runtimes"));
+        assert!(body.contains("1. q1"));
     }
 
     #[tokio::test]
-    async fn plan_gate_edit_after_timeout_is_a_noop_with_status() {
+    async fn survey_ready_arms_the_gate_and_renders_a_survey_section() {
         let mut a = test_app();
         a.research_model = "openai/gpt-5-mini".to_string();
-        a.start_research("rust async runtimes");
-        // Simulate the gate already having closed (approved, or the
-        // pipeline's own 60s timeout fired) — either way, `research_plan_gate`
-        // is `None` by the time a stray edit submission arrives.
-        a.research_plan_gate = None;
-        a.submit_research_plan_edit("whatever");
-        assert!(a.status.contains("ignored"));
+        a.start_research("fine-tuning LLMs");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        let space_id = a.active_space.id.clone();
+        let space_name = a.active_space.name.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        a.survey_reply_tx = Some(tx);
+
+        a.on_research_done(Some((
+            session_id.clone(),
+            space_id,
+            space_name,
+            ResearchUpdate::SurveyReady {
+                questions: vec!["Depth or breadth?".to_string()],
+                round: 1,
+            },
+        )));
+        assert!(a.survey_gate_targets_current_session());
+        let survey = a
+            .messages
+            .iter()
+            .find(|m| m.role == "survey")
+            .unwrap();
+        assert!(survey.content.contains("For \"fine-tuning LLMs\":"));
+        assert!(survey.content.contains("1. Depth or breadth?"));
+        assert!(survey.content.contains("I approve"));
+        let stored = a.db.load_messages(&session_id).unwrap();
+        assert!(stored.iter().any(|m| m.role == "survey"));
+
+        a.reply_to_survey_gate("depth first");
+        assert!(a.survey_gate.is_none());
+        assert_eq!(rx.recv().await.unwrap(), "depth first");
+        assert!(a.status.contains("follow-ups"));
+    }
+
+    #[tokio::test]
+    async fn gate_only_targets_the_viewed_gated_session() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("topic one");
+        let gated_session = a.session.as_ref().unwrap().id.clone();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        a.survey_reply_tx = Some(tx);
+        a.on_research_done(Some((
+            gated_session.clone(),
+            a.active_space.id.clone(),
+            a.active_space.name.clone(),
+            ResearchUpdate::SurveyReady {
+                questions: vec!["q?".to_string()],
+                round: 1,
+            },
+        )));
+        assert!(a.survey_gate_targets_current_session());
+
+        // Switch to a different session: the gate must not intercept typing.
+        let other = a
+            .db
+            .create_session("other", "m", &a.active_space.id, "chat")
+            .unwrap();
+        a.session = Some(other);
+        a.messages.clear();
+        assert!(!a.survey_gate_targets_current_session());
+        assert!(a.survey_gate.is_some(), "gate stays armed for its session");
+    }
+
+    #[tokio::test]
+    async fn closed_reply_channel_fails_plan_approval_closed() {
+        // A gate whose reply channel closed (job teardown racing the parked
+        // approval) must fail closed — never run searchers on an unapproved
+        // plan. The closed channel surfaces immediately, before any provider
+        // call, so a bare test client is fine.
+        let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<String>();
+        drop(reply_tx);
+        let (tx, _rx) = mpsc::unbounded_channel::<ResearchMsg>();
+        let ids = ("s".to_string(), "sp".to_string(), "sn".to_string());
+        let mut questions = vec![PlanQuestion::bare("q1".to_string())];
+        let provider = OpenRouter::openrouter("test-key".to_string());
+        let result = await_plan_approval(
+            &provider,
+            "a/b",
+            "topic",
+            &mut questions,
+            &mut reply_rx,
+            &tx,
+            &ids,
+        )
+        .await;
+        let err = result.expect_err("closed channel must fail closed, not approve");
+        assert!(err.contains("cancelled"), "{err}");
     }
 
     #[test]
@@ -1779,6 +3020,359 @@ mod tests {
         assert_eq!(visible_rows.len(), 1);
         assert_eq!(visible_rows[0].content, "planning: revised");
         assert!(a.status.contains("Ctrl+↑ agents"));
+    }
+
+    #[tokio::test]
+    async fn multiple_drained_steers_each_keep_their_own_stage_row() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("rust async runtimes");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        let space_id = a.active_space.id.clone();
+        let space_name = a.active_space.name.clone();
+
+        // Two drained steers arrive as `steer #N` rows (N = queue position =
+        // drain order). A text-keyed label would collapse rows when one
+        // steer's text is a prefix of another's — the sequence key keeps
+        // every drained steer its own persisted + visible row.
+        for (i, steer) in ["look into X", "also Y"].iter().enumerate() {
+            a.on_research_done(Some((
+                session_id.clone(),
+                space_id.clone(),
+                space_name.clone(),
+                ResearchUpdate::Stage {
+                    label: format!("steer #{}", i + 1),
+                    detail: steer.to_string(),
+                },
+            )));
+        }
+        // The pipeline's acknowledgements are job-global: both steers must
+        // no longer count as queued, and their rows persist for display.
+        assert_eq!(a.research_steer_acked, std::collections::HashSet::from([1, 2]));
+        let stored = a.db.load_messages(&session_id).unwrap();
+        let steer_rows: Vec<_> = stored
+            .iter()
+            .filter(|m| m.role == "research_stage" && m.content.starts_with("steer #"))
+            .collect();
+        assert_eq!(steer_rows.len(), 2, "one persisted row per drained steer");
+        let visible: Vec<_> = a
+            .messages
+            .iter()
+            .filter(|m| m.role == "research_stage" && m.content.starts_with("steer #"))
+            .collect();
+        assert_eq!(visible.len(), 2, "both steers visible in the transcript");
+    }
+
+    #[tokio::test]
+    async fn steer_rows_do_not_collide_on_duplicate_prefix_or_wildcard_text() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("rust async runtimes");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        let space_id = a.active_space.id.clone();
+        let space_name = a.active_space.name.clone();
+
+        // The bug this guards against: steers were keyed by their text, so
+        // "a: b" then "a" collapsed into one row (the upsert matches labels
+        // by prefix), identical duplicates collapsed too, and `%`/`_` acted
+        // as SQL LIKE wildcards in the match. Sequence keys make the text
+        // irrelevant to row identity.
+        let steers = ["a: b", "a", "same", "same", "100% done"];
+        for (i, steer) in steers.iter().enumerate() {
+            a.on_research_done(Some((
+                session_id.clone(),
+                space_id.clone(),
+                space_name.clone(),
+                ResearchUpdate::Stage {
+                    label: format!("steer #{}", i + 1),
+                    detail: steer.to_string(),
+                },
+            )));
+        }
+        let stored = a.db.load_messages(&session_id).unwrap();
+        let rows: Vec<_> = stored
+            .iter()
+            .filter(|m| m.role == "research_stage" && m.content.starts_with("steer #"))
+            .collect();
+        assert_eq!(
+            rows.len(),
+            steers.len(),
+            "one row per drained steer — no collapse on duplicate/prefix/wildcard text"
+        );
+        for (i, steer) in steers.iter().enumerate() {
+            let want = format!("steer #{}: {steer}", i + 1);
+            assert!(
+                rows.iter().any(|m| m.content == want),
+                "missing row for steer #{}: {want}",
+                i + 1
+            );
+        }
+        // The pipeline's acknowledgements are job-global and position-keyed.
+        assert_eq!(
+            a.research_steer_acked,
+            (1..=steers.len()).collect::<std::collections::HashSet<usize>>(),
+            "every steer position picked up"
+        );
+    }
+
+    #[test]
+    fn steer_log_drops_acknowledged_entries_and_clears_on_stop() {
+        let mut a = test_app();
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        a.research_steer_tx = Some(tx);
+
+        a.steer_research("first");
+        a.steer_research("second");
+        a.steer_research("third");
+        assert_eq!(
+            a.research_steer_log,
+            vec![(1, "first".into()), (2, "second".into()), (3, "third".into())]
+        );
+
+        // The pipeline drains 1 and 2: acknowledged entries are dropped on
+        // the next queue (positions are never renumbered).
+        a.research_steer_acked = std::collections::HashSet::from([1, 2]);
+        a.steer_research("fourth");
+        assert_eq!(
+            a.research_steer_log,
+            vec![(3, "third".into()), (4, "fourth".into())]
+        );
+
+        // An ack that arrives while the job is parked prunes the log
+        // immediately — no need to wait for the next `/steer`.
+        a.research_steer_acked.insert(3);
+        a.on_research_done(Some((
+            "s".to_string(),
+            "sp".to_string(),
+            "sn".to_string(),
+            ResearchUpdate::Stage {
+                label: "steer #3".to_string(),
+                detail: "third".to_string(),
+            },
+        )));
+        assert_eq!(a.research_steer_log, vec![(4, "fourth".into())]);
+
+        // Stopping the job drops the whole retained log.
+        let (_tx, rx) = mpsc::unbounded_channel::<ResearchMsg>();
+        a.research_rx = Some(rx);
+        a.research_running = Some(("s".to_string(), "t".to_string()));
+        a.stop_research();
+        assert!(a.research_steer_log.is_empty());
+        assert!(a.research_steer_acked.is_empty());
+    }
+
+    #[test]
+    fn steer_queue_is_hard_bound() {
+        let mut a = test_app();
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        a.research_steer_tx = Some(tx);
+
+        // Fill the queue to the bound; further steers are refused with a
+        // status message (which also bounds the unbounded channel and the
+        // retained log).
+        for i in 0..MAX_QUEUED_STEERS {
+            a.steer_research(&format!("steer {i}"));
+        }
+        assert_eq!(a.research_steer_log.len(), MAX_QUEUED_STEERS);
+        a.steer_research("overflow");
+        assert_eq!(a.research_steer_log.len(), MAX_QUEUED_STEERS);
+        assert!(a.status.contains("steer queue full"), "{}", a.status);
+    }
+
+    #[tokio::test]
+    async fn plan_ready_in_incognito_mode_writes_no_plan_file() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.incognito = true;
+        a.start_research("rust async runtimes");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        let space_id = a.active_space.id.clone();
+        let space_name = a.active_space.name.clone();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        a.survey_reply_tx = Some(tx);
+
+        a.on_research_done(Some((
+            session_id.clone(),
+            space_id,
+            space_name.clone(),
+            ResearchUpdate::PlanReady {
+                questions: vec![PlanQuestion::bare("q1".to_string())],
+                rework: false,
+            },
+        )));
+
+        // "Nothing persists": the plan (which folds in the user's survey
+        // replies) must not land on disk, and must not be written to the
+        // message db either — the in-memory transcript still shows it while
+        // the session is viewed.
+        let dir = a.space.files_dir(&space_name);
+        let _ = std::fs::create_dir_all(&dir);
+        let saved: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("plan-"))
+            .collect();
+        assert!(saved.is_empty(), "no plan files in incognito: {saved:?}");
+        let stored = a.db.load_messages(&session_id).unwrap();
+        assert!(
+            stored.iter().all(|m| m.role != "research_plan"),
+            "the plan must not be persisted to the message db in incognito"
+        );
+        assert!(
+            a.messages.iter().any(|m| m.role == "research_plan"),
+            "the in-memory transcript still shows the plan while viewed"
+        );
+    }
+
+    #[tokio::test]
+    async fn incognito_gate_rows_follow_the_mode_captured_at_job_start() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.incognito = true;
+        a.start_research("private topic");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        assert!(a.research_incognito);
+
+        // A later UI-mode change must not make this already-private job start
+        // persisting its survey or the user's answer.
+        a.incognito = false;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        a.survey_reply_tx = Some(tx);
+        a.on_research_done(Some((
+            session_id.clone(),
+            a.active_space.id.clone(),
+            a.active_space.name.clone(),
+            ResearchUpdate::SurveyReady {
+                questions: vec!["Which confidential product?".to_string()],
+                round: 1,
+            },
+        )));
+        a.reply_to_survey_gate("Project Juniper");
+        assert_eq!(rx.recv().await.unwrap(), "Project Juniper");
+
+        let stored = a.db.load_messages(&session_id).unwrap();
+        assert!(stored.iter().all(|m| m.role != "survey"));
+        assert!(stored.iter().all(|m| m.role != "gate_reply"));
+    }
+
+    #[tokio::test]
+    async fn off_screen_incognito_plan_is_restored_when_its_session_opens() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.incognito = true;
+        a.start_research("private topic");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        let other = a
+            .db
+            .create_session("other", "m", &a.active_space.id, "chat")
+            .unwrap();
+        a.session = Some(other);
+        a.messages.clear();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        a.survey_reply_tx = Some(tx);
+
+        a.on_research_done(Some((
+            session_id.clone(),
+            a.active_space.id.clone(),
+            a.active_space.name.clone(),
+            ResearchUpdate::PlanReady {
+                questions: vec![PlanQuestion::bare("private question".to_string())],
+                rework: true,
+            },
+        )));
+        assert!(!a.survey_gate_targets_current_session());
+        assert!(
+            a.db
+                .load_messages(&session_id)
+                .unwrap()
+                .iter()
+                .all(|m| m.role != "research_plan")
+        );
+
+        a.switch_to_session_by_id(&session_id).unwrap();
+
+        assert!(a.survey_gate_targets_current_session());
+        let plan = a
+            .messages
+            .iter()
+            .find(|m| m.role == "research_plan")
+            .expect("pending incognito plan restored in memory");
+        assert!(plan.content.contains("private question"));
+        assert!(plan.content.contains("reply \"approve\""));
+        assert!(!plan.content.contains("tell me what to change"));
+    }
+
+    #[tokio::test]
+    async fn undelivered_gate_reply_is_rolled_back_and_restored_to_composer() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("rust async runtimes");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        // The gate's receiver is already gone: persisting succeeds, but
+        // channel delivery fails — the persisted reply must be rolled back
+        // so a retry can't duplicate it.
+        let (reply_tx, rx) = mpsc::unbounded_channel::<String>();
+        drop(rx);
+        a.survey_reply_tx = Some(reply_tx.clone());
+        a.on_research_done(Some((
+            session_id.clone(),
+            a.active_space.id.clone(),
+            a.active_space.name.clone(),
+            ResearchUpdate::PlanReady {
+                questions: vec![PlanQuestion::bare("q1".to_string())],
+                rework: false,
+            },
+        )));
+        assert!(a.survey_gate.is_some());
+
+        a.reply_to_survey_gate("drop q2");
+
+        assert!(a.survey_gate.is_none());
+        // Composer restored, nothing persisted, nothing mirrored in memory.
+        assert!(a.input_text().contains("drop q2"), "{}", a.input_text());
+        let stored = a.db.load_messages(&session_id).unwrap();
+        assert!(
+            stored.iter().all(|m| m.role != "gate_reply"),
+            "undelivered reply must not remain persisted"
+        );
+        assert!(!a.messages.iter().any(|m| m.role == "gate_reply"));
+    }
+
+    #[tokio::test]
+    async fn off_screen_gate_marks_the_session_unread_and_notifies() {
+        let mut a = test_app();
+        a.research_model = "openai/gpt-5-mini".to_string();
+        a.start_research("rust async runtimes");
+        let session_id = a.session.as_ref().unwrap().id.clone();
+        // Navigate away before the gate arrives.
+        let other = a
+            .db
+            .create_session("other", "m", &a.active_space.id, "chat")
+            .unwrap();
+        a.session = Some(other);
+        a.messages.clear();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        a.survey_reply_tx = Some(tx);
+
+        a.on_research_done(Some((
+            session_id.clone(),
+            a.active_space.id.clone(),
+            a.active_space.name.clone(),
+            ResearchUpdate::SurveyReady {
+                questions: vec!["Depth or breadth?".to_string()],
+                round: 1,
+            },
+        )));
+
+        // The gate is armed for the job's session and the user is told where
+        // input is needed — a silently parked pipeline can't block later
+        // research unnoticed.
+        assert!(a.survey_gate.is_some());
+        assert!(!a.survey_gate_targets_current_session());
+        assert!(a.unread.contains(&session_id), "session must be marked unread");
+        assert!(a.status.contains("waiting on you"), "{}", a.status);
+        assert!(a.status.contains("survey round 1"), "{}", a.status);
     }
 
     #[tokio::test]
@@ -1912,14 +3506,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_research_done_none_clears_channel_and_running_state() {
+    async fn on_research_done_none_clears_state_and_closes_the_live_popup() {
         let mut a = test_app();
         a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("t");
         assert!(a.research_rx.is_some());
+        a.popup = super::super::Popup::ResearchLive;
+        a.research_live_input = "late steer".to_string();
+        a.research_stage_rows = vec!["writer: done".to_string()];
+
         a.on_research_done(None);
+
         assert!(a.research_rx.is_none());
         assert!(a.research_running.is_none());
+        assert_eq!(a.popup, super::super::Popup::None);
+        assert!(a.research_live_input.is_empty());
+        assert!(a.research_stage_rows.is_empty());
     }
 
     #[test]

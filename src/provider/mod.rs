@@ -54,13 +54,94 @@ impl BackendTag {
     }
 }
 
+/// A reasoning/thinking effort value a model accepts, in cycle order.
+/// Provider catalogs expose different subsets per model, so this enum covers
+/// every effort currently present in those catalogs. `None` is the explicit
+/// wire-level disable value; absence from `ChatParams` still means "do not
+/// send a reasoning parameter".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    /// Wire value sent to the provider (and stored in model_prefs).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReasoningEffort::None => "none",
+            ReasoningEffort::Minimal => "minimal",
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+            ReasoningEffort::XHigh => "xhigh",
+            ReasoningEffort::Max => "max",
+        }
+    }
+
+    /// Every known wire value in UI cycle order: enabled tiers from least to
+    /// most thinking, then explicit disable when the model accepts it.
+    pub const CYCLE_ORDER: &'static [ReasoningEffort] = &[
+        ReasoningEffort::Minimal,
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::XHigh,
+        ReasoningEffort::Max,
+        ReasoningEffort::None,
+    ];
+
+    /// The values most reasoning models accept when no richer metadata exists.
+    pub const STANDARD: &'static [ReasoningEffort] = &[
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+    ];
+
+    /// Models that add a `minimal` tier to the standard set.
+    pub const WITH_MINIMAL: &'static [ReasoningEffort] = &[
+        ReasoningEffort::Minimal,
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+    ];
+
+    /// Models that can be explicitly disabled and add an `xhigh` tier.
+    pub const WITH_XHIGH_AND_NONE: &'static [ReasoningEffort] = &[
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::XHigh,
+        ReasoningEffort::None,
+    ];
+
+    /// Models that additionally expose a top-level `max` tier.
+    pub const WITH_MAX_XHIGH_AND_NONE: &'static [ReasoningEffort] = &[
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::XHigh,
+        ReasoningEffort::Max,
+        ReasoningEffort::None,
+    ];
+
+    /// Models whose only configurable reasoning tier is `high`.
+    pub const HIGH_ONLY: &'static [ReasoningEffort] = &[ReasoningEffort::High];
+}
+
 /// A model offered by the provider, as shown in the picker.
 #[derive(Debug, Clone)]
 pub struct Model {
     pub id: String,
     pub name: String,
-    /// Whether the model accepts a `reasoning` parameter (thinking effort).
-    pub supports_reasoning: bool,
+    /// The reasoning effort values this model accepts, in Ctrl+T cycle order.
+    /// Empty = the model has no reasoning/thinking mode at all.
+    pub reasoning_efforts: Vec<ReasoningEffort>,
     /// Context window size in tokens, if the provider reports it.
     pub context_length: Option<u64>,
     /// Whether the model accepts image input (`architecture.input_modalities`).
@@ -76,7 +157,9 @@ pub struct Model {
 /// Sampling + reasoning parameters for a completion request.
 #[derive(Debug, Clone, Default)]
 pub struct ChatParams {
-    /// Reasoning effort: "low" | "medium" | "high". None = don't send it.
+    /// Reasoning effort wire value (for example `minimal`, `low`, `high`,
+    /// `xhigh`, `max`, or explicit `none`), as stored per model. Rust `None`
+    /// means do not send the parameter at all.
     pub reasoning_effort: Option<String>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,

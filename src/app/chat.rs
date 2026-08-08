@@ -144,17 +144,13 @@ impl App {
             // the model remembers what it already tried (and got back) in
             // prior turns — dropping these caused it to repeat the same
             // mistakes on file-writing tools with no memory of the failure.
-            // Skip research/progress/error rows — background job scratch,
-            // UI-only prompts, and transport failures are never shown to the
-            // model. Skip per-persona swarm round replies too — supporting
-            // detail for that turn, not part of ongoing conversation context;
-            // only the turn's final synthesis reply carries forward.
-            if m.role == "research_stage"
-                || m.role == "research_plan"
-                || m.role == "session_link"
-                || m.role == "error"
-                || m.persona.is_some()
-            {
+            // Skip every row that must never reach the model (shared with
+            // compaction, so a digest can't leak the same rows later):
+            // background-job scratch, UI-only prompts, transport failures,
+            // per-persona swarm round replies, and gate replies (whose
+            // survey/plan sections are excluded, so a bare "the second
+            // option" or "drop Q2" must not reach the model without context).
+            if crate::app::App::excluded_from_model_history(m) {
                 continue;
             }
             if m.role == "tool_call" {
@@ -212,8 +208,26 @@ impl App {
             return Ok(());
         };
         let history = self.build_history();
+        // Catalog capabilities can change underneath a persisted preference.
+        // Keep the request, in-memory badge, and database in sync rather than
+        // silently omitting a stale value while the picker still shows it.
+        let stored_effort = self.reasoning.get(&model).cloned();
+        let (reasoning_effort, reasoning_warning) = match stored_effort {
+            Some(effort) if self.effort_accepted(&model, &effort) => (Some(effort), None),
+            Some(effort) => {
+                self.db.set_reasoning(&model, None)?;
+                self.reasoning.remove(&model);
+                (
+                    None,
+                    Some(format!(
+                        "cleared unsupported reasoning {effort}: {model}"
+                    )),
+                )
+            }
+            None => (None, None),
+        };
         let params = ChatParams {
-            reasoning_effort: self.reasoning.get(&model).cloned(),
+            reasoning_effort,
             temperature: self.settings.temperature,
             top_p: self.settings.top_p,
             max_tokens: self.settings.max_tokens,
@@ -268,7 +282,7 @@ impl App {
         self.spinner_frame = 0;
         self.thinking_idx = thinking_idx;
         self.spinner_color = spinner_color;
-        self.status.clear();
+        self.status = reasoning_warning.unwrap_or_default();
         self.scroll = 0;
         self.prev_total = 0;
         Ok(())
@@ -773,7 +787,7 @@ impl App {
     /// Flags are keyed by the message's normalized URL, session-scoped.
     pub(crate) fn flag_source_under_selection(&mut self, flag: Option<&str>) {
         let Some(selected) = self.sel.selected_text() else {
-            self.status = "select a [n] citation, then press p/x".to_string();
+            self.status = "select a [n] citation, then press x".to_string();
             return;
         };
         let Some(n) = crate::citations::citation_number_in(&selected) else {

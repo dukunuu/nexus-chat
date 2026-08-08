@@ -162,7 +162,7 @@ fn sync_cache(app: &mut App, width: usize) {
     let theme = app.theme;
     for (i, m) in app.messages.iter().enumerate().skip(c.msg_count) {
         let start = c.lines.len();
-        if m.role == "user" {
+        if m.role == "user" || m.role == "gate_reply" {
             let images_dir = app.space.files_dir(&app.active_space.name);
             render_markdown_images(
                 &mut c.lines,
@@ -178,6 +178,8 @@ fn sync_cache(app: &mut App, width: usize) {
             push_research_stage(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "error" {
             push_error(&mut c.lines, &m.content, width, &theme);
+        } else if m.role == "survey" {
+            push_survey_section(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_plan" {
             push_research_plan(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "session_link" {
@@ -370,9 +372,41 @@ fn push_error(
     out.push(Line::from(""));
 }
 
+/// A pending research-survey section: the scoping agent's clarifying
+/// questions, awaiting a chat answer. Same family as `push_research_plan` —
+/// distinct ❓ marker, accent header line, questions plain, the guidance
+/// footer dimmed (it's the only passive part).
+fn push_survey_section(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) {
+    let mut first = true;
+    for line in wrap_plain(content, width.saturating_sub(2)) {
+        if first {
+            out.push(Line::from(vec![
+                Span::styled("❓ ", Style::default().fg(theme.accent)),
+                Span::styled(
+                    line,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            first = false;
+        } else if line.starts_with("Answer in chat") {
+            out.push(Line::from(dim(line, theme)));
+        } else {
+            out.push(Line::from(format!("  {line}")));
+        }
+    }
+    out.push(Line::from(""));
+}
+
 /// A pending plan-approval message: like `push_research_stage` but with a
 /// distinct marker and full (non-dim) styling, since it's actionable —
-/// [e]dit / Enter to continue — not passive progress.
+/// reply in chat to approve or change it — not passive progress.
 fn push_research_plan(
     out: &mut Vec<Line<'static>>,
     content: &str,
@@ -755,5 +789,30 @@ mod tests {
         sync_cache(&mut a, 20);
         assert_eq!(a.history_cache.lines.len(), 0);
         assert_eq!(a.history_cache.msg_count, 0);
+    }
+
+    #[test]
+    fn survey_section_renders_marker_header_and_dimmed_footer() {
+        let mut a = test_app();
+        a.messages.push(msg(
+            "survey",
+            "For \"fine-tuning LLMs\":\n 1. Depth or breadth?\n\nAnswer in chat — then say \"I approve\".",
+        ));
+        sync_cache(&mut a, 80);
+        let text = a.history_cache.lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("❓"), "{text}");
+        assert!(text.contains("fine-tuning LLMs"), "{text}");
+        assert!(text.contains("1. Depth or breadth?"), "{text}");
+        assert!(text.contains("Answer in chat"), "{text}");
+        // The survey row is never replayed to the model — the role filter in
+        // build_history skips it (covered in app/chat.rs tests); here we just
+        // verify the renderer picked it up.
+        assert_eq!(
+            a.history_cache
+                .plain
+                .iter()
+                .any(|l| l.contains("Depth or breadth?")),
+            true
+        );
     }
 }

@@ -52,13 +52,19 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     // Available column (with the search box in the title).
     let avail_items = model_items(app, &app.available_models());
     let backend = app.model_backend_filter_label();
+    // Show which effort values the focused model accepts, so the Ctrl+T
+    // cycle is predictable before pressing it (e.g. Claude's extra minimal).
+    let hint = match app.focused_reasoning_hint() {
+        Some(accepts) => format!("Ctrl+P switch backend · Ctrl+S fav · Ctrl+T reason · {accepts}"),
+        None => "Ctrl+P switch backend · Ctrl+S fav · Ctrl+T reason".to_string(),
+    };
     let avail_list = panel_list(
         avail_items,
         chrome::input_title(
             app,
             format!("Available [{backend}] search"),
             &app.model_filter.to_string(),
-            "Ctrl+P switch backend · Ctrl+S fav · Ctrl+T reason",
+            &hint,
         ),
         !fav_focused,
         &app.theme,
@@ -80,8 +86,9 @@ fn model_items(app: &App, models: &[&Model]) -> Vec<ListItem<'static>> {
             };
             // Reasoning badge: [r:high] if set, [r] if supported but off.
             let badge = match app.reasoning_of(&id) {
+                Some("none") => "  [r:off]".to_string(),
                 Some(effort) => format!("  [r:{effort}]"),
-                None if m.supports_reasoning => "  [r]".to_string(),
+                None if !m.reasoning_efforts.is_empty() => "  [r]".to_string(),
                 None => String::new(),
             };
             let mut spans = vec![Span::raw(format!("{marker}{id}{badge}"))];

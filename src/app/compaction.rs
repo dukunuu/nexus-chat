@@ -8,6 +8,23 @@ use crate::provider::ChatMessage;
 impl App {
     // --- auto-compaction ---
 
+    /// Rows that must never reach a model — neither in the raw history
+    /// (`build_history`) nor in a compaction digest: background-job scratch
+    /// (research stage/plan/survey rows), transport failures, session links,
+    /// per-persona swarm round replies (the turn's synthesis carries the
+    /// context), and gate replies — the survey/plan sections they answer are
+    /// excluded too, so a bare "drop Q2" must not leak into later turns via
+    /// a digest.
+    pub(super) fn excluded_from_model_history(m: &Message) -> bool {
+        m.role == "research_stage"
+            || m.role == "research_plan"
+            || m.role == "survey"
+            || m.role == "gate_reply"
+            || m.role == "session_link"
+            || m.role == "error"
+            || m.persona.is_some()
+    }
+
     /// The messages actually sent on the next turn: everything after the
     /// session's compaction boundary, or all of them if it hasn't compacted
     /// (yet). The full, uncompacted history stays in `self.messages`/the db
@@ -101,12 +118,7 @@ impl App {
             return; // nothing new since the last compaction to fold in
         }
         let prior_summary = session.compact_summary.clone();
-        let tail: String = self.messages[through..]
-            .iter()
-            .filter(|m| m.role != "tool_call")
-            .map(|m| format!("{}: {}", m.role, m.content))
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let tail = compaction_tail(&self.messages, through);
         let session_id = session.id.clone();
         let new_through = self.messages.len() as i64;
         let (tx, rx) = mpsc::unbounded_channel();
@@ -246,5 +258,78 @@ impl App {
         }
         self.status = "compaction digest updated".to_string();
         Ok(())
+    }
+}
+
+/// The message tail handed to the compaction model: everything since the
+/// last digest except rows that must never reach a model — tool-call blocks
+/// and `App::excluded_from_model_history`. Without this, a digest could
+/// carry contextless gate replies ("drop Q2") into later history even
+/// though `build_history` skips them.
+fn compaction_tail(messages: &[Message], through: usize) -> String {
+    messages[through..]
+        .iter()
+        .filter(|m| m.role != "tool_call" && !App::excluded_from_model_history(m))
+        .map(|m| format!("{}: {}", m.role, m.content))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(role: &str, content: &str) -> Message {
+        Message {
+            role: role.into(),
+            content: content.into(),
+            model: None,
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            phrase: None,
+            persona: None,
+        }
+    }
+
+    #[test]
+    fn compaction_tail_skips_rows_that_must_never_reach_the_model() {
+        let mut msgs = vec![
+            msg("user", "what should we research?"),
+            msg("research_stage", "planner: working"),
+            msg("survey", "For \"x\":\n 1. Depth?"),
+            msg("gate_reply", "drop Q2"),
+            msg("research_plan", "Research plan: …"),
+            msg("error", "request failed"),
+            msg("session_link", "sess-1\n↩ from: x"),
+            msg("user", "the final question"),
+            msg("tool_call", r#"{"name":"search"}"#),
+        ];
+        let mut persona = msg("assistant", "round reply");
+        persona.persona = Some("Optimist".into());
+        msgs.push(persona);
+
+        let tail = compaction_tail(&msgs, 0);
+        assert!(tail.contains("what should we research?"), "{tail}");
+        assert!(tail.contains("the final question"), "{tail}");
+        // Background rows, gate replies, errors, links, and persona round
+        // replies never enter a digest — the compacted history would
+        // otherwise leak contextless "drop Q2" to later models.
+        for banned in [
+            "planner: working",
+            "Depth?",
+            "drop Q2",
+            "Research plan",
+            "request failed",
+            "sess-1",
+            "round reply",
+            "tool_call",
+        ] {
+            assert!(!tail.contains(banned), "digest must not contain {banned:?}: {tail}");
+        }
+        // The compaction boundary still applies.
+        let partial = compaction_tail(&msgs, 1);
+        assert!(!partial.contains("what should we research?"), "{partial}");
+        assert!(partial.contains("the final question"), "{partial}");
     }
 }

@@ -469,12 +469,6 @@ impl App {
         (chars / 4) as u64
     }
 
-    fn model_supports_reasoning(&self, id: &str) -> bool {
-        self.models
-            .iter()
-            .any(|m| super::composite_id(m) == id && m.supports_reasoning)
-    }
-
     /// Whether the active model accepts image input (unknown model → false).
     pub(crate) fn current_model_supports_images(&self) -> bool {
         self.current_model.as_deref().is_some_and(|id| {
@@ -485,38 +479,126 @@ impl App {
     }
 
     pub(crate) fn reasoning_of(&self, id: &str) -> Option<&str> {
-        self.reasoning.get(id).map(String::as_str)
+        let effort = self.reasoning.get(id)?.as_str();
+        self.effort_accepted(id, effort).then_some(effort)
     }
 
-    /// Cycle the focused model's reasoning effort: off → low → medium → high → off.
-    /// No-op for models that don't support reasoning.
+    /// Cycle the focused model through exactly its catalog-provided enabled
+    /// effort values. A model that accepts the explicit `none` wire value
+    /// uses that when wrapping from its highest tier, so "off" still disables
+    /// models whose provider enables reasoning by default.
     pub(crate) fn cycle_reasoning_focused(&mut self) -> Result<()> {
         let selected = self.state_mut(self.model_focus).selected().unwrap_or(0);
         let Some(id) = self.id_at(self.model_focus, selected) else {
             return Ok(());
         };
-        if !self.model_supports_reasoning(&id) {
-            self.status = format!("{id} has no reasoning setting");
+        let efforts = self
+            .models
+            .iter()
+            .find(|m| super::composite_id(m) == id)
+            .map(|m| m.reasoning_efforts.clone())
+            .unwrap_or_default();
+        let enabled: Vec<_> = efforts
+            .iter()
+            .copied()
+            .filter(|effort| *effort != crate::provider::ReasoningEffort::None)
+            .collect();
+        if enabled.is_empty() {
+            if self.reasoning.contains_key(&id) {
+                self.db.set_reasoning(&id, None)?;
+                self.reasoning.remove(&id);
+                self.status = format!("cleared stale reasoning setting: {id}");
+            } else {
+                self.status = format!("{id} has no reasoning setting");
+            }
             return Ok(());
         }
-        let next = match self.reasoning.get(&id).map(String::as_str) {
-            None => Some("low"),
-            Some("low") => Some("medium"),
-            Some("medium") => Some("high"),
-            _ => None,
+
+        // A missing, explicit-none, or stale stored value starts at the first
+        // enabled tier. The final tier wraps to explicit `none` when accepted,
+        // otherwise it removes the parameter as before.
+        let stored = self.reasoning.get(&id).map(String::as_str);
+        let pos = stored.and_then(|s| enabled.iter().position(|e| e.as_str() == s));
+        let next = match pos {
+            Some(i) if i + 1 < enabled.len() => Some(enabled[i + 1]),
+            Some(_) if efforts.contains(&crate::provider::ReasoningEffort::None) => {
+                Some(crate::provider::ReasoningEffort::None)
+            }
+            Some(_) => None,
+            None => Some(enabled[0]),
         };
+        let next = next.map(|effort| effort.as_str());
+        let accepted = efforts
+            .iter()
+            .map(|effort| {
+                if *effort == crate::provider::ReasoningEffort::None {
+                    "off"
+                } else {
+                    effort.as_str()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
         self.db.set_reasoning(&id, next)?;
         match next {
-            Some(e) => {
-                self.reasoning.insert(id.clone(), e.to_string());
-                self.status = format!("reasoning {e}: {id}");
+            Some("none") => {
+                self.reasoning.insert(id.clone(), "none".to_string());
+                self.status = format!("reasoning off (accepts {accepted}): {id}");
+            }
+            Some(effort) => {
+                self.reasoning.insert(id.clone(), effort.to_string());
+                self.status = format!("reasoning {effort} (accepts {accepted}): {id}");
             }
             None => {
                 self.reasoning.remove(&id);
-                self.status = format!("reasoning off: {id}");
+                self.status = format!("reasoning off (accepts {accepted}): {id}");
             }
         }
         Ok(())
+    }
+
+    /// Whether `effort` is in `model`'s accepted reasoning set, so a stored
+    /// value is only sent when the model actually accepts it. Unknown models
+    /// (not in the loaded catalog) accept anything — never silently drop a
+    /// stored value just because the catalog isn't fetched yet.
+    pub(crate) fn effort_accepted(&self, model: &str, effort: &str) -> bool {
+        self.models
+            .iter()
+            .find(|m| super::composite_id(m) == model)
+            .is_none_or(|m| m.reasoning_efforts.iter().any(|e| e.as_str() == effort))
+    }
+
+    /// The focused model's exact accepted effort values for the picker hint.
+    /// None when the focused row has no reasoning mode.
+    pub(crate) fn focused_reasoning_hint(&self) -> Option<String> {
+        let selected = match self.model_focus {
+            ModelPanel::Favorites => self.fav_state.selected().unwrap_or(0),
+            ModelPanel::Available => self.avail_state.selected().unwrap_or(0),
+        };
+        let id = self.id_at(self.model_focus, selected)?;
+        let efforts = self
+            .models
+            .iter()
+            .find(|m| super::composite_id(m) == id)?
+            .reasoning_efforts
+            .as_slice();
+        if efforts.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "accepts {}",
+            efforts
+                .iter()
+                .map(|effort| {
+                    if *effort == crate::provider::ReasoningEffort::None {
+                        "off"
+                    } else {
+                        effort.as_str()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+        ))
     }
 
     /// Move the focused panel's selection by `delta` (clamped).
