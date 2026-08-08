@@ -63,6 +63,7 @@ fn delete_removes_session_and_clears_if_active() {
         secs: None,
         phrase: None,
         persona: None,
+        created_at: None,
     });
     a.session_selected = 0;
     a.confirm_delete().unwrap();
@@ -1011,6 +1012,7 @@ fn context_used_and_limit() {
         secs: None,
         phrase: None,
         persona: None,
+        created_at: None,
     });
     assert_eq!(a.context_used(), 10);
 }
@@ -1034,6 +1036,7 @@ fn compaction_narrows_effective_messages_and_context_used() {
             secs: None,
             phrase: None,
             persona: None,
+            created_at: None,
         });
     }
     s.compact_summary = Some("y".repeat(80)); // ~20 tokens
@@ -1115,6 +1118,7 @@ async fn force_compact_reports_why_it_no_ops() {
         secs: None,
         phrase: None,
         persona: None,
+        created_at: None,
     });
     a.force_compact();
     assert!(a.compact_rx.is_some());
@@ -1134,6 +1138,7 @@ fn context_breakdown_reports_system_memory_conversation() {
         secs: None,
         phrase: None,
         persona: None,
+        created_at: None,
     });
     let b = a.context_breakdown();
     assert_eq!(b.conversation_tokens, 10);
@@ -1576,6 +1581,7 @@ fn copy_message_uses_exact_original_content() {
         secs: None,
         phrase: None,
         persona: None,
+        created_at: None,
     });
     a.messages.push(Message {
         role: "assistant".into(),
@@ -1586,6 +1592,7 @@ fn copy_message_uses_exact_original_content() {
         secs: None,
         phrase: None,
         persona: None,
+        created_at: None,
     });
     // copy_message resolves *some* text at each index (clipboard availability
     // is environment-dependent in CI, so just assert it didn't silently no-op).
@@ -1964,6 +1971,7 @@ async fn swarm_synthesis_triggers_post_reply_jobs_like_normal_chat() {
         secs: None,
         phrase: None,
         persona: None,
+        created_at: None,
     });
 
     a.on_swarm_update(Some((
@@ -1991,6 +1999,7 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
         secs: None,
         phrase: None,
         persona: None,
+        created_at: None,
     });
     a.messages.push(Message {
         role: "assistant".into(),
@@ -2001,6 +2010,7 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
         secs: None,
         phrase: None,
         persona: Some("Optimist".into()),
+        created_at: None,
     });
     a.messages.push(Message {
         role: "assistant".into(),
@@ -2011,6 +2021,7 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
         secs: None,
         phrase: None,
         persona: None,
+        created_at: None,
     });
     let history = a.build_history();
     let contents: Vec<&str> = history.iter().map(|m| m.content.as_str()).collect();

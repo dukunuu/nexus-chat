@@ -77,15 +77,6 @@ pub fn dim(s: impl Into<String>, theme: &crate::theme::Theme) -> Span<'static> {
     Span::styled(s.into(), Style::default().fg(theme.fg_dim))
 }
 
-pub fn dot(theme: &crate::theme::Theme) -> Line<'static> {
-    Line::from(Span::styled(
-        "⏺",
-        Style::default()
-            .fg(theme.success)
-            .add_modifier(Modifier::BOLD),
-    ))
-}
-
 fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
     let hint = if app.settings.hide_hints {
         String::new()
@@ -106,19 +97,28 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         " message (Enter to send, /help) ".to_string()
     };
-    // Session title sits in the top-right corner of the input box.
+    // Session title sits in the top-right corner of the input box; the
+    // border brightens while a stream is running so the active state reads
+    // at a glance.
     let name = match &app.session {
         Some(s) => s.title.clone(),
         None => "nexus-chat".to_string(),
     };
+    let border_color = if app.is_streaming() {
+        app.spinner_color()
+    } else {
+        app.theme.border_dim
+    };
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(border_color))
         .title_top(Line::from(hint));
     block = block.title_top(
         Line::from(Span::styled(
             format!(" {name} "),
-            Style::default().fg(app.theme.accent),
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
         ))
         .right_aligned(),
     );
@@ -336,16 +336,32 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
     let incog_tag = if app.incognito { "🕶️ " } else { "" };
     let show_bar = app.settings.show_stats && app.context_limit().is_some();
 
+    // Model badge: accent bold; the rest dim.
+    let badge = |m: &str| {
+        Line::from(vec![
+            Span::styled(
+                m.to_string(),
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  |  ", Style::default().fg(app.theme.border_dim)),
+        ])
+    };
+
     if !show_bar {
-        let text = format!("{space_tag}{incog_tag}{web_tag}{model}  |  {}", app.status);
-        let para = Paragraph::new(text).style(Style::default().fg(app.theme.fg_dim));
-        f.render_widget(para, area);
+        let mut line = badge(&format!("{space_tag}{incog_tag}{web_tag}{model}"));
+        line.spans.push(Span::styled(
+            app.status.clone(),
+            Style::default().fg(app.theme.fg_dim),
+        ));
+        f.render_widget(Paragraph::new(line), area);
         return;
     }
 
-    // Model, then the gradient context bar beside it, then numbers + status.
-    let model = format!("{incog_tag}{web_tag}{model}");
-    let model_w = model.chars().count() as u16 + 2;
+    // Model badge, then the gradient context bar beside it, then numbers + status.
+    let model_s = format!("{incog_tag}{web_tag}{model}");
+    let model_w = model_s.chars().count() as u16 + 6;
     let gauge_w = 18u16.min(area.width.saturating_sub(model_w + 4));
     let cols = Layout::horizontal([
         Constraint::Length(model_w),
@@ -354,14 +370,19 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
     ])
     .split(area);
 
-    let style = Style::default().fg(app.theme.fg_dim);
-    f.render_widget(Paragraph::new(format!("{model} ")).style(style), cols[0]);
+    f.render_widget(badge(&model_s), cols[0]);
     render_context_bar(f, app, cols[1]);
     let tail = match context_label(app) {
         Some(l) => format!(" {l}  |  {}", app.status),
         None => format!("  |  {}", app.status),
     };
-    f.render_widget(Paragraph::new(tail).style(style), cols[2]);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            tail,
+            Style::default().fg(app.theme.fg_dim),
+        ))),
+        cols[2],
+    );
 }
 
 /// Persistent, direct-click targets for completed chat tasks. The queue keeps
@@ -406,7 +427,7 @@ fn render_notifications(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Short absolute timestamp from an rfc3339 string (falls back to the raw text).
-fn fmt_created(rfc3339: &str) -> String {
+pub(super) fn fmt_created(rfc3339: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(rfc3339).map_or_else(
         |_| rfc3339.to_string(),
         |dt| {

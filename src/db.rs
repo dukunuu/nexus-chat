@@ -108,6 +108,9 @@ pub struct Message {
     /// Which `/swarm` persona produced this reply, if any (`None` for
     /// ordinary messages and for a swarm turn's final synthesis reply).
     pub persona: Option<String>,
+    /// RFC3339 timestamp of the row (None for in-memory-only messages that
+    /// were never persisted, e.g. incognito streams).
+    pub created_at: Option<String>,
 }
 
 /// Name of the always-present, undeletable space that sessions default into.
@@ -602,8 +605,8 @@ impl Db {
 
     pub fn load_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT role, content, model, reasoning, tokens, secs, phrase, persona FROM messages
-             WHERE session_id = ?1 ORDER BY created_at ASC",
+            "SELECT role, content, model, reasoning, tokens, secs, phrase, persona, created_at
+             FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
         )?;
         let messages = stmt
             .query_map([session_id], |r| {
@@ -616,6 +619,7 @@ impl Db {
                     secs: r.get(5)?,
                     phrase: r.get(6)?,
                     persona: r.get(7)?,
+                    created_at: r.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

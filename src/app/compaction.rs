@@ -290,6 +290,7 @@ mod tests {
             secs: None,
             phrase: None,
             persona: None,
+            created_at: None,
         }
     }
 

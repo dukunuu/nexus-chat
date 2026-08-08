@@ -10,13 +10,13 @@
 use image::GenericImageView;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use super::{dim, dot, line_text};
+use super::{dim, line_text};
 use crate::app::App;
 use crate::db::Message;
 
@@ -185,7 +185,13 @@ fn sync_cache(app: &mut App, width: usize) {
                 &mut c.image_at_line,
                 &mut c.image_cache,
             );
-            push_user(&mut c.lines, &m.content, width, &theme);
+            push_user(
+                &mut c.lines,
+                &m.content,
+                width,
+                &theme,
+                m.created_at.as_deref(),
+            );
         } else if m.role == "research_stage" {
             push_research_stage(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "error" {
@@ -235,15 +241,23 @@ fn sync_cache(app: &mut App, width: usize) {
     c.msg_count = app.messages.len();
 }
 
-/// The empty start screen: centered banner, a random greeting, and a live clock.
+/// The empty start screen: a gradient banner, a random greeting, a live
+/// clock, and a row of quick-start command chips.
 fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
-    for l in app.banner.lines() {
+    // Per-line gradient across the accent ramp: accent -> accent2.
+    let banner_lines: Vec<&str> = app.banner.lines().collect();
+    let n = banner_lines.len().max(1);
+    for (i, l) in banner_lines.into_iter().enumerate() {
+        let t = if n > 1 {
+            i as f32 / (n - 1) as f32
+        } else {
+            0.0
+        };
+        let color = ramp(app.theme.accent, app.theme.accent2, t);
         lines.push(Line::from(Span::styled(
             l.to_string(),
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         )));
     }
     lines.push(Line::from(""));
@@ -257,6 +271,13 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
             .to_string(),
         &app.theme,
     )));
+    if !app.settings.hide_hints {
+        lines.push(Line::from(""));
+        lines.push(chip_row(
+            &["/research", "/swarm", "/model", "/help"],
+            &app.theme,
+        ));
+    }
 
     // Center vertically.
     let pad = (area.height as usize).saturating_sub(lines.len()) / 2;
@@ -266,30 +287,62 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(out).alignment(Alignment::Center), area);
 }
 
-/// A user message: `❯ ` prefix, wrapped with a 2-col hanging indent.
+/// Linear blend between two colors at `t` in 0.0..=1.0.
+fn ramp(a: Color, b: Color, t: f32) -> Color {
+    let mix = |x: u8, y: u8| {
+        let (xf, yf) = (f32::from(x), f32::from(y));
+        (xf + (yf - xf) * t).round() as u8
+    };
+    match (a, b) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
+        }
+        _ => a,
+    }
+}
+
+/// `[ /cmd ]` chips in a dim bracket style, separated by two spaces.
+fn chip_row(cmds: &[&str], theme: &crate::theme::Theme) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, cmd) in cmds.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled("[ ", Style::default().fg(theme.border_dim)));
+        spans.push(Span::styled(
+            cmd.to_string(),
+            Style::default().fg(theme.accent),
+        ));
+        spans.push(Span::styled(" ]", Style::default().fg(theme.border_dim)));
+    }
+    Line::from(spans)
+}
+
+/// A user message: a `❯ You` header in the user color with the send time
+/// right-aligned when known, then the body wrapped with a 2-col hanging
+/// indent so the header column stays visually empty.
 fn push_user(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
     theme: &crate::theme::Theme,
+    created_at: Option<&str>,
 ) {
-    let head = Span::styled(
-        "❯ ",
+    let mut head = vec![Span::styled(
+        "❯ You",
         Style::default()
             .fg(theme.user_msg)
             .add_modifier(Modifier::BOLD),
-    );
-    let mut first = true;
-    for line in wrap_plain(content, width.saturating_sub(2)) {
-        if first {
-            out.push(Line::from(vec![head.clone(), Span::raw(line)]));
-            first = false;
-        } else {
-            out.push(Line::from(format!("  {line}")));
-        }
+    )];
+    if let Some(t) = created_at {
+        let time = super::fmt_created(t);
+        let pad = width.saturating_sub(6 + time.chars().count());
+        head.push(Span::raw(" ".repeat(pad)));
+        head.push(Span::styled(time, Style::default().fg(theme.fg_dim)));
     }
-    if first {
-        out.push(Line::from(head));
+    out.push(Line::from(head));
+    for line in wrap_plain(content, width.saturating_sub(2)) {
+        out.push(Line::from(format!("  {line}")));
     }
     out.push(Line::from(""));
 }
@@ -440,8 +493,9 @@ fn push_research_plan(
     out.push(Line::from(""));
 }
 
-/// A stored assistant reply: dot, collapsible reasoning, the answer, then a
-/// dim `· model · stats` footer (stats only when `show_stats` is on).
+/// A stored assistant reply: a `✦ <model>` header (persona name in accent
+/// for swarm turns) with the completion time right-aligned, the collapsible
+/// reasoning, the markdown answer, then a dim stats/phrase footer.
 fn push_assistant_stored(
     out: &mut Vec<Line<'static>>,
     msg: &Message,
@@ -451,32 +505,56 @@ fn push_assistant_stored(
     blocks: &mut Vec<String>,
     theme: &crate::theme::Theme,
 ) {
-    // A `/swarm` persona's round reply gets a small header identifying it.
-    if let Some(persona) = &msg.persona {
-        let model = msg.model.as_deref().unwrap_or("");
-        out.push(Line::from(vec![
-            Span::styled(
-                format!("**{persona}**"),
+    // Header: ✦ + who answered (persona overrides the model name).
+    let mut head = vec![Span::styled(
+        "✦ ",
+        Style::default()
+            .fg(theme.accent2)
+            .add_modifier(Modifier::BOLD),
+    )];
+    match (&msg.persona, msg.model.as_deref()) {
+        (Some(p), Some(m)) => {
+            head.push(Span::styled(
+                p.clone(),
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
-            ),
-            dim(format!(" · {model}"), theme),
-        ]));
-    }
-    // Completion line: "⏺ Vibed for 13.3 seconds" (dot green, text dim).
-    match (&msg.phrase, msg.secs) {
-        (Some(p), Some(secs)) => out.push(Line::from(vec![
-            Span::styled(
-                "⏺ ",
+            ));
+            head.push(dim(format!(" · {m}"), theme));
+        }
+        (Some(p), None) => {
+            head.push(Span::styled(
+                p.clone(),
                 Style::default()
-                    .fg(theme.success)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
-            ),
-            dim(format!("{p} for {secs:.1} seconds"), theme),
-        ])),
-        _ => out.push(dot(theme)),
+            ));
+        }
+        (None, Some(m)) => {
+            head.push(Span::styled(
+                m.to_string(),
+                Style::default()
+                    .fg(theme.assistant_msg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        (None, None) => {
+            head.push(Span::styled(
+                "assistant",
+                Style::default()
+                    .fg(theme.assistant_msg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
     }
+    if let Some(t) = &msg.created_at {
+        let time = super::fmt_created(t);
+        let head_len: usize = head.iter().map(|s| s.content.chars().count()).sum();
+        let pad = width.saturating_sub(head_len + 1 + time.chars().count());
+        head.push(Span::raw(" ".repeat(pad)));
+        head.push(Span::styled(time, Style::default().fg(theme.fg_dim)));
+    }
+    out.push(Line::from(head));
 
     if let Some(r) = &msg.reasoning {
         if settings.show_reasoning {
@@ -503,15 +581,20 @@ fn push_assistant_stored(
     rendered.lines = crate::citations::style_confidence_tags(rendered.lines);
     push_rendered(out, code, blocks, rendered);
 
-    // Footer below the response.
-    if let Some(m) = &msg.model {
-        let mut footer = format!("· {m}");
-        if settings.show_stats
-            && let (Some(tok), Some(secs)) = (msg.tokens, msg.secs)
-        {
-            let tps = if secs > 0.0 { tok as f64 / secs } else { 0.0 };
-            let _ = write!(footer, "  ·  {tps:.1} tok/s · ~{tok} tok · {secs:.2}s");
-        }
+    // Footer below the response: phrase + stats (the model lives in the
+    // header now).
+    let mut footer = String::new();
+    if let Some(p) = &msg.phrase {
+        footer.push_str("· ");
+        footer.push_str(p);
+    }
+    if settings.show_stats
+        && let (Some(tok), Some(secs)) = (msg.tokens, msg.secs)
+    {
+        let tps = if secs > 0.0 { tok as f64 / secs } else { 0.0 };
+        let _ = write!(footer, "  ·  {tps:.1} tok/s · ~{tok} tok · {secs:.2}s");
+    }
+    if !footer.is_empty() {
         out.push(Line::from(dim(footer, theme)));
     }
     out.push(Line::from(""));
@@ -567,6 +650,8 @@ fn push_session_link(
 
 /// The in-progress reply: "spinner Phrase" on one line in a random colour, live
 /// reasoning below, then the answer as it streams.
+/// The in-progress reply: a `⠹ <model> — <phrase>` header in the spinner
+/// color, the thinking block when present, then the live markdown stream.
 fn push_assistant_streaming(
     out: &mut Vec<Line<'static>>,
     app: &App,
@@ -575,13 +660,16 @@ fn push_assistant_streaming(
     blocks: &mut Vec<String>,
 ) {
     let color = app.spinner_color();
+    let name = app
+        .active_chat_task()
+        .map_or("assistant", |t| t.model.as_str());
     out.push(Line::from(vec![
         Span::styled(
             format!("{} ", app.spinner_char()),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            app.thinking_phrase().to_string(),
+            format!("{name} — {}", app.thinking_phrase()),
             Style::default().fg(color),
         ),
     ]));
@@ -750,6 +838,7 @@ mod tests {
             secs: None,
             phrase: None,
             persona: None,
+            created_at: None,
         }
     }
 

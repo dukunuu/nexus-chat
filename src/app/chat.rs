@@ -105,6 +105,7 @@ impl App {
             secs: None,
             phrase: None,
             persona: None,
+            created_at: None,
         });
 
         if self.session.as_ref().is_some_and(|s| s.swarm_mode) {
@@ -335,6 +336,7 @@ impl App {
                 secs: None,
                 phrase: None,
                 persona: None,
+                created_at: None,
             });
         }
         Ok(())
@@ -403,6 +405,7 @@ impl App {
                         secs: None,
                         phrase: None,
                         persona: None,
+                        created_at: None,
                     });
                 }
                 // Generated images land on disk but aren't indexed until
@@ -516,6 +519,7 @@ impl App {
         let secs = Some(task.started.elapsed().as_secs_f64());
         let reasoning = (!reasoning.is_empty()).then_some(reasoning);
         let phrase = Some(THINKING[task.thinking_idx].1.to_string());
+        let created_at = Some(chrono::Utc::now().to_rfc3339());
 
         if !task.incognito && !buf.is_empty() {
             self.db.add_assistant_message(
@@ -538,6 +542,7 @@ impl App {
                 secs,
                 phrase,
                 persona: None,
+                created_at,
             });
             // These jobs still use active-session state, so only launch them
             // when the task's origin is the session currently being viewed.
@@ -562,6 +567,7 @@ impl App {
                     secs: None,
                     phrase: None,
                     persona: None,
+                    created_at: None,
                 });
             } else if !task.incognito {
                 self.unread.insert(task.session_id.clone());

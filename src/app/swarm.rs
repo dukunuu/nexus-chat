@@ -274,6 +274,7 @@ impl App {
                             secs: None,
                             phrase: None,
                             persona: None,
+                            created_at: None,
                         });
                     }
                     self.status = format!("swarm: {s}");
@@ -299,6 +300,7 @@ impl App {
                         secs: None,
                         phrase: None,
                         persona: Some(persona),
+                        created_at: None,
                     });
                 }
             }
@@ -335,6 +337,7 @@ impl App {
                         secs: None,
                         phrase: Some("Discussed".to_string()),
                         persona: None,
+                        created_at: None,
                     });
                     self.status = "swarm turn complete".to_string();
                     self.maybe_generate_title();
@@ -358,6 +361,7 @@ impl App {
                         secs: None,
                         phrase: None,
                         persona: None,
+                        created_at: None,
                     });
                     self.status = format!("swarm error: {e}");
                 }

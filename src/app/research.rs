@@ -1962,6 +1962,7 @@ impl super::App {
             secs: None,
             phrase: None,
             persona: None,
+            created_at: None,
         });
     }
 
@@ -2023,6 +2024,7 @@ impl super::App {
                 secs: None,
                 phrase: None,
                 persona: None,
+                created_at: None,
             });
         }
         match gate.phase {
@@ -2084,6 +2086,7 @@ impl super::App {
                     secs: None,
                     phrase: None,
                     persona: None,
+                    created_at: None,
                 });
             }
         }
@@ -2188,6 +2191,7 @@ impl super::App {
                         secs: None,
                         phrase: None,
                         persona: None,
+                        created_at: None,
                     });
                     self.status = format!("survey round {round} — answer in chat · Ctrl+↑ agents");
                 } else {
@@ -2267,6 +2271,7 @@ impl super::App {
                         secs: None,
                         phrase: None,
                         persona: None,
+                        created_at: None,
                     });
                     self.status = if rework {
                         "revised plan ready — reply to approve".to_string()
@@ -2335,6 +2340,7 @@ impl super::App {
                         secs: None,
                         phrase: Some("Researched".to_string()),
                         persona: None,
+                        created_at: None,
                     });
                     self.status = "research complete".to_string();
                 } else {
@@ -2359,6 +2365,7 @@ impl super::App {
                         secs: None,
                         phrase: None,
                         persona: None,
+                        created_at: None,
                     });
                 }
                 self.status = msg;
