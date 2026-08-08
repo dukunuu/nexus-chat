@@ -1408,8 +1408,8 @@ impl App {
         self.active_chat_task().map(|task| task.buffer.as_str())
     }
 
-    /// True when the active session is the one the in-flight stream belongs
-    /// to (untagged streams count as viewed — legacy/test paths).
+    /// True when the in-flight stream belongs to the active session (every
+    /// stream carries its origin `session_id`, so this is exact).
     pub fn viewing_stream(&self) -> bool {
         self.active_chat_task().is_some()
     }

@@ -355,10 +355,10 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('o') if ctrl && app.sel.selected_text().is_some() => {
             app.open_session_link();
         }
-        // 'p' pins, 'x' discards the [n] source under the current selection —
-        // same selection→citation resolution as 'o'. Both are plain letters
-        // guarded by an active mouse selection, so composer typing is
-        // untouched (the guard fires only while a selection exists).
+        // 'p' pins, 'x' discards the [n] source under the current selection.
+        // Both are plain letters guarded by an active mouse selection, so
+        // composer typing is untouched (the guard fires only while a
+        // selection exists).
         KeyCode::Char('p') if !ctrl && !shift && app.sel.selected_text().is_some() => {
             app.flag_source_under_selection(Some("pinned"));
         }
