@@ -22,8 +22,8 @@ pub fn render(f: &mut Frame, app: &App) {
     let inner = chrome::render_hinted(
         f,
         area,
-        chrome::hinted_title(app, "login", ""),
-        "↑↓ move · Enter pick · Esc close",
+        chrome::popup_title(app, "🔑", "login"),
+        "↑↓ · Enter pick · Esc close",
         app,
         true,
     );

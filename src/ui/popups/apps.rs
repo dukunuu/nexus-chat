@@ -68,12 +68,13 @@ pub fn render(f: &mut Frame, app: &App) {
                 "Ctrl+D confirm · Esc cancel",
             )
         }
-        AppsMode::Browse => chrome::hinted_title(app, "apps", ""),
+        AppsMode::Browse => chrome::popup_title(app, "🧩", "apps"),
     };
     let hint = match app.apps_mode {
         AppsMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        _ if app.apps_cache.is_empty() => "ask the model to build you one".to_string(),
         _ => format!(
-            "{}Enter open · Ctrl+E edit file · Ctrl+D remove",
+            "{}↑↓ · Enter open · Ctrl+E edit file · Ctrl+D remove",
             chrome::count_hint(app.apps_cache.len(), "app")
         ),
     };

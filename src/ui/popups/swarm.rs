@@ -46,16 +46,19 @@ pub fn render(f: &mut Frame, app: &App) {
                 "Ctrl+D confirm · Esc cancel",
             )
         }
-        SwarmPopupMode::Browse => chrome::hinted_title(
+        SwarmPopupMode::Browse => chrome::popup_title(
             app,
-            format!("swarm mode is {}", if on { "ON" } else { "OFF" }),
-            "",
+            "👥",
+            format!("swarm — {}", if on { "ON" } else { "OFF" }),
         ),
     };
     let hint = match app.swarm_popup_mode {
         SwarmPopupMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        SwarmPopupMode::Browse if app.swarm_cache.is_empty() => {
+            "Ctrl+N add · Ctrl+G toggle · Ctrl+X stop".to_string()
+        }
         SwarmPopupMode::Browse => format!(
-            "{}Enter edit · Ctrl+N add · Ctrl+G toggle · Ctrl+M model · Ctrl+D remove · Ctrl+X stop",
+            "{}↑↓ · Enter edit · Ctrl+N add · Ctrl+G toggle · Ctrl+M model · Ctrl+D remove · Ctrl+X stop",
             chrome::count_hint(app.swarm_cache.len(), "persona")
         ),
     };

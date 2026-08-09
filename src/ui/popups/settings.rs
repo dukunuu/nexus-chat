@@ -112,15 +112,16 @@ pub fn render(f: &mut Frame, app: &App) {
         SettingsRow::Group(_) => String::new(),
     };
 
-    let inner = chrome::render_frame(
+    let hint = format!(
+        "{}Space toggles/collapses · type numbers · ↑↓ · Esc saves",
+        chrome::count_hint(rows.len(), "setting")
+    );
+    let inner = chrome::render_hinted(
         f,
         area,
-        chrome::hinted_title(
-            app,
-            "nerd config",
-            "Space toggles/collapses · type numbers · Esc saves",
-        ),
-        &app.theme,
+        chrome::popup_title(app, "⚙", "nerd config"),
+        &hint,
+        app,
         true,
     );
     let (list_area, detail_area) = chrome::split_with_detail(inner, &desc);

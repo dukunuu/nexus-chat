@@ -103,15 +103,16 @@ fn render_files(f: &mut Frame, app: &App) {
                 .unwrap_or_default();
             chrome::danger_title(app, format!("remove \"{name}\"?"), "")
         }
-        FilesMode::Browse => chrome::hinted_title(app, "files", ""),
+        FilesMode::Browse => chrome::popup_title(app, "📁", "files"),
         FilesMode::Pick => Line::from(""),
     };
     let hint = match app.files_mode {
         FilesMode::Add => "Enter import · Esc cancel".to_string(),
         FilesMode::Rename => "Enter rename · Esc cancel".to_string(),
         FilesMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        FilesMode::Browse if app.files_cache.is_empty() => "Ctrl+N add · Tab tab".to_string(),
         FilesMode::Browse => format!(
-            "{}Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+D remove · Tab tab",
+            "{}↑↓ · Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+D remove · Tab tab",
             chrome::count_hint(app.files_cache.len(), "file")
         ),
         FilesMode::Pick => String::new(),
@@ -157,12 +158,13 @@ fn render_images(f: &mut Frame, app: &App) {
                 .unwrap_or_default();
             chrome::danger_title(app, format!("remove \"{name}\"?"), "")
         }
-        ImagesMode::Browse => chrome::hinted_title(app, "images", ""),
+        ImagesMode::Browse => chrome::popup_title(app, "🖼", "images"),
     };
     let hint = match app.images_mode {
         ImagesMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        ImagesMode::Browse if app.images_cache.is_empty() => "Tab switch tab".to_string(),
         ImagesMode::Browse => format!(
-            "{}Enter open · Ctrl+D remove · Tab switch tab",
+            "{}↑↓ · Enter open · Ctrl+D remove · Tab tab",
             chrome::count_hint(app.images_cache.len(), "image")
         ),
     };
@@ -218,13 +220,16 @@ fn render_scripts(f: &mut Frame, app: &App) {
                 .unwrap_or_default();
             chrome::danger_title(app, format!("remove \"{name}\"?"), "")
         }
-        ScriptsMode::Browse => chrome::hinted_title(app, "scripts", ""),
+        ScriptsMode::Browse => chrome::popup_title(app, "📜", "scripts"),
         _ => unreachable!(),
     };
     let hint = match app.scripts_mode {
         ScriptsMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        ScriptsMode::Browse if app.scripts_cache.is_empty() => {
+            "Ctrl+N create · Tab tab".to_string()
+        }
         _ => format!(
-            "{}Enter edit · Ctrl+N create · Ctrl+R rename · Ctrl+D remove · Tab switch tab",
+            "{}↑↓ · Enter edit · Ctrl+N create · Ctrl+R rename · Ctrl+D remove · Tab tab",
             chrome::count_hint(app.scripts_cache.len(), "script")
         ),
     };

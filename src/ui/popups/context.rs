@@ -58,14 +58,14 @@ pub fn render(f: &mut Frame, app: &App) {
     ]));
 
     let hint = if b.compacted {
-        "v views digest · Esc close"
+        "v digest · Esc close"
     } else {
         "Ctrl+G toggle · Esc close"
     };
     let inner = chrome::render_hinted(
         f,
         area,
-        chrome::hinted_title(app, "context", ""),
+        chrome::popup_title(app, "📊", "context"),
         hint,
         app,
         true,

@@ -80,13 +80,16 @@ pub fn render(f: &mut Frame, app: &App) {
             let name = app.selected_session().map(|s| s.title).unwrap_or_default();
             chrome::danger_title(app, format!("delete \"{}\"?", truncate(&name, 30)), "")
         }
-        SessionMode::Browse => chrome::filter_title(app, "sessions", &app.session_filter),
+        SessionMode::Browse => chrome::filter_title(app, "🗂", "sessions", &app.session_filter),
     };
     let hint = match app.session_mode {
         SessionMode::Rename => "Enter save · Esc cancel".to_string(),
         SessionMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        SessionMode::Browse if sessions.is_empty() => {
+            "no sessions match — type to clear the filter".to_string()
+        }
         SessionMode::Browse => format!(
-            "{}↑↓ move · Enter open · Ctrl+R rename · Ctrl+D delete",
+            "{}↑↓ · Enter open · Ctrl+R rename · Ctrl+D delete",
             chrome::count_hint(sessions.len(), "session")
         ),
     };

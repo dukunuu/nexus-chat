@@ -8,12 +8,19 @@ use super::chrome;
 
 pub fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
-    let hint = chrome::count_hint(app.copy_options.len(), "option");
+    let hint = if app.copy_options.is_empty() {
+        "Esc close".to_string()
+    } else {
+        format!(
+            "{}↑↓ · Enter copy · Esc close",
+            chrome::count_hint(app.copy_options.len(), "option")
+        )
+    };
     let inner = chrome::render_hinted(
         f,
         area,
-        chrome::hinted_title(app, "copy", ""),
-        &format!("{hint}↑↓ move · Enter copy · Esc close"),
+        chrome::popup_title(app, "📋", "copy"),
+        &hint,
         app,
         true,
     );

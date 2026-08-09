@@ -43,12 +43,15 @@ pub fn render(f: &mut Frame, app: &App) {
                 .unwrap_or_default();
             chrome::danger_title(app, format!("delete watch \"{topic}\"?"), "")
         }
-        WatchMode::Browse => chrome::hinted_title(app, "watches", ""),
+        WatchMode::Browse => chrome::popup_title(app, "⏰", "watches"),
     };
     let hint = match app.watch_mode {
         WatchMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        WatchMode::Browse if app.watches_cache.is_empty() => {
+            "no watches yet — /watch <topic> to start one".to_string()
+        }
         WatchMode::Browse => format!(
-            "{}Enter jump to session · Ctrl+D delete",
+            "{}↑↓ · Enter jump to session · Ctrl+D delete",
             chrome::count_hint(app.watches_cache.len(), "watch")
         ),
     };

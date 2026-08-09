@@ -47,11 +47,14 @@ pub fn render(f: &mut Frame, app: &App) {
                 "Ctrl+D confirm · Esc cancel",
             )
         }
-        SkillsMode::Browse => chrome::hinted_title(app, "skills", ""),
+        SkillsMode::Browse => chrome::popup_title(app, "🧠", "skills"),
     };
     let hint = match app.skills_mode {
+        SkillsMode::Browse if app.skills.is_empty() => {
+            "no skills yet — Ctrl+N installs one from GitHub".to_string()
+        }
         SkillsMode::Browse => format!(
-            "{}Ctrl+N install · Ctrl+D remove · Ctrl+E edit",
+            "{}↑↓ · Ctrl+N install · Ctrl+D remove · Ctrl+E edit",
             chrome::count_hint(app.skills.len(), "skill")
         ),
         SkillsMode::Install => "owner/repo/path · Enter install · Esc cancel".to_string(),

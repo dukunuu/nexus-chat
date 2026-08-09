@@ -15,7 +15,7 @@ pub fn render(f: &mut Frame, app: &App) {
     let masked = "*".repeat(app.key_input.chars().count());
     let title = chrome::input_title(
         app,
-        format!("{} key", app.key_target_label()),
+        format!("🔑 {} key", app.key_target_label()),
         masked.as_str(),
         "",
     );

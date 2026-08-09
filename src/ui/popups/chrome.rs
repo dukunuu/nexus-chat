@@ -145,16 +145,25 @@ fn titled_line(app: &App, text: impl Into<String>, color: Color, hint: &str) -> 
     Line::from(spans)
 }
 
-/// Browse-mode title for a filterable list popup: `label` alone when the
-/// filter is empty, `label: <filter>▏` (live cursor) while typing.
-pub fn filter_title(app: &App, label: impl Into<String>, filter: &str) -> Line<'static> {
+/// Browse-mode title for a filterable list popup: a per-popup glyph
+/// (accent2) + `label` alone when the filter is empty, `label: <filter>▏`
+/// (live cursor) while typing.
+pub fn filter_title(
+    app: &App,
+    glyph: &str,
+    label: impl Into<String>,
+    filter: &str,
+) -> Line<'static> {
     let label = label.into();
-    let mut spans = vec![Span::styled(
-        format!(" {label}"),
-        Style::default()
-            .fg(app.theme.accent)
-            .add_modifier(Modifier::BOLD),
-    )];
+    let mut spans = vec![
+        Span::styled(format!(" {glyph} "), Style::default().fg(app.theme.accent2)),
+        Span::styled(
+            label,
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
     if !filter.is_empty() {
         spans.push(Span::styled(
             format!(": {filter}▏"),
@@ -164,9 +173,19 @@ pub fn filter_title(app: &App, label: impl Into<String>, filter: &str) -> Line<'
     Line::from(spans)
 }
 
-/// A normal popup title with optional hint text.
-pub fn hinted_title(app: &App, text: impl Into<String>, hint: &str) -> Line<'static> {
-    titled_line(app, text, app.theme.accent, hint)
+/// The standard popup title: a per-popup glyph (accent2) + bold accent name.
+/// Every popup picks its own glyph so the family reads distinct at a glance
+/// while staying visually identical in frame.
+pub fn popup_title(app: &App, glyph: &str, name: impl Into<String>) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!(" {glyph} "), Style::default().fg(app.theme.accent2)),
+        Span::styled(
+            name.into(),
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
 }
 
 /// A title for text-entry popups: label + live value + trailing cursor.

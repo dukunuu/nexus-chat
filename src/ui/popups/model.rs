@@ -29,11 +29,15 @@ pub fn render(f: &mut Frame, app: &mut App) {
         crate::app::ModelPickTarget::ImageGen => "picking image gen model",
         crate::app::ModelPickTarget::VideoGen => "picking video gen model",
     };
-    let fav_title = chrome::hinted_title(app, "★ favorites", picking);
-    let fav_hint = format!(
-        "{}Ctrl+S unfav · Ctrl+T reason · →",
-        chrome::count_hint(app.favorite_models().len(), "favorite")
-    );
+    let fav_title = chrome::popup_title(app, "★", "favorites");
+    let fav_hint = if app.favorite_models().is_empty() {
+        "no favorites yet — Ctrl+S in the available list".to_string()
+    } else {
+        format!(
+            "{}↑↓ · Ctrl+S unfav · Ctrl+T reason",
+            chrome::count_hint(app.favorite_models().len(), "favorite")
+        )
+    };
 
     // Favorites column.
     let fav_items = model_items(app, &app.favorite_models());
@@ -56,12 +60,20 @@ pub fn render(f: &mut Frame, app: &mut App) {
         Some(accepts) => accepts.clone(),
         None => String::new(),
     };
-    let avail_hint = format!(
-        "{}type to search · Ctrl+P backend · Ctrl+S fav · Ctrl+T reason · {hint}",
-        chrome::count_hint(app.available_models().len(), "model")
+    let avail_hint = if app.available_models().is_empty() {
+        "no models match — type to clear the filter, Ctrl+P to switch backend".to_string()
+    } else {
+        format!(
+            "{}type to search · Ctrl+P backend · Ctrl+S fav · Ctrl+T reason · {hint}",
+            chrome::count_hint(app.available_models().len(), "model")
+        )
+    };
+    let avail_title = chrome::filter_title(
+        app,
+        "▦",
+        format!("available [{backend}] — {picking}"),
+        &app.model_filter,
     );
-    let avail_title =
-        chrome::filter_title(app, format!("available [{backend}]"), &app.model_filter);
     let avail_list = panel_list(
         avail_items,
         avail_title,
