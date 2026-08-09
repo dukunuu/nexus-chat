@@ -22,9 +22,14 @@ pub fn render(f: &mut Frame, app: &App) {
         app.swarm_cache
             .iter()
             .map(|p| {
-                let blurb: String = p.blurb.chars().take(64).collect();
+                let content_w = (area.width.saturating_sub(5)) as usize;
+                let name = chrome::truncate(
+                    &p.name,
+                    content_w.saturating_sub(p.model.chars().count() + 3),
+                );
+                let blurb = chrome::truncate(&p.blurb, content_w.saturating_sub(3));
                 let top = Line::from(vec![
-                    Span::styled(p.name.clone(), Style::default().fg(app.theme.fg)),
+                    Span::styled(name, Style::default().fg(app.theme.fg)),
                     Span::styled(format!("  {}", p.model), dim),
                 ]);
                 ListItem::new(vec![

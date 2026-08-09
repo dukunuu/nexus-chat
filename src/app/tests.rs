@@ -1182,7 +1182,9 @@ fn system_prompt_lists_files_but_not_their_content() {
     let dir = a.space.files_dir(&a.active_space.name);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("plan.md"), "SECRET-CONTENT-MARKER inside").unwrap();
-    a.rescan_files();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        a.rescan_files();
+    });
 
     let sp = a.system_prompt();
     assert!(sp.contains("## Files"));
@@ -1192,7 +1194,9 @@ fn system_prompt_lists_files_but_not_their_content() {
 
     // No files → no section.
     std::fs::remove_file(dir.join("plan.md")).unwrap();
-    a.rescan_files();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        a.rescan_files();
+    });
     assert!(!a.system_prompt().contains("## Files"));
 }
 

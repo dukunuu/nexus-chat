@@ -98,10 +98,14 @@ pub fn render(f: &mut Frame, app: &App) {
             }
             SettingsRow::Field(field) => {
                 let (name, _) = split_label(field.label());
+                let name = chrome::truncate(&name, name_w.max(1));
+                let v = value(*field);
+                let v_max = (area.width.saturating_sub(8)) as usize - name_w - 3; // border + scrollbar + highlight + label column
+                let v_span = Span::styled(chrome::truncate(&v.content, v_max.max(1)), v.style);
                 ListItem::new(Line::from(vec![
                     Span::raw(format!("  {name:<name_w$}")),
                     Span::raw("   "),
-                    value(*field),
+                    v_span,
                 ]))
             }
         })

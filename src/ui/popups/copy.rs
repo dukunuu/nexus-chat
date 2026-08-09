@@ -1,5 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState};
 
 use crate::app::App;
@@ -34,7 +36,12 @@ pub fn render(f: &mut Frame, app: &App) {
     } else {
         app.copy_options
             .iter()
-            .map(|o| ListItem::new(o.label.clone()))
+            .map(|o| {
+                ListItem::new(Line::from(Span::styled(
+                    chrome::truncate(&o.label, (area.width.saturating_sub(5)) as usize),
+                    Style::default().fg(app.theme.fg),
+                )))
+            })
             .collect()
     };
     let list = chrome::standard_list(items, &app.theme);

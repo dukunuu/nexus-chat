@@ -36,14 +36,15 @@ fn render_files(f: &mut Frame, app: &App) {
         let items: Vec<ListItem> = entries
             .iter()
             .map(|e| {
+                let max = (area.width.saturating_sub(5)) as usize;
                 if e.is_dir {
                     ListItem::new(Line::from(Span::styled(
-                        format!("{}/", e.name),
+                        chrome::truncate(&format!("{}/", e.name), max),
                         Style::default().fg(app.theme.accent),
                     )))
                 } else {
                     ListItem::new(Line::from(Span::styled(
-                        e.name.clone(),
+                        chrome::truncate(&e.name, max),
                         Style::default().fg(app.theme.fg),
                     )))
                 }
@@ -73,6 +74,7 @@ fn render_files(f: &mut Frame, app: &App) {
     }
 
     let dim = Style::default().fg(app.theme.fg_dim);
+    let content_w = (area.width.saturating_sub(5)) as usize; // border + scrollbar + highlight
     let items: Vec<ListItem> = app
         .files_cache
         .iter()
@@ -83,13 +85,23 @@ fn render_files(f: &mut Frame, app: &App) {
             } else {
                 Style::default().fg(app.theme.warning)
             };
-            ListItem::new(Line::from(vec![
-                Span::styled(file.name.clone(), Style::default().fg(app.theme.fg)),
-                Span::styled(
-                    format!("  {}", crate::app::human_size(file.size.unsigned_abs())),
-                    dim,
+            // Status can carry long error text — cap the meta column so the
+            // name keeps a fair share of the row.
+            let meta = chrome::truncate(
+                &format!(
+                    "  {}  {}",
+                    crate::app::human_size(file.size.unsigned_abs()),
+                    file.status
                 ),
-                Span::styled(format!("  {}", file.status), status_style),
+                36,
+            );
+            let name = chrome::truncate(
+                &file.name,
+                content_w.saturating_sub(meta.chars().count() + 1),
+            );
+            ListItem::new(Line::from(vec![
+                Span::styled(name, Style::default().fg(app.theme.fg)),
+                Span::styled(meta, status_style),
             ]))
         })
         .collect();
@@ -155,10 +167,15 @@ fn render_images(f: &mut Frame, app: &App) {
             .iter()
             .map(|img| {
                 let created = crate::ui::fmt_created(&img.modified);
+                let meta = format!("  {}  {created}", crate::app::human_size(img.size));
+                let name = chrome::truncate(
+                    &img.name,
+                    (area.width.saturating_sub(5) as usize)
+                        .saturating_sub(meta.chars().count() + 1),
+                );
                 ListItem::new(Line::from(vec![
-                    Span::styled(img.name.clone(), Style::default().fg(app.theme.fg)),
-                    Span::styled(format!("  {}", crate::app::human_size(img.size)), dim),
-                    Span::styled(format!("  {created}"), dim),
+                    Span::styled(name, Style::default().fg(app.theme.fg)),
+                    Span::styled(meta, dim),
                 ]))
             })
             .collect()
@@ -246,10 +263,14 @@ fn render_scripts(f: &mut Frame, app: &App) {
         .iter()
         .map(|s| {
             let created = crate::ui::fmt_created(&s.modified);
+            let meta = format!("  {}  {created}", crate::app::human_size(s.size));
+            let name = chrome::truncate(
+                &s.name,
+                (area.width.saturating_sub(5) as usize).saturating_sub(meta.chars().count() + 1),
+            );
             ListItem::new(Line::from(vec![
-                Span::styled(s.name.clone(), Style::default().fg(app.theme.fg)),
-                Span::styled(format!("  {}", crate::app::human_size(s.size)), dim),
-                Span::styled(format!("  {created}"), dim),
+                Span::styled(name, Style::default().fg(app.theme.fg)),
+                Span::styled(meta, dim),
             ]))
         })
         .collect();

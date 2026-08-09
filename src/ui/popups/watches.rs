@@ -56,14 +56,19 @@ pub fn render(f: &mut Frame, app: &App) {
                 } else {
                     Span::styled(next, dim)
                 };
-                let pad = width
-                    .saturating_sub(w.topic.chars().count() + state.content.chars().count() + 2);
+                let topic = chrome::truncate(
+                    &w.topic,
+                    width.saturating_sub(state.content.chars().count() + 2),
+                );
+                let pad =
+                    width.saturating_sub(topic.chars().count() + state.content.chars().count() + 2);
                 let top = Line::from(vec![
-                    Span::styled(w.topic.clone(), Style::default().fg(app.theme.fg)),
+                    Span::styled(topic, Style::default().fg(app.theme.fg)),
                     Span::raw(" ".repeat(pad)),
                     state,
                 ]);
                 let meta = format!("every {}h · last run: {last_run}", w.interval_hours);
+                let meta = chrome::truncate(&meta, (area.width.saturating_sub(4)) as usize);
                 ListItem::new(vec![
                     top,
                     Line::from(Span::styled(meta, dim)),

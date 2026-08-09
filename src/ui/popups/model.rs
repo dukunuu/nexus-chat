@@ -40,7 +40,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
     };
 
     // Favorites column.
-    let fav_items = model_items(app, &app.favorite_models());
+    let content_w = (list_inner(fav_outer).width.saturating_sub(3)) as usize;
+    let fav_items = model_items(app, &app.favorite_models(), content_w);
     let fav_list = panel_list(
         fav_items,
         fav_title,
@@ -62,7 +63,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     );
 
     // Available column (with the search box in the title).
-    let avail_items = model_items(app, &app.available_models());
+    let avail_items = model_items(app, &app.available_models(), content_w);
     let backend = app.model_backend_filter_label();
     // Show which effort values the focused model accepts, so the Ctrl+T
     // cycle is predictable before pressing it (e.g. Claude's extra minimal).
@@ -104,11 +105,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
     );
 }
 
-fn model_items(app: &App, models: &[&Model]) -> Vec<ListItem<'static>> {
+fn model_items(app: &App, models: &[&Model], width: usize) -> Vec<ListItem<'static>> {
     models
         .iter()
         .map(|m| {
-            let id = crate::app::composite_id(m);
+            let mut id = crate::app::composite_id(m);
             let marker = if app.favorites.contains(&id) {
                 "★ "
             } else if app.last_used.contains_key(&id) {
@@ -123,6 +124,14 @@ fn model_items(app: &App, models: &[&Model]) -> Vec<ListItem<'static>> {
                 None if !m.reasoning_efforts.is_empty() => "  [r]".to_string(),
                 None => String::new(),
             };
+            // Context window (dim, right-aligned) so the available size is
+            // visible before picking — OpenCode Zen models included.
+            let ctx_w = if m.context_length.is_some() { 7 } else { 0 };
+            let vision_w = if m.supports_images { 2 } else { 0 };
+            id = chrome::truncate(
+                &id,
+                width.saturating_sub(2 + badge.chars().count() + vision_w + ctx_w + 1),
+            );
             let mut spans = vec![Span::raw(format!("{marker}{id}{badge}"))];
             // Vision glyph (dim) for models with image support.
             if m.supports_images {

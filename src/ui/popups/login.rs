@@ -47,9 +47,11 @@ pub fn render(f: &mut Frame, app: &App) {
                 Span::styled("○ no key", dim)
             };
             let width = area.width.saturating_sub(6) as usize;
+            let name =
+                chrome::truncate(name, width.saturating_sub(chip.content.chars().count() + 2));
             let pad = width.saturating_sub(name.chars().count() + chip.content.chars().count() + 2);
             let top = Line::from(vec![
-                ratatui::text::Span::styled(name.to_string(), Style::default().fg(app.theme.fg)),
+                ratatui::text::Span::styled(name, Style::default().fg(app.theme.fg)),
                 ratatui::text::Span::raw(" ".repeat(pad)),
                 chip,
             ]);

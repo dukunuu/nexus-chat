@@ -21,8 +21,9 @@ pub fn render(f: &mut Frame, app: &App) {
         app.skills
             .iter()
             .map(|s| {
+                let name = chrome::truncate(&s.name, (area.width.saturating_sub(5)) as usize);
                 ListItem::new(Line::from(Span::styled(
-                    s.name.clone(),
+                    name,
                     Style::default().fg(app.theme.fg),
                 )))
             })

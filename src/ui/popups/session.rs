@@ -23,7 +23,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         app.session_preview = app
             .db
             .last_message_preview(&sid)
-            .map(|c| (sid.clone(), truncate(&c, 260)));
+            .map(|c| (sid.clone(), chrome::truncate(&c, 260)));
     }
     let preview = app
         .session_preview
@@ -81,7 +81,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
             ]);
             let top = Line::from(top_spans);
             // title (truncated) with the model dimmed after it.
-            let title = truncate(&s.title, width.saturating_sub(s.model.chars().count() + 5));
+            let title =
+                chrome::truncate(&s.title, width.saturating_sub(s.model.chars().count() + 5));
             let body = Line::from(vec![
                 Span::styled(title, Style::default().fg(app.theme.fg)),
                 Span::styled(format!("  {}", s.model), dim),
@@ -96,7 +97,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
         SessionMode::Rename => chrome::input_title(app, "rename session", &app.session_edit, ""),
         SessionMode::ConfirmDelete => {
             let name = app.selected_session().map(|s| s.title).unwrap_or_default();
-            chrome::danger_title(app, format!("delete \"{}\"?", truncate(&name, 30)), "")
+            chrome::danger_title(
+                app,
+                format!("delete \"{}\"?", chrome::truncate(&name, 30)),
+                "",
+            )
         }
         SessionMode::Browse => chrome::filter_title(app, "🗂", "sessions", &app.session_filter),
     };
@@ -133,16 +138,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
         3,
         &app.theme,
     );
-}
-
-/// Truncate `s` to `max` chars, appending `…` when it overflows.
-fn truncate(s: &str, max: usize) -> String {
-    let max = max.max(1);
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let keep = max.saturating_sub(1);
-    format!("{}…", s.chars().take(keep).collect::<String>())
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {

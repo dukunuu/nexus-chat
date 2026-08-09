@@ -137,6 +137,17 @@ pub fn standard_list<'a>(items: Vec<ListItem<'a>>, theme: &Theme) -> List<'a> {
         )
 }
 
+/// Truncate `s` to `max` chars, appending `…` when it overflows — the same
+/// ellipsis language as the hint bar, for row names across popups.
+pub fn truncate(s: &str, max: usize) -> String {
+    let max = max.max(1);
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    format!("{}…", s.chars().take(keep).collect::<String>())
+}
+
 /// Render a popup list statefully with a right-edge scrollbar when the
 /// content overflows. `total` is the number of items, `item_lines` how many
 /// terminal rows each occupies (1 for single-line rows, 3 for two-line+

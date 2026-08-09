@@ -25,21 +25,22 @@ pub fn render(f: &mut Frame, app: &App) {
             } else {
                 "  "
             };
-            let name = if s.name == DEFAULT_SPACE {
-                format!("{mark}{} (default)", s.name)
+            let base = if s.name == DEFAULT_SPACE {
+                format!("{} (default)", s.name)
             } else {
-                format!("{mark}{}", s.name)
+                s.name.clone()
             };
+            let meta = format!(
+                "  {n} session{}  · {}",
+                if n == 1 { "" } else { "s" },
+                crate::ui::fmt_created(&s.created_at)
+            );
+            // border 2 + scrollbar 1 + highlight 2
+            let content_w = area.width.saturating_sub(5) as usize;
+            let name = chrome::truncate(&base, content_w.saturating_sub(meta.chars().count() + 1));
             let line = Line::from(vec![
-                Span::styled(name, Style::default().fg(app.theme.fg)),
-                Span::styled(
-                    format!("  {n} session{}", if n == 1 { "" } else { "s" }),
-                    dim,
-                ),
-                Span::styled(
-                    format!("  · {}", crate::ui::fmt_created(&s.created_at)),
-                    dim,
-                ),
+                Span::styled(format!("{mark}{name}"), Style::default().fg(app.theme.fg)),
+                Span::styled(meta, dim),
             ]);
             ListItem::new(line)
         })
