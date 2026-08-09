@@ -43,9 +43,25 @@ pub(super) enum BrowseAction {
     Backspace,
     MoveUp,
     MoveDown,
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
     Create,
     Rename,
     ConfirmDelete,
+}
+
+/// Move a list cursor by a paging `BrowseAction`, via the popup's own
+/// clamped move helper. `page` is how many rows a page jump covers.
+pub(super) fn apply_page(mut move_by: impl FnMut(i32), action: BrowseAction, page: i32) {
+    match action {
+        BrowseAction::PageUp => move_by(-page),
+        BrowseAction::PageDown => move_by(page),
+        BrowseAction::Top => move_by(i32::MIN / 2),
+        BrowseAction::Bottom => move_by(i32::MAX / 2),
+        _ => {}
+    }
 }
 
 /// Maps a keypress to a `BrowseAction` for a popup's Browse mode.
@@ -65,6 +81,10 @@ pub(super) const fn classify_browse_key(
         KeyCode::Esc => Some(BrowseAction::Close),
         KeyCode::Up => Some(BrowseAction::MoveUp),
         KeyCode::Down => Some(BrowseAction::MoveDown),
+        KeyCode::PageUp => Some(BrowseAction::PageUp),
+        KeyCode::PageDown => Some(BrowseAction::PageDown),
+        KeyCode::Home => Some(BrowseAction::Top),
+        KeyCode::End => Some(BrowseAction::Bottom),
         KeyCode::Char('n') if ctrl && supports_create => Some(BrowseAction::Create),
         KeyCode::Char('r') if ctrl && supports_rename => Some(BrowseAction::Rename),
         KeyCode::Char('d') if ctrl => Some(BrowseAction::ConfirmDelete),

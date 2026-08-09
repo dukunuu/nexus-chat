@@ -45,11 +45,15 @@ pub fn render(f: &mut Frame, app: &App) {
                 let url = app
                     .app_url(name)
                     .unwrap_or_else(|| "server not running".to_string());
-                ListItem::new(Line::from(vec![
-                    Span::styled(name.clone(), Style::default().fg(app.theme.fg)),
-                    Span::styled(format!("  {n} file{}", if n == 1 { "" } else { "s" }), dim),
-                    Span::styled(format!("  {url}"), dim),
-                ]))
+                let meta = format!("{n} file{} · {url}", if n == 1 { "" } else { "s" });
+                ListItem::new(vec![
+                    Line::from(Span::styled(
+                        name.clone(),
+                        Style::default().fg(app.theme.fg),
+                    )),
+                    Line::from(Span::styled(format!("  {meta}"), dim)),
+                    Line::from(""),
+                ])
             })
             .collect()
     };
@@ -89,7 +93,15 @@ pub fn render(f: &mut Frame, app: &App) {
     if !app.apps_cache.is_empty() {
         state.select(Some(app.apps_selected.min(app.apps_cache.len() - 1)));
     }
-    f.render_stateful_widget(list, inner, &mut state);
+    chrome::render_list(
+        f,
+        list,
+        &mut state,
+        inner,
+        app.apps_cache.len(),
+        3,
+        &app.theme,
+    );
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -127,6 +139,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 Some(BrowseAction::Close) => app.popup = crate::app::Popup::None,
                 Some(BrowseAction::MoveUp) => app.move_apps_selection(-1),
                 Some(BrowseAction::MoveDown) => app.move_apps_selection(1),
+                Some(
+                    a @ (BrowseAction::PageUp
+                    | BrowseAction::PageDown
+                    | BrowseAction::Top
+                    | BrowseAction::Bottom),
+                ) => {
+                    super::apply_page(|d| app.move_apps_selection(d), a, 10);
+                }
                 Some(BrowseAction::ConfirmDelete) if !app.apps_cache.is_empty() => {
                     app.apps_mode = AppsMode::ConfirmDelete;
                 }

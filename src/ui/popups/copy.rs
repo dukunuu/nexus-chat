@@ -42,7 +42,15 @@ pub fn render(f: &mut Frame, app: &App) {
     if !app.copy_options.is_empty() {
         state.select(Some(app.copy_selected.min(app.copy_options.len() - 1)));
     }
-    f.render_stateful_widget(list, inner, &mut state);
+    chrome::render_list(
+        f,
+        list,
+        &mut state,
+        inner,
+        app.copy_options.len(),
+        1,
+        &app.theme,
+    );
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {

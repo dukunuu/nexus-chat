@@ -22,12 +22,16 @@ pub fn render(f: &mut Frame, app: &App) {
         app.swarm_cache
             .iter()
             .map(|p| {
-                let blurb: String = p.blurb.chars().take(60).collect();
-                ListItem::new(Line::from(vec![
+                let blurb: String = p.blurb.chars().take(64).collect();
+                let top = Line::from(vec![
                     Span::styled(p.name.clone(), Style::default().fg(app.theme.fg)),
                     Span::styled(format!("  {}", p.model), dim),
-                    Span::styled(format!("  {blurb}"), dim),
-                ]))
+                ]);
+                ListItem::new(vec![
+                    top,
+                    Line::from(Span::styled(format!("  {blurb}"), dim)),
+                    Line::from(""),
+                ])
             })
             .collect()
     };
@@ -73,7 +77,15 @@ pub fn render(f: &mut Frame, app: &App) {
     if !app.swarm_cache.is_empty() {
         state.select(Some(app.swarm_selected.min(app.swarm_cache.len() - 1)));
     }
-    f.render_stateful_widget(list, inner, &mut state);
+    chrome::render_list(
+        f,
+        list,
+        &mut state,
+        inner,
+        app.swarm_cache.len(),
+        3,
+        &app.theme,
+    );
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -97,6 +109,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 KeyCode::Esc => app.popup = crate::app::Popup::None,
                 KeyCode::Up => app.move_swarm_selection(-1),
                 KeyCode::Down => app.move_swarm_selection(1),
+                KeyCode::PageUp => app.move_swarm_selection(-10),
+                KeyCode::PageDown => app.move_swarm_selection(10),
+                KeyCode::Home => app.move_swarm_selection(i32::MIN / 2),
+                KeyCode::End => app.move_swarm_selection(i32::MAX / 2),
                 KeyCode::Char('g') if ctrl => app.toggle_swarm_mode()?,
                 KeyCode::Char('n') if ctrl => app.queue_swarm_persona_editor(true)?,
                 KeyCode::Enter if !app.swarm_cache.is_empty() => {

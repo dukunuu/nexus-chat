@@ -9,6 +9,7 @@ use crate::app::App;
 
 use super::chrome;
 
+#[allow(clippy::too_many_lines)] // row design + preview strip
 pub fn render(f: &mut Frame, app: &mut App) {
     use crate::app::SessionMode;
     let area = crate::ui::centered(f.area(), chrome::TALL.0, chrome::TALL.1);
@@ -123,7 +124,15 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if !sessions.is_empty() {
         state.select(Some(app.session_selected.min(sessions.len() - 1)));
     }
-    f.render_stateful_widget(list, list_area, &mut state);
+    chrome::render_list(
+        f,
+        list,
+        &mut state,
+        list_area,
+        sessions.len(),
+        3,
+        &app.theme,
+    );
 }
 
 /// Truncate `s` to `max` chars, appending `…` when it overflows.
@@ -174,6 +183,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 Some(super::BrowseAction::Close) => app.popup = crate::app::Popup::None,
                 Some(super::BrowseAction::MoveUp) => app.move_session_selection(-1),
                 Some(super::BrowseAction::MoveDown) => app.move_session_selection(1),
+                Some(
+                    a @ (super::BrowseAction::PageUp
+                    | super::BrowseAction::PageDown
+                    | super::BrowseAction::Top
+                    | super::BrowseAction::Bottom),
+                ) => {
+                    super::apply_page(|d| app.move_session_selection(d), a, 10);
+                }
                 Some(super::BrowseAction::Rename) => app.start_rename(),
                 Some(super::BrowseAction::ConfirmDelete) => {
                     app.session_mode = SessionMode::ConfirmDelete;

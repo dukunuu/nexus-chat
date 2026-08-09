@@ -49,7 +49,17 @@ pub fn render(f: &mut Frame, app: &mut App) {
         fav_outer.width,
         app,
     );
-    f.render_stateful_widget(fav_list, fav_outer, &mut app.fav_state);
+    let theme = app.theme;
+    let fav_total = app.favorite_models().len();
+    chrome::render_list(
+        f,
+        fav_list,
+        &mut app.fav_state,
+        list_inner(fav_outer),
+        fav_total,
+        1,
+        &theme,
+    );
 
     // Available column (with the search box in the title).
     let avail_items = model_items(app, &app.available_models());
@@ -82,7 +92,16 @@ pub fn render(f: &mut Frame, app: &mut App) {
         avail_outer.width,
         app,
     );
-    f.render_stateful_widget(avail_list, avail_outer, &mut app.avail_state);
+    let avail_total = app.available_models().len();
+    chrome::render_list(
+        f,
+        avail_list,
+        &mut app.avail_state,
+        list_inner(avail_outer),
+        avail_total,
+        1,
+        &theme,
+    );
 }
 
 fn model_items(app: &App, models: &[&Model]) -> Vec<ListItem<'static>> {

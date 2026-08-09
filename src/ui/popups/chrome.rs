@@ -14,7 +14,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+};
 
 use crate::app::App;
 use crate::theme::{Theme, blend};
@@ -135,6 +137,50 @@ pub fn standard_list<'a>(items: Vec<ListItem<'a>>, theme: &Theme) -> List<'a> {
         )
 }
 
+/// Render a popup list statefully with a right-edge scrollbar when the
+/// content overflows. `total` is the number of items, `item_lines` how many
+/// terminal rows each occupies (1 for single-line rows, 3 for two-line+
+/// blank rows) — used to compute the visible count so the thumb is honest.
+/// The list renders one column narrower than `area` so the gutter never
+/// overlaps row text; the scrollbar follows `state.offset`, which the List
+/// widget updates during its own render.
+pub fn render_list(
+    f: &mut Frame,
+    list: List<'_>,
+    state: &mut ListState,
+    area: Rect,
+    total: usize,
+    item_lines: u16,
+    theme: &Theme,
+) {
+    let list_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.saturating_sub(1).max(1),
+        height: area.height,
+    };
+    f.render_stateful_widget(list, list_area, state);
+    let viewport = (area.height / item_lines.max(1)) as usize;
+    if total > viewport {
+        let gutter = Rect {
+            x: area.x + area.width.saturating_sub(1),
+            y: area.y,
+            width: 1,
+            height: area.height,
+        };
+        let mut sb_state = ratatui::widgets::ScrollbarState::new(total)
+            .viewport_content_length(viewport)
+            .position(state.offset());
+        let sb =
+            ratatui::widgets::Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(Style::default().fg(theme.accent))
+                .track_style(Style::default().fg(theme.border_dim));
+        f.render_stateful_widget(sb, gutter, &mut sb_state);
+    }
+}
+
 /// A dim italic placeholder row for empty lists, so every popup's empty
 /// state looks intentional rather than blank.
 pub fn empty_placeholder(message: &str, theme: &Theme) -> ListItem<'static> {
@@ -238,11 +284,6 @@ pub fn input_title(
 
 fn confirmish_title(app: &App, text: impl Into<String>, color: Color, hint: &str) -> Line<'static> {
     titled_line(app, text, color, hint)
-}
-
-/// Confirmation prompt title (warning color).
-pub fn confirm_title(app: &App, text: impl Into<String>, hint: &str) -> Line<'static> {
-    confirmish_title(app, text, app.theme.warning, hint)
 }
 
 /// Destructive prompt title (error color).

@@ -9,6 +9,7 @@ use crate::app::{App, WatchMode};
 
 use super::chrome;
 
+#[allow(clippy::too_many_lines)] // two-line rows + due/scheduled status
 pub fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), chrome::STANDARD.0, chrome::STANDARD.1);
     let dim = Style::default().fg(app.theme.fg_dim);
@@ -21,15 +22,53 @@ pub fn render(f: &mut Frame, app: &App) {
         app.watches_cache
             .iter()
             .map(|w| {
+                let width = area.width.saturating_sub(6) as usize;
                 let last_run = match &w.last_run_at {
                     Some(t) => crate::ui::fmt_created(t),
                     None => "never".to_string(),
                 };
-                ListItem::new(Line::from(vec![
+                // Next run: last run + interval, or "due" when past.
+                let next = match &w.last_run_at {
+                    Some(t) => chrono::DateTime::parse_from_rfc3339(t).ok().map_or_else(
+                        || "soon".to_string(),
+                        |dt| {
+                            let due = dt.with_timezone(&chrono::Local)
+                                + chrono::Duration::hours(w.interval_hours);
+                            if due < chrono::Local::now() {
+                                "due now".to_string()
+                            } else {
+                                let mins = (due - chrono::Local::now()).num_minutes();
+                                if mins >= 48 * 60 {
+                                    format!("in {}d", mins / (24 * 60))
+                                } else if mins >= 120 {
+                                    format!("in {}h", mins / 60)
+                                } else {
+                                    format!("in {mins}m")
+                                }
+                            }
+                        },
+                    ),
+                    None => "due now".to_string(),
+                };
+                let active = app.chat_task_for_session(&w.session_id).is_some();
+                let state = if active {
+                    Span::styled("⟳ checking", Style::default().fg(app.theme.accent))
+                } else {
+                    Span::styled(next, dim)
+                };
+                let pad = width
+                    .saturating_sub(w.topic.chars().count() + state.content.chars().count() + 2);
+                let top = Line::from(vec![
                     Span::styled(w.topic.clone(), Style::default().fg(app.theme.fg)),
-                    Span::styled(format!("  every {}h", w.interval_hours), dim),
-                    Span::styled(format!("  last run: {last_run}"), dim),
-                ]))
+                    Span::raw(" ".repeat(pad)),
+                    state,
+                ]);
+                let meta = format!("every {}h · last run: {last_run}", w.interval_hours);
+                ListItem::new(vec![
+                    top,
+                    Line::from(Span::styled(meta, dim)),
+                    Line::from(""),
+                ])
             })
             .collect()
     };
@@ -66,7 +105,15 @@ pub fn render(f: &mut Frame, app: &App) {
     if !app.watches_cache.is_empty() {
         state.select(Some(app.watch_selected.min(app.watches_cache.len() - 1)));
     }
-    f.render_stateful_widget(list, inner, &mut state);
+    chrome::render_list(
+        f,
+        list,
+        &mut state,
+        inner,
+        app.watches_cache.len(),
+        3,
+        &app.theme,
+    );
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -83,6 +130,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             KeyCode::Esc => app.popup = crate::app::Popup::None,
             KeyCode::Up => app.move_watch_selection(-1),
             KeyCode::Down => app.move_watch_selection(1),
+            KeyCode::PageUp => app.move_watch_selection(-10),
+            KeyCode::PageDown => app.move_watch_selection(10),
+            KeyCode::Home => app.move_watch_selection(i32::MIN / 2),
+            KeyCode::End => app.move_watch_selection(i32::MAX / 2),
             KeyCode::Enter => app.confirm_watch_session()?,
             KeyCode::Char('d')
                 if key

@@ -92,7 +92,7 @@ pub fn render(f: &mut Frame, app: &App) {
     if !spaces.is_empty() {
         state.select(Some(app.space_selected.min(spaces.len() - 1)));
     }
-    f.render_stateful_widget(list, inner, &mut state);
+    chrome::render_list(f, list, &mut state, inner, spaces.len(), 1, &app.theme);
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -132,6 +132,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 Some(super::BrowseAction::Close) => app.popup = crate::app::Popup::None,
                 Some(super::BrowseAction::MoveUp) => app.move_space_selection(-1),
                 Some(super::BrowseAction::MoveDown) => app.move_space_selection(1),
+                Some(
+                    a @ (super::BrowseAction::PageUp
+                    | super::BrowseAction::PageDown
+                    | super::BrowseAction::Top
+                    | super::BrowseAction::Bottom),
+                ) => {
+                    super::apply_page(|d| app.move_space_selection(d), a, 10);
+                }
                 Some(super::BrowseAction::Create) => app.start_space_create(),
                 Some(super::BrowseAction::Rename) => app.start_space_rename(),
                 // The default space is never deletable.

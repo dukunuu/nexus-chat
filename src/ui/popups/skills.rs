@@ -41,7 +41,7 @@ pub fn render(f: &mut Frame, app: &App) {
                 .skills
                 .get(app.skills_selected)
                 .map_or("", |s| s.name.as_str());
-            chrome::confirm_title(
+            chrome::danger_title(
                 app,
                 format!("remove \"{name}\"?"),
                 "Ctrl+D confirm · Esc cancel",
@@ -77,7 +77,15 @@ pub fn render(f: &mut Frame, app: &App) {
     if !app.skills.is_empty() {
         state.select(Some(app.skills_selected.min(app.skills.len() - 1)));
     }
-    f.render_stateful_widget(list, list_area, &mut state);
+    chrome::render_list(
+        f,
+        list,
+        &mut state,
+        list_area,
+        app.skills.len(),
+        1,
+        &app.theme,
+    );
     chrome::render_detail(f, detail_area, desc, &app.theme);
 }
 
@@ -110,6 +118,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             Some(super::BrowseAction::Close) => app.popup = crate::app::Popup::None,
             Some(super::BrowseAction::MoveUp) => app.move_skills_selection(-1),
             Some(super::BrowseAction::MoveDown) => app.move_skills_selection(1),
+            Some(
+                a @ (super::BrowseAction::PageUp
+                | super::BrowseAction::PageDown
+                | super::BrowseAction::Top
+                | super::BrowseAction::Bottom),
+            ) => {
+                super::apply_page(|d| app.move_skills_selection(d), a, 10);
+            }
             Some(super::BrowseAction::Create) => app.start_skill_install(),
             Some(super::BrowseAction::ConfirmDelete) => app.start_skill_remove(),
             _ => {}

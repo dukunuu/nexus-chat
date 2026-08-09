@@ -132,7 +132,7 @@ pub fn render(f: &mut Frame, app: &App) {
     if !rows.is_empty() {
         state.select(Some(app.settings_selected.min(rows.len() - 1)));
     }
-    f.render_stateful_widget(list, list_area, &mut state);
+    chrome::render_list(f, list, &mut state, list_area, rows.len(), 1, &app.theme);
     chrome::render_detail(f, detail_area, &desc, &app.theme);
 }
 
@@ -175,6 +175,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             },
             KeyCode::Up => app.move_settings_selection(-1),
             KeyCode::Down | KeyCode::Tab => app.move_settings_selection(1),
+            KeyCode::PageUp => app.move_settings_selection(-10),
+            KeyCode::PageDown => app.move_settings_selection(10),
+            KeyCode::Home => app.move_settings_selection(i32::MIN / 2),
+            KeyCode::End => app.move_settings_selection(i32::MAX / 2),
             _ => {}
         }
         return Ok(());
@@ -188,6 +192,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Esc | KeyCode::Enter => app.save_settings()?,
         KeyCode::Up => app.move_settings_selection(-1),
         KeyCode::Down | KeyCode::Tab => app.move_settings_selection(1),
+        KeyCode::PageUp => app.move_settings_selection(-10),
+        KeyCode::PageDown => app.move_settings_selection(10),
+        KeyCode::Home => app.move_settings_selection(i32::MIN / 2),
+        KeyCode::End => app.move_settings_selection(i32::MAX / 2),
         KeyCode::Char(' ') => app.toggle_settings_field(),
         KeyCode::Char(c) => app.settings_input_char(c),
         KeyCode::Backspace => app.settings_input_backspace(),

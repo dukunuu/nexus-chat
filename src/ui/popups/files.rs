@@ -26,6 +26,7 @@ pub fn render(f: &mut Frame, app: &App) {
     }
 }
 
+#[allow(clippy::too_many_lines)] // tabs + picker + browse rows
 fn render_files(f: &mut Frame, app: &App) {
     use crate::app::FilesMode;
     let area = crate::ui::centered(f.area(), 64, 60);
@@ -67,7 +68,7 @@ fn render_files(f: &mut Frame, app: &App) {
         if !entries.is_empty() {
             state.select(Some(app.picker_selected.min(entries.len() - 1)));
         }
-        f.render_stateful_widget(list, inner, &mut state);
+        chrome::render_list(f, list, &mut state, inner, entries.len(), 1, &app.theme);
         return;
     }
 
@@ -129,7 +130,15 @@ fn render_files(f: &mut Frame, app: &App) {
     if !app.files_cache.is_empty() {
         state.select(Some(app.files_selected.min(app.files_cache.len() - 1)));
     }
-    f.render_stateful_widget(list, inner, &mut state);
+    chrome::render_list(
+        f,
+        list,
+        &mut state,
+        inner,
+        app.files_cache.len(),
+        1,
+        &app.theme,
+    );
 }
 
 fn render_images(f: &mut Frame, app: &App) {
@@ -185,7 +194,15 @@ fn render_images(f: &mut Frame, app: &App) {
     if !app.images_cache.is_empty() {
         state.select(Some(app.images_selected.min(app.images_cache.len() - 1)));
     }
-    f.render_stateful_widget(list, inner, &mut state);
+    chrome::render_list(
+        f,
+        list,
+        &mut state,
+        inner,
+        app.files_cache.len(),
+        1,
+        &app.theme,
+    );
 }
 
 fn render_scripts(f: &mut Frame, app: &App) {
@@ -270,7 +287,15 @@ fn render_scripts(f: &mut Frame, app: &App) {
     if !app.scripts_cache.is_empty() {
         state.select(Some(app.scripts_selected.min(app.scripts_cache.len() - 1)));
     }
-    f.render_stateful_widget(list, inner, &mut state);
+    chrome::render_list(
+        f,
+        list,
+        &mut state,
+        inner,
+        app.files_cache.len(),
+        1,
+        &app.theme,
+    );
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -352,6 +377,10 @@ fn handle_files_key(app: &mut App, key: KeyEvent) -> Result<()> {
             KeyCode::Backspace => app.picker_backspace(),
             KeyCode::Up => app.move_picker_selection(-1),
             KeyCode::Down => app.move_picker_selection(1),
+            KeyCode::PageUp => app.move_picker_selection(-10),
+            KeyCode::PageDown => app.move_picker_selection(10),
+            KeyCode::Home => app.move_picker_selection(i32::MIN / 2),
+            KeyCode::End => app.move_picker_selection(i32::MAX / 2),
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.picker_filter_push(c);
             }
