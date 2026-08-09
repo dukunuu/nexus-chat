@@ -9,9 +9,26 @@ use crate::app::App;
 
 use super::chrome;
 
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &mut App) {
     use crate::app::SessionMode;
     let area = crate::ui::centered(f.area(), chrome::TALL.0, chrome::TALL.1);
+
+    // Preview strip: the selected session's last exchange, so the picker
+    // tells you what a session is about before you open it. Re-queried only
+    // when the selection changes (selected_session returns an owned clone,
+    // so this must run before filtered_sessions borrows the cache).
+    let sid = app.selected_session().map(|s| s.id).unwrap_or_default();
+    if app.session_preview.as_ref().map(|(id, _)| id) != Some(&sid) {
+        app.session_preview = app
+            .db
+            .last_message_preview(&sid)
+            .map(|c| (sid.clone(), truncate(&c, 260)));
+    }
+    let preview = app
+        .session_preview
+        .as_ref()
+        .map(|(_, p)| format!("↳ {p}"))
+        .unwrap_or_default();
 
     let sessions = app.filtered_sessions();
     let width = area.width.saturating_sub(4) as usize; // inside border + highlight symbol
@@ -93,13 +110,20 @@ pub fn render(f: &mut Frame, app: &App) {
             chrome::count_hint(sessions.len(), "session")
         ),
     };
-    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let tone = if app.session_mode == SessionMode::ConfirmDelete {
+        chrome::Tone::Danger
+    } else {
+        chrome::Tone::Normal
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true, tone);
+    let (list_area, detail_area) = chrome::split_with_detail(inner, &preview);
+    chrome::render_detail(f, detail_area, &preview, &app.theme);
     let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !sessions.is_empty() {
         state.select(Some(app.session_selected.min(sessions.len() - 1)));
     }
-    f.render_stateful_widget(list, inner, &mut state);
+    f.render_stateful_widget(list, list_area, &mut state);
 }
 
 /// Truncate `s` to `max` chars, appending `…` when it overflows.

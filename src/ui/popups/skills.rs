@@ -60,7 +60,12 @@ pub fn render(f: &mut Frame, app: &App) {
         SkillsMode::Install => "owner/repo/path · Enter install · Esc cancel".to_string(),
         SkillsMode::ConfirmRemove => "Ctrl+D confirm · Esc cancel".to_string(),
     };
-    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let tone = if app.skills_mode == SkillsMode::ConfirmRemove {
+        chrome::Tone::Danger
+    } else {
+        chrome::Tone::Normal
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true, tone);
     let desc = app
         .skills
         .get(app.skills_selected)

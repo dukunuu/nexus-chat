@@ -353,6 +353,23 @@ impl Db {
         Ok(n as u64)
     }
 
+    /// The most recent user/assistant message of a session — the session
+    /// picker's preview strip, so you can see what a session is about before
+    /// opening it.
+    pub fn last_message_preview(&self, session_id: &str) -> Option<String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT content FROM messages WHERE session_id = ?1 \
+                 AND role IN ('user','assistant') ORDER BY id DESC LIMIT 1",
+            )
+            .ok()?;
+        let mut rows = stmt
+            .query_map([session_id], |r| r.get::<_, String>(0))
+            .ok()?;
+        rows.next().and_then(Result::ok)
+    }
+
     // --- key/value app settings ---
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {

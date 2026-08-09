@@ -60,6 +60,7 @@ fn render_files(f: &mut Frame, app: &App) {
             "Enter open/import · Backspace up · Esc cancel",
             app,
             true,
+            chrome::Tone::Normal,
         );
         let list = chrome::standard_list(items, &app.theme);
         let mut state = ListState::default();
@@ -117,7 +118,12 @@ fn render_files(f: &mut Frame, app: &App) {
         ),
         FilesMode::Pick => String::new(),
     };
-    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let tone = if app.files_mode == FilesMode::ConfirmDelete {
+        chrome::Tone::Danger
+    } else {
+        chrome::Tone::Normal
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true, tone);
     let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.files_cache.is_empty() {
@@ -168,7 +174,12 @@ fn render_images(f: &mut Frame, app: &App) {
             chrome::count_hint(app.images_cache.len(), "image")
         ),
     };
-    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let tone = if app.images_mode == ImagesMode::ConfirmDelete {
+        chrome::Tone::Danger
+    } else {
+        chrome::Tone::Normal
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true, tone);
     let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.images_cache.is_empty() {
@@ -183,8 +194,15 @@ fn render_scripts(f: &mut Frame, app: &App) {
 
     if app.scripts_mode == ScriptsMode::Create {
         let title = chrome::input_title(app, "script name", &app.scripts_edit, "");
-        let inner =
-            chrome::render_hinted(f, area, title, "Enter create+edit · Esc cancel", app, true);
+        let inner = chrome::render_hinted(
+            f,
+            area,
+            title,
+            "Enter create+edit · Esc cancel",
+            app,
+            true,
+            chrome::Tone::Normal,
+        );
         let list = chrome::standard_list(Vec::<ListItem>::new(), &app.theme);
         f.render_widget(list, inner);
         return;
@@ -192,7 +210,15 @@ fn render_scripts(f: &mut Frame, app: &App) {
 
     if app.scripts_mode == ScriptsMode::Rename {
         let title = chrome::input_title(app, "rename to", &app.scripts_edit, "");
-        let inner = chrome::render_hinted(f, area, title, "Enter rename · Esc cancel", app, true);
+        let inner = chrome::render_hinted(
+            f,
+            area,
+            title,
+            "Enter rename · Esc cancel",
+            app,
+            true,
+            chrome::Tone::Normal,
+        );
         let list = chrome::standard_list(Vec::<ListItem>::new(), &app.theme);
         f.render_widget(list, inner);
         return;
@@ -233,7 +259,12 @@ fn render_scripts(f: &mut Frame, app: &App) {
             chrome::count_hint(app.scripts_cache.len(), "script")
         ),
     };
-    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let tone = if app.scripts_mode == ScriptsMode::ConfirmDelete {
+        chrome::Tone::Danger
+    } else {
+        chrome::Tone::Normal
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true, tone);
     let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.scripts_cache.is_empty() {

@@ -123,6 +123,7 @@ pub fn render(f: &mut Frame, app: &App) {
         &hint,
         app,
         true,
+        chrome::Tone::Normal,
     );
     let (list_area, detail_area) = chrome::split_with_detail(inner, &desc);
 

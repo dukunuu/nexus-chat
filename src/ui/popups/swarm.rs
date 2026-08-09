@@ -62,7 +62,12 @@ pub fn render(f: &mut Frame, app: &App) {
             chrome::count_hint(app.swarm_cache.len(), "persona")
         ),
     };
-    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let tone = if app.swarm_popup_mode == SwarmPopupMode::ConfirmDelete {
+        chrome::Tone::Danger
+    } else {
+        chrome::Tone::Normal
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true, tone);
     let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.swarm_cache.is_empty() {

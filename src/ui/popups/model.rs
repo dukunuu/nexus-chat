@@ -130,8 +130,14 @@ fn panel_list<'a>(
     width: u16,
     app: &App,
 ) -> List<'a> {
-    chrome::standard_list(items, &app.theme)
-        .block(chrome::hinted_block(title, hint, app, focused, width))
+    chrome::standard_list(items, &app.theme).block(chrome::hinted_block(
+        title,
+        hint,
+        app,
+        focused,
+        chrome::Tone::Normal,
+        width,
+    ))
 }
 
 /// Outer rects of the model picker's two columns (Favorites, Available).

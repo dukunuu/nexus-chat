@@ -23,6 +23,7 @@ pub fn render(f: &mut Frame, app: &App) {
         &hint,
         app,
         true,
+        chrome::Tone::Normal,
     );
 
     let items: Vec<ListItem> = if app.copy_options.is_empty() {

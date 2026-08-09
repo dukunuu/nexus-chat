@@ -102,6 +102,7 @@ pub fn render(f: &mut Frame, app: &App) {
         ),
         &app.theme,
         true,
+        chrome::Tone::Normal,
     );
     let list = chrome::standard_list(items, &app.theme);
     f.render_widget(list, inner);

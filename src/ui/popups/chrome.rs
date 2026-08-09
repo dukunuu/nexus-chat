@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use crate::app::App;
-use crate::theme::Theme;
+use crate::theme::{Theme, blend};
 
 /// Canonical popup sizes — every popup picks one so the whole family reads
 /// as the same design: small prompts, standard lists, tall lists, wide
@@ -27,21 +27,34 @@ pub const STANDARD: (u16, u16) = (64, 60);
 pub const TALL: (u16, u16) = (64, 74);
 pub const WIDE: (u16, u16) = (78, 66);
 
-/// The rounded border + title style shared by every popup.
+/// Frame tone: Normal (focused border brightens) or Danger (error-colored
+/// border, for destructive confirm states — matches `danger_title`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Normal,
+    Danger,
+}
+
+/// The rounded border + title style shared by every popup. The block also
+/// carries a subtle surface tint (theme bg blended toward the border color)
+/// so popups read as cards floating above the conversation, matching the
+/// user-message bubbles.
 pub fn popup_block_focused<'a>(
     title: impl Into<Line<'a>>,
     theme: &Theme,
     focused: bool,
+    tone: Tone,
 ) -> Block<'a> {
-    let border = if focused {
-        theme.border
-    } else {
-        theme.border_dim
+    let border = match tone {
+        Tone::Normal if focused => theme.border,
+        Tone::Normal => theme.border_dim,
+        Tone::Danger => theme.error,
     };
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border))
+        .style(Style::default().bg(blend(theme.bg, theme.border, 0.05)))
         .title(title)
 }
 
@@ -54,9 +67,10 @@ pub fn hinted_block<'a>(
     hint: &str,
     app: &App,
     focused: bool,
+    tone: Tone,
     width: u16,
 ) -> Block<'a> {
-    let mut block = popup_block_focused(title, &app.theme, focused);
+    let mut block = popup_block_focused(title, &app.theme, focused, tone);
     if !app.settings.hide_hints && !hint.trim().is_empty() {
         let max = (width.saturating_sub(4)) as usize; // +2 for the border, +2 for the hint padding
         let text: String = if hint.chars().count() > max {
@@ -83,9 +97,10 @@ pub fn render_frame<'a>(
     title: impl Into<Line<'a>>,
     theme: &Theme,
     focused: bool,
+    tone: Tone,
 ) -> Rect {
     f.render_widget(Clear, area);
-    let block = popup_block_focused(title, theme, focused);
+    let block = popup_block_focused(title, theme, focused, tone);
     let inner = block.inner(area);
     f.render_widget(block, area);
     inner
@@ -99,19 +114,25 @@ pub fn render_hinted<'a>(
     hint: &str,
     app: &App,
     focused: bool,
+    tone: Tone,
 ) -> Rect {
     f.render_widget(Clear, area);
-    let block = hinted_block(title, hint, app, focused, area.width);
+    let block = hinted_block(title, hint, app, focused, tone, area.width);
     let inner = block.inner(area);
     f.render_widget(block, area);
     inner
 }
 
-/// Standard popup list selection: accent `▸ ` marker + bold selection.
+/// Standard popup list selection: accent `▸ ` marker + bold selection on a
+/// subtle accent-tinted row — the same surface language as the chat cards.
 pub fn standard_list<'a>(items: Vec<ListItem<'a>>, theme: &Theme) -> List<'a> {
     List::new(items)
         .highlight_symbol(Span::styled("▸ ", Style::default().fg(theme.accent)))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .highlight_style(
+            Style::default()
+                .bg(blend(theme.bg, theme.accent, 0.08))
+                .add_modifier(Modifier::BOLD),
+        )
 }
 
 /// A dim italic placeholder row for empty lists, so every popup's empty

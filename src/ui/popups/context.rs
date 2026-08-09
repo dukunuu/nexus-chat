@@ -69,6 +69,7 @@ pub fn render(f: &mut Frame, app: &App) {
         hint,
         app,
         true,
+        chrome::Tone::Normal,
     );
     f.render_widget(Paragraph::new(lines), inner);
 }

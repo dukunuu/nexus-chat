@@ -925,6 +925,9 @@ pub struct App {
     pub session_mode: SessionMode,
     /// Edit buffer while renaming a session.
     pub session_edit: String,
+    /// (session id, preview text) of the last session the picker previewed
+    /// from the db — recomputed only when the selection moves.
+    pub session_preview: Option<(String, String)>,
     /// Background topic-generation result channel.
     title_rx: Option<mpsc::UnboundedReceiver<(String, String, String)>>,
     /// `/copy` menu entries and the highlighted row.
@@ -1204,6 +1207,7 @@ impl App {
             session_filter: FilterInput::default(),
             session_mode: SessionMode::Browse,
             session_edit: String::new(),
+            session_preview: None,
             title_rx: None,
             copy_options: Vec::new(),
             copy_selected: 0,

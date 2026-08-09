@@ -26,6 +26,7 @@ pub fn render(f: &mut Frame, app: &App) {
         "paste or type · Enter save · Esc back",
         app,
         true,
+        chrome::Tone::Normal,
     );
 
     let shown = if masked.is_empty() {

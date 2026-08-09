@@ -306,7 +306,7 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
     // Most recent sessions across this space, as a quick-jump list.
-    if let Ok(sessions) = app.db.list_sessions(&app.active_space.name) {
+    if let Ok(sessions) = app.db.list_sessions(&app.active_space.id) {
         let recent: Vec<_> = sessions.into_iter().take(4).collect();
         if !recent.is_empty() {
             lines.push(Line::from(""));

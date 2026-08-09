@@ -26,7 +26,7 @@ pub fn render(f: &mut Frame, app: &App) {
             &app.apps_edit,
             "Enter open in $EDITOR · Esc cancel",
         );
-        let inner = chrome::render_frame(f, area, title, &app.theme, true);
+        let inner = chrome::render_frame(f, area, title, &app.theme, true, chrome::Tone::Normal);
         let list = chrome::standard_list(Vec::<ListItem>::new(), &app.theme);
         f.render_widget(list, inner);
         return;
@@ -78,7 +78,12 @@ pub fn render(f: &mut Frame, app: &App) {
             chrome::count_hint(app.apps_cache.len(), "app")
         ),
     };
-    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let tone = if app.apps_mode == AppsMode::ConfirmDelete {
+        chrome::Tone::Danger
+    } else {
+        chrome::Tone::Normal
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true, tone);
     let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.apps_cache.is_empty() {

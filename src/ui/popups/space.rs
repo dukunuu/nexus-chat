@@ -60,21 +60,33 @@ pub fn render(f: &mut Frame, app: &App) {
         ),
         SpaceMode::ConfirmDelete => {
             let name = app.selected_space().map(|s| s.name).unwrap_or_default();
-            chrome::confirm_title(
+            chrome::danger_title(
                 app,
                 format!("delete \"{name}\"? sessions move to default."),
                 "Ctrl+D confirm · Esc cancel",
             )
         }
-        SpaceMode::Browse => chrome::input_title(
-            app,
-            "space search",
-            app.space_filter.to_string(),
-            "Ctrl+N new · Ctrl+R rename · Ctrl+D delete · Ctrl+E instructions · Ctrl+K memory",
-        ),
+        SpaceMode::Browse => chrome::filter_title(app, "🗃", "spaces", &app.space_filter),
     };
 
-    let inner = chrome::render_frame(f, area, title, &app.theme, true);
+    let hint = match app.space_mode {
+        SpaceMode::Create => "Enter create · Esc cancel".to_string(),
+        SpaceMode::Rename => "Enter save · Esc cancel".to_string(),
+        SpaceMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
+        SpaceMode::Browse if spaces.is_empty() => {
+            "no spaces match — type to clear the filter".to_string()
+        }
+        SpaceMode::Browse => format!(
+            "{}↑↓ · Enter open · Ctrl+N new · Ctrl+R rename · Ctrl+D delete · Ctrl+E docs · Ctrl+K memory",
+            chrome::count_hint(spaces.len(), "space")
+        ),
+    };
+    let tone = if app.space_mode == SpaceMode::ConfirmDelete {
+        chrome::Tone::Danger
+    } else {
+        chrome::Tone::Normal
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true, tone);
     let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !spaces.is_empty() {

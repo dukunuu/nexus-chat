@@ -55,7 +55,12 @@ pub fn render(f: &mut Frame, app: &App) {
             chrome::count_hint(app.watches_cache.len(), "watch")
         ),
     };
-    let inner = chrome::render_hinted(f, area, title, &hint, app, true);
+    let tone = if app.watch_mode == WatchMode::ConfirmDelete {
+        chrome::Tone::Danger
+    } else {
+        chrome::Tone::Normal
+    };
+    let inner = chrome::render_hinted(f, area, title, &hint, app, true, tone);
     let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     if !app.watches_cache.is_empty() {

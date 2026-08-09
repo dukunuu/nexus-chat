@@ -26,6 +26,7 @@ pub fn render(f: &mut Frame, app: &App) {
         "↑↓ · Enter pick · Esc close",
         app,
         true,
+        chrome::Tone::Normal,
     );
 
     let items: Vec<ListItem> = ROWS
