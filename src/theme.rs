@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 #[derive(Clone, Copy)]
 pub struct Theme {
+    pub bg: Color,
     pub fg: Color,
     pub fg_dim: Color,
     pub accent: Color,
@@ -30,6 +31,7 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
+            bg: Color::Black,
             fg: Color::White,
             fg_dim: Color::DarkGray,
             accent: Color::Cyan,
@@ -61,6 +63,7 @@ struct ColorsSection {
 
 #[derive(Deserialize)]
 struct Primary {
+    background: String,
     foreground: String,
 }
 
@@ -91,6 +94,7 @@ impl Theme {
         let n = &a.colors.normal;
         let b = &a.colors.bright;
         Self {
+            bg: hex_to_color(&a.colors.primary.background).unwrap_or(fallback.bg),
             fg: hex_to_color(&a.colors.primary.foreground).unwrap_or(fallback.fg),
             fg_dim: hex_to_color(&b.black).unwrap_or(fallback.fg_dim),
             accent: hex_to_color(&n.cyan).unwrap_or(fallback.accent),
@@ -111,6 +115,30 @@ impl Theme {
 
 fn omarchy_current_dir() -> Option<PathBuf> {
     Some(std::env::home_dir()?.join(".config/omarchy/current"))
+}
+
+/// Linear blend between two colors at `t` in 0.0..=1.0 (used for tinted
+/// message cards — terminals have no alpha, so the tint is pre-mixed into
+/// the theme background). Falls back to `a` for non-RGB colors.
+pub fn blend(a: Color, b: Color, t: f32) -> Color {
+    let mix = |x: u8, y: u8| {
+        let (xf, yf) = (f32::from(x), f32::from(y));
+        // t is caller-clamped to 0.0..=1.0; the result is always in 0..=255.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            clippy::cast_sign_loss
+        )]
+        {
+            (xf + (yf - xf) * t).round() as u8
+        }
+    };
+    match (a, b) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
+        }
+        _ => a,
+    }
 }
 
 /// The omarchy theme symlink's current target (e.g. `.../themes/retropc`), or

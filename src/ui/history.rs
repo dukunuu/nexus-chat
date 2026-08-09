@@ -12,7 +12,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -38,14 +38,24 @@ pub struct HistoryCache {
     /// Cache of rendered half-block image lines by (path, width) — avoids
     /// re-decoding image files every frame.
     image_cache: HashMap<(String, usize), Vec<Line<'static>>>,
+    /// Calendar day ("2026-08-08") of the last cached message, for the
+    /// `── Today ──` day dividers.
+    last_day: Option<String>,
 }
 
 pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
-    // Borderless: the conversation fills the whole pane.
-    let inner = area;
+    // Borderless: the conversation fills the whole pane minus the rightmost
+    // column, which is the scrollbar gutter (always reserved so lines don't
+    // shift when the scrollbar appears).
+    let inner = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.saturating_sub(1).max(1),
+        height: area.height,
+    };
     if app.is_welcome() {
         app.max_scroll = 0;
-        render_welcome(f, app, inner);
+        render_welcome(f, app, area);
         return;
     }
     let width = inner.width.max(1) as usize;
@@ -117,6 +127,25 @@ pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     f.render_widget(Paragraph::new(visible), inner);
+
+    // Scrollbar in the gutter: only when the conversation overflows, thumb
+    // following the viewport.
+    if total > height {
+        let gutter = Rect {
+            x: area.x + area.width.saturating_sub(1),
+            y: area.y,
+            width: 1,
+            height: area.height,
+        };
+        let mut state = ratatui::widgets::ScrollbarState::new(total).position(top);
+        let sb =
+            ratatui::widgets::Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(Style::default().fg(app.theme.accent))
+                .track_style(Style::default().fg(app.theme.border_dim));
+        f.render_stateful_widget(sb, gutter, &mut state);
+    }
 }
 
 // Long by design (cache sync).
@@ -174,23 +203,26 @@ fn sync_cache(app: &mut App, width: usize) {
     let theme = app.theme;
     for (i, m) in app.messages.iter().enumerate().skip(c.msg_count) {
         let start = c.lines.len();
+        // Day divider when the conversation crosses a midnight boundary.
+        if let Some(day) = m.created_at.as_deref().map(day_of)
+            && c.last_day.as_deref() != Some(day)
+        {
+            if c.last_day.is_some() {
+                rule_line(&mut c.lines, &day_label(day), width, &theme);
+            }
+            c.last_day = Some(day.to_string());
+        }
         if m.role == "user" || m.role == "gate_reply" {
             let images_dir = app.space.files_dir(&app.active_space.name);
-            render_markdown_images(
+            push_user_card(
                 &mut c.lines,
-                &m.content,
-                width,
-                &theme,
-                &images_dir,
                 &mut c.image_at_line,
-                &mut c.image_cache,
-            );
-            push_user(
-                &mut c.lines,
                 &m.content,
                 width,
                 &theme,
                 m.created_at.as_deref(),
+                &images_dir,
+                &mut c.image_cache,
             );
         } else if m.role == "research_stage" {
             push_research_stage(&mut c.lines, &m.content, width, &theme);
@@ -212,24 +244,18 @@ fn sync_cache(app: &mut App, width: usize) {
                 &theme,
             );
         } else {
-            let images_dir = app.space.files_dir(&app.active_space.name);
-            render_markdown_images(
-                &mut c.lines,
-                &m.content,
-                width,
-                &theme,
-                &images_dir,
-                &mut c.image_at_line,
-                &mut c.image_cache,
-            );
             push_assistant_stored(
                 &mut c.lines,
+                &mut c.image_at_line,
+                &m.content,
                 m,
                 &app.settings,
                 width,
                 &mut c.code,
                 &mut c.blocks,
                 &theme,
+                &app.space.files_dir(&app.active_space.name),
+                &mut c.image_cache,
             );
         }
         c.owner.resize(c.lines.len(), Some(i));
@@ -241,8 +267,9 @@ fn sync_cache(app: &mut App, width: usize) {
     c.msg_count = app.messages.len();
 }
 
-/// The empty start screen: a gradient banner, a random greeting, a live
-/// clock, and a row of quick-start command chips.
+/// The empty start screen: a rounded panel holding the gradient banner, a
+/// random greeting, a live clock, quick-start chips, and the most recent
+/// sessions.
 fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     // Per-line gradient across the accent ramp: accent -> accent2.
@@ -278,13 +305,46 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
             &app.theme,
         ));
     }
+    // Most recent sessions across this space, as a quick-jump list.
+    if let Ok(sessions) = app.db.list_sessions(&app.active_space.name) {
+        let recent: Vec<_> = sessions.into_iter().take(4).collect();
+        if !recent.is_empty() {
+            lines.push(Line::from(""));
+            let inner_w = area.width.saturating_sub(4) as usize;
+            rule_line(&mut lines, "recent", inner_w, &app.theme);
+            for s in &recent {
+                let when = super::fmt_created(&s.created_at);
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "▸ ",
+                        Style::default()
+                            .fg(app.theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(s.title.clone(), Style::default().fg(app.theme.fg)),
+                    Span::styled(format!("  {when}"), Style::default().fg(app.theme.fg_dim)),
+                ]));
+            }
+        }
+    }
 
-    // Center vertically.
-    let pad = (area.height as usize).saturating_sub(lines.len()) / 2;
-    let mut out = vec![Line::from(""); pad];
-    out.extend(lines);
-
-    f.render_widget(Paragraph::new(out).alignment(Alignment::Center), area);
+    // Frame it in a rounded panel, centered.
+    let panel_w = area.width.min(86);
+    let panel_h = (lines.len() + 2).min(area.height as usize) as u16;
+    let panel = Rect {
+        x: area.x + area.width.saturating_sub(panel_w) / 2,
+        y: area.y + area.height.saturating_sub(panel_h) / 2,
+        width: panel_w,
+        height: panel_h,
+    };
+    f.render_widget(Clear, panel);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(app.theme.border_dim));
+    let inner = block.inner(panel);
+    f.render_widget(block, panel);
+    f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
 /// Linear blend between two colors at `t` in 0.0..=1.0.
@@ -318,33 +378,157 @@ fn chip_row(cmds: &[&str], theme: &crate::theme::Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-/// A user message: a `❯ You` header in the user color with the send time
-/// right-aligned when known, then the body wrapped with a 2-col hanging
-/// indent so the header column stays visually empty.
-fn push_user(
+/// A centered `── label ──` rule, used for day dividers and the welcome
+/// screen's recent-sessions header.
+fn rule_line(out: &mut Vec<Line<'static>>, label: &str, width: usize, theme: &crate::theme::Theme) {
+    let label = format!(" {label} ");
+    let dashes = width.saturating_sub(label.chars().count());
+    let line = format!(
+        "{}{}{}",
+        "─".repeat(dashes / 2),
+        label,
+        "─".repeat(dashes - dashes / 2)
+    );
+    out.push(Line::from(Span::styled(
+        line,
+        Style::default().fg(theme.fg_dim),
+    )));
+}
+
+/// `2026-08-08T14:32:00Z` -> `2026-08-08` (`created_at` is ISO-8601; the
+/// first 10 bytes of an RFC3339 timestamp are always an ASCII date).
+fn day_of(rfc3339: &str) -> &str {
+    rfc3339.get(0..10).unwrap_or(rfc3339)
+}
+
+/// Human label for a "YYYY-MM-DD" day: Today / Yesterday / weekday+date.
+fn day_label(day: &str) -> String {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    if day == today {
+        return "Today".into();
+    }
+    let yesterday = (chrono::Local::now() - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    if day == yesterday {
+        return "Yesterday".into();
+    }
+    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+        .map_or_else(|_| day.to_string(), |d| d.format("%A, %B %-d").to_string())
+}
+
+/// Remove `![alt](file)` image references from text — the images themselves
+/// are rendered inline by `render_markdown_images`, so the raw refs must not
+/// also wrap into the body text. Unterminated refs (mid-stream) are kept
+/// verbatim.
+fn strip_markdown_images(content: &str) -> String {
+    let mut rest = content;
+    let mut out = String::with_capacity(content.len());
+    loop {
+        let Some(start) = rest.find("![") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find(')') {
+            Some(end) if after[..end].contains("](") => {
+                rest = &after[end + 1..];
+            }
+            _ => {
+                out.push_str("![");
+                out.push_str(after);
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// A user message card: a right-aligned bubble capped at ~60% of the pane,
+/// tinted with the user color blended into the theme background (terminals
+/// have no alpha, so the tint is pre-mixed). The `❯ you` header and time sit
+/// inside the bubble; images render inside at the bubble's width.
+#[allow(clippy::too_many_arguments)]
+fn push_user_card(
     out: &mut Vec<Line<'static>>,
+    image_at_line: &mut Vec<Option<String>>,
     content: &str,
     width: usize,
     theme: &crate::theme::Theme,
     created_at: Option<&str>,
+    images_dir: &std::path::Path,
+    image_cache: &mut HashMap<(String, usize), Vec<Line<'static>>>,
 ) {
+    let card_w = (width * 3 / 5)
+        .clamp(24, 64)
+        .min(width.saturating_sub(6).max(24));
+    let inner = card_w.saturating_sub(4);
+    let bg = crate::theme::blend(theme.bg, theme.user_msg, 0.08);
+    let bg_style = Style::default().bg(bg);
+
+    let mut card: Vec<Line<'static>> = Vec::new();
+    let mut card_img: Vec<Option<String>> = Vec::new();
+
     let mut head = vec![Span::styled(
-        "❯ You",
+        "❯ you",
         Style::default()
             .fg(theme.user_msg)
             .add_modifier(Modifier::BOLD),
     )];
     if let Some(t) = created_at {
         let time = super::fmt_created(t);
-        let pad = width.saturating_sub(6 + time.chars().count());
+        let used: usize = head.iter().map(|s| s.content.chars().count()).sum();
+        let pad = inner.saturating_sub(used + 1 + time.chars().count());
         head.push(Span::raw(" ".repeat(pad)));
         head.push(Span::styled(time, Style::default().fg(theme.fg_dim)));
     }
-    out.push(Line::from(head));
-    for line in wrap_plain(content, width.saturating_sub(2)) {
-        out.push(Line::from(format!("  {line}")));
+    card.push(Line::from(head));
+    card_img.push(None);
+
+    render_markdown_images(
+        &mut card,
+        content,
+        inner,
+        theme,
+        images_dir,
+        &mut card_img,
+        image_cache,
+        None,
+    );
+    for line in wrap_plain(&strip_markdown_images(content), inner) {
+        card.push(Line::from(Span::raw(line)));
+        card_img.push(None);
+    }
+
+    // Emit: left margin (pane bg) + 2-col pad + content + pad to card width.
+    let lead = width.saturating_sub(card_w);
+    for (li, line) in card.into_iter().enumerate() {
+        let len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        let is_image = card_img[li].is_some();
+        let mut spans = Vec::with_capacity(4);
+        if lead > 0 {
+            spans.push(Span::raw(" ".repeat(lead)));
+        }
+        spans.push(Span::styled("  ", bg_style));
+        for sp in line.spans {
+            // Image rows carry their own per-pixel backgrounds — the card
+            // tint must not override them.
+            if is_image {
+                spans.push(sp);
+            } else {
+                spans.push(Span::styled(sp.content, sp.style.patch(bg_style)));
+            }
+        }
+        spans.push(Span::styled(
+            " ".repeat(card_w.saturating_sub(len + 2)),
+            bg_style,
+        ));
+        out.push(Line::from(spans));
+        image_at_line.push(card_img[li].clone());
     }
     out.push(Line::from(""));
+    image_at_line.push(None);
 }
 
 /// A tool call block: a dim `⚒ name summary` one-liner; when tool detail is
@@ -495,15 +679,21 @@ fn push_research_plan(
 
 /// A stored assistant reply: a `✦ <model>` header (persona name in accent
 /// for swarm turns) with the completion time right-aligned, the collapsible
-/// reasoning, the markdown answer, then a dim stats/phrase footer.
+/// reasoning, inline images, the markdown answer, then a dim stats/phrase
+/// footer. Everything below the header carries the `▎` left rail.
+#[allow(clippy::too_many_arguments)]
 fn push_assistant_stored(
     out: &mut Vec<Line<'static>>,
+    image_at_line: &mut Vec<Option<String>>,
+    content: &str,
     msg: &Message,
     settings: &crate::app::Settings,
     width: usize,
     code: &mut Vec<Option<usize>>,
     blocks: &mut Vec<String>,
     theme: &crate::theme::Theme,
+    images_dir: &std::path::Path,
+    image_cache: &mut HashMap<(String, usize), Vec<Line<'static>>>,
 ) {
     // Header: ✦ + who answered (persona overrides the model name).
     let mut head = vec![Span::styled(
@@ -556,11 +746,12 @@ fn push_assistant_stored(
     }
     out.push(Line::from(head));
 
+    let rail = Span::styled("▎ ", Style::default().fg(theme.accent2));
     if let Some(r) = &msg.reasoning {
         if settings.show_reasoning {
-            out.push(Line::from(dim("▾ reasoning", theme)));
+            out.push(Line::from(vec![rail.clone(), dim("▾ reasoning", theme)]));
             for line in wrap_plain(r, width.saturating_sub(2)) {
-                out.push(Line::from(dim(format!("┆ {line}"), theme)));
+                out.push(Line::from(vec![rail.clone(), dim(line, theme)]));
             }
         } else {
             let n = r.chars().count();
@@ -569,17 +760,30 @@ fn push_assistant_stored(
             } else {
                 " — Ctrl+R to expand"
             };
-            out.push(Line::from(dim(
-                format!("▸ reasoning ({n} chars){hint}"),
-                theme,
-            )));
+            out.push(Line::from(vec![
+                rail.clone(),
+                dim(format!("▸ reasoning ({n} chars){hint}"), theme),
+            ]));
         }
     }
 
-    let mut rendered = crate::markdown::render(&msg.content, width);
+    // Inline images slot between the reasoning block and the answer body.
+    render_markdown_images(
+        out,
+        content,
+        width.saturating_sub(2),
+        theme,
+        images_dir,
+        image_at_line,
+        image_cache,
+        Some(&rail),
+    );
+
+    let mut rendered =
+        crate::markdown::render(&strip_markdown_images(content), width.saturating_sub(2));
     rendered.lines = crate::citations::style_citations(rendered.lines, theme.accent);
     rendered.lines = crate::citations::style_confidence_tags(rendered.lines);
-    push_rendered(out, code, blocks, rendered);
+    push_rendered(out, code, blocks, rendered, Some(rail));
 
     // Footer below the response: phrase + stats (the model lives in the
     // header now).
@@ -663,7 +867,7 @@ fn push_assistant_streaming(
     let name = app
         .active_chat_task()
         .map_or("assistant", |t| t.model.as_str());
-    out.push(Line::from(vec![
+    let mut head = vec![
         Span::styled(
             format!("{} ", app.spinner_char()),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -672,41 +876,66 @@ fn push_assistant_streaming(
             format!("{name} — {}", app.thinking_phrase()),
             Style::default().fg(color),
         ),
-    ]));
+    ];
+    // Live elapsed time, right-aligned.
+    if let Some(t) = app.active_chat_task() {
+        let secs = t.started.elapsed().as_secs();
+        let time = format!("{}:{:02}", secs / 60, secs % 60);
+        let used: usize = head.iter().map(|s| s.content.chars().count()).sum();
+        let pad = width.saturating_sub(used + 1 + time.chars().count());
+        head.push(Span::raw(" ".repeat(pad)));
+        head.push(Span::styled(time, Style::default().fg(app.theme.fg_dim)));
+    }
+    out.push(Line::from(head));
 
+    let rail = Span::styled("▎ ", Style::default().fg(color));
     if let Some(t) = app.thinking_text() {
         for line in wrap_plain(t, width.saturating_sub(2)) {
-            out.push(Line::from(dim(format!("┆ {line}"), &app.theme)));
+            out.push(Line::from(vec![rail.clone(), dim(line, &app.theme)]));
         }
     }
 
     let buf = app.active_streaming_text().unwrap_or("");
-    let mut rendered = crate::markdown::render(buf, width);
+    let mut rendered =
+        crate::markdown::render(&strip_markdown_images(buf), width.saturating_sub(2));
     rendered.lines = crate::citations::style_citations(rendered.lines, app.theme.accent);
     rendered.lines = crate::citations::style_confidence_tags(rendered.lines);
-    push_rendered(out, code, blocks, rendered);
+    push_rendered(out, code, blocks, rendered, Some(rail));
     out.push(Line::from(""));
 }
 
 /// Splice a `markdown::Rendered` into the running line/code/block vecs, keeping
-/// `code` aligned to `out` and offsetting local block ids to global ones.
+/// `code` aligned to `out` and offsetting local block ids to global ones. When
+/// `rail` is given it prefixes every body line (the assistant left gutter).
 fn push_rendered(
     out: &mut Vec<Line<'static>>,
     code: &mut Vec<Option<usize>>,
     blocks: &mut Vec<String>,
     r: crate::markdown::Rendered,
+    rail: Option<Span<'static>>,
 ) {
     code.resize(out.len(), None); // align past any dot/reasoning lines
     let base = blocks.len();
     code.extend(r.code.iter().map(|c| c.map(|id| id + base)));
     blocks.extend(r.blocks);
-    out.extend(r.lines);
+    if let Some(rail) = rail {
+        for line in r.lines {
+            let mut line = line;
+            line.spans.insert(0, rail.clone());
+            out.push(line);
+        }
+    } else {
+        out.extend(r.lines);
+    }
 }
 
 /// Scan content for markdown image references `![alt](file)` and render them
 /// inline. For each match, resolve the file against `images_dir`, render it
 /// with `image_to_halfblock_lines`, and track the lines in `image_at_line`.
-/// Results are cached by (path, width) to avoid re-decoding every frame.
+/// Results are cached by (path, width) to avoid re-decoding every frame. When
+/// `prefix` is given (the assistant rail) every pushed line — image rows and
+/// the trailing blank alike — carries it, so the gutter stays continuous.
+#[allow(clippy::too_many_arguments)]
 fn render_markdown_images(
     out: &mut Vec<Line<'static>>,
     content: &str,
@@ -715,6 +944,7 @@ fn render_markdown_images(
     images_dir: &std::path::Path,
     image_at_line: &mut Vec<Option<String>>,
     image_cache: &mut HashMap<(String, usize), Vec<Line<'static>>>,
+    prefix: Option<&Span<'static>>,
 ) {
     let mut rest = content;
     while let Some(start) = rest.find("![") {
@@ -734,13 +964,27 @@ fn render_markdown_images(
                         .unwrap_or_default()
                         .contains("[image]")
                 {
-                    out.push(Line::from(dim(format!("🖼 {alt}"), theme)));
+                    let mut line = Line::from(dim(format!("🖼 {alt}"), theme));
+                    if let Some(p) = prefix {
+                        line.spans.insert(0, p.clone());
+                    }
+                    out.push(line);
                     image_at_line.push(Some(path_str));
                 } else {
                     let img_start = out.len();
-                    out.extend(half.clone());
+                    for l in half.clone() {
+                        let mut l = l;
+                        if let Some(p) = prefix {
+                            l.spans.insert(0, p.clone());
+                        }
+                        out.push(l);
+                    }
                     let img_end = out.len();
-                    out.push(Line::from(""));
+                    let mut blank = Line::from("");
+                    if let Some(p) = prefix {
+                        blank.spans.insert(0, p.clone());
+                    }
+                    out.push(blank);
                     for _ in img_start..img_end {
                         image_at_line.push(Some(path_str.clone()));
                     }
@@ -918,5 +1162,52 @@ mod tests {
                 .any(|l| l.contains("Depth or breadth?")),
             true
         );
+    }
+}
+
+#[cfg(test)]
+mod card_tint_tests {
+    use super::*;
+    use crate::db::{Db, Message};
+    use crate::space::Space;
+
+    #[test]
+    fn user_card_paints_tinted_bg_and_stays_right_aligned() {
+        let db = Db::open_in_memory().unwrap();
+        let space = Space {
+            root: std::env::temp_dir().join(format!("nexus-tint-{}", uuid::Uuid::new_v4())),
+        };
+        let mut app = App::new(db, Some("k"), space);
+        app.messages.push(Message {
+            role: "user".into(),
+            content: "a short note".into(),
+            model: None,
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            phrase: None,
+            persona: None,
+            created_at: Some("2026-08-08T10:00:00Z".into()),
+        });
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 10)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        // The card occupies the right side: find a "a" of "a short note".
+        let expected_bg = crate::theme::blend(app.theme.bg, app.theme.user_msg, 0.08);
+        let mut painted = 0;
+        let mut rightmost = 0;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                if cell.bg == expected_bg {
+                    painted += 1;
+                    rightmost = rightmost.max(x);
+                }
+            }
+        }
+        assert!(painted > 10, "card bg should cover many cells, got {painted}");
+        // Right-aligned: the card's tint must reach near the scrollbar gutter.
+        assert!(rightmost >= 76, "card should reach the right edge, got {rightmost}");
     }
 }
