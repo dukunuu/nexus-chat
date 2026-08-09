@@ -199,7 +199,7 @@ fn render_images(f: &mut Frame, app: &App) {
         list,
         &mut state,
         inner,
-        app.files_cache.len(),
+        app.images_cache.len(),
         1,
         &app.theme,
     );
@@ -292,7 +292,7 @@ fn render_scripts(f: &mut Frame, app: &App) {
         list,
         &mut state,
         inner,
-        app.files_cache.len(),
+        app.scripts_cache.len(),
         1,
         &app.theme,
     );
