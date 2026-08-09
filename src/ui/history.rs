@@ -1206,8 +1206,14 @@ mod card_tint_tests {
                 }
             }
         }
-        assert!(painted > 10, "card bg should cover many cells, got {painted}");
+        assert!(
+            painted > 10,
+            "card bg should cover many cells, got {painted}"
+        );
         // Right-aligned: the card's tint must reach near the scrollbar gutter.
-        assert!(rightmost >= 76, "card should reach the right edge, got {rightmost}");
+        assert!(
+            rightmost >= 76,
+            "card should reach the right edge, got {rightmost}"
+        );
     }
 }
