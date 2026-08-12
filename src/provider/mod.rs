@@ -256,6 +256,10 @@ pub struct Usage {
     pub cache_read_tokens: u64,
     /// Prompt tokens written into the cache on this request (cache writes).
     pub cache_creation_tokens: u64,
+    /// Provider-reported request cost in USD. `OpenCode` Zen/Go reports it in a
+    /// trailing streamed chunk (`"cost":"0.0012"`); other providers price
+    /// from the catalog instead, so this is `None` for them.
+    pub cost: Option<f64>,
 }
 
 impl Usage {

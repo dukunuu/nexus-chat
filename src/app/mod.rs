@@ -562,6 +562,9 @@ pub struct ChatTask {
     pub thinking: String,
     pub tool_status: Option<String>,
     pub usage: Option<Usage>,
+    /// Row id of this task's `usage_log` row (one per request); the trailing
+    /// `OpenCode` Zen cost event updates it rather than inserting a duplicate.
+    pub usage_row_id: Option<i64>,
     pub started: std::time::Instant,
     pub thinking_idx: usize,
     pub spinner_color: Color,

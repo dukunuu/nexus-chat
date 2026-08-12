@@ -1658,7 +1658,7 @@ impl Db {
         cost: Option<f64>,
         session_id: Option<&str>,
         space_id: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO usage_log (created_at, session_id, space_id, backend, model,
                 prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens, cost)
@@ -1674,6 +1674,35 @@ impl Db {
                 cache_read_tokens as i64,
                 cache_creation_tokens as i64,
                 cost,
+            ),
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Update a usage row written earlier in the same request's lifecycle.
+    /// `OpenCode` Zen splits accounting across two streamed events (real
+    /// usage, then the provider-reported cost); the second event updates the
+    /// row the first created instead of inserting a duplicate.
+    pub fn update_usage(
+        &self,
+        row_id: i64,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+        cost: Option<f64>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE usage_log SET prompt_tokens = ?1, completion_tokens = ?2,
+                cache_read_tokens = ?3, cache_creation_tokens = ?4, cost = ?5
+             WHERE id = ?6",
+            (
+                prompt_tokens as i64,
+                completion_tokens as i64,
+                cache_read_tokens as i64,
+                cache_creation_tokens as i64,
+                cost,
+                row_id,
             ),
         )?;
         Ok(())

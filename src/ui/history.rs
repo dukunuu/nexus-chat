@@ -1248,6 +1248,7 @@ mod tests {
             thinking: thinking.into(),
             tool_status: None,
             usage: None,
+            usage_row_id: None,
             started: std::time::Instant::now(),
             thinking_idx: 0,
             spinner_color: ratatui::style::Color::Red,

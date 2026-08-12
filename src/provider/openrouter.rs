@@ -1529,6 +1529,18 @@ impl OpenRouter {
                     accumulate_tool_calls(&mut tool_calls, &msg.data);
                     if let Some(usage) = parse_usage(&msg.data) {
                         let _ = tx.send(StreamEvent::Usage(usage));
+                    } else if let Some(cost) = parse_stream_cost(&msg.data) {
+                        // OpenCode Zen: models on the general route never
+                        // report usage (every chunk carries `usage:null`);
+                        // the trailing cost chunk is the only accounting.
+                        let _ = tx.send(StreamEvent::Usage(Usage {
+                            prompt_tokens: 0,
+                            completion_tokens: 0,
+                            total_tokens: 0,
+                            cache_read_tokens: 0,
+                            cache_creation_tokens: 0,
+                            cost: Some(cost),
+                        }));
                     }
                 }
                 Err(reqwest_eventsource::Error::StreamEnded) => break,
@@ -1798,31 +1810,53 @@ fn accumulate_tool_calls(acc: &mut BTreeMap<usize, ToolCall>, data: &str) {
     }
 }
 
-/// Pull the `usage` object from an SSE chunk, if present.
+/// Pull the `usage` object from an SSE chunk, if present. Returns `None`
+/// when the chunk carries no real accounting: absent, `null`, or all-zero
+/// usage objects (several providers echo `"usage":null` on every chunk and
+/// report real numbers only in the final one — emitting a zero event would
+/// log garbage rows and clobber the last cache hit rate).
 fn parse_usage(data: &str) -> Option<Usage> {
     let v: serde_json::Value = serde_json::from_str(data).ok()?;
-    let u = v.get("usage")?;
+    let u = v.get("usage").and_then(serde_json::Value::as_object)?;
     let get = |k: &str| u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
     // OpenAI-style reports cached input under `prompt_tokens_details.cached_tokens`;
     // Anthropic-style (passed through by OpenRouter) under the flat
-    // `cache_read_input_tokens`. Take whichever is present, larger wins.
-    let cached = u
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0)
-        .max(
-            u.get("cache_read_input_tokens")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
-        );
-    Some(Usage {
+    // `cache_read_input_tokens`; DeepSeek-style (OpenCode Zen) under the
+    // flat `prompt_cache_hit_tokens`. Take whichever is present, largest
+    // wins.
+    let cached = [
+        u.get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        u.get("cache_read_input_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        u.get("prompt_cache_hit_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    let usage = Usage {
         prompt_tokens: get("prompt_tokens"),
         completion_tokens: get("completion_tokens"),
         total_tokens: get("total_tokens"),
         cache_read_tokens: cached,
         cache_creation_tokens: get("cache_creation_input_tokens"),
-    })
+        cost: None,
+    };
+    (usage.prompt_tokens > 0 || usage.completion_tokens > 0).then_some(usage)
+}
+
+/// The trailing chunk of an `OpenCode` Zen/Go stream carries the request's
+/// billed cost as a string (`"cost":"0.0012"`) with no usage object — the
+/// only accounting those endpoints send for models that report no usage.
+/// Other providers don't emit it, so this returns `None` for them.
+fn parse_stream_cost(data: &str) -> Option<f64> {
+    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+    v.get("cost")?.as_str()?.parse::<f64>().ok()
 }
 
 fn codex_instructions(messages: &[ChatMessage]) -> String {
@@ -2146,6 +2180,7 @@ fn codex_usage(data: &str) -> Option<Usage> {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
         cache_creation_tokens: 0,
+        cost: None,
     })
 }
 
@@ -2893,6 +2928,43 @@ mod tests {
         assert_eq!(u.cache_read_tokens, 40);
         assert_eq!(u.cache_creation_tokens, 10);
         assert_eq!(u.cache_hit_rate(), Some(0.4));
+    }
+
+    #[test]
+    fn deepseek_style_cache_hit_tokens_parsed() {
+        // OpenCode Zen reports cached input as flat prompt_cache_hit_tokens
+        // (DeepSeek-style) plus the OpenAI-style nested field — captured from
+        // the real zen/go/v1 finish chunk.
+        let data = r#"{"choices":[],"usage":{"prompt_tokens":6,"completion_tokens":28,"total_tokens":34,"prompt_cache_hit_tokens":2,"prompt_cache_miss_tokens":4,"prompt_tokens_details":{"cached_tokens":1},"completion_tokens_details":{"reasoning_tokens":26}}}"#;
+        let u = parse_usage(data).unwrap();
+        assert_eq!(u.cache_read_tokens, 2);
+        assert_eq!(u.cache_hit_rate(), Some(2.0 / 6.0));
+    }
+
+    #[test]
+    fn null_or_zero_usage_is_not_an_event() {
+        // OpenCode Zen echoes `"usage":null` on every chunk; the app must
+        // not emit (and log) a zero-usage event per chunk.
+        let null_usage =
+            r#"{"id":"x","choices":[{"index":0,"delta":{"content":null}}],"usage":null}"#;
+        assert!(parse_usage(null_usage).is_none());
+        // All-zero usage objects are equally uninformative.
+        let zero =
+            r#"{"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}"#;
+        assert!(parse_usage(zero).is_none());
+    }
+
+    #[test]
+    fn stream_cost_parses_string_dollars() {
+        // The trailing OpenCode Zen chunk: `{"choices":[],"cost":"0"}`.
+        assert_eq!(parse_stream_cost(r#"{"choices":[],"cost":"0"}"#), Some(0.0));
+        assert_eq!(
+            parse_stream_cost(r#"{"choices":[],"cost":"0.0012"}"#),
+            Some(0.0012)
+        );
+        // No cost field -> None (OpenRouter/OpenAI/Codex trailing chunks).
+        assert!(parse_stream_cost(r#"{"choices":[]}"#).is_none());
+        assert!(parse_stream_cost(r#"{"choices":[],"usage":{"prompt_tokens":1}}"#).is_none());
     }
 
     #[test]

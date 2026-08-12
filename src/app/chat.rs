@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use tokio::sync::mpsc;
 
 use crate::db::Message;
-use crate::provider::{ChatMessage, ChatParams, StreamEvent, ToolCall};
+use crate::provider::{ChatMessage, ChatParams, StreamEvent, ToolCall, Usage};
 
 use super::{App, SPINNER_COLORS, THINKING, parse_topic, verbosity_clause};
 
@@ -307,6 +307,7 @@ impl App {
                 thinking: String::new(),
                 tool_status: None,
                 usage: None,
+                usage_row_id: None,
                 started: std::time::Instant::now(),
                 thinking_idx,
                 spinner_color,
@@ -384,36 +385,81 @@ impl App {
                 // to the context window and log the request (tokens, cache,
                 // cost) for the /usage panel. Incognito streams are never
                 // persisted, matching the message-storage convention.
-                self.last_cache_rate = u.cache_hit_rate();
-                let Some(task) = self.chat_tasks.get(&task_id) else {
+                //
+                // OpenCode Zen splits accounting across two events: the
+                // finish chunk may carry real usage, and a trailing chunk
+                // carries only the provider-reported `cost`. Merge instead
+                // of logging two rows.
+                if u.prompt_tokens + u.completion_tokens > 0 {
+                    self.last_cache_rate = u.cache_hit_rate();
+                }
+                let Some(task) = self.chat_tasks.get_mut(&task_id) else {
                     return Ok(());
                 };
+                let merged = match task.usage {
+                    Some(prev) if u.prompt_tokens + u.completion_tokens > 0 => {
+                        // Real accounting (arrives after a cost-only chunk).
+                        Usage {
+                            cost: prev.cost.or(u.cost),
+                            ..u
+                        }
+                    }
+                    Some(prev) => Usage {
+                        cost: u.cost.or(prev.cost),
+                        ..prev
+                    },
+                    None => u,
+                };
+                task.usage = Some(merged);
                 let session_id = task.session_id.clone();
                 let space_id = task.space_id.clone();
                 let model_id = task.model_id.clone();
                 let backend = task.backend;
                 let incognito = task.incognito;
-                if let Some(task) = self.chat_tasks.get_mut(&task_id) {
-                    task.usage = Some(u);
-                }
-                if !incognito {
-                    // Cost at catalog list price; None when no price is
-                    // known. Non-OpenRouter backends price via their
-                    // OpenRouter catalog twin (see `Db::model_price`).
-                    let cost =
-                        self.db
-                            .request_cost(&model_id, u.prompt_tokens, u.completion_tokens);
-                    let _ = self.db.log_usage(
-                        backend.name(),
-                        &model_id,
-                        u.prompt_tokens,
-                        u.completion_tokens,
-                        u.cache_read_tokens,
-                        u.cache_creation_tokens,
-                        cost,
-                        Some(&session_id),
-                        Some(&space_id),
-                    );
+                let row_id = task.usage_row_id;
+                if !incognito
+                    && (merged.prompt_tokens > 0
+                        || merged.completion_tokens > 0
+                        || merged.cost.is_some())
+                {
+                    // Provider-reported cost wins; otherwise price at
+                    // catalog list price (None when no price is known).
+                    // Non-OpenRouter backends price via their OpenRouter
+                    // catalog twin (see `Db::model_price`).
+                    let cost = merged.cost.or_else(|| {
+                        self.db.request_cost(
+                            &model_id,
+                            merged.prompt_tokens,
+                            merged.completion_tokens,
+                        )
+                    });
+                    if let Some(id) = row_id {
+                        let _ = self.db.update_usage(
+                            id,
+                            merged.prompt_tokens,
+                            merged.completion_tokens,
+                            merged.cache_read_tokens,
+                            merged.cache_creation_tokens,
+                            cost,
+                        );
+                    } else {
+                        let id = self.db.log_usage(
+                            backend.name(),
+                            &model_id,
+                            merged.prompt_tokens,
+                            merged.completion_tokens,
+                            merged.cache_read_tokens,
+                            merged.cache_creation_tokens,
+                            cost,
+                            Some(&session_id),
+                            Some(&space_id),
+                        );
+                        if let Ok(id) = id
+                            && let Some(task) = self.chat_tasks.get_mut(&task_id)
+                        {
+                            task.usage_row_id = Some(id);
+                        }
+                    }
                 }
             }
             StreamEvent::Status(s) => {

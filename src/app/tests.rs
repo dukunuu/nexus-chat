@@ -408,6 +408,89 @@ async fn concurrent_chat_tasks_route_results_to_their_origin_sessions() {
 }
 
 #[tokio::test]
+async fn opencode_split_usage_merges_cost_into_one_row() {
+    // OpenCode Zen sends accounting as two events: the finish chunk carries
+    // real usage, then a trailing chunk carries only the provider cost.
+    // Both must merge into a single usage_log row — not two.
+    let mut a = app_with_key();
+    a.current_model = Some("go:deepseek-v4-pro".into());
+    a.set_input("hi");
+    a.submit().unwrap();
+    let session = a.session.as_ref().unwrap().id.clone();
+    let task = a.chat_task_for_session(&session).map(|t| t.id).unwrap();
+
+    a.on_chat_event(
+        task,
+        StreamEvent::Usage(crate::provider::Usage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            cache_read_tokens: 60,
+            cache_creation_tokens: 0,
+            cost: None,
+        }),
+    )
+    .unwrap();
+    a.on_chat_event(
+        task,
+        StreamEvent::Usage(crate::provider::Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost: Some(0.0042),
+        }),
+    )
+    .unwrap();
+
+    let rows = a.db.usage_recent(10, None).unwrap();
+    assert_eq!(rows.len(), 1, "split accounting must log exactly one row");
+    assert_eq!(rows[0].prompt_tokens, 100);
+    assert_eq!(rows[0].completion_tokens, 20);
+    assert_eq!(rows[0].cache_read_tokens, 60);
+    assert_eq!(rows[0].cost, Some(0.0042));
+    assert!(a.last_cache_rate.is_some());
+}
+
+#[tokio::test]
+async fn cost_only_usage_event_is_logged_with_zero_tokens() {
+    // OpenCode Zen free models never report usage — the trailing cost chunk
+    // is the only accounting. It must still land in the log (provider cost
+    // beats the catalog's unknown price) and not clobber the cache rate.
+    let mut a = app_with_key();
+    a.current_model = Some("deepseek-v4-flash-free".into());
+    a.set_input("hi");
+    a.submit().unwrap();
+    let session = a.session.as_ref().unwrap().id.clone();
+    let task = a.chat_task_for_session(&session).map(|t| t.id).unwrap();
+    a.last_cache_rate = Some(0.5);
+
+    a.on_chat_event(
+        task,
+        StreamEvent::Usage(crate::provider::Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost: Some(0.0),
+        }),
+    )
+    .unwrap();
+
+    let rows = a.db.usage_recent(10, None).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].prompt_tokens, 0);
+    assert_eq!(rows[0].cost, Some(0.0));
+    assert_eq!(
+        a.last_cache_rate,
+        Some(0.5),
+        "cost-only events must not clear the cache rate"
+    );
+}
+
+#[tokio::test]
 async fn chat_task_limit_rejects_the_eleventh_task() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());
