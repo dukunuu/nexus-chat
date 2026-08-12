@@ -377,7 +377,7 @@ pub struct Db {
 impl Db {
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let conn = open_attached(path).with_context(|| format!("opening db {}", path.display()))?;
-        let db = Self { conn };
+        let mut db = Self { conn };
         db.migrate()?;
         Ok(db)
     }
@@ -387,7 +387,7 @@ impl Db {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("ATTACH DATABASE ':memory:' AS cache")?;
         migrate_cache(&conn, "cache")?;
-        let db = Db { conn };
+        let mut db = Db { conn };
         db.migrate()?;
         Ok(db)
     }
@@ -425,7 +425,7 @@ impl Db {
 
     // Long by design (schema migrations).
     #[allow(clippy::too_many_lines)]
-    fn migrate(&self) -> Result<()> {
+    fn migrate(&mut self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
@@ -561,22 +561,24 @@ impl Db {
                 }
             }
             // Device-local ids for rows whose AUTOINCREMENT ids can't be
-            // sync identity.
+            // sync identity. One transaction: a large usage_log must not
+            // pay a per-row fsync (minutes on a file db). Idempotent — rows
+            // already stamped are skipped by the IS NULL filter.
+            let backfill_tx = self.conn.transaction()?;
             for table in ["citations", "usage_log"] {
                 let ids: Vec<i64> = {
-                    let mut stmt = self
-                        .conn
+                    let mut stmt = backfill_tx
                         .prepare(&format!("SELECT id FROM {table} WHERE sync_id IS NULL"))?;
                     let rows = stmt.query_map([], |r| r.get(0))?;
                     rows.collect::<rusqlite::Result<Vec<_>>>()?
                 };
+                let mut update = backfill_tx
+                    .prepare(&format!("UPDATE {table} SET sync_id = ?1 WHERE id = ?2"))?;
                 for id in ids {
-                    self.conn.execute(
-                        &format!("UPDATE {table} SET sync_id = ?1 WHERE id = ?2"),
-                        (Uuid::new_v4().to_string(), id),
-                    )?;
+                    update.execute((Uuid::new_v4().to_string(), id))?;
                 }
             }
+            backfill_tx.commit()?;
             // Unique indexes on the backfilled ids (fresh dbs already have
             // the columns inline; the indexes must wait until legacy dbs
             // have theirs).
