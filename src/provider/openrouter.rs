@@ -19,7 +19,8 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use super::{
-    ChatMessage, ChatParams, Model, ReasoningEffort, StreamEvent, ToolCall, ToolDef, Usage,
+    ChatMessage, ChatParams, Model, ModelPricing, ReasoningEffort, StreamEvent, ToolCall, ToolDef,
+    Usage,
 };
 use crate::tools::ToolBox;
 
@@ -377,30 +378,38 @@ struct ModelEntry {
     #[serde(default)]
     architecture: Option<Architecture>,
     #[serde(default)]
-    pricing: Option<ModelPricing>,
+    pricing: Option<CatalogPricing>,
 }
 
 /// `OpenRouter` catalog pricing, in USD **per token** (stringly-typed in the
 /// API: gpt-5 reports `1.25e-06`, i.e. $1.25/M). Only the `OpenRouter` flavor
 /// reports it; others default to absent.
 #[derive(Deserialize, Clone)]
-struct ModelPricing {
+struct CatalogPricing {
     #[serde(default)]
     prompt: Option<String>,
     #[serde(default)]
     completion: Option<String>,
+    #[serde(default)]
+    input_cache_read: Option<String>,
+    #[serde(default)]
+    input_cache_write: Option<String>,
 }
 
-impl ModelPricing {
-    /// (prompt, completion) USD per 1M tokens — the unit every cost
-    /// calculation in this codebase uses (see `Db::request_cost`) — or
-    /// None when either is absent or unparsable (e.g. `"0"`-style or
-    /// free-tier entries parse fine). The API reports per-token values, so
-    /// scale to per-1M once here.
-    fn usd_per_million(&self) -> Option<(f64, f64)> {
-        let prompt = self.prompt.as_deref()?.parse::<f64>().ok()?;
-        let completion = self.completion.as_deref()?.parse::<f64>().ok()?;
-        Some((prompt * 1e6, completion * 1e6))
+impl CatalogPricing {
+    /// Prices in USD per 1M tokens — the unit every cost calculation in this
+    /// codebase uses (see `Db::request_cost`) — or `None` when either base
+    /// token rate is absent or unparsable. Cache rates are optional: when a
+    /// catalog omits one, the regular prompt rate applies. The API reports
+    /// per-token values, so scale to per-1M once here.
+    fn usd_per_million(&self) -> Option<ModelPricing> {
+        let parse = |value: Option<&str>| value?.parse::<f64>().ok().map(|v| v * 1e6);
+        Some(ModelPricing {
+            prompt: parse(self.prompt.as_deref())?,
+            completion: parse(self.completion.as_deref())?,
+            cache_read: parse(self.input_cache_read.as_deref()),
+            cache_write: parse(self.input_cache_write.as_deref()),
+        })
     }
 }
 
@@ -1848,35 +1857,53 @@ fn parse_usage(data: &str) -> Option<Usage> {
     let v: serde_json::Value = serde_json::from_str(data).ok()?;
     let u = v.get("usage").and_then(serde_json::Value::as_object)?;
     let get = |k: &str| u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
-    // OpenAI-style reports cached input under `prompt_tokens_details.cached_tokens`;
-    // Anthropic-style (passed through by OpenRouter) under the flat
-    // `cache_read_input_tokens`; DeepSeek-style (OpenCode Zen) under the
-    // flat `prompt_cache_hit_tokens`. Take whichever is present, largest
-    // wins.
+    let detail = |group: &str, field: &str| {
+        u.get(group)
+            .and_then(|d| d.get(field))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    // OpenAI/OpenRouter report cache accounting in prompt_tokens_details
+    // (Responses-style payloads call it input_tokens_details). Anthropic and
+    // DeepSeek-compatible backends may expose flat fields instead. Take the
+    // largest reported value so duplicated compatibility fields count once.
     let cached = [
-        u.get("prompt_tokens_details")
-            .and_then(|d| d.get("cached_tokens"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
-        u.get("cache_read_input_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
-        u.get("prompt_cache_hit_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+        detail("prompt_tokens_details", "cached_tokens"),
+        detail("input_tokens_details", "cached_tokens"),
+        get("cache_read_input_tokens"),
+        get("prompt_cache_hit_tokens"),
     ]
     .into_iter()
     .max()
     .unwrap_or(0);
+    let cache_creation = [
+        detail("prompt_tokens_details", "cache_write_tokens"),
+        detail("input_tokens_details", "cache_write_tokens"),
+        get("cache_creation_input_tokens"),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    let cost = u.get("cost").and_then(json_f64);
     let usage = Usage {
         prompt_tokens: get("prompt_tokens"),
         completion_tokens: get("completion_tokens"),
         total_tokens: get("total_tokens"),
         cache_read_tokens: cached,
-        cache_creation_tokens: get("cache_creation_input_tokens"),
-        cost: None,
+        cache_creation_tokens: cache_creation,
+        cost,
     };
-    (usage.prompt_tokens > 0 || usage.completion_tokens > 0).then_some(usage)
+    (usage.prompt_tokens > 0 || usage.completion_tokens > 0 || usage.cost.is_some())
+        .then_some(usage)
+}
+
+/// Parse either JSON's numeric representation or a provider's stringly-typed
+/// equivalent, rejecting non-finite values before they reach `SQLite`.
+fn json_f64(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse::<f64>().ok())
+        .filter(|n| n.is_finite())
 }
 
 /// The trailing chunk of an `OpenCode` Zen/Go stream carries the request's
@@ -1885,7 +1912,7 @@ fn parse_usage(data: &str) -> Option<Usage> {
 /// Other providers don't emit it, so this returns `None` for them.
 fn parse_stream_cost(data: &str) -> Option<f64> {
     let v: serde_json::Value = serde_json::from_str(data).ok()?;
-    v.get("cost")?.as_str()?.parse::<f64>().ok()
+    v.get("cost").and_then(json_f64)
 }
 
 fn codex_instructions(messages: &[ChatMessage]) -> String {
@@ -2946,12 +2973,15 @@ mod tests {
 
     #[test]
     fn parses_usage_cache_tokens_both_styles() {
-        // OpenAI-style: cached input nested under prompt_tokens_details.
-        let openai = r#"{"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":70},"completion_tokens":10,"total_tokens":110}}"#;
+        // OpenRouter/OpenAI style: cache reads and writes nested under
+        // prompt_tokens_details, alongside the provider's exact request cost.
+        let openai = r#"{"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":70,"cache_write_tokens":20},"completion_tokens":10,"total_tokens":110,"cost":0.00024}}"#;
         let u = parse_usage(openai).unwrap();
         assert_eq!(u.cache_read_tokens, 70);
+        assert_eq!(u.cache_creation_tokens, 20);
         assert_eq!(u.cache_hit_rate(), Some(0.7));
-        // Anthropic-style: flat cache_read_input_tokens (OpenRouter passthrough).
+        assert_eq!(u.cost, Some(0.00024));
+        // Anthropic-style: flat cache fields (OpenRouter passthrough).
         let anthropic = r#"{"usage":{"prompt_tokens":100,"cache_read_input_tokens":40,"cache_creation_input_tokens":10,"completion_tokens":10,"total_tokens":110}}"#;
         let u = parse_usage(anthropic).unwrap();
         assert_eq!(u.cache_read_tokens, 40);
@@ -3108,20 +3138,38 @@ mod tests {
     fn catalog_pricing_scales_per_token_to_per_million() {
         // The API reports USD per token (gpt-5 → 1.25e-06 = $1.25/M); the
         // rest of the codebase prices in USD per 1M tokens, so parsing must
-        // scale. Free-tier entries ("0") stay zero.
-        let p = ModelPricing {
+        // scale. Cache rates are preserved and free-tier entries stay zero.
+        let p = CatalogPricing {
             prompt: Some("8e-08".into()),
             completion: Some("1.8e-07".into()),
+            input_cache_read: Some("1.6e-08".into()),
+            input_cache_write: Some("1e-07".into()),
         };
-        assert_eq!(p.usd_per_million(), Some((0.08, 0.18)));
-        let free = ModelPricing {
+        let scaled = p.usd_per_million().unwrap();
+        assert!((scaled.prompt - 0.08).abs() < 1e-12);
+        assert!((scaled.completion - 0.18).abs() < 1e-12);
+        assert!((scaled.cache_read.unwrap() - 0.016).abs() < 1e-12);
+        assert!((scaled.cache_write.unwrap() - 0.1).abs() < 1e-12);
+        let free = CatalogPricing {
             prompt: Some("0".into()),
             completion: Some("0".into()),
+            input_cache_read: None,
+            input_cache_write: None,
         };
-        assert_eq!(free.usd_per_million(), Some((0.0, 0.0)));
-        let missing = ModelPricing {
+        assert_eq!(
+            free.usd_per_million(),
+            Some(ModelPricing {
+                prompt: 0.0,
+                completion: 0.0,
+                cache_read: None,
+                cache_write: None,
+            })
+        );
+        let missing = CatalogPricing {
             prompt: None,
             completion: None,
+            input_cache_read: None,
+            input_cache_write: None,
         };
         assert_eq!(missing.usd_per_million(), None);
     }

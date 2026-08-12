@@ -130,6 +130,18 @@ impl ReasoningEffort {
     pub const HIGH_ONLY: &'static [Self] = &[Self::High];
 }
 
+/// Per-token catalog prices in USD per 1M tokens.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelPricing {
+    pub prompt: f64,
+    pub completion: f64,
+    /// Discounted cache-read price. `None` means cache reads use the regular
+    /// prompt price (or the catalog does not expose a separate rate).
+    pub cache_read: Option<f64>,
+    /// Cache-write price. `None` means writes use the regular prompt price.
+    pub cache_write: Option<f64>,
+}
+
 /// A model offered by the provider, as shown in the picker.
 #[derive(Debug, Clone)]
 pub struct Model {
@@ -148,9 +160,9 @@ pub struct Model {
     pub supports_video_generation: bool,
     /// Which backend this model came from.
     pub backend: BackendTag,
-    /// USD per 1M prompt/completion tokens from the catalog (`OpenRouter`
-    /// only; other backends report no prices). `None` = cost unknown.
-    pub pricing: Option<(f64, f64)>,
+    /// USD per 1M tokens from the catalog (`OpenRouter` only; other backends
+    /// report no prices). `None` = cost unknown.
+    pub pricing: Option<ModelPricing>,
 }
 
 /// Sampling + reasoning parameters for a completion request.
@@ -256,9 +268,9 @@ pub struct Usage {
     pub cache_read_tokens: u64,
     /// Prompt tokens written into the cache on this request (cache writes).
     pub cache_creation_tokens: u64,
-    /// Provider-reported request cost in USD. `OpenCode` Zen/Go reports it in a
-    /// trailing streamed chunk (`"cost":"0.0012"`); other providers price
-    /// from the catalog instead, so this is `None` for them.
+    /// Provider-reported request cost in USD. `OpenRouter` includes it in the
+    /// final usage object; `OpenCode` Zen/Go reports it in a trailing streamed
+    /// chunk (`"cost":"0.0012"`). `None` when the provider omits cost.
     pub cost: Option<f64>,
 }
 

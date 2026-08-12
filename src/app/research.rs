@@ -926,7 +926,7 @@ async fn local_known_chunks(
         return Vec::new();
     }
     let query = vecs.remove(0);
-    let Ok(conn) = rusqlite::Connection::open(db_path) else {
+    let Ok(conn) = crate::db::open_attached(db_path) else {
         return Vec::new();
     };
     crate::db::semantic_chunks(&conn, space_id, &query, 5)

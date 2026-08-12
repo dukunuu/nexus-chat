@@ -511,7 +511,9 @@ impl App {
                     let _ = write!(h, "{b:02x}");
                     h
                 });
-            if let Some(f) = existing.filter(|f| f.hash == hash) {
+            if let Some(f) = existing.filter(|f| f.hash == hash)
+                && self.db.file_indexed(&f.id).unwrap_or(false)
+            {
                 // Content unchanged (touched, or indexed before mtimes were
                 // tracked): just record the stat for next time.
                 let _ = self.db.set_file_mtime(&f.id, mtime);
@@ -520,6 +522,9 @@ impl App {
                 }
                 continue;
             }
+            // Cold cache (fresh restore, wiped cache.db): the durable row
+            // survives but this device's index state is gone — fall through
+            // to re-extract so chunks/embeddings rebuild here.
             let size = bytes.len() as i64;
             let (status, chunks) = match crate::extract::extract_text(&path) {
                 Ok(text) if text.trim().is_empty() => {
@@ -1212,6 +1217,57 @@ mod tests {
         let hits = crate::db::search_chunks(a.db.conn_for_test(), &a.active_space.id, "revenue", 8)
             .unwrap();
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn cold_cache_after_restore_reindexes_from_disk() {
+        // A real file db: the cold-cache scenario only exists when the
+        // sibling cache.db can be deleted underneath the durable db (a
+        // restore does exactly that — backup excludes cache.db).
+        let root = std::env::temp_dir().join(format!("nexus-cold-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("spaces")).unwrap();
+        let space = Space { root };
+        let db = Db::open(&space.db_path()).unwrap();
+        let mut a = App::new(db, Some("k"), space);
+
+        let src = std::env::temp_dir().join(format!("nexus-cold-src-{}.md", uuid::Uuid::new_v4()));
+        std::fs::write(&src, "# report\nresilience is a property").unwrap();
+        let name = a.import_file(&src).unwrap();
+        let id = a.files_cache[0].id.clone();
+        assert!(a.db.file_indexed(&id).unwrap());
+        assert!(
+            crate::db::file_text(a.db.conn_for_test(), &a.active_space.id, &name)
+                .unwrap()
+                .is_some()
+        );
+        // A restore runs with the app closed — drop the connections so the
+        // cache file can actually go away.
+        let root = a.space.root.clone();
+        drop(a);
+
+        // Restore: durable db survives, cache.db is dropped.
+        let cache_path = root.join("cache.db");
+        assert!(cache_path.exists());
+        std::fs::remove_file(&cache_path).unwrap();
+
+        let mut a = App::new(
+            Db::open(&root.join("nexus.db")).unwrap(),
+            Some("k"),
+            Space { root },
+        );
+        assert!(!a.db.file_indexed(&id).unwrap());
+
+        // The rescan must not trust the stat skip on an unchanged file — it
+        // re-extracts and rewrites the index state.
+        a.rescan_files();
+        assert!(a.db.file_indexed(&id).unwrap());
+        assert_eq!(
+            crate::db::file_text(a.db.conn_for_test(), &a.active_space.id, &name)
+                .unwrap()
+                .as_deref(),
+            Some("# report\nresilience is a property")
+        );
+        assert_eq!(a.db.list_files(&a.active_space.id).unwrap()[0].status, "ok");
     }
 
     #[test]

@@ -41,9 +41,12 @@ pub struct ToolBox {
     /// Domains a per-space setting always excludes from `search(mode=web)` results
     /// (appended to any `exclude_domains` the model passes).
     pub blocked_domains: Vec<String>,
-    /// Db path for the (space-agnostic) fetched-page cache; None disables
-    /// caching (some tests).
-    web_cache_db: Option<PathBuf>,
+    /// Main db path for tool connections. Connections open the db with its
+    /// sibling `cache.db` attached (`open_attached`), so both durable tables
+    /// (`session_sources`, `citations`, `files`) and device-local ones
+    /// (`web_cache`, `file_chunks`, `model_prices`) resolve on one
+    /// connection. `None` disables the cache-backed tools (some tests).
+    db_path: Option<PathBuf>,
     /// Set for follow-up turns inside a `/research` session: enables the
     /// `research_lookup(scope=session_sources)` over that session's gathered source bundle.
     research_session_id: Option<String>,
@@ -453,7 +456,7 @@ impl ToolBox {
         langsearch_key: Option<String>,
         search_provider: String,
         blocked_domains: Vec<String>,
-        web_cache_db: Option<PathBuf>,
+        db_path: Option<PathBuf>,
         files: Option<FilesCtx>,
         apps: Option<AppsCtx>,
     ) -> Self {
@@ -464,7 +467,7 @@ impl ToolBox {
             search_provider,
             research_only: false,
             blocked_domains,
-            web_cache_db,
+            db_path,
             research_session_id: None,
             client: reqwest::Client::new(),
             files,
@@ -487,7 +490,7 @@ impl ToolBox {
         langsearch_key: Option<String>,
         search_provider: String,
         blocked_domains: Vec<String>,
-        web_cache_db: Option<PathBuf>,
+        db_path: Option<PathBuf>,
     ) -> Self {
         let mut tb = Self::new(
             PathBuf::new(),
@@ -495,7 +498,7 @@ impl ToolBox {
             langsearch_key,
             search_provider,
             blocked_domains,
-            web_cache_db,
+            db_path,
             None,
             None,
         );
@@ -509,7 +512,7 @@ impl ToolBox {
     /// `search`/`fetch_url` call excludes them the same way the global
     /// setting does.
     pub fn with_research_session(mut self, session_id: String) -> Self {
-        if let Some(db_path) = &self.web_cache_db
+        if let Some(db_path) = &self.db_path
             && let Ok(conn) = rusqlite::Connection::open(db_path)
             && let Ok(hosts) = crate::db::discarded_domains(&conn, &session_id)
         {
@@ -627,8 +630,8 @@ impl ToolBox {
     async fn fetch_cached(&self, url: &str, force_fresh: bool) -> anyhow::Result<String> {
         let url_norm = normalize_url(url);
         if !force_fresh
-            && let Some(db_path) = &self.web_cache_db
-            && let Ok(conn) = rusqlite::Connection::open(db_path)
+            && let Some(db_path) = &self.db_path
+            && let Ok(conn) = crate::db::open_attached(db_path)
             && let Ok(Some((_, text, fetched_at))) = crate::db::cache_get(&conn, &url_norm)
             && crate::db::is_fresh(&fetched_at, chrono::Utc::now())
         {
@@ -642,8 +645,8 @@ impl ToolBox {
         } else {
             fetch_url_text(&self.client, url).await?
         };
-        if let Some(db_path) = &self.web_cache_db
-            && let Ok(conn) = rusqlite::Connection::open(db_path)
+        if let Some(db_path) = &self.db_path
+            && let Ok(conn) = crate::db::open_attached(db_path)
         {
             let _ = crate::db::cache_put(&conn, &url_norm, url, None, &text);
         }
@@ -1503,8 +1506,8 @@ impl ToolBox {
                 let cache_key = format!("discussion://{query}");
 
                 // Check cache first if enabled
-                let cached = if let Some(db_path) = &self.web_cache_db {
-                    rusqlite::Connection::open(db_path)
+                let cached = if let Some(db_path) = &self.db_path {
+                    crate::db::open_attached(db_path)
                         .ok()
                         .and_then(|conn| crate::db::cache_get(&conn, &cache_key).ok().flatten())
                         .and_then(|(_, text, fetched_at)| {
@@ -1529,8 +1532,8 @@ impl ToolBox {
                     let text = discussion_search(&self.client, &query).await;
                     // Write through to cache if enabled
                     if text != "no results"
-                        && let Some(db_path) = &self.web_cache_db
-                        && let Ok(conn) = rusqlite::Connection::open(db_path)
+                        && let Some(db_path) = &self.db_path
+                        && let Ok(conn) = crate::db::open_attached(db_path)
                     {
                         let _ = crate::db::cache_put(&conn, &cache_key, &cache_key, None, &text);
                     }
@@ -1544,28 +1547,26 @@ impl ToolBox {
                     .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(str::to_string))
                     .unwrap_or_default();
                 let status = "Searching session sources…".to_string();
-                let result = match (&self.research_session_id, &self.web_cache_db) {
-                    (Some(session_id), Some(db_path)) => {
-                        match rusqlite::Connection::open(db_path) {
-                            Err(e) => format!("source search failed: {e}"),
-                            Ok(conn) => {
-                                match crate::db::search_session_sources(&conn, session_id, &query) {
-                                    Ok(hits) if hits.is_empty() => {
-                                        "no matches in this session's sources".to_string()
-                                    }
-                                    Ok(hits) => hits
-                                        .iter()
-                                        .map(|(url, text)| {
-                                            let cut: String = text.chars().take(500).collect();
-                                            format!("{url}:\n{cut}")
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("\n\n"),
-                                    Err(e) => format!("source search failed: {e}"),
+                let result = match (&self.research_session_id, &self.db_path) {
+                    (Some(session_id), Some(db_path)) => match crate::db::open_attached(db_path) {
+                        Err(e) => format!("source search failed: {e}"),
+                        Ok(conn) => {
+                            match crate::db::search_session_sources(&conn, session_id, &query) {
+                                Ok(hits) if hits.is_empty() => {
+                                    "no matches in this session's sources".to_string()
                                 }
+                                Ok(hits) => hits
+                                    .iter()
+                                    .map(|(url, text)| {
+                                        let cut: String = text.chars().take(500).collect();
+                                        format!("{url}:\n{cut}")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n"),
+                                Err(e) => format!("source search failed: {e}"),
                             }
                         }
-                    }
+                    },
                     _ => "no session source bundle available".to_string(),
                 };
                 (result, status)
@@ -1734,8 +1735,7 @@ impl ToolBox {
                 let status = format!("Reading {name}…");
                 let result = match &self.files {
                     None => "no files imported".to_string(),
-                    Some(ctx) => match rusqlite::Connection::open(&ctx.db_path)
-                        .map_err(anyhow::Error::from)
+                    Some(ctx) => match crate::db::open_attached(&ctx.db_path)
                         .and_then(|conn| crate::db::file_text(&conn, &ctx.space_id, &name))
                     {
                         Ok(Some(text)) => {
@@ -1777,7 +1777,7 @@ impl ToolBox {
                     None => "no files imported".to_string(),
                     Some(ctx) => {
                         // Verify the PDF is known via DB lookup
-                        let known = rusqlite::Connection::open(&ctx.db_path)
+                        let known = crate::db::open_attached(&ctx.db_path)
                             .ok()
                             .and_then(|conn| {
                                 crate::db::file_text(&conn, &ctx.space_id, &name)
@@ -1831,7 +1831,7 @@ impl ToolBox {
                             Err(e) => return (e, status),
                             Ok(t) => t,
                         };
-                        let conn = match rusqlite::Connection::open(&fc.db_path) {
+                        let conn = match crate::db::open_attached(&fc.db_path) {
                             Err(e) => return (format!("db error: {e}"), status),
                             Ok(c) => c,
                         };
@@ -3239,7 +3239,7 @@ fn valid_relative_path(path: &str) -> bool {
 /// are stored yet) fall back to FTS keywords, tagged so the model knows the
 /// weaker path answered.
 async fn search_files_impl(ctx: &FilesCtx, query: &str) -> String {
-    let conn = match rusqlite::Connection::open(&ctx.db_path) {
+    let conn = match crate::db::open_attached(&ctx.db_path) {
         Ok(c) => c,
         Err(e) => return format!("file search failed: {e}"),
     };
@@ -4880,8 +4880,11 @@ mod tests {
 
     #[tokio::test]
     async fn search_sources_tool_only_appears_and_works_for_a_research_session_toolbox() {
-        let path =
-            std::env::temp_dir().join(format!("nexus-searchsrc-{}.db", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("nexus-searchsrc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Own directory: the attached sibling cache.db must not collide with
+        // other tests' dbs, all of which live flat in the temp dir.
+        let path = dir.join("nexus.db");
         let db = crate::db::Db::open(&path).unwrap();
         let space = db.default_space_id().unwrap();
         let s = db.create_session("t", "a/b", &space, "chat").unwrap();
@@ -4948,7 +4951,9 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_url_serves_from_cache_when_fresh() {
-        let path = std::env::temp_dir().join(format!("nexus-webcache-{}.db", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("nexus-webcache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nexus.db");
         let db = crate::db::Db::open(&path).unwrap();
         let cached_body = "x".repeat(MAX_TOOL_RESULT_CHARS + 100);
         crate::db::cache_put(
@@ -5091,7 +5096,9 @@ mod tests {
 
     #[tokio::test]
     async fn discussion_search_serves_from_cache_when_fresh() {
-        let path = std::env::temp_dir().join(format!("nexus-discache-{}.db", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("nexus-discache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nexus.db");
         let db = crate::db::Db::open(&path).unwrap();
         let cache_key = "discussion://rust performance";
         let cached_response =
@@ -5436,7 +5443,11 @@ mod tests {
 
     fn files_toolbox() -> (ToolBox, crate::db::Db, String) {
         // A real temp-file db (the toolbox opens its own connection by path).
-        let path = std::env::temp_dir().join(format!("nexus-tools-{}.db", uuid::Uuid::new_v4()));
+        // Own directory: the attached sibling cache.db must not collide with
+        // other tests' dbs, all of which live flat in the temp dir.
+        let dir = std::env::temp_dir().join(format!("nexus-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nexus.db");
         let db = crate::db::Db::open(&path).unwrap();
         let space = db.default_space_id().unwrap();
         let id = db.upsert_file(&space, "report.md", "h", 1, "ok").unwrap();

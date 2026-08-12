@@ -1672,11 +1672,11 @@ impl App {
                 // this table when usage is logged. Batched into a single
                 // transaction — hundreds of per-model writes on the UI task
                 // would stall the interface after every catalog fetch.
-                let prices: Vec<(String, String, f64, f64)> = models
+                let prices: Vec<_> = models
                     .iter()
                     .filter_map(|m| {
                         m.pricing
-                            .map(|(p, c)| (m.id.clone(), m.backend.name().to_string(), p, c))
+                            .map(|price| (m.id.clone(), m.backend.name().to_string(), price))
                     })
                     .collect();
                 let _ = self.db.upsert_model_prices(&prices);

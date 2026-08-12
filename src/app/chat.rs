@@ -400,7 +400,7 @@ impl App {
                     Some(prev) if u.prompt_tokens + u.completion_tokens > 0 => {
                         // Real accounting (arrives after a cost-only chunk).
                         Usage {
-                            cost: prev.cost.or(u.cost),
+                            cost: u.cost.or(prev.cost),
                             ..u
                         }
                     }
@@ -422,15 +422,18 @@ impl App {
                         || merged.completion_tokens > 0
                         || merged.cost.is_some())
                 {
-                    // Provider-reported cost wins; otherwise price at
-                    // catalog list price (None when no price is known).
+                    // Provider-reported cost wins; otherwise estimate from
+                    // cache-aware catalog rates (None when unknown).
                     // Non-OpenRouter backends price via their OpenRouter
                     // catalog twin (see `Db::model_price`).
+                    let cost_is_provider = merged.cost.is_some();
                     let cost = merged.cost.or_else(|| {
                         self.db.request_cost(
                             &model_id,
                             merged.prompt_tokens,
                             merged.completion_tokens,
+                            merged.cache_read_tokens,
+                            merged.cache_creation_tokens,
                         )
                     });
                     if let Some(id) = row_id {
@@ -441,6 +444,7 @@ impl App {
                             merged.cache_read_tokens,
                             merged.cache_creation_tokens,
                             cost,
+                            cost_is_provider,
                         );
                     } else {
                         let id = self.db.log_usage(
@@ -451,6 +455,7 @@ impl App {
                             merged.cache_read_tokens,
                             merged.cache_creation_tokens,
                             cost,
+                            cost_is_provider,
                             Some(&session_id),
                             Some(&space_id),
                         );
@@ -634,11 +639,18 @@ impl App {
             self.context_total = Some(total);
         }
         let secs = Some(task.started.elapsed().as_secs_f64());
-        // Per-request cost at catalog list price (None when unknown); the
-        // same value was already logged to `usage_log` by the Usage event.
+        // Prefer the provider's exact charge; otherwise estimate from the
+        // cache-aware catalog. The same value was logged by the Usage event.
         let cost = usage.and_then(|u| {
-            self.db
-                .request_cost(&task.model_id, u.prompt_tokens, u.completion_tokens)
+            u.cost.or_else(|| {
+                self.db.request_cost(
+                    &task.model_id,
+                    u.prompt_tokens,
+                    u.completion_tokens,
+                    u.cache_read_tokens,
+                    u.cache_creation_tokens,
+                )
+            })
         });
         let reasoning = (!reasoning.is_empty()).then_some(reasoning);
         let phrase = Some(THINKING[task.thinking_idx].1.to_string());

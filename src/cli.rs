@@ -1036,7 +1036,14 @@ fn restore(file: &Path, yes: bool) -> Result<()> {
             bail!("aborted");
         }
     }
+    // The device-local cache.db is keyed to the pre-restore db: stale chunks
+    // and embeddings must not survive the restore. Drop it before unzipping,
+    // then again after (pre-split backups may contain one) — the next launch
+    // recreates it empty and re-indexes on demand.
+    let cache_path = space.root.join("cache.db");
+    let _ = std::fs::remove_file(&cache_path);
     unzip_into(file, &space.root)?;
+    let _ = std::fs::remove_file(&cache_path);
     out("restored");
     Ok(())
 }
@@ -1064,6 +1071,11 @@ fn zip_entries(
         let rel = path
             .strip_prefix(root)
             .with_context(|| format!("path outside root: {}", path.display()))?;
+        // The device-local cache.db is excluded from backups by design — it
+        // is disposable derived state that rebuilds on demand.
+        if rel == std::path::Path::new("cache.db") {
+            continue;
+        }
         if entry.file_type()?.is_dir() {
             zip.add_directory(format!("{}/", rel.display()), opts)?;
             zip_entries(zip, root, &path, opts)?;
@@ -1256,6 +1268,8 @@ fn status() -> Result<()> {
     Ok(())
 }
 
+// Long by design: one checklist fn per check line.
+#[allow(clippy::too_many_lines)]
 async fn doctor(network: bool) -> Result<()> {
     let dirs = config::project_dirs()?;
     let mut problems = 0usize;
@@ -1284,6 +1298,35 @@ async fn doctor(network: bool) -> Result<()> {
         integrity.as_deref().unwrap_or("unreadable"),
     );
 
+    // Device-local cache db: disposable, so absent or empty is healthy — it
+    // is recreated on the next launch and re-indexes on demand.
+    let cache_path = data_dir.join("cache.db");
+    match std::fs::metadata(&cache_path) {
+        Err(_) => check("cache db", true, "absent (created on next launch)"),
+        Ok(meta) if meta.len() == 0 => check("cache db", true, "empty (rebuilds on demand)"),
+        Ok(_) => {
+            let ok = db::open_attached(&db_path)
+                .ok()
+                .and_then(|conn| {
+                    conn.query_row("PRAGMA cache.integrity_check", [], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .ok()
+                })
+                .as_deref()
+                == Some("ok");
+            check(
+                "cache db",
+                ok,
+                if ok {
+                    "integrity ok"
+                } else {
+                    "unreadable (deleting it is safe — rebuilds on demand)"
+                },
+            );
+        }
+    }
+
     // Config parses.
     let cfg_path = config::config_path()?;
     let cfg_ok = match std::fs::read_to_string(&cfg_path) {
@@ -1301,7 +1344,7 @@ async fn doctor(network: bool) -> Result<()> {
     );
 
     // Optional external tools.
-    for tool in ["ffmpeg", "tesseract", "ollama"] {
+    for tool in ["ffmpeg", "tesseract", "ollama", "node", "npm"] {
         let present = std::process::Command::new(tool)
             .arg("--version")
             .output()

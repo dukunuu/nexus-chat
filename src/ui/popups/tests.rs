@@ -53,12 +53,24 @@ fn usage_popup_renders_dashboard_with_cache_bars_and_tables() {
             700,
             200,
             Some(0.0042),
+            true,
             None,
             None,
         )
         .unwrap();
     app.db
-        .log_usage("Codex", "gpt-5.1-codex", 100, 10, 0, 0, None, None, None)
+        .log_usage(
+            "Codex",
+            "gpt-5.1-codex",
+            100,
+            10,
+            0,
+            0,
+            None,
+            false,
+            None,
+            None,
+        )
         .unwrap();
     app.open_usage_popup();
 

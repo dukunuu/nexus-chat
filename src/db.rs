@@ -12,6 +12,8 @@ use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
+use crate::provider::ModelPricing;
+
 /// Stored per-model preferences.
 #[derive(Debug, Clone)]
 pub struct ModelPref {
@@ -80,7 +82,9 @@ pub struct Watch {
 
 /// A file imported into a space's fileset. `status` is "ok", "no text
 /// (scanned?)", "unsupported", or "error: …"; extraction text lives in the
-/// `file_chunks` FTS table, not here.
+/// `cache.file_chunks` FTS table. `status`/`mtime` are this device's derived
+/// index state from `cache.file_index_state` — a cold cache reports
+/// "not indexed"/0 until the next rescan re-derives them.
 #[derive(Debug, Clone)]
 pub struct FileRow {
     pub id: String,
@@ -103,9 +107,9 @@ pub struct Message {
     pub reasoning: Option<String>,
     pub tokens: Option<i64>,
     pub secs: Option<f64>,
-    /// USD cost of the request that produced this reply, at catalog list
-    /// price (`None` when unknown — non-`OpenRouter` backends, or replies
-    /// logged before pricing existed).
+    /// USD cost of the request that produced this reply: provider-reported
+    /// when available, otherwise a cache-aware catalog estimate. `None` when
+    /// neither source is available.
     pub cost: Option<f64>,
     /// Past-tense flavour phrase for the completion line, e.g. "Vibed".
     pub phrase: Option<String>,
@@ -120,6 +124,249 @@ pub struct Message {
 /// Name of the always-present, undeletable space that sessions default into.
 pub const DEFAULT_SPACE: &str = "default";
 
+/// Schema version of the durable db, tracked via `PRAGMA user_version`.
+/// Legacy dbs (never versioned) are 0 and get one-time column adds plus the
+/// device-local table move into `cache.db`; fresh dbs are created complete
+/// and stamped 1 immediately.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Columns added since the v1 schema. Fresh dbs declare them inline; legacy
+/// dbs get them via `user_version`-gated `ALTER TABLE` adds guarded by
+/// `PRAGMA table_info` (the only tolerated "duplicate" is an existing
+/// column — real errors propagate). `files.mtime` is deliberately absent:
+/// it moved to `cache.file_index_state` and stays a dead column on legacy
+/// dbs (see the roadmap, Phase 1).
+const LEGACY_COLUMN_ADDS: &[(&str, &str, &str)] = &[
+    (
+        "messages",
+        "model",
+        "ALTER TABLE messages ADD COLUMN model TEXT",
+    ),
+    (
+        "messages",
+        "reasoning",
+        "ALTER TABLE messages ADD COLUMN reasoning TEXT",
+    ),
+    (
+        "messages",
+        "tokens",
+        "ALTER TABLE messages ADD COLUMN tokens INTEGER",
+    ),
+    (
+        "messages",
+        "secs",
+        "ALTER TABLE messages ADD COLUMN secs REAL",
+    ),
+    (
+        "messages",
+        "cost",
+        "ALTER TABLE messages ADD COLUMN cost REAL",
+    ),
+    (
+        "messages",
+        "phrase",
+        "ALTER TABLE messages ADD COLUMN phrase TEXT",
+    ),
+    (
+        "messages",
+        "persona",
+        "ALTER TABLE messages ADD COLUMN persona TEXT",
+    ),
+    (
+        "model_prefs",
+        "reasoning",
+        "ALTER TABLE model_prefs ADD COLUMN reasoning TEXT",
+    ),
+    (
+        "model_prefs",
+        "updated_at",
+        "ALTER TABLE model_prefs ADD COLUMN updated_at TEXT",
+    ),
+    (
+        "sessions",
+        "slug",
+        "ALTER TABLE sessions ADD COLUMN slug TEXT",
+    ),
+    (
+        "sessions",
+        "space_id",
+        "ALTER TABLE sessions ADD COLUMN space_id TEXT",
+    ),
+    (
+        "sessions",
+        "compact_summary",
+        "ALTER TABLE sessions ADD COLUMN compact_summary TEXT",
+    ),
+    (
+        "sessions",
+        "compact_through",
+        "ALTER TABLE sessions ADD COLUMN compact_through INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "sessions",
+        "web_mode",
+        "ALTER TABLE sessions ADD COLUMN web_mode INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "sessions",
+        "swarm_mode",
+        "ALTER TABLE sessions ADD COLUMN swarm_mode INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "sessions",
+        "kind",
+        "ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'",
+    ),
+    (
+        "sessions",
+        "research_parent_id",
+        "ALTER TABLE sessions ADD COLUMN research_parent_id TEXT",
+    ),
+    (
+        "session_sources",
+        "flag",
+        "ALTER TABLE session_sources ADD COLUMN flag TEXT",
+    ),
+    (
+        "session_sources",
+        "updated_at",
+        "ALTER TABLE session_sources ADD COLUMN updated_at TEXT",
+    ),
+    (
+        "usage_log",
+        "cost_is_provider",
+        "ALTER TABLE usage_log ADD COLUMN cost_is_provider INTEGER",
+    ),
+    (
+        "usage_log",
+        "sync_id",
+        "ALTER TABLE usage_log ADD COLUMN sync_id TEXT",
+    ),
+    (
+        "usage_log",
+        "updated_at",
+        "ALTER TABLE usage_log ADD COLUMN updated_at TEXT",
+    ),
+    (
+        "app_settings",
+        "scope",
+        "ALTER TABLE app_settings ADD COLUMN scope TEXT NOT NULL DEFAULT 'sync'",
+    ),
+    (
+        "app_settings",
+        "updated_at",
+        "ALTER TABLE app_settings ADD COLUMN updated_at TEXT",
+    ),
+    (
+        "spaces",
+        "updated_at",
+        "ALTER TABLE spaces ADD COLUMN updated_at TEXT",
+    ),
+    (
+        "files",
+        "updated_at",
+        "ALTER TABLE files ADD COLUMN updated_at TEXT",
+    ),
+    (
+        "citations",
+        "sync_id",
+        "ALTER TABLE citations ADD COLUMN sync_id TEXT",
+    ),
+    (
+        "watches",
+        "updated_at",
+        "ALTER TABLE watches ADD COLUMN updated_at TEXT",
+    ),
+];
+
+/// The device-local cache db living next to the durable db: `cache.db` in
+/// the same directory as `nexus.db`. Disposable — derived index state
+/// (chunks, embeddings, fetched pages, price catalog) that rebuilds on
+/// demand, so backups exclude it and restores drop it.
+pub fn cache_path_for(db_path: &std::path::Path) -> std::path::PathBuf {
+    db_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(
+            || std::path::PathBuf::from("cache.db"),
+            |p| p.join("cache.db"),
+        )
+}
+
+/// Open a connection to a durable db with its sibling `cache.db` attached
+/// as schema `cache`. Cross-db queries (file chunks, fetched pages, price
+/// catalog) run on one connection through the `cache.` prefix; cache-only
+/// queries use unqualified names so they also work on a standalone
+/// cache-only connection (the schema fallback resolves them). Tool
+/// connections use this directly; `Db::open` wraps it in migrations.
+pub fn open_attached(db_path: &std::path::Path) -> Result<Connection> {
+    let conn =
+        Connection::open(db_path).with_context(|| format!("opening db {}", db_path.display()))?;
+    let cache = cache_path_for(db_path);
+    let escaped = cache.display().to_string().replace('\'', "''");
+    conn.execute_batch(&format!("ATTACH DATABASE '{escaped}' AS cache"))
+        .with_context(|| format!("attaching cache db {}", cache.display()))?;
+    migrate_cache(&conn, "cache")?;
+    Ok(conn)
+}
+
+/// Create the device-local cache schema on `conn` under the given schema
+/// name — `cache` on a main-db connection from `open_attached`, or `main`
+/// on a standalone cache-only connection.
+pub fn migrate_cache(conn: &Connection, schema: &str) -> Result<()> {
+    conn.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS {schema}.web_cache (
+            url_norm   TEXT PRIMARY KEY,
+            url        TEXT NOT NULL,
+            title      TEXT,
+            text       TEXT NOT NULL,
+            fetched_at TEXT NOT NULL
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS {schema}.file_chunks USING fts5(
+            file_id UNINDEXED,
+            seq UNINDEXED,
+            location UNINDEXED,
+            text
+        );
+        CREATE TABLE IF NOT EXISTS {schema}.chunk_embeddings (
+            file_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            vec BLOB NOT NULL,
+            PRIMARY KEY (file_id, seq)
+        );
+        CREATE TABLE IF NOT EXISTS {schema}.model_prices (
+            model_id TEXT PRIMARY KEY,
+            backend TEXT NOT NULL,
+            prompt_price REAL NOT NULL,
+            completion_price REAL NOT NULL,
+            cache_read_price REAL,
+            cache_write_price REAL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS {schema}.file_index_state (
+            file_id TEXT PRIMARY KEY,
+            mtime INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );",
+    ))?;
+    Ok(())
+}
+
+/// Whether `table` in the **main** schema has `column` — the guard for
+/// legacy column adds. Explicitly main-scoped: `PRAGMA table_info` would
+/// otherwise resolve names across the attached `cache` schema too.
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA main.table_info({table})"))?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 // ponytail: rusqlite is synchronous and called inline on the UI task. Writes are
 // tiny single-user local inserts, so no spawn_blocking. Move to a blocking pool
 // only if the db ever lives on slow/remote storage.
@@ -129,8 +376,7 @@ pub struct Db {
 
 impl Db {
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        let conn =
-            Connection::open(path).with_context(|| format!("opening db {}", path.display()))?;
+        let conn = open_attached(path).with_context(|| format!("opening db {}", path.display()))?;
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
@@ -138,9 +384,10 @@ impl Db {
 
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
-        let db = Db {
-            conn: Connection::open_in_memory()?,
-        };
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("ATTACH DATABASE ':memory:' AS cache")?;
+        migrate_cache(&conn, "cache")?;
+        let db = Db { conn };
         db.migrate()?;
         Ok(db)
     }
@@ -173,16 +420,21 @@ impl Db {
             CREATE TABLE IF NOT EXISTS model_prefs (
                 id TEXT PRIMARY KEY,
                 favorite INTEGER NOT NULL DEFAULT 0,
-                last_used TEXT
+                last_used TEXT,
+                reasoning TEXT,
+                updated_at TEXT
             );
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
+                value TEXT NOT NULL,
+                scope TEXT NOT NULL DEFAULT 'sync',
+                updated_at TEXT
             );
             CREATE TABLE IF NOT EXISTS spaces (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                updated_at TEXT
             );
             CREATE TABLE IF NOT EXISTS files (
                 id TEXT PRIMARY KEY,
@@ -190,31 +442,13 @@ impl Db {
                 name TEXT NOT NULL,
                 hash TEXT NOT NULL,
                 size INTEGER NOT NULL,
-                status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
                 UNIQUE(space_id, name)
-            );
-            CREATE VIRTUAL TABLE IF NOT EXISTS file_chunks USING fts5(
-                file_id UNINDEXED,
-                seq UNINDEXED,
-                location UNINDEXED,
-                text
-            );
-            CREATE TABLE IF NOT EXISTS chunk_embeddings (
-                file_id TEXT NOT NULL,
-                seq INTEGER NOT NULL,
-                vec BLOB NOT NULL,
-                PRIMARY KEY (file_id, seq)
-            );
-            CREATE TABLE IF NOT EXISTS web_cache (
-                url_norm   TEXT PRIMARY KEY,
-                url        TEXT NOT NULL,
-                title      TEXT,
-                text       TEXT NOT NULL,
-                fetched_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS citations (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                sync_id     TEXT NOT NULL,
                 space_id    TEXT NOT NULL,
                 report_file TEXT NOT NULL,
                 url         TEXT NOT NULL,
@@ -224,6 +458,8 @@ impl Db {
             CREATE TABLE IF NOT EXISTS session_sources (
                 session_id TEXT NOT NULL,
                 url_norm   TEXT NOT NULL,
+                flag TEXT,
+                updated_at TEXT,
                 PRIMARY KEY (session_id, url_norm)
             );
             CREATE TABLE IF NOT EXISTS watches (
@@ -232,7 +468,8 @@ impl Db {
                 topic          TEXT NOT NULL,
                 interval_hours INTEGER NOT NULL,
                 session_id     TEXT NOT NULL,
-                last_run_at    TEXT
+                last_run_at    TEXT,
+                updated_at     TEXT
             );
             CREATE TABLE IF NOT EXISTS swarm_personas (
                 session_id TEXT NOT NULL,
@@ -245,6 +482,7 @@ impl Db {
                 ON swarm_personas(session_id, ord);
             CREATE TABLE IF NOT EXISTS usage_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sync_id TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 session_id TEXT,
                 space_id TEXT,
@@ -254,40 +492,122 @@ impl Db {
                 completion_tokens INTEGER NOT NULL,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
-                cost REAL
+                cost REAL,
+                cost_is_provider INTEGER,
+                updated_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at);
             CREATE INDEX IF NOT EXISTS idx_usage_log_model ON usage_log(model);
-            CREATE TABLE IF NOT EXISTS model_prices (
-                model_id TEXT PRIMARY KEY,
-                backend TEXT NOT NULL,
-                prompt_price REAL NOT NULL,
-                completion_price REAL NOT NULL,
-                updated_at TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS sync_tombstones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                table_name TEXT NOT NULL,
+                row_id TEXT NOT NULL,
+                deleted_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_sync_tombstones_table ON sync_tombstones(table_name, row_id);
+            CREATE TABLE IF NOT EXISTS device_meta (
+                device_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sync_state (
+                peer_id TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                pull_cursor TEXT,
+                push_cursor TEXT,
+                last_synced_at TEXT,
+                PRIMARY KEY (peer_id, table_name)
             );",
         )?;
-        // Columns added after v1; ignore "duplicate column" on existing dbs.
-        for stmt in [
-            "ALTER TABLE messages ADD COLUMN model TEXT",
-            "ALTER TABLE messages ADD COLUMN reasoning TEXT",
-            "ALTER TABLE messages ADD COLUMN tokens INTEGER",
-            "ALTER TABLE messages ADD COLUMN secs REAL",
-            "ALTER TABLE messages ADD COLUMN cost REAL",
-            "ALTER TABLE messages ADD COLUMN phrase TEXT",
-            "ALTER TABLE model_prefs ADD COLUMN reasoning TEXT",
-            "ALTER TABLE sessions ADD COLUMN slug TEXT",
-            "ALTER TABLE sessions ADD COLUMN space_id TEXT",
-            "ALTER TABLE sessions ADD COLUMN compact_summary TEXT",
-            "ALTER TABLE sessions ADD COLUMN compact_through INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE sessions ADD COLUMN web_mode INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE session_sources ADD COLUMN flag TEXT",
-            "ALTER TABLE sessions ADD COLUMN swarm_mode INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE messages ADD COLUMN persona TEXT",
-            "ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'",
-            "ALTER TABLE sessions ADD COLUMN research_parent_id TEXT",
-        ] {
-            let _ = self.conn.execute(stmt, []);
+        // user_version-gated migrations. Legacy dbs (version 0) get the
+        // column adds they may still lack — guarded by `PRAGMA table_info`,
+        // the only tolerated "duplicate" — plus a one-time move of the
+        // device-local tables into cache.db. Real errors propagate; nothing
+        // is swallowed.
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < SCHEMA_VERSION {
+            for (table, column, ddl) in LEGACY_COLUMN_ADDS {
+                if !has_column(&self.conn, table, column)? {
+                    self.conn.execute(ddl, []).with_context(|| {
+                        format!("migrating column {table}.{column} (user_version {version})")
+                    })?;
+                }
+            }
+            // Device-local ids for rows whose AUTOINCREMENT ids can't be
+            // sync identity.
+            for table in ["citations", "usage_log"] {
+                let ids: Vec<i64> = {
+                    let mut stmt = self
+                        .conn
+                        .prepare(&format!("SELECT id FROM {table} WHERE sync_id IS NULL"))?;
+                    let rows = stmt.query_map([], |r| r.get(0))?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                for id in ids {
+                    self.conn.execute(
+                        &format!("UPDATE {table} SET sync_id = ?1 WHERE id = ?2"),
+                        (Uuid::new_v4().to_string(), id),
+                    )?;
+                }
+            }
+            // Unique indexes on the backfilled ids (fresh dbs already have
+            // the columns inline; the indexes must wait until legacy dbs
+            // have theirs).
+            self.conn.execute_batch(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_citations_sync_id ON citations(sync_id);
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_log_sync_id ON usage_log(sync_id);",
+            )?;
+            // One-time move of the device-local tables into cache.db (they
+            // were the same device's local store before the split, so the
+            // copy preserves behavior exactly). Each copy is guarded by
+            // table existence — fresh dbs have nothing to move.
+            let now = Utc::now().to_rfc3339();
+            if has_column(&self.conn, "files", "mtime")? {
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO cache.file_index_state (file_id, mtime, status, updated_at)
+                     SELECT id, mtime, status, ?1 FROM files",
+                    [&now],
+                )?;
+            }
+            if has_column(&self.conn, "web_cache", "url_norm")? {
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO cache.web_cache (url_norm, url, title, text, fetched_at)
+                     SELECT url_norm, url, title, text, fetched_at FROM web_cache",
+                    [],
+                )?;
+            }
+            if has_column(&self.conn, "chunk_embeddings", "file_id")? {
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO cache.chunk_embeddings (file_id, seq, vec)
+                     SELECT file_id, seq, vec FROM chunk_embeddings",
+                    [],
+                )?;
+            }
+            if has_column(&self.conn, "file_chunks", "file_id")? {
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO cache.file_chunks (file_id, seq, location, text)
+                     SELECT file_id, seq, location, text FROM file_chunks",
+                    [],
+                )?;
+            }
+            // model_prices may predate its cache-rate columns; copy with the
+            // widest shape the legacy table actually has.
+            if has_column(&self.conn, "model_prices", "model_id")? {
+                let cols = if has_column(&self.conn, "model_prices", "cache_read_price")? {
+                    "model_id, backend, prompt_price, completion_price,\n                        cache_read_price, cache_write_price, updated_at"
+                } else {
+                    "model_id, backend, prompt_price, completion_price, updated_at"
+                };
+                self.conn.execute(
+                    &format!(
+                        "INSERT OR IGNORE INTO cache.model_prices ({cols}) SELECT {cols} FROM model_prices"
+                    ),
+                    [],
+                )?;
+            }
+            self.conn
+                .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
         }
         // Migration: remove the message_images table — images are now embedded
         // as markdown `![alt](file)` in message content.
@@ -858,8 +1178,8 @@ impl Db {
     }
 
     /// Insert an assistant reply with its model, reasoning trace, and stats.
-    /// `cost` is the request's USD total at catalog list price (`None` when
-    /// the model's price is unknown).
+    /// `cost` is the provider-reported USD total or a cache-aware catalog
+    /// estimate (`None` when neither is available).
     /// Args mirror the messages table columns; ~25 call sites pass inline
     /// `None`s for unused fields, so a struct would churn all of them.
     #[allow(clippy::too_many_arguments)]
@@ -1006,6 +1326,9 @@ impl Db {
 
     /// Insert or replace a file row (unique per space+name). Returns the row id;
     /// an existing row keeps its id, so its chunks can be replaced by `file_id`.
+    /// The durable `files` row keeps only identity + content stats; `status`
+    /// is this device's derived index state and lives in `cache.file_index_state`
+    /// (a cold cache shows "not indexed" until the next rescan re-derives it).
     pub fn upsert_file(
         &self,
         space_id: &str,
@@ -1014,31 +1337,48 @@ impl Db {
         size: i64,
         status: &str,
     ) -> Result<String> {
+        let now = Utc::now().to_rfc3339();
         if let Ok(existing) = self.conn.query_row(
             "SELECT id FROM files WHERE space_id = ?1 AND name = ?2",
             (space_id, name),
             |r| r.get::<_, String>(0),
         ) {
             self.conn.execute(
-                "UPDATE files SET hash = ?2, size = ?3, status = ?4 WHERE id = ?1",
-                (&existing, hash, size, status),
+                "UPDATE files SET hash = ?2, size = ?3, updated_at = ?4 WHERE id = ?1",
+                (&existing, hash, size, &now),
+            )?;
+            self.conn.execute(
+                "INSERT INTO cache.file_index_state (file_id, mtime, status, updated_at)
+                 VALUES (?1, 0, ?2, ?3)
+                 ON CONFLICT(file_id) DO UPDATE SET status = excluded.status,
+                     updated_at = excluded.updated_at",
+                (&existing, status, &now),
             )?;
             return Ok(existing);
         }
         let id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO files (id, space_id, name, hash, size, status, created_at)
+            "INSERT INTO files (id, space_id, name, hash, size, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            (&id, space_id, name, hash, size, status, &now),
+            (&id, space_id, name, hash, size, &now, &now),
+        )?;
+        self.conn.execute(
+            "INSERT INTO cache.file_index_state (file_id, mtime, status, updated_at)
+             VALUES (?1, 0, ?2, ?3)",
+            (&id, status, &now),
         )?;
         Ok(id)
     }
 
     pub fn list_files(&self, space_id: &str) -> Result<Vec<FileRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, hash, size, status, mtime FROM files
-             WHERE space_id = ?1 ORDER BY name ASC",
+            "SELECT files.id, files.name, files.hash, files.size,
+                    COALESCE(cache.file_index_state.status, 'not indexed'),
+                    COALESCE(cache.file_index_state.mtime, 0)
+             FROM files
+             LEFT JOIN cache.file_index_state
+                 ON cache.file_index_state.file_id = files.id
+             WHERE files.space_id = ?1 ORDER BY files.name ASC",
         )?;
         let rows = stmt.query_map([space_id], |r| {
             Ok(FileRow {
@@ -1053,28 +1393,62 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Whether a file has a `file_index_state` row — i.e. this device has
+    /// derived index state for it. A missing row means a cold cache (fresh
+    /// restore, deleted cache.db): the rescan must re-extract rather than
+    /// trust the stat skip.
+    pub fn file_indexed(&self, file_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cache.file_index_state WHERE file_id = ?1)",
+            [file_id],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn delete_file(&self, file_id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
+        self.conn.execute(
+            "DELETE FROM cache.file_chunks WHERE file_id = ?1",
+            [file_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM cache.chunk_embeddings WHERE file_id = ?1",
+            [file_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM cache.file_index_state WHERE file_id = ?1",
+            [file_id],
+        )?;
         self.conn
             .execute("DELETE FROM files WHERE id = ?1", [file_id])?;
         Ok(())
     }
 
-    /// Record the disk mtime a file was indexed at (see `FileRow::mtime`).
+    /// Record the disk mtime a file was indexed at (see `FileRow::mtime`),
+    /// in `cache.file_index_state`. A missing row (cold cache) is created
+    /// with the current status.
     pub fn set_file_mtime(&self, file_id: &str, mtime: i64) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
         self.conn.execute(
-            "UPDATE files SET mtime = ?2 WHERE id = ?1",
-            (file_id, mtime),
+            "INSERT INTO cache.file_index_state (file_id, mtime, status, updated_at)
+             VALUES (?1, ?2, '', ?3)
+             ON CONFLICT(file_id) DO UPDATE SET mtime = excluded.mtime,
+                 updated_at = excluded.updated_at",
+            (file_id, mtime, &now),
         )?;
         Ok(())
     }
 
-    /// Update a file's status column (e.g. "ok", "ocr…", or an error message).
+    /// Update a file's derived status (e.g. "ok", "ocr…", or an error
+    /// message) in `cache.file_index_state`. A missing row (cold cache) is
+    /// created with the current mtime.
     pub fn set_file_status(&self, file_id: &str, status: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
         self.conn.execute(
-            "UPDATE files SET status = ?2 WHERE id = ?1",
-            (file_id, status),
+            "INSERT INTO cache.file_index_state (file_id, mtime, status, updated_at)
+             VALUES (?1, 0, ?2, ?3)
+             ON CONFLICT(file_id) DO UPDATE SET status = excluded.status,
+                 updated_at = excluded.updated_at",
+            (file_id, status, &now),
         )?;
         Ok(())
     }
@@ -1106,15 +1480,20 @@ impl Db {
 
     /// Replace a file's indexed chunks. `chunks` are `(location, text)` in
     /// order. Any stored embeddings are dropped too — they described the old
-    /// chunk texts, and the embedder backfills the new ones.
+    /// chunk texts, and the embedder backfills the new ones. All of this is
+    /// device-local derived state in `cache.db`.
     pub fn set_file_chunks(&self, file_id: &str, chunks: &[(String, String)]) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM file_chunks WHERE file_id = ?1", [file_id])?;
-        self.conn
-            .execute("DELETE FROM chunk_embeddings WHERE file_id = ?1", [file_id])?;
+        self.conn.execute(
+            "DELETE FROM cache.file_chunks WHERE file_id = ?1",
+            [file_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM cache.chunk_embeddings WHERE file_id = ?1",
+            [file_id],
+        )?;
         for (seq, (location, text)) in chunks.iter().enumerate() {
             self.conn.execute(
-                "INSERT INTO file_chunks (file_id, seq, location, text) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO cache.file_chunks (file_id, seq, location, text) VALUES (?1, ?2, ?3, ?4)",
                 (file_id, seq as i64, location, text),
             )?;
         }
@@ -1140,7 +1519,7 @@ impl Db {
     /// A file's chunk texts as `(seq, text)`, in order — the embedder's input.
     pub fn file_chunk_texts(&self, file_id: &str) -> Result<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT CAST(seq AS INTEGER), text FROM file_chunks
+            "SELECT CAST(seq AS INTEGER), text FROM cache.file_chunks
              WHERE file_id = ?1 ORDER BY CAST(seq AS INTEGER) ASC",
         )?;
         let rows = stmt.query_map([file_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -1153,6 +1532,8 @@ impl Db {
     }
 
     /// Record a research report's cited sources for the citation index.
+    /// Each row gets a UUID `sync_id` — the AUTOINCREMENT `id` is only a
+    /// device-local cursor.
     pub fn add_citations(
         &self,
         space_id: &str,
@@ -1161,8 +1542,15 @@ impl Db {
     ) -> Result<()> {
         for (url, title) in citations {
             self.conn.execute(
-                "INSERT INTO citations (space_id, report_file, url, title) VALUES (?1, ?2, ?3, ?4)",
-                (space_id, report_file, url, title),
+                "INSERT INTO citations (sync_id, space_id, report_file, url, title)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                (
+                    Uuid::new_v4().to_string(),
+                    space_id,
+                    report_file,
+                    url,
+                    title,
+                ),
             )?;
         }
         Ok(())
@@ -1184,7 +1572,7 @@ impl Db {
     pub fn set_chunk_embeddings(&self, file_id: &str, vecs: &[(i64, Vec<f32>)]) -> Result<()> {
         for (seq, v) in vecs {
             self.conn.execute(
-                "INSERT OR REPLACE INTO chunk_embeddings (file_id, seq, vec) VALUES (?1, ?2, ?3)",
+                "INSERT OR REPLACE INTO cache.chunk_embeddings (file_id, seq, vec) VALUES (?1, ?2, ?3)",
                 (file_id, seq, vec_to_blob(v)),
             )?;
         }
@@ -1339,8 +1727,8 @@ pub fn search_session_sources(
     query: &str,
 ) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
-        "SELECT web_cache.url, web_cache.text FROM session_sources
-         JOIN web_cache ON web_cache.url_norm = session_sources.url_norm
+        "SELECT cache.web_cache.url, cache.web_cache.text FROM session_sources
+         JOIN cache.web_cache ON cache.web_cache.url_norm = session_sources.url_norm
          WHERE session_sources.session_id = ?1",
     )?;
     let rows = stmt.query_map([session_id], |r| {
@@ -1396,7 +1784,10 @@ pub fn is_fresh(fetched_at: &str, now: chrono::DateTime<Utc>) -> bool {
 
 /// A cached fetched page: (title, text, `fetched_at` rfc3339), or None on a
 /// cache miss. Free function — the toolbox opens its own short-lived
-/// connection by path, same as the file-search queries.
+/// connection by path, same as the file-search queries. The `web_cache`
+/// name is deliberately unqualified: it resolves to the attached `cache`
+/// schema on a main-db connection, or to `main` on a standalone cache-only
+/// connection.
 pub fn cache_get(conn: &Connection, url_norm: &str) -> Result<Option<(String, String, String)>> {
     let row = conn.query_row(
         "SELECT COALESCE(title, ''), text, fetched_at FROM web_cache WHERE url_norm = ?1",
@@ -1429,12 +1820,13 @@ pub fn cache_put(
 
 /// Ids of files (in one space) that have chunks but not a vector per chunk —
 /// the embedder's work queue, which doubles as the pre-upgrade backfill.
+/// Cross-db: `files` is durable, the chunk tables are device-local.
 pub fn files_missing_embeddings(conn: &Connection, space_id: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT files.id FROM files
          WHERE files.space_id = ?1
-           AND (SELECT COUNT(*) FROM file_chunks WHERE file_chunks.file_id = files.id) >
-               (SELECT COUNT(*) FROM chunk_embeddings WHERE chunk_embeddings.file_id = files.id)",
+           AND (SELECT COUNT(*) FROM cache.file_chunks WHERE cache.file_chunks.file_id = files.id) >
+               (SELECT COUNT(*) FROM cache.chunk_embeddings WHERE cache.chunk_embeddings.file_id = files.id)",
     )?;
     let rows = stmt.query_map([space_id], |r| r.get(0))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1451,11 +1843,13 @@ pub fn semantic_chunks(
     limit: usize,
 ) -> Result<Vec<(String, String, String, f32)>> {
     let mut stmt = conn.prepare(
-        "SELECT files.name, file_chunks.location, file_chunks.text, chunk_embeddings.vec
-         FROM chunk_embeddings
-         JOIN files ON files.id = chunk_embeddings.file_id
-         JOIN file_chunks ON file_chunks.file_id = chunk_embeddings.file_id
-                         AND CAST(file_chunks.seq AS INTEGER) = chunk_embeddings.seq
+        "SELECT files.name, cache.file_chunks.location, cache.file_chunks.text,
+                cache.chunk_embeddings.vec
+         FROM cache.chunk_embeddings
+         JOIN files ON files.id = cache.chunk_embeddings.file_id
+         JOIN cache.file_chunks
+             ON cache.file_chunks.file_id = cache.chunk_embeddings.file_id
+            AND CAST(cache.file_chunks.seq AS INTEGER) = cache.chunk_embeddings.seq
          WHERE files.space_id = ?1",
     )?;
     let rows = stmt.query_map([space_id], |r| {
@@ -1607,9 +2001,9 @@ pub fn price_name(model: &str) -> &str {
 /// cross-backend fallback as `Db::model_price`, but against an in-memory
 /// snapshot so a 28k-row backfill needs no per-row SQL).
 fn catalog_price<'a>(
-    prices: &'a std::collections::HashMap<String, (f64, f64)>,
+    prices: &'a std::collections::HashMap<String, ModelPricing>,
     model: &str,
-) -> Option<&'a (f64, f64)> {
+) -> Option<&'a ModelPricing> {
     if let Some(price) = prices.get(model) {
         return Some(price);
     }
@@ -1625,6 +2019,40 @@ fn catalog_price<'a>(
         })
         .min_by_key(|(id, _)| id.len()) // shortest vendor wins, deterministic
         .map(|(_, price)| price)
+}
+
+/// Price a token breakdown. Prompt totals include cache reads/writes, so each
+/// cached bucket replaces (rather than adds to) the ordinary prompt rate.
+fn catalog_request_cost(
+    price: ModelPricing,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+) -> f64 {
+    let reads = cache_read_tokens.min(prompt_tokens);
+    let writes = cache_creation_tokens.min(prompt_tokens - reads);
+    let ordinary = prompt_tokens - reads - writes;
+    let read_price = price.cache_read.unwrap_or(price.prompt);
+    let write_price = price.cache_write.unwrap_or(price.prompt);
+    (ordinary as f64 * price.prompt
+        + reads as f64 * read_price
+        + writes as f64 * write_price
+        + completion_tokens as f64 * price.completion)
+        / 1e6
+}
+
+struct CostBackfillRow {
+    id: i64,
+    backend: String,
+    model: String,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    old_cost: Option<f64>,
+    /// `None` identifies rows written before cost provenance was tracked.
+    cost_is_provider: Option<bool>,
 }
 
 /// Lifetime token/cost totals across every logged request.
@@ -1698,14 +2126,17 @@ impl Db {
         cache_read_tokens: u64,
         cache_creation_tokens: u64,
         cost: Option<f64>,
+        cost_is_provider: bool,
         session_id: Option<&str>,
         space_id: Option<&str>,
     ) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO usage_log (created_at, session_id, space_id, backend, model,
-                prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens, cost)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO usage_log (sync_id, created_at, session_id, space_id, backend, model,
+                prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens,
+                cost, cost_is_provider, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             (
+                Uuid::new_v4().to_string(),
                 Utc::now().to_rfc3339(),
                 session_id,
                 space_id,
@@ -1716,6 +2147,8 @@ impl Db {
                 cache_read_tokens as i64,
                 cache_creation_tokens as i64,
                 cost,
+                i64::from(cost_is_provider),
+                Utc::now().to_rfc3339(),
             ),
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -1725,6 +2158,7 @@ impl Db {
     /// `OpenCode` Zen splits accounting across two streamed events (real
     /// usage, then the provider-reported cost); the second event updates the
     /// row the first created instead of inserting a duplicate.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_usage(
         &self,
         row_id: i64,
@@ -1733,85 +2167,98 @@ impl Db {
         cache_read_tokens: u64,
         cache_creation_tokens: u64,
         cost: Option<f64>,
+        cost_is_provider: bool,
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE usage_log SET prompt_tokens = ?1, completion_tokens = ?2,
-                cache_read_tokens = ?3, cache_creation_tokens = ?4, cost = ?5
-             WHERE id = ?6",
+                cache_read_tokens = ?3, cache_creation_tokens = ?4, cost = ?5,
+                cost_is_provider = ?6
+             WHERE id = ?7",
             (
                 prompt_tokens as i64,
                 completion_tokens as i64,
                 cache_read_tokens as i64,
                 cache_creation_tokens as i64,
                 cost,
+                i64::from(cost_is_provider),
                 row_id,
             ),
         )?;
         Ok(())
     }
 
-    /// Cost of one completed request in USD at current catalog prices
-    /// (`None` when no price is known). Non-`OpenRouter` backends expose no
-    /// pricing API, so their models are priced via the `OpenRouter` catalog
-    /// entry for the same model (see `model_price`). Prompt tokens are
-    /// billed at the prompt rate even when served from cache; the catalog
-    /// has no separate cache-read rate.
+    /// Estimated cost of one completed request in USD at current catalog
+    /// prices (`None` when no price is known). Cache reads and writes use the
+    /// catalog's separate rates when present. Non-`OpenRouter` models fall
+    /// back to the matching `OpenRouter` catalog entry (see `model_price`).
     pub fn request_cost(
         &self,
         model: &str,
         prompt_tokens: u64,
         completion_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
     ) -> Option<f64> {
-        self.model_price(model)
-            .map(|(prompt_price, completion_price)| {
-                prompt_tokens as f64 / 1e6 * prompt_price
-                    + completion_tokens as f64 / 1e6 * completion_price
-            })
+        self.model_price(model).map(|price| {
+            catalog_request_cost(
+                price,
+                prompt_tokens,
+                completion_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+            )
+        })
     }
 
-    /// Reconcile every logged request's cost with the current `model_prices`
-    /// catalog: NULL rows (logged before pricing existed) get the exact
-    /// `tokens × price` total, and rows whose value no longer matches the
-    /// catalog (legacy unit bug, price changes) are recomputed. Non-`OpenRouter`
-    /// models are priced through their `OpenRouter` `vendor/name` twin, like
-    /// `model_price`. Existing costs for models without any catalog price are
-    /// left untouched — a model dropping out of the catalog shouldn't void
-    /// its history.
+    /// Reconcile estimated request costs with the current `model_prices`
+    /// catalog. Rows logged before pricing existed are filled, and stale
+    /// estimates (legacy unit bug, price changes, or ignored cache discounts)
+    /// are recomputed. Provider-reported costs are exact and never overwritten.
+    /// Non-`OpenRouter` models are priced through their `OpenRouter`
+    /// `vendor/name` twin, like `model_price`. Existing costs for models with
+    /// no current catalog entry are left untouched.
+    ///
     /// Idempotent — unchanged rows are not rewritten — so it can run after
-    /// every catalog refresh and whenever the `/usage` popup opens.
-    /// Returns how many rows were visited.
+    /// every catalog refresh and whenever the `/usage` popup opens. Returns
+    /// how many rows were visited.
     pub fn backfill_usage_costs(&mut self) -> Result<usize> {
-        // The catalog endpoint reports USD per token while every cost
-        // formula here works in USD per 1M tokens. Heal a legacy
-        // per-token-shaped catalog (MAX < $0.001/M is impossible for a
-        // real catalog — o1-pro alone lists at $150/M) so backfills
-        // computed against it produce real totals. Self-limiting: once
-        // scaled (or refreshed by the fixed fetch path) it no longer
-        // matches the shape.
+        // The catalog endpoint reports USD per token while every cost formula
+        // here uses USD per 1M. Heal a legacy per-token-shaped catalog before
+        // computing costs. NULL cache rates remain NULL under multiplication.
         let max_price: f64 = self.conn.query_row(
-            "SELECT COALESCE(MAX(prompt_price), 0) FROM model_prices",
+            "SELECT COALESCE(MAX(prompt_price), 0) FROM cache.model_prices",
             [],
             |r| r.get(0),
         )?;
         if max_price > 0.0 && max_price < 0.001 {
             self.conn.execute(
-                "UPDATE model_prices
-                 SET prompt_price = prompt_price * 1e6, completion_price = completion_price * 1e6",
+                "UPDATE cache.model_prices SET
+                    prompt_price = prompt_price * 1e6,
+                    completion_price = completion_price * 1e6,
+                    cache_read_price = cache_read_price * 1e6,
+                    cache_write_price = cache_write_price * 1e6",
                 [],
             )?;
         }
         // Snapshot the catalog, then rewrite every usage row in one
         // transaction. 28k rows is a few ms even on a file DB.
-        let mut prices: std::collections::HashMap<String, (f64, f64)> =
+        let mut prices: std::collections::HashMap<String, ModelPricing> =
             std::collections::HashMap::default();
         {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT model_id, prompt_price, completion_price FROM model_prices")?;
+            let mut stmt = self.conn.prepare(
+                "SELECT model_id, prompt_price, completion_price,
+                        cache_read_price, cache_write_price
+                 FROM cache.model_prices",
+            )?;
             let rows = stmt.query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    (r.get::<_, f64>(1)?, r.get::<_, f64>(2)?),
+                    ModelPricing {
+                        prompt: r.get(1)?,
+                        completion: r.get(2)?,
+                        cache_read: r.get(3)?,
+                        cache_write: r.get(4)?,
+                    },
                 ))
             })?;
             for row in rows {
@@ -1819,38 +2266,60 @@ impl Db {
                 prices.insert(model, price);
             }
         }
-        let rows: Vec<(i64, String, i64, i64, Option<f64>)> = {
+        let rows: Vec<CostBackfillRow> = {
             let mut stmt = self.conn.prepare(
-                "SELECT id, model, prompt_tokens, completion_tokens, cost FROM usage_log",
+                "SELECT id, backend, model, prompt_tokens, completion_tokens,
+                        cache_read_tokens, cache_creation_tokens, cost,
+                        cost_is_provider
+                 FROM usage_log",
             )?;
             let rows = stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, Option<f64>>(4)?,
-                ))
+                Ok(CostBackfillRow {
+                    id: r.get(0)?,
+                    backend: r.get(1)?,
+                    model: r.get(2)?,
+                    prompt_tokens: r.get::<_, i64>(3)? as u64,
+                    completion_tokens: r.get::<_, i64>(4)? as u64,
+                    cache_read_tokens: r.get::<_, i64>(5)? as u64,
+                    cache_creation_tokens: r.get::<_, i64>(6)? as u64,
+                    old_cost: r.get(7)?,
+                    cost_is_provider: r.get::<_, Option<i64>>(8)?.map(|v| v != 0),
+                })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         let tx = self.conn.transaction()?;
         {
-            let mut update = tx.prepare("UPDATE usage_log SET cost = ?2 WHERE id = ?1")?;
-            for (id, model, prompt, completion, old) in &rows {
-                let recomputed = catalog_price(&prices, model)
-                    .map(|(p, c)| *prompt as f64 / 1e6 * p + *completion as f64 / 1e6 * c);
-                // Fill rows logged before pricing existed, and heal values
-                // computed against a stale catalog. Never erase an existing
-                // cost when no price is currently known — a model dropping
-                // out of the catalog shouldn't void its history.
-                let write = match (recomputed, old) {
-                    (Some(c), None) => Some(c),
-                    (Some(c), Some(o)) if (c - *o).abs() > 1e-12 => Some(c),
+            let mut update =
+                tx.prepare("UPDATE usage_log SET cost = ?2, cost_is_provider = 0 WHERE id = ?1")?;
+            for row in &rows {
+                // Before provenance was added, OpenCode was the only backend
+                // whose costs came from the provider. Preserve those legacy
+                // exact values; all new rows carry an explicit true/false bit.
+                let legacy_opencode_cost = row.cost_is_provider.is_none()
+                    && row.backend == "OpenCode Go"
+                    && row.old_cost.is_some();
+                if row.cost_is_provider == Some(true) || legacy_opencode_cost {
+                    continue;
+                }
+                let recomputed = catalog_price(&prices, &row.model).map(|price| {
+                    catalog_request_cost(
+                        *price,
+                        row.prompt_tokens,
+                        row.completion_tokens,
+                        row.cache_read_tokens,
+                        row.cache_creation_tokens,
+                    )
+                });
+                // Fill missing rows and heal stale estimates. Never erase an
+                // existing cost when a model drops out of the catalog.
+                let write = match (recomputed, row.old_cost) {
+                    (Some(cost), None) => Some(cost),
+                    (Some(cost), Some(old)) if (cost - old).abs() > 1e-12 => Some(cost),
                     _ => None,
                 };
                 if let Some(cost) = write {
-                    update.execute((id, cost))?;
+                    update.execute((row.id, cost))?;
                 }
             }
         }
@@ -1862,44 +2331,64 @@ impl Db {
     /// catalog is hundreds of models; per-row autocommits (each an fsync on
     /// the UI task) made the post-load pause noticeable. The `WHERE` clause
     /// also skips rows whose price didn't move, so re-fetches write nothing.
-    pub fn upsert_model_prices(&mut self, prices: &[(String, String, f64, f64)]) -> Result<()> {
+    pub fn upsert_model_prices(&mut self, prices: &[(String, String, ModelPricing)]) -> Result<()> {
         if prices.is_empty() {
             return Ok(());
         }
         let tx = self.conn.transaction()?;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO model_prices (model_id, backend, prompt_price, completion_price, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO cache.model_prices (model_id, backend, prompt_price, completion_price,
+                    cache_read_price, cache_write_price, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(model_id) DO UPDATE SET
                     prompt_price = excluded.prompt_price,
                     completion_price = excluded.completion_price,
+                    cache_read_price = excluded.cache_read_price,
+                    cache_write_price = excluded.cache_write_price,
                     updated_at = excluded.updated_at
-                 WHERE model_prices.prompt_price != excluded.prompt_price
-                    OR model_prices.completion_price != excluded.completion_price",
+                 WHERE cache.model_prices.prompt_price != excluded.prompt_price
+                    OR cache.model_prices.completion_price != excluded.completion_price
+                    OR cache.model_prices.cache_read_price IS NOT excluded.cache_read_price
+                    OR cache.model_prices.cache_write_price IS NOT excluded.cache_write_price",
             )?;
             let now = Utc::now().to_rfc3339();
-            for (model, backend, prompt, completion) in prices {
-                stmt.execute((model, backend, prompt, completion, &now))?;
+            for (model, backend, price) in prices {
+                stmt.execute((
+                    model,
+                    backend,
+                    price.prompt,
+                    price.completion,
+                    price.cache_read,
+                    price.cache_write,
+                    &now,
+                ))?;
             }
         }
         tx.commit()?;
         Ok(())
     }
 
-    /// Catalog price for a model, `(prompt, completion)` USD per 1M tokens.
-    /// Tries the exact `model_prices` row first (`OpenRouter` ids match
-    /// directly); if there is none, falls back to the `OpenRouter` catalog
-    /// entry for the same model — backend prefixes (`go:`, `openai:`,
-    /// `codex:`, `opencode:`) and the catalog's `vendor/` part are stripped
-    /// (`go:deepseek-v4-flash` → `deepseek/deepseek-v4-flash`). The other
-    /// backends' APIs expose no pricing, so `OpenRouter`'s list price for the
-    /// same model is the best available estimate.
-    pub fn model_price(&self, model: &str) -> Option<(f64, f64)> {
+    /// Catalog prices for a model in USD per 1M tokens. Tries the exact
+    /// `model_prices` row first (`OpenRouter` ids match directly); if there is
+    /// none, falls back to the `OpenRouter` catalog entry for the same model —
+    /// backend prefixes and the catalog's `vendor/` part are stripped. Other
+    /// backends expose no pricing, so the matching `OpenRouter` list price is
+    /// the best available estimate.
+    pub fn model_price(&self, model: &str) -> Option<ModelPricing> {
+        let read_price = |r: &rusqlite::Row| {
+            Ok(ModelPricing {
+                prompt: r.get(0)?,
+                completion: r.get(1)?,
+                cache_read: r.get(2)?,
+                cache_write: r.get(3)?,
+            })
+        };
         if let Ok(price) = self.conn.query_row(
-            "SELECT prompt_price, completion_price FROM model_prices WHERE model_id = ?1",
+            "SELECT prompt_price, completion_price, cache_read_price, cache_write_price
+             FROM cache.model_prices WHERE model_id = ?1",
             [model],
-            |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)),
+            read_price,
         ) {
             return Some(price);
         }
@@ -1911,12 +2400,13 @@ impl Db {
         // bare name appears under several vendors.
         self.conn
             .query_row(
-                "SELECT prompt_price, completion_price FROM model_prices
+                "SELECT prompt_price, completion_price, cache_read_price, cache_write_price
+                 FROM cache.model_prices
                  WHERE backend = 'OpenRouter'
                    AND substr(model_id, -length(?1) - 1) = '/' || ?1
                  ORDER BY length(model_id) LIMIT 1",
                 [name],
-                |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)),
+                read_price,
             )
             .ok()
     }
@@ -2115,9 +2605,9 @@ pub fn search_chunks(
         return Ok(Vec::new());
     }
     let mut stmt = conn.prepare(
-        "SELECT files.name, file_chunks.location,
+        "SELECT files.name, cache.file_chunks.location,
                 snippet(file_chunks, 3, '', '', '…', 24)
-         FROM file_chunks JOIN files ON files.id = file_chunks.file_id
+         FROM cache.file_chunks JOIN files ON files.id = cache.file_chunks.file_id
          WHERE file_chunks MATCH ?1 AND files.space_id = ?2
          ORDER BY bm25(file_chunks) LIMIT ?3",
     )?;
@@ -2130,10 +2620,10 @@ pub fn search_chunks(
 /// A file's full extracted text (chunks re-joined in order), by display name.
 pub fn file_text(conn: &Connection, space_id: &str, name: &str) -> Result<Option<String>> {
     let mut stmt = conn.prepare(
-        "SELECT file_chunks.text
-         FROM file_chunks JOIN files ON files.id = file_chunks.file_id
+        "SELECT cache.file_chunks.text
+         FROM cache.file_chunks JOIN files ON files.id = cache.file_chunks.file_id
          WHERE files.space_id = ?1 AND files.name = ?2
-         ORDER BY CAST(file_chunks.seq AS INTEGER) ASC",
+         ORDER BY CAST(cache.file_chunks.seq AS INTEGER) ASC",
     )?;
     let rows = stmt.query_map((space_id, name), |r| r.get::<_, String>(0))?;
     let parts = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2153,6 +2643,29 @@ pub fn count_files(conn: &Connection, space_id: &str) -> Result<u64> {
 mod tests {
     use super::*;
 
+    fn price(prompt: f64, completion: f64) -> ModelPricing {
+        ModelPricing {
+            prompt,
+            completion,
+            cache_read: None,
+            cache_write: None,
+        }
+    }
+
+    fn cache_price(
+        prompt: f64,
+        completion: f64,
+        cache_read: f64,
+        cache_write: f64,
+    ) -> ModelPricing {
+        ModelPricing {
+            prompt,
+            completion,
+            cache_read: Some(cache_read),
+            cache_write: Some(cache_write),
+        }
+    }
+
     #[test]
     fn is_fresh_true_under_24h_false_over() {
         let now = Utc::now();
@@ -2169,25 +2682,23 @@ mod tests {
         db.upsert_model_prices(&[(
             "anthropic/claude-3.5-sonnet".to_string(),
             "OpenRouter".to_string(),
-            3.0,
-            15.0,
+            price(3.0, 15.0),
         )])
         .unwrap();
         assert_eq!(
             db.model_price("anthropic/claude-3.5-sonnet"),
-            Some((3.0, 15.0))
+            Some(price(3.0, 15.0))
         );
-        // Re-upsert refreshes rather than duplicating.
+        // Re-upsert refreshes every rate rather than duplicating.
         db.upsert_model_prices(&[(
             "anthropic/claude-3.5-sonnet".to_string(),
             "OpenRouter".to_string(),
-            4.0,
-            16.0,
+            cache_price(4.0, 16.0, 0.4, 5.0),
         )])
         .unwrap();
         assert_eq!(
             db.model_price("anthropic/claude-3.5-sonnet"),
-            Some((4.0, 16.0))
+            Some(cache_price(4.0, 16.0, 0.4, 5.0))
         );
         assert_eq!(db.model_price("unknown/model"), None);
 
@@ -2200,12 +2711,24 @@ mod tests {
             70,
             20,
             Some(0.00056),
+            true,
             Some("s1"),
             Some("space-a"),
         )
         .unwrap();
-        db.log_usage("Codex", "gpt-5.1-codex", 50, 5, 0, 0, None, None, None)
-            .unwrap();
+        db.log_usage(
+            "Codex",
+            "gpt-5.1-codex",
+            50,
+            5,
+            0,
+            0,
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
 
         let totals = db.usage_totals(None).unwrap();
         assert_eq!(totals.requests, 2);
@@ -2237,10 +2760,10 @@ mod tests {
         // Rows with explicit timestamps (raw insert: log_usage stamps now).
         let insert = |created: &str| {
             db.raw().execute(
-                "INSERT INTO usage_log (created_at, session_id, backend, model,
+                "INSERT INTO usage_log (sync_id, created_at, session_id, backend, model,
                     prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens, cost)
-                 VALUES (?1, NULL, 'OpenRouter', 'a/model', 100, 10, 0, 0, 0.001)",
-                [created],
+                 VALUES (?1, ?2, NULL, 'OpenRouter', 'a/model', 100, 10, 0, 0, 0.001)",
+                (uuid::Uuid::new_v4().to_string(), created),
             )
         };
         insert("2026-01-01T00:00:00+00:00").unwrap();
@@ -2286,8 +2809,7 @@ mod tests {
         db.upsert_model_prices(&[(
             "anthropic/claude-3.5-sonnet".to_string(),
             "OpenRouter".to_string(),
-            3.0,
-            15.0,
+            cache_price(3.0, 15.0, 0.3, 3.75),
         )])
         .unwrap();
         // Rows logged before pricing existed: one priced model (NULL cost),
@@ -2300,25 +2822,66 @@ mod tests {
             70,
             20,
             None,
+            false,
             None,
             None,
         )
         .unwrap();
-        db.log_usage("Codex", "gpt-5.1-codex", 50, 5, 0, 0, None, None, None)
-            .unwrap();
+        db.log_usage(
+            "Codex",
+            "gpt-5.1-codex",
+            50,
+            5,
+            0,
+            0,
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
 
         let visited = db.backfill_usage_costs().unwrap();
         assert_eq!(visited, 2);
-        // 100 prompt @ $3/1M + 10 completion @ $15/1M = $0.0003 + $0.00015.
+        // 10 ordinary @ $3/M + 70 reads @ $0.30/M + 20 writes @ $3.75/M,
+        // plus 10 completion @ $15/M = $0.000276.
         let totals = db.usage_totals(None).unwrap();
-        assert!((totals.cost - 0.00045).abs() < 1e-12);
+        assert!((totals.cost - 0.000_276).abs() < 1e-12);
         let recent = db.usage_recent(10, None).unwrap();
-        assert!((recent[1].cost.unwrap() - 0.00045).abs() < 1e-12); // priced row filled in
+        assert!((recent[1].cost.unwrap() - 0.000_276).abs() < 1e-12); // priced row filled in
         assert_eq!(recent[0].cost, None); // unknown price stays unknown
 
         // Idempotent: a second pass leaves the values untouched.
         db.backfill_usage_costs().unwrap();
-        assert!((db.usage_totals(None).unwrap().cost - 0.00045).abs() < 1e-12);
+        assert!((db.usage_totals(None).unwrap().cost - 0.000_276).abs() < 1e-12);
+    }
+
+    #[test]
+    fn backfill_preserves_provider_reported_cost() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.upsert_model_prices(&[(
+            "anthropic/claude-3.5-sonnet".to_string(),
+            "OpenRouter".to_string(),
+            cache_price(3.0, 15.0, 0.3, 3.75),
+        )])
+        .unwrap();
+        db.log_usage(
+            "OpenRouter",
+            "anthropic/claude-3.5-sonnet",
+            100,
+            10,
+            70,
+            20,
+            Some(0.000_321),
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+
+        db.backfill_usage_costs().unwrap();
+
+        assert_eq!(db.usage_recent(1, None).unwrap()[0].cost, Some(0.000_321));
     }
 
     #[test]
@@ -2330,8 +2893,7 @@ mod tests {
         db.upsert_model_prices(&[(
             "deepseek/deepseek-v4-flash-0731".to_string(),
             "OpenRouter".to_string(),
-            8e-08,
-            1.8e-07,
+            price(8e-08, 1.8e-07),
         )])
         .unwrap();
         db.log_usage(
@@ -2342,6 +2904,7 @@ mod tests {
             118_784,
             0,
             Some(9.89864e-09), // the old, 1e6×-too-small value
+            false,
             None,
             None,
         )
@@ -2351,30 +2914,29 @@ mod tests {
 
         assert_eq!(
             db.model_price("deepseek/deepseek-v4-flash-0731"),
-            Some((0.08, 0.18))
+            Some(price(0.08, 0.18))
         );
         // 122221/1e6 × 0.08 + 672/1e6 × 0.18 ≈ $0.00989.
         let recent = db.usage_recent(10, None).unwrap();
         let cost = recent[0].cost.unwrap();
-        assert!((cost - 0.0098986).abs() < 1e-6, "cost was {cost}");
+        assert!((cost - 0.009_898_6).abs() < 1e-6, "cost was {cost}");
         assert!(cost > 0.009, "cost was {cost}");
     }
 
     #[test]
     fn request_cost_prices_tokens_against_catalog() {
         let mut db = Db::open_in_memory().unwrap();
-        assert_eq!(db.request_cost("unknown/model", 100, 10), None);
+        assert_eq!(db.request_cost("unknown/model", 100, 10, 0, 0), None);
         db.upsert_model_prices(&[(
             "anthropic/claude-3.5-sonnet".to_string(),
             "OpenRouter".to_string(),
-            3.0,
-            15.0,
+            cache_price(3.0, 15.0, 0.3, 3.75),
         )])
         .unwrap();
         let cost = db
-            .request_cost("anthropic/claude-3.5-sonnet", 100, 10)
+            .request_cost("anthropic/claude-3.5-sonnet", 100, 10, 70, 20)
             .unwrap();
-        assert!((cost - 0.00045).abs() < 1e-12);
+        assert!((cost - 0.000_276).abs() < 1e-12);
     }
 
     #[test]
@@ -2384,14 +2946,12 @@ mod tests {
             (
                 "deepseek/deepseek-v4-flash".to_string(),
                 "OpenRouter".to_string(),
-                0.08,
-                0.18,
+                cache_price(0.08, 0.18, 0.016, 0.08),
             ),
             (
                 "openai/gpt-5".to_string(),
                 "OpenRouter".to_string(),
-                1.25,
-                10.0,
+                cache_price(1.25, 10.0, 0.125, 1.25),
             ),
         ])
         .unwrap();
@@ -2399,17 +2959,31 @@ mod tests {
         // through the vendor/name twin.
         assert_eq!(
             db.model_price("deepseek/deepseek-v4-flash"),
-            Some((0.08, 0.18))
+            Some(cache_price(0.08, 0.18, 0.016, 0.08))
         );
-        assert_eq!(db.model_price("go:deepseek-v4-flash"), Some((0.08, 0.18)));
-        assert_eq!(db.model_price("deepseek-v4-flash"), Some((0.08, 0.18)));
-        assert_eq!(db.model_price("openai:gpt-5"), Some((1.25, 10.0)));
-        assert_eq!(db.model_price("codex:gpt-5"), Some((1.25, 10.0)));
+        assert_eq!(
+            db.model_price("go:deepseek-v4-flash"),
+            Some(cache_price(0.08, 0.18, 0.016, 0.08))
+        );
+        assert_eq!(
+            db.model_price("deepseek-v4-flash"),
+            Some(cache_price(0.08, 0.18, 0.016, 0.08))
+        );
+        assert_eq!(
+            db.model_price("openai:gpt-5"),
+            Some(cache_price(1.25, 10.0, 0.125, 1.25))
+        );
+        assert_eq!(
+            db.model_price("codex:gpt-5"),
+            Some(cache_price(1.25, 10.0, 0.125, 1.25))
+        );
         // No twin anywhere: unknown.
         assert_eq!(db.model_price("no-such-model-anywhere"), None);
         // The price flows into per-request costs for the other backend.
-        let cost = db.request_cost("go:deepseek-v4-flash", 100, 10).unwrap();
-        assert!((cost - 0.0000098).abs() < 1e-15);
+        let cost = db
+            .request_cost("go:deepseek-v4-flash", 100, 10, 70, 0)
+            .unwrap();
+        assert!((cost - 0.000_005_32).abs() < 1e-15);
     }
 
     #[test]
@@ -2431,8 +3005,7 @@ mod tests {
         db.upsert_model_prices(&[(
             "deepseek/deepseek-v4-flash".to_string(),
             "OpenRouter".to_string(),
-            0.08,
-            0.18,
+            cache_price(0.08, 0.18, 0.016, 0.08),
         )])
         .unwrap();
         // OpenCode Go rows logged with no cost — the flat-fee backend has
@@ -2445,6 +3018,7 @@ mod tests {
             0,
             0,
             None,
+            false,
             None,
             None,
         )
@@ -2454,8 +3028,8 @@ mod tests {
 
         let recent = db.usage_recent(10, None).unwrap();
         let cost = recent[0].cost.unwrap();
-        assert!((cost - 0.0000098).abs() < 1e-15, "cost was {cost}");
-        assert!((db.usage_totals(None).unwrap().cost - 0.0000098).abs() < 1e-15);
+        assert!((cost - 0.000_009_8).abs() < 1e-15, "cost was {cost}");
+        assert!((db.usage_totals(None).unwrap().cost - 0.000_009_8).abs() < 1e-15);
     }
 
     #[test]
@@ -2994,5 +3568,178 @@ mod tests {
         let space_b_watches = db.list_watches("space-b").unwrap();
         assert_eq!(space_b_watches.len(), 1);
         assert!(space_b_watches.iter().all(|w| w.space_id == "space-b"));
+    }
+
+    /// Build a db shaped like the pre-split schema: `files` carries
+    /// `status`/`mtime`, and the device-local tables live in `main` (the
+    /// legacy CREATE TABLEs + column adds, minus anything added later).
+    fn legacy_db(path: &std::path::Path, now: &str) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                model TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+             CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL);
+             CREATE TABLE model_prefs (id TEXT PRIMARY KEY,
+                favorite INTEGER NOT NULL DEFAULT 0, last_used TEXT);
+             CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE spaces (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL);
+             CREATE TABLE files (id TEXT PRIMARY KEY, space_id TEXT NOT NULL,
+                name TEXT NOT NULL, hash TEXT NOT NULL, size INTEGER NOT NULL,
+                status TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(space_id, name));
+             ALTER TABLE files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0;
+             CREATE VIRTUAL TABLE file_chunks USING fts5(
+                file_id UNINDEXED, seq UNINDEXED, location UNINDEXED, text);
+             CREATE TABLE chunk_embeddings (file_id TEXT NOT NULL, seq INTEGER NOT NULL,
+                vec BLOB NOT NULL, PRIMARY KEY (file_id, seq));
+             CREATE TABLE web_cache (url_norm TEXT PRIMARY KEY, url TEXT NOT NULL,
+                title TEXT, text TEXT NOT NULL, fetched_at TEXT NOT NULL);
+             CREATE TABLE citations (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                space_id TEXT NOT NULL, report_file TEXT NOT NULL,
+                url TEXT NOT NULL, title TEXT);
+             CREATE TABLE session_sources (session_id TEXT NOT NULL,
+                url_norm TEXT NOT NULL, PRIMARY KEY (session_id, url_norm));
+             CREATE TABLE watches (id TEXT PRIMARY KEY, space_id TEXT NOT NULL,
+                topic TEXT NOT NULL, interval_hours INTEGER NOT NULL,
+                session_id TEXT NOT NULL, last_run_at TEXT);
+             CREATE TABLE swarm_personas (session_id TEXT NOT NULL, ord INTEGER NOT NULL,
+                name TEXT NOT NULL, model TEXT NOT NULL, persona TEXT NOT NULL);
+             CREATE TABLE usage_log (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL, session_id TEXT, space_id TEXT,
+                backend TEXT NOT NULL, model TEXT NOT NULL,
+                prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0, cost REAL);
+             CREATE TABLE model_prices (model_id TEXT PRIMARY KEY, backend TEXT NOT NULL,
+                prompt_price REAL NOT NULL, completion_price REAL NOT NULL,
+                cache_read_price REAL, cache_write_price REAL, updated_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO spaces (id, name, created_at) VALUES ('sp', 'default', ?1)",
+            [now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files (id, space_id, name, hash, size, status, created_at, mtime)
+             VALUES ('f1', 'sp', 'a.txt', 'h1', 10, 'ok', ?1, 1234)",
+            [now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO file_chunks (file_id, seq, location, text)
+             VALUES ('f1', 0, 'l', 'hello world')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chunk_embeddings (file_id, seq, vec) VALUES ('f1', 0, ?1)",
+            [vec_to_blob(&[1.0, 0.0])],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO web_cache (url_norm, url, title, text, fetched_at)
+             VALUES ('https://x.test/', 'https://x.test/', NULL, 'cached body', ?1)",
+            [now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO model_prices (model_id, backend, prompt_price, completion_price, updated_at)
+             VALUES ('a/model', 'OpenRouter', 1.0, 2.0, ?1)",
+            [now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_log (created_at, backend, model, prompt_tokens, completion_tokens)
+             VALUES (?1, 'OpenRouter', 'a/model', 100, 10)",
+            [now],
+        )
+        .unwrap();
+        drop(conn);
+    }
+
+    #[test]
+    fn legacy_db_migrates_cache_tables_and_seeds_file_index_state() {
+        let dir = std::env::temp_dir().join(format!("nexus-migrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("nexus.db");
+        legacy_db(&db_path, &Utc::now().to_rfc3339());
+        let mut db = Db::open(&db_path).unwrap();
+
+        // user_version stamped; legacy columns survive as dead columns.
+        let v: i64 = db
+            .raw()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        assert!(has_column(db.raw(), "files", "mtime").unwrap());
+
+        // Derived index state seeded from the legacy files row.
+        let (mtime, status) = db
+            .raw()
+            .query_row(
+                "SELECT mtime, status FROM cache.file_index_state WHERE file_id = 'f1'",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!((mtime, status.as_str()), (1234, "ok"));
+
+        // Device-local tables moved into the sibling cache.db, reachable
+        // through the attached connection.
+        assert!(cache_path_for(&db_path).is_file());
+        let hits = search_chunks(db.raw(), "sp", "hello", 8).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            file_text(db.raw(), "sp", "a.txt").unwrap().as_deref(),
+            Some("hello world")
+        );
+        let (_, text, _) = cache_get(db.raw(), "https://x.test/").unwrap().unwrap();
+        assert_eq!(text, "cached body");
+        let hits = semantic_chunks(db.raw(), "sp", &[1.0, 0.0], 4).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "a.txt");
+
+        // The price catalog moved too — the backfill can price the legacy
+        // usage row, and its sync_id was backfilled.
+        assert_eq!(db.model_price("a/model").unwrap().prompt, 1.0);
+        assert_eq!(db.backfill_usage_costs().unwrap(), 1);
+        let sync: String = db
+            .raw()
+            .query_row("SELECT sync_id FROM usage_log WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(!sync.is_empty());
+    }
+
+    #[test]
+    fn fresh_db_creates_sibling_cache_db_with_split_tables() {
+        let dir = std::env::temp_dir().join(format!("nexus-fresh-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("nexus.db");
+        let db = Db::open(&db_path).unwrap();
+        let space = db.default_space_id().unwrap();
+        let id = db.upsert_file(&space, "doc.txt", "h", 1, "ok").unwrap();
+        db.set_file_chunks(&id, &[("l".into(), "needle text".into())])
+            .unwrap();
+
+        // The durable db holds no cache tables and no legacy file columns...
+        assert!(!has_column(db.raw(), "web_cache", "url_norm").unwrap());
+        assert!(!has_column(db.raw(), "files", "mtime").unwrap());
+        // ...they live in the sibling cache.db: reachable through the
+        // attached connection, and a standalone cache-only connection works.
+        let cache_path = cache_path_for(&db_path);
+        assert!(cache_path.is_file());
+        let conn = rusqlite::Connection::open(&cache_path).unwrap();
+        assert!(cache_get(&conn, "x").unwrap().is_none());
+        drop(conn);
+        assert_eq!(
+            file_text(db.raw(), &space, "doc.txt").unwrap().as_deref(),
+            Some("needle text")
+        );
+        assert_eq!(db.list_files(&space).unwrap()[0].status, "ok");
     }
 }
