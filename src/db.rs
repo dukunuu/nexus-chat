@@ -397,6 +397,32 @@ impl Db {
         &self.conn
     }
 
+    /// Bump a versioned row's `updated_at` — the LWW version the sync
+    /// engine compares (RFC3339, so lexical order = time order). Every
+    /// mutation path on a versioned table must go through here or inline
+    /// the same bump.
+    fn touch(&self, table: &str, id: &str) -> Result<()> {
+        self.conn.execute(
+            &format!("UPDATE {table} SET updated_at = ?1 WHERE id = ?2"),
+            (Utc::now().to_rfc3339(), id),
+        )?;
+        Ok(())
+    }
+
+    /// Record that a syncable row was physically deleted. Application
+    /// tables stay clean (no soft-delete columns); the merge engine
+    /// propagates deletes from `sync_tombstones`. `row_id` is the row's
+    /// sync identity — its uuid id, or the `sync_id` for AUTOINCREMENT
+    /// tables.
+    fn tombstone(&self, table: &str, row_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO sync_tombstones (table_name, row_id, deleted_at)
+             VALUES (?1, ?2, ?3)",
+            (table, row_id, Utc::now().to_rfc3339()),
+        )?;
+        Ok(())
+    }
+
     // Long by design (schema migrations).
     #[allow(clippy::too_many_lines)]
     fn migrate(&self) -> Result<()> {
@@ -646,7 +672,7 @@ impl Db {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO spaces (id, name, created_at) VALUES (?1, ?2, ?3)",
+            "INSERT INTO spaces (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
             (&id, name, &now),
         )?;
         Ok(Space {
@@ -672,21 +698,26 @@ impl Db {
     }
 
     pub fn rename_space(&self, id: &str, name: &str) -> Result<()> {
-        self.conn
-            .execute("UPDATE spaces SET name = ?2 WHERE id = ?1", (id, name))?;
+        self.conn.execute(
+            "UPDATE spaces SET name = ?2, updated_at = ?3 WHERE id = ?1",
+            (id, name, Utc::now().to_rfc3339()),
+        )?;
         Ok(())
     }
 
     /// Delete a space, reassigning its sessions to `default` rather than
     /// deleting them — only the space's own memory/instructions are lost.
+    /// The reassignment bumps every moved session's version (a mutation,
+    /// sync-wise); the space itself is tombstoned.
     pub fn delete_space(&self, id: &str) -> Result<()> {
         let default_id = self.default_space_id()?;
         self.conn.execute(
-            "UPDATE sessions SET space_id = ?1 WHERE space_id = ?2",
-            (&default_id, id),
+            "UPDATE sessions SET space_id = ?1, updated_at = ?2 WHERE space_id = ?3",
+            (&default_id, Utc::now().to_rfc3339(), id),
         )?;
         self.conn
             .execute("DELETE FROM spaces WHERE id = ?1", [id])?;
+        self.tombstone("spaces", id)?;
         Ok(())
     }
 
@@ -719,11 +750,42 @@ impl Db {
 
     // --- key/value app settings ---
 
+    /// Whether an `app_settings` key is device-local rather than syncable.
+    /// Local keys describe this device's capabilities or per-device state
+    /// (search endpoints, secrets, the OCR stack, ui state); everything else
+    /// is a user preference that should follow the user. New keys must be
+    /// classified here — the default is sync, so a forgotten local key would
+    /// silently sync to other devices.
+    pub fn setting_is_local(key: &str) -> bool {
+        matches!(
+            key,
+            // Device capabilities / local services: a phone has no
+            // localhost SearXNG, no ollama, no tesseract, and its API keys
+            // are its own.
+            "searxng_url"
+                | "langsearch_key"
+                | "search_provider"
+                | "ocr_engine"
+                | "ocr_model"
+                | "local_ocr_model"
+                // Per-device ui/timing state.
+                | "usage_range"
+                | "last_update_check"
+        )
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let scope = if Self::setting_is_local(key) {
+            "local"
+        } else {
+            "sync"
+        };
         self.conn.execute(
-            "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = ?2",
-            (key, value),
+            "INSERT INTO app_settings (key, value, scope, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(key) DO UPDATE SET value = ?2, scope = ?3, updated_at = ?4",
+            (key, value, scope, &now),
         )?;
         Ok(())
     }
@@ -758,9 +820,9 @@ impl Db {
     /// Set (or clear, with None) a model's reasoning effort.
     pub fn set_reasoning(&self, model_id: &str, effort: Option<&str>) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO model_prefs (id, reasoning) VALUES (?1, ?2)
-             ON CONFLICT(id) DO UPDATE SET reasoning = ?2",
-            (model_id, effort),
+            "INSERT INTO model_prefs (id, reasoning, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET reasoning = ?2, updated_at = ?3",
+            (model_id, effort, Utc::now().to_rfc3339()),
         )?;
         Ok(())
     }
@@ -768,9 +830,9 @@ impl Db {
     /// Flip a model's favorite flag; returns the new state.
     pub fn toggle_favorite(&self, model_id: &str) -> Result<bool> {
         self.conn.execute(
-            "INSERT INTO model_prefs (id, favorite) VALUES (?1, 1)
-             ON CONFLICT(id) DO UPDATE SET favorite = 1 - favorite",
-            [model_id],
+            "INSERT INTO model_prefs (id, favorite, updated_at) VALUES (?1, 1, ?2)
+             ON CONFLICT(id) DO UPDATE SET favorite = 1 - favorite, updated_at = ?2",
+            (model_id, Utc::now().to_rfc3339()),
         )?;
         let fav: i64 = self.conn.query_row(
             "SELECT favorite FROM model_prefs WHERE id = ?1",
@@ -784,8 +846,8 @@ impl Db {
     pub fn mark_model_used(&self, model_id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO model_prefs (id, favorite, last_used) VALUES (?1, 0, ?2)
-             ON CONFLICT(id) DO UPDATE SET last_used = ?2",
+            "INSERT INTO model_prefs (id, favorite, last_used, updated_at) VALUES (?1, 0, ?2, ?2)
+             ON CONFLICT(id) DO UPDATE SET last_used = ?2, updated_at = ?2",
             (model_id, &now),
         )?;
         Ok(())
@@ -894,8 +956,9 @@ impl Db {
     /// it now covers.
     pub fn set_compaction(&self, session_id: &str, summary: &str, through: i64) -> Result<()> {
         self.conn.execute(
-            "UPDATE sessions SET compact_summary = ?2, compact_through = ?3 WHERE id = ?1",
-            (session_id, summary, through),
+            "UPDATE sessions SET compact_summary = ?2, compact_through = ?3, updated_at = ?4
+             WHERE id = ?1",
+            (session_id, summary, through, Utc::now().to_rfc3339()),
         )?;
         Ok(())
     }
@@ -903,8 +966,8 @@ impl Db {
     /// Persist a session's `/web` answer-mode toggle.
     pub fn set_session_web_mode(&self, session_id: &str, on: bool) -> Result<()> {
         self.conn.execute(
-            "UPDATE sessions SET web_mode = ?2 WHERE id = ?1",
-            (session_id, i64::from(on)),
+            "UPDATE sessions SET web_mode = ?2, updated_at = ?3 WHERE id = ?1",
+            (session_id, i64::from(on), Utc::now().to_rfc3339()),
         )?;
         Ok(())
     }
@@ -912,8 +975,8 @@ impl Db {
     /// Persist a session's `/swarm` mode toggle.
     pub fn set_session_swarm_mode(&self, session_id: &str, on: bool) -> Result<()> {
         self.conn.execute(
-            "UPDATE sessions SET swarm_mode = ?2 WHERE id = ?1",
-            (session_id, i64::from(on)),
+            "UPDATE sessions SET swarm_mode = ?2, updated_at = ?3 WHERE id = ?1",
+            (session_id, i64::from(on), Utc::now().to_rfc3339()),
         )?;
         Ok(())
     }
@@ -935,7 +998,20 @@ impl Db {
     }
 
     /// Replace a session's whole `/swarm` roster with `personas`, in order.
+    /// The roster has no per-row LWW — saving is DELETE-all + INSERT — so
+    /// the collection is versioned by bumping the owning session, and each
+    /// removed slot is tombstoned for the merge engine.
     pub fn save_swarm_personas(&self, session_id: &str, personas: &[Persona]) -> Result<()> {
+        let old: Vec<i64> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT ord FROM swarm_personas WHERE session_id = ?1")?;
+            let rows = stmt.query_map([session_id], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for ord in old {
+            self.tombstone("swarm_personas", &format!("{session_id}:{ord}"))?;
+        }
         self.conn.execute(
             "DELETE FROM swarm_personas WHERE session_id = ?1",
             [session_id],
@@ -947,7 +1023,7 @@ impl Db {
                 (session_id, i as i64, &p.name, &p.model, &p.blurb),
             )?;
         }
-        Ok(())
+        self.touch("sessions", session_id)
     }
 
     /// Set a session's `research_parent_id` after creation (e.g. when
@@ -955,8 +1031,8 @@ impl Db {
     /// created first).
     pub fn set_research_parent(&self, id: &str, parent_id: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE sessions SET research_parent_id = ?2 WHERE id = ?1",
-            (id, parent_id),
+            "UPDATE sessions SET research_parent_id = ?2, updated_at = ?3 WHERE id = ?1",
+            (id, parent_id, Utc::now().to_rfc3339()),
         )?;
         Ok(())
     }
@@ -964,27 +1040,42 @@ impl Db {
     /// Set a session's title and (optionally) its generated slug.
     pub fn set_session_title(&self, id: &str, title: &str, slug: Option<&str>) -> Result<()> {
         self.conn.execute(
-            "UPDATE sessions SET title = ?2, slug = COALESCE(?3, slug) WHERE id = ?1",
-            (id, title, slug),
+            "UPDATE sessions SET title = ?2, slug = COALESCE(?3, slug), updated_at = ?4
+             WHERE id = ?1",
+            (id, title, slug, Utc::now().to_rfc3339()),
         )?;
         Ok(())
     }
 
     /// Delete a single message row by id — used to roll back a persisted
     /// `gate_reply` whose channel delivery failed, so a retry can't
-    /// duplicate it in the transcript.
+    /// duplicate it in the transcript. Tombstoned for sync.
     pub fn delete_message(&self, id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM messages WHERE id = ?1", [id])?;
+        self.tombstone("messages", id)?;
         Ok(())
     }
 
-    /// Delete a session and all its messages.
+    /// Delete a session and all its messages. Every removed row is
+    /// tombstoned — messages are append-only union rows, so a peer must
+    /// learn each one is gone, not just the session.
     pub fn delete_session(&self, id: &str) -> Result<()> {
+        let ids: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM messages WHERE session_id = ?1")?;
+            let rows = stmt.query_map([id], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for mid in &ids {
+            self.tombstone("messages", mid)?;
+        }
         self.conn
             .execute("DELETE FROM messages WHERE session_id = ?1", [id])?;
         self.conn
             .execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+        self.tombstone("sessions", id)?;
         Ok(())
     }
 
@@ -1163,7 +1254,7 @@ impl Db {
     /// (`None`) a session source's flag. `url_norm` must already exist in
     /// `session_sources` for this session (a no-op UPDATE otherwise — the
     /// row is created by `add_session_sources` when a source is first
-    /// cited, not here).
+    /// cited, not here). Bumps the row's version — flag changes sync.
     pub fn set_source_flag(
         &self,
         session_id: &str,
@@ -1171,8 +1262,9 @@ impl Db {
         flag: Option<&str>,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE session_sources SET flag = ?3 WHERE session_id = ?1 AND url_norm = ?2",
-            (session_id, url_norm, flag),
+            "UPDATE session_sources SET flag = ?3, updated_at = ?4
+             WHERE session_id = ?1 AND url_norm = ?2",
+            (session_id, url_norm, flag, Utc::now().to_rfc3339()),
         )?;
         Ok(())
     }
@@ -1316,8 +1408,8 @@ impl Db {
 
     pub fn set_session_model(&self, session_id: &str, model: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE sessions SET model = ?2 WHERE id = ?1",
-            (session_id, model),
+            "UPDATE sessions SET model = ?2, updated_at = ?3 WHERE id = ?1",
+            (session_id, model, Utc::now().to_rfc3339()),
         )?;
         Ok(())
     }
@@ -1420,6 +1512,7 @@ impl Db {
         )?;
         self.conn
             .execute("DELETE FROM files WHERE id = ?1", [file_id])?;
+        self.tombstone("files", file_id)?;
         Ok(())
     }
 
@@ -1455,8 +1548,8 @@ impl Db {
 
     pub fn rename_file(&self, file_id: &str, new_name: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE files SET name = ?2 WHERE id = ?1",
-            (file_id, new_name),
+            "UPDATE files SET name = ?2, updated_at = ?3 WHERE id = ?1",
+            (file_id, new_name, Utc::now().to_rfc3339()),
         )?;
         Ok(())
     }
@@ -1587,10 +1680,11 @@ impl Db {
         session_id: &str,
     ) -> Result<String> {
         let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO watches (id, space_id, topic, interval_hours, session_id, last_run_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
-            (&id, space_id, topic, interval_hours, session_id),
+            "INSERT INTO watches (id, space_id, topic, interval_hours, session_id, last_run_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
+            (&id, space_id, topic, interval_hours, session_id, &now),
         )?;
         Ok(id)
     }
@@ -1634,8 +1728,8 @@ impl Db {
 
     pub fn touch_watch(&self, id: &str, now_rfc3339: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE watches SET last_run_at = ?2 WHERE id = ?1",
-            (id, now_rfc3339),
+            "UPDATE watches SET last_run_at = ?2, updated_at = ?3 WHERE id = ?1",
+            (id, now_rfc3339, Utc::now().to_rfc3339()),
         )?;
         Ok(())
     }
@@ -1645,8 +1739,8 @@ impl Db {
     /// (`previous_citations_for_watch_session`) can match against it.
     pub fn set_watch_session(&self, id: &str, session_id: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE watches SET session_id = ?2 WHERE id = ?1",
-            (id, session_id),
+            "UPDATE watches SET session_id = ?2, updated_at = ?3 WHERE id = ?1",
+            (id, session_id, Utc::now().to_rfc3339()),
         )?;
         Ok(())
     }
@@ -1654,6 +1748,7 @@ impl Db {
     pub fn delete_watch(&self, id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM watches WHERE id = ?1", [id])?;
+        self.tombstone("watches", id)?;
         Ok(())
     }
 }
@@ -1708,10 +1803,12 @@ pub fn add_session_sources(
     session_id: &str,
     url_norms: &[String],
 ) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
     for u in url_norms {
         conn.execute(
-            "INSERT OR IGNORE INTO session_sources (session_id, url_norm) VALUES (?1, ?2)",
-            (session_id, u),
+            "INSERT OR IGNORE INTO session_sources (session_id, url_norm, updated_at)
+             VALUES (?1, ?2, ?3)",
+            (session_id, u, &now),
         )?;
     }
     Ok(())
@@ -2172,8 +2269,8 @@ impl Db {
         self.conn.execute(
             "UPDATE usage_log SET prompt_tokens = ?1, completion_tokens = ?2,
                 cache_read_tokens = ?3, cache_creation_tokens = ?4, cost = ?5,
-                cost_is_provider = ?6
-             WHERE id = ?7",
+                cost_is_provider = ?6, updated_at = ?7
+             WHERE id = ?8",
             (
                 prompt_tokens as i64,
                 completion_tokens as i64,
@@ -2181,6 +2278,7 @@ impl Db {
                 cache_creation_tokens as i64,
                 cost,
                 i64::from(cost_is_provider),
+                Utc::now().to_rfc3339(),
                 row_id,
             ),
         )?;
@@ -2290,8 +2388,9 @@ impl Db {
         };
         let tx = self.conn.transaction()?;
         {
-            let mut update =
-                tx.prepare("UPDATE usage_log SET cost = ?2, cost_is_provider = 0 WHERE id = ?1")?;
+            let mut update = tx.prepare(
+                "UPDATE usage_log SET cost = ?2, cost_is_provider = 0, updated_at = ?3 WHERE id = ?1",
+            )?;
             for row in &rows {
                 // Before provenance was added, OpenCode was the only backend
                 // whose costs came from the provider. Preserve those legacy
@@ -2319,7 +2418,7 @@ impl Db {
                     _ => None,
                 };
                 if let Some(cost) = write {
-                    update.execute((row.id, cost))?;
+                    update.execute((row.id, cost, Utc::now().to_rfc3339()))?;
                 }
             }
         }
@@ -2578,6 +2677,93 @@ impl Db {
             Some(s) => stmt.query_map(rusqlite::params![s, limit as i64], map),
             None => stmt.query_map(rusqlite::params![limit as i64], map),
         }?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
+// --- sync groundwork (Phase 3 consumes this) ---
+
+/// One peer's sync cursor for one table. Cursors are opaque strings; for
+/// append-only tables they are `(created_at, id)` tuples (so equal
+/// timestamps don't collide), never naked timestamps.
+/// Phase 3's merge engine reads/writes these; kept live from day one so
+/// the schema and identity can't drift.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncState {
+    pub peer_id: String,
+    pub table_name: String,
+    pub pull_cursor: Option<String>,
+    pub push_cursor: Option<String>,
+    pub last_synced_at: Option<String>,
+}
+
+/// Sync identity + cursor bookkeeping for the Phase 3 merge engine.
+#[allow(dead_code)]
+impl Db {
+    /// This device's stable id, created on first use. Sync identity for
+    /// everything this device writes (tombstones, LWW tie-breaks on
+    /// `updated_at + device_id` in Phase 3).
+    pub fn device_id(&self) -> Result<String> {
+        if let Some(id) = self
+            .conn
+            .query_row("SELECT device_id FROM device_meta LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .optional()?
+        {
+            return Ok(id);
+        }
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO device_meta (device_id, created_at) VALUES (?1, ?2)",
+            (&id, &now),
+        )?;
+        Ok(id)
+    }
+
+    /// Store (or update) a peer's cursors for one table, stamping
+    /// `last_synced_at`. `None` leaves an existing cursor untouched.
+    pub fn set_sync_state(
+        &self,
+        peer_id: &str,
+        table_name: &str,
+        pull_cursor: Option<&str>,
+        push_cursor: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO sync_state (peer_id, table_name, pull_cursor, push_cursor, last_synced_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(peer_id, table_name) DO UPDATE SET
+                pull_cursor = COALESCE(?3, pull_cursor),
+                push_cursor = COALESCE(?4, push_cursor),
+                last_synced_at = ?5",
+            (
+                peer_id,
+                table_name,
+                pull_cursor,
+                push_cursor,
+                Utc::now().to_rfc3339(),
+            ),
+        )?;
+        Ok(())
+    }
+
+    pub fn load_sync_state(&self) -> Result<Vec<SyncState>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT peer_id, table_name, pull_cursor, push_cursor, last_synced_at
+             FROM sync_state ORDER BY peer_id, table_name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SyncState {
+                peer_id: r.get(0)?,
+                table_name: r.get(1)?,
+                pull_cursor: r.get(2)?,
+                push_cursor: r.get(3)?,
+                last_synced_at: r.get(4)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
@@ -3741,5 +3927,316 @@ mod tests {
             Some("needle text")
         );
         assert_eq!(db.list_files(&space).unwrap()[0].status, "ok");
+    }
+
+    /// Every mutable table bumps its version (`updated_at`, RFC3339 so
+    /// lexical order = time order) on every mutation path — the LWW input
+    /// for the Phase 3 merge engine. Reads happen 2ms after each write so
+    /// equal-microsecond timestamps can't pass a `>` check by accident.
+    // Long by design (one assertion per mutation path).
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn every_mutable_table_bumps_updated_at_on_mutation() {
+        let mut db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let sid = db.create_session("t", "a/b", &space, "chat").unwrap().id;
+        let read = |table: &str, id: &str| -> String {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            db.raw()
+                .query_row(
+                    &format!("SELECT updated_at FROM {table} WHERE id = ?1"),
+                    [id],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+
+        // sessions: every mutation path bumps.
+        let mutators: [&dyn Fn(&Db) -> Result<()>; 6] = [
+            &|db: &Db| db.set_compaction(&sid, "sum", 3),
+            &|db: &Db| db.set_session_web_mode(&sid, true),
+            &|db: &Db| db.set_session_swarm_mode(&sid, true),
+            &|db: &Db| db.set_session_title(&sid, "new", Some("new-slug")),
+            &|db: &Db| db.set_session_model(&sid, "m/x"),
+            &|db: &Db| db.set_research_parent(&sid, "parent"),
+        ];
+        for mutate in mutators {
+            let before = read("sessions", &sid);
+            mutate(&db).unwrap();
+            assert!(read("sessions", &sid) > before);
+        }
+        // The swarm roster has no per-row LWW — saving versions the session.
+        let before = read("sessions", &sid);
+        db.save_swarm_personas(
+            &sid,
+            &[Persona {
+                name: "a".into(),
+                model: "m".into(),
+                blurb: "b".into(),
+            }],
+        )
+        .unwrap();
+        assert!(read("sessions", &sid) > before);
+
+        // model_prefs.
+        assert!(db.toggle_favorite("a/model").unwrap());
+        let before = read("model_prefs", "a/model");
+        db.set_reasoning("a/model", Some("high")).unwrap();
+        assert!(read("model_prefs", "a/model") > before);
+        let before = read("model_prefs", "a/model");
+        db.mark_model_used("a/model").unwrap();
+        assert!(read("model_prefs", "a/model") > before);
+
+        // app_settings.
+        let read_key = |key: &str| -> String {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            db.raw()
+                .query_row(
+                    "SELECT updated_at FROM app_settings WHERE key = ?1",
+                    [key],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+        db.set_setting("temperature", "0.5").unwrap();
+        let before = read_key("temperature");
+        db.set_setting("temperature", "0.9").unwrap();
+        assert!(read_key("temperature") > before);
+
+        // spaces.
+        let sp = db.create_space("other").unwrap();
+        let before = read("spaces", &sp.id);
+        db.rename_space(&sp.id, "other2").unwrap();
+        assert!(read("spaces", &sp.id) > before);
+
+        // files.
+        let fid = db.upsert_file(&space, "f.txt", "h", 1, "ok").unwrap();
+        let before = read("files", &fid);
+        db.rename_file(&fid, "g.txt").unwrap();
+        assert!(read("files", &fid) > before);
+
+        // watches.
+        let wid = db.create_watch(&space, "topic", 24, &sid).unwrap();
+        let before = read("watches", &wid);
+        db.touch_watch(&wid, "2026-01-01T00:00:00Z").unwrap();
+        assert!(read("watches", &wid) > before);
+        let before = read("watches", &wid);
+        db.set_watch_session(&wid, "other-session").unwrap();
+        assert!(read("watches", &wid) > before);
+
+        // session_sources: insert and flag changes both version the row.
+        let url = "https://x.test/";
+        add_session_sources(db.raw(), &sid, &[url.to_string()]).unwrap();
+        let read_src = || -> String {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            db.raw()
+                .query_row(
+                    "SELECT updated_at FROM session_sources
+                     WHERE session_id = ?1 AND url_norm = ?2",
+                    (&sid, url),
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+        let before = read_src();
+        db.set_source_flag(&sid, url, Some("pinned")).unwrap();
+        assert!(read_src() > before);
+
+        // usage_log: in-place updates bump; the backfill does too.
+        let row = db
+            .log_usage("OpenRouter", "a/model", 1, 2, 3, 4, None, false, None, None)
+            .unwrap();
+        let read_usage = |db: &Db, row: i64| -> String {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            db.raw()
+                .query_row(
+                    "SELECT updated_at FROM usage_log WHERE id = ?1",
+                    [&row],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+        let before = read_usage(&db, row);
+        db.update_usage(row, 5, 6, 7, 8, Some(0.1), false).unwrap();
+        assert!(read_usage(&db, row) > before);
+        db.upsert_model_prices(&[(
+            "a/model".to_string(),
+            "OpenRouter".to_string(),
+            price(1.0, 2.0),
+        )])
+        .unwrap();
+        let before = read_usage(&db, row);
+        assert_eq!(db.backfill_usage_costs().unwrap(), 1);
+        assert!(read_usage(&db, row) > before);
+    }
+
+    #[test]
+    fn delete_paths_write_tombstones_for_sync() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let sid = db.create_session("t", "a/b", &space, "chat").unwrap().id;
+        let tombstones = |table: &str| -> Vec<String> {
+            let mut stmt = db
+                .raw()
+                .prepare("SELECT row_id FROM sync_tombstones WHERE table_name = ?1 ORDER BY row_id")
+                .unwrap();
+            let rows = stmt.query_map([table], |r| r.get::<_, String>(0)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+
+        // Message delete.
+        let mid = db.add_user_message(&sid, "hi").unwrap();
+        db.delete_message(&mid).unwrap();
+        assert_eq!(tombstones("messages"), vec![mid.clone()]);
+
+        // Session delete tombstones the session and each of its messages.
+        let sid2 = db.create_session("t2", "a/b", &space, "chat").unwrap().id;
+        let m1 = db.add_user_message(&sid2, "one").unwrap();
+        let m2 = db.add_user_message(&sid2, "two").unwrap();
+        db.delete_session(&sid2).unwrap();
+        let mut expected = vec![mid, m1, m2];
+        expected.sort();
+        assert_eq!(tombstones("messages"), expected);
+        assert_eq!(tombstones("sessions"), vec![sid2]);
+
+        // File delete.
+        let fid = db.upsert_file(&space, "f.txt", "h", 1, "ok").unwrap();
+        db.delete_file(&fid).unwrap();
+        assert_eq!(tombstones("files"), vec![fid]);
+
+        // Watch delete.
+        let wid = db.create_watch(&space, "topic", 24, &sid).unwrap();
+        db.delete_watch(&wid).unwrap();
+        assert_eq!(tombstones("watches"), vec![wid]);
+
+        // Space delete (its sessions are reassigned, not deleted).
+        let sp = db.create_space("doomed").unwrap();
+        db.delete_space(&sp.id).unwrap();
+        assert_eq!(tombstones("spaces"), vec![sp.id]);
+
+        // Roster replace: removed slots are tombstoned as `session:ord`.
+        let persona = |name: &str| Persona {
+            name: name.into(),
+            model: "m".into(),
+            blurb: "b".into(),
+        };
+        db.save_swarm_personas(&sid, &[persona("a"), persona("b")])
+            .unwrap();
+        db.save_swarm_personas(&sid, &[persona("b")]).unwrap();
+        assert_eq!(
+            tombstones("swarm_personas"),
+            vec![format!("{sid}:0"), format!("{sid}:1")]
+        );
+    }
+
+    #[test]
+    fn device_id_is_stable_and_sync_state_roundtrips() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db.device_id().unwrap();
+        let b = db.device_id().unwrap();
+        assert_eq!(a, b);
+        assert!(!a.is_empty());
+
+        // Cursors round-trip per (peer, table); None leaves values alone.
+        db.set_sync_state(
+            "peer-1",
+            "sessions",
+            Some("2026-01-01T00:00:00Z|id1"),
+            Some("2026-01-02T00:00:00Z|id2"),
+        )
+        .unwrap();
+        db.set_sync_state("peer-1", "sessions", None, Some("2026-01-03T00:00:00Z|id3"))
+            .unwrap();
+        db.set_sync_state("peer-1", "messages", Some("c1"), None)
+            .unwrap();
+        let states = db.load_sync_state().unwrap();
+        assert_eq!(states.len(), 2);
+        let s = states.iter().find(|s| s.table_name == "sessions").unwrap();
+        assert_eq!(s.pull_cursor.as_deref(), Some("2026-01-01T00:00:00Z|id1"));
+        assert_eq!(s.push_cursor.as_deref(), Some("2026-01-03T00:00:00Z|id3"));
+        assert!(s.last_synced_at.is_some());
+        let m = states.iter().find(|s| s.table_name == "messages").unwrap();
+        assert_eq!(m.pull_cursor.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn settings_scope_registry_classifies_keys_and_stores_scope() {
+        // Device-local keys are classified local; user prefs default to sync.
+        for local in [
+            "searxng_url",
+            "langsearch_key",
+            "search_provider",
+            "ocr_engine",
+            "ocr_model",
+            "local_ocr_model",
+            "usage_range",
+            "last_update_check",
+        ] {
+            assert!(Db::setting_is_local(local), "{local} should be local");
+        }
+        for sync in [
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "show_stats",
+            "show_reasoning",
+            "hide_hints",
+            "verbosity",
+            "memory_model",
+            "embedding_model",
+        ] {
+            assert!(!Db::setting_is_local(sync), "{sync} should sync");
+        }
+
+        let db = Db::open_in_memory().unwrap();
+        db.set_setting("temperature", "0.7").unwrap();
+        db.set_setting("ocr_engine", "tesseract").unwrap();
+        let scope = |key: &str| -> String {
+            db.raw()
+                .query_row(
+                    "SELECT scope FROM app_settings WHERE key = ?1",
+                    [key],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(scope("temperature"), "sync");
+        assert_eq!(scope("ocr_engine"), "local");
+    }
+
+    #[test]
+    fn sync_ids_are_unique_for_citations_and_usage() {
+        let db = Db::open_in_memory().unwrap();
+        db.add_citations(
+            "sp",
+            "r.md",
+            &[
+                ("https://a.test/".to_string(), None),
+                ("https://b.test/".to_string(), None),
+            ],
+        )
+        .unwrap();
+        db.log_usage("OpenRouter", "m", 1, 2, 0, 0, None, false, None, None)
+            .unwrap();
+        db.log_usage("OpenRouter", "m", 1, 2, 0, 0, None, false, None, None)
+            .unwrap();
+        let distinct: i64 = db
+            .raw()
+            .query_row(
+                "SELECT COUNT(DISTINCT sync_id) FROM
+                 (SELECT sync_id FROM citations UNION ALL SELECT sync_id FROM usage_log)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let total: i64 = db
+            .raw()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM citations) + (SELECT COUNT(*) FROM usage_log)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(distinct, total);
     }
 }
