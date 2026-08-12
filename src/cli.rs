@@ -1708,6 +1708,8 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("memory.md"), "hello").unwrap();
         std::fs::write(root.join("nexus.db"), b"\x00\x01".to_vec()).unwrap();
+        // The device-local cache db must never ride along in a backup.
+        std::fs::write(root.join("cache.db"), b"\x02\x03".to_vec()).unwrap();
 
         let zip_path = root.with_extension("zip");
         zip_dir(&root, &zip_path).unwrap();
@@ -1718,6 +1720,10 @@ mod tests {
         assert_eq!(
             std::fs::read(dest.join("nexus.db")).unwrap(),
             b"\x00\x01".to_vec()
+        );
+        assert!(
+            !dest.join("cache.db").exists(),
+            "cache.db must be excluded from backups"
         );
         assert_eq!(
             std::fs::read_to_string(dest.join("spaces/default/memory.md")).unwrap(),
