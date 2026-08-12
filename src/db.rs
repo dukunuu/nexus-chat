@@ -414,6 +414,27 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Daily throttle for the startup update check: returns `true` (and
+    /// records today as the check date) when no check has run today yet,
+    /// `false` when one already has. The check is a courtesy, not a
+    /// service — one tiny index fetch per day is plenty.
+    pub fn update_check_due(&self) -> bool {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let last = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'last_update_check'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok();
+        if last.as_deref() == Some(today.as_str()) {
+            return false;
+        }
+        let _ = self.set_setting("last_update_check", &today);
+        true
+    }
+
     /// Set (or clear, with None) a model's reasoning effort.
     pub fn set_reasoning(&self, model_id: &str, effort: Option<&str>) -> Result<()> {
         self.conn.execute(

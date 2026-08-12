@@ -149,6 +149,7 @@ async fn run_loop(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
                 AppEvent::Research(r) => app.on_research_done(r),
                 AppEvent::ResearchTopic(r) => app.on_research_topic_derived(r),
                 AppEvent::Login(r) => app.on_login_result(r),
+                AppEvent::UpdateCheck(r) => app.on_update_check(r),
                 AppEvent::Swarm(r) => app.on_swarm_update(r),
             },
             () = async {

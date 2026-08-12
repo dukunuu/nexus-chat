@@ -14,6 +14,7 @@ mod space;
 mod theme;
 mod tools;
 mod ui;
+mod update;
 
 use anyhow::Result;
 
@@ -54,6 +55,7 @@ async fn main() -> Result<()> {
         );
     }
     app.init(); // fetch models if a key is already present
+    app.spawn_update_check(); // once a day: is a newer release out?
     app.run_due_watches(); // re-run any standing research watches that are due
     let result = events::run(app, &mut terminal).await;
     if enhanced {

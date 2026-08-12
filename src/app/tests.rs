@@ -368,6 +368,26 @@ async fn second_send_in_the_same_session_is_rejected() {
 }
 
 #[tokio::test]
+async fn update_check_notifies_only_for_newer_versions() {
+    let mut a = app_with_key();
+    // Newer published version -> status + notification.
+    a.on_update_check(Some("99.0.0".into()));
+    assert!(a.status.contains("update available"));
+    assert_eq!(a.notifications.len(), 1);
+    // Same/older version or a failed check -> silent.
+    a.on_update_check(Some("0.0.1".into()));
+    a.on_update_check(None);
+    assert_eq!(a.notifications.len(), 1, "only newer versions notify");
+}
+
+#[tokio::test]
+async fn update_check_due_is_daily_throttled() {
+    let db = Db::open_in_memory().unwrap();
+    assert!(db.update_check_due(), "first check of the day is due");
+    assert!(!db.update_check_due(), "second check same day is throttled");
+}
+
+#[tokio::test]
 async fn concurrent_chat_tasks_route_results_to_their_origin_sessions() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());

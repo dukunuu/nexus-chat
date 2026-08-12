@@ -667,6 +667,9 @@ pub enum AppEvent {
     Research(Option<ResearchMsg>),
     /// `/research` with no topic: a distilled topic from recent chat, or an error.
     ResearchTopic(Option<Result<String, String>>),
+    /// Startup update check: newest published version, or `None` when the
+    /// check failed (offline, index hiccup) — silently ignored.
+    UpdateCheck(Option<String>),
     /// `OpenAI` Codex subscription login status or final result.
     Login(Option<LoginMsg>),
     /// A `/swarm` turn update, or `None` when its channel closed.
@@ -789,6 +792,8 @@ pub struct App {
     pub(crate) research_rx: Option<mpsc::UnboundedReceiver<ResearchMsg>>,
     pub(crate) research_abort: Option<tokio::task::AbortHandle>,
     pub(crate) login_rx: Option<mpsc::UnboundedReceiver<LoginMsg>>,
+    /// Startup update check result (newest published version, or `None` on failure).
+    pub(crate) update_rx: Option<mpsc::UnboundedReceiver<Option<String>>>,
     /// A running `/swarm` discussion's channel, cancellation handle, and
     /// origin session id (used for targeting the correct progress row).
     pub(crate) swarm_rx: Option<mpsc::UnboundedReceiver<swarm::SwarmMsg>>,
@@ -1117,6 +1122,7 @@ impl App {
             research_rx: None,
             research_abort: None,
             login_rx: None,
+            update_rx: None,
             swarm_rx: None,
             swarm_abort: None,
             swarm_session: None,
@@ -1413,6 +1419,45 @@ impl App {
         self.rescan_files();
     }
 
+    /// Kick off the startup update check: once per day, compare the newest
+    /// published version against this build and let the user know when a
+    /// newer release exists. Best-effort — offline or a failed fetch is
+    /// silent. Spawned before the event loop starts; the result arrives as
+    /// `AppEvent::UpdateCheck`.
+    pub fn spawn_update_check(&mut self) {
+        if !self.db.update_check_due() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.update_rx = Some(rx);
+        tokio::spawn(async move {
+            let latest = crate::update::latest_version().await;
+            let _ = tx.send(latest);
+        });
+    }
+
+    /// Handle the startup update check result: notify when a newer version
+    /// is published. `None` (failed check) and same/older versions are
+    /// silent — the check is a courtesy, not a nag.
+    pub(crate) fn on_update_check(&mut self, latest: Option<String>) {
+        let Some(latest) = latest else {
+            return;
+        };
+        if !crate::update::version_gt(&latest, crate::update::CURRENT) {
+            return;
+        }
+        self.status = format!(
+            "update available: v{latest} (you have {}) — run `cargo install nexus-chat`",
+            crate::update::CURRENT
+        );
+        self.notifications.push_back(ChatNotification {
+            session_id: String::new(),
+            title: "update available".to_string(),
+            text: format!("v{latest} is out — you have {}", crate::update::CURRENT),
+            success: true,
+        });
+    }
+
     pub fn is_streaming(&self) -> bool {
         !self.chat_tasks.is_empty()
     }
@@ -1554,6 +1599,12 @@ impl App {
                     None => std::future::pending().await,
                 }
             } => AppEvent::Login(r),
+            r = async {
+                match self.update_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => AppEvent::UpdateCheck(r.flatten()),
             r = async {
                 match self.swarm_rx.as_mut() {
                     Some(rx) => rx.recv().await,
