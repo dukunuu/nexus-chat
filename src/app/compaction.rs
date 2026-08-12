@@ -21,11 +21,14 @@ impl App {
     /// (`build_history`) nor in a compaction digest: background-job scratch
     /// (research stage/plan/survey rows), transport failures, session links,
     /// per-persona swarm round replies (the turn's synthesis carries the
-    /// context), and gate replies — the survey/plan sections they answer are
+    /// context), gate replies — the survey/plan sections they answer are
     /// excluded too, so a bare "drop Q2" must not leak into later turns via
-    /// a digest.
+    /// a digest — and the compaction digest row itself (the digest is
+    /// already fed to the model via `compact_summary`, so a transcript row
+    /// must never be sent twice).
     pub(super) fn excluded_from_model_history(m: &Message) -> bool {
-        m.role == "research_stage"
+        m.role == "compaction"
+            || m.role == "research_stage"
             || m.role == "research_plan"
             || m.role == "survey"
             || m.role == "gate_reply"
@@ -126,7 +129,9 @@ impl App {
         let new_through = self.messages.len() as i64;
         let (tx, rx) = mpsc::unbounded_channel();
         self.compact_rx = Some(rx);
-        self.status = "compacting…".to_string();
+        // No status write here: the input bar's "⟳ compacting…" hint (driven
+        // by `compact_rx`) is the progress indicator — a status message would
+        // be overwritten by the next event and never seen again.
         tokio::spawn(async move {
             let mut prompt = String::new();
             if let Some(s) = &prior_summary {
@@ -153,10 +158,15 @@ impl App {
         });
     }
 
-    /// Apply a compaction digest to the matching session (in memory + db).
-    /// Clears the exact usage total — it reflects the pre-compaction request,
-    /// so `context_used` should fall back to the (now accurate) estimate
-    /// until the next real response reports fresh usage.
+    /// Apply a compaction digest to the matching session (in memory + db):
+    /// the digest itself becomes a visible `compaction` transcript row at the
+    /// compaction boundary, so what was folded away is shown in the chat
+    /// instead of being reachable only through the context popup's editor.
+    /// A later compaction updates that row in place (one digest row per
+    /// session, at the same boundary). Clears the exact usage total — it
+    /// reflects the pre-compaction request, so `context_used` should fall
+    /// back to the (now accurate) estimate until the next real response
+    /// reports fresh usage.
     pub fn on_compact_result(&mut self, result: Option<(String, String, i64, u64)>) {
         self.compact_rx = None;
         let Some((id, summary, through, before_pct)) = result else {
@@ -164,8 +174,62 @@ impl App {
         };
         let _ = self.db.set_compaction(&id, &summary, through);
         if let Some(s) = self.session.as_mut().filter(|s| s.id == id) {
-            s.compact_summary = Some(summary);
+            s.compact_summary = Some(summary.clone());
             s.compact_through = through;
+        }
+        // Surface the digest in the transcript: update the existing row (a
+        // re-compaction folds new messages into the same digest), or insert
+        // one at the boundary — after the last message it covers, before
+        // anything the user says next. The db row is anchored to that last
+        // message's timestamp so reloads keep the same position.
+        if self.session.as_ref().is_some_and(|s| s.id == id) {
+            if let Some(row) = self.messages.iter_mut().find(|m| m.role == "compaction") {
+                row.content.clone_from(&summary);
+            } else {
+                let through = (through as usize).min(self.messages.len());
+                let anchor = self
+                    .messages
+                    .get(through.saturating_sub(1))
+                    .and_then(|m| m.created_at.clone());
+                self.messages.insert(
+                    through,
+                    crate::db::Message {
+                        role: "compaction".to_string(),
+                        content: summary.clone(),
+                        model: None,
+                        reasoning: None,
+                        tokens: None,
+                        secs: None,
+                        cost: None,
+                        phrase: None,
+                        persona: None,
+                        created_at: anchor,
+                    },
+                );
+                self.invalidate_history_cache();
+            }
+        }
+        if self
+            .db
+            .update_compaction_message(&id, &summary)
+            .is_ok_and(|n| n == 0)
+        {
+            // Anchor: the in-memory row we just placed (viewing the session),
+            // else the boundary message's timestamp straight from the db
+            // (job finished after the user switched away), else now.
+            let anchor = self
+                .messages
+                .iter()
+                .find(|m| m.role == "compaction")
+                .and_then(|m| m.created_at.clone())
+                .or_else(|| {
+                    self.db
+                        .message_created_at(&id, (through as usize).saturating_sub(1))
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+            let _ = self.db.add_compaction_message(&id, &summary, &anchor);
         }
         self.context_total = None;
         let after_pct = self
@@ -176,6 +240,48 @@ impl App {
             Some(after) => format!("compacted: {before_pct}% → {after}%"),
             None => "compacted".to_string(),
         };
+    }
+
+    /// Sessions compacted before compaction rows existed (or loaded from a
+    /// db written by such a version) carry the digest only in
+    /// `compact_summary`. Surface it as a transcript row at the boundary,
+    /// exactly like a fresh compaction would, so the digest is never hidden
+    /// behind the context popup. Idempotent: no-ops once a compaction row
+    /// exists. Called after every session load.
+    pub(crate) fn backfill_compaction_row(&mut self) {
+        let Some(s) = self.session.as_ref() else {
+            return;
+        };
+        let Some(summary) = s.compact_summary.clone() else {
+            return;
+        };
+        if self.messages.iter().any(|m| m.role == "compaction") {
+            return;
+        }
+        let through = (s.compact_through as usize).min(self.messages.len());
+        let anchor = self
+            .messages
+            .get(through.saturating_sub(1))
+            .and_then(|m| m.created_at.clone())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        let id = s.id.clone();
+        let _ = self.db.add_compaction_message(&id, &summary, &anchor);
+        self.messages.insert(
+            through,
+            crate::db::Message {
+                role: "compaction".to_string(),
+                content: summary,
+                model: None,
+                reasoning: None,
+                tokens: None,
+                secs: None,
+                cost: None,
+                phrase: None,
+                persona: None,
+                created_at: Some(anchor),
+            },
+        );
+        self.invalidate_history_cache();
     }
 
     /// System/memory/conversation token estimate for the context breakdown
@@ -201,6 +307,9 @@ impl App {
         let mut conversation_chars: usize = self
             .effective_messages()
             .iter()
+            // The digest transcript row is the same text as `compact_summary`
+            // (counted below) — never double-count it.
+            .filter(|m| m.role != "compaction")
             .map(|m| m.content.chars().count())
             .sum();
         if let Some(s) = self
@@ -279,6 +388,8 @@ fn compaction_tail(messages: &[Message], through: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Db;
+    use crate::space::Space;
 
     fn msg(role: &str, content: &str) -> Message {
         Message {
@@ -288,10 +399,115 @@ mod tests {
             reasoning: None,
             tokens: None,
             secs: None,
+            cost: None,
             phrase: None,
             persona: None,
             created_at: None,
         }
+    }
+
+    fn test_app() -> App {
+        let db = Db::open_in_memory().unwrap();
+        let root =
+            std::env::temp_dir().join(format!("nexus-compact-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("spaces")).unwrap();
+        App::new(db, Some("k"), Space { root })
+    }
+
+    /// A fresh session with `n` user/assistant pairs loaded as the active one.
+    fn app_with_session(n: usize) -> (App, String) {
+        let mut a = test_app();
+        let sid =
+            a.db.create_session("t", "m", &a.active_space.id, "chat")
+                .unwrap()
+                .id;
+        for i in 0..n {
+            a.db.add_user_message(&sid, &format!("u{i}")).unwrap();
+            a.db.add_assistant_message(&sid, &format!("a{i}"), None, None, None, None, None, None)
+                .unwrap();
+        }
+        a.messages = a.db.load_messages(&sid).unwrap();
+        a.session = a.db.get_session(&sid).unwrap();
+        (a, sid)
+    }
+
+    #[test]
+    fn on_compact_result_surfaces_the_digest_at_the_boundary() {
+        let (mut a, sid) = app_with_session(2);
+
+        a.on_compact_result(Some((sid.clone(), "digest text".to_string(), 3, 42)));
+
+        // The digest row sits at the boundary: after the 3 compacted
+        // messages, before anything the user says next.
+        assert_eq!(a.messages.len(), 5);
+        assert_eq!(a.messages[3].role, "compaction");
+        assert_eq!(a.messages[3].content, "digest text");
+        assert_eq!(a.messages[2].content, "u1"); // last compacted message
+        // Session state applied.
+        assert_eq!(a.session.as_ref().unwrap().compact_through, 3);
+        assert_eq!(
+            a.session.as_ref().unwrap().compact_summary.as_deref(),
+            Some("digest text")
+        );
+        // Persisted, anchored to the last compacted message's timestamp so
+        // reloads keep the same position.
+        let stored = a.db.load_messages(&sid).unwrap();
+        assert_eq!(stored.len(), 5);
+        let digest = stored.iter().find(|m| m.role == "compaction").unwrap();
+        assert_eq!(digest.content, "digest text");
+        let last_compacted = stored.iter().find(|m| m.content == "u1").unwrap();
+        assert_eq!(digest.created_at, last_compacted.created_at);
+        assert!(a.status.contains("compacted"), "{}", a.status);
+    }
+
+    #[test]
+    fn re_compaction_updates_the_digest_row_in_place() {
+        let (mut a, sid) = app_with_session(5);
+
+        a.on_compact_result(Some((sid.clone(), "digest one".to_string(), 4, 50)));
+        assert_eq!(
+            a.messages.iter().filter(|m| m.role == "compaction").count(),
+            1
+        );
+
+        // Second compaction folds the rest in: same single row, new text.
+        a.on_compact_result(Some((sid.clone(), "digest two".to_string(), 10, 60)));
+        assert_eq!(
+            a.messages.iter().filter(|m| m.role == "compaction").count(),
+            1
+        );
+        let row = a.messages.iter().find(|m| m.role == "compaction").unwrap();
+        assert_eq!(row.content, "digest two");
+        let stored = a.db.load_messages(&sid).unwrap();
+        assert_eq!(stored.iter().filter(|m| m.role == "compaction").count(), 1);
+        assert_eq!(
+            stored
+                .iter()
+                .find(|m| m.role == "compaction")
+                .unwrap()
+                .content,
+            "digest two"
+        );
+    }
+
+    #[test]
+    fn backfill_surfaces_a_legacy_digest_at_the_boundary_and_is_idempotent() {
+        let (mut a, sid) = app_with_session(1);
+        // Legacy compaction: digest only in the session row, no transcript
+        // message — the state of sessions compacted before digests rendered.
+        a.db.set_compaction(&sid, "legacy digest", 2).unwrap();
+        a.session = a.db.get_session(&sid).unwrap();
+
+        a.backfill_compaction_row();
+        assert_eq!(a.messages.len(), 3);
+        assert_eq!(a.messages[2].role, "compaction");
+        assert_eq!(a.messages[2].content, "legacy digest");
+        assert_eq!(a.db.load_messages(&sid).unwrap().len(), 3);
+
+        // A second backfill (another session load) adds nothing.
+        a.backfill_compaction_row();
+        assert_eq!(a.messages.len(), 3);
+        assert_eq!(a.db.load_messages(&sid).unwrap().len(), 3);
     }
 
     #[test]
@@ -304,6 +520,7 @@ mod tests {
             msg("research_plan", "Research plan: …"),
             msg("error", "request failed"),
             msg("session_link", "sess-1\n↩ from: x"),
+            msg("compaction", "folded-away digest"),
             msg("user", "the final question"),
             msg("tool_call", r#"{"name":"search"}"#),
         ];
@@ -314,9 +531,10 @@ mod tests {
         let tail = compaction_tail(&msgs, 0);
         assert!(tail.contains("what should we research?"), "{tail}");
         assert!(tail.contains("the final question"), "{tail}");
-        // Background rows, gate replies, errors, links, and persona round
-        // replies never enter a digest — the compacted history would
-        // otherwise leak contextless "drop Q2" to later models.
+        // Background rows, gate replies, errors, links, the digest row itself
+        // (already fed via compact_summary), and persona round replies never
+        // enter a digest — the compacted history would otherwise leak
+        // contextless "drop Q2" to later models.
         for banned in [
             "planner: working",
             "Depth?",
@@ -324,6 +542,7 @@ mod tests {
             "Research plan",
             "request failed",
             "sess-1",
+            "folded-away digest",
             "round reply",
             "tool_call",
         ] {

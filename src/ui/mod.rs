@@ -18,6 +18,7 @@ use crate::app::{App, Popup};
 pub mod filter_input;
 pub mod history;
 pub mod popups;
+
 use history::render_history;
 
 pub fn render(f: &mut Frame, app: &mut App) {
@@ -63,6 +64,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         Popup::Watch => popups::watches::render(f, app),
         Popup::ResearchLive => popups::research_live::render(f, app),
         Popup::Swarm => popups::swarm::render(f, app),
+        Popup::Usage => popups::usage::render(f, app),
         Popup::Login => popups::login::render(f, app),
         Popup::None => {}
     }
@@ -88,6 +90,11 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
             app.chat_task_count(),
             if app.chat_task_count() == 1 { "" } else { "s" }
         )
+    } else if app.compact_rx.is_some() {
+        // Compaction is a background job on this session — keep its state on
+        // the input bar for as long as it runs, not in a status message that
+        // the next event overwrites.
+        " ⟳ compacting… ".to_string()
     } else if let Some((_, topic)) = app
         .research_running
         .as_ref()
@@ -98,13 +105,13 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
         " message (Enter to send, /help) ".to_string()
     };
     // Session title sits in the top-right corner of the input box; the
-    // border brightens while a stream is running so the active state reads
-    // at a glance.
+    // border brightens while a stream or compaction is running so the active
+    // state reads at a glance.
     let name = match &app.session {
         Some(s) => s.title.clone(),
         None => "nexus-chat".to_string(),
     };
-    let border_color = if app.is_streaming() {
+    let border_color = if app.is_streaming() || app.compact_rx.is_some() {
         app.spinner_color()
     } else {
         app.theme.border_dim
@@ -301,7 +308,8 @@ fn gradient(t: f64) -> Color {
     Color::Rgb(r, g, 40)
 }
 
-/// `"34% 44k/128k"` for the status line, or None when unavailable.
+/// `"34% 44k/128k"` for the status line, or None when unavailable. Appends
+/// the last request's prompt-cache hit rate when one was reported.
 fn context_label(app: &App) -> Option<String> {
     let limit = app.context_limit()?;
     let used = app.context_used();
@@ -310,7 +318,12 @@ fn context_label(app: &App) -> Option<String> {
     } else {
         0.0
     };
-    Some(format!("{pct:.0}% {}/{}", humanize(used), humanize(limit)))
+    let mut label = format!("{pct:.0}% {}/{}", humanize(used), humanize(limit));
+    if let Some(rate) = app.last_cache_rate {
+        let _ =
+            std::fmt::Write::write_fmt(&mut label, format_args!(" · {:.0}% cached", rate * 100.0));
+    }
+    Some(label)
 }
 
 /// Compact token counts: 940, 1.2k, 128k, 1.0m.
@@ -321,6 +334,23 @@ fn humanize(n: u64) -> String {
         format!("{:.1}k", n as f64 / 1000.0)
     } else {
         format!("{:.1}m", n as f64 / 1_000_000.0)
+    }
+}
+
+/// `$0.0042`, `$1.23`, `$0.000012`, or `—` when the price is unknown.
+/// Small-but-real costs keep enough decimals that they never read `$0.0000`.
+fn fmt_cost(cost: Option<f64>) -> String {
+    match cost {
+        Some(c) if c > 0.0 && c < 1.0 => {
+            let four = format!("${c:.4}");
+            if four == "$0.0000" {
+                format!("${c:.6}")
+            } else {
+                four
+            }
+        }
+        Some(c) => format!("${c:.2}"),
+        None => "—".to_string(),
     }
 }
 

@@ -528,6 +528,25 @@ mod tests {
     }
 
     #[test]
+    fn recording_an_empty_layout_invalidates_stale_lines() {
+        let mut s = sel_with(&["go to https://example.com/x now"]);
+        assert!(s.pos_at(6, 0).is_some());
+        // The welcome screen (fresh /new session) re-records an empty layout:
+        // stale lines from the previous session must not stay clickable — a
+        // plain click on them would open the old session's URL.
+        s.record_render(
+            Rect::default(),
+            0,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(s.pos_at(6, 0), None);
+        assert_eq!(s.url_at((0, 10)), None);
+    }
+
+    #[test]
     fn click_on_url_opens_instead_of_clearing_selection() {
         let mut s = sel_with(&["see https://example.com/x here"]);
         s.on_down((0, 6));

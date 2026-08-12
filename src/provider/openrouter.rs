@@ -376,6 +376,32 @@ struct ModelEntry {
     context_length: Option<u64>,
     #[serde(default)]
     architecture: Option<Architecture>,
+    #[serde(default)]
+    pricing: Option<ModelPricing>,
+}
+
+/// OpenRouter catalog pricing, in USD **per token** (stringly-typed in the
+/// API: gpt-5 reports `1.25e-06`, i.e. $1.25/M). Only the OpenRouter flavor
+/// reports it; others default to absent.
+#[derive(Deserialize, Clone)]
+struct ModelPricing {
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    completion: Option<String>,
+}
+
+impl ModelPricing {
+    /// (prompt, completion) USD per 1M tokens — the unit every cost
+    /// calculation in this codebase uses (see `Db::request_cost`) — or
+    /// None when either is absent or unparsable (e.g. `"0"`-style or
+    /// free-tier entries parse fine). The API reports per-token values, so
+    /// scale to per-1M once here.
+    fn usd_per_million(&self) -> Option<(f64, f64)> {
+        let prompt = self.prompt.as_deref()?.parse::<f64>().ok()?;
+        let completion = self.completion.as_deref()?.parse::<f64>().ok()?;
+        Some((prompt * 1e6, completion * 1e6))
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -692,15 +718,6 @@ impl OpenRouter {
         }
     }
 
-    pub const fn default_escalation_model(&self) -> &'static str {
-        match self.flavor {
-            ProviderFlavor::OpenRouter => "anthropic/claude-sonnet-4.5",
-            ProviderFlavor::OpenAi => "gpt-4.1",
-            ProviderFlavor::OpenAiCodex => "gpt-5.5",
-            ProviderFlavor::OpencodeGo => "deepseek-v4-pro",
-        }
-    }
-
     pub const fn default_embedding_model(&self) -> &'static str {
         match self.flavor {
             ProviderFlavor::OpenRouter => "openai/text-embedding-3-small",
@@ -744,6 +761,7 @@ impl OpenRouter {
                     supports_image_generation: false,
                     supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
+                    pricing: None,
                 },
                 Model {
                     id: "gpt-5.4".into(),
@@ -754,6 +772,7 @@ impl OpenRouter {
                     supports_image_generation: false,
                     supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
+                    pricing: None,
                 },
                 Model {
                     id: "gpt-5.4-mini".into(),
@@ -764,6 +783,7 @@ impl OpenRouter {
                     supports_image_generation: false,
                     supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
+                    pricing: None,
                 },
                 Model {
                     id: "gpt-5.5".into(),
@@ -774,6 +794,7 @@ impl OpenRouter {
                     supports_image_generation: false,
                     supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
+                    pricing: None,
                 },
                 Model {
                     id: "gpt-5.6-sol".into(),
@@ -784,6 +805,7 @@ impl OpenRouter {
                     supports_image_generation: false,
                     supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
+                    pricing: None,
                 },
                 Model {
                     id: "gpt-5.6-terra".into(),
@@ -794,6 +816,7 @@ impl OpenRouter {
                     supports_image_generation: false,
                     supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
+                    pricing: None,
                 },
                 Model {
                     id: "gpt-5.6-luna".into(),
@@ -804,6 +827,7 @@ impl OpenRouter {
                     supports_image_generation: false,
                     supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
+                    pricing: None,
                 },
             ]);
         }
@@ -880,6 +904,7 @@ impl OpenRouter {
                     supports_video_generation: false,
                     backend: crate::provider::BackendTag::OpenRouter,
                     id,
+                    pricing: None,
                 }
             })
             .collect())
@@ -913,6 +938,7 @@ impl OpenRouter {
                     supports_video_generation: true,
                     backend: crate::provider::BackendTag::OpenRouter,
                     id,
+                    pricing: None,
                 }
             })
             .collect())
@@ -958,6 +984,7 @@ impl OpenRouter {
                     supports_image_generation,
                     supports_video_generation,
                     backend: self.backend_tag(),
+                    pricing: m.pricing.and_then(|p| p.usd_per_million()),
                 }
             })
             .collect();
@@ -1295,6 +1322,14 @@ impl OpenRouter {
         max_tool_iters: usize,
         tx: &mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<()> {
+        // Dedup state for tool results: (tool, arguments) → latest full
+        // result. Seeded from the incoming history (which `build_history`
+        // already deduped with the same rule), so a result that duplicates
+        // anything the model has seen — this turn or earlier turns — is
+        // compressed before it ever enters the context, and the wire
+        // history stays byte-identical to what the next turn's replay will
+        // rebuild (prompt-cache continuity).
+        let mut seen_results = super::seed_tool_result_dedup(&messages);
         for iter in 0..=max_tool_iters {
             // On the final allowed iteration, omit tools and tell the model
             // why — otherwise it writes the tool call as plain text.
@@ -1323,18 +1358,59 @@ impl OpenRouter {
                         tool_call_id: None,
                         images: Vec::new(),
                     });
-                    for call in &calls {
+                    // Parallel calls the model issued in one response run
+                    // concurrently when they're all read-only (searches,
+                    // fetches, file/app reads) — network latency overlaps
+                    // instead of stacking. Any mutating call keeps the batch
+                    // sequential so writes to the same file can't race.
+                    // Results are zipped back into call order either way.
+                    let results: Vec<(String, String)> = if calls.len() > 1
+                        && calls.iter().all(|call| {
+                            crate::tools::is_read_only_tool(&call.name, &call.arguments)
+                        }) {
+                        futures_util::future::join_all(calls.iter().map(|call| {
+                            let toolbox = toolbox.clone();
+                            async move { toolbox.run(&call.name, &call.arguments).await }
+                        }))
+                        .await
+                    } else {
+                        let mut results = Vec::with_capacity(calls.len());
+                        for call in &calls {
+                            results.push(toolbox.run(&call.name, &call.arguments).await);
+                        }
+                        results
+                    };
+                    for (call, (result, status)) in calls.iter().zip(results) {
                         let _ = tx.send(StreamEvent::Status("Running tool…".to_string()));
-                        let (result, status) = toolbox.run(&call.name, &call.arguments).await;
                         let _ = tx.send(StreamEvent::Status(status));
                         let _ = tx.send(StreamEvent::ToolCall {
                             name: call.name.clone(),
                             arguments: call.arguments.clone(),
                             result: result.clone(),
                         });
+                        // A result byte-identical to an earlier call with
+                        // the same tool and arguments (e.g. re-reading an
+                        // unchanged file) is replaced by a one-line note so
+                        // the duplicate never re-enters the context. The
+                        // transcript above still carries the full result and
+                        // the db stores it; `build_history` applies the same
+                        // rule on replay, keeping the cache prefix intact.
+                        let key = (call.name.clone(), call.arguments.clone());
+                        let content = match seen_results.get(&key) {
+                            Some(prev) if *prev == result => {
+                                crate::tools::tool_result_unchanged_note(
+                                    &call.name,
+                                    &call.arguments,
+                                )
+                            }
+                            _ => {
+                                seen_results.insert(key, result.clone());
+                                result.clone()
+                            }
+                        };
                         messages.push(ChatMessage {
                             role: "tool".to_string(),
-                            content: result.clone(),
+                            content,
                             tool_calls: None,
                             tool_call_id: Some(call.id.clone()),
                             images: Vec::new(),
@@ -1727,10 +1803,25 @@ fn parse_usage(data: &str) -> Option<Usage> {
     let v: serde_json::Value = serde_json::from_str(data).ok()?;
     let u = v.get("usage")?;
     let get = |k: &str| u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    // OpenAI-style reports cached input under `prompt_tokens_details.cached_tokens`;
+    // Anthropic-style (passed through by OpenRouter) under the flat
+    // `cache_read_input_tokens`. Take whichever is present, larger wins.
+    let cached = u
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .max(
+            u.get("cache_read_input_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        );
     Some(Usage {
         prompt_tokens: get("prompt_tokens"),
         completion_tokens: get("completion_tokens"),
         total_tokens: get("total_tokens"),
+        cache_read_tokens: cached,
+        cache_creation_tokens: get("cache_creation_input_tokens"),
     })
 }
 
@@ -2049,6 +2140,12 @@ fn codex_usage(data: &str) -> Option<Usage> {
             .get("total_tokens")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(prompt_tokens + completion_tokens),
+        cache_read_tokens: u
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        cache_creation_tokens: 0,
     })
 }
 
@@ -2560,6 +2657,7 @@ mod tests {
             }),
             context_length: None,
             architecture: None,
+            pricing: None,
         };
 
         let or = OpenRouter::openrouter_flavor("k".into());
@@ -2638,7 +2736,6 @@ mod tests {
         assert_eq!(p.flavor.base(), "https://opencode.ai/zen/v1");
         assert!(!p.default_utility_model().is_empty());
         assert!(!p.default_research_model().is_empty());
-        assert!(!p.default_escalation_model().is_empty());
         // No embedding models on Go — feature stays disabled by default.
         assert_eq!(p.default_embedding_model(), "");
     }
@@ -2778,7 +2875,33 @@ mod tests {
         assert_eq!(u.prompt_tokens, 120);
         assert_eq!(u.completion_tokens, 40);
         assert_eq!(u.total_tokens, 160);
+        assert_eq!(u.cache_read_tokens, 0);
+        assert_eq!(u.cache_creation_tokens, 0);
         assert!(parse_usage(r#"{"choices":[{"delta":{"content":"hi"}}]}"#).is_none());
+    }
+
+    #[test]
+    fn parses_usage_cache_tokens_both_styles() {
+        // OpenAI-style: cached input nested under prompt_tokens_details.
+        let openai = r#"{"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":70},"completion_tokens":10,"total_tokens":110}}"#;
+        let u = parse_usage(openai).unwrap();
+        assert_eq!(u.cache_read_tokens, 70);
+        assert_eq!(u.cache_hit_rate(), Some(0.7));
+        // Anthropic-style: flat cache_read_input_tokens (OpenRouter passthrough).
+        let anthropic = r#"{"usage":{"prompt_tokens":100,"cache_read_input_tokens":40,"cache_creation_input_tokens":10,"completion_tokens":10,"total_tokens":110}}"#;
+        let u = parse_usage(anthropic).unwrap();
+        assert_eq!(u.cache_read_tokens, 40);
+        assert_eq!(u.cache_creation_tokens, 10);
+        assert_eq!(u.cache_hit_rate(), Some(0.4));
+    }
+
+    #[test]
+    fn codex_usage_reads_cached_input() {
+        let data = r#"{"response":{"usage":{"input_tokens":50,"output_tokens":5,"input_tokens_details":{"cached_tokens":30}}}}"#;
+        let u = codex_usage(data).unwrap();
+        assert_eq!(u.prompt_tokens, 50);
+        assert_eq!(u.cache_read_tokens, 30);
+        assert_eq!(u.cache_hit_rate(), Some(0.6));
     }
 
     #[test]
@@ -2878,6 +3001,28 @@ mod tests {
         let resp: ModelsResponse = serde_json::from_str(json).unwrap();
         let flags: Vec<bool> = resp.data.iter().map(entry_supports_images).collect();
         assert_eq!(flags, vec![true, false, false]);
+    }
+
+    #[test]
+    fn catalog_pricing_scales_per_token_to_per_million() {
+        // The API reports USD per token (gpt-5 → 1.25e-06 = $1.25/M); the
+        // rest of the codebase prices in USD per 1M tokens, so parsing must
+        // scale. Free-tier entries ("0") stay zero.
+        let p = ModelPricing {
+            prompt: Some("8e-08".into()),
+            completion: Some("1.8e-07".into()),
+        };
+        assert_eq!(p.usd_per_million(), Some((0.08, 0.18)));
+        let free = ModelPricing {
+            prompt: Some("0".into()),
+            completion: Some("0".into()),
+        };
+        assert_eq!(free.usd_per_million(), Some((0.0, 0.0)));
+        let missing = ModelPricing {
+            prompt: None,
+            completion: None,
+        };
+        assert_eq!(missing.usd_per_million(), None);
     }
 
     #[test]

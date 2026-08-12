@@ -183,6 +183,7 @@ mod tests {
             reasoning: None,
             tokens: None,
             secs: None,
+            cost: None,
             phrase: None,
             persona: None,
             created_at: None,

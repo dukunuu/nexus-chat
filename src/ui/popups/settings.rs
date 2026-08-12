@@ -65,8 +65,6 @@ pub fn render(f: &mut Frame, app: &App) {
             ),
             SettingsField::TranscriberModel => numeric(&app.transcriber_model),
             SettingsField::OcrModel => numeric(&app.ocr_model),
-            SettingsField::ResearchModel => numeric(&app.research_model),
-            SettingsField::EscalationModel => numeric(&app.escalation_model),
             SettingsField::OcrEngine => Span::styled(
                 app.ocr_engine.clone(),
                 Style::default().fg(app.theme.accent),
@@ -150,8 +148,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             SettingsField::MemoryModel
                 | SettingsField::TranscriberModel
                 | SettingsField::OcrModel
-                | SettingsField::ResearchModel
-                | SettingsField::EscalationModel
                 | SettingsField::ImageGenModel
                 | SettingsField::VideoGenModel
         )
@@ -162,8 +158,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             KeyCode::Enter => match app.settings_field() {
                 Some(SettingsField::MemoryModel) => app.open_model_picker_for_memory(),
                 Some(SettingsField::OcrModel) => app.open_model_picker_for_ocr(),
-                Some(SettingsField::ResearchModel) => app.open_model_picker_for_research(),
-                Some(SettingsField::EscalationModel) => app.open_model_picker_for_escalation(),
                 Some(SettingsField::ImageGenModel) => app.open_model_picker_for_image_gen(),
                 Some(SettingsField::VideoGenModel) => app.open_model_picker_for_video_gen(),
                 _ => app.open_model_picker_for_transcriber(),
@@ -171,8 +165,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             KeyCode::Backspace => match app.settings_field() {
                 Some(SettingsField::MemoryModel) => app.clear_memory_model()?,
                 Some(SettingsField::OcrModel) => app.clear_ocr_model()?,
-                Some(SettingsField::ResearchModel) => app.clear_research_model()?,
-                Some(SettingsField::EscalationModel) => app.clear_escalation_model()?,
                 Some(SettingsField::ImageGenModel) => app.clear_image_gen_model()?,
                 Some(SettingsField::VideoGenModel) => app.clear_video_gen_model()?,
                 _ => app.clear_transcriber_model()?,

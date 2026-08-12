@@ -21,9 +21,8 @@ use anyhow::Result;
 async fn main() -> Result<()> {
     let saved = config::load_all_providers().await?;
     // A single bootstrap key just seeds App::new's "reasonable defaults"
-    // guess (utility/research/escalation model strings); rebuild_all_backends
-    // below populates every configured backend regardless of which one this
-    // picked.
+    // guess (utility model strings); rebuild_all_backends below populates
+    // every configured backend regardless of which one this picked.
     let key = config::first_configured(&saved).map(|(_, k)| k);
     let space = space::Space::open()?;
     let space_root = space.spaces_root();

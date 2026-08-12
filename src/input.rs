@@ -134,6 +134,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["watches"],
     },
     Command {
+        name: "usage",
+        desc: "token/cache/cost analytics by backend and model",
+        aliases: &["analytics", "costs", "billing"],
+    },
+    Command {
         name: "web",
         desc: "toggle web answer mode (search-first, cited)",
         aliases: &["websearch"],
@@ -774,7 +779,7 @@ mod tests {
     fn paste_into_url_settings_field_keeps_full_text() {
         let mut a = test_app();
         a.popup = crate::app::Popup::Settings;
-        a.settings_selected = 18; // SearxngUrl (free text)
+        a.settings_selected = 15; // SearxngUrl (free text)
         a.paste("http://localhost:8080");
         assert_eq!(a.settings_inputs[4], "http://localhost:8080");
     }

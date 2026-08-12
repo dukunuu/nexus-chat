@@ -20,6 +20,10 @@ impl App {
     pub(super) fn new_session(&mut self) {
         self.session = None;
         self.messages.clear();
+        // A selection points into the old session's wrapped lines — a stale
+        // one would mis-highlight the new chat and resolve links against the
+        // wrong messages.
+        self.sel.clear();
         self.context_total = None;
         self.scroll = 0;
         self.cleanup_incognito_images();
@@ -139,10 +143,12 @@ impl App {
         self.current_model = Some(s.model.clone());
         self.web_mode = s.web_mode;
         self.session = Some(s);
+        self.backfill_compaction_row();
         self.restore_survey_gate_prompt();
         self.refresh_toolbox();
         self.context_total = None;
         self.scroll = 0;
+        self.sel.clear(); // selection points into the previous session's lines
         self.cleanup_incognito_images();
         Ok(())
     }
@@ -156,11 +162,13 @@ impl App {
             self.current_model = Some(s.model.clone());
             self.web_mode = s.web_mode;
             self.session = Some(s);
+            self.backfill_compaction_row();
             self.restore_survey_gate_prompt();
             self.refresh_toolbox();
             // Estimate from history until the next response reports exact usage.
             self.context_total = None;
             self.scroll = 0;
+            self.sel.clear(); // selection points into the previous session's lines
             self.cleanup_incognito_images();
         }
         self.popup = Popup::None;

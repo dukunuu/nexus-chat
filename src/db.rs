@@ -93,8 +93,8 @@ pub struct FileRow {
     pub mtime: i64,
 }
 
-/// One message in a session. `model`/`reasoning`/`tokens`/`secs` are populated
-/// for assistant replies (None for user/system messages).
+/// One message in a session. `model`/`reasoning`/`tokens`/`secs`/`cost` are
+/// populated for assistant replies (None for user/system messages).
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: String,
@@ -103,6 +103,10 @@ pub struct Message {
     pub reasoning: Option<String>,
     pub tokens: Option<i64>,
     pub secs: Option<f64>,
+    /// USD cost of the request that produced this reply, at catalog list
+    /// price (`None` when unknown — non-OpenRouter backends, or replies
+    /// logged before pricing existed).
+    pub cost: Option<f64>,
     /// Past-tense flavour phrase for the completion line, e.g. "Vibed".
     pub phrase: Option<String>,
     /// Which `/swarm` persona produced this reply, if any (`None` for
@@ -238,7 +242,29 @@ impl Db {
                 persona    TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_swarm_personas_session
-                ON swarm_personas(session_id, ord);",
+                ON swarm_personas(session_id, ord);
+            CREATE TABLE IF NOT EXISTS usage_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                session_id TEXT,
+                space_id TEXT,
+                backend TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_tokens INTEGER NOT NULL,
+                completion_tokens INTEGER NOT NULL,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                cost REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at);
+            CREATE INDEX IF NOT EXISTS idx_usage_log_model ON usage_log(model);
+            CREATE TABLE IF NOT EXISTS model_prices (
+                model_id TEXT PRIMARY KEY,
+                backend TEXT NOT NULL,
+                prompt_price REAL NOT NULL,
+                completion_price REAL NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
         )?;
         // Columns added after v1; ignore "duplicate column" on existing dbs.
         for stmt in [
@@ -246,6 +272,7 @@ impl Db {
             "ALTER TABLE messages ADD COLUMN reasoning TEXT",
             "ALTER TABLE messages ADD COLUMN tokens INTEGER",
             "ALTER TABLE messages ADD COLUMN secs REAL",
+            "ALTER TABLE messages ADD COLUMN cost REAL",
             "ALTER TABLE messages ADD COLUMN phrase TEXT",
             "ALTER TABLE model_prefs ADD COLUMN reasoning TEXT",
             "ALTER TABLE sessions ADD COLUMN slug TEXT",
@@ -622,7 +649,7 @@ impl Db {
 
     pub fn load_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT role, content, model, reasoning, tokens, secs, phrase, persona, created_at
+            "SELECT role, content, model, reasoning, tokens, secs, cost, phrase, persona, created_at
              FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
         )?;
         let messages = stmt
@@ -634,9 +661,10 @@ impl Db {
                     reasoning: r.get(3)?,
                     tokens: r.get(4)?,
                     secs: r.get(5)?,
-                    phrase: r.get(6)?,
-                    persona: r.get(7)?,
-                    created_at: r.get(8)?,
+                    cost: r.get(6)?,
+                    phrase: r.get(7)?,
+                    persona: r.get(8)?,
+                    created_at: r.get(9)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -645,7 +673,9 @@ impl Db {
 
     /// Insert a user message (no model/reasoning/stats). Returns its id.
     pub fn add_user_message(&self, session_id: &str, content: &str) -> Result<String> {
-        self.insert_message(session_id, "user", content, None, None, None, None, None)
+        self.insert_message(
+            session_id, "user", content, None, None, None, None, None, None,
+        )
     }
 
     /// A user's reply to a survey/approval gate: rendered in the transcript
@@ -658,6 +688,7 @@ impl Db {
             session_id,
             "gate_reply",
             content,
+            None,
             None,
             None,
             None,
@@ -678,13 +709,16 @@ impl Db {
             None,
             None,
             None,
+            None,
         )
     }
 
     /// Insert a failed-response line. It remains visible in the transcript
     /// after the status bar changes, but is never replayed to the model.
     pub fn add_error_message(&self, session_id: &str, content: &str) -> Result<String> {
-        self.insert_message(session_id, "error", content, None, None, None, None, None)
+        self.insert_message(
+            session_id, "error", content, None, None, None, None, None, None,
+        )
     }
 
     /// Insert a background-research stage/progress line: plain text, shown in
@@ -696,6 +730,7 @@ impl Db {
             session_id,
             "research_stage",
             content,
+            None,
             None,
             None,
             None,
@@ -716,6 +751,7 @@ impl Db {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -723,7 +759,9 @@ impl Db {
     /// questions awaiting a chat answer. Rendered like a stage row but
     /// actionable, and never replayed to the model.
     pub fn add_survey_message(&self, session_id: &str, content: &str) -> Result<String> {
-        self.insert_message(session_id, "survey", content, None, None, None, None, None)
+        self.insert_message(
+            session_id, "survey", content, None, None, None, None, None, None,
+        )
     }
 
     /// Update the most recent `research_stage` row for `session_id` whose
@@ -799,6 +837,8 @@ impl Db {
     }
 
     /// Insert an assistant reply with its model, reasoning trace, and stats.
+    /// `cost` is the request's USD total at catalog list price (`None` when
+    /// the model's price is unknown).
     /// Args mirror the messages table columns; ~25 call sites pass inline
     /// `None`s for unused fields, so a struct would churn all of them.
     #[allow(clippy::too_many_arguments)]
@@ -810,6 +850,7 @@ impl Db {
         reasoning: Option<&str>,
         tokens: Option<i64>,
         secs: Option<f64>,
+        cost: Option<f64>,
         phrase: Option<&str>,
     ) -> Result<String> {
         self.insert_message(
@@ -820,6 +861,7 @@ impl Db {
             reasoning,
             tokens,
             secs,
+            cost,
             phrase,
         )
     }
@@ -838,6 +880,7 @@ impl Db {
             "assistant",
             content,
             Some(model),
+            None,
             None,
             None,
             None,
@@ -862,16 +905,17 @@ impl Db {
         reasoning: Option<&str>,
         tokens: Option<i64>,
         secs: Option<f64>,
+        cost: Option<f64>,
         phrase: Option<&str>,
     ) -> Result<String> {
         let now = Utc::now().to_rfc3339();
         let id = Uuid::new_v4().to_string();
         self.conn.execute(
             "INSERT INTO messages
-                (id, session_id, role, content, model, reasoning, tokens, secs, phrase, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                (id, session_id, role, content, model, reasoning, tokens, secs, cost, phrase, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             (
-                &id, session_id, role, content, model, reasoning, tokens, secs, phrase, &now,
+                &id, session_id, role, content, model, reasoning, tokens, secs, cost, phrase, &now,
             ),
         )?;
         self.conn.execute(
@@ -879,6 +923,54 @@ impl Db {
             (session_id, &now),
         )?;
         Ok(id)
+    }
+
+    /// `created_at` of the message at `index` (0-based, transcript order) —
+    /// used to anchor a compaction row at the boundary without loading the
+    /// whole session (e.g. when the job finishes after the user switched
+    /// sessions). `None` when the session has fewer than `index + 1` messages.
+    pub fn message_created_at(&self, session_id: &str, index: usize) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT created_at FROM messages WHERE session_id = ?1
+             ORDER BY created_at ASC LIMIT 1 OFFSET ?2",
+        )?;
+        Ok(stmt
+            .query_row((session_id, index as i64), |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Insert a compaction-digest row at the exact `created_at` position —
+    /// the timestamp of the last message the digest covers, so reloads keep
+    /// the digest at the compaction boundary (right after the raw messages
+    /// it summarizes) instead of at the end of the transcript. Unlike
+    /// `insert_message`, this does not bump the session's `updated_at`:
+    /// compacting is bookkeeping, not new activity.
+    pub fn add_compaction_message(
+        &self,
+        session_id: &str,
+        content: &str,
+        at: &str,
+    ) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO messages
+                (id, session_id, role, content, model, reasoning, tokens, secs, phrase, created_at)
+             VALUES (?1, ?2, 'compaction', ?3, NULL, NULL, NULL, NULL, NULL, ?4)",
+            (&id, session_id, content, at),
+        )?;
+        Ok(id)
+    }
+
+    /// Replace the session's compaction row's content in place — a later
+    /// compaction folds new messages into the same digest, so there is
+    /// exactly one row per session. Returns the number of rows updated
+    /// (0 = the session has no compaction row yet).
+    pub fn update_compaction_message(&self, session_id: &str, content: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE messages SET content = ?2
+             WHERE session_id = ?1 AND role = 'compaction'",
+            (session_id, content),
+        )?)
     }
 
     pub fn set_session_model(&self, session_id: &str, model: &str) -> Result<()> {
@@ -1370,6 +1462,529 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if denom == 0.0 { 0.0 } else { dot / denom }
 }
 
+// --- usage analytics ---
+
+/// Time window for the `/usage` dashboard: which logged requests count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UsageRange {
+    Day,
+    Week,
+    Month,
+    #[default]
+    All,
+}
+
+impl UsageRange {
+    /// Cycle order for the popup's range key (`←/→`).
+    pub const CYCLE: [Self; 4] = [Self::Day, Self::Week, Self::Month, Self::All];
+
+    /// Short badge label, e.g. the `24h` in the popup title.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Day => "24h",
+            Self::Week => "7d",
+            Self::Month => "30d",
+            Self::All => "all",
+        }
+    }
+
+    /// Long form for titles and empty-state messages.
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Day => "last 24 hours",
+            Self::Week => "last 7 days",
+            Self::Month => "last 30 days",
+            Self::All => "all time",
+        }
+    }
+
+    /// Persisted `app_settings` key value.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+            Self::All => "all",
+        }
+    }
+
+    /// Parse a persisted `app_settings` value; unknown keys fall back to
+    /// the default (all time).
+    pub fn from_key(key: &str) -> Self {
+        Self::CYCLE
+            .iter()
+            .copied()
+            .find(|r| r.key() == key)
+            .unwrap_or_default()
+    }
+
+    /// The next window in cycle order.
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Day => Self::Week,
+            Self::Week => Self::Month,
+            Self::Month => Self::All,
+            Self::All => Self::Day,
+        }
+    }
+
+    /// The previous window in cycle order.
+    pub const fn prev(self) -> Self {
+        match self {
+            Self::Day => Self::All,
+            Self::Week => Self::Day,
+            Self::Month => Self::Week,
+            Self::All => Self::Month,
+        }
+    }
+
+    /// Inclusive cutoff timestamp for SQL filtering; `None` = no filter.
+    pub fn since(self) -> Option<chrono::DateTime<chrono::Utc>> {
+        use chrono::{Duration, Utc};
+        match self {
+            Self::Day => Some(Utc::now() - Duration::hours(24)),
+            Self::Week => Some(Utc::now() - Duration::days(7)),
+            Self::Month => Some(Utc::now() - Duration::days(30)),
+            Self::All => None,
+        }
+    }
+
+    /// Empty-state message for the dashboard/status line.
+    pub const fn empty_message(self) -> &'static str {
+        match self {
+            Self::Day => "no usage in the last 24 hours — ←/→ for a wider window",
+            Self::Week => "no usage in the last 7 days — ←/→ for a wider window",
+            Self::Month => "no usage in the last 30 days — ←/→ for a wider window",
+            Self::All => "no usage logged yet — send a message first",
+        }
+    }
+}
+
+/// The bare model name used by the OpenRouter catalog's `vendor/name` ids:
+/// backend prefixes (`go:`, `openai:`, `codex:`, `opencode:`) and any
+/// `vendor/` part are stripped (`go:deepseek-v4-flash` → `deepseek-v4-flash`,
+/// `openai:gpt-5` → `gpt-5`). Empty when the id has no name left.
+pub fn price_name(model: &str) -> &str {
+    let stripped = ["go:", "openai:", "codex:", "opencode:"]
+        .iter()
+        .find_map(|p| model.strip_prefix(p))
+        .unwrap_or(model);
+    stripped.rsplit('/').next().unwrap_or(stripped)
+}
+
+/// Catalog price for a usage row's model: exact `model_prices` key first,
+/// then the OpenRouter `vendor/name` entry matching the bare name (same
+/// cross-backend fallback as `Db::model_price`, but against an in-memory
+/// snapshot so a 28k-row backfill needs no per-row SQL).
+fn catalog_price<'a>(
+    prices: &'a std::collections::HashMap<String, (f64, f64)>,
+    model: &str,
+) -> Option<&'a (f64, f64)> {
+    if let Some(price) = prices.get(model) {
+        return Some(price);
+    }
+    let name = price_name(model);
+    if name.is_empty() {
+        return None;
+    }
+    prices
+        .iter()
+        .filter(|(id, _)| {
+            id.strip_suffix(name)
+                .is_some_and(|rest| rest.ends_with('/'))
+        })
+        .min_by_key(|(id, _)| id.len()) // shortest vendor wins, deterministic
+        .map(|(_, price)| price)
+}
+
+/// Lifetime token/cost totals across every logged request.
+#[derive(Default)]
+pub struct UsageTotals {
+    pub requests: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    /// Total USD (0 when no model had a known price).
+    pub cost: f64,
+}
+
+/// One backend's aggregate row.
+#[derive(Default)]
+pub struct UsageByBackend {
+    pub backend: String,
+    pub requests: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cost: f64,
+}
+
+/// One model's aggregate row.
+#[derive(Default)]
+pub struct UsageByModel {
+    pub model: String,
+    pub requests: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cost: f64,
+}
+
+/// One logged request, newest first.
+#[derive(Default)]
+pub struct UsageRow {
+    pub created_at: String,
+    pub backend: String,
+    pub model: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cost: Option<f64>,
+}
+
+impl Db {
+    /// Record one completed API request's usage. Content-free — only
+    /// backend/model/tokens — so it never leaks conversation text.
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_usage(
+        &self,
+        backend: &str,
+        model: &str,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+        cost: Option<f64>,
+        session_id: Option<&str>,
+        space_id: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO usage_log (created_at, session_id, space_id, backend, model,
+                prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens, cost)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            (
+                Utc::now().to_rfc3339(),
+                session_id,
+                space_id,
+                backend,
+                model,
+                prompt_tokens as i64,
+                completion_tokens as i64,
+                cache_read_tokens as i64,
+                cache_creation_tokens as i64,
+                cost,
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// Cost of one completed request in USD at current catalog prices
+    /// (`None` when no price is known). Non-OpenRouter backends expose no
+    /// pricing API, so their models are priced via the OpenRouter catalog
+    /// entry for the same model (see `model_price`). Prompt tokens are
+    /// billed at the prompt rate even when served from cache; the catalog
+    /// has no separate cache-read rate.
+    pub fn request_cost(
+        &self,
+        model: &str,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+    ) -> Option<f64> {
+        self.model_price(model)
+            .map(|(prompt_price, completion_price)| {
+                prompt_tokens as f64 / 1e6 * prompt_price
+                    + completion_tokens as f64 / 1e6 * completion_price
+            })
+    }
+
+    /// Reconcile every logged request's cost with the current `model_prices`
+    /// catalog: NULL rows (logged before pricing existed) get the exact
+    /// `tokens × price` total, and rows whose value no longer matches the
+    /// catalog (legacy unit bug, price changes) are recomputed. Non-OpenRouter
+    /// models are priced through their OpenRouter `vendor/name` twin, like
+    /// `model_price`. Existing costs for models without any catalog price are
+    /// left untouched — a model dropping out of the catalog shouldn't void
+    /// its history.
+    /// Idempotent — unchanged rows are not rewritten — so it can run after
+    /// every catalog refresh and whenever the `/usage` popup opens.
+    /// Returns how many rows were visited.
+    pub fn backfill_usage_costs(&mut self) -> Result<usize> {
+        // The catalog endpoint reports USD per token while every cost
+        // formula here works in USD per 1M tokens. Heal a legacy
+        // per-token-shaped catalog (MAX < $0.001/M is impossible for a
+        // real catalog — o1-pro alone lists at $150/M) so backfills
+        // computed against it produce real totals. Self-limiting: once
+        // scaled (or refreshed by the fixed fetch path) it no longer
+        // matches the shape.
+        let max_price: f64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(prompt_price), 0) FROM model_prices",
+            [],
+            |r| r.get(0),
+        )?;
+        if max_price > 0.0 && max_price < 0.001 {
+            self.conn.execute(
+                "UPDATE model_prices
+                 SET prompt_price = prompt_price * 1e6, completion_price = completion_price * 1e6",
+                [],
+            )?;
+        }
+        // Snapshot the catalog, then rewrite every usage row in one
+        // transaction. 28k rows is a few ms even on a file DB.
+        let mut prices: std::collections::HashMap<String, (f64, f64)> = Default::default();
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT model_id, prompt_price, completion_price FROM model_prices")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (r.get::<_, f64>(1)?, r.get::<_, f64>(2)?),
+                ))
+            })?;
+            for row in rows {
+                let (model, price) = row?;
+                prices.insert(model, price);
+            }
+        }
+        let rows: Vec<(i64, String, i64, i64, Option<f64>)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, model, prompt_tokens, completion_tokens, cost FROM usage_log",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<f64>>(4)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let tx = self.conn.transaction()?;
+        {
+            let mut update = tx.prepare("UPDATE usage_log SET cost = ?2 WHERE id = ?1")?;
+            for (id, model, prompt, completion, old) in &rows {
+                let recomputed = catalog_price(&prices, model)
+                    .map(|(p, c)| *prompt as f64 / 1e6 * p + *completion as f64 / 1e6 * c);
+                // Fill rows logged before pricing existed, and heal values
+                // computed against a stale catalog. Never erase an existing
+                // cost when no price is currently known — a model dropping
+                // out of the catalog shouldn't void its history.
+                let write = match (recomputed, old) {
+                    (Some(c), None) => Some(c),
+                    (Some(c), Some(o)) if c != *o => Some(c),
+                    _ => None,
+                };
+                if let Some(cost) = write {
+                    update.execute((id, cost))?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(rows.len())
+    }
+
+    /// Batch save/refresh catalog prices in one transaction. The OpenRouter
+    /// catalog is hundreds of models; per-row autocommits (each an fsync on
+    /// the UI task) made the post-load pause noticeable. The `WHERE` clause
+    /// also skips rows whose price didn't move, so re-fetches write nothing.
+    pub fn upsert_model_prices(&mut self, prices: &[(String, String, f64, f64)]) -> Result<()> {
+        if prices.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO model_prices (model_id, backend, prompt_price, completion_price, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(model_id) DO UPDATE SET
+                    prompt_price = excluded.prompt_price,
+                    completion_price = excluded.completion_price,
+                    updated_at = excluded.updated_at
+                 WHERE model_prices.prompt_price != excluded.prompt_price
+                    OR model_prices.completion_price != excluded.completion_price",
+            )?;
+            let now = Utc::now().to_rfc3339();
+            for (model, backend, prompt, completion) in prices {
+                stmt.execute((model, backend, prompt, completion, &now))?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Catalog price for a model, `(prompt, completion)` USD per 1M tokens.
+    /// Tries the exact `model_prices` row first (OpenRouter ids match
+    /// directly); if there is none, falls back to the OpenRouter catalog
+    /// entry for the same model — backend prefixes (`go:`, `openai:`,
+    /// `codex:`, `opencode:`) and the catalog's `vendor/` part are stripped
+    /// (`go:deepseek-v4-flash` → `deepseek/deepseek-v4-flash`). The other
+    /// backends' APIs expose no pricing, so OpenRouter's list price for the
+    /// same model is the best available estimate.
+    pub fn model_price(&self, model: &str) -> Option<(f64, f64)> {
+        if let Ok(price) = self.conn.query_row(
+            "SELECT prompt_price, completion_price FROM model_prices WHERE model_id = ?1",
+            [model],
+            |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)),
+        ) {
+            return Some(price);
+        }
+        let name = price_name(model);
+        if name.is_empty() {
+            return None;
+        }
+        // Suffix match on `vendor/name`: the shortest vendor wins when a
+        // bare name appears under several vendors.
+        self.conn
+            .query_row(
+                "SELECT prompt_price, completion_price FROM model_prices
+                 WHERE backend = 'OpenRouter'
+                   AND substr(model_id, -length(?1) - 1) = '/' || ?1
+                 ORDER BY length(model_id) LIMIT 1",
+                [name],
+                |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)),
+            )
+            .ok()
+    }
+
+    /// Totals across logged requests, optionally limited to requests logged
+    /// at or after `since` (RFC3339; `None` = all time). `created_at` is
+    /// stored as fixed-width UTC RFC3339, so lexicographic comparison is a
+    /// correct time filter.
+    pub fn usage_totals(&self, since: Option<&str>) -> Result<UsageTotals> {
+        let mut sql = String::from(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(prompt_tokens), 0),
+                    COALESCE(SUM(completion_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(cache_creation_tokens), 0),
+                    COALESCE(SUM(cost), 0)
+             FROM usage_log",
+        );
+        if since.is_some() {
+            sql.push_str(" WHERE created_at >= ?1");
+        }
+        let map = |r: &rusqlite::Row| {
+            Ok(UsageTotals {
+                requests: r.get::<_, i64>(0)? as u64,
+                prompt_tokens: r.get::<_, i64>(1)? as u64,
+                completion_tokens: r.get::<_, i64>(2)? as u64,
+                cache_read_tokens: r.get::<_, i64>(3)? as u64,
+                cache_creation_tokens: r.get::<_, i64>(4)? as u64,
+                cost: r.get::<_, f64>(5)?,
+            })
+        };
+        let totals = match since {
+            Some(s) => self.conn.query_row(&sql, [s], map),
+            None => self.conn.query_row(&sql, [], map),
+        }?;
+        Ok(totals)
+    }
+
+    /// Per-backend aggregates, most-used first. `since` filters the window
+    /// (RFC3339 cutoff; `None` = all time).
+    pub fn usage_by_backend(&self, since: Option<&str>) -> Result<Vec<UsageByBackend>> {
+        let mut sql = String::from(
+            "SELECT backend, COUNT(*),
+                    COALESCE(SUM(prompt_tokens), 0),
+                    COALESCE(SUM(completion_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(cost), 0)
+             FROM usage_log",
+        );
+        if since.is_some() {
+            sql.push_str(" WHERE created_at >= ?1");
+        }
+        sql.push_str(" GROUP BY backend ORDER BY COUNT(*) DESC");
+        let map = |r: &rusqlite::Row| {
+            Ok(UsageByBackend {
+                backend: r.get(0)?,
+                requests: r.get::<_, i64>(1)? as u64,
+                prompt_tokens: r.get::<_, i64>(2)? as u64,
+                completion_tokens: r.get::<_, i64>(3)? as u64,
+                cache_read_tokens: r.get::<_, i64>(4)? as u64,
+                cost: r.get::<_, f64>(5)?,
+            })
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = match since {
+            Some(s) => stmt.query_map([s], map),
+            None => stmt.query_map([], map),
+        }?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Per-model aggregates, most-used first. `since` filters the window
+    /// (RFC3339 cutoff; `None` = all time).
+    pub fn usage_by_model(&self, limit: u64, since: Option<&str>) -> Result<Vec<UsageByModel>> {
+        let mut sql = String::from(
+            "SELECT model, COUNT(*),
+                    COALESCE(SUM(prompt_tokens), 0),
+                    COALESCE(SUM(completion_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(cost), 0)
+             FROM usage_log",
+        );
+        if since.is_some() {
+            sql.push_str(" WHERE created_at >= ?1");
+            sql.push_str(" GROUP BY model ORDER BY COUNT(*) DESC LIMIT ?2");
+        } else {
+            sql.push_str(" GROUP BY model ORDER BY COUNT(*) DESC LIMIT ?1");
+        }
+        let map = |r: &rusqlite::Row| {
+            Ok(UsageByModel {
+                model: r.get(0)?,
+                requests: r.get::<_, i64>(1)? as u64,
+                prompt_tokens: r.get::<_, i64>(2)? as u64,
+                completion_tokens: r.get::<_, i64>(3)? as u64,
+                cache_read_tokens: r.get::<_, i64>(4)? as u64,
+                cost: r.get::<_, f64>(5)?,
+            })
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = match since {
+            Some(s) => stmt.query_map(rusqlite::params![s, limit as i64], map),
+            None => stmt.query_map(rusqlite::params![limit as i64], map),
+        }?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The most recent logged requests, newest first. `since` filters the
+    /// window (RFC3339 cutoff; `None` = all time).
+    pub fn usage_recent(&self, limit: u64, since: Option<&str>) -> Result<Vec<UsageRow>> {
+        let mut sql = String::from(
+            "SELECT created_at, backend, model, prompt_tokens, completion_tokens,
+                    cache_read_tokens, cost
+             FROM usage_log",
+        );
+        if since.is_some() {
+            sql.push_str(" WHERE created_at >= ?1");
+            sql.push_str(" ORDER BY id DESC LIMIT ?2");
+        } else {
+            sql.push_str(" ORDER BY id DESC LIMIT ?1");
+        }
+        let map = |r: &rusqlite::Row| {
+            Ok(UsageRow {
+                created_at: r.get(0)?,
+                backend: r.get(1)?,
+                model: r.get(2)?,
+                prompt_tokens: r.get::<_, i64>(3)? as u64,
+                completion_tokens: r.get::<_, i64>(4)? as u64,
+                cache_read_tokens: r.get::<_, i64>(5)? as u64,
+                cost: r.get(6)?,
+            })
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = match since {
+            Some(s) => stmt.query_map(rusqlite::params![s, limit as i64], map),
+            None => stmt.query_map(rusqlite::params![limit as i64], map),
+        }?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
 /// Quote a query for FTS5 MATCH: each whitespace token becomes a quoted
 /// phrase (inner quotes doubled), so model-supplied text can't be an FTS
 /// syntax error. Tokens are implicitly `ANDed` by FTS5.
@@ -1439,6 +2054,301 @@ mod tests {
         assert!(is_fresh(&recent, now));
         assert!(!is_fresh(&stale, now));
         assert!(!is_fresh("not a timestamp", now)); // unparseable = not fresh
+    }
+
+    #[test]
+    fn usage_log_round_trips_and_aggregates() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.upsert_model_prices(&[(
+            "anthropic/claude-3.5-sonnet".to_string(),
+            "OpenRouter".to_string(),
+            3.0,
+            15.0,
+        )])
+        .unwrap();
+        assert_eq!(
+            db.model_price("anthropic/claude-3.5-sonnet"),
+            Some((3.0, 15.0))
+        );
+        // Re-upsert refreshes rather than duplicating.
+        db.upsert_model_prices(&[(
+            "anthropic/claude-3.5-sonnet".to_string(),
+            "OpenRouter".to_string(),
+            4.0,
+            16.0,
+        )])
+        .unwrap();
+        assert_eq!(
+            db.model_price("anthropic/claude-3.5-sonnet"),
+            Some((4.0, 16.0))
+        );
+        assert_eq!(db.model_price("unknown/model"), None);
+
+        // 100 prompt @ $4/1M + 10 completion @ $16/1M = $0.0004 + $0.00016.
+        db.log_usage(
+            "OpenRouter",
+            "anthropic/claude-3.5-sonnet",
+            100,
+            10,
+            70,
+            20,
+            Some(0.00056),
+            Some("s1"),
+            Some("space-a"),
+        )
+        .unwrap();
+        db.log_usage("Codex", "gpt-5.1-codex", 50, 5, 0, 0, None, None, None)
+            .unwrap();
+
+        let totals = db.usage_totals(None).unwrap();
+        assert_eq!(totals.requests, 2);
+        assert_eq!(totals.prompt_tokens, 150);
+        assert_eq!(totals.completion_tokens, 15);
+        assert_eq!(totals.cache_read_tokens, 70);
+        assert_eq!(totals.cache_creation_tokens, 20);
+        assert!((totals.cost - 0.00056).abs() < 1e-9);
+
+        let by_backend = db.usage_by_backend(None).unwrap();
+        assert_eq!(by_backend.len(), 2);
+        assert_eq!(by_backend[0].backend, "OpenRouter"); // most-used first
+        assert_eq!(by_backend[0].requests, 1);
+
+        let by_model = db.usage_by_model(5, None).unwrap();
+        assert_eq!(by_model.len(), 2);
+        assert!(by_model.iter().any(|m| m.model == "gpt-5.1-codex"));
+
+        let recent = db.usage_recent(10, None).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].model, "gpt-5.1-codex"); // newest first
+        assert_eq!(recent[0].cost, None);
+        assert_eq!(recent[1].cache_read_tokens, 70);
+    }
+
+    #[test]
+    fn usage_queries_filter_by_since_window() {
+        let db = Db::open_in_memory().unwrap();
+        // Rows with explicit timestamps (raw insert: log_usage stamps now).
+        let insert = |created: &str| {
+            db.raw().execute(
+                "INSERT INTO usage_log (created_at, session_id, backend, model,
+                    prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens, cost)
+                 VALUES (?1, NULL, 'OpenRouter', 'a/model', 100, 10, 0, 0, 0.001)",
+                [created],
+            )
+        };
+        insert("2026-01-01T00:00:00+00:00").unwrap();
+        insert("2026-01-02T00:00:00+00:00").unwrap();
+        insert("2026-01-03T00:00:00+00:00").unwrap();
+
+        let since = Some("2026-01-02T00:00:00+00:00");
+        let totals = db.usage_totals(since).unwrap();
+        assert_eq!(totals.requests, 2);
+        assert_eq!(totals.prompt_tokens, 200);
+        assert!((totals.cost - 0.002).abs() < 1e-12);
+        assert_eq!(db.usage_totals(None).unwrap().requests, 3);
+        assert_eq!(db.usage_by_backend(since).unwrap()[0].requests, 2);
+        assert_eq!(db.usage_by_model(5, since).unwrap()[0].requests, 2);
+        let recent = db.usage_recent(10, since).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].created_at, "2026-01-03T00:00:00+00:00");
+        // Boundary is inclusive: the exact-cutoff row is included.
+        assert!(
+            recent
+                .iter()
+                .any(|r| r.created_at == "2026-01-02T00:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn usage_range_cycles_and_persists() {
+        use crate::db::UsageRange;
+        assert_eq!(UsageRange::Day.next(), UsageRange::Week);
+        assert_eq!(UsageRange::All.next(), UsageRange::Day);
+        assert_eq!(UsageRange::Day.prev(), UsageRange::All);
+        assert_eq!(UsageRange::from_key("month"), UsageRange::Month);
+        assert_eq!(UsageRange::from_key("bogus"), UsageRange::All);
+        assert_eq!(UsageRange::Week.key(), "week");
+        assert_eq!(UsageRange::Day.title(), "last 24 hours");
+        assert!(UsageRange::All.since().is_none());
+        assert!(UsageRange::Day.since().is_some());
+    }
+
+    #[test]
+    fn backfill_usage_costs_recomputes_history_from_catalog() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.upsert_model_prices(&[(
+            "anthropic/claude-3.5-sonnet".to_string(),
+            "OpenRouter".to_string(),
+            3.0,
+            15.0,
+        )])
+        .unwrap();
+        // Rows logged before pricing existed: one priced model (NULL cost),
+        // one model with no catalog entry.
+        db.log_usage(
+            "OpenRouter",
+            "anthropic/claude-3.5-sonnet",
+            100,
+            10,
+            70,
+            20,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        db.log_usage("Codex", "gpt-5.1-codex", 50, 5, 0, 0, None, None, None)
+            .unwrap();
+
+        let visited = db.backfill_usage_costs().unwrap();
+        assert_eq!(visited, 2);
+        // 100 prompt @ $3/1M + 10 completion @ $15/1M = $0.0003 + $0.00015.
+        let totals = db.usage_totals(None).unwrap();
+        assert!((totals.cost - 0.00045).abs() < 1e-12);
+        let recent = db.usage_recent(10, None).unwrap();
+        assert!((recent[1].cost.unwrap() - 0.00045).abs() < 1e-12); // priced row filled in
+        assert_eq!(recent[0].cost, None); // unknown price stays unknown
+
+        // Idempotent: a second pass leaves the values untouched.
+        db.backfill_usage_costs().unwrap();
+        assert!((db.usage_totals(None).unwrap().cost - 0.00045).abs() < 1e-12);
+    }
+
+    #[test]
+    fn backfill_usage_costs_heals_per_token_catalog() {
+        // A legacy catalog holding the endpoint's raw per-token values
+        // (deepseek-v4-flash at $0.08/M stores 8e-08) must be scaled to the
+        // per-1M convention before costs are computed against it.
+        let mut db = Db::open_in_memory().unwrap();
+        db.upsert_model_prices(&[(
+            "deepseek/deepseek-v4-flash-0731".to_string(),
+            "OpenRouter".to_string(),
+            8e-08,
+            1.8e-07,
+        )])
+        .unwrap();
+        db.log_usage(
+            "OpenRouter",
+            "deepseek/deepseek-v4-flash-0731",
+            122_221,
+            672,
+            118_784,
+            0,
+            Some(9.89864e-09), // the old, 1e6×-too-small value
+            None,
+            None,
+        )
+        .unwrap();
+
+        db.backfill_usage_costs().unwrap();
+
+        assert_eq!(
+            db.model_price("deepseek/deepseek-v4-flash-0731"),
+            Some((0.08, 0.18))
+        );
+        // 122221/1e6 × 0.08 + 672/1e6 × 0.18 ≈ $0.00989.
+        let recent = db.usage_recent(10, None).unwrap();
+        let cost = recent[0].cost.unwrap();
+        assert!((cost - 0.0098986).abs() < 1e-6, "cost was {cost}");
+        assert!(cost > 0.009, "cost was {cost}");
+    }
+
+    #[test]
+    fn request_cost_prices_tokens_against_catalog() {
+        let mut db = Db::open_in_memory().unwrap();
+        assert_eq!(db.request_cost("unknown/model", 100, 10), None);
+        db.upsert_model_prices(&[(
+            "anthropic/claude-3.5-sonnet".to_string(),
+            "OpenRouter".to_string(),
+            3.0,
+            15.0,
+        )])
+        .unwrap();
+        let cost = db
+            .request_cost("anthropic/claude-3.5-sonnet", 100, 10)
+            .unwrap();
+        assert!((cost - 0.00045).abs() < 1e-12);
+    }
+
+    #[test]
+    fn model_price_cross_references_openrouter_catalog_twins() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.upsert_model_prices(&[
+            (
+                "deepseek/deepseek-v4-flash".to_string(),
+                "OpenRouter".to_string(),
+                0.08,
+                0.18,
+            ),
+            (
+                "openai/gpt-5".to_string(),
+                "OpenRouter".to_string(),
+                1.25,
+                10.0,
+            ),
+        ])
+        .unwrap();
+        // Exact ids hit directly; other backends' prefixed/bare ids resolve
+        // through the vendor/name twin.
+        assert_eq!(
+            db.model_price("deepseek/deepseek-v4-flash"),
+            Some((0.08, 0.18))
+        );
+        assert_eq!(db.model_price("go:deepseek-v4-flash"), Some((0.08, 0.18)));
+        assert_eq!(db.model_price("deepseek-v4-flash"), Some((0.08, 0.18)));
+        assert_eq!(db.model_price("openai:gpt-5"), Some((1.25, 10.0)));
+        assert_eq!(db.model_price("codex:gpt-5"), Some((1.25, 10.0)));
+        // No twin anywhere: unknown.
+        assert_eq!(db.model_price("no-such-model-anywhere"), None);
+        // The price flows into per-request costs for the other backend.
+        let cost = db.request_cost("go:deepseek-v4-flash", 100, 10).unwrap();
+        assert!((cost - 0.0000098).abs() < 1e-15);
+    }
+
+    #[test]
+    fn price_name_strips_backend_prefixes_and_vendors() {
+        assert_eq!(price_name("go:deepseek-v4-flash"), "deepseek-v4-flash");
+        assert_eq!(price_name("openai:gpt-5"), "gpt-5");
+        assert_eq!(price_name("codex:gpt-5.1-codex"), "gpt-5.1-codex");
+        assert_eq!(price_name("opencode:qwen3.6-plus"), "qwen3.6-plus");
+        assert_eq!(
+            price_name("deepseek/deepseek-v4-flash"),
+            "deepseek-v4-flash"
+        );
+        assert_eq!(price_name("gpt-5"), "gpt-5");
+    }
+
+    #[test]
+    fn backfill_prices_non_openrouter_models_via_catalog_twins() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.upsert_model_prices(&[(
+            "deepseek/deepseek-v4-flash".to_string(),
+            "OpenRouter".to_string(),
+            0.08,
+            0.18,
+        )])
+        .unwrap();
+        // OpenCode Go rows logged with no cost — the flat-fee backend has
+        // no pricing of its own, so the twin's list price is the estimate.
+        db.log_usage(
+            "OpenCode Go",
+            "go:deepseek-v4-flash",
+            100,
+            10,
+            0,
+            0,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        db.backfill_usage_costs().unwrap();
+
+        let recent = db.usage_recent(10, None).unwrap();
+        let cost = recent[0].cost.unwrap();
+        assert!((cost - 0.0000098).abs() < 1e-15, "cost was {cost}");
+        assert!((db.usage_totals(None).unwrap().cost - 0.0000098).abs() < 1e-15);
     }
 
     #[test]
@@ -1537,7 +2447,7 @@ mod tests {
         assert_eq!(msgs[0].model.as_deref(), Some("a/one"));
 
         // An ordinary assistant message has no persona tag.
-        db.add_assistant_message(&s.id, "final answer", None, None, None, None, None)
+        db.add_assistant_message(&s.id, "final answer", None, None, None, None, None, None)
             .unwrap();
         let msgs = db.load_messages(&s.id).unwrap();
         assert_eq!(msgs[1].persona, None);
@@ -1648,6 +2558,7 @@ mod tests {
             Some("let me think"),
             Some(3),
             Some(1.5),
+            Some(0.0042),
             Some("Vibed"),
         )
         .unwrap();
@@ -1659,6 +2570,7 @@ mod tests {
         assert_eq!(msgs[1].model.as_deref(), Some("openai/gpt-4o"));
         assert_eq!(msgs[1].reasoning.as_deref(), Some("let me think"));
         assert_eq!(msgs[1].tokens, Some(3));
+        assert_eq!(msgs[1].cost, Some(0.0042));
 
         let sessions = db.list_sessions(&space).unwrap();
         assert_eq!(sessions.len(), 1);

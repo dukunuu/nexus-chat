@@ -177,8 +177,11 @@ impl App {
             self.open_login_popup();
             return;
         };
+        // The swarm meta agent has no separate model setting — it resolves on
+        // the current session's provider with that provider's research-class
+        // default model.
         let (meta_provider, raw_meta_model) = self
-            .resolve_feature_model_backend(&self.research_model, OpenRouter::default_research_model)
+            .resolve_feature_model_backend("", OpenRouter::default_research_model)
             .unwrap_or_else(|| (default_provider.clone(), raw_default_model.clone()));
         let personas = self.db.list_swarm_personas(&session.id).unwrap_or_default();
         let user_message = self
@@ -272,6 +275,7 @@ impl App {
                             reasoning: None,
                             tokens: None,
                             secs: None,
+                            cost: None,
                             phrase: None,
                             persona: None,
                             created_at: None,
@@ -298,6 +302,7 @@ impl App {
                         reasoning: None,
                         tokens: None,
                         secs: None,
+                        cost: None,
                         phrase: None,
                         persona: Some(persona),
                         created_at: None,
@@ -326,6 +331,7 @@ impl App {
                     None,
                     None,
                     None,
+                    None,
                 );
                 if viewing {
                     self.messages.push(crate::db::Message {
@@ -335,6 +341,7 @@ impl App {
                         reasoning: None,
                         tokens: None,
                         secs: None,
+                        cost: None,
                         phrase: Some("Discussed".to_string()),
                         persona: None,
                         created_at: None,
@@ -359,6 +366,7 @@ impl App {
                         reasoning: None,
                         tokens: None,
                         secs: None,
+                        cost: None,
                         phrase: None,
                         persona: None,
                         created_at: None,

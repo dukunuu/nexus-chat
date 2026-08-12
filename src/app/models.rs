@@ -162,20 +162,6 @@ impl App {
         self.open_model_picker_impl();
     }
 
-    /// Open the same model picker, but a confirmed pick sets the research
-    /// model (in `/config`) instead of the active session's model.
-    pub(crate) fn open_model_picker_for_research(&mut self) {
-        self.model_pick_target = ModelPickTarget::Research;
-        self.open_model_picker_impl();
-    }
-
-    /// Open the same model picker, but a confirmed pick sets the escalation
-    /// model (in `/config`) instead of the active session's model.
-    pub(crate) fn open_model_picker_for_escalation(&mut self) {
-        self.model_pick_target = ModelPickTarget::Escalation;
-        self.open_model_picker_impl();
-    }
-
     /// Open the same model picker, but a confirmed pick sets the model for
     /// one row of the active session's `/swarm` roster.
     pub(crate) fn open_model_picker_for_swarm_persona(&mut self, row: usize) {
@@ -471,6 +457,9 @@ impl App {
         chars += self
             .effective_messages()
             .iter()
+            // The digest transcript row duplicates `compact_summary` (counted
+            // above) — never double-count it.
+            .filter(|m| m.role != "compaction")
             .map(|m| m.content.chars().count())
             .sum::<usize>();
         if let Some(buf) = self.active_streaming_text() {
@@ -716,18 +705,6 @@ impl App {
                 self.status = format!("OCR model: {id}");
                 self.popup = Popup::Settings;
             }
-            ModelPickTarget::Research => {
-                self.research_model = id.to_string();
-                self.db.set_setting("research_model", id)?;
-                self.status = format!("research model: {id}");
-                self.popup = Popup::Settings;
-            }
-            ModelPickTarget::Escalation => {
-                self.escalation_model = id.to_string();
-                self.db.set_setting("escalation_model", id)?;
-                self.status = format!("escalation model: {id}");
-                self.popup = Popup::Settings;
-            }
             ModelPickTarget::ImageGen => {
                 self.image_gen_model = id.to_string();
                 self.db.set_setting("image_gen_model", id)?;
@@ -795,25 +772,6 @@ impl App {
         self.status = "video gen model cleared — generation disabled".to_string();
         Ok(())
     }
-
-    /// Reset the research model to blank (Backspace on its row in
-    /// `/config`) — disables `/research`.
-    pub(crate) fn clear_research_model(&mut self) -> Result<()> {
-        self.research_model.clear();
-        self.db.set_setting("research_model", "")?;
-        self.status = "research model cleared — /research disabled".to_string();
-        Ok(())
-    }
-
-    /// Reset the escalation model to blank (Backspace on its row in
-    /// `/config`) — /research falls back to the research model for its
-    /// contradiction-resolution stage.
-    pub(crate) fn clear_escalation_model(&mut self) -> Result<()> {
-        self.escalation_model.clear();
-        self.db.set_setting("escalation_model", "")?;
-        self.status = "escalation model cleared — falls back to research model".to_string();
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -836,6 +794,7 @@ mod tests {
             supports_image_generation: false,
             supports_video_generation: false,
             backend,
+            pricing: None,
         }
     }
 

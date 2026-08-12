@@ -103,6 +103,7 @@ impl App {
             reasoning: None,
             tokens: None,
             secs: None,
+            cost: None,
             phrase: None,
             persona: None,
             created_at: None,
@@ -152,6 +153,15 @@ impl App {
             ));
         }
         let vision = self.current_model_supports_images();
+        // Dedup state for replayed tool results: (tool, arguments) → latest
+        // full result. A row whose result is byte-identical to the latest
+        // one for the same tool+arguments (e.g. a re-read of an unchanged
+        // file) is replayed as a one-line note instead of the full copy, so
+        // duplicates don't re-enter the context on every request. The live
+        // tool loop applies the same rule with the same state (seeded from
+        // this history), keeping the prompt-cache prefix continuous.
+        let mut seen_results: std::collections::HashMap<(String, String), String> =
+            std::collections::HashMap::new();
         for m in self.effective_messages() {
             // Replay past tool calls as real assistant/tool message pairs so
             // the model remembers what it already tried (and got back) in
@@ -175,9 +185,19 @@ impl App {
                         tool_call_id: None,
                         images: Vec::new(),
                     });
+                    let key = (call.name.clone(), call.arguments.clone());
+                    let content = match seen_results.get(&key) {
+                        Some(prev) if *prev == result => {
+                            crate::tools::tool_result_unchanged_note(&call.name, &call.arguments)
+                        }
+                        _ => {
+                            seen_results.insert(key, result.clone());
+                            result
+                        }
+                    };
                     history.push(ChatMessage {
                         role: "tool".to_string(),
-                        content: result,
+                        content,
                         tool_calls: None,
                         tool_call_id: Some(call.id),
                         images: Vec::new(),
@@ -245,7 +265,7 @@ impl App {
         };
         let tools = self.toolbox.defs();
         let (rx, abort) = provider.stream_chat(
-            raw_model,
+            raw_model.clone(),
             history,
             params,
             tools,
@@ -255,6 +275,7 @@ impl App {
         let Some(session) = self.session.clone() else {
             return Ok(());
         };
+        let backend = provider.backend_tag();
         let (thinking_idx, spinner_color) = pick_flavor();
         let task_id = self.next_chat_task_id;
         self.next_chat_task_id = self.next_chat_task_id.wrapping_add(1);
@@ -279,6 +300,8 @@ impl App {
                 session_title: session.title,
                 space_id: self.active_space.id.clone(),
                 model,
+                model_id: raw_model,
+                backend,
                 incognito: self.incognito,
                 buffer: String::new(),
                 thinking: String::new(),
@@ -334,6 +357,7 @@ impl App {
                 reasoning: None,
                 tokens: None,
                 secs: None,
+                cost: None,
                 phrase: None,
                 persona: None,
                 created_at: None,
@@ -355,8 +379,40 @@ impl App {
                 }
             }
             StreamEvent::Usage(u) => {
+                // One API request finished: surface its cache hit rate next
+                // to the context window and log the request (tokens, cache,
+                // cost) for the /usage panel. Incognito streams are never
+                // persisted, matching the message-storage convention.
+                self.last_cache_rate = u.cache_hit_rate();
+                let Some(task) = self.chat_tasks.get(&task_id) else {
+                    return Ok(());
+                };
+                let session_id = task.session_id.clone();
+                let space_id = task.space_id.clone();
+                let model_id = task.model_id.clone();
+                let backend = task.backend;
+                let incognito = task.incognito;
                 if let Some(task) = self.chat_tasks.get_mut(&task_id) {
                     task.usage = Some(u);
+                }
+                if !incognito {
+                    // Cost at catalog list price; None when no price is
+                    // known. Non-OpenRouter backends price via their
+                    // OpenRouter catalog twin (see `Db::model_price`).
+                    let cost =
+                        self.db
+                            .request_cost(&model_id, u.prompt_tokens, u.completion_tokens);
+                    let _ = self.db.log_usage(
+                        backend.name(),
+                        &model_id,
+                        u.prompt_tokens,
+                        u.completion_tokens,
+                        u.cache_read_tokens,
+                        u.cache_creation_tokens,
+                        cost,
+                        Some(&session_id),
+                        Some(&space_id),
+                    );
                 }
             }
             StreamEvent::Status(s) => {
@@ -369,7 +425,8 @@ impl App {
                 arguments,
                 result,
             } => {
-                if ((name == "skill_admin")
+                if ((name == "skills")
+                    || (name == "skill_admin")
                     || (name == "install_skill" && result.starts_with("installed"))
                     || (name == "create_skill"
                         && (result.starts_with("created") || result.starts_with("updated"))))
@@ -403,6 +460,7 @@ impl App {
                         reasoning: None,
                         tokens: None,
                         secs: None,
+                        cost: None,
                         phrase: None,
                         persona: None,
                         created_at: None,
@@ -411,15 +469,27 @@ impl App {
                 // Generated images land on disk but aren't indexed until
                 // rescan_files picks them up. Without this, they'd be missing
                 // from files_cache and never OCR'd for descriptive naming.
-                if in_active_space
-                    && (name == "generate_image"
-                        || name == "generate_video"
-                        || name == "video_transform"
-                        || matches!(
-                            name.as_str(),
-                            "edit_video" | "extract_frame" | "stitch_videos"
-                        ))
-                {
+                let media_generated = matches!(
+                    name.as_str(),
+                    "generate_image" | "generate_video" | "video_transform"
+                ) || matches!(
+                    name.as_str(),
+                    "edit_video" | "extract_frame" | "stitch_videos"
+                ) || (name == "media"
+                    && serde_json::from_str::<serde_json::Value>(&arguments)
+                        .ok()
+                        .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_string))
+                        .is_some_and(|a| {
+                            matches!(
+                                a.as_str(),
+                                "generate_image"
+                                    | "generate_video"
+                                    | "edit"
+                                    | "extract_frame"
+                                    | "stitch"
+                            )
+                        }));
+                if in_active_space && media_generated {
                     self.rescan_files();
                 }
             }
@@ -517,6 +587,12 @@ impl App {
             self.context_total = Some(total);
         }
         let secs = Some(task.started.elapsed().as_secs_f64());
+        // Per-request cost at catalog list price (None when unknown); the
+        // same value was already logged to `usage_log` by the Usage event.
+        let cost = usage.and_then(|u| {
+            self.db
+                .request_cost(&task.model_id, u.prompt_tokens, u.completion_tokens)
+        });
         let reasoning = (!reasoning.is_empty()).then_some(reasoning);
         let phrase = Some(THINKING[task.thinking_idx].1.to_string());
         let created_at = Some(chrono::Utc::now().to_rfc3339());
@@ -529,6 +605,7 @@ impl App {
                 reasoning.as_deref(),
                 tokens,
                 secs,
+                cost,
                 phrase.as_deref(),
             )?;
         }
@@ -540,6 +617,7 @@ impl App {
                 reasoning,
                 tokens,
                 secs,
+                cost,
                 phrase,
                 persona: None,
                 created_at,
@@ -565,6 +643,7 @@ impl App {
                     reasoning: None,
                     tokens: None,
                     secs: None,
+                    cost: None,
                     phrase: None,
                     persona: None,
                     created_at: None,
@@ -905,8 +984,8 @@ impl App {
         if self.skills.is_empty() {
             return None;
         }
-        let mut s = "## Skills\nYou have skills available. To use one, call the `skill` tool \
-                     with its name; the full instructions will be returned.\n"
+        let mut s = "## Skills\nYou have skills available. To use one, call the `skills` tool \
+                     with action=load and its name; the full instructions will be returned.\n"
             .to_string();
         for skill in &self.skills {
             let _ = writeln!(s, "- {}: {}", skill.name, skill.description);
@@ -921,9 +1000,9 @@ impl App {
             return None;
         }
         let mut s = "## Scripts\nThe user has reusable scripts in this space. \
-                      Call `script_files(action=read, path=...)` to see one, \
-                      `script_files(action=edit, path=..., edits=...)` to modify, or \
-                      `run_script(space=true, path=...)` to execute. \
+                      Call `scripts(action=read, path=...)` to see one, \
+                      `scripts(action=edit, path=..., edits=...)` to modify, or \
+                      `scripts(action=run, space=true, path=...)` to execute. \
                       The `path` parameter is relative to the scripts dir — do NOT prefix `scripts/`.\n"
             .to_string();
         for script in &self.scripts_cache {
@@ -940,7 +1019,8 @@ impl App {
         }
         let mut s = "## Files\nThe user has imported these files into this space. Do not guess \
                      their contents: call `files(action=search, query=...)` to find relevant passages, or \
-                     `files(action=read, name=...)` to read one (200 lines per call, use offset to page).\n"
+                     `files(action=read, name=...)` to read one (200 lines per call, use offset to page). \
+                     Need several at once? Wrap them in one `batch` call.\n"
             .to_string();
         for f in &self.files_cache {
             let kind = std::path::Path::new(&f.name)
@@ -968,22 +1048,25 @@ impl App {
         self.app_server.as_ref()?;
         let mut s = "## Apps\nYou can build apps served locally. \
                      ALWAYS use the KV store for persistence (not LocalStorage), the upload endpoint for file \
-                     uploads, and app_assets to bring user data into the app.\n\n\
-                     **CRITICAL: URLs are UUID-based.** The UUID comes from `app_modify(action=write)`'s result \
+                     uploads, and the app tool to bring user data into the app.\n\n\
+                     **CRITICAL: URLs are UUID-based.** The UUID comes from `app(action=write)`'s result \
                      (\"live at http://...\"). Copy it from there — never invent or guess a UUID. \
-                     If you don't have the result, call `app_inspect(action=read)` or `app_inspect(action=search)` on the app to \
+                     If you don't have the result, call `app(action=read)` or `app(action=search)` on the app to \
                      rediscover it.\n\n"
             .to_string();
 
         s.push_str("### Tools\n");
-        s.push_str("- `app_modify(action=write, app, path, content)` — create/replace a file. App can be a name or UUID; a new app gets a UUID.\n");
-        s.push_str("- `app_inspect(action=read, app, path)` / `app_modify(action=patch, app, path, edits)` — read and edit by hashline.\n");
-        s.push_str("- `app_modify(action=diff, app, path, content)` — preview a complete-file change without writing it.\n");
-        s.push_str("- `app_inspect(action=search, app, pattern)` — search non-ignored app files; respects `.gitignore`.\n");
-        s.push_str("- `install_packages(app=..., packages=[...])` — npm-install into an app.\n");
-        s.push_str("- `app_assets(action=list)` — list pasted conversation images.\n");
-        s.push_str("- `app_assets(action=copy_images, image_ids, app)` — copy images into `_images/` for `<img src=\"...\">`.\n");
-        s.push_str("- `app_assets(action=copy_file, file_name, app)` — copy a space file's text into the app's KV store.\n\n");
+        s.push_str("- `batch` — wrap several app operations into one round-trip (results come back labeled).\n");
+        s.push_str("- `app(action=write, app, path, content)` — create/replace a file. App can be a name or UUID; a new app gets a UUID.\n");
+        s.push_str("- `app(action=read, app, path)` / `app(action=patch, app, path, edits)` — read and edit by hashline.\n");
+        s.push_str("- `app(action=diff, app, path, content)` — preview a complete-file change without writing it.\n");
+        s.push_str("- `app(action=search, app, pattern)` — search non-ignored app files; respects `.gitignore`.\n");
+        s.push_str(
+            "- `scripts(action=install, app=..., packages=[...])` — npm-install into an app.\n",
+        );
+        s.push_str("- `app(action=list)` — list pasted conversation images.\n");
+        s.push_str("- `app(action=copy_images, image_ids, app)` — copy images into `_images/` for `<img src=\"...\">`.\n");
+        s.push_str("- `app(action=copy_file, file_name, app)` — copy a space file's text into the app's KV store.\n\n");
 
         s.push_str("### KV Store (persistent key-value per app)\n");
         s.push_str("Each app has a SQLite-backed KV store. Call these from frontend JS:\n");
@@ -996,14 +1079,12 @@ impl App {
         s.push_str("- `POST <app_url>/_api/upload` with `multipart/form-data` — upload a file. Returns `{\"name\", \"url\"}`. Files persist and are served via GET.\n\n");
 
         s.push_str("### Using User Images\n");
-        s.push_str("1. `app_assets(action=list)` to see conversation images.\n");
-        s.push_str(
-            "2. `app_assets(action=copy_images, image_ids, app)` to copy them into `_images/`.\n",
-        );
+        s.push_str("1. `app(action=list)` to see conversation images.\n");
+        s.push_str("2. `app(action=copy_images, image_ids, app)` to copy them into `_images/`.\n");
         s.push_str("3. Use returned URLs in `<img src=\"...\">` tags.\n\n");
 
         s.push_str("### Using Space Files\n");
-        s.push_str("- `app_assets(action=copy_file, file_name, app)` copies file text into KV under `_file:<name>`. Read it via `GET <app_url>/_api/kv/_file:<name>`.\n\n");
+        s.push_str("- `app(action=copy_file, file_name, app)` copies file text into KV under `_file:<name>`. Read it via `GET <app_url>/_api/kv/_file:<name>`.\n\n");
 
         let apps = self.list_apps();
         if apps.is_empty() {

@@ -103,10 +103,12 @@ impl super::App {
             self.status = format!("switched to: {}", s.title);
             self.web_mode = s.web_mode;
             self.session = Some(s);
+            self.backfill_compaction_row();
             self.restore_survey_gate_prompt();
             self.refresh_toolbox();
             self.context_total = None;
             self.scroll = 0;
+            self.sel.clear(); // selection points into the previous session's lines
             self.cleanup_incognito_images();
         }
         self.popup = super::Popup::None;
@@ -244,7 +246,7 @@ mod tests {
     #[tokio::test]
     async fn run_due_watches_repoints_the_watch_at_its_new_session() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
+        a.current_model = Some("openai/gpt-5-mini".to_string());
         let space_id = a.active_space.id.clone();
 
         // The watch's original session, from some earlier run.
@@ -274,7 +276,7 @@ mod tests {
     #[tokio::test]
     async fn run_due_watches_only_touches_the_watch_whose_job_actually_started() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
+        a.current_model = Some("openai/gpt-5-mini".to_string());
         let space_id = a.active_space.id.clone();
 
         let first_session =

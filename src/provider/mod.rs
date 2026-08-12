@@ -31,6 +31,16 @@ pub enum BackendTag {
 }
 
 impl BackendTag {
+    /// Human-readable backend name, used in usage analytics.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::OpenRouter => "OpenRouter",
+            Self::OpenAi => "OpenAI",
+            Self::OpencodeGo => "OpenCode Go",
+            Self::Codex => "Codex",
+        }
+    }
+
     /// Prefix used to key favorites/last-used/current-model/etc. for this
     /// backend's models — bare (no prefix) for `OpenRouter` so existing
     /// users' saved data keeps working untouched; the other three are
@@ -138,6 +148,9 @@ pub struct Model {
     pub supports_video_generation: bool,
     /// Which backend this model came from.
     pub backend: BackendTag,
+    /// USD per 1M prompt/completion tokens from the catalog (OpenRouter
+    /// only; other backends report no prices). `None` = cost unknown.
+    pub pricing: Option<(f64, f64)>,
 }
 
 /// Sampling + reasoning parameters for a completion request.
@@ -239,6 +252,59 @@ pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// Prompt tokens served from the provider's prompt cache (cache reads).
+    pub cache_read_tokens: u64,
+    /// Prompt tokens written into the cache on this request (cache writes).
+    pub cache_creation_tokens: u64,
+}
+
+impl Usage {
+    /// Fraction of this request's prompt served from cache, 0.0..=1.0.
+    /// `None` when the provider reported no usage or a zero prompt.
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        if self.prompt_tokens == 0 {
+            None
+        } else {
+            Some((self.cache_read_tokens as f64 / self.prompt_tokens as f64).clamp(0.0, 1.0))
+        }
+    }
+}
+
+/// Rebuild the tool-result dedup state — `(tool, arguments) → latest full
+/// result` — from a wire history produced by `build_history`. Both that
+/// replay and the live tool loop apply the same rule ("keep the first full
+/// copy of a (tool, arguments, result) triple; replace later identical
+/// copies with `tool_result_unchanged_note`"), and the loop seeds its map
+/// from the incoming history so its compression decisions match what the
+/// next turn's replay will rebuild — which keeps the prompt-cache prefix
+/// continuous across turns. Note messages (marked with
+/// `TOOL_RESULT_OMITTED_PREFIX`) never update the map, exactly as in the
+/// replay.
+pub fn seed_tool_result_dedup(
+    messages: &[ChatMessage],
+) -> std::collections::HashMap<(String, String), String> {
+    use std::collections::HashMap;
+    let mut seen: HashMap<(String, String), String> = HashMap::new();
+    // Assistant tool_calls arrive immediately before their tool results, in
+    // order (build_history emits one pair per row; the loop emits the call
+    // batch then its results) — a FIFO queue pairs them up.
+    let mut pending: std::collections::VecDeque<(String, String)> =
+        std::collections::VecDeque::new();
+    for msg in messages {
+        if let Some(calls) = &msg.tool_calls {
+            for call in calls {
+                pending.push_back((call.name.clone(), call.arguments.clone()));
+            }
+        } else if msg.role == "tool"
+            && let Some((name, args)) = pending.pop_front()
+            && !msg
+                .content
+                .starts_with(crate::tools::TOOL_RESULT_OMITTED_PREFIX)
+        {
+            seen.insert((name, args), msg.content.clone());
+        }
+    }
+    seen
 }
 
 #[derive(Debug)]
@@ -265,6 +331,85 @@ pub enum StreamEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seed_tool_result_dedup_reconstructs_replay_state() {
+        // A build_history-style wire history: full v1, note (dup), full v2
+        // (file changed), note (dup of v2).
+        let pair = |id: &str, name: &str, args: &str, content: &str| {
+            vec![
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: String::new(),
+                    tool_calls: Some(vec![ToolCall {
+                        id: id.into(),
+                        name: name.into(),
+                        arguments: args.into(),
+                    }]),
+                    tool_call_id: None,
+                    images: Vec::new(),
+                },
+                ChatMessage {
+                    role: "tool".into(),
+                    content: content.into(),
+                    tool_calls: None,
+                    tool_call_id: Some(id.into()),
+                    images: Vec::new(),
+                },
+            ]
+        };
+        let args = r#"{"name":"a.txt"}"#;
+        let mut msgs = pair("c0", "read_file", args, "v1");
+        msgs.extend(pair(
+            "c1",
+            "read_file",
+            args,
+            crate::tools::tool_result_unchanged_note("read_file", args).as_str(),
+        ));
+        msgs.extend(pair("c2", "read_file", args, "v2"));
+        msgs.extend(pair(
+            "c3",
+            "read_file",
+            args,
+            crate::tools::tool_result_unchanged_note("read_file", args).as_str(),
+        ));
+        let seen = seed_tool_result_dedup(&msgs);
+        // Notes must never overwrite the map: the latest full result wins.
+        assert_eq!(
+            seen.get(&("read_file".to_string(), args.to_string())),
+            Some(&"v2".to_string())
+        );
+        assert_eq!(seen.len(), 1);
+    }
+
+    #[test]
+    fn seed_tool_result_dedup_keeps_latest_full_per_call() {
+        let msgs = vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_calls: Some(vec![ToolCall {
+                    id: "a".into(),
+                    name: "search".into(),
+                    arguments: r#"{"query":"x"}"#.into(),
+                }]),
+                tool_call_id: None,
+                images: Vec::new(),
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "hits-a".into(),
+                tool_calls: None,
+                tool_call_id: Some("a".into()),
+                images: Vec::new(),
+            },
+        ];
+        let seen = seed_tool_result_dedup(&msgs);
+        assert_eq!(
+            seen.get(&("search".to_string(), r#"{"query":"x"}"#.to_string())),
+            Some(&"hits-a".to_string())
+        );
+    }
 
     #[test]
     fn chat_message_serializes_string_content_when_no_images() {

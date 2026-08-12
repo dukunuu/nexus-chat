@@ -19,9 +19,11 @@ space directories, model-created web apps served from localhost.
   scripts, apps) with embeddings-backed semantic file search
 - **Skills**: reusable instruction packs (SKILL.md) with sandboxed Python
   virtualenvs, installable from chat
-- **Tools for the model**: web search, URL fetching, PDF/YouTube extraction,
-  image + video generation (with ffmpeg transforms), file reading, and
-  building & editing web apps served on `http://localhost:8642`
+- **Tools for the model**: nine consolidated tools — `search` (web/academic/
+  discussion), `fetch_url` (with PDF/YouTube extraction), `batch` (multi-op
+  calls), `research_lookup`, `files`, `app` (build & edit web apps served on
+  `http://localhost:8642`), `scripts`, `skills`, and `media` (image/video
+  generation with ffmpeg transforms)
 - **Terminal ergonomics**: markdown rendering, image display, @-file
   autocomplete, mouse selection → copy, context breakdown, compaction,
   incognito mode, per-session history
@@ -57,6 +59,7 @@ Type `/` in the composer for autocomplete. Aliases in parentheses.
 | `/files` (`images`, `scripts`, …) | browse space files / images / scripts |
 | `/apps` (`webapps`) | view model-created web apps |
 | `/skills` | manage skills |
+| `/usage` (`analytics`, `costs`) | token/cache/cost analytics by backend & model (←/→ for 24h/7d/30d/all windows) |
 | `/compact` (`summarize`) | summarize old messages into a digest |
 | `/config` (`settings`, `stats`) | settings, footer toggles, sampling params |
 | `/web` | toggle search-first cited answering |

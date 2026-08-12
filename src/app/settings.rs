@@ -91,6 +91,7 @@ impl App {
                 SettingsField::ShowStats => self.settings.show_stats = !self.settings.show_stats,
                 SettingsField::ShowReasoning => {
                     self.settings.show_reasoning = !self.settings.show_reasoning;
+                    self.pin_viewport_top = true;
                 }
                 SettingsField::HideHints => self.settings.hide_hints = !self.settings.hide_hints,
                 SettingsField::Verbosity => {
@@ -140,6 +141,7 @@ impl App {
     /// Expand/collapse stored reasoning traces (Ctrl+R), persisted.
     pub(crate) fn toggle_reasoning_view(&mut self) -> Result<()> {
         self.settings.show_reasoning = !self.settings.show_reasoning;
+        self.pin_viewport_top = true;
         self.db.set_setting(
             "show_reasoning",
             if self.settings.show_reasoning {
@@ -231,12 +233,6 @@ impl App {
         self.ocr_model = self.ocr_model.trim().to_string();
         self.db.set_setting("ocr_model", &self.ocr_model)?;
         self.db.set_setting("ocr_engine", &self.ocr_engine)?;
-        self.research_model = self.research_model.trim().to_string();
-        self.db
-            .set_setting("research_model", &self.research_model)?;
-        self.escalation_model = self.escalation_model.trim().to_string();
-        self.db
-            .set_setting("escalation_model", &self.escalation_model)?;
         self.embedding_model = self.settings_inputs[6].trim().to_string();
         self.db
             .set_setting("embedding_model", &self.embedding_model)?;

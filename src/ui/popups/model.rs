@@ -22,8 +22,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
         crate::app::ModelPickTarget::Memory => "picking memory model",
         crate::app::ModelPickTarget::Transcriber => "picking image model",
         crate::app::ModelPickTarget::Ocr => "picking OCR model",
-        crate::app::ModelPickTarget::Research => "picking research model",
-        crate::app::ModelPickTarget::Escalation => "picking escalation model",
         crate::app::ModelPickTarget::Session => "picking chat model",
         crate::app::ModelPickTarget::SwarmPersona(_) => "picking persona model",
         crate::app::ModelPickTarget::ImageGen => "picking image gen model",
@@ -195,8 +193,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 crate::app::ModelPickTarget::Memory
                 | crate::app::ModelPickTarget::Transcriber
                 | crate::app::ModelPickTarget::Ocr
-                | crate::app::ModelPickTarget::Research
-                | crate::app::ModelPickTarget::Escalation
                 | crate::app::ModelPickTarget::ImageGen
                 | crate::app::ModelPickTarget::VideoGen => Popup::Settings,
                 crate::app::ModelPickTarget::SwarmPersona(_) => Popup::Swarm,

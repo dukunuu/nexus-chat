@@ -42,6 +42,47 @@ fn copy_popup_uses_rounded_border_and_standard_marker() {
 }
 
 #[test]
+fn usage_popup_renders_dashboard_with_cache_bars_and_tables() {
+    let mut app = test_app();
+    app.db
+        .log_usage(
+            "OpenRouter",
+            "anthropic/claude-3.5-sonnet",
+            1000,
+            120,
+            700,
+            200,
+            Some(0.0042),
+            None,
+            None,
+        )
+        .unwrap();
+    app.db
+        .log_usage("Codex", "gpt-5.1-codex", 100, 10, 0, 0, None, None, None)
+        .unwrap();
+    app.open_usage_popup();
+
+    let screen = render_to_string(96, 40, |f| super::usage::render(f, &app));
+
+    // Section markers + headers.
+    assert!(screen.contains("by backend"), "{screen}");
+    assert!(screen.contains("most used models"), "{screen}");
+    assert!(screen.contains("recent requests"), "{screen}");
+    // Hero summary: request count, cache fraction, cache-write count.
+    assert!(screen.contains("2 requests"), "{screen}");
+    assert!(screen.contains("cache writes"), "{screen}");
+    assert!(screen.contains("% of prompt served from cache"), "{screen}");
+    // Both backends with their glyphs; cache bar glyphs present in rows.
+    assert!(screen.contains("OpenRouter"), "{screen}");
+    assert!(screen.contains("Codex"), "{screen}");
+    assert!(screen.contains('█'), "{screen}");
+    assert!(screen.contains('░'), "{screen}");
+    // Models ranked; cost formatting for known vs unknown prices.
+    assert!(screen.contains("claude-3.5-sonnet"), "{screen}");
+    assert!(screen.contains("$0.0042"), "{screen}");
+}
+
+#[test]
 fn hidden_hints_do_not_show_in_popup_titles() {
     let mut app = test_app();
     app.settings.hide_hints = true;
@@ -185,4 +226,47 @@ fn completed_chat_notification_is_rendered_as_a_click_target() {
 
     assert!(screen.contains("background chat"), "{screen}");
     assert_eq!(app.notification_areas.len(), 1);
+}
+
+#[test]
+fn new_session_welcome_screen_drops_the_previous_sessions_click_layout() {
+    let mut app = test_app();
+    let sid = app
+        .db
+        .create_session("old", "a/one", &app.active_space.id, "chat")
+        .unwrap()
+        .id;
+    app.db
+        .add_assistant_message(
+            &sid,
+            "see https://example.com/old-link",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    app.session = app.db.get_session(&sid).unwrap();
+    app.messages = app.db.load_messages(&sid).unwrap();
+
+    // Render the old session: the history area is clickable now (a click
+    // anywhere inside it maps to a recorded line — which is how a stale
+    // snapshot would resolve the old URL).
+    render_to_string(100, 30, |f| crate::ui::render(f, &mut app));
+    assert!(
+        app.sel.pos_at(10, 5).is_some(),
+        "old session layout recorded"
+    );
+
+    // Start a new session and render the welcome screen.
+    app.run_command("new").unwrap(); // /new
+    render_to_string(100, 30, |f| crate::ui::render(f, &mut app));
+
+    // The layout snapshot is empty — clicking where the old URL used to be
+    // must not resolve to anything (it would otherwise open the old link).
+    assert_eq!(app.sel.pos_at(10, 5), None);
+    // And the selection itself is cleared by /new.
+    assert!(app.sel.selected_text().is_none());
 }

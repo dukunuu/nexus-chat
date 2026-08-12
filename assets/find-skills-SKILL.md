@@ -14,12 +14,14 @@ install them yourself.
    into the install source `<owner>/<repo>/<path>` (drop `tree/<branch>`; a
    skill at the repo root is just `<owner>/<repo>`).
 3. Tell the user which skill you found and what it does, then call
-   `skill_admin` with `action=install` and that source.
-4. On success the skill is immediately usable: load it with the `skill` tool.
+   `skills` with `action=install` and that source.
+4. On success the skill is immediately usable: load it with the `skills`
+   tool using `action=load` and its name.
 
-Installed skills may ship scripts — run them with the `run_script` tool.
+Installed skills may ship scripts — run them with the `scripts` tool using
+`action=run` (`skill=<name>`, `path=<script>`).
 Python scripts get the skill's own virtualenv (its `requirements.txt` installs
-automatically); add extra packages with `install_packages(skill, packages)`.
+automatically); add extra packages with `scripts(action=install, skill, packages)`.
 
 If the user names a repo or source directly, skip the search and install it.
 If installation fails with "no SKILL.md", the path doesn't point at a skill

@@ -162,7 +162,7 @@ const SYNTHESIZER_PROMPT: &str = "You are the synthesis stage of a research pipe
 
 const CRITIC_PROMPT: &str = "You are the critic stage of a research pipeline. Given the original topic and a draft report, decide if it's ready. Respond in exactly one of these forms:\n- the single word SATISFIED, if the draft thoroughly covers the topic with no notable gaps or contradictions.\n- GAPS: followed by a newline-separated bullet list (each line starting with '- ') of specific missing sub-topics or unanswered angles, each phrased as a searchable question.\n- CONTRADICTION: followed by one line describing a specific factual contradiction between sources in the draft that isn't resolved.\nUse CONTRADICTION only for an actual conflict between sources, not a missing angle — missing angles are always GAPS. Respond with nothing else.";
 
-const ESCALATION_PROMPT: &str = "You are resolving a contradiction found in a research draft. You are given the topic, the draft, the full set of source findings gathered so far, and a description of the contradiction. Determine which claim the evidence better supports (or that both apply in different contexts) and write one paragraph resolving it, citing the [n] sources involved. Output only that paragraph.";
+const RESOLVER_PROMPT: &str = "You are resolving a contradiction found in a research draft. You are given the topic, the draft, the full set of source findings gathered so far, and a description of the contradiction. Determine which claim the evidence better supports (or that both apply in different contexts) and write one paragraph resolving it, citing the [n] sources involved. Output only that paragraph.";
 
 const VERIFIER_PROMPT: &str = "You are the verifier stage. Given the topic, the gathered source findings (with their citations), and a draft report, check every factual claim in the draft against the source findings. Rewrite the draft unchanged except: (1) remove or mark with '⚠ unverifiable:' any claim not actually supported by the gathered findings; (2) immediately after a claim's citations, judge its confidence from citation count and cross-source agreement and, only for low or medium confidence, append the tag ‹low› or ‹med› right after the citation (high confidence is the default and stays untagged — do not tag it). Output the corrected draft in markdown, nothing else. You have a fetch_url tool restricted to already-cached pages: use it to check any direct quote in the draft against the cached source text, and mark a quote that doesn't actually match with '‹unverified quote›' immediately after it.";
 
@@ -509,7 +509,7 @@ fn critic_messages(topic: &str, draft: &str) -> Vec<ChatMessage> {
     ]
 }
 
-fn escalation_messages(
+fn resolver_messages(
     topic: &str,
     draft: &str,
     findings: &[String],
@@ -517,7 +517,7 @@ fn escalation_messages(
 ) -> Vec<ChatMessage> {
     let body = findings.join("\n\n");
     vec![
-        ChatMessage::text("system", ESCALATION_PROMPT),
+        ChatMessage::text("system", RESOLVER_PROMPT),
         ChatMessage::text(
             "user",
             format!(
@@ -879,8 +879,6 @@ async fn run_searchers(
 pub struct ResearchOptions {
     pub research_provider: OpenRouter,
     pub research_model: String,
-    pub escalation_provider: OpenRouter,
-    pub escalation_model: String,
     pub embedding_provider: OpenRouter,
     pub embedding_model: String,
     pub db_path: std::path::PathBuf,
@@ -1104,8 +1102,6 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
     let ResearchOptions {
         research_provider,
         research_model,
-        escalation_provider,
-        escalation_model,
         embedding_provider,
         embedding_model,
         db_path,
@@ -1478,9 +1474,9 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
             "working — reconciling conflicting source claims",
         );
         let resolution = complete_agent(
-            escalation_provider,
-            escalation_model,
-            escalation_messages(topic, &draft, &findings, desc),
+            research_provider,
+            research_model,
+            resolver_messages(topic, &draft, &findings, desc),
             tx,
             ids,
             "resolver",
@@ -1697,24 +1693,19 @@ impl super::App {
             self.status = "usage: /research <topic>".to_string();
             return;
         }
-        if self.research_model.trim().is_empty() {
-            self.status = "no research model configured — set one in /config".to_string();
-            return;
-        }
         if self.research_rx.is_some() {
             self.status = "a research job is already running".to_string();
             return;
         }
-        let research_model = self.research_model.trim().to_string();
-        let Some((provider, raw_research_model)) = self.resolve_model_backend(&research_model)
-        else {
-            self.open_login_popup();
+        // Research inherits the session's model (or the global default) —
+        // there is no separate researcher-model setting anymore.
+        let Some(model) = self.current_model.clone() else {
+            self.status = "no model configured — set one in /login or /model".to_string();
             return;
         };
-        let escalation_model = if self.escalation_model.trim().is_empty() {
-            research_model.clone()
-        } else {
-            self.escalation_model.trim().to_string()
+        let Some((provider, raw_research_model)) = self.resolve_model_backend(&model) else {
+            self.status = format!("model backend unavailable: {model} — pick another with /model");
+            return;
         };
         let title = super::chat::title_from(&topic);
         // Hygiene: no gate or reply channel from a previous job may linger.
@@ -1740,7 +1731,7 @@ impl super::App {
         let session =
             match self
                 .db
-                .create_session(&title, &research_model, &self.active_space.id, "research")
+                .create_session(&title, &model, &self.active_space.id, "research")
             {
                 Ok(s) => s,
                 Err(e) => {
@@ -1797,6 +1788,7 @@ impl super::App {
                 None,
                 None,
                 None,
+                None,
             );
 
             // Link message in the research session back to the original
@@ -1805,6 +1797,7 @@ impl super::App {
                 &session.id,
                 "session_link",
                 &format!("{pid}\n↩ Originally from: {back_title}"),
+                None,
                 None,
                 None,
                 None,
@@ -1863,11 +1856,9 @@ impl super::App {
         self.session = Some(session.clone());
         self.context_total = None;
         self.scroll = 0;
+        self.sel.clear(); // selection points into the previous session's lines
         self.refresh_toolbox();
 
-        let (escalation_provider, raw_escalation_model) = self
-            .resolve_model_backend(&escalation_model)
-            .unwrap_or_else(|| (provider.clone(), escalation_model.clone()));
         let embedding_model = self.embedding_model.trim().to_string();
         let (embedding_provider, raw_embedding_model) = self
             .resolve_model_backend(&embedding_model)
@@ -1876,8 +1867,6 @@ impl super::App {
         let task = tokio::spawn(run_research(crate::app::research::ResearchOptions {
             research_provider: provider,
             research_model: raw_research_model,
-            escalation_provider,
-            escalation_model: raw_escalation_model,
             embedding_provider,
             embedding_model: raw_embedding_model,
             db_path: self.space.db_path(),
@@ -1960,6 +1949,7 @@ impl super::App {
             reasoning: None,
             tokens: None,
             secs: None,
+            cost: None,
             phrase: None,
             persona: None,
             created_at: None,
@@ -2022,6 +2012,7 @@ impl super::App {
                 reasoning: None,
                 tokens: None,
                 secs: None,
+                cost: None,
                 phrase: None,
                 persona: None,
                 created_at: None,
@@ -2084,6 +2075,7 @@ impl super::App {
                     reasoning: None,
                     tokens: None,
                     secs: None,
+                    cost: None,
                     phrase: None,
                     persona: None,
                     created_at: None,
@@ -2189,6 +2181,7 @@ impl super::App {
                         reasoning: None,
                         tokens: None,
                         secs: None,
+                        cost: None,
                         phrase: None,
                         persona: None,
                         created_at: None,
@@ -2269,6 +2262,7 @@ impl super::App {
                         reasoning: None,
                         tokens: None,
                         secs: None,
+                        cost: None,
                         phrase: None,
                         persona: None,
                         created_at: None,
@@ -2314,6 +2308,7 @@ impl super::App {
                     None,
                     None,
                     None,
+                    None,
                 );
                 let topic = self
                     .research_running
@@ -2338,6 +2333,7 @@ impl super::App {
                         reasoning: None,
                         tokens: None,
                         secs: None,
+                        cost: None,
                         phrase: Some("Researched".to_string()),
                         persona: None,
                         created_at: None,
@@ -2352,9 +2348,16 @@ impl super::App {
             }
             ResearchUpdate::Done(Err(e)) => {
                 let msg = format!("research failed: {e}");
-                let _ =
-                    self.db
-                        .add_assistant_message(&session_id, &msg, None, None, None, None, None);
+                let _ = self.db.add_assistant_message(
+                    &session_id,
+                    &msg,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
                 if viewing {
                     self.messages.push(crate::db::Message {
                         role: "assistant".to_string(),
@@ -2363,6 +2366,7 @@ impl super::App {
                         reasoning: None,
                         tokens: None,
                         secs: None,
+                        cost: None,
                         phrase: None,
                         persona: None,
                         created_at: None,
@@ -2457,7 +2461,10 @@ mod tests {
             std::env::temp_dir().join(format!("nexus-research-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("spaces")).unwrap();
         let space = Space { root };
-        App::new(db, Some("k"), space)
+        let mut a = App::new(db, Some("k"), space);
+        // Research inherits the session/global model — give tests one.
+        a.current_model = Some("openai/gpt-5-mini".to_string());
+        a
     }
 
     #[tokio::test]
@@ -2755,7 +2762,6 @@ mod tests {
     #[tokio::test]
     async fn on_research_done_final_report_populates_citation_index() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
         let space_id = a.active_space.id.clone();
@@ -2786,7 +2792,6 @@ mod tests {
     #[tokio::test]
     async fn plan_ready_arms_the_gate_and_reply_routes_into_the_pipeline() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
         let space_id = a.active_space.id.clone();
@@ -2849,7 +2854,6 @@ mod tests {
     #[tokio::test]
     async fn plan_ready_saves_a_plan_file_record_in_the_space() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
         let space_id = a.active_space.id.clone();
@@ -2883,7 +2887,6 @@ mod tests {
     #[tokio::test]
     async fn survey_ready_arms_the_gate_and_renders_a_survey_section() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("fine-tuning LLMs");
         let session_id = a.session.as_ref().unwrap().id.clone();
         let space_id = a.active_space.id.clone();
@@ -2917,7 +2920,6 @@ mod tests {
     #[tokio::test]
     async fn gate_only_targets_the_viewed_gated_session() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("topic one");
         let gated_session = a.session.as_ref().unwrap().id.clone();
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -2976,16 +2978,15 @@ mod tests {
         assert!(a.status.contains("usage:"));
         assert!(a.research_rx.is_none());
 
-        a.research_model.clear();
+        a.current_model = None;
         a.start_research("rust async runtimes");
-        assert!(a.status.contains("no research model configured"));
+        assert!(a.status.contains("no model configured"));
         assert!(a.research_rx.is_none());
     }
 
     #[tokio::test]
     async fn start_research_creates_and_switches_into_a_new_session() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
         assert!(a.research_rx.is_some());
         assert!(a.research_running.is_some());
@@ -3004,7 +3005,6 @@ mod tests {
     #[tokio::test]
     async fn start_research_refuses_a_second_concurrent_job() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("topic one");
         assert!(a.research_rx.is_some());
         a.start_research("topic two");
@@ -3016,7 +3016,6 @@ mod tests {
     #[tokio::test]
     async fn on_research_done_stage_update_persists_and_shows_when_viewing() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
         let space_id = a.active_space.id.clone();
@@ -3077,7 +3076,6 @@ mod tests {
     #[tokio::test]
     async fn multiple_drained_steers_each_keep_their_own_stage_row() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
         let space_id = a.active_space.id.clone();
@@ -3121,7 +3119,6 @@ mod tests {
     #[tokio::test]
     async fn steer_rows_do_not_collide_on_duplicate_prefix_or_wildcard_text() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
         let space_id = a.active_space.id.clone();
@@ -3241,7 +3238,6 @@ mod tests {
     #[tokio::test]
     async fn plan_ready_in_incognito_mode_writes_no_plan_file() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.incognito = true;
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
@@ -3287,7 +3283,6 @@ mod tests {
     #[tokio::test]
     async fn incognito_gate_rows_follow_the_mode_captured_at_job_start() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.incognito = true;
         a.start_research("private topic");
         let session_id = a.session.as_ref().unwrap().id.clone();
@@ -3318,7 +3313,6 @@ mod tests {
     #[tokio::test]
     async fn off_screen_incognito_plan_is_restored_when_its_session_opens() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.incognito = true;
         a.start_research("private topic");
         let session_id = a.session.as_ref().unwrap().id.clone();
@@ -3363,7 +3357,6 @@ mod tests {
     #[tokio::test]
     async fn undelivered_gate_reply_is_rolled_back_and_restored_to_composer() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
         // The gate's receiver is already gone: persisting succeeds, but
@@ -3399,7 +3392,6 @@ mod tests {
     #[tokio::test]
     async fn off_screen_gate_marks_the_session_unread_and_notifies() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
         // Navigate away before the gate arrives.
@@ -3437,7 +3429,6 @@ mod tests {
     #[tokio::test]
     async fn on_research_done_final_report_posts_message_saves_file_and_notifies_when_away() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
         let space_id = a.active_space.id.clone();
@@ -3479,7 +3470,6 @@ mod tests {
     #[tokio::test]
     async fn on_research_done_saves_report_to_original_space_even_if_user_switched() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
 
         // Start research in the default space (space A)
         a.start_research("rust async runtimes");
@@ -3542,7 +3532,6 @@ mod tests {
     #[tokio::test]
     async fn on_research_done_failure_posts_error_message() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("rust async runtimes");
         let session_id = a.session.as_ref().unwrap().id.clone();
         let space_id = a.active_space.id.clone();
@@ -3567,7 +3556,6 @@ mod tests {
     #[tokio::test]
     async fn on_research_done_none_clears_state_and_closes_the_live_popup() {
         let mut a = test_app();
-        a.research_model = "openai/gpt-5-mini".to_string();
         a.start_research("t");
         assert!(a.research_rx.is_some());
         a.popup = super::super::Popup::ResearchLive;
@@ -3715,8 +3703,8 @@ mod tests {
     }
 
     #[test]
-    fn escalation_messages_includes_contradiction_description() {
-        let msgs = escalation_messages("t", "draft", &["f1".to_string()], "A vs B");
+    fn resolver_messages_includes_contradiction_description() {
+        let msgs = resolver_messages("t", "draft", &["f1".to_string()], "A vs B");
         assert!(msgs[1].content.contains("A vs B"));
         assert!(msgs[1].content.contains("f1"));
     }

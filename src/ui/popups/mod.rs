@@ -12,6 +12,7 @@ pub mod settings;
 pub mod skills;
 pub mod space;
 pub mod swarm;
+pub mod usage;
 pub mod watches;
 
 #[cfg(test)]

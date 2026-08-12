@@ -227,6 +227,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             ui::popups::research_live::handle_key(app, key);
         }
         Popup::Swarm => ui::popups::swarm::handle_key(app, key)?,
+        Popup::Usage => {
+            ui::popups::usage::handle_key(app, key);
+        }
         Popup::Login => {
             ui::popups::login::handle_key(app, key);
         }
@@ -356,7 +359,10 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         // shadowed here — the composer rarely needs it).
         KeyCode::Char('r') if ctrl => app.toggle_reasoning_view()?,
         // Ctrl+T expands/collapses tool-call detail blocks in the transcript.
-        KeyCode::Char('t') if ctrl => app.show_tool_detail = !app.show_tool_detail,
+        KeyCode::Char('t') if ctrl => {
+            app.show_tool_detail = !app.show_tool_detail;
+            app.pin_viewport_top = true;
+        }
         // Ctrl+N toggles incognito mode (no persistence, no apps).
         KeyCode::Char('n') if ctrl => app.toggle_incognito()?,
         // Ctrl+O navigates a session link message under the current selection.

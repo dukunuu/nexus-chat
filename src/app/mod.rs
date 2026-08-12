@@ -46,6 +46,7 @@ mod swarm;
 #[cfg(test)]
 mod tests;
 mod transcribe;
+mod usage;
 mod watches;
 pub use backends::{Backends, composite_id};
 pub use chat::human_size;
@@ -104,6 +105,8 @@ pub enum Popup {
     Watch,
     ResearchLive,
     Swarm,
+    /// `/usage`: aggregated per-backend/per-model token, cache, and cost stats.
+    Usage,
     /// `/login`'s provider selector (`OpenRouter` / `OpenCode` Go / `OpenAI` / Codex).
     Login,
 }
@@ -239,8 +242,6 @@ pub enum ModelPickTarget {
     Memory,
     Transcriber,
     Ocr,
-    Research,
-    Escalation,
     /// Picking the model for one row of the active session's `/swarm` roster.
     SwarmPersona(usize),
     /// Model used for AI image generation.
@@ -266,8 +267,6 @@ pub enum SettingsField {
     SearchProvider,
     TranscriberModel,
     OcrModel,
-    ResearchModel,
-    EscalationModel,
     OcrEngine,
     EmbeddingModel,
     BlockedDomains,
@@ -276,7 +275,7 @@ pub enum SettingsField {
 }
 
 impl SettingsField {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 19] = [
         Self::ShowStats,
         Self::ShowReasoning,
         Self::HideHints,
@@ -291,8 +290,6 @@ impl SettingsField {
         Self::SearchProvider,
         Self::TranscriberModel,
         Self::OcrModel,
-        Self::ResearchModel,
-        Self::EscalationModel,
         Self::OcrEngine,
         Self::EmbeddingModel,
         Self::BlockedDomains,
@@ -318,10 +315,6 @@ impl SettingsField {
             }
             Self::TranscriberModel => "image model (Enter to pick, Backspace clears)",
             Self::OcrModel => "OCR model (Enter to pick, Backspace clears)",
-            Self::ResearchModel => "research model (Enter to pick, Backspace clears)",
-            Self::EscalationModel => {
-                "escalation model (Enter to pick, Backspace clears; blank = same as research model)"
-            }
             Self::OcrEngine => {
                 "OCR engine (Space cycles auto/tesseract/vlm/local; local pulls via ollama)"
             }
@@ -371,10 +364,6 @@ pub const SETTINGS_GROUPS: &[SettingsGroup] = &[
             SettingsField::CompactThreshold,
             SettingsField::EmbeddingModel,
         ],
-    },
-    SettingsGroup {
-        name: "Research",
-        fields: &[SettingsField::ResearchModel, SettingsField::EscalationModel],
     },
     SettingsGroup {
         name: "Web Search",
@@ -564,6 +553,10 @@ pub struct ChatTask {
     pub session_title: String,
     pub space_id: String,
     pub model: String,
+    /// Raw wire model id (backend prefix stripped) — the key for pricing.
+    pub model_id: String,
+    /// Which backend serves this task's requests.
+    pub backend: BackendTag,
     pub incognito: bool,
     pub buffer: String,
     pub thinking: String,
@@ -703,12 +696,6 @@ pub struct App {
     pub transcriber_model: String,
     /// Vision model for scanned-PDF OCR (empty = tesseract only).
     pub ocr_model: String,
-    /// Model used for every deep-research pipeline stage except escalation
-    /// (empty = /research disabled).
-    pub research_model: String,
-    /// Model used only for the deep-research escalation (contradiction
-    /// resolution) stage; empty = falls back to `research_model`.
-    pub escalation_model: String,
     /// OCR engine choice: "auto" (vlm when `ocr_model` set), "tesseract",
     /// "vlm", or "local" (Ollama on 127.0.0.1:11434, set up by cycling to it in /config).
     pub ocr_engine: String,
@@ -823,6 +810,12 @@ pub struct App {
     pub apps_mode: AppsMode,
     pub apps_edit: String,
 
+    /// The `/usage` popup: aggregates snapshot + recent-list cursor.
+    pub usage_data: Option<usage::UsageData>,
+    pub usage_scroll: usize,
+    /// Time window the `/usage` dashboard aggregates (`24h/7d/30d/all`).
+    pub usage_range: crate::db::UsageRange,
+
     /// The space's images (`/image` popup): cache and cursor.
     pub images_cache: Vec<ImageMeta>,
     pub images_selected: usize,
@@ -892,6 +885,10 @@ pub struct App {
     pub(crate) unread: std::collections::HashSet<String>,
     /// Exact conversation token total from the last completed response.
     pub(crate) context_total: Option<u64>,
+    /// Cache hit rate of the most recent completed request (0..=1), shown
+    /// next to the context window. Transient — not persisted here; the
+    /// per-request numbers live in `usage_log`.
+    pub(crate) last_cache_rate: Option<f64>,
 
     pub settings: Settings,
     /// Animated "thinking" indicator shown while a response streams.
@@ -959,6 +956,16 @@ pub struct App {
     /// Total rendered lines from the previous render frame, used during streaming
     /// to keep the viewport pinned when the user has scrolled up.
     pub(super) prev_total: usize,
+    /// Rendered text of the streaming tail from the last frame (empty when
+    /// not streaming). The tail re-renders from scratch every frame, so line
+    /// indices aren't stable — this lets the next frame re-find the line the
+    /// viewport was pinned to by content instead of by index.
+    pub(super) prev_tail: Vec<String>,
+    /// One-shot flag: the user just toggled a display flag (Ctrl+R reasoning,
+    /// Ctrl+T tool detail), so the next frame's cache re-wrap must expand/
+    /// collapse in place — pin the viewport top even when following the bottom
+    /// of a live stream.
+    pub(super) pin_viewport_top: bool,
     /// Mouse text-selection over the history pane.
     pub sel: crate::selection::HistorySel,
     /// Which pane a mouse press is currently interacting with, so drag/release
@@ -1042,14 +1049,6 @@ impl App {
             OpenRouter::default_utility_model,
             "google/gemini-2.5-flash-lite",
         );
-        let research_model = default_model_id(
-            OpenRouter::default_research_model,
-            "google/gemini-2.5-flash",
-        );
-        let escalation_model = default_model_id(
-            OpenRouter::default_escalation_model,
-            "anthropic/claude-sonnet-4.5",
-        );
         let embedding_model = default_model_id(
             OpenRouter::default_embedding_model,
             "openai/text-embedding-3-small",
@@ -1130,6 +1129,9 @@ impl App {
             apps_selected: 0,
             apps_mode: AppsMode::Browse,
             apps_edit: String::new(),
+            usage_data: None,
+            usage_scroll: 0,
+            usage_range: crate::db::UsageRange::default(),
             watches_cache: Vec::new(),
             watch_selected: 0,
             watch_mode: WatchMode::Browse,
@@ -1154,8 +1156,6 @@ impl App {
             memory_model: utility_model.clone(),
             transcriber_model: utility_model.clone(),
             ocr_model: utility_model,
-            research_model,
-            escalation_model,
             ocr_engine: "auto".to_string(),
             local_ocr_model: "glm-ocr".to_string(),
             embedding_model,
@@ -1188,6 +1188,7 @@ impl App {
             notification_areas: Vec::new(),
             unread: std::collections::HashSet::new(),
             context_total: None,
+            last_cache_rate: None,
             settings: Settings::default(),
             spinner_frame: 0,
             thinking_idx: 0,
@@ -1224,6 +1225,8 @@ impl App {
             scroll: 0,
             max_scroll: 0,
             prev_total: 0,
+            prev_tail: Vec::new(),
+            pin_viewport_top: false,
             sel: crate::selection::HistorySel::default(),
             mouse_target: MouseTarget::None,
             composer_click: None,
@@ -1273,14 +1276,13 @@ impl App {
                 "show_stats" => self.settings.show_stats = v == "1",
                 "show_reasoning" => self.settings.show_reasoning = v == "1",
                 "hide_hints" => self.settings.hide_hints = v == "1",
+                "usage_range" => self.usage_range = crate::db::UsageRange::from_key(&v),
                 "temperature" => self.settings.temperature = v.parse().ok(),
                 "top_p" => self.settings.top_p = v.parse().ok(),
                 "max_tokens" => self.settings.max_tokens = v.parse().ok(),
                 "memory_model" => self.memory_model = v,
                 "transcriber_model" => self.transcriber_model = v,
                 "ocr_model" => self.ocr_model = v,
-                "research_model" => self.research_model = v,
-                "escalation_model" => self.escalation_model = v,
                 "ocr_engine" if OCR_ENGINES.contains(&v.as_str()) => self.ocr_engine = v,
                 "local_ocr_model" => self.local_ocr_model = v,
                 "embedding_model" => self.embedding_model = v,
@@ -1339,7 +1341,7 @@ impl App {
                     .then(|| self.backends.resolve(self.embedding_model.trim()))
                     .flatten(),
             }),
-            // App tools only exist while the server runs — an app_modify write whose
+            // App tools only exist while the server runs — an app(action=write) whose
             // link can never load is worse than no tool. Disabled in incognito.
             self.app_server
                 .as_ref()
@@ -1610,6 +1612,23 @@ impl App {
         match result {
             Ok(models) => {
                 let n = models.len();
+                // Keep per-model catalog pricing current (OpenRouter only;
+                // other backends report none). Costs are computed against
+                // this table when usage is logged. Batched into a single
+                // transaction — hundreds of per-model writes on the UI task
+                // would stall the interface after every catalog fetch.
+                let prices: Vec<(String, String, f64, f64)> = models
+                    .iter()
+                    .filter_map(|m| {
+                        m.pricing
+                            .map(|(p, c)| (m.id.clone(), m.backend.name().to_string(), p, c))
+                    })
+                    .collect();
+                let _ = self.db.upsert_model_prices(&prices);
+                // Fresh catalog in hand — recompute every logged request's
+                // cost against it (fills rows logged before pricing existed
+                // and heals any legacy per-token-shaped catalog).
+                let _ = self.db.backfill_usage_costs();
                 self.models = models;
                 self.status = format!("loaded {n} models");
                 // First key just landed and nothing picked yet → jump into the picker.
@@ -1698,6 +1717,7 @@ impl App {
                             .to_string();
                 }
             }
+            "usage" => self.open_usage_popup(),
             other => {
                 if self.skills.iter().any(|s| s.name == other) {
                     self.forced_skill = Some(other.to_string());
@@ -1729,8 +1749,6 @@ impl App {
             | SettingsField::SearchProvider
             | SettingsField::TranscriberModel
             | SettingsField::OcrModel
-            | SettingsField::ResearchModel
-            | SettingsField::EscalationModel
             | SettingsField::OcrEngine
             | SettingsField::ImageGenModel
             | SettingsField::VideoGenModel => None,
@@ -1802,6 +1820,36 @@ pub fn tool_call_summary(name: &str, args: &str, result: &str) -> String {
         if value.is_empty() { f(second) } else { value }
     };
     match name {
+        "skills" => {
+            let target = if f("action") == "install" {
+                f("source")
+            } else {
+                f("name")
+            };
+            format!("skills/{} {}", f("action"), target)
+        }
+        "scripts" => {
+            let target = match f("action").as_str() {
+                "install" => {
+                    let n = v
+                        .get("packages")
+                        .and_then(|a| a.as_array())
+                        .map_or(0, Vec::len);
+                    format!("{n} packages")
+                }
+                "python" => f("name"),
+                _ => f("path"),
+            };
+            format!("scripts/{} {}", f("action"), target)
+        }
+        "app" => format!("app/{} {}", f("action"), f("app")),
+        "media" => {
+            let target = [f("video_id"), f("name"), f("image_id")]
+                .into_iter()
+                .find(|t| !t.is_empty())
+                .unwrap_or_else(|| f("prompt").chars().take(30).collect());
+            format!("media/{} {}", f("action"), target)
+        }
         "skill" => format!("skill {}", f("name")),
         "skill_admin" => format!("skill_admin {} → {}", f("action"), first_line(result)),
         "search" => {
@@ -1810,6 +1858,18 @@ pub fn tool_call_summary(name: &str, args: &str, result: &str) -> String {
             format!("search/{} \"{}\" → {hits}", f("mode"), f("query"))
         }
         "research_lookup" => format!("research_lookup/{} \"{}\"", f("scope"), f("query")),
+        "batch" => {
+            let calls = v.get("calls").and_then(|c| c.as_array());
+            let n = calls.map_or(0, Vec::len);
+            let tools: Vec<&str> = calls
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| item.get("tool").and_then(|t| t.as_str()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            format!("batch [{n} ops: {}]", tools.join(", "))
+        }
         "fetch_url" => format!("fetch_url {} → {}", f("url"), first_line(result)),
         "files" => format!(
             "files/{} {} → {}",

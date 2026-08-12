@@ -61,6 +61,7 @@ fn delete_removes_session_and_clears_if_active() {
         reasoning: None,
         tokens: None,
         secs: None,
+        cost: None,
         phrase: None,
         persona: None,
         created_at: None,
@@ -173,6 +174,7 @@ pub(super) fn app_with_key() -> App {
             supports_image_generation: false,
             supports_video_generation: false,
             backend: BackendTag::OpenRouter,
+            pricing: None,
         },
         Model {
             id: "b/two".into(),
@@ -183,6 +185,7 @@ pub(super) fn app_with_key() -> App {
             supports_image_generation: false,
             supports_video_generation: false,
             backend: BackendTag::OpenRouter,
+            pricing: None,
         },
     ];
     a
@@ -530,6 +533,7 @@ fn panels_split_favorites_from_available_by_recency() {
             supports_image_generation: false,
             supports_video_generation: false,
             backend: BackendTag::OpenRouter,
+            pricing: None,
         },
         Model {
             id: "b/two".into(),
@@ -540,6 +544,7 @@ fn panels_split_favorites_from_available_by_recency() {
             supports_image_generation: false,
             supports_video_generation: false,
             backend: BackendTag::OpenRouter,
+            pricing: None,
         },
         Model {
             id: "c/three".into(),
@@ -550,6 +555,7 @@ fn panels_split_favorites_from_available_by_recency() {
             supports_image_generation: false,
             supports_video_generation: false,
             backend: BackendTag::OpenRouter,
+            pricing: None,
         },
     ];
     // three is favorite; two was used more recently than one.
@@ -578,6 +584,7 @@ fn toggle_favorite_persists_and_moves_panel() {
         supports_image_generation: false,
         supports_video_generation: false,
         backend: BackendTag::OpenRouter,
+        pricing: None,
     }];
     a.model_focus = ModelPanel::Available;
     a.avail_state.select(Some(0));
@@ -614,6 +621,7 @@ fn reasoning_cycles_only_for_supporting_models() {
         supports_image_generation: false,
         supports_video_generation: false,
         backend: BackendTag::OpenRouter,
+        pricing: None,
     }];
     a.model_focus = ModelPanel::Available;
     a.avail_state.select(Some(0));
@@ -648,6 +656,7 @@ fn reasoning_cycles_models_own_effort_list() {
         supports_image_generation: false,
         supports_video_generation: false,
         backend: BackendTag::OpenRouter,
+        pricing: None,
     }];
     a.model_focus = ModelPanel::Available;
     a.avail_state.select(Some(0));
@@ -679,6 +688,7 @@ fn reasoning_cycle_uses_explicit_none_and_clears_stale_preferences() {
             supports_image_generation: false,
             supports_video_generation: false,
             backend: BackendTag::OpenRouter,
+            pricing: None,
         },
         Model {
             id: "no-reasoning".into(),
@@ -689,6 +699,7 @@ fn reasoning_cycle_uses_explicit_none_and_clears_stale_preferences() {
             supports_image_generation: false,
             supports_video_generation: false,
             backend: BackendTag::OpenRouter,
+            pricing: None,
         },
     ];
     a.model_focus = ModelPanel::Available;
@@ -740,6 +751,7 @@ fn effort_accepted_follows_the_models_own_list() {
             supports_image_generation: false,
             supports_video_generation: false,
             backend: BackendTag::OpenRouter,
+            pricing: None,
         },
         Model {
             id: "dumb".into(),
@@ -750,6 +762,7 @@ fn effort_accepted_follows_the_models_own_list() {
             supports_image_generation: false,
             supports_video_generation: false,
             backend: BackendTag::OpenRouter,
+            pricing: None,
         },
     ];
     // Claude's own list: minimal/low/medium/high.
@@ -803,6 +816,7 @@ fn focused_reasoning_hint_lists_accepted_values() {
         supports_image_generation: false,
         supports_video_generation: false,
         backend: BackendTag::OpenRouter,
+        pricing: None,
     }];
     a.model_focus = ModelPanel::Available;
     a.avail_state.select(Some(0));
@@ -934,7 +948,7 @@ fn searxng_url_setting_persists_and_enables_search_tool() {
     assert!(a.toolbox.searxng_url.is_none());
 
     a.popup = Popup::Settings;
-    a.settings_selected = 18; // SearxngUrl
+    a.settings_selected = 15; // SearxngUrl
     for c in "http://localhost:8080/".chars() {
         a.settings_input_char(c);
     }
@@ -958,31 +972,6 @@ fn searxng_url_setting_persists_and_enables_search_tool() {
     let mut b = App::new(a.db, Some("k".into()), test_space());
     b.load_settings();
     assert_eq!(b.searxng_url, "http://localhost:8080");
-}
-
-#[test]
-fn research_and_escalation_model_settings_persist() {
-    let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
-    a.research_model = "openai/gpt-5-mini".to_string();
-    a.db.set_setting("research_model", &a.research_model)
-        .unwrap();
-    a.escalation_model = "anthropic/claude-sonnet-4.5".to_string();
-    a.db.set_setting("escalation_model", &a.escalation_model)
-        .unwrap();
-
-    let reloaded = a.db.load_settings().unwrap();
-    assert!(
-        reloaded
-            .iter()
-            .any(|(k, v)| k == "research_model" && v == "openai/gpt-5-mini")
-    );
-
-    // Reloading a fresh App from the same db picks it back up.
-    let mut b = App::new(a.db, Some("k".into()), test_space());
-    b.load_settings();
-    assert_eq!(b.research_model, "openai/gpt-5-mini");
-    assert_eq!(b.escalation_model, "anthropic/claude-sonnet-4.5");
 }
 
 #[test]
@@ -1010,6 +999,7 @@ fn context_used_and_limit() {
         reasoning: None,
         tokens: None,
         secs: None,
+        cost: None,
         phrase: None,
         persona: None,
         created_at: None,
@@ -1034,6 +1024,7 @@ fn compaction_narrows_effective_messages_and_context_used() {
             reasoning: None,
             tokens: None,
             secs: None,
+            cost: None,
             phrase: None,
             persona: None,
             created_at: None,
@@ -1116,6 +1107,7 @@ async fn force_compact_reports_why_it_no_ops() {
         reasoning: None,
         tokens: None,
         secs: None,
+        cost: None,
         phrase: None,
         persona: None,
         created_at: None,
@@ -1136,6 +1128,7 @@ fn context_breakdown_reports_system_memory_conversation() {
         reasoning: None,
         tokens: None,
         secs: None,
+        cost: None,
         phrase: None,
         persona: None,
         created_at: None,
@@ -1268,8 +1261,6 @@ fn utility_defaults_are_prefixed_for_non_openrouter_bootstrap_backend() {
     assert_eq!(a.memory_model, "openai:gpt-4.1-mini");
     assert_eq!(a.transcriber_model, "openai:gpt-4.1-mini");
     assert_eq!(a.ocr_model, "openai:gpt-4.1-mini");
-    assert_eq!(a.research_model, "openai:gpt-4.1");
-    assert_eq!(a.escalation_model, "openai:gpt-4.1");
     assert_eq!(a.embedding_model, "openai:text-embedding-3-small");
 }
 
@@ -1286,6 +1277,7 @@ fn utility_model_resolution_falls_back_from_legacy_openrouter_id_on_openai() {
         supports_image_generation: false,
         supports_video_generation: false,
         backend: BackendTag::OpenAi,
+        pricing: None,
     }];
     a.current_model = Some("openai:gpt-4.1-mini".into());
 
@@ -1338,6 +1330,65 @@ async fn stream_error_is_persisted_in_transcript_and_not_replayed() {
             .iter()
             .all(|message| !message.content.contains("backend unavailable"))
     );
+}
+
+#[test]
+fn build_history_compresses_duplicate_tool_results_and_keeps_changed_ones() {
+    let mut a = app_with_key();
+    let s =
+        a.db.create_session("t", "a/one", &a.active_space.id, "chat")
+            .unwrap();
+    a.session = Some(s);
+    a.messages.push(Message {
+        role: "user".into(),
+        content: "read the file".into(),
+        model: None,
+        reasoning: None,
+        tokens: None,
+        secs: None,
+        cost: None,
+        phrase: None,
+        persona: None,
+        created_at: None,
+    });
+    let row = |result: &str| {
+        serde_json::json!({
+            "name": "read_file",
+            "arguments": r#"{"name":"a.txt"}"#,
+            "result": result,
+        })
+        .to_string()
+    };
+    // read v1 → re-read (identical) → edit → re-read v2 (changed).
+    for result in ["v1", "v1", "v2"] {
+        a.messages.push(Message {
+            role: "tool_call".into(),
+            content: row(result),
+            model: None,
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            cost: None,
+            phrase: None,
+            persona: None,
+            created_at: None,
+        });
+    }
+    let history = a.build_history();
+    let tools: Vec<&str> = history
+        .iter()
+        .filter(|m| m.role == "tool")
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(tools.len(), 3, "all three calls still replayed");
+    assert_eq!(tools[0], "v1", "first read stays full");
+    assert!(
+        tools[1].starts_with(crate::tools::TOOL_RESULT_OMITTED_PREFIX),
+        "identical re-read compressed, got: {}",
+        tools[1]
+    );
+    assert!(tools[1].contains("read_file a.txt"), "{}", tools[1]);
+    assert_eq!(tools[2], "v2", "changed re-read stays full");
 }
 
 #[test]
@@ -1583,6 +1634,7 @@ fn copy_message_uses_exact_original_content() {
         reasoning: None,
         tokens: None,
         secs: None,
+        cost: None,
         phrase: None,
         persona: None,
         created_at: None,
@@ -1594,6 +1646,7 @@ fn copy_message_uses_exact_original_content() {
         reasoning: None,
         tokens: None,
         secs: None,
+        cost: None,
         phrase: None,
         persona: None,
         created_at: None,
@@ -1643,6 +1696,7 @@ fn history_carries_markdown_images_as_data_urls_for_vision_models() {
             supports_image_generation: false,
             supports_video_generation: false,
             backend: BackendTag::OpenRouter,
+            pricing: None,
         },
         Model {
             id: "txt/model".into(),
@@ -1653,6 +1707,7 @@ fn history_carries_markdown_images_as_data_urls_for_vision_models() {
             supports_image_generation: false,
             supports_video_generation: false,
             backend: BackendTag::OpenRouter,
+            pricing: None,
         },
     ];
 
@@ -1782,6 +1837,50 @@ fn tool_call_summaries_name_the_interesting_argument() {
             "ok"
         ),
         "install_packages pillow requests → pdf"
+    );
+    assert_eq!(
+        tool_call_summary("skills", r#"{"action":"load","name":"commit"}"#, "…"),
+        "skills/load commit"
+    );
+    assert_eq!(
+        tool_call_summary(
+            "skills",
+            r#"{"action":"install","source":"anthropics/skills/pdf"}"#,
+            "installed"
+        ),
+        "skills/install anthropics/skills/pdf"
+    );
+    assert_eq!(
+        tool_call_summary(
+            "scripts",
+            r#"{"action":"run","path":"fill.py","space":true}"#,
+            "ok"
+        ),
+        "scripts/run fill.py"
+    );
+    assert_eq!(
+        tool_call_summary(
+            "scripts",
+            r#"{"action":"python","code":"print(1)","name":"x.py"}"#,
+            "ok"
+        ),
+        "scripts/python x.py"
+    );
+    assert_eq!(
+        tool_call_summary(
+            "app",
+            r#"{"action":"write","app":"deck","path":"index.html","content":"<h1>hi</h1>"}"#,
+            "wrote"
+        ),
+        "app/write deck"
+    );
+    assert_eq!(
+        tool_call_summary(
+            "media",
+            r#"{"action":"generate_video","prompt":"a red fox"}"#,
+            "ok"
+        ),
+        "media/generate_video a red fox"
     );
     let long = format!(r#"{{"x":"{}"}}"#, "y".repeat(100));
     assert!(tool_call_summary("mystery", &long, "").ends_with('…'));
@@ -1973,6 +2072,7 @@ async fn swarm_synthesis_triggers_post_reply_jobs_like_normal_chat() {
         reasoning: None,
         tokens: None,
         secs: None,
+        cost: None,
         phrase: None,
         persona: None,
         created_at: None,
@@ -2001,6 +2101,7 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
         reasoning: None,
         tokens: None,
         secs: None,
+        cost: None,
         phrase: None,
         persona: None,
         created_at: None,
@@ -2012,6 +2113,7 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
         reasoning: None,
         tokens: None,
         secs: None,
+        cost: None,
         phrase: None,
         persona: Some("Optimist".into()),
         created_at: None,
@@ -2023,6 +2125,7 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
         reasoning: None,
         tokens: None,
         secs: None,
+        cost: None,
         phrase: None,
         persona: None,
         created_at: None,

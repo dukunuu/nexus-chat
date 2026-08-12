@@ -16,7 +16,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use super::{dim, line_text};
+use super::{dim, fmt_cost, line_text};
 use crate::app::App;
 use crate::db::Message;
 
@@ -55,6 +55,18 @@ pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
     };
     if app.is_welcome() {
         app.max_scroll = 0;
+        // The welcome screen renders no history lines — record an empty
+        // layout so a click here can never map onto the previous session's
+        // stale snapshot and open one of its URLs (or images) instead of
+        // doing nothing.
+        app.sel.record_render(
+            Rect::default(),
+            0,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
         render_welcome(f, app, area);
         return;
     }
@@ -80,16 +92,84 @@ pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
     let max_top = total.saturating_sub(height);
     app.max_scroll = max_top as u16; // let the event loop clamp scrolling
 
-    // When the user has scrolled up during streaming, new tokens grow the tail
-    // which pushes max_top up.  Keep the viewport pinned by raising scroll to
-    // cancel out the growth.
-    if app.scroll > 0 && app.viewing_stream() {
-        let delta = total.saturating_sub(app.prev_total);
-        if delta > 0 {
-            app.scroll = app.scroll.saturating_add(delta as u16);
+    // The rendered line count can change under the viewport: the streaming
+    // tail grows, or a display-flag toggle (Ctrl+R reasoning, Ctrl+T tool
+    // detail) re-wraps the whole cache. Keep the viewport where the user is
+    // reading instead of letting it jump.
+    //
+    // A raw line-count delta only pins correctly when every new line landed
+    // BELOW the viewport. Growth above it (reasoning streaming while the
+    // user reads the answer below it, a tool-call message landing in the
+    // cache, the tail re-wrapping) shifts the content without shifting the
+    // line index, so delta compensation scrolls the wrong text under the
+    // viewport. Instead, re-find the exact line the viewport was pinned to:
+    // the tail re-renders every frame, but a surviving line's text is a
+    // prefix of the line at its new position (only the frontier lines grow),
+    // so the previous frame's viewport-top line can be matched by prefix in
+    // the newly-rendered region and the viewport pinned back onto it.
+    let prev_tail = std::mem::take(&mut app.prev_tail);
+    let anchor: Option<&str> = if app.prev_total > 0 && !prev_tail.is_empty() {
+        let prev_cached = app.prev_total.saturating_sub(prev_tail.len());
+        let prev_top = app
+            .prev_total
+            .saturating_sub(height)
+            .saturating_sub(app.scroll as usize);
+        prev_top
+            .checked_sub(prev_cached)
+            .and_then(|offset| prev_tail.get(offset).map(String::as_str))
+    } else {
+        None
+    };
+
+    let explicit_toggle = app.pin_viewport_top;
+    app.pin_viewport_top = false;
+    let pin_top =
+        app.prev_total > 0 && (explicit_toggle || app.scroll > 0 || !app.viewing_stream());
+    if pin_top
+        && !explicit_toggle
+        && let Some(anchor) = anchor
+        && anchor.chars().count() >= 12
+    {
+        // Scrolled up (or the stream just ended) with the viewport inside
+        // the streaming tail: pin to the content line, not the line index.
+        // A very short anchor is a frontier line still being typed, where
+        // the delta path below is exact anyway (all growth is below it) —
+        // and a short prefix could match unrelated lines below the anchor.
+        let prefix: String = anchor.chars().take(24).collect();
+        // The anchor can only have moved into lines rendered since the last
+        // frame: the tail plus any messages appended to the cache.
+        let search_from = app.prev_total.saturating_sub(prev_tail.len()).min(total);
+        let mut hit: Option<usize> = None;
+        let mut i = total;
+        while i > search_from && hit.is_none() {
+            i -= 1;
+            let text = if i < cached_lines {
+                line_text(&cache.lines[i])
+            } else {
+                line_text(&tail[i - cached_lines])
+            };
+            if text.starts_with(&prefix) {
+                hit = Some(i);
+                break;
+            }
+        }
+        if let Some(hit) = hit {
+            app.scroll = max_top.saturating_sub(hit) as u16;
+        } else {
+            let delta = total as i64 - app.prev_total as i64;
+            if delta != 0 {
+                app.scroll =
+                    (i64::from(app.scroll) + delta).clamp(0, i64::from(app.max_scroll)) as u16;
+            }
+        }
+    } else if pin_top {
+        let delta = total as i64 - app.prev_total as i64;
+        if delta != 0 {
+            app.scroll = (i64::from(app.scroll) + delta).clamp(0, i64::from(app.max_scroll)) as u16;
         }
     }
     app.prev_total = total;
+    app.prev_tail = tail.iter().map(line_text).collect();
 
     app.scroll = app.scroll.min(app.max_scroll);
     let top = max_top.saturating_sub(app.scroll as usize);
@@ -224,6 +304,8 @@ fn sync_cache(app: &mut App, width: usize) {
                 &images_dir,
                 &mut c.image_cache,
             );
+        } else if m.role == "compaction" {
+            push_compaction(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_stage" {
             push_research_stage(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "error" {
@@ -570,6 +652,32 @@ fn push_tool_call(
     out.push(Line::from(""));
 }
 
+/// A compaction-digest block: the digest of the earlier conversation, shown
+/// right at the compaction boundary in the transcript — what was folded
+/// away is visible in the chat itself, not only behind the context popup's
+/// editor. Header in accent2, digest body dimmed so the live conversation
+/// stays prominent.
+fn push_compaction(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) {
+    out.push(Line::from(vec![
+        Span::styled("📄 ", Style::default().fg(theme.accent2)),
+        Span::styled(
+            "conversation compacted — earlier messages summarized:",
+            Style::default()
+                .fg(theme.accent2)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    for line in wrap_plain(content, width.saturating_sub(2)) {
+        out.push(Line::from(dim(format!("  {line}"), theme)));
+    }
+    out.push(Line::from(""));
+}
+
 /// A background-research progress line: a dim one-liner with a 🔎 marker,
 /// no expand/collapse (unlike `tool_call` — there's no arguments/result pair,
 /// just a phase label).
@@ -797,6 +905,11 @@ fn push_assistant_stored(
     {
         let tps = if secs > 0.0 { tok as f64 / secs } else { 0.0 };
         let _ = write!(footer, "  ·  {tps:.1} tok/s · ~{tok} tok · {secs:.2}s");
+    }
+    if settings.show_stats
+        && let Some(cost) = msg.cost.filter(|c| *c > 0.0)
+    {
+        let _ = write!(footer, "  ·  {}", fmt_cost(Some(cost)));
     }
     if !footer.is_empty() {
         out.push(Line::from(dim(footer, theme)));
@@ -1080,6 +1193,7 @@ mod tests {
             reasoning: None,
             tokens: None,
             secs: None,
+            cost: None,
             phrase: None,
             persona: None,
             created_at: None,
@@ -1092,6 +1206,68 @@ mod tests {
             root: std::env::temp_dir().join(format!("nexus-hist-{}", uuid::Uuid::new_v4())),
         };
         App::new(db, Some("k"), space)
+    }
+
+    /// Build an app with a session and a manually-inserted streaming task.
+    fn streaming_app(thinking: &str, buffer: &str) -> App {
+        let mut a = test_app();
+        let space = a.active_space.id.clone();
+        let s =
+            a.db.create_session("stream test", "a/one", &space, "chat")
+                .unwrap();
+        let session = a.db.get_session(&s.id).unwrap().unwrap();
+        a.session = Some(session);
+        a.settings.show_reasoning = true;
+        a.show_tool_detail = true;
+        // Stored history so the transcript overflows the pane.
+        for i in 0..8 {
+            a.messages.push(msg(
+                "user",
+                &format!("earlier user message number {i} with a decent amount of body text"),
+            ));
+            a.messages.push(msg(
+                "assistant",
+                &format!(
+                    "earlier assistant reply {i} with a longer body so it wraps over a few lines"
+                ),
+            ));
+        }
+        let abort = tokio::spawn(async {}).abort_handle();
+        let task = crate::app::ChatTask {
+            id: 1,
+            session_id: s.id.clone(),
+            session_title: "stream test".into(),
+            space_id: space,
+            model: "a/one".into(),
+            model_id: "one".into(),
+            backend: crate::provider::BackendTag::OpenRouter,
+            incognito: false,
+            buffer: buffer.into(),
+            thinking: thinking.into(),
+            tool_status: None,
+            usage: None,
+            started: std::time::Instant::now(),
+            thinking_idx: 0,
+            spinner_color: ratatui::style::Color::Red,
+            abort,
+        };
+        a.chat_tasks.insert(1, task);
+        a
+    }
+
+    /// The rendered text of the first three rows of the history pane — the
+    /// ground truth of what the user sees at the viewport top.
+    fn visible_snapshot(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..3 {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                out.push_str(cell.symbol());
+            }
+            out.push('|');
+        }
+        out
     }
 
     #[test]
@@ -1163,6 +1339,276 @@ mod tests {
             true
         );
     }
+
+    #[test]
+    fn compaction_digest_renders_with_header_and_body() {
+        let mut a = test_app();
+        a.messages.push(msg("user", "long conversation…"));
+        a.messages
+            .push(msg("compaction", "digest line one\ndigest line two"));
+        sync_cache(&mut a, 80);
+        let text = a
+            .history_cache
+            .lines
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("📄"), "{text}");
+        assert!(text.contains("conversation compacted"), "{text}");
+        assert!(text.contains("digest line one"), "{text}");
+        assert!(text.contains("digest line two"), "{text}");
+        // The digest appears in the copy/plain view too — it's visible
+        // transcript content, not a hidden sidecar.
+        assert!(
+            a.history_cache
+                .plain
+                .iter()
+                .any(|l| l.contains("digest line one")),
+            "{text}"
+        );
+    }
+
+    /// A conversation tall enough to overflow the history pane, with one
+    /// tool-call block whose detail toggle produces a large line delta.
+    fn tall_tool_call_app() -> App {
+        let mut a = test_app();
+        for i in 0..60 {
+            a.messages.push(msg(
+                "user",
+                &format!("message number {i} with some body text"),
+            ));
+        }
+        let tool_content = serde_json::json!({
+            "name": "search",
+            "arguments": r#"{"mode":"web","query":"q"}"#,
+            "result": "line one\n".repeat(40),
+        })
+        .to_string();
+        a.messages.push(msg("tool_call", &tool_content));
+        a
+    }
+
+    #[tokio::test]
+    async fn streaming_reasoning_growth_keeps_viewport_on_reasoning() {
+        let reasoning: String = (0..60)
+            .map(|i| format!("reasoning line {i} with a bunch of words to wrap around"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut a = streaming_app(&reasoning, "The answer body.\nSecond answer line.");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        // Scroll up into the middle of the reasoning block.
+        a.scroll = 8;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let before = visible_snapshot(&terminal);
+        assert!(
+            before.contains("reasoning line"),
+            "viewport should be in the reasoning, got: {before}"
+        );
+
+        // Reasoning keeps streaming below the viewport.
+        let task = a.chat_tasks.get_mut(&1).unwrap();
+        for i in 0..20 {
+            task.thinking.push_str(&format!(
+                "\nfresh reasoning token {i} some more words to wrap"
+            ));
+        }
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+
+        let after = visible_snapshot(&terminal);
+        assert!(
+            after.starts_with(&before[..before.len().min(24)]),
+            "viewport content jumped while reading reasoning: before={before:?} after={after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_reasoning_growth_keeps_viewport_on_answer() {
+        let reasoning: String = (0..50)
+            .map(|i| format!("reasoning line {i} with a bunch of words to wrap around"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let answer: String = (0..40)
+            .map(|i| format!("answer paragraph line {i} with a bunch of words to wrap around"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut a = streaming_app(&reasoning, &answer);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+
+        // Scroll up into the answer region (bottom of the streaming tail).
+        assert!(a.max_scroll > 0, "needs an overflowing transcript");
+        a.scroll = 12;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let before = visible_snapshot(&terminal);
+        assert!(
+            before.contains("answer"),
+            "viewport should be in the answer, got: {before}"
+        );
+
+        // Reasoning keeps streaming above the viewport; answer grows a bit below.
+        let task = a.chat_tasks.get_mut(&1).unwrap();
+        for i in 0..30 {
+            task.thinking.push_str(&format!(
+                "\nmore reasoning token {i} with some words to wrap"
+            ));
+        }
+        task.buffer.push_str(" more answer tokens here.");
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+
+        let after = visible_snapshot(&terminal);
+        assert!(
+            after.starts_with(&before[..before.len().min(24)]),
+            "viewport content jumped: before={before:?} after={after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_tail_to_cache_transition_does_not_jump() {
+        let mut a = streaming_app(
+            "some reasoning text here\nmore of it",
+            &"A final answer body with enough text to wrap over several lines. ".repeat(6),
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        a.scroll = 3;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let before = visible_snapshot(&terminal);
+
+        // Stream finishes: the tail is replaced by the cached stored message.
+        a.on_chat_event(1, crate::provider::StreamEvent::Done)
+            .unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+
+        let after = visible_snapshot(&terminal);
+        assert!(
+            after.starts_with(&before[..before.len().min(24)]),
+            "tail->cache transition jumped: before={before:?} after={after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_tail_to_cache_transition_pins_inside_the_tail() {
+        let reasoning: String = (0..40)
+            .map(|i| format!("reasoning line {i} with a bunch of words to wrap around"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut a = streaming_app(&reasoning, "A final answer body line one.\nBody line two.");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        // Scroll up so the viewport top is inside the reasoning block.
+        a.scroll = 5;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let before = visible_snapshot(&terminal);
+        assert!(
+            before.contains("reasoning line"),
+            "viewport should be in the reasoning, got: {before}"
+        );
+
+        a.on_chat_event(1, crate::provider::StreamEvent::Done)
+            .unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+
+        let after = visible_snapshot(&terminal);
+        assert!(
+            after.starts_with(&before[..before.len().min(24)]),
+            "tail->cache transition inside the tail jumped: before={before:?} after={after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_landing_above_viewport_keeps_position() {
+        let reasoning: String = (0..60)
+            .map(|i| format!("reasoning line {i} with a bunch of words to wrap around"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut a = streaming_app(&reasoning, "answer body line one\nanswer body line two");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        // Scroll up into the reasoning block (well above where the tool
+        // message will land in the cache).
+        a.scroll = 10;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let before = visible_snapshot(&terminal);
+        assert!(
+            before.contains("reasoning line"),
+            "viewport should be in the reasoning, got: {before}"
+        );
+
+        // A tool call completes: with tool detail on, its block is long and
+        // lands in the cache ABOVE the streaming tail.
+        a.on_chat_event(
+            1,
+            crate::provider::StreamEvent::ToolCall {
+                name: "web_search".into(),
+                arguments: r#"{"query":"some search query text"}"#.into(),
+                result: "result line one\nresult line two\nresult line three".into(),
+            },
+        )
+        .unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+
+        let after = visible_snapshot(&terminal);
+        assert!(
+            after.starts_with(&before[..before.len().min(24)]),
+            "tool call landing above the viewport jumped: before={before:?} after={after:?}"
+        );
+    }
+
+    #[test]
+    fn flag_toggle_pins_viewport_when_scrolled_up() {
+        let mut a = tall_tool_call_app();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let total1 = a.history_cache.lines.len();
+        assert!(a.max_scroll > 10, "conversation should overflow the pane");
+
+        // User scrolls up a little, then Ctrl+T expands the tool block.
+        a.scroll = 5;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        assert_eq!(a.scroll, 5);
+        a.show_tool_detail = true;
+        a.pin_viewport_top = true;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let total2 = a.history_cache.lines.len();
+        let delta = total2 as i64 - total1 as i64;
+        assert!(delta > 20, "tool detail should add many lines");
+        // Scroll compensated by the delta: the top line stayed put.
+        assert_eq!(a.scroll, 5 + delta as u16, "viewport top must stay pinned");
+
+        // Ctrl+T again collapses: the viewport returns to the same spot.
+        a.show_tool_detail = false;
+        a.pin_viewport_top = true;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        assert_eq!(a.scroll, 5, "collapse must restore the pinned position");
+    }
+
+    #[test]
+    fn flag_toggle_expands_in_place_at_bottom() {
+        let mut a = tall_tool_call_app();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let total1 = a.history_cache.lines.len();
+        assert_eq!(a.scroll, 0, "starts following the bottom");
+
+        // Ctrl+T while following the bottom: the block expands in place and
+        // the scroll position records the growth (the viewport does not jump
+        // to a different part of the conversation).
+        a.show_tool_detail = true;
+        a.pin_viewport_top = true;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let total2 = a.history_cache.lines.len();
+        let delta = total2 as i64 - total1 as i64;
+        assert_eq!(a.scroll, delta as u16, "expand in place at the bottom");
+    }
 }
 
 #[cfg(test)]
@@ -1185,6 +1631,7 @@ mod card_tint_tests {
             reasoning: None,
             tokens: None,
             secs: None,
+            cost: None,
             phrase: None,
             persona: None,
             created_at: Some("2026-08-08T10:00:00Z".into()),

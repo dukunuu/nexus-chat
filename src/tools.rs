@@ -1,5 +1,7 @@
-//! Tools the model can call mid-response: `skill` (progressive-disclosure
-//! skill bodies) and `search`. Concrete (no trait) —
+//! Tools the model can call mid-response, advertised as nine consolidated
+//! names (`batch`, `skills`, `scripts`, `search`, `fetch_url`,
+//! `research_lookup`, `files`, `app`, `media`) that dispatch onto a larger
+//! set of specialized implementations below. Concrete (no trait) —
 //! there's exactly one implementation and no need for one yet.
 
 use std::fmt::Write as _;
@@ -14,6 +16,13 @@ use crate::provider::openrouter::{OpenRouter, normalize_video_params};
 use crate::skills::{load_skills, skill_body};
 
 const MAX_TOOL_RESULT_CHARS: usize = 8_000;
+/// Maximum sub-operations in one `batch` call — bounds execution time and
+/// the size of the combined result.
+const MAX_BATCH_CALLS: usize = 8;
+/// Combined-result cap for a `batch` call. Each sub-result is already capped
+/// at `MAX_TOOL_RESULT_CHARS`; this lets a few of them through together
+/// while still bounding what a runaway batch pushes into the conversation.
+const MAX_BATCH_RESULT_CHARS: usize = MAX_TOOL_RESULT_CHARS * 4;
 
 pub struct ToolBox {
     pub skills_dir: PathBuf,
@@ -27,7 +36,7 @@ pub struct ToolBox {
     pub search_provider: String,
     /// When true, `defs()`/`run()` restrict to `search`/`fetch_url` only —
     /// used for deep-research searcher agents, which must never reach
-    /// `run_python/install_packages/app` tools even if hallucinated.
+    /// `scripts`/`app`/`media` tools even if hallucinated.
     research_only: bool,
     /// Domains a per-space setting always excludes from `search(mode=web)` results
     /// (appended to any `exclude_domains` the model passes).
@@ -54,8 +63,8 @@ pub struct ToolBox {
     /// Directory to save generated images into / search for reference images.
     pub space_files_dir: PathBuf,
     pub space_apps_dir: PathBuf,
-    /// Directory holding space-local scripts (created by the model via
-    /// `script_files` / `run_python`).
+    /// Directory holding space-local scripts (created by the model via the
+    /// `scripts` tool).
     pub space_scripts_dir: PathBuf,
     /// Current session id — for attaching generated images to a message.
     pub session_id: String,
@@ -112,15 +121,19 @@ fn required_array(v: &serde_json::Value, key: &str) -> Result<(), String> {
 // Long by design (tool dispatch).
 #[allow(clippy::too_many_lines)]
 /// Normalize advertised consolidated calls onto the specialized implementations below.
-/// The old names are intentionally still accepted by `run()` for persisted/replayed calls,
-/// but never returned by `defs()`.
+/// The retired names (`skill_admin`, `app_inspect`, `run_python`, …) are intentionally
+/// still accepted by `run()` for persisted/replayed calls, but never returned by `defs()`.
 fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
     let public = matches!(
         name,
-        "skill_admin"
+        "skills"
+            | "scripts"
             | "search"
             | "research_lookup"
             | "files"
+            | "app"
+            | "media"
+            | "skill_admin"
             | "app_inspect"
             | "app_modify"
             | "app_assets"
@@ -141,6 +154,55 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
             .ok_or_else(|| format!("missing required field: {key}"))
     };
     let mapped = match name {
+        "skills" => match action("action")? {
+            "load" => {
+                required_arg(&value, "name")?;
+                "skill"
+            }
+            "create" => {
+                required_arg(&value, "name")?;
+                required_arg(&value, "description")?;
+                "create_skill"
+            }
+            "install" => {
+                required_arg(&value, "source")?;
+                "install_skill"
+            }
+            other => return Err(format!("invalid action for skills: {other}")),
+        },
+        "scripts" => match action("action")? {
+            "list" => "list_scripts",
+            "read" => {
+                required_arg(&value, "path")?;
+                "read_script"
+            }
+            "write" => {
+                required_arg(&value, "path")?;
+                if value.get("content").and_then(|v| v.as_str()).is_none() {
+                    return Err("missing required field: content".to_string());
+                }
+                "write_script"
+            }
+            "edit" => {
+                required_arg(&value, "path")?;
+                required_array(&value, "edits")?;
+                "edit_script"
+            }
+            "run" => {
+                required_arg(&value, "path")?;
+                "run_script"
+            }
+            "python" => {
+                required_arg(&value, "code")?;
+                required_arg(&value, "name")?;
+                "run_python"
+            }
+            "install" => {
+                required_array(&value, "packages")?;
+                "install_packages"
+            }
+            other => return Err(format!("invalid action for scripts: {other}")),
+        },
         "skill_admin" => match action("action")? {
             "create" => {
                 required_arg(&value, "name")?;
@@ -197,6 +259,50 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
                 "read_pdf_page"
             }
             other => return Err(format!("invalid action for files: {other}")),
+        },
+        "app" => match action("action")? {
+            "read" => {
+                required_arg(&value, "app")?;
+                required_arg(&value, "path")?;
+                "read_app_file"
+            }
+            "search" => {
+                required_arg(&value, "app")?;
+                required_arg(&value, "pattern")?;
+                "grep_app"
+            }
+            "write" => {
+                required_arg(&value, "app")?;
+                required_arg(&value, "path")?;
+                required_arg(&value, "content")?;
+                "write_file"
+            }
+            "patch" => {
+                required_arg(&value, "app")?;
+                required_arg(&value, "path")?;
+                required_array(&value, "edits")?;
+                "edit_file"
+            }
+            "diff" => {
+                required_arg(&value, "app")?;
+                required_arg(&value, "path")?;
+                if value.get("content").and_then(|v| v.as_str()).is_none() {
+                    return Err("missing required field: content".to_string());
+                }
+                "diff_app"
+            }
+            "list" => "list_images",
+            "copy_file" => {
+                required_arg(&value, "app")?;
+                required_arg(&value, "file_name")?;
+                "copy_file_to_app"
+            }
+            "copy_images" => {
+                required_arg(&value, "app")?;
+                required_array(&value, "image_ids")?;
+                "copy_images_to_app"
+            }
+            other => return Err(format!("invalid action for app: {other}")),
         },
         "app_inspect" => match action("action")? {
             "read" => {
@@ -267,6 +373,40 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
                 "edit_script"
             }
             other => return Err(format!("invalid action for script_files: {other}")),
+        },
+        "media" => match action("action")? {
+            "generate_image" => {
+                required_arg(&value, "prompt")?;
+                "generate_image"
+            }
+            "generate_video" => {
+                required_arg(&value, "prompt")?;
+                "generate_video"
+            }
+            "edit" => {
+                required_arg(&value, "video_id")?;
+                "edit_video"
+            }
+            "extract_frame" => {
+                required_arg(&value, "video_id")?;
+                "extract_frame"
+            }
+            "stitch" => {
+                required_array(&value, "video_ids")?;
+                "stitch_videos"
+            }
+            "save_reference" => {
+                required_arg(&value, "name")?;
+                required_arg(&value, "image_id")?;
+                required_arg(&value, "description")?;
+                "save_reference"
+            }
+            "list_references" => "list_references",
+            "delete_reference" => {
+                required_arg(&value, "name")?;
+                "delete_reference"
+            }
+            other => return Err(format!("invalid action for media: {other}")),
         },
         "video_transform" => match action("action")? {
             "edit" => {
@@ -519,28 +659,47 @@ impl ToolBox {
     #[allow(clippy::too_many_lines)]
     pub fn defs(&self) -> Vec<ToolDef> {
         let mut defs = Vec::new();
-        if !load_skills(&self.skills_dir).is_empty() {
-            defs.push(tool_def(
-                "skill",
-                "Load a skill's full instructions, or a specific file within the skill (SKILL.md by default).",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "skill name" },
-                        "file": { "type": "string", "description": "optional path within the skill; defaults to SKILL.md" }
-                    },
-                    "required": ["name"]
-                }),
-            ));
-        }
         defs.push(tool_def(
-            "skill_admin",
-            "Create or install a reusable skill. Set action to create or install.",
+            "batch",
+            "Run several independent tool operations in ONE call — multiple searches, multiple file\
+             searches/reads, or multiple app/script writes. Every result comes back in a single\
+             round-trip, each labeled [n/N]. Prefer this over calling tools one by one whenever you\
+             need several operations at once. Sub-calls use the same public tool names and\
+             parameters as normal calls. Never nest batch inside batch; keep dependent steps (e.g.\
+             write then edit the same file) as separate calls.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["create", "install"] },
-                    "name": { "type": "string", "description": "skill name for create" },
+                    "calls": {
+                        "type": "array",
+                        "description": "up to 8 operations, run in order",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tool": { "type": "string", "description": "public tool name, e.g. search, fetch_url, files, app, scripts, research_lookup, skills" },
+                                "arguments": { "type": "object", "description": "that tool's parameters, same shape as a normal call" }
+                            },
+                            "required": ["tool"]
+                        }
+                    }
+                },
+                "required": ["calls"]
+            }),
+        ));
+        let has_skills = !load_skills(&self.skills_dir).is_empty();
+        let mut skills_actions = vec!["create", "install"];
+        if has_skills {
+            skills_actions.insert(0, "load");
+        }
+        defs.push(tool_def(
+            "skills",
+            "Manage reusable skills. action=load returns a skill's full instructions (SKILL.md by default, or a specific file within it); action=create makes a new skill from name/description/body; action=install fetches one from GitHub.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": skills_actions },
+                    "name": { "type": "string", "description": "skill name for load/create" },
+                    "file": { "type": "string", "description": "optional path within the skill for load; defaults to SKILL.md" },
                     "description": { "type": "string", "description": "short description for create" },
                     "body": { "type": "string", "description": "skill instructions for create" },
                     "overwrite": { "type": "boolean", "description": "replace an existing skill (default false)" },
@@ -550,44 +709,27 @@ impl ToolBox {
             }),
         ));
         defs.push(tool_def(
-            "run_python",
-            "Write and run inline Python in the space scripts environment. It persists by default; set temporary=true for one-off execution.",
+            "scripts",
+            "Everything script-related in one tool. action=list/read/write/edit manage files inside the space scripts directory (confined paths, hash-line editing); action=run executes an existing skill or space script; action=python writes and runs inline Python in the space scripts environment (persists unless temporary=true); action=install adds packages to a skill virtualenv, an app's npm dependencies, or the shared space-script Python virtualenv (at most one target).",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "code": { "type": "string", "description": "Python source" },
-                    "name": { "type": "string", "description": "confined .py filename" },
-                    "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments" },
-                    "temporary": { "type": "boolean", "description": "delete the script after running (default false)" }
-                },
-                "required": ["code", "name"]
-            }),
-        ));
-        defs.push(tool_def(
-            "run_script",
-            "Run an existing skill script or a script in the space scripts directory. Set space=true for a space script; paths are confined to their respective roots.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "skill": { "type": "string", "description": "skill name, unless space=true" },
-                    "path": { "type": "string", "description": "script path" },
+                    "action": { "type": "string", "enum": ["list", "read", "write", "edit", "run", "python", "install"] },
+                    "path": { "type": "string", "description": "script path relative to the scripts dir" },
+                    "content": { "type": "string", "description": "complete script content for write" },
+                    "offset": { "type": "integer" },
+                    "limit": { "type": "integer", "description": "maximum 200 lines" },
+                    "edits": { "type": "array", "items": { "type": "object", "properties": { "hash": { "type": "string" }, "new": { "type": ["string", "null"] } }, "required": ["hash"] } },
+                    "code": { "type": "string", "description": "Python source for python" },
+                    "name": { "type": "string", "description": "confined .py filename for python" },
+                    "temporary": { "type": "boolean", "description": "delete the script after python runs (default false)" },
+                    "skill": { "type": "string", "description": "skill name for run (unless space=true), or pip target for install" },
                     "space": { "type": "boolean", "description": "run from the space scripts directory" },
-                    "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments" }
+                    "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments for run/python" },
+                    "packages": { "type": "array", "items": { "type": "string" }, "description": "packages for install" },
+                    "app": { "type": "string", "description": "app npm target for install" }
                 },
-                "required": ["path"]
-            }),
-        ));
-        defs.push(tool_def(
-            "install_packages",
-            "Install packages into a skill virtualenv, an app's npm dependencies, or the shared space-script Python virtualenv. Pass at most one target.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "packages": { "type": "array", "items": { "type": "string" } },
-                    "skill": { "type": "string", "description": "skill pip target" },
-                    "app": { "type": "string", "description": "app npm target" }
-                },
-                "required": ["packages"]
+                "required": ["action"]
             }),
         ));
         defs.push(tool_def(
@@ -663,130 +805,77 @@ impl ToolBox {
         }
         if self.apps.is_some() {
             defs.push(tool_def(
-                "app_inspect",
-                "Inspect an app. action=read returns hash-lines for safe editing; action=search recursively searches non-ignored files and returns locations.",
+                "app",
+                "Build and manage locally served web apps. action=read returns hash-lines for safe editing and action=search greps non-ignored files; action=write replaces complete content, action=patch applies hash-line edits with stale-hash rejection, and action=diff previews a complete candidate without writing; action=list shows conversation/space images and action=copy_file/copy_images bring user data into an app (images go to _images/, text files to the app KV store).",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "enum": ["read", "search"] },
+                        "action": { "type": "string", "enum": ["read", "search", "write", "patch", "diff", "list", "copy_file", "copy_images"] },
                         "app": { "type": "string", "description": "app name or UUID" },
-                        "path": { "type": "string", "description": "file path for read" },
-                        "pattern": { "type": "string", "description": "case-insensitive search text" },
+                        "path": { "type": "string", "description": "file path within the app" },
+                        "pattern": { "type": "string", "description": "case-insensitive search text for search" },
+                        "content": { "type": "string", "description": "complete content for write or diff" },
+                        "edits": { "type": "array", "description": "hash-line edits for patch", "items": { "type": "object", "properties": { "hash": { "type": "string" }, "new": { "type": ["string", "null"] } }, "required": ["hash"] } },
+                        "file_name": { "type": "string", "description": "imported file name for copy_file" },
+                        "image_ids": { "type": "array", "items": { "type": "string" }, "description": "image IDs for copy_images" },
                         "offset": { "type": "integer" },
                         "limit": { "type": "integer", "description": "maximum 200 lines" },
                         "compact": { "type": "boolean", "description": "return locations only for search (default true)" }
                     },
-                    "required": ["action", "app"]
-                }),
-            ));
-            defs.push(tool_def(
-                "app_modify",
-                "Modify or preview an app file. write replaces complete content, patch applies hash-line edits with stale-hash rejection, and diff previews a complete candidate without writing.",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["write", "patch", "diff"] },
-                        "app": { "type": "string", "description": "app name or UUID" },
-                        "path": { "type": "string" },
-                        "content": { "type": "string", "description": "complete content for write or diff" },
-                        "edits": { "type": "array", "description": "hash-line edits for patch", "items": { "type": "object", "properties": { "hash": { "type": "string" }, "new": { "type": ["string", "null"] } }, "required": ["hash"] } }
-                    },
-                    "required": ["action", "app", "path"]
-                }),
-            ));
-            defs.push(tool_def(
-                "app_assets",
-                "List conversation/space images or copy imported files and images into an app. Use action to choose the operation; image copies go to _images/ and text files to the app KV store.",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["list", "copy_file", "copy_images"] },
-                        "app": { "type": "string", "description": "app name or UUID for copy operations" },
-                        "file_name": { "type": "string", "description": "imported file name for copy_file" },
-                        "image_ids": { "type": "array", "items": { "type": "string" }, "description": "image IDs for copy_images" }
-                    },
                     "required": ["action"]
                 }),
             ));
         }
-        if !self.space_scripts_dir.as_os_str().is_empty() {
-            defs.push(tool_def(
-                "script_files",
-                "Manage files only inside the space scripts directory. action=list discovers scripts; write/read/edit preserve confined paths and hash-line editing.",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["list", "write", "read", "edit"] },
-                        "path": { "type": "string" },
-                        "content": { "type": "string" },
-                        "offset": { "type": "integer" },
-                        "limit": { "type": "integer", "description": "maximum 200 lines" },
-                        "edits": { "type": "array", "items": { "type": "object", "properties": { "hash": { "type": "string" }, "new": { "type": ["string", "null"] } }, "required": ["hash"] } }
-                    },
-                    "required": ["action"]
-                }),
-            ));
-        }
+        let mut media_actions = Vec::new();
         if self.image_gen_backend.is_some() {
-            defs.push(tool_def(
-                "generate_image",
-                "Generate an image from a prompt, optionally using a pasted image ID as a reference. The result is saved in the space.",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "prompt": { "type": "string" },
-                        "image_id": { "type": "string", "description": "optional reference image ID" },
-                        "size": { "type": "string", "default": "1024x1024" }
-                    },
-                    "required": ["prompt"]
-                }),
-            ));
+            media_actions.push("generate_image");
         }
         if self.video_gen_backend.is_some() {
-            defs.push(tool_def(
+            media_actions.extend([
                 "generate_video",
-                "Generate a video from text and optional frame/reference images using the configured video backend.",
+                "edit",
+                "extract_frame",
+                "stitch",
+                "save_reference",
+                "list_references",
+                "delete_reference",
+            ]);
+        }
+        if !media_actions.is_empty() {
+            defs.push(tool_def(
+                "media",
+                "Generate and transform media. action=generate_image makes an image from a prompt, optionally using a pasted image ID as a reference; action=generate_video makes a video from text and optional frame/reference images; action=edit/extract_frame/stitch transform videos locally with ffmpeg (effects, frame extraction, clip concatenation); action=save_reference/list_references/delete_reference manage named image references used for video consistency.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "prompt": { "type": "string" }, "duration": { "type": "integer" },
-                        "resolution": { "type": "string" }, "aspect_ratio": { "type": "string" },
-                        "generate_audio": { "type": "boolean" }, "first_frame_id": { "type": "string" },
-                        "last_frame_id": { "type": "string" }, "ref_image_id": { "type": "string" },
+                        "action": { "type": "string", "enum": media_actions },
+                        "prompt": { "type": "string" },
+                        "image_id": { "type": "string", "description": "reference image for generate_image, or image being saved for save_reference" },
+                        "size": { "type": "string", "default": "1024x1024" },
+                        "duration": { "type": "integer" },
+                        "resolution": { "type": "string" },
+                        "aspect_ratio": { "type": "string" },
+                        "generate_audio": { "type": "boolean" },
+                        "first_frame_id": { "type": "string" },
+                        "last_frame_id": { "type": "string" },
+                        "ref_image_id": { "type": "string" },
                         "character_refs": { "type": "array", "items": { "type": "string" } },
                         "location_refs": { "type": "array", "items": { "type": "string" } },
-                        "seed": { "type": "integer" }, "source_video_id": { "type": "string" }
-                    },
-                    "required": ["prompt"]
-                }),
-            ));
-            defs.push(tool_def(
-                "video_transform",
-                "Transform generated videos locally with ffmpeg. action=edit applies effects, extract_frame extracts an image, and stitch concatenates clips.",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["edit", "extract_frame", "stitch"] },
-                        "video_id": { "type": "string" }, "video_ids": { "type": "array", "items": { "type": "string" } },
+                        "seed": { "type": "integer" },
+                        "source_video_id": { "type": "string" },
+                        "video_id": { "type": "string" },
+                        "video_ids": { "type": "array", "items": { "type": "string" } },
                         "lighting": { "type": "string", "enum": ["noir", "warm", "cold", "vintage", "vivid", "bleach_bypass"] },
                         "camera_move": { "type": "string", "enum": ["dolly_in", "dolly_out", "pan_left", "pan_right", "tilt_up", "tilt_down"] },
-                        "intensity": { "type": "number" }, "speed": { "type": "number" },
-                        "trim_start": { "type": "number" }, "trim_end": { "type": "number" },
-                        "remove_audio": { "type": "boolean" }, "time_sec": { "type": "number" },
-                        "format": { "type": "string", "enum": ["png", "jpg"] }
-                    },
-                    "required": ["action"]
-                }),
-            ));
-            defs.push(tool_def(
-                "video_references",
-                "Save, list, or delete named image references used for video consistency.",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["save", "list", "delete"] },
-                        "name": { "type": "string" }, "type": { "type": "string" },
-                        "image_id": { "type": "string" }, "description": { "type": "string" }
+                        "intensity": { "type": "number" },
+                        "speed": { "type": "number" },
+                        "trim_start": { "type": "number" },
+                        "trim_end": { "type": "number" },
+                        "remove_audio": { "type": "boolean" },
+                        "time_sec": { "type": "number" },
+                        "format": { "type": "string", "enum": ["png", "jpg"] },
+                        "name": { "type": "string", "description": "reference name for save_reference/delete_reference" },
+                        "description": { "type": "string", "description": "reference description for save_reference" }
                     },
                     "required": ["action"]
                 }),
@@ -1512,6 +1601,104 @@ impl ToolBox {
                     },
                 };
                 (result, status)
+            }
+            "batch" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let calls: Vec<(String, serde_json::Value)> = v
+                    .get("calls")
+                    .and_then(|c| c.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|item| {
+                                let tool = item
+                                    .get("tool")
+                                    .and_then(|t| t.as_str())
+                                    .filter(|t| !t.is_empty())?
+                                    .to_string();
+                                let arguments = item
+                                    .get("arguments")
+                                    .cloned()
+                                    .unwrap_or_else(|| serde_json::json!({}));
+                                Some((tool, arguments))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if calls.is_empty() {
+                    return (
+                        "batch requires a non-empty calls array".to_string(),
+                        "Running batch…".to_string(),
+                    );
+                }
+                if calls.len() > MAX_BATCH_CALLS {
+                    return (
+                        format!(
+                            "batch accepts at most {MAX_BATCH_CALLS} calls, got {}",
+                            calls.len()
+                        ),
+                        "Running batch…".to_string(),
+                    );
+                }
+                if calls.iter().any(|(tool, _)| tool == "batch") {
+                    return (
+                        "nested batch calls are not allowed — flatten them into one list"
+                            .to_string(),
+                        "Running batch…".to_string(),
+                    );
+                }
+                let status = format!("Running {} batched operations…", calls.len());
+                // Serialize each sub-call once. Read-only batches run
+                // concurrently (network latency overlaps); any mutating call
+                // keeps the whole batch sequential so writes to the same file
+                // can't race. Results are zipped back into call order.
+                let items: Vec<(String, String)> = calls
+                    .iter()
+                    .map(|(tool, arguments)| {
+                        (
+                            tool.clone(),
+                            serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string()),
+                        )
+                    })
+                    .collect();
+                let results: Vec<(String, String)> = if items.len() > 1
+                    && items
+                        .iter()
+                        .all(|(tool, args)| is_read_only_tool(tool, args))
+                {
+                    // Box::pin keeps the recursive `run` future behind a
+                    // pointer so the join_all future stays finitely sized.
+                    futures_util::future::join_all(
+                        items
+                            .iter()
+                            .map(|(tool, args)| Box::pin(self.run(tool, args))),
+                    )
+                    .await
+                } else {
+                    let mut results = Vec::with_capacity(items.len());
+                    for (tool, args) in &items {
+                        results.push(Box::pin(self.run(tool, args)).await);
+                    }
+                    results
+                };
+                let mut out = String::new();
+                for (i, ((tool, _), (_, arguments))) in items.iter().zip(calls.iter()).enumerate() {
+                    if i > 0 {
+                        out.push('\n');
+                    }
+                    let label: String = batch_call_label(tool, arguments)
+                        .chars()
+                        .take(120)
+                        .collect();
+                    let _ = write!(
+                        out,
+                        "[{}/{}] {}\n{}",
+                        i + 1,
+                        items.len(),
+                        label,
+                        results[i].0,
+                    );
+                }
+                (out, status)
             }
             "search_files" => {
                 let query = serde_json::from_str::<serde_json::Value>(args)
@@ -2854,19 +3041,179 @@ impl ToolBox {
                 "Running tool…".to_string(),
             ),
         };
-        (cap_tool_result(result), status)
+        let result = if name == "batch" {
+            // The batch arm already bounded each sub-result; apply the larger
+            // combined cap here so several packed results survive intact.
+            cap_result(result, MAX_BATCH_RESULT_CHARS)
+        } else {
+            cap_tool_result(result)
+        };
+        (result, status)
     }
+}
+
+/// Tools safe to run concurrently in one round-trip: they read state or hit
+/// the network but never mutate files/db in ways that could race. Used to
+/// parallelize both model-issued parallel tool calls and `batch` sub-calls.
+/// Consolidated names (`search`, `files`, `skills`, `scripts`, `app`, `media`,
+/// `research_lookup`) count as read-only only for their read-only actions —
+/// the `action` argument decides. Legacy names (`skill`, `web_search`, …)
+/// classify as before; mutating consolidations (`batch`) are never read-only.
+pub fn is_read_only_tool(name: &str, args: &str) -> bool {
+    let action_is = |actions: &[&str]| {
+        serde_json::from_str::<serde_json::Value>(args)
+            .ok()
+            .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_string))
+            .is_some_and(|a| actions.contains(&a.as_str()))
+    };
+    match name {
+        "skills" => action_is(&["load"]),
+        "scripts" => action_is(&["list", "read"]),
+        "app" => action_is(&["read", "search", "diff", "list"]),
+        "media" => action_is(&["list_references"]),
+        _ => matches!(
+            name,
+            "skill"
+                | "search"
+                | "web_search"
+                | "academic_search"
+                | "discussion_search"
+                | "fetch_url"
+                | "research_lookup"
+                | "search_sources"
+                | "list_citations"
+                | "files"
+                | "search_files"
+                | "read_file"
+                | "read_pdf_page"
+                | "app_inspect"
+                | "read_app_file"
+                | "grep_app"
+                | "diff_app"
+                | "list_images"
+                | "read_script"
+                | "list_scripts"
+                | "list_references"
+        ),
+    }
+}
+
+/// Compact label for one `batch` sub-call, shown above its result so the
+/// model can tell which output belongs to which operation.
+fn batch_call_label(name: &str, v: &serde_json::Value) -> String {
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let quoted = |k: &str| format!("{:?}", s(k));
+    match name {
+        "skills" => format!("skills/{} {}", s("action"), s("name")),
+        "scripts" => {
+            let target = if s("action") == "install" {
+                "packages".to_string()
+            } else {
+                s("path")
+            };
+            format!("scripts/{} {}", s("action"), target)
+        }
+        "app" => {
+            let path = s("path");
+            if path.is_empty() {
+                format!("app/{} {}", s("action"), s("app"))
+            } else {
+                format!("app/{} {}/{}", s("action"), s("app"), path)
+            }
+        }
+        "media" => {
+            let target = [s("video_id"), s("name"), s("image_id")]
+                .into_iter()
+                .find(|t| !t.is_empty())
+                .unwrap_or_else(|| s("prompt").chars().take(40).collect());
+            format!("media/{} {}", s("action"), target)
+        }
+        "search" => format!("search {} {}", s("mode"), quoted("query")),
+        "fetch_url" => format!("fetch_url {}", s("url")),
+        "files" => {
+            let target = if s("name").is_empty() {
+                quoted("query")
+            } else {
+                s("name")
+            };
+            format!("files/{} {target}", s("action"))
+        }
+        "app_inspect" => format!("app_inspect/{} {}/{}", s("action"), s("app"), s("path")),
+        "app_modify" => format!("app_modify/{} {}/{}", s("action"), s("app"), s("path")),
+        "app_assets" => format!("app_assets/{} {}", s("action"), s("app")),
+        "script_files" => format!("script_files/{} {}", s("action"), s("path")),
+        "research_lookup" => format!("research_lookup/{} {}", s("scope"), quoted("query")),
+        "web_search" => format!("web_search {:?}", s("query")),
+        "academic_search" => format!("academic_search {:?}", s("query")),
+        "discussion_search" => format!("discussion_search {:?}", s("query")),
+        "search_files" => format!("search_files {:?}", s("query")),
+        "search_sources" => format!("search_sources {:?}", s("query")),
+        "list_citations" => "list_citations".to_string(),
+        "read_file" => format!("read_file {}", s("name")),
+        "read_pdf_page" => format!("read_pdf_page {} page {}", s("name"), s("page")),
+        "read_app_file" => format!("read_app_file {}/{}", s("app"), s("path")),
+        "grep_app" => format!("grep_app {} {:?}", s("app"), s("pattern")),
+        "read_script" => format!("read_script {}", s("path")),
+        "skill" => format!("skill {}", s("name")),
+        "skill_admin" => format!("skill_admin {}", s("action")),
+        "run_python" => format!("run_python {}", s("name")),
+        "run_script" => format!("run_script {}", s("path")),
+        "install_packages" => {
+            let target = [s("skill"), s("app")]
+                .into_iter()
+                .find(|t| !t.is_empty())
+                .unwrap_or_default();
+            format!("install_packages {target}")
+        }
+        "generate_image" | "generate_video" => {
+            let prompt: String = s("prompt").chars().take(60).collect();
+            format!("{name} {prompt:?}")
+        }
+        _ => name.to_string(),
+    }
+}
+
+/// Marker prefix of `tool_result_unchanged_note` — a tool result omitted
+/// because it is byte-identical to an earlier call with the same tool and
+/// arguments. Both the live tool loop and `build_history` emit this exact
+/// text for duplicates, which lets the loop recognize replayed notes when
+/// seeding its dedup map. A real tool result beginning with this string
+/// would at worst miss one dedup (and cause a single prompt-cache break),
+/// never corrupt model-visible content.
+pub const TOOL_RESULT_OMITTED_PREFIX: &str = "[result omitted: ";
+
+/// One-line replacement for a tool result that duplicates an earlier call
+/// with the same tool and arguments. The first full copy stays in the
+/// conversation, so nothing is lost; the note keeps the duplicate from
+/// re-entering the context on every subsequent request.
+pub fn tool_result_unchanged_note(name: &str, args: &str) -> String {
+    let label = serde_json::from_str::<serde_json::Value>(args)
+        .ok()
+        .map_or_else(|| name.to_string(), |v| batch_call_label(name, &v));
+    format!(
+        "{TOOL_RESULT_OMITTED_PREFIX}{label} returned exactly the same result as an earlier \
+         call — content unchanged; the earlier result is above]"
+    )
 }
 
 /// Bound every tool result before it is sent back to the model and persisted.
 /// This is especially important for fetched web pages, which can otherwise
 /// consume the conversation context one tool call at a time.
 fn cap_tool_result(result: String) -> String {
+    cap_result(result, MAX_TOOL_RESULT_CHARS)
+}
+
+fn cap_result(result: String, max_chars: usize) -> String {
     const SUFFIX: &str = "\n... (tool result truncated)";
-    if result.chars().count() <= MAX_TOOL_RESULT_CHARS {
+    if result.chars().count() <= max_chars {
         return result;
     }
-    let keep = MAX_TOOL_RESULT_CHARS.saturating_sub(SUFFIX.chars().count());
+    let keep = max_chars.saturating_sub(SUFFIX.chars().count());
     let mut capped: String = result.chars().take(keep).collect();
     capped.push_str(SUFFIX);
     capped
@@ -5417,8 +5764,13 @@ mod tests {
             None,
         );
         let names: Vec<_> = tb.defs().into_iter().map(|def| def.name).collect();
-        assert!(names.len() <= 17, "too many public tools: {names:?}");
+        assert!(names.len() <= 9, "too many public tools: {names:?}");
         for old in [
+            "skill",
+            "skill_admin",
+            "run_python",
+            "run_script",
+            "install_packages",
             "create_skill",
             "install_skill",
             "web_search",
@@ -5429,6 +5781,9 @@ mod tests {
             "search_files",
             "read_file",
             "read_pdf_page",
+            "app_inspect",
+            "app_modify",
+            "app_assets",
             "read_app_file",
             "grep_app",
             "write_file",
@@ -5437,10 +5792,15 @@ mod tests {
             "list_images",
             "copy_file_to_app",
             "copy_images_to_app",
+            "script_files",
             "list_scripts",
             "write_script",
             "read_script",
             "edit_script",
+            "generate_image",
+            "generate_video",
+            "video_transform",
+            "video_references",
             "edit_video",
             "extract_frame",
             "stitch_videos",
@@ -5453,19 +5813,230 @@ mod tests {
                 "deprecated tool advertised: {old}"
             );
         }
-        for required in [
-            "skill_admin",
-            "run_python",
-            "run_script",
-            "install_packages",
-            "search",
-            "fetch_url",
-        ] {
+        for required in ["batch", "skills", "scripts", "search", "fetch_url"] {
             assert!(
                 names.iter().any(|name| name == required),
                 "missing {required}"
             );
         }
+    }
+
+    #[test]
+    fn unchanged_result_note_labels_the_call_and_marks_it() {
+        let note = super::tool_result_unchanged_note("read_file", r#"{"name":"report.pdf"}"#);
+        assert!(
+            note.starts_with(super::TOOL_RESULT_OMITTED_PREFIX),
+            "{note}"
+        );
+        assert!(note.contains("read_file report.pdf"), "{note}");
+        assert!(note.contains("unchanged"), "{note}");
+        // Unknown tools fall back to the bare name.
+        let note = super::tool_result_unchanged_note("mystery_tool", "{}");
+        assert!(note.contains("mystery_tool"), "{note}");
+    }
+
+    #[test]
+    fn read_only_tool_classification() {
+        for (tool, args) in [
+            ("search", r#"{"mode":"web","query":"x"}"#),
+            ("web_search", r#"{"query":"x"}"#),
+            ("academic_search", r#"{"query":"x"}"#),
+            ("discussion_search", r#"{"query":"x"}"#),
+            ("fetch_url", r#"{"url":"https://x"}"#),
+            ("research_lookup", r#"{"scope":"citations"}"#),
+            ("search_sources", r#"{"query":"x"}"#),
+            ("list_citations", "{}"),
+            ("files", r#"{"action":"read","name":"x"}"#),
+            ("search_files", r#"{"query":"x"}"#),
+            ("read_file", r#"{"name":"x"}"#),
+            ("read_pdf_page", r#"{"name":"x","page":1}"#),
+            ("app_inspect", r#"{"action":"read","app":"a","path":"x"}"#),
+            ("read_app_file", r#"{"app":"a","path":"x"}"#),
+            ("grep_app", r#"{"app":"a","pattern":"x"}"#),
+            ("diff_app", r#"{"app":"a","path":"x","content":"y"}"#),
+            ("list_images", "{}"),
+            ("read_script", r#"{"path":"x"}"#),
+            ("list_scripts", "{}"),
+            ("list_references", "{}"),
+            ("skill", r#"{"name":"t"}"#),
+            ("skills", r#"{"action":"load","name":"t"}"#),
+            ("scripts", r#"{"action":"list"}"#),
+            ("scripts", r#"{"action":"read","path":"a.sh"}"#),
+            ("app", r#"{"action":"read","app":"a","path":"x"}"#),
+            ("app", r#"{"action":"search","app":"a","pattern":"x"}"#),
+            ("app", r#"{"action":"list"}"#),
+            ("media", r#"{"action":"list_references"}"#),
+        ] {
+            assert!(
+                super::is_read_only_tool(tool, args),
+                "{tool} {args} should be read-only"
+            );
+        }
+        for (tool, args) in [
+            ("batch", "{}"),
+            (
+                "skills",
+                r#"{"action":"create","name":"x","description":"y"}"#,
+            ),
+            ("skills", r#"{"action":"install","source":"a/b"}"#),
+            (
+                "scripts",
+                r#"{"action":"write","path":"a.sh","content":"x"}"#,
+            ),
+            ("scripts", r#"{"action":"run","path":"a.sh"}"#),
+            (
+                "scripts",
+                r#"{"action":"python","code":"print(1)","name":"x.py"}"#,
+            ),
+            ("scripts", r#"{"action":"install","packages":["x"]}"#),
+            (
+                "app",
+                r#"{"action":"write","app":"a","path":"x","content":"y"}"#,
+            ),
+            (
+                "app",
+                r#"{"action":"patch","app":"a","path":"x","edits":[{"hash":"h"}]}"#,
+            ),
+            (
+                "app",
+                r#"{"action":"copy_images","app":"a","image_ids":["i"]}"#,
+            ),
+            ("media", r#"{"action":"generate_image","prompt":"x"}"#),
+            ("media", r#"{"action":"edit","video_id":"v"}"#),
+            (
+                "media",
+                r#"{"action":"save_reference","name":"n","image_id":"i","description":"d"}"#,
+            ),
+            (
+                "skill_admin",
+                r#"{"action":"create","name":"x","description":"y"}"#,
+            ),
+            ("create_skill", r#"{"name":"x","description":"y"}"#),
+            ("install_skill", r#"{"source":"a/b"}"#),
+            ("run_python", r#"{"code":"print(1)","name":"x.py"}"#),
+            ("run_script", r#"{"path":"x"}"#),
+            ("install_packages", r#"{"packages":["x"]}"#),
+            (
+                "app_modify",
+                r#"{"action":"write","app":"a","path":"x","content":"y"}"#,
+            ),
+            ("write_file", r#"{"app":"a","path":"x","content":"y"}"#),
+            (
+                "edit_file",
+                r#"{"app":"a","path":"x","edits":[{"hash":"h"}]}"#,
+            ),
+            (
+                "app_assets",
+                r#"{"action":"copy_file","app":"a","file_name":"f"}"#,
+            ),
+            ("copy_file_to_app", r#"{"app":"a","file_name":"f"}"#),
+            ("copy_images_to_app", r#"{"app":"a","image_ids":["i"]}"#),
+            (
+                "script_files",
+                r#"{"action":"write","path":"a.sh","content":"x"}"#,
+            ),
+            ("write_script", r#"{"path":"a.sh","content":"x"}"#),
+            ("edit_script", r#"{"path":"a.sh","edits":[{"hash":"h"}]}"#),
+            ("generate_image", r#"{"prompt":"x"}"#),
+            ("generate_video", r#"{"prompt":"x"}"#),
+            ("video_transform", r#"{"action":"edit","video_id":"v"}"#),
+            (
+                "save_reference",
+                r#"{"name":"n","image_id":"i","description":"d"}"#,
+            ),
+            ("delete_reference", r#"{"name":"n"}"#),
+        ] {
+            assert!(
+                !super::is_read_only_tool(tool, args),
+                "{tool} {args} should be mutating"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_runs_mixed_operations_in_order() {
+        let (mut tb, dir) = skills_toolbox();
+        let scripts = dir.join("space-scripts");
+        tb.space_scripts_dir = scripts.clone();
+        let (result, status) = tb
+            .run(
+                "batch",
+                r#"{"calls":[
+                    {"tool":"scripts","arguments":{"action":"write","path":"a.sh","content":"echo a"}},
+                    {"tool":"scripts","arguments":{"action":"read","path":"a.sh"}},
+                    {"tool":"skills","arguments":{"action":"load","name":"t"}}
+                ]}"#,
+            )
+            .await;
+        assert!(status.contains("3"), "status was {status:?}");
+        assert!(result.contains("[1/3] scripts/write a.sh"), "{result}");
+        assert!(result.contains("[2/3] scripts/read a.sh"), "{result}");
+        assert!(result.contains("[3/3] skills/load t"), "{result}");
+        assert!(result.contains("wrote a.sh"), "{result}");
+        assert!(result.contains("echo a"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn batch_of_reads_returns_every_result() {
+        let (tb, _dir) = apps_toolbox();
+        let _ = tb
+            .run(
+                "write_file",
+                r#"{"app":"deck","path":"index.html","content":"<h1>hi</h1>"}"#,
+            )
+            .await;
+        let (result, status) = tb
+            .run(
+                "batch",
+                r#"{"calls":[
+                    {"tool":"app","arguments":{"action":"read","app":"deck","path":"index.html"}},
+                    {"tool":"app","arguments":{"action":"read","app":"deck","path":"index.html"}}
+                ]}"#,
+            )
+            .await;
+        assert!(status.contains("2"), "status was {status:?}");
+        assert!(
+            result.contains("[1/2] app/read deck/index.html"),
+            "{result}"
+        );
+        assert!(
+            result.contains("[2/2] app/read deck/index.html"),
+            "{result}"
+        );
+        assert!(result.contains("<h1>hi</h1>"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_nested_oversized_and_empty() {
+        let (tb, _) = skills_toolbox();
+        let (result, _) = tb.run("batch", r#"{"calls":[]}"#).await;
+        assert!(result.contains("non-empty"), "{result}");
+        let (result, _) = tb
+            .run("batch", r#"{"calls":[{"tool":"batch","arguments":{}}]}"#)
+            .await;
+        assert!(result.contains("nested"), "{result}");
+        let calls: Vec<serde_json::Value> = (0..9)
+            .map(|_| serde_json::json!({ "tool": "skill", "arguments": { "name": "t" } }))
+            .collect();
+        let args = serde_json::json!({ "calls": calls }).to_string();
+        let (result, _) = tb.run("batch", &args).await;
+        assert!(result.contains("at most 8"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn batch_isolates_unknown_subcalls() {
+        let (tb, _) = skills_toolbox();
+        let (result, _) = tb
+            .run(
+                "batch",
+                r#"{"calls":[
+                    {"tool":"nonexistent","arguments":{}},
+                    {"tool":"skills","arguments":{"action":"load","name":"t"}}
+                ]}"#,
+            )
+            .await;
+        assert!(result.contains("unknown tool: nonexistent"), "{result}");
+        assert!(result.contains("[2/2] skills/load t"), "{result}");
     }
 
     #[tokio::test]
@@ -5481,6 +6052,18 @@ mod tests {
             None,
         );
         for (name, args, expected) in [
+            ("skills", r#"{"action":"nope"}"#, "invalid action"),
+            (
+                "skills",
+                r#"{"action":"create","name":"x"}"#,
+                "missing required field: description",
+            ),
+            ("scripts", r#"{"action":"nope"}"#, "invalid action"),
+            (
+                "scripts",
+                r#"{"action":"python","code":"print(1)"}"#,
+                "missing required field: name",
+            ),
             ("skill_admin", r#"{"action":"nope"}"#, "invalid action"),
             (
                 "search",
@@ -5493,6 +6076,12 @@ mod tests {
                 "missing required field: query",
             ),
             ("files", r#"{"action":"nope"}"#, "invalid action"),
+            ("app", r#"{"action":"nope"}"#, "invalid action"),
+            (
+                "app",
+                r#"{"action":"read","app":"a"}"#,
+                "missing required field: path",
+            ),
             (
                 "app_inspect",
                 r#"{"action":"nope","app":"a"}"#,
@@ -5505,6 +6094,12 @@ mod tests {
             ),
             ("app_assets", r#"{"action":"nope"}"#, "invalid action"),
             ("script_files", r#"{"action":"nope"}"#, "invalid action"),
+            ("media", r#"{"action":"nope"}"#, "invalid action"),
+            (
+                "media",
+                r#"{"action":"save_reference","name":"x","image_id":"i"}"#,
+                "missing required field: description",
+            ),
             ("video_transform", r#"{"action":"nope"}"#, "invalid action"),
             (
                 "video_references",
@@ -5621,7 +6216,7 @@ mod tests {
     fn defs_include_app_tools_only_with_apps_ctx() {
         let (tb, _) = apps_toolbox();
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
-        for t in ["app_modify", "app_inspect", "app_assets"] {
+        for t in ["app"] {
             assert!(names.contains(&t.to_string()), "missing {t}");
         }
         let empty = ToolBox::new(
@@ -5635,7 +6230,7 @@ mod tests {
             None,
         );
         let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
-        assert!(!names.contains(&"app_modify".to_string()));
+        assert!(!names.contains(&"app".to_string()));
     }
 
     #[tokio::test]
@@ -5687,11 +6282,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_app_modify_and_inspect_delegate_to_hashline_backend() {
+    async fn public_app_delegates_to_hashline_backend() {
         let (tb, dir) = apps_toolbox();
         let (result, _) = tb
             .run(
-                "app_modify",
+                "app",
                 r#"{"action":"write","app":"public-deck","path":"index.html","content":"<h1>Hello</h1>"}"#,
             )
             .await;
@@ -5701,7 +6296,7 @@ mod tests {
         );
         let (result, _) = tb
             .run(
-                "app_inspect",
+                "app",
                 r#"{"action":"read","app":"public-deck","path":"index.html"}"#,
             )
             .await;
@@ -5709,14 +6304,14 @@ mod tests {
         let hash = line_hash(1, "<h1>Hello</h1>");
         let (result, _) = tb
             .run(
-                "app_modify",
+                "app",
                 &format!(r#"{{"action":"patch","app":"public-deck","path":"index.html","edits":[{{"hash":"{hash}","new":"<h1>Bye</h1>"}}]}}"#),
             )
             .await;
         assert!(result.contains("edited public-deck/index.html"), "{result}");
         let (result, _) = tb
             .run(
-                "app_inspect",
+                "app",
                 r#"{"action":"search","app":"public-deck","pattern":"bye","compact":false}"#,
             )
             .await;
@@ -5725,6 +6320,30 @@ mod tests {
             std::fs::read_to_string(dir.join("public-deck/index.html")).unwrap(),
             "<h1>Bye</h1>"
         );
+    }
+
+    #[tokio::test]
+    async fn consolidated_skills_scripts_and_media_delegate() {
+        let (mut tb, dir) = skills_toolbox();
+        let scripts_dir = dir.join("space-scripts");
+        tb.space_scripts_dir = scripts_dir.clone();
+        let (result, status) = tb.run("skills", r#"{"action":"load","name":"t"}"#).await;
+        assert!(status.contains("Reading"), "{status}");
+        assert_eq!(result, "x"); // skill body, frontmatter stripped
+
+        let (result, _) = tb
+            .run(
+                "scripts",
+                r#"{"action":"python","code":"print(2**32)","name":"t.py"}"#,
+            )
+            .await;
+        assert!(result.contains("4294967296"), "{result}");
+        assert!(scripts_dir.join("t.py").exists());
+
+        let (result, status) = tb.run("media", r#"{"action":"list_references"}"#).await;
+        assert!(status.contains("Listing"), "{status}");
+        assert!(result.contains("no references"), "{result}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
