@@ -42,7 +42,7 @@ impl BackendTag {
     }
 
     /// Prefix used to key favorites/last-used/current-model/etc. for this
-    /// backend's models — bare (no prefix) for `OpenRouter` so existing
+    /// backend's models — bare (no prefix) for ``OpenRouter`` so existing
     /// users' saved data keeps working untouched; the other three are
     /// visually tagged since their raw ids can collide (e.g. two "gpt-4.1"s).
     pub const fn key_prefix(self) -> &'static str {
@@ -144,11 +144,11 @@ pub struct Model {
     pub supports_images: bool,
     /// Whether the model generates image output (`architecture.output_modalities`).
     pub supports_image_generation: bool,
-    /// Whether the model is listed by `OpenRouter`'s dedicated video catalog.
+    /// Whether the model is listed by ``OpenRouter``'s dedicated video catalog.
     pub supports_video_generation: bool,
     /// Which backend this model came from.
     pub backend: BackendTag,
-    /// USD per 1M prompt/completion tokens from the catalog (OpenRouter
+    /// USD per 1M prompt/completion tokens from the catalog (`OpenRouter`
     /// only; other backends report no prices). `None` = cost unknown.
     pub pricing: Option<(f64, f64)>,
 }
@@ -261,6 +261,7 @@ pub struct Usage {
 impl Usage {
     /// Fraction of this request's prompt served from cache, 0.0..=1.0.
     /// `None` when the provider reported no usage or a zero prompt.
+    #[allow(clippy::cast_precision_loss)] // token counts are too large for u32; a ratio loses nothing meaningful
     pub fn cache_hit_rate(&self) -> Option<f64> {
         if self.prompt_tokens == 0 {
             None

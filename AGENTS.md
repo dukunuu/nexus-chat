@@ -28,7 +28,7 @@ code that fails `cargo clippy -- -D warnings -W clippy::pedantic`.**
 
 ## Conventions
 
-- **Rust edition 2024**, `rustc 1.85+`. `cargo fmt` is mandatory.
+- **Rust edition 2024**, `rustc 1.91+`. `cargo fmt` is mandatory.
 - **Clippy at pedantic with warnings denied** — write code that satisfies it
   (explicit lifetimes where needed, `#[must_use]` on pure fns, docs on public
   items, no `unwrap()` on fallible paths). Prefer params structs over

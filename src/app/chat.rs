@@ -366,6 +366,7 @@ impl App {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)] // one match per stream event; arms are short
     pub fn on_chat_event(&mut self, task_id: super::ChatTaskId, ev: StreamEvent) -> Result<()> {
         match ev {
             StreamEvent::Token(t) => {

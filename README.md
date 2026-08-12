@@ -14,7 +14,7 @@ space directories, model-created web apps served from localhost.
 cargo install nexus-chat
 ```
 
-This provides the `nexus` command. Requires Rust 1.85+ (edition 2024).
+This provides the `nexus` command. Requires Rust 1.91+ (edition 2024).
 
 To run from a checkout instead:
 
@@ -25,7 +25,7 @@ cargo build --release
 
 ### Requirements
 
-- Rust 1.85+ (only needed to build/install — no runtime dependency)
+- Rust 1.91+ (only needed to build/install — no runtime dependency)
 - A modern terminal (truecolor recommended)
 - Extra tooling, all optional:
   - `tesseract` — local OCR

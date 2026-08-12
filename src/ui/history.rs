@@ -43,6 +43,7 @@ pub struct HistoryCache {
     last_day: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)] // whole conversation view: header, day dividers, cards, stats
 pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
     // Borderless: the conversation fills the whole pane minus the rightmost
     // column, which is the scrollbar gutter (always reserved so lines don't
@@ -789,6 +790,7 @@ fn push_research_plan(
 /// for swarm turns) with the completion time right-aligned, the collapsible
 /// reasoning, inline images, the markdown answer, then a dim stats/phrase
 /// footer. Everything below the header carries the `▎` left rail.
+#[allow(clippy::too_many_lines)] // one card shape per content kind
 #[allow(clippy::too_many_arguments)]
 fn push_assistant_stored(
     out: &mut Vec<Line<'static>>,

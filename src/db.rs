@@ -104,7 +104,7 @@ pub struct Message {
     pub tokens: Option<i64>,
     pub secs: Option<f64>,
     /// USD cost of the request that produced this reply, at catalog list
-    /// price (`None` when unknown — non-OpenRouter backends, or replies
+    /// price (`None` when unknown — non-`OpenRouter` backends, or replies
     /// logged before pricing existed).
     pub cost: Option<f64>,
     /// Past-tense flavour phrase for the completion line, e.g. "Vibed".
@@ -1560,7 +1560,7 @@ impl UsageRange {
     }
 }
 
-/// The bare model name used by the OpenRouter catalog's `vendor/name` ids:
+/// The bare model name used by the ``OpenRouter`` catalog's `vendor/name` ids:
 /// backend prefixes (`go:`, `openai:`, `codex:`, `opencode:`) and any
 /// `vendor/` part are stripped (`go:deepseek-v4-flash` → `deepseek-v4-flash`,
 /// `openai:gpt-5` → `gpt-5`). Empty when the id has no name left.
@@ -1573,7 +1573,7 @@ pub fn price_name(model: &str) -> &str {
 }
 
 /// Catalog price for a usage row's model: exact `model_prices` key first,
-/// then the OpenRouter `vendor/name` entry matching the bare name (same
+/// then the ``OpenRouter`` `vendor/name` entry matching the bare name (same
 /// cross-backend fallback as `Db::model_price`, but against an in-memory
 /// snapshot so a 28k-row backfill needs no per-row SQL).
 fn catalog_price<'a>(
@@ -1680,8 +1680,8 @@ impl Db {
     }
 
     /// Cost of one completed request in USD at current catalog prices
-    /// (`None` when no price is known). Non-OpenRouter backends expose no
-    /// pricing API, so their models are priced via the OpenRouter catalog
+    /// (`None` when no price is known). Non-`OpenRouter` backends expose no
+    /// pricing API, so their models are priced via the `OpenRouter` catalog
     /// entry for the same model (see `model_price`). Prompt tokens are
     /// billed at the prompt rate even when served from cache; the catalog
     /// has no separate cache-read rate.
@@ -1701,8 +1701,8 @@ impl Db {
     /// Reconcile every logged request's cost with the current `model_prices`
     /// catalog: NULL rows (logged before pricing existed) get the exact
     /// `tokens × price` total, and rows whose value no longer matches the
-    /// catalog (legacy unit bug, price changes) are recomputed. Non-OpenRouter
-    /// models are priced through their OpenRouter `vendor/name` twin, like
+    /// catalog (legacy unit bug, price changes) are recomputed. Non-`OpenRouter`
+    /// models are priced through their `OpenRouter` `vendor/name` twin, like
     /// `model_price`. Existing costs for models without any catalog price are
     /// left untouched — a model dropping out of the catalog shouldn't void
     /// its history.
@@ -1731,7 +1731,8 @@ impl Db {
         }
         // Snapshot the catalog, then rewrite every usage row in one
         // transaction. 28k rows is a few ms even on a file DB.
-        let mut prices: std::collections::HashMap<String, (f64, f64)> = Default::default();
+        let mut prices: std::collections::HashMap<String, (f64, f64)> =
+            std::collections::HashMap::default();
         {
             let mut stmt = self
                 .conn
@@ -1774,7 +1775,7 @@ impl Db {
                 // out of the catalog shouldn't void its history.
                 let write = match (recomputed, old) {
                     (Some(c), None) => Some(c),
-                    (Some(c), Some(o)) if c != *o => Some(c),
+                    (Some(c), Some(o)) if (c - *o).abs() > 1e-12 => Some(c),
                     _ => None,
                 };
                 if let Some(cost) = write {
@@ -1786,7 +1787,7 @@ impl Db {
         Ok(rows.len())
     }
 
-    /// Batch save/refresh catalog prices in one transaction. The OpenRouter
+    /// Batch save/refresh catalog prices in one transaction. The `OpenRouter`
     /// catalog is hundreds of models; per-row autocommits (each an fsync on
     /// the UI task) made the post-load pause noticeable. The `WHERE` clause
     /// also skips rows whose price didn't move, so re-fetches write nothing.
@@ -1816,12 +1817,12 @@ impl Db {
     }
 
     /// Catalog price for a model, `(prompt, completion)` USD per 1M tokens.
-    /// Tries the exact `model_prices` row first (OpenRouter ids match
-    /// directly); if there is none, falls back to the OpenRouter catalog
+    /// Tries the exact `model_prices` row first (`OpenRouter` ids match
+    /// directly); if there is none, falls back to the `OpenRouter` catalog
     /// entry for the same model — backend prefixes (`go:`, `openai:`,
     /// `codex:`, `opencode:`) and the catalog's `vendor/` part are stripped
     /// (`go:deepseek-v4-flash` → `deepseek/deepseek-v4-flash`). The other
-    /// backends' APIs expose no pricing, so OpenRouter's list price for the
+    /// backends' APIs expose no pricing, so `OpenRouter`'s list price for the
     /// same model is the best available estimate.
     pub fn model_price(&self, model: &str) -> Option<(f64, f64)> {
         if let Ok(price) = self.conn.query_row(

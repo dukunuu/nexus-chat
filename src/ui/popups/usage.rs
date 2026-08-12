@@ -16,6 +16,7 @@ use crate::ui::{fmt_cost, humanize};
 
 use super::chrome;
 
+#[allow(clippy::too_many_lines)] // usage popup: window header, tables per section
 pub fn render(f: &mut Frame, app: &App) {
     let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::WIDE.1);
     let Some(data) = &app.usage_data else {
@@ -148,8 +149,7 @@ pub fn render(f: &mut Frame, app: &App) {
         let time = r
             .created_at
             .parse::<chrono::DateTime<chrono::Utc>>()
-            .map(|t| t.format("%H:%M").to_string())
-            .unwrap_or_else(|_| "--:--".to_string());
+            .map_or_else(|_| "--:--".to_string(), |t| t.format("%H:%M").to_string());
         let model = chrome::truncate(&r.model, 24);
         let tokens = format!(
             "{}→{}",
@@ -358,7 +358,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::PageDown => app.scroll_usage(10),
         // Time window: ←/h step back, →/l and t step forward.
         KeyCode::Left | KeyCode::Char('h') => app.cycle_usage_range(-1),
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('t') => app.cycle_usage_range(1),
+        KeyCode::Right | KeyCode::Char('l' | 't') => app.cycle_usage_range(1),
         KeyCode::Char('r')
             if key
                 .modifiers

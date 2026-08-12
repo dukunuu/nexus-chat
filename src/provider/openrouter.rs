@@ -380,8 +380,8 @@ struct ModelEntry {
     pricing: Option<ModelPricing>,
 }
 
-/// OpenRouter catalog pricing, in USD **per token** (stringly-typed in the
-/// API: gpt-5 reports `1.25e-06`, i.e. $1.25/M). Only the OpenRouter flavor
+/// `OpenRouter` catalog pricing, in USD **per token** (stringly-typed in the
+/// API: gpt-5 reports `1.25e-06`, i.e. $1.25/M). Only the `OpenRouter` flavor
 /// reports it; others default to absent.
 #[derive(Deserialize, Clone)]
 struct ModelPricing {
@@ -1739,7 +1739,7 @@ fn truncate_error_body(body: &str) -> String {
     truncated
 }
 
-/// Pull `(content, reasoning)` deltas out of one SSE data chunk. `OpenRouter` puts
+/// Pull `(content, reasoning)` deltas out of one SSE data chunk. ``OpenRouter`` puts
 /// thinking tokens in `delta.reasoning`, separate from the visible `delta.content`.
 fn parse_delta(data: &str) -> (Option<String>, Option<String>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
@@ -2151,7 +2151,7 @@ fn codex_usage(data: &str) -> Option<Usage> {
 
 /// Request body for a one-shot image-understanding call: a text part with the
 /// instruction plus the image as a data-URL content part (`OpenAI` vision shape).
-/// Shared page-transcription instructions (`OpenRouter` VLMs and local Ollama).
+/// Shared page-transcription instructions (``OpenRouter`` VLMs and local Ollama).
 pub const OCR_PROMPT: &str = "Transcribe this scanned page to plain text, faithfully and completely. \
      Output ONLY the transcription — no commentary, no markdown fences. \
      Preserve the natural reading order; vertical Japanese text reads in \
