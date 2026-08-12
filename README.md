@@ -126,7 +126,7 @@ SQLite db, files, scripts, apps, and generated media.
 
 ```sh
 scripts/check.sh          # fmt + clippy (-D warnings, pedantic) + cargo-audit + tests
-cargo test --bin nexus-chat   # 428 tests, no network needed
+cargo test --bin nexus   # 428 tests, no network needed
 ```
 
 ## Known limitations
