@@ -2,6 +2,7 @@
 name = "nexus-chat"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "A local-first terminal chat app for deep research and multi-agent work"
 license = "MIT"
 repository = "https://github.com/dukunuu/nexus-chat"

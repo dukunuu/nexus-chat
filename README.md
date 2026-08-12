@@ -1,8 +1,49 @@
 # nexus-chat
 
+[![crates.io](https://img.shields.io/crates/v/nexus-chat.svg)](https://crates.io/crates/nexus-chat)
+[![docs.rs](https://docs.rs/nexus-chat/badge.svg)](https://docs.rs/nexus-chat)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A local-first terminal chat app for deep research and multi-agent work. Rust +
 [ratatui], all state on your machine — SQLite per space, files and artifacts in
 space directories, model-created web apps served from localhost.
+
+## Install
+
+```sh
+cargo install nexus-chat
+```
+
+This provides the `nexus` command. Requires Rust 1.85+ (edition 2024).
+
+To run from a checkout instead:
+
+```sh
+cargo build --release
+./target/release/nexus
+```
+
+### Requirements
+
+- Rust 1.85+ (only needed to build/install — no runtime dependency)
+- A modern terminal (truecolor recommended)
+- Extra tooling, all optional:
+  - `tesseract` — local OCR
+  - `ffmpeg` — video transforms for `media`
+  - `ollama` — local embeddings/OCR
+
+### Configuration
+
+Keys come from the config file or env (`OPENROUTER_API_KEY`,
+`OPENAI_API_KEY`, `OPENCODE_API_KEY`), or `/login` in-app. On first launch a
+key is enough; models are fetched from the catalogs.
+
+| What | Where |
+|---|---|
+| credentials & settings | `~/.config/nexus-chat/config.toml` |
+| system prompt overrides | `~/.config/nexus-chat/system_prompt.md` |
+| custom banner | `~/.config/nexus-chat/banner.txt` |
+| spaces (db, files, scripts, apps, media) | `~/.local/share/nexus-chat/spaces/<space>/` |
 
 ## Features
 
@@ -24,22 +65,11 @@ space directories, model-created web apps served from localhost.
   calls), `research_lookup`, `files`, `app` (build & edit web apps served on
   `http://localhost:8642`), `scripts`, `skills`, and `media` (image/video
   generation with ffmpeg transforms)
+- **Usage analytics**: `/usage` shows token/cache/cost analytics by backend
+  and model, priced from a synced catalog
 - **Terminal ergonomics**: markdown rendering, image display, @-file
   autocomplete, mouse selection → copy, context breakdown, compaction,
   incognito mode, per-session history
-
-## Build & run
-
-```sh
-cargo build --release
-./target/release/nexus-chat
-```
-
-Keys come from the config file or env (`OPENROUTER_API_KEY`,
-`OPENAI_API_KEY`, `OPENCODE_API_KEY`), or `/login` in-app. On first launch a
-key is enough; models are fetched from the catalogs. Extra tooling (all
-optional): `tesseract` for local OCR, `ffmpeg` for video transforms, an
-`ollama` instance for local embeddings/OCR.
 
 ## Commands
 
@@ -102,6 +132,7 @@ src/
 │   ├── research.rs  the research pipeline: survey → plan → searchers → …
 │   ├── swarm.rs     multi-persona roundtable
 │   ├── watches.rs   standing research jobs
+│   ├── usage.rs     usage/cost analytics
 │   ├── sessions.rs, spaces.rs, models.rs, backends.rs, memory.rs
 │   ├── files.rs, images.rs, scripts.rs, apps.rs   space artifacts
 │   ├── skills_popup.rs, compaction.rs, export.rs, copy.rs, transcribe.rs
@@ -110,8 +141,8 @@ src/
 │   ├── mod.rs       message shapes, tool-call wire format, events
 │   └── openrouter.rs  one client for all OpenAI-wire backends (OR/OpenAI/…)
 ├── tools.rs         the model's tools: search, fetch, python, video, apps…
-├── tools (cont.)    skills.rs, extract.rs (PDF/OCR/text), citations.rs
-├── db.rs            SQLite: sessions, messages, citations, model prefs
+├── skills.rs, extract.rs, citations.rs   tool support
+├── db.rs            SQLite: sessions, messages, usage, citations, model prefs
 ├── appserver.rs     localhost static server for model-created apps (port 8642)
 ├── ui/              ratatui rendering: history, popups, theme, markdown
 ├── input.rs         composer, @-autocomplete, command catalog
@@ -126,8 +157,12 @@ SQLite db, files, scripts, apps, and generated media.
 
 ```sh
 scripts/check.sh          # fmt + clippy (-D warnings, pedantic) + cargo-audit + tests
-cargo test --bin nexus   # 428 tests, no network needed
+cargo test --bin nexus   # 468 tests, no network needed
 ```
+
+The pre-commit hook runs `scripts/check.sh` on every commit — a merge-ready
+change passes it. See [AGENTS.md](AGENTS.md) for conventions and a deeper
+module map.
 
 ## Known limitations
 
