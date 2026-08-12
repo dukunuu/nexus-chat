@@ -1507,12 +1507,14 @@ impl OpenRouter {
         let mut es = EventSource::new(request).context("opening SSE stream")?;
         let mut tool_calls: BTreeMap<usize, ToolCall> = BTreeMap::new();
         let mut content_acc = String::new();
+        let mut done = false;
         while let Some(event) = es.next().await {
             match event {
                 Ok(Event::Open) => {}
                 Ok(Event::Message(msg)) => {
                     if msg.data == "[DONE]" {
-                        break;
+                        done = true;
+                        break; // main phase over; the cost drain runs below
                     }
                     let (content, reasoning) = parse_delta(&msg.data);
                     if let Some(r) = reasoning
@@ -1566,6 +1568,33 @@ impl OpenRouter {
                     let _ = tx.send(StreamEvent::Error(e.to_string()));
                     es.close();
                     return Ok(Finish::Errored);
+                }
+            }
+        }
+        // The stream isn't finished at [DONE]: OpenCode sends the trailing
+        // cost chunk ({"choices":[],"cost":"…"}) AFTER it, and for
+        // no-usage (zen free) models that chunk is the entire accounting.
+        // Drain it with a cap so a peer that keeps the connection open
+        // after [DONE] can't hang the turn.
+        if done {
+            loop {
+                let next = tokio::time::timeout(std::time::Duration::from_secs(3), es.next()).await;
+                match next {
+                    Ok(Some(Ok(Event::Message(msg)))) if msg.data != "[DONE]" => {
+                        if let Some(cost) = parse_stream_cost(&msg.data) {
+                            let _ = tx.send(StreamEvent::Usage(Usage {
+                                prompt_tokens: 0,
+                                completion_tokens: 0,
+                                total_tokens: 0,
+                                cache_read_tokens: 0,
+                                cache_creation_tokens: 0,
+                                cost: Some(cost),
+                            }));
+                        }
+                    }
+                    // StreamEnded, transport error, a second [DONE], or the
+                    // 3-second cap — either way the accounting is complete.
+                    _ => break,
                 }
             }
         }
