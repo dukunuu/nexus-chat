@@ -1128,6 +1128,15 @@ impl Db {
         &self.conn
     }
 
+    /// `PRAGMA integrity_check` — the db's own self-test. Returns `"ok"`
+    /// when the file is sound, or a list of problems otherwise. Used by
+    /// `nexus doctor`.
+    pub fn integrity_check(&self) -> Result<String> {
+        self.conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .context("running integrity check")
+    }
+
     /// A file's chunk texts as `(seq, text)`, in order — the embedder's input.
     pub fn file_chunk_texts(&self, file_id: &str) -> Result<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare(
@@ -1630,6 +1639,18 @@ pub struct UsageTotals {
     pub cost: f64,
 }
 
+/// One day's aggregate row from `usage_log` (CLI `--by-day`).
+#[derive(Default)]
+pub struct UsageDay {
+    /// `YYYY-MM-DD`, from the RFC 3339 `created_at` prefix.
+    pub day: String,
+    pub requests: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cost: f64,
+}
+
 /// One backend's aggregate row.
 #[derive(Default)]
 pub struct UsageByBackend {
@@ -2025,6 +2046,41 @@ impl Db {
                 completion_tokens: r.get::<_, i64>(4)? as u64,
                 cache_read_tokens: r.get::<_, i64>(5)? as u64,
                 cost: r.get(6)?,
+            })
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = match since {
+            Some(s) => stmt.query_map(rusqlite::params![s, limit as i64], map),
+            None => stmt.query_map(rusqlite::params![limit as i64], map),
+        }?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Per-day aggregates (`created_at` is RFC 3339, so its first 10 chars
+    /// are the date), newest day first — the CLI's `usage --by-day`.
+    pub fn usage_by_day(&self, limit: u64, since: Option<&str>) -> Result<Vec<UsageDay>> {
+        let mut sql = String::from(
+            "SELECT substr(created_at, 1, 10) AS day, COUNT(*),
+                    COALESCE(SUM(prompt_tokens), 0),
+                    COALESCE(SUM(completion_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(cost), 0)
+             FROM usage_log",
+        );
+        if since.is_some() {
+            sql.push_str(" WHERE created_at >= ?1");
+            sql.push_str(" GROUP BY day ORDER BY day DESC LIMIT ?2");
+        } else {
+            sql.push_str(" GROUP BY day ORDER BY day DESC LIMIT ?1");
+        }
+        let map = |r: &rusqlite::Row| {
+            Ok(UsageDay {
+                day: r.get(0)?,
+                requests: r.get::<_, i64>(1)? as u64,
+                prompt_tokens: r.get::<_, i64>(2)? as u64,
+                completion_tokens: r.get::<_, i64>(3)? as u64,
+                cache_read_tokens: r.get::<_, i64>(4)? as u64,
+                cost: r.get(5)?,
             })
         };
         let mut stmt = self.conn.prepare(&sql)?;

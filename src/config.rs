@@ -85,17 +85,12 @@ pub fn load_system_prompt() -> Result<String> {
     std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
 }
 
-/// Resolve every configured credential at once: `$OPENROUTER_API_KEY`/
-/// `$OPENAI_API_KEY`/`$OPENCODE_API_KEY` (if set) win over the config file
-/// for their respective slot, Codex creds always come from the config file
-/// (refreshed if stale). Scaffolds an empty config on first run. Never
-/// fails on missing credentials — the app launches regardless and they can
-/// be set in-app with `/login`.
-pub async fn load_all_providers() -> Result<SavedCreds> {
-    let path = config_path()?;
-    if !path.exists() {
-        write_provider_config("", "", "", None)?; // scaffold template
-    }
+/// Resolve every configured credential from disk + env, with no network
+/// access: Codex creds are returned exactly as stored (no refresh). Read-only
+/// CLI commands (`status`, `usage`, `sessions`, …) use this so they never
+/// touch the network; the TUI and `nexus ask` use `load_all_providers`,
+/// which additionally refreshes a stale Codex token.
+pub fn load_creds_offline() -> SavedCreds {
     let (mut openrouter_key, mut openai_key, mut opencode_key, codex) =
         load_config_all().unwrap_or_default();
     if openrouter_key.is_empty()
@@ -116,20 +111,32 @@ pub async fn load_all_providers() -> Result<SavedCreds> {
     {
         opencode_key = v.trim().to_string();
     }
-    let codex = match codex {
-        Some(creds) => {
-            let creds = refresh_codex_if_needed(creds).await?;
-            save_codex_credentials(&creds)?;
-            Some(creds)
-        }
-        None => None,
-    };
-    Ok(SavedCreds {
+    SavedCreds {
         openrouter_key: (!openrouter_key.is_empty()).then_some(openrouter_key),
         openai_key: (!openai_key.is_empty()).then_some(openai_key),
         opencode_key: (!opencode_key.is_empty()).then_some(opencode_key),
         codex,
-    })
+    }
+}
+
+/// Resolve every configured credential at once: `$OPENROUTER_API_KEY`/
+/// `$OPENAI_API_KEY`/`$OPENCODE_API_KEY` (if set) win over the config file
+/// for their respective slot, Codex creds always come from the config file
+/// (refreshed if stale). Scaffolds an empty config on first run. Never
+/// fails on missing credentials — the app launches regardless and they can
+/// be set in-app with `/login`.
+pub async fn load_all_providers() -> Result<SavedCreds> {
+    let path = config_path()?;
+    if !path.exists() {
+        write_provider_config("", "", "", None)?; // scaffold template
+    }
+    let mut saved = load_creds_offline();
+    if let Some(creds) = saved.codex.take() {
+        let creds = refresh_codex_if_needed(creds).await?;
+        save_codex_credentials(&creds)?;
+        saved.codex = Some(creds);
+    }
+    Ok(saved)
 }
 
 /// The first configured credential in a fixed priority order (openrouter >

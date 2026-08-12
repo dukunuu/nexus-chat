@@ -1,6 +1,7 @@
 mod app;
 mod appserver;
 mod citations;
+mod cli;
 mod config;
 mod db;
 mod events;
@@ -20,6 +21,12 @@ use anyhow::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // A subcommand (ask/usage/sessions/…) runs headless; no subcommand boots
+    // the TUI.
+    if let Some(cmd) = cli::parse() {
+        return cli::run(cmd).await;
+    }
+
     let saved = config::load_all_providers().await?;
     // A single bootstrap key just seeds App::new's "reasonable defaults"
     // guess (utility model strings); rebuild_all_backends below populates
@@ -55,6 +62,21 @@ async fn main() -> Result<()> {
         );
     }
     app.init(); // fetch models if a key is already present
+    // `nexus open <session>` handoff: the CLI wrote a pending-open file —
+    // jump straight into that session (switching to its space first).
+    let handoff = app.space.root.join("pending-open");
+    if let Ok(id) = std::fs::read_to_string(&handoff) {
+        let _ = std::fs::remove_file(&handoff);
+        let id = id.trim();
+        if !id.is_empty()
+            && let Ok((space_id, session)) = cli::resolve_session(&app.db, id)
+            && let Ok(rows) = app.db.list_spaces()
+            && let Some(row) = rows.into_iter().find(|s| s.id == space_id)
+        {
+            app.set_active_space(row);
+            let _ = app.switch_to_session_by_id(&session.id);
+        }
+    }
     app.spawn_update_check(); // once a day: is a newer release out?
     app.run_due_watches(); // re-run any standing research watches that are due
     let result = events::run(app, &mut terminal).await;

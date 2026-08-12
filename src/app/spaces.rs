@@ -131,7 +131,7 @@ impl App {
 
     /// Switch the active space, clearing the open conversation (a session
     /// belongs to exactly one space).
-    fn set_active_space(&mut self, row: SpaceRow) {
+    pub(crate) fn set_active_space(&mut self, row: SpaceRow) {
         self.active_space = row;
         self.session = None;
         self.messages.clear();

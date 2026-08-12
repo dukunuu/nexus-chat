@@ -23,6 +23,56 @@ cargo build --release
 ./target/release/nexus
 ```
 
+### CLI
+
+`nexus` with no arguments launches the TUI. Subcommands work headless
+from the shell — everything they write (sessions, usage, reports) lands in
+the same local state the TUI reads, so you can mix both freely:
+
+```sh
+nexus ask "summarize the EU AI Act in 5 bullets"      # one-shot chat, streams to stdout
+nexus ask --model deepseek/deepseek-v3 --web "..."    # pick a model, search-grounded
+cat brief.md | nexus ask "summarize this"             # prompt from stdin
+nexus ask --space new:research "..."                  # create-and-use a space
+nexus ask --json --quiet "..."                        # structured output for scripting
+nexus chat                                             # bare REPL, one session
+nexus research "impact of EU AI Act on startups"       # deep research (survey + plan gates)
+nexus research --approve "..."                        # skip the gates, run unattended
+nexus watch list                                       # standing research watches
+nexus watch run                                        # run the due watches (cron-friendly)
+nexus watch run <id> --all                             # force-run one / every watch
+nexus usage [--range 24h|7d|30d|all] [--by-day]        # token/cache/cost analytics
+nexus usage --json                                     # same, machine-readable
+nexus sessions [--space <name>] [--json]               # list sessions
+nexus sessions rm <id|slug>                            # delete one session
+nexus sessions prune --keep 20 --days 90 --dry-run     # delete old sessions
+nexus spaces [--json]                                  # list spaces
+nexus export <id|slug>                                 # print a session's latest report + sources
+nexus export <id> --transcript -o chat.md              # the whole conversation
+nexus backup [-o file.zip]                             # zip db + spaces + skills
+nexus restore file.zip --yes                           # restore a backup (overwrites)
+nexus memory [--space] [--edit]                        # print/edit a space's memory
+nexus instructions [--space] [--edit]                  # print/edit a space's instructions
+nexus files [--space]                                  # list imported files
+nexus models [--backend openrouter]                    # fetch + list model catalogs
+nexus login openrouter sk-... [--check]                # save a provider key
+nexus skills list                                      # installed skills
+nexus skills install owner/repo[/path]                 # install a skill from GitHub
+nexus open <id|slug>                                   # launch the TUI inside that session
+nexus update                                           # check for a newer release
+nexus status                                           # paths, providers configured, db stats
+nexus doctor [--network]                               # db integrity, config, tools
+```
+
+`nexus ask`/`chat`/`research` use your most recently used model (or
+`--model`), run the same search/tool pipelines as the TUI, and save
+conversations as normal sessions — tool status and token usage go to
+stderr, answers to stdout. `research` without `--approve` parks at the
+survey/plan checkpoints: interactive when stdin is a terminal, an error
+otherwise (`--approve` runs unattended, like `/research!`). The read-only
+commands (`usage`, `sessions`, `spaces`, `export`, `status`, `doctor`,
+`backup`, `memory`, …) never touch the network.
+
 ### Requirements
 
 - Rust 1.91+ (only needed to build/install — no runtime dependency)

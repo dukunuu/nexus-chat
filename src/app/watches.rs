@@ -136,48 +136,56 @@ impl super::App {
         };
         let due = due_watches(&all, chrono::Utc::now());
         for w in due {
-            // A watch may belong to a space other than whatever's currently
-            // active (`due_watches` spans every space) — `start_research_with_gate`
-            // reads `self.active_space` for the toolbox/file paths and
-            // `save_research_report`'s destination, so it must be switched to
-            // the watch's own space for the run, same as its session.
-            let Ok(spaces) = self.db.list_spaces() else {
-                continue;
-            };
-            let Some(space_row) = spaces.into_iter().find(|s| s.id == w.space_id) else {
-                continue;
-            };
-            let restore_space = self.active_space.clone();
-            let restore_session = self.session.clone();
-            let restore_messages = std::mem::take(&mut self.messages);
-            if let Ok(Some(s)) = self.db.get_session(&w.session_id) {
-                let prior_session_id = s.id.clone();
-                self.active_space = space_row;
-                self.session = Some(s);
-                self.start_research_with_gate(&w.topic, false);
-                // `start_research_with_gate` only allows one job at a time —
-                // for the 2nd+ due watch in this loop, `research_rx.is_some()`
-                // is still set from the first watch's job (it isn't cleared
-                // until that job's background task finishes, long after this
-                // synchronous loop returns), so the guard fires and the call
-                // above is a no-op: `self.session` is left exactly as set on
-                // the line above (the watch's *prior* session), unchanged.
-                // Only when a new session was actually created do we know the
-                // job really started — compare ids to tell those cases apart,
-                // and leave a not-actually-run watch untouched (still due) for
-                // the next startup rather than falsely marking it caught up.
-                if let Some(new_session) = self.session.as_ref()
-                    && new_session.id != prior_session_id
-                {
-                    let _ = self.db.set_watch_session(&w.id, &new_session.id);
-                    let _ = self.db.touch_watch(&w.id, &chrono::Utc::now().to_rfc3339());
-                }
-            }
-            self.active_space = restore_space;
-            self.session = restore_session;
-            self.messages = restore_messages;
-            self.refresh_toolbox();
+            let _ = self.run_one_watch(&w);
         }
+    }
+
+    /// Start one watch's research job (due or not — `nexus watch run <id>`
+    /// force-runs). A watch may belong to a space other than whatever's
+    /// currently active — `start_research_with_gate` reads `self.active_space`
+    /// for the toolbox/file paths and `save_research_report`'s destination,
+    /// so it must be switched to the watch's own space for the run, same as
+    /// its session. Returns whether a job actually started.
+    pub(crate) fn run_one_watch(&mut self, w: &crate::db::Watch) -> bool {
+        let Ok(spaces) = self.db.list_spaces() else {
+            return false;
+        };
+        let Some(space_row) = spaces.into_iter().find(|s| s.id == w.space_id) else {
+            return false;
+        };
+        let restore_space = self.active_space.clone();
+        let restore_session = self.session.clone();
+        let restore_messages = std::mem::take(&mut self.messages);
+        let mut started = false;
+        if let Ok(Some(s)) = self.db.get_session(&w.session_id) {
+            let prior_session_id = s.id.clone();
+            self.active_space = space_row;
+            self.session = Some(s);
+            self.start_research_with_gate(&w.topic, false);
+            // `start_research_with_gate` only allows one job at a time —
+            // for the 2nd+ due watch in the startup loop, `research_rx.is_some()`
+            // is still set from the first watch's job (it isn't cleared until
+            // that job's background task finishes, long after this synchronous
+            // loop returns), so the guard fires and the call above is a no-op:
+            // `self.session` is left exactly as set on the line above (the
+            // watch's *prior* session), unchanged. Only when a new session was
+            // actually created do we know the job really started — compare ids
+            // to tell those cases apart, and leave a not-actually-run watch
+            // untouched (still due) for the next startup rather than falsely
+            // marking it caught up.
+            if let Some(new_session) = self.session.as_ref()
+                && new_session.id != prior_session_id
+            {
+                let _ = self.db.set_watch_session(&w.id, &new_session.id);
+                let _ = self.db.touch_watch(&w.id, &chrono::Utc::now().to_rfc3339());
+                started = true;
+            }
+        }
+        self.active_space = restore_space;
+        self.session = restore_session;
+        self.messages = restore_messages;
+        self.refresh_toolbox();
+        started
     }
 
     /// `Some(urls)` if `session_id` is a watch's session and it has a prior
