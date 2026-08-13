@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
             let _ = app.execute(nexus_core::app::AppCommand::ResolveSession { id: session.id });
         }
     }
-    app.spawn_update_check(); // once a day: is a newer release out?
+    app.spawn_update_check(); // once a day: is a newer release out? — auto-installs it in the background
     app.run_due_watches(); // re-run any standing research watches that are due
     let result = events::run(app, &mut terminal).await;
     if enhanced {

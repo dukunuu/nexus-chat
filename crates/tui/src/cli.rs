@@ -208,7 +208,8 @@ pub enum Command {
         /// Session id, slug, or id prefix.
         session: String,
     },
-    /// Check whether a newer release exists.
+    /// Update to the latest release from crates.io — runs
+    /// `cargo install nexus-chat` when a newer version exists.
     Update,
     /// Show data/config paths and which providers are configured.
     Status,
@@ -1393,9 +1394,14 @@ async fn update() -> Result<()> {
     match nexus_core::update::latest_version().await {
         Some(latest) if nexus_core::update::version_gt(&latest, nexus_core::update::CURRENT) => {
             out(format!(
-                "update available: v{latest} (you have {}) — run `cargo install nexus-chat`",
+                "updating v{} → v{latest} — `cargo install nexus-chat` (this can take a few minutes)",
                 nexus_core::update::CURRENT
             ));
+            let status = nexus_core::update::install_now()?;
+            if !status.success() {
+                bail!("cargo install failed ({status}) — see the output above");
+            }
+            out(format!("updated to v{latest} — relaunch nexus"));
         }
         _ => out(format!("up to date — v{}", nexus_core::update::CURRENT)),
     }

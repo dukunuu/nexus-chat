@@ -1466,7 +1466,7 @@ impl App {
     }
 
     /// Kick off the startup update check: once per day, compare the newest
-    /// published version against this build and let the user know when a
+    /// published version against this build and auto-install it when a
     /// newer release exists. Best-effort — offline or a failed fetch is
     /// silent. Spawned before the event loop starts; the result arrives as
     /// `AppEvent::UpdateCheck`.
@@ -1482,9 +1482,12 @@ impl App {
         });
     }
 
-    /// Handle the startup update check result: notify when a newer version
-    /// is published. `None` (failed check) and same/older versions are
-    /// silent — the check is a courtesy, not a nag.
+    /// Handle the startup update check result: when a newer version is
+    /// published, auto-install it via `cargo` in a detached background
+    /// process when the environment allows (dev builds, missing cargo, and
+    /// opted-out installs fall back to a plain notice). `None` (failed
+    /// check) and same/older versions are silent — the check is a
+    /// courtesy, not a nag.
     pub fn on_update_check(&mut self, latest: Option<String>) {
         let Some(latest) = latest else {
             return;
@@ -1492,16 +1495,38 @@ impl App {
         if !crate::update::version_gt(&latest, crate::update::CURRENT) {
             return;
         }
-        self.push_status(format!(
-            "update available: v{latest} (you have {}) — run `cargo install nexus-chat`",
-            crate::update::CURRENT
-        ));
-        self.notifications.push_back(ChatNotification {
-            session_id: String::new(),
-            title: "update available".to_string(),
-            text: format!("v{latest} is out — you have {}", crate::update::CURRENT),
-            success: true,
-        });
+        let notice = |app: &mut Self| {
+            app.push_status(format!(
+                "update available: v{latest} (you have {}) — run `cargo install nexus-chat`",
+                crate::update::CURRENT
+            ));
+            app.notifications.push_back(ChatNotification {
+                session_id: String::new(),
+                title: "update available".to_string(),
+                text: format!("v{latest} is out — you have {}", crate::update::CURRENT),
+                success: true,
+            });
+        };
+        match crate::update::try_start_auto_update(&self.space.root, &latest) {
+            crate::update::AutoUpdateOutcome::Started => {
+                self.push_status(format!(
+                    "auto-updating to v{latest} in the background — restart nexus to apply"
+                ));
+                self.notifications.push_back(ChatNotification {
+                    session_id: String::new(),
+                    title: format!("updating to v{latest}"),
+                    text: "installing via `cargo install` in the background — the new \
+                           version is live on your next launch"
+                        .to_string(),
+                    success: true,
+                });
+            }
+            crate::update::AutoUpdateOutcome::InFlight => {
+                // A previous launch already started the install; the next
+                // launch picks it up. Nothing to do.
+            }
+            crate::update::AutoUpdateOutcome::Unavailable => notice(self),
+        }
     }
 
     pub fn is_streaming(&self) -> bool {
