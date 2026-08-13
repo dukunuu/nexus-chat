@@ -73,9 +73,15 @@ jobs:
       - name: Build release binary
         run: cargo build --release --bin nexus
 
+      # GitHub's own auto-notes are PR-based; this repo commits straight to
+      # master, so they come out empty. Generate notes from the git history
+      # instead (conventional commits grouped by type, bump commits skipped).
+      - name: Generate release notes
+        run: scripts/release-notes.sh "${{ inputs.tag_name || github.ref_name }}" > RELEASE_NOTES.md
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag_name || github.ref_name }}
           files: target/release/nexus
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md

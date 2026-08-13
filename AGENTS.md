@@ -25,6 +25,8 @@ scripts/check.sh --fix         # auto-fix fmt/clippy, then run the gate
 Pushing to master auto-bumps the patch version, tags `vX.Y.Z`, and releases
 (crates.io + GitHub) via `.github/workflows/version-bump.yml`; a manual `v*`
 tag push publishes the same way. Workflows live in `.github/workflows/`.
+Release notes are generated from conventional commits since the last tag
+(`scripts/release-notes.sh`).
 
 Every commit runs `scripts/check.sh` via the local pre-commit hook — a commit
 that fails the gate is rejected. **Never disable the hook, and never commit

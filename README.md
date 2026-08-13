@@ -218,7 +218,9 @@ module map.
 
 Pushes to `master` release automatically: a workflow bumps the patch version,
 tags `vX.Y.Z`, and runs the publish pipeline (crates.io + GitHub release with
-the release binary). Manual `v*` tag pushes publish the same way. Details in
+the release binary). Release notes are generated from the conventional commits
+since the last tag (`scripts/release-notes.sh`), so the GitHub release always
+shows what changed. Manual `v*` tag pushes publish the same way. Details in
 `.github/workflows/`.
 
 ## Roadmap
