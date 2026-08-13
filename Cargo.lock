@@ -1814,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-chat"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1839,7 +1839,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "arboard",
