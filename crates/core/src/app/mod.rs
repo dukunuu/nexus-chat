@@ -990,10 +990,11 @@ pub struct App {
     /// Start-screen banner (custom or built-in) and a greeting picked at launch.
     pub banner: String,
     pub greeting: &'static str,
-    pub scroll: u16,
+    /// Lines scrolled up from the bottom (0 = following the newest lines).
+    pub scroll: usize,
     /// Max useful `scroll` (lines above the viewport), refreshed each render so
     /// scrolling can be clamped instead of running off into empty space.
-    pub max_scroll: u16,
+    pub max_scroll: usize,
     /// Total rendered lines from the previous render frame, used during streaming
     /// to keep the viewport pinned when the user has scrolled up.
     pub prev_total: usize,

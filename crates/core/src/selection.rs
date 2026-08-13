@@ -83,6 +83,19 @@ impl HistorySel {
         self.code_raw = code_raw;
     }
 
+    /// The plain text of a rendered line from the last frame (cache prefix
+    /// plus streaming tail), if any — lets the history viewport re-find the
+    /// line it was pinned to after a cache re-wrap.
+    pub fn line_at(&self, li: usize) -> Option<&str> {
+        self.lines.get(li).map(String::as_str)
+    }
+
+    /// The message each rendered line belonged to in the last frame, if any
+    /// — lets the history viewport re-pin by message after a cache re-wrap.
+    pub fn owner_at(&self, li: usize) -> Option<usize> {
+        self.owner.get(li).copied().flatten()
+    }
+
     /// Map a screen cell to a wrapped-line position, clamped to real content.
     pub fn pos_at(&self, col: u16, row: u16) -> Option<Pos> {
         if self.lines.is_empty() || !self.inner.contains(Position::new(col, row)) {

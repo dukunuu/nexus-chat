@@ -70,7 +70,7 @@ pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
     // Scroll: app.scroll counts lines scrolled UP from the bottom (0 = follow bottom).
     let height = inner.height as usize;
     let max_top = total.saturating_sub(height);
-    app.max_scroll = max_top as u16; // let the event loop clamp scrolling
+    app.max_scroll = max_top; // let the event loop clamp scrolling
 
     // The rendered line count can change under the viewport: the streaming
     // tail grows, or a display-flag toggle (Ctrl+R reasoning, Ctrl+T tool
@@ -88,12 +88,12 @@ pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
     // so the previous frame's viewport-top line can be matched by prefix in
     // the newly-rendered region and the viewport pinned back onto it.
     let prev_tail = std::mem::take(&mut app.prev_tail);
+    let prev_top = app
+        .prev_total
+        .saturating_sub(height)
+        .saturating_sub(app.scroll);
     let anchor: Option<&str> = if app.prev_total > 0 && !prev_tail.is_empty() {
         let prev_cached = app.prev_total.saturating_sub(prev_tail.len());
-        let prev_top = app
-            .prev_total
-            .saturating_sub(height)
-            .saturating_sub(app.scroll as usize);
         prev_top
             .checked_sub(prev_cached)
             .and_then(|offset| prev_tail.get(offset).map(String::as_str))
@@ -103,15 +103,26 @@ pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
 
     let explicit_toggle = app.pin_viewport_top;
     app.pin_viewport_top = false;
-    let pin_top =
-        app.prev_total > 0 && (explicit_toggle || app.scroll > 0 || !app.viewing_stream());
-    if pin_top
+    // Pin only when the user has actually scrolled up, or just toggled a
+    // display flag. While following the bottom (scroll == 0) the viewport
+    // tracks the newest lines — including across the tail→cache transition
+    // when a reply finishes, where delta-compensating would leave the
+    // viewport short of the end of the content (the stored card renders a
+    // couple of lines taller than the streaming tail, so the reply's last
+    // lines would end up hidden below the pane).
+    let pin_top = app.prev_total > 0 && (explicit_toggle || app.scroll > 0);
+    // A display-flag toggle while following the bottom keeps following the
+    // bottom: the re-wrap's growth belongs above the viewport, so pinning
+    // the top line would push the end of the conversation below the pane
+    // ("the view moves way past the messages").
+    let pin = pin_top && !(explicit_toggle && app.scroll == 0);
+    if pin
         && !explicit_toggle
         && let Some(anchor) = anchor
         && anchor.chars().count() >= 12
     {
-        // Scrolled up (or the stream just ended) with the viewport inside
-        // the streaming tail: pin to the content line, not the line index.
+        // Scrolled up with the viewport inside the streaming tail: pin to
+        // the content line, not the line index.
         // A very short anchor is a frontier line still being typed, where
         // the delta path below is exact anyway (all growth is below it) —
         // and a short prefix could match unrelated lines below the anchor.
@@ -134,25 +145,100 @@ pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
         if let Some(hit) = hit {
-            app.scroll = max_top.saturating_sub(hit) as u16;
+            app.scroll = max_top.saturating_sub(hit);
         } else {
             let delta = total as i64 - app.prev_total as i64;
             if delta != 0 {
-                app.scroll =
-                    (i64::from(app.scroll) + delta).clamp(0, i64::from(app.max_scroll)) as u16;
+                app.scroll = (app.scroll as i64 + delta).clamp(0, app.max_scroll as i64) as usize;
             }
         }
-    } else if pin_top {
+    } else if pin && explicit_toggle {
+        // Display-flag toggle (Ctrl+R reasoning, Ctrl+T tool detail) while
+        // scrolled up: the cache re-wrap preserves every message — only
+        // reasoning / tool-detail blocks inside them appear or disappear —
+        // so pin the viewport to the message the previous frame's top line
+        // belonged to, at the same offset within it. Delta-compensating the
+        // absolute line index would instead land on content shifted by all
+        // the growth above the viewport ("the view jumps way past the
+        // messages").
+        let mut pinned: Option<usize> = None;
+        if let Some(owner) = app.sel.owner_at(prev_top) {
+            // The top line's offset within its message block in the
+            // previous render (walk up to the block start).
+            let mut old_start = prev_top;
+            while old_start > 0 && app.sel.owner_at(old_start - 1) == Some(owner) {
+                old_start -= 1;
+            }
+            let offset = prev_top - old_start;
+            // The same message's block in the new render: the cache prefix
+            // for stored messages, the streaming tail for the in-flight
+            // reply (its owner id is the message count at record time).
+            let (new_start, block_len) = if owner == app.messages.len() {
+                (Some(cached_lines), tail.len())
+            } else {
+                let start = cache.owner.iter().position(|o| *o == Some(owner));
+                let len = start.map_or(0, |s| {
+                    cache.owner[s..]
+                        .iter()
+                        .take_while(|o| **o == Some(owner))
+                        .count()
+                });
+                (start, len)
+            };
+            if let Some(new_start) = new_start {
+                pinned = Some(new_start + offset.min(block_len.saturating_sub(1)));
+            }
+        }
+        if pinned.is_none() {
+            // Fallback when the message block can't be located (e.g. the
+            // session changed between frames): re-find the previous top
+            // line's text, trying nearby lines first — the top is often a
+            // blank card row or a "▸ reasoning" header whose text the
+            // toggle itself changes.
+            'candidates: for off in [0, 1, 2, 3, 4, 5, -1, -2, -3, -4, -5] {
+                let li = if off >= 0 {
+                    prev_top + off as usize
+                } else {
+                    prev_top.saturating_sub((-off) as usize)
+                };
+                let Some(text) = app.sel.line_at(li) else {
+                    continue;
+                };
+                if text.chars().count() < 12 {
+                    continue;
+                }
+                // Exact text survives the re-wrap; fall back to a prefix
+                // for streaming frontier lines that kept growing.
+                if let Some(hit) = find_line(&cache.lines, &tail, |l| l == text) {
+                    pinned = Some((hit as i64 - off).max(0) as usize);
+                    break 'candidates;
+                }
+                let prefix: String = text.chars().take(24).collect();
+                if let Some(hit) = find_line(&cache.lines, &tail, |l| l.starts_with(&prefix)) {
+                    pinned = Some((hit as i64 - off).max(0) as usize);
+                    break 'candidates;
+                }
+            }
+        }
+        if let Some(pinned) = pinned {
+            app.scroll = max_top.saturating_sub(pinned);
+        } else {
+            let delta = total as i64 - app.prev_total as i64;
+            if delta != 0 {
+                app.scroll = (app.scroll as i64 + delta).clamp(0, app.max_scroll as i64) as usize;
+            }
+        }
+    } else if pin {
         let delta = total as i64 - app.prev_total as i64;
         if delta != 0 {
-            app.scroll = (i64::from(app.scroll) + delta).clamp(0, i64::from(app.max_scroll)) as u16;
+            app.scroll = (app.scroll as i64 + delta).clamp(0, app.max_scroll as i64) as usize;
         }
     }
     app.prev_total = total;
     app.prev_tail = tail.iter().map(line_text).collect();
 
     app.scroll = app.scroll.min(app.max_scroll);
-    let top = max_top.saturating_sub(app.scroll as usize);
+    let top = max_top.saturating_sub(app.scroll);
 
     // Snapshot the layout + plain text + per-line message owner so mouse
     // selection can map screen cells and scope a selection to one message.
@@ -188,24 +274,88 @@ pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
 
     f.render_widget(Paragraph::new(visible), inner);
 
-    // Scrollbar in the gutter: only when the conversation overflows, thumb
-    // following the viewport.
+    // Scrollbar in the gutter: only when the conversation overflows. Drawn
+    // directly rather than with ratatui's `Scrollbar` widget — that widget
+    // proportions the thumb against `content_length - 1 + viewport`, which
+    // inflates it when the content barely overflows, re-rounds its size and
+    // position on every streamed line (the thumb visibly jumps while
+    // thinking or tool output grows), and never maps it flush to the track
+    // bottom — following the stream leaves a dead gap under the thumb.
+    // Here the thumb is the true viewport fraction and its travel maps
+    // linearly onto the track: flush at the top when scrolled to the start,
+    // flush at the bottom when following.
     if total > height {
-        let gutter = Rect {
-            x: area.x + area.width.saturating_sub(1),
-            y: area.y,
-            width: 1,
-            height: area.height,
-        };
-        let mut state = ratatui::widgets::ScrollbarState::new(total).position(top);
-        let sb =
-            ratatui::widgets::Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .thumb_style(Style::default().fg(app.theme.accent))
-                .track_style(Style::default().fg(app.theme.border_dim));
-        f.render_stateful_widget(sb, gutter, &mut state);
+        render_scrollbar(f, area, total, top, &app.theme);
     }
+}
+
+/// Draw the history scrollbar into the 1-column gutter at `area`'s right
+/// edge. `total` is the rendered line count and `top` the first visible
+/// line. The thumb covers the viewport's fraction of the content and maps
+/// linearly onto the track, so it sits flush against both track ends at the
+/// scroll extremes — no dead gap under the thumb while following the stream.
+fn render_scrollbar(
+    f: &mut Frame,
+    area: Rect,
+    total: usize,
+    top: usize,
+    theme: &nexus_core::theme::Theme,
+) {
+    let track = area.height as usize;
+    if track == 0 {
+        return;
+    }
+    // Viewport fraction of the content, at least one cell.
+    let thumb_len = (track * track / total).clamp(1, track);
+    // `top` ranges 0..=total-track; map it onto the thumb's travel range
+    // 0..=track-thumb_len so both scroll extremes land flush. (The caller
+    // only renders the scrollbar when `total > height`, so `room` is never
+    // zero — the `unwrap_or(0)` is just a safety net.)
+    let room = total.saturating_sub(track);
+    let thumb_top = (top * (track - thumb_len)).checked_div(room).unwrap_or(0);
+    let gutter = Rect {
+        x: area.x + area.width.saturating_sub(1),
+        y: area.y,
+        width: 1,
+        height: area.height,
+    };
+    let thumb_style = Style::default().fg(theme.accent);
+    let track_style = Style::default().fg(theme.border_dim);
+    let lines: Vec<Line> = (0..track)
+        .map(|y| {
+            let (symbol, style) = if y >= thumb_top && y < thumb_top + thumb_len {
+                ("█", thumb_style)
+            } else {
+                ("║", track_style)
+            };
+            Line::from(Span::styled(symbol, style))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), gutter);
+}
+
+/// Scan the rendered lines (cache prefix + streaming tail) from the bottom
+/// for the last line matching `pred` — used to re-find a pinned viewport
+/// line by text after a cache re-wrap.
+fn find_line(
+    cache: &[Line<'static>],
+    tail: &[Line<'static>],
+    pred: impl Fn(&str) -> bool,
+) -> Option<usize> {
+    let total = cache.len() + tail.len();
+    let mut i = total;
+    while i > 0 {
+        i -= 1;
+        let text = if i < cache.len() {
+            line_text(&cache[i])
+        } else {
+            line_text(&tail[i - cache.len()])
+        };
+        if pred(&text) {
+            return Some(i);
+        }
+    }
+    None
 }
 
 // Long by design (cache sync).
@@ -1568,7 +1718,11 @@ mod tests {
         let delta = total2 as i64 - total1 as i64;
         assert!(delta > 20, "tool detail should add many lines");
         // Scroll compensated by the delta: the top line stayed put.
-        assert_eq!(a.scroll, 5 + delta as u16, "viewport top must stay pinned");
+        assert_eq!(
+            a.scroll,
+            5 + delta as usize,
+            "viewport top must stay pinned"
+        );
 
         // Ctrl+T again collapses: the viewport returns to the same spot.
         a.show_tool_detail = false;
@@ -1578,7 +1732,7 @@ mod tests {
     }
 
     #[test]
-    fn flag_toggle_expands_in_place_at_bottom() {
+    fn flag_toggle_while_following_bottom_stays_at_bottom() {
         let mut a = tall_tool_call_app();
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
@@ -1587,14 +1741,259 @@ mod tests {
         assert_eq!(a.scroll, 0, "starts following the bottom");
 
         // Ctrl+T while following the bottom: the block expands in place and
-        // the scroll position records the growth (the viewport does not jump
-        // to a different part of the conversation).
+        // the viewport keeps following the bottom — the end of the
+        // conversation stays visible instead of the expansion pushing it
+        // below the pane.
         a.show_tool_detail = true;
         a.pin_viewport_top = true;
         terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
         let total2 = a.history_cache.lines.len();
-        let delta = total2 as i64 - total1 as i64;
-        assert_eq!(a.scroll, delta as u16, "expand in place at the bottom");
+        assert!(total2 > total1, "tool detail should add lines");
+        assert_eq!(a.scroll, 0, "must keep following the bottom");
+    }
+
+    /// A tall conversation with reasoning traces on many assistant messages,
+    /// so a show-reasoning toggle re-wraps content above and below the
+    /// viewport, not just below it.
+    fn tall_reasoning_app() -> App {
+        let mut a = test_app();
+        for i in 0..40 {
+            a.messages.push(msg(
+                "user",
+                &format!("question number {i} with some body text"),
+            ));
+            let mut m = msg(
+                "assistant",
+                &format!("answer number {i} with a decent amount of body text"),
+            );
+            m.reasoning = Some(format!(
+                "thinking trace {i} line one\nthinking trace {i} line two\nthinking trace {i} line three"
+            ));
+            m.model = Some("a/one".into());
+            m.phrase = Some("working".into());
+            a.messages.push(m);
+        }
+        a.settings.show_reasoning = false;
+        a
+    }
+
+    #[test]
+    fn flag_toggle_reasoning_while_scrolled_up_pins_content() {
+        let mut a = tall_reasoning_app();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let total1 = a.history_cache.lines.len();
+        assert!(a.max_scroll > 10, "conversation should overflow the pane");
+
+        // Scroll up into the middle of the conversation.
+        a.scroll = 25;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let before = visible_snapshot(&terminal);
+        assert!(
+            before.contains("answer number 34"),
+            "viewport should be in the middle of the conversation, got: {before}"
+        );
+
+        // Ctrl+R expands reasoning across the whole conversation — most of
+        // the growth lands ABOVE the viewport. The viewport must stay on
+        // the same content, not jump to older messages.
+        a.settings.show_reasoning = true;
+        a.pin_viewport_top = true;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let total2 = a.history_cache.lines.len();
+        assert!(total2 > total1, "reasoning should add lines");
+        let after = visible_snapshot(&terminal);
+        assert!(
+            after.starts_with(&before[..before.len().min(24)]),
+            "viewport content jumped on reasoning toggle: before={before:?} after={after:?}"
+        );
+
+        // Collapsing again returns to the same content.
+        a.settings.show_reasoning = false;
+        a.pin_viewport_top = true;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let after2 = visible_snapshot(&terminal);
+        assert!(
+            after2.starts_with(&before[..before.len().min(24)]),
+            "viewport content jumped on reasoning collapse: before={before:?} after={after2:?}"
+        );
+    }
+
+    #[test]
+    fn flag_toggle_reasoning_while_following_bottom_stays_at_bottom() {
+        let mut a = tall_reasoning_app();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        assert_eq!(a.scroll, 0, "starts following the bottom");
+
+        // Ctrl+R while at the bottom: the end of the conversation stays at
+        // the bottom — the last message's reasoning is visible instead of
+        // being pushed below the pane.
+        a.settings.show_reasoning = true;
+        a.pin_viewport_top = true;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        assert_eq!(a.scroll, 0, "must keep following the bottom");
+        let buf = terminal.backend().buffer();
+        let all: String = (0..HISTORY_H)
+            .flat_map(|y| {
+                (0..buf.area.width - 1).map(move |x| buf[(x, y as u16)].symbol().to_string())
+            })
+            .collect();
+        assert!(
+            all.contains("thinking trace 39"),
+            "the last message's reasoning must be visible at the bottom"
+        );
+    }
+
+    #[tokio::test]
+    async fn flag_toggle_while_streaming_and_scrolled_into_tail_stays_pinned() {
+        let reasoning: String = (0..60)
+            .map(|i| format!("reasoning line {i} with a bunch of words to wrap around"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut a = streaming_app(&reasoning, "The answer body.\nSecond answer line.");
+        // One stored tool call that the Ctrl+T toggle will expand.
+        a.messages.push(msg(
+            "tool_call",
+            r#"{"name":"search","arguments":"{}","result":"line one\nline two"}"#,
+        ));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        // Scroll into the middle of the reasoning (inside the streaming tail).
+        a.scroll = 8;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let before = visible_snapshot(&terminal);
+        assert!(
+            before.contains("reasoning line"),
+            "viewport should be in the tail, got: {before}"
+        );
+
+        // Ctrl+T re-wraps the cache (tool detail expands ABOVE the tail)
+        // while the user reads the streaming reply: the tail content must
+        // stay put.
+        a.show_tool_detail = true;
+        a.pin_viewport_top = true;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let after = visible_snapshot(&terminal);
+        assert!(
+            after.starts_with(&before[..before.len().min(24)]),
+            "viewport jumped on toggle while streaming: before={before:?} after={after:?}"
+        );
+    }
+
+    /// The scrollbar gutter column (x = width - 1): (symbol, fg) per row.
+    fn gutter_snapshot(
+        terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+    ) -> Vec<(String, ratatui::style::Color)> {
+        let buf = terminal.backend().buffer();
+        let x = buf.area.width - 1;
+        (0..buf.area.height)
+            .map(|y| (buf[(x, y)].symbol().to_string(), buf[(x, y)].fg))
+            .collect()
+    }
+
+    /// Height of the history pane on an 80x24 terminal with an empty
+    /// composer: 24 minus 3 input rows (1 content + 2 border) minus 1 status.
+    const HISTORY_H: usize = 20;
+
+    #[test]
+    fn scrollbar_thumb_sits_flush_at_bottom_when_following() {
+        let mut a = tall_tool_call_app();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        assert_eq!(a.scroll, 0, "starts following the bottom");
+        let gutter = gutter_snapshot(&terminal);
+        assert_eq!(
+            gutter[HISTORY_H - 1].1,
+            a.theme.accent,
+            "thumb must sit flush at the track bottom — no dead gap"
+        );
+        // The rest of the gutter above it is the dim track.
+        assert_eq!(gutter[0].1, a.theme.border_dim);
+    }
+
+    #[test]
+    fn scrollbar_thumb_sits_flush_at_top_when_scrolled_to_start() {
+        let mut a = tall_tool_call_app();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        a.scroll = a.max_scroll;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let gutter = gutter_snapshot(&terminal);
+        assert_eq!(
+            gutter[0].1, a.theme.accent,
+            "thumb must sit flush at the track top when scrolled to the start"
+        );
+    }
+
+    #[test]
+    fn scrollbar_thumb_tracks_viewport_proportionally() {
+        let mut a = tall_tool_call_app();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let total = a.history_cache.lines.len();
+        assert!(total > HISTORY_H, "conversation should overflow the pane");
+        // Halfway up the conversation: the thumb must sit at the halfway
+        // point of its travel range, with the proportional length.
+        a.scroll = a.max_scroll / 2;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let top = a.max_scroll - a.scroll;
+        let thumb_len = (HISTORY_H * HISTORY_H / total).clamp(1, HISTORY_H);
+        let expect_top = top * (HISTORY_H - thumb_len) / (total - HISTORY_H);
+        let gutter = gutter_snapshot(&terminal);
+        let accent_rows: Vec<usize> = (0..HISTORY_H)
+            .filter(|&y| gutter[y].1 == a.theme.accent)
+            .collect();
+        assert_eq!(
+            accent_rows.len(),
+            thumb_len,
+            "thumb length is the viewport fraction"
+        );
+        assert_eq!(
+            accent_rows.first(),
+            Some(&expect_top),
+            "thumb top maps to the viewport"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_end_while_following_bottom_stays_at_bottom() {
+        let mut a = streaming_app(
+            "some reasoning text here\nmore of it",
+            "A short final answer.",
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        assert_eq!(a.scroll, 0, "follows the bottom while streaming");
+
+        // The reply finishes: the tail moves into the cache as a stored card
+        // that renders taller than the streaming tail (reasoning header +
+        // phrase footer). Following the bottom must still show the very end
+        // of the conversation — not a viewport that stops short of it.
+        a.on_chat_event(1, nexus_core::provider::StreamEvent::Done)
+            .unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        assert_eq!(
+            a.scroll, 0,
+            "must keep following the bottom after the stream ends"
+        );
+        // The pane's bottom row shows the last rendered line of the message
+        // (its trailing blank card row) — nothing is cut off below it.
+        let buf = terminal.backend().buffer();
+        let bottom_row: String = (0..buf.area.width - 1)
+            .map(|x| buf[(x, HISTORY_H as u16 - 1)].symbol().to_string())
+            .collect();
+        assert!(
+            bottom_row.trim().is_empty(),
+            "the message's trailing blank row must sit at the pane bottom, got: {bottom_row:?}"
+        );
     }
 }
 
