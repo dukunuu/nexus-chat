@@ -23,7 +23,7 @@ fn parse_topic_extracts_and_slugifies() {
 #[test]
 fn session_filter_matches_title_and_slug() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("k"), test_space());
     let space = a.active_space.id.clone();
     let s1 =
         a.db.create_session("Rust async runtimes", "a/b", &space, "chat")
@@ -47,7 +47,7 @@ fn session_filter_matches_title_and_slug() {
 #[test]
 fn delete_removes_session_and_clears_if_active() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("k"), test_space());
     let space = a.active_space.id.clone();
     let s =
         a.db.create_session("doomed", "a/b", &space, "chat")
@@ -77,7 +77,7 @@ fn delete_removes_session_and_clears_if_active() {
 #[test]
 fn watch_picker_resets_confirm_mode_on_open() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("k"), test_space());
     let space = a.active_space.id.clone();
     let session = a.db.create_session("watch", "a/b", &space, "chat").unwrap();
     let _ =
@@ -104,7 +104,7 @@ fn code_blocks_split_by_fence_with_lang() {
 
 pub fn app_with_key() -> App {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("sk-or-test-key".into()), test_space());
+    let mut a = App::new(db, Some("sk-or-test-key"), test_space());
     a.models = vec![
         Model {
             id: "a/one".into(),
@@ -199,7 +199,7 @@ async fn message_with_model_creates_session_and_streams() {
 #[test]
 fn ocr_settings_defaults_gate_and_cycle() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("sk-or-test".into()), test_space());
+    let mut a = App::new(db, Some("sk-or-test"), test_space());
     assert_eq!(a.ocr_model, "google/gemini-2.5-flash-lite");
     assert_eq!(a.ocr_engine, "auto");
     assert_eq!(a.embedding_model, "openai/text-embedding-3-small");
@@ -566,7 +566,7 @@ async fn esc_stop_keeps_partial_response() {
 #[test]
 fn panels_split_favorites_from_available_by_recency() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("k"), test_space());
     a.models = vec![
         Model {
             id: "a/one".into(),
@@ -618,7 +618,7 @@ fn panels_split_favorites_from_available_by_recency() {
 #[test]
 fn toggle_favorite_persists_and_moves_panel() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("k"), test_space());
     a.models = vec![Model {
         id: "a/one".into(),
         name: "One".into(),
@@ -655,7 +655,7 @@ fn filter_narrows_available() {
 #[test]
 fn reasoning_cycles_only_for_supporting_models() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("k"), test_space());
     a.models = vec![Model {
         id: "r/model".into(),
         name: "R".into(),
@@ -690,7 +690,7 @@ fn reasoning_cycles_models_own_effort_list() {
     // A Claude-like model accepts an extra `minimal` tier before `low`;
     // the cycle must walk exactly the model's own list, not a global one.
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("k"), test_space());
     a.models = vec![Model {
         id: "anthropic/claude-sonnet-4.5".into(),
         name: "Sonnet".into(),
@@ -721,7 +721,7 @@ fn reasoning_cycles_models_own_effort_list() {
 #[test]
 fn reasoning_cycle_uses_explicit_none_and_clears_stale_preferences() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("k"), test_space());
     a.models = vec![
         Model {
             id: "xhigh-model".into(),
@@ -784,7 +784,7 @@ fn reasoning_cycle_uses_explicit_none_and_clears_stale_preferences() {
 #[test]
 fn effort_accepted_follows_the_models_own_list() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("k"), test_space());
     a.models = vec![
         Model {
             id: "claude".into(),
@@ -850,7 +850,7 @@ async fn starting_a_request_clears_an_unsupported_reasoning_preference() {
 #[test]
 fn focused_reasoning_hint_lists_accepted_values() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("k"), test_space());
     a.models = vec![Model {
         id: "claude".into(),
         name: "C".into(),
@@ -898,7 +898,7 @@ fn settings_groups_cover_every_field_exactly_once() {
 #[test]
 fn collapsing_a_group_hides_its_fields_and_toggling_header_again_restores_them() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("k"), test_space());
     a.popup = Popup::Settings;
     let rows_expanded = a.settings_rows().len();
     a.settings_selected = 0; // first group header ("Interface")
@@ -913,7 +913,7 @@ fn collapsing_a_group_hides_its_fields_and_toggling_header_again_restores_them()
 #[test]
 fn settings_edit_and_save_persists() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("k"), test_space());
     a.popup = Popup::Settings;
     a.settings_selected = 1; // ShowStats (row 0 is the "Interface" group header)
     a.toggle_settings_field();
@@ -926,11 +926,7 @@ fn settings_edit_and_save_persists() {
     assert_eq!(a.settings.temperature, Some(0.7));
 
     // reload from db picks up the saved values
-    let b = App::new(
-        Db::open_in_memory().unwrap(),
-        Some("k".into()),
-        test_space(),
-    );
+    let b = App::new(Db::open_in_memory().unwrap(), Some("k"), test_space());
     let _ = b; // separate in-memory db; just assert current instance loads its own
     let reloaded = a.db.load_settings().unwrap();
     assert!(
@@ -985,7 +981,7 @@ fn verbosity_setting_persists_and_changes_the_prompt() {
 #[test]
 fn searxng_url_setting_persists_and_enables_search_tool() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("k".into()), test_space());
+    let mut a = App::new(db, Some("k"), test_space());
     // search always works (DuckDuckGo fallback needs no config); only
     // the backend it uses depends on this setting.
     assert!(a.toolbox.defs().iter().any(|t| t.name == "search"));
@@ -1010,7 +1006,7 @@ fn searxng_url_setting_persists_and_enables_search_tool() {
     );
 
     // Reloading a fresh App from the same db picks it back up.
-    let mut b = App::new(a.db, Some("k".into()), test_space());
+    let mut b = App::new(a.db, Some("k"), test_space());
     b.load_settings();
     assert_eq!(b.searxng_url, "http://localhost:8080");
 }
@@ -1021,7 +1017,7 @@ fn last_used_model_restored_on_startup() {
     db.mark_model_used("a/one").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2));
     db.mark_model_used("b/two").unwrap(); // more recent
-    let a = App::new(db, Some("k".into()), test_space());
+    let a = App::new(db, Some("k"), test_space());
     assert_eq!(a.current_model.as_deref(), Some("b/two"));
 }
 
@@ -1240,7 +1236,7 @@ fn pick_model_at_sets_current_and_closes() {
     a.popup = Popup::Model;
     a.pick_model_at(ModelPanel::Available, 0).unwrap();
     assert!(a.current_model.is_some());
-    assert!(a.popup == Popup::None);
+    assert_eq!(a.popup, Popup::None);
 }
 
 #[test]
@@ -1248,12 +1244,12 @@ fn picking_memory_model_sets_it_and_returns_to_settings() {
     let mut a = app_with_key();
     let original_model = a.current_model.clone();
     a.open_model_picker_for_memory();
-    assert!(a.popup == Popup::Model);
+    assert_eq!(a.popup, Popup::Model);
     assert!(a.model_pick_target == ModelPickTarget::Memory);
 
     a.pick_model_at(ModelPanel::Available, 0).unwrap();
     assert_eq!(a.memory_model, "a/one");
-    assert!(a.popup == Popup::Settings); // back to /config, not closed
+    assert_eq!(a.popup, Popup::Settings); // back to /config, not closed
     assert_eq!(a.current_model, original_model); // session model untouched
     assert_eq!(
         a.db.load_settings()
@@ -1297,7 +1293,7 @@ fn transcriber_model_defaults_and_persists() {
 #[test]
 fn utility_defaults_are_prefixed_for_non_openrouter_bootstrap_backend() {
     let db = Db::open_in_memory().unwrap();
-    let a = App::new(db, Some("sk-openai-test-key".into()), test_space());
+    let a = App::new(db, Some("sk-openai-test-key"), test_space());
 
     assert_eq!(a.memory_model, "openai:gpt-4.1-mini");
     assert_eq!(a.transcriber_model, "openai:gpt-4.1-mini");
@@ -1308,7 +1304,7 @@ fn utility_defaults_are_prefixed_for_non_openrouter_bootstrap_backend() {
 #[test]
 fn utility_model_resolution_falls_back_from_legacy_openrouter_id_on_openai() {
     let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("sk-openai-test-key".into()), test_space());
+    let mut a = App::new(db, Some("sk-openai-test-key"), test_space());
     a.models = vec![Model {
         id: "gpt-4.1-mini".into(),
         name: "GPT-4.1 mini".into(),
@@ -1437,7 +1433,7 @@ fn model_picker_without_key_opens_login_popup() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, None, test_space());
     a.open_model_picker();
-    assert!(a.popup == Popup::Login);
+    assert_eq!(a.popup, Popup::Login);
 }
 
 #[test]
@@ -1821,6 +1817,8 @@ fn research_stage_rows_are_never_replayed_into_history() {
 }
 
 #[test]
+// One assertion per tool call summary — the table is the point.
+#[allow(clippy::too_many_lines)]
 fn tool_call_summaries_name_the_interesting_argument() {
     use crate::app::tool_call_summary;
     assert_eq!(
@@ -1936,13 +1934,12 @@ async fn swarm_popup_add_edit_remove_and_toggle_persist_to_db() {
     let sid = a.session.as_ref().unwrap().id.clone();
 
     a.run_command("swarm").unwrap();
-    assert!(a.popup == Popup::Swarm);
+    assert_eq!(a.popup, Popup::Swarm);
     assert!(a.swarm_cache.is_empty());
 
     a.queue_swarm_persona_editor(true).unwrap();
-    let path = match a.pending_editor.take().unwrap() {
-        PendingEditor::Persona(path) => path,
-        _ => panic!("expected persona editor request"),
+    let PendingEditor::Persona(path) = a.pending_editor.take().unwrap() else {
+        panic!("expected persona editor request");
     };
     std::fs::write(
         &path,
@@ -1980,9 +1977,8 @@ async fn swarm_add_row_then_cancel_without_naming_drops_the_blank_row() {
     a.run_command("swarm").unwrap();
     a.queue_swarm_persona_editor(true).unwrap();
     assert_eq!(a.swarm_cache.len(), 1);
-    let path = match a.pending_editor.take().unwrap() {
-        PendingEditor::Persona(path) => path,
-        _ => panic!("expected persona editor request"),
+    let PendingEditor::Persona(path) = a.pending_editor.take().unwrap() else {
+        panic!("expected persona editor request");
     };
     a.apply_swarm_persona_editor(&path).unwrap(); // unchanged blank name cancels
     assert!(a.swarm_cache.is_empty());
@@ -2024,9 +2020,8 @@ fn swarm_persona_round_trips_through_external_editor_file() {
     }];
 
     a.queue_swarm_persona_editor(false).unwrap();
-    let path = match a.pending_editor.take().unwrap() {
-        PendingEditor::Persona(path) => path,
-        _ => panic!("expected persona editor request"),
+    let PendingEditor::Persona(path) = a.pending_editor.take().unwrap() else {
+        panic!("expected persona editor request");
     };
     let template = std::fs::read_to_string(&path).unwrap();
     assert!(template.contains("name: Skeptic"));

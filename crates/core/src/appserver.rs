@@ -992,7 +992,12 @@ mod tests {
         let resp: serde_json::Value = r.json().await.unwrap();
         let url = resp["url"].as_str().unwrap().to_string();
         assert!(url.starts_with(&format!("/{uuid}/_uploads/")), "url: {url}");
-        assert!(url.ends_with(".txt"), "url: {url}");
+        assert!(
+            std::path::Path::new(&url)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("txt")),
+            "url: {url}"
+        );
 
         let r = c.get(format!("{base}{url}")).send().await.unwrap();
         assert_eq!(r.status(), 200);

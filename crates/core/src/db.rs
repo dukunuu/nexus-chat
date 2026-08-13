@@ -3722,6 +3722,8 @@ mod tests {
     }
 
     #[test]
+    // space_a_watches / space_b_watches differ only by the space label.
+    #[allow(clippy::similar_names)]
     fn list_all_watches_returns_watches_from_all_spaces() {
         let db = Db::open_in_memory().unwrap();
 
@@ -3851,6 +3853,8 @@ mod tests {
     }
 
     #[test]
+    // The price catalog round-trips exact decimals (1.0 in, 1.0 out).
+    #[allow(clippy::float_cmp)]
     fn legacy_db_migrates_cache_tables_and_seeds_file_index_state() {
         let dir = std::env::temp_dir().join(format!("nexus-migrate-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3941,6 +3945,8 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     #[test]
     fn every_mutable_table_bumps_updated_at_on_mutation() {
+        // One closure per table; the array needs a shared fn type.
+        type Mutator<'a> = &'a dyn Fn(&Db) -> Result<()>;
         let mut db = Db::open_in_memory().unwrap();
         let space = db.default_space_id().unwrap();
         let sid = db.create_session("t", "a/b", &space, "chat").unwrap().id;
@@ -3956,7 +3962,7 @@ mod tests {
         };
 
         // sessions: every mutation path bumps.
-        let mutators: [&dyn Fn(&Db) -> Result<()>; 6] = [
+        let mutators: [Mutator<'_>; 6] = [
             &|db: &Db| db.set_compaction(&sid, "sum", 3),
             &|db: &Db| db.set_session_web_mode(&sid, true),
             &|db: &Db| db.set_session_swarm_mode(&sid, true),

@@ -1524,7 +1524,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("seen.txt"), "content").unwrap();
         a.run_command("files").unwrap();
-        assert!(a.popup == crate::app::Popup::Files);
+        assert_eq!(a.popup, crate::app::Popup::Files);
         assert_eq!(a.files_cache.len(), 1);
         assert!(a.files_mode == crate::app::FilesMode::Browse);
     }

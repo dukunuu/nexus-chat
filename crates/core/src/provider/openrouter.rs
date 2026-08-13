@@ -2594,6 +2594,8 @@ mod tests {
     }
 
     #[test]
+    // One row per live catalog id — the table is the point.
+    #[allow(clippy::too_many_lines)]
     fn opencode_context_fallback_covers_every_live_catalog_id() {
         // The live endpoints serve exactly these ids today; each must have a
         // known context window, or that model silently shows no context size
@@ -2743,9 +2745,15 @@ mod tests {
         let entry = |id: &str, parameters: &[&str], efforts: &[&str]| ModelEntry {
             id: id.to_string(),
             name: None,
-            supported_parameters: parameters.iter().map(|value| value.to_string()).collect(),
+            supported_parameters: parameters
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             reasoning: (!efforts.is_empty()).then(|| ModelReasoningEntry {
-                supported_efforts: efforts.iter().map(|value| value.to_string()).collect(),
+                supported_efforts: efforts
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
             }),
             context_length: None,
             architecture: None,

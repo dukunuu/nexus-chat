@@ -481,19 +481,18 @@ fn installed_langs(tesseract: &str) -> Option<String> {
 
 /// Build a minimal valid PDF: one page, optionally with `text` drawn in
 /// Helvetica. Offsets are computed at runtime so the xref is always correct.
-/// Test fixture shared with app::files tests.
+/// Test fixture shared with `app::files` tests.
 #[cfg(test)]
 pub(crate) fn minimal_pdf(text: Option<&str>) -> Vec<u8> {
-    match text {
-        Some(t) => pdf_with_pages(&[t]),
-        None => {
-            let objs = vec![
-                "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
-                "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 150] >>".to_string(),
-            ];
-            serialize_pdf(objs)
-        }
+    if let Some(t) = text {
+        pdf_with_pages(&[t])
+    } else {
+        let objs = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 150] >>".to_string(),
+        ];
+        serialize_pdf(&objs)
     }
 }
 
@@ -523,11 +522,11 @@ pub(crate) fn pdf_with_pages(texts: &[&str]) -> Vec<u8> {
         ));
     }
     objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into());
-    serialize_pdf(objs)
+    serialize_pdf(&objs)
 }
 
 #[cfg(test)]
-fn serialize_pdf(objs: Vec<String>) -> Vec<u8> {
+fn serialize_pdf(objs: &[String]) -> Vec<u8> {
     let mut out = b"%PDF-1.4\n".to_vec();
     let mut offsets: Vec<usize> = Vec::new();
     for (i, o) in objs.iter().enumerate() {
@@ -606,15 +605,15 @@ mod tests {
             &[
                 (
                     "ppt/slides/slide1.xml",
-                    r#"<p:sld><a:t>Title one</a:t><a:t>Bullet</a:t></p:sld>"#,
+                    r"<p:sld><a:t>Title one</a:t><a:t>Bullet</a:t></p:sld>",
                 ),
                 (
                     "ppt/slides/slide2.xml",
-                    r#"<p:sld><a:t>Second slide</a:t></p:sld>"#,
+                    r"<p:sld><a:t>Second slide</a:t></p:sld>",
                 ),
                 (
                     "ppt/slides/slide10.xml",
-                    r#"<p:sld><a:t>Tenth slide</a:t></p:sld>"#,
+                    r"<p:sld><a:t>Tenth slide</a:t></p:sld>",
                 ),
             ],
         );
@@ -636,11 +635,11 @@ mod tests {
             &[
                 (
                     "xl/sharedStrings.xml",
-                    r#"<sst><si><t>revenue</t></si><si><t>cost</t></si></sst>"#,
+                    r"<sst><si><t>revenue</t></si><si><t>cost</t></si></sst>",
                 ),
                 (
                     "xl/worksheets/sheet1.xml",
-                    r#"<worksheet><c><v>42</v></c><c><v>7</v></c></worksheet>"#,
+                    r"<worksheet><c><v>42</v></c><c><v>7</v></c></worksheet>",
                 ),
             ],
         );

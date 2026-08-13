@@ -411,10 +411,10 @@ mod tests {
         s.record_render(
             Rect::new(0, 0, 40, 10),
             0,
-            lines.iter().map(|l| l.to_string()).collect(),
+            lines.iter().map(std::string::ToString::to_string).collect(),
             owner.to_vec(),
             code.to_vec(),
-            raw.iter().map(|l| l.to_string()).collect(),
+            raw.iter().map(std::string::ToString::to_string).collect(),
         );
         s
     }

@@ -5382,7 +5382,7 @@ mod tests {
 
     #[test]
     fn missing_results_field_yields_no_hits() {
-        let resp: SearxngResponse = serde_json::from_str(r#"{}"#).unwrap();
+        let resp: SearxngResponse = serde_json::from_str(r"{}").unwrap();
         assert!(resp.results.is_empty());
     }
 
@@ -6067,6 +6067,8 @@ mod tests {
     }
 
     #[test]
+    // One row per tool — the classification table is the point.
+    #[allow(clippy::too_many_lines)]
     fn read_only_tool_classification() {
         for (tool, args) in [
             ("search", r#"{"mode":"web","query":"x"}"#),
@@ -6199,7 +6201,7 @@ mod tests {
                 ]}"#,
             )
             .await;
-        assert!(status.contains("3"), "status was {status:?}");
+        assert!(status.contains('3'), "status was {status:?}");
         assert!(result.contains("[1/3] scripts/write a.sh"), "{result}");
         assert!(result.contains("[2/3] scripts/read a.sh"), "{result}");
         assert!(result.contains("[3/3] skills/load t"), "{result}");
@@ -6225,7 +6227,7 @@ mod tests {
                 ]}"#,
             )
             .await;
-        assert!(status.contains("2"), "status was {status:?}");
+        assert!(status.contains('2'), "status was {status:?}");
         assert!(
             result.contains("[1/2] app/read deck/index.html"),
             "{result}"
@@ -6447,7 +6449,8 @@ mod tests {
     fn defs_include_app_tools_only_with_apps_ctx() {
         let (tb, _) = apps_toolbox();
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
-        for t in ["app"] {
+        {
+            let t = "app";
             assert!(names.contains(&t.to_string()), "missing {t}");
         }
         // The app tool's action surface includes init/build.
@@ -6545,17 +6548,16 @@ mod tests {
             .arg("--version")
             .output()
             .await
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+            .is_ok_and(|o| o.status.success())
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn build_runs_the_declared_tool_and_marks_dist_served() {
+        use std::os::unix::fs::PermissionsExt;
         if !npx_available().await {
             return; // no node/npm on this machine — skip
         }
-        use std::os::unix::fs::PermissionsExt;
         let (tb, dir) = apps_toolbox();
         let app = dir.join("built");
         std::fs::create_dir_all(app.join("node_modules/.bin")).unwrap();
@@ -6601,10 +6603,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn build_without_dist_output_never_marks_dist_served() {
+        use std::os::unix::fs::PermissionsExt;
         if !npx_available().await {
             return; // no node/npm on this machine — skip
         }
-        use std::os::unix::fs::PermissionsExt;
         let (tb, dir) = apps_toolbox();
         let app = dir.join("misbuilt");
         std::fs::create_dir_all(app.join("node_modules/.bin")).unwrap();

@@ -9,7 +9,7 @@ fn test_app() -> App {
     let db = Db::open_in_memory().unwrap();
     let root = std::env::temp_dir().join(format!("nexus-popup-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join("spaces")).unwrap();
-    App::new(db, Some("k".into()), Space { root })
+    App::new(db, Some("k"), Space { root })
 }
 
 fn render_to_string(width: u16, height: u16, render: impl FnOnce(&mut ratatui::Frame)) -> String {
@@ -295,7 +295,7 @@ mod usage_render_tests {
         let space = Space {
             root: std::env::temp_dir().join(format!("nexus-usage-{}", uuid::Uuid::new_v4())),
         };
-        let mut app = App::new(db, Some("k".into()), space);
+        let mut app = App::new(db, Some("k"), space);
         app.usage_data = Some(UsageData {
             totals: UsageTotals {
                 requests: 28_172,
@@ -385,16 +385,18 @@ mod usage_render_tests {
     /// value's right edge in `row` (right-aligned columns), with the cached
     /// column's "%" riding one cell past the label like the rows' "65%".
     fn assert_column(header: &str, row: &str, label: &str, value: &str) {
-        let label_end = char_pos(header, label)
-            .map(|i| i + label.len())
-            .unwrap_or_else(|| {
+        let label_end = char_pos(header, label).map_or_else(
+            || {
                 panic!("header missing {label:?}: {header}");
-            });
-        let value_end = char_pos(row, value)
-            .map(|i| i + value.len())
-            .unwrap_or_else(|| {
+            },
+            |i| i + label.len(),
+        );
+        let value_end = char_pos(row, value).map_or_else(
+            || {
                 panic!("row missing {value:?}: {row}");
-            });
+            },
+            |i| i + value.len(),
+        );
         assert_eq!(
             label_end, value_end,
             "column {label:?} ({value:?}) misaligned\nheader: {header}\nrow:    {row}"
@@ -498,7 +500,7 @@ mod watch_popup_tests {
     #[test]
     fn watch_picker_ctrl_d_confirms_with_a_second_press() {
         let db = Db::open_in_memory().unwrap();
-        let mut a = App::new(db, Some("k".into()), test_space());
+        let mut a = App::new(db, Some("k"), test_space());
         let space = a.active_space.id.clone();
         let session = a.db.create_session("watch", "a/b", &space, "chat").unwrap();
         let _ =
@@ -532,7 +534,7 @@ mod watch_popup_tests {
     #[test]
     fn watch_picker_escape_cancels_delete_confirmation() {
         let db = Db::open_in_memory().unwrap();
-        let mut a = App::new(db, Some("k".into()), test_space());
+        let mut a = App::new(db, Some("k"), test_space());
         let space = a.active_space.id.clone();
         let session = a.db.create_session("watch", "a/b", &space, "chat").unwrap();
         let _ =

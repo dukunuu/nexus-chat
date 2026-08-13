@@ -140,7 +140,7 @@ mod tests {
         std::fs::write(dir.join("deck/node_modules/p/i.js"), "z").unwrap();
 
         a.run_command("apps").unwrap();
-        assert!(a.popup == Popup::Apps);
+        assert_eq!(a.popup, Popup::Apps);
         assert_eq!(a.apps_cache, vec!["deck"]);
         assert_eq!(a.app_file_count("deck"), 2); // node_modules skipped
 

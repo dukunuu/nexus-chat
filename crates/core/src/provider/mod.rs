@@ -456,7 +456,7 @@ mod tests {
     fn chat_message_with_tool_calls_still_serializes_them() {
         let m = ChatMessage {
             role: "assistant".into(),
-            content: "".into(),
+            content: String::new(),
             tool_calls: Some(vec![ToolCall {
                 id: "c1".into(),
                 name: "web_search".into(),

@@ -1710,9 +1710,9 @@ mod tests {
         let nested = root.join("spaces").join("default");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("memory.md"), "hello").unwrap();
-        std::fs::write(root.join("nexus.db"), b"\x00\x01".to_vec()).unwrap();
+        std::fs::write(root.join("nexus.db"), b"\x00\x01").unwrap();
         // The device-local cache db must never ride along in a backup.
-        std::fs::write(root.join("cache.db"), b"\x02\x03".to_vec()).unwrap();
+        std::fs::write(root.join("cache.db"), b"\x02\x03").unwrap();
 
         let zip_path = root.with_extension("zip");
         zip_dir(&root, &zip_path).unwrap();

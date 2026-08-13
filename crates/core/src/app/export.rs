@@ -87,7 +87,7 @@ mod tests {
             (
                 "report-a.md".to_string(),
                 "https://b.example".to_string(),
-                "".to_string(),
+                String::new(),
             ),
         ];
         let out = assemble_report("# Report\nBody [1] [2].", &citations);

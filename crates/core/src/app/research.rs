@@ -2745,7 +2745,7 @@ mod tests {
         assert!(p.contains("internals; benchmarks"));
         assert!(p.contains("papers"));
         // A bare question stays prompt-safe too.
-        assert!(PlanQuestion::bare("q".into()).prompt("t").contains("q"));
+        assert!(PlanQuestion::bare("q".into()).prompt("t").contains('q'));
     }
 
     #[test]
@@ -2771,10 +2771,10 @@ mod tests {
     fn survey_messages_include_topic_and_rounds() {
         let msgs = survey_messages("t", &[]);
         assert_eq!(msgs[0].role, "system");
-        assert!(msgs[1].content.contains("t"));
+        assert!(msgs[1].content.contains('t'));
         let msgs = survey_messages("t", &[("q".to_string(), "a".to_string())]);
-        assert!(msgs[1].content.contains("q"));
-        assert!(msgs[1].content.contains("a"));
+        assert!(msgs[1].content.contains('q'));
+        assert!(msgs[1].content.contains('a'));
     }
 
     #[test]
@@ -2901,9 +2901,14 @@ mod tests {
         let dir = a.space.files_dir(&space_name);
         let saved: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with("plan-") && n.ends_with(".md"))
+            .filter(|n| {
+                n.starts_with("plan-")
+                    && std::path::Path::new(n)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            })
             .collect();
         assert_eq!(saved.len(), 1, "expected one plan file in {dir:?}");
         let body = std::fs::read_to_string(dir.join(&saved[0])).unwrap();
@@ -3291,7 +3296,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let saved: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.starts_with("plan-"))
             .collect();
@@ -3486,7 +3491,7 @@ mod tests {
         let dir = a.space.files_dir(&space_name);
         let saved = std::fs::read_dir(&dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .count();
         assert_eq!(
             saved, 1,
@@ -3530,7 +3535,7 @@ mod tests {
         let original_dir = a.space.files_dir(&original_space_name);
         let original_files = std::fs::read_dir(&original_dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .count();
         assert_eq!(
             original_files, 1,
@@ -3540,8 +3545,7 @@ mod tests {
         // Assert: the report file did NOT land in the second (now-active) space's files_dir
         let second_dir = a.space.files_dir(&second_space.name);
         let second_files = std::fs::read_dir(&second_dir)
-            .map(|d| d.filter_map(|e| e.ok()).count())
-            .unwrap_or(0);
+            .map_or(0, |d| d.filter_map(std::result::Result::ok).count());
         assert_eq!(
             second_files, 0,
             "expected no files in second (active) space {second_dir:?}"

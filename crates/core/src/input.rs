@@ -793,7 +793,7 @@ mod tests {
         std::fs::write(&src, "x").unwrap();
 
         a.paste(&src.to_string_lossy());
-        assert!(a.popup == crate::app::Popup::Files);
+        assert_eq!(a.popup, crate::app::Popup::Files);
         assert!(a.files_mode == crate::app::FilesMode::Add);
         assert_eq!(a.files_edit, src.to_string_lossy());
         assert!(a.input_text().is_empty()); // path did not land in the composer
@@ -801,12 +801,12 @@ mod tests {
         // file:// URIs and quoted paths (file-manager drag/drop) work too.
         let mut a = test_app();
         a.paste(&format!("file://{}", src.to_string_lossy()));
-        assert!(a.popup == crate::app::Popup::Files);
+        assert_eq!(a.popup, crate::app::Popup::Files);
 
         // Ordinary text is untouched.
         let mut a = test_app();
         a.paste("/not/a/real/path and some prose");
-        assert!(a.popup == crate::app::Popup::None);
+        assert_eq!(a.popup, crate::app::Popup::None);
         assert_eq!(a.input_text(), "/not/a/real/path and some prose");
     }
 }

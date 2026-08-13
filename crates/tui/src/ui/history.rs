@@ -1468,12 +1468,11 @@ mod tests {
         // The survey row is never replayed to the model — the role filter in
         // build_history skips it (covered in app/chat.rs tests); here we just
         // verify the renderer picked it up.
-        assert_eq!(
+        assert!(
             a.history_cache
                 .plain
                 .iter()
-                .any(|l| l.contains("Depth or breadth?")),
-            true
+                .any(|l| l.contains("Depth or breadth?"))
         );
     }
 
@@ -1528,6 +1527,7 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_reasoning_growth_keeps_viewport_on_reasoning() {
+        use std::fmt::Write as _;
         let reasoning: String = (0..60)
             .map(|i| format!("reasoning line {i} with a bunch of words to wrap around"))
             .collect::<Vec<_>>()
@@ -1548,9 +1548,11 @@ mod tests {
         // Reasoning keeps streaming below the viewport.
         let task = a.chat_tasks.get_mut(&1).unwrap();
         for i in 0..20 {
-            task.thinking.push_str(&format!(
+            write!(
+                task.thinking,
                 "\nfresh reasoning token {i} some more words to wrap"
-            ));
+            )
+            .unwrap();
         }
         terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
 
@@ -1563,6 +1565,7 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_reasoning_growth_keeps_viewport_on_answer() {
+        use std::fmt::Write as _;
         let reasoning: String = (0..50)
             .map(|i| format!("reasoning line {i} with a bunch of words to wrap around"))
             .collect::<Vec<_>>()
@@ -1589,9 +1592,11 @@ mod tests {
         // Reasoning keeps streaming above the viewport; answer grows a bit below.
         let task = a.chat_tasks.get_mut(&1).unwrap();
         for i in 0..30 {
-            task.thinking.push_str(&format!(
+            write!(
+                task.thinking,
                 "\nmore reasoning token {i} with some words to wrap"
-            ));
+            )
+            .unwrap();
         }
         task.buffer.push_str(" more answer tokens here.");
         terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();

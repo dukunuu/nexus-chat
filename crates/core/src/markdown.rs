@@ -650,7 +650,7 @@ mod table_tests {
                 assert!(matches!(aligns[0], Align::Left));
                 assert!(matches!(aligns[1], Align::Right));
             }
-            _ => panic!("expected a table segment"),
+            Segment::Text(_) => panic!("expected a table segment"),
         }
         assert!(matches!(&segs[2], Segment::Text(t) if t.trim() == "after"));
     }

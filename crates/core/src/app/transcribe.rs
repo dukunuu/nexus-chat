@@ -107,12 +107,12 @@ mod tests {
 
     #[test]
     fn encodes_rgba_as_png_data_url() {
+        use base64::Engine;
         // 2x1 image: red pixel, transparent pixel.
         let rgba = [255, 0, 0, 255, 0, 0, 0, 0];
         let url = png_data_url(2, 1, &rgba).unwrap();
         assert!(url.starts_with("data:image/png;base64,"));
         // Round-trip: the payload decodes as a real 2x1 PNG.
-        use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(url.strip_prefix("data:image/png;base64,").unwrap())
             .unwrap();
