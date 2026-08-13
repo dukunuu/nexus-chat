@@ -22,6 +22,10 @@ scripts/check.sh               # THE gate: fmt + clippy + audit + tests
 scripts/check.sh --fix         # auto-fix fmt/clippy, then run the gate
 ```
 
+Pushing to master auto-bumps the patch version, tags `vX.Y.Z`, and releases
+(crates.io + GitHub) via `.github/workflows/version-bump.yml`; a manual `v*`
+tag push publishes the same way. Workflows live in `.github/workflows/`.
+
 Every commit runs `scripts/check.sh` via the local pre-commit hook — a commit
 that fails the gate is rejected. **Never disable the hook, and never commit
 code that fails `cargo clippy -- -D warnings -W clippy::pedantic`.**

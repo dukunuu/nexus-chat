@@ -1,0 +1,72 @@
+name: Auto version bump + release
+
+# Every push to master bumps the patch version, commits "chore: bump to
+# X.Y.Z", tags it vX.Y.Z, and runs the release pipeline (check gate,
+# crates.io publish, GitHub release). The bump commit and tag are pushed
+# with GITHUB_TOKEN, whose pushes do not trigger new workflow runs — so no
+# loop: the only re-run would see Cargo.toml already matching the latest
+# tag and skip. Manual v* tag pushes keep working via publish.yml.
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: version-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump version and tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+      skip: ${{ steps.bump.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Bump patch version, commit, and tag
+        id: bump
+        run: |
+          set -euo pipefail
+          git fetch --tags --force origin
+          last_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          manifest="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ -n "$last_tag" ] && [ "$manifest" != "${last_tag#v}" ]; then
+            # Cargo.toml is already ahead of the last tag — a manual bump is
+            # in flight; leave it to the manual tag flow.
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          new="$(printf '%s' "$manifest" | awk -F. '{print $1"."$2"."($3+1)}')"
+          sed -i "s/^version = \".*\"$/version = \"$new\"/" Cargo.toml
+          # Lockfile: only the root package version changes (a full
+          # re-resolve would churn every dependency).
+          sed -i '/^name = "nexus-chat"$/{n;s/^version = ".*"/version = "'"$new"'"/;}' Cargo.lock
+          # Sanity check: fail loudly if the manifests are inconsistent.
+          cargo metadata --no-deps --locked >/dev/null
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: bump to $new"
+          git tag "v$new"
+          git push origin master
+          git push origin "v$new"
+          echo "tag=v$new" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Publish and cut release
+    needs: bump
+    if: needs.bump.outputs.skip != 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag_name: ${{ needs.bump.outputs.tag }}
+    secrets: inherit

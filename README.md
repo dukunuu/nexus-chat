@@ -215,6 +215,11 @@ The pre-commit hook runs `scripts/check.sh` on every commit — a merge-ready
 change passes it. See [AGENTS.md](AGENTS.md) for conventions and a deeper
 module map.
 
+Pushes to `master` release automatically: a workflow bumps the patch version,
+tags `vX.Y.Z`, and runs the publish pipeline (crates.io + GitHub release with
+the release binary). Manual `v*` tag pushes publish the same way. Details in
+`.github/workflows/`.
+
 ## Roadmap
 
 Multi-device (web + mobile) via a sync mesh, no 24/7 backend — see

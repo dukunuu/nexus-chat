@@ -1,0 +1,77 @@
+name: Release steps
+
+# Shared release pipeline, called from publish.yml (manual v* tag pushes) and
+# version-bump.yml (automatic releases on master pushes). Runs the check
+# gate, publishes to crates.io, and cuts a GitHub release with the binary.
+
+on:
+  workflow_call:
+    inputs:
+      tag_name:
+        description: "Tag to cut the release for (auto path); empty = the pushed tag (manual path)"
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Check, publish to crates.io, cut release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Auto path: the bump commit + tag were pushed by version-bump.yml
+      # after this run started, so check out the tag explicitly.
+      - name: Checkout release tag
+        if: inputs.tag_name != ''
+        run: |
+          git fetch --tags --force origin
+          git checkout "${{ inputs.tag_name }}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run check gate
+        run: scripts/check.sh
+
+      # Manual path only: version-bump.yml keeps Cargo.toml and the tag
+      # consistent by construction.
+      - name: Verify version matches tag
+        if: github.ref_type == 'tag'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$tag" != "$manifest" ]; then
+            echo "tag $tag does not match Cargo.toml version $manifest" >&2
+            exit 1
+          fi
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: cargo publish
+
+      - name: Build release binary
+        run: cargo build --release --bin nexus
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
+          files: target/release/nexus
+          generate_release_notes: true
