@@ -6,11 +6,11 @@ cd "$(dirname "$0")/.."
 
 if [[ "${1:-}" == "--fix" ]]; then
     cargo fmt
-    cargo clippy --fix --allow-dirty --bin nexus || true
+    cargo clippy --fix --allow-dirty --workspace || true
 fi
 
 cargo fmt --check
-cargo clippy --bin nexus -- -D warnings -W clippy::pedantic
+cargo clippy --workspace -- -D warnings -W clippy::pedantic
 cargo audit
-cargo test --bin nexus
+cargo test --workspace
 echo "check.sh: all green"

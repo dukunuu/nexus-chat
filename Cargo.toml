@@ -1,20 +1,18 @@
-[package]
-name = "nexus-chat"
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/tui"]
+
+[workspace.package]
 version = "0.1.4"
 edition = "2024"
 rust-version = "1.91"
 description = "A local-first terminal chat app for deep research and multi-agent work"
 license = "MIT"
 repository = "https://github.com/dukunuu/nexus-chat"
-readme = "README.md"
 keywords = ["chat", "research", "tui", "ratatui", "llm"]
 categories = ["command-line-utilities", "multimedia::images"]
 
-[[bin]]
-name = "nexus"
-path = "src/main.rs"
-
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0.103"
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control", "image-data"] }
 base64 = "0.22.1"

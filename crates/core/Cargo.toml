@@ -1,0 +1,50 @@
+[package]
+name = "nexus-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+# Compiles test-only helpers (in-memory Db) for downstream test code.
+# Enabled from the TUI crate's dev-dependencies only.
+test-helpers = []
+
+[dependencies]
+# ── Interim TUI deps (Phase 2a → 2e) ──────────────────────────────────────
+# The App struct still carries view state (composer, theme, render caches,
+# clipboard) until step 2e moves UI state into the TUI crate. These are
+# removed then; nothing in this crate's *own* modules should gain new
+# ratatui/crossterm/arboard usage in the meantime.
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tui-textarea-2 = { workspace = true }
+arboard = { workspace = true }
+tui-markdown = { workspace = true }
+textwrap = { workspace = true }
+unicode-width = { workspace = true }
+
+# ── Core deps ─────────────────────────────────────────────────────────────
+anyhow = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+directories = { workspace = true }
+futures-util = { workspace = true }
+image = { workspace = true }
+open = { workspace = true }
+pdf-extract = { workspace = true }
+png = { workspace = true }
+reqwest = { workspace = true }
+reqwest-eventsource = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+uuid = { workspace = true }
+zip = { workspace = true }

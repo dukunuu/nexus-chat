@@ -1,0 +1,224 @@
+use anyhow::Result;
+
+use super::{App, Popup, SessionMode};
+use crate::db::Session;
+
+impl App {
+    pub fn activate_notification(&mut self, index: usize) -> Result<()> {
+        let Some(notification) = self.notifications.remove(index) else {
+            return Ok(());
+        };
+        self.switch_to_session_by_id(&notification.session_id)
+    }
+
+    // --- commands ---
+
+    /// Clear back to a blank conversation. Doesn't touch the db — a session
+    /// row is only created lazily on the first message actually sent (same as
+    /// the very first message of the app), so `/new` without typing anything
+    /// doesn't leave an empty "new chat" behind in the session list.
+    pub fn new_session(&mut self) {
+        self.session = None;
+        self.messages.clear();
+        // A selection points into the old session's wrapped lines — a stale
+        // one would mis-highlight the new chat and resolve links against the
+        // wrong messages.
+        self.sel.clear();
+        self.context_total = None;
+        self.scroll = 0;
+        self.cleanup_incognito_images();
+        self.status = "new chat — send a message to start it".to_string();
+    }
+
+    pub fn open_session_picker(&mut self) -> Result<()> {
+        self.sessions_cache = self.db.list_sessions(&self.active_space.id)?;
+        if self.sessions_cache.is_empty() {
+            self.status = "no sessions yet — send a message to start one".to_string();
+            return Ok(());
+        }
+        self.session_selected = 0;
+        self.session_filter.clear();
+        self.session_mode = SessionMode::Browse;
+        self.popup = Popup::Session;
+        Ok(())
+    }
+
+    /// Sessions matching the current fuzzy filter (title, slug, and id), best
+    /// match first. Empty filter keeps the recency order from the db.
+    pub fn filtered_sessions(&self) -> Vec<&Session> {
+        let needle = self.session_filter.trim();
+        if needle.is_empty() {
+            return self.sessions_cache.iter().collect();
+        }
+        super::fuzzy_filter_sorted(&self.sessions_cache, |s| session_score(s, needle))
+    }
+
+    /// The session under the picker cursor (respecting the active filter).
+    pub fn selected_session(&self) -> Option<Session> {
+        self.filtered_sessions()
+            .get(self.session_selected)
+            .map(|s| (*s).clone())
+    }
+
+    pub fn move_session_selection(&mut self, delta: i32) {
+        self.session_selected =
+            super::clamp_cursor(self.session_selected, self.filtered_sessions().len(), delta);
+    }
+
+    /// A filter keystroke re-runs the fuzzy match and resets the cursor to the top.
+    pub fn session_filter_push(&mut self, c: char) {
+        self.session_filter.insert_char(c);
+        self.session_selected = 0;
+    }
+
+    pub fn session_filter_pop(&mut self) {
+        self.session_filter.backspace();
+        self.session_selected = 0;
+    }
+
+    /// Enter rename mode, seeding the edit buffer with the current title.
+    pub fn start_rename(&mut self) {
+        if let Some(s) = self.selected_session() {
+            self.session_edit = s.title;
+            self.session_mode = SessionMode::Rename;
+        }
+    }
+
+    pub fn confirm_rename(&mut self) -> Result<()> {
+        let title = self.session_edit.trim().to_string();
+        if let (false, Some(s)) = (title.is_empty(), self.selected_session()) {
+            self.db.set_session_title(&s.id, &title, None)?;
+            if let Some(cached) = self.sessions_cache.iter_mut().find(|c| c.id == s.id) {
+                cached.title.clone_from(&title);
+            }
+            if let Some(cur) = self.session.as_mut().filter(|c| c.id == s.id) {
+                cur.title = title;
+            }
+        }
+        self.session_mode = SessionMode::Browse;
+        Ok(())
+    }
+
+    /// Delete the highlighted session; if it was the active one, reset to a blank
+    /// state so the stale conversation doesn't linger.
+    pub fn confirm_delete(&mut self) -> Result<()> {
+        if let Some(s) = self.selected_session() {
+            self.db.delete_session(&s.id)?;
+            self.discard_chat_task(&s.id);
+            self.unread.remove(&s.id);
+            self.notifications.retain(|n| n.session_id != s.id);
+            self.sessions_cache.retain(|c| c.id != s.id);
+            if self.session.as_ref().is_some_and(|c| c.id == s.id) {
+                self.session = None;
+                self.messages.clear();
+                self.context_total = None;
+                self.scroll = 0;
+                self.cleanup_incognito_images();
+            }
+            self.status = format!("deleted: {}", s.title);
+        }
+        self.session_mode = SessionMode::Browse;
+        let len = self.filtered_sessions().len();
+        self.session_selected = self.session_selected.min(len.saturating_sub(1));
+        if self.sessions_cache.is_empty() {
+            self.popup = Popup::None;
+        }
+        Ok(())
+    }
+
+    /// Switch to a session by its id. Used by session-link navigation (Ctrl+O).
+    pub fn switch_to_session_by_id(&mut self, id: &str) -> Result<()> {
+        let Some(s) = self
+            .db
+            .get_session(id)?
+            .or_else(|| self.sessions_cache.iter().find(|s| s.id == id).cloned())
+        else {
+            self.status = format!("session not found: {id}");
+            return Ok(());
+        };
+        self.messages = self.db.load_messages(&s.id)?;
+        self.unread.remove(&s.id);
+        self.notifications.retain(|n| n.session_id != s.id);
+        self.status = format!("switched to: {}", s.title);
+        self.current_model = Some(s.model.clone());
+        self.web_mode = s.web_mode;
+        self.session = Some(s);
+        self.backfill_compaction_row();
+        self.restore_survey_gate_prompt();
+        self.refresh_toolbox();
+        self.context_total = None;
+        self.scroll = 0;
+        self.sel.clear(); // selection points into the previous session's lines
+        self.cleanup_incognito_images();
+        Ok(())
+    }
+
+    pub fn confirm_session(&mut self) -> Result<()> {
+        if let Some(s) = self.selected_session() {
+            self.messages = self.db.load_messages(&s.id)?;
+            self.unread.remove(&s.id);
+            self.notifications.retain(|n| n.session_id != s.id);
+            self.status = format!("switched to: {}", s.title);
+            self.current_model = Some(s.model.clone());
+            self.web_mode = s.web_mode;
+            self.session = Some(s);
+            self.backfill_compaction_row();
+            self.restore_survey_gate_prompt();
+            self.refresh_toolbox();
+            // Estimate from history until the next response reports exact usage.
+            self.context_total = None;
+            self.scroll = 0;
+            self.sel.clear(); // selection points into the previous session's lines
+            self.cleanup_incognito_images();
+        }
+        self.popup = Popup::None;
+        Ok(())
+    }
+}
+
+/// Best fuzzy score of `needle` against a session's title, slug, and uuid.
+fn session_score(s: &Session, needle: &str) -> Option<i32> {
+    use crate::input::fuzzy_score;
+    let mut best = fuzzy_score(&s.title, needle);
+    let upd = |best: &mut Option<i32>, cand: Option<i32>| {
+        if let Some(c) = cand {
+            *best = Some(best.map_or(c, |b| b.max(c)));
+        }
+    };
+    if let Some(slug) = &s.slug {
+        upd(&mut best, fuzzy_score(slug, needle).map(|v| v + 2));
+    }
+    upd(&mut best, fuzzy_score(&s.id, needle));
+    best
+}
+
+/// Parse the model's topic reply into `(topic, slug)`. Tolerates surrounding prose
+/// or code fences by extracting the first `{...}` and reading the two fields.
+pub fn parse_topic(text: &str) -> Option<(String, String)> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    let json = text.get(start..=end)?;
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let topic = v.get("topic").and_then(|t| t.as_str())?.trim();
+    if topic.is_empty() {
+        return None;
+    }
+    let raw_slug = v.get("id").and_then(|s| s.as_str()).unwrap_or(topic);
+    Some((topic.to_string(), slugify(raw_slug)))
+}
+
+/// Normalise to a short kebab-case slug: lowercase, `[a-z0-9-]`, max 5 words.
+pub fn slugify(s: &str) -> String {
+    let slug = s
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .take(5)
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        "chat".to_string()
+    } else {
+        slug
+    }
+}
