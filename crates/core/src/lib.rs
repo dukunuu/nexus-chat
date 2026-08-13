@@ -1,5 +1,5 @@
-//! nexus-core: the engine behind the `nexus` TUI and (later) the nexus
-//! host API. Owns all domain logic — sessions, research pipeline, provider
+//! nexus-chat-core (lib crate `nexus_core`): the engine behind the `nexus`
+//! TUI and (later) the nexus host API. Owns all domain logic — sessions, research pipeline, provider
 //! clients, tools, files, skills, `SQLite` state — with no knowledge of the
 //! terminal UI.
 //!

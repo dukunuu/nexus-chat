@@ -145,7 +145,7 @@ same `App`; `AppEvent` already carries Stream/Models/Title/Research/Swarm…).
 - **2e CLI on the seam** (canary): ask/chat/research/watch-run rebuilt on
   commands/events; `app/tests.rs` (2.2k lines) re-wired to the seam;
   popup snapshot tests against a thin TUI wrapper (`Core` + view state).
-- **2f Docs/CI/publish**: `check.sh` builds the workspace; `nexus-core`
+- **2f Docs/CI/publish**: `check.sh` builds the workspace; `nexus-chat-core`
   crate metadata for publishing (mobile FFI path later); README/AGENTS
   tree updates.
 - **Sequencing**: 2a → 2d → 2b → 2e → 2c → 2f; each step lands green, TUI

@@ -52,7 +52,7 @@ jobs:
           # member packages ride the same bump (a full re-resolve would
           # churn every dependency).
           sed -i '/^name = "nexus-chat"$/{n;s/^version = ".*"/version = "'"$new"'"/;}' Cargo.lock
-          sed -i '/^name = "nexus-core"$/{n;s/^version = ".*"/version = "'"$new"'"/;}' Cargo.lock
+          sed -i '/^name = "nexus-chat-core"$/{n;s/^version = ".*"/version = "'"$new"'"/;}' Cargo.lock
           # Sanity check: fail loudly if the manifests are inconsistent.
           cargo metadata --no-deps --locked >/dev/null
           git config user.name "github-actions[bot]"

@@ -15,7 +15,7 @@ name = "nexus"
 path = "src/main.rs"
 
 [dependencies]
-nexus-core = { path = "../core" }
+nexus-chat-core = { path = "../core" }
 anyhow = { workspace = true }
 arboard = { workspace = true }
 chrono = { workspace = true }
@@ -36,4 +36,4 @@ uuid = { workspace = true }
 zip = { workspace = true }
 
 [dev-dependencies]
-nexus-core = { path = "../core", features = ["test-helpers"] }
+nexus-chat-core = { path = "../core", features = ["test-helpers"] }

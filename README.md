@@ -177,7 +177,7 @@ answers the gate; a reply with edits is folded in once by the approval agent.
 Two-crate workspace: the engine and the terminal frontend.
 
 ```
-crates/core/        nexus-core — no UI, drives TUI + CLI + the future host API
+crates/core/        nexus-chat-core (lib crate `nexus_core`) — no UI, drives TUI + CLI + the future host API
 ├── src/app/        the state machine (one module per feature)
 │   ├── mod.rs      App struct, gates, commands, boot, snapshot, event stream
 │   ├── commands.rs AppCommand seam (parsed from /-commands, executed)

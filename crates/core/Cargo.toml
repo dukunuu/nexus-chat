@@ -1,5 +1,8 @@
 [package]
-name = "nexus-core"
+# `nexus-core` on crates.io belongs to another project (SparkAIUR/nexus),
+# so the published package is `nexus-chat-core`. The lib target keeps the
+# `nexus_core` name, so every `use nexus_core::…` in both crates is stable.
+name = "nexus-chat-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +11,9 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
+
+[lib]
+name = "nexus_core"
 
 [features]
 # Compiles test-only helpers (in-memory Db) for downstream test code.
