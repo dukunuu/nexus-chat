@@ -219,20 +219,21 @@ fn strip_inline(text: &str) -> String {
     while i < chars.len() {
         let c = chars[i];
         // `![alt](url)` → `alt`.
-        if c == '!' && chars.get(i + 1) == Some(&'[') {
-            if let Some((alt, rest)) = take_link(&chars, i + 1) {
-                out.push_str(&alt);
-                i = rest;
-                continue;
-            }
+        if c == '!'
+            && chars.get(i + 1) == Some(&'[')
+            && let Some((alt, rest)) = take_link(&chars, i + 1)
+        {
+            out.push_str(&alt);
+            i = rest;
+            continue;
         }
         // `[text](url)` → `text`.
-        if c == '[' {
-            if let Some((link_text, rest)) = take_link(&chars, i) {
-                out.push_str(&link_text);
-                i = rest;
-                continue;
-            }
+        if c == '['
+            && let Some((link_text, rest)) = take_link(&chars, i)
+        {
+            out.push_str(&link_text);
+            i = rest;
+            continue;
         }
         // `` `code` `` → `code` (a run of backticks closes a run of the same
         // length, per CommonMark).
@@ -246,12 +247,13 @@ fn strip_inline(text: &str) -> String {
             }
         }
         // `~~strike~~`.
-        if c == '~' && chars.get(i + 1) == Some(&'~') {
-            if let Some(close) = find_run(&chars, i + 2, 2, '~') {
-                out.push_str(&chars[i + 2..close].iter().collect::<String>());
-                i = close + 2;
-                continue;
-            }
+        if c == '~'
+            && chars.get(i + 1) == Some(&'~')
+            && let Some(close) = find_run(&chars, i + 2, 2, '~')
+        {
+            out.push_str(&chars[i + 2..close].iter().collect::<String>());
+            i = close + 2;
+            continue;
         }
         // `**bold**`, `*italic*`, `__strong__`, `_em_`.
         if (c == '*' || c == '_')
