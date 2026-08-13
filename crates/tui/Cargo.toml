@@ -15,7 +15,11 @@ name = "nexus"
 path = "src/main.rs"
 
 [dependencies]
-nexus-chat-core = { path = "../core" }
+# `version` is required for `cargo publish` (path-only deps can't be
+# rewritten for the registry). The caret `0.1` always resolves to the
+# just-published nexus-chat-core release — both packages ride the same
+# workspace version.
+nexus-chat-core = { path = "../core", version = "0.1" }
 anyhow = { workspace = true }
 arboard = { workspace = true }
 chrono = { workspace = true }
@@ -36,4 +40,4 @@ uuid = { workspace = true }
 zip = { workspace = true }
 
 [dev-dependencies]
-nexus-chat-core = { path = "../core", features = ["test-helpers"] }
+nexus-chat-core = { path = "../core", version = "0.1", features = ["test-helpers"] }
