@@ -3,6 +3,7 @@
 //! shape is stable before the API lands; the TUI does not consume this
 //! (it reads fields directly until 2e).
 
+use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use super::App;
@@ -67,24 +68,26 @@ pub struct TaskSnapshot {
     pub session_title: String,
     pub model: String,
     pub backend: String,
-    /// "streaming" while tokens flow, "tool" while a tool runs, else "idle".
+    /// "tool" while a tool runs, "streaming" otherwise. Tasks only live in
+    /// the map while their loop is active, so there is no idle state.
     pub status: String,
     pub buffer_chars: usize,
 }
 
 impl App {
     /// Serde-shaped state for API consumers (the Phase 4 host). Sessions
-    /// come from the picker cache when loaded, else a fresh db read.
-    pub fn snapshot(&self) -> CoreSnapshot {
+    /// come from the picker cache when loaded, else a fresh db read — a
+    /// failed read is an error, never a silently-empty session list.
+    pub fn snapshot(&self) -> Result<CoreSnapshot> {
         let sessions = if self.sessions_cache.is_empty() {
             self.db
                 .list_sessions(&self.active_space.id)
-                .unwrap_or_default()
+                .context("reading sessions for snapshot")?
         } else {
             self.sessions_cache.clone()
         };
         let favorite_ids = &self.favorites;
-        CoreSnapshot {
+        Ok(CoreSnapshot {
             sessions: sessions
                 .into_iter()
                 .map(|s| SessionSnapshot {
@@ -136,7 +139,7 @@ impl App {
                     session_id: t.session_id.clone(),
                     session_title: t.session_title.clone(),
                     model: t.model.clone(),
-                    backend: format!("{:?}", t.backend),
+                    backend: t.backend.name().to_string(),
                     status: if t.tool_status.is_some() {
                         "tool".to_string()
                     } else {
@@ -145,6 +148,6 @@ impl App {
                     buffer_chars: t.buffer.chars().count(),
                 })
                 .collect(),
-        }
+        })
     }
 }

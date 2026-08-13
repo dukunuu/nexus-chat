@@ -2272,6 +2272,35 @@ fn set_model_and_setting_commands_apply() {
     );
 }
 
+#[test]
+fn set_setting_fails_fast_on_unknown_keys_and_invalid_values() {
+    let mut a = app_with_key();
+    // Unknown keys bail instead of persisting a no-op as success.
+    assert!(
+        a.execute(AppCommand::SetSetting {
+            key: "verbosityy".into(),
+            value: "caveman".into(),
+        })
+        .is_err()
+    );
+    // Constrained keys reject values `apply_setting` would drop silently.
+    assert!(
+        a.execute(AppCommand::SetSetting {
+            key: "verbosity".into(),
+            value: "shouty".into(),
+        })
+        .is_err()
+    );
+    assert!(
+        a.execute(AppCommand::SetSetting {
+            key: "temperature".into(),
+            value: "hot".into(),
+        })
+        .is_err()
+    );
+    assert_eq!(a.verbosity, "concise"); // untouched by the rejected values
+}
+
 #[tokio::test]
 async fn gate_in_another_session_never_swallows_typing_and_the_event_carries_its_session() {
     let mut a = app_with_key();
@@ -2293,7 +2322,7 @@ async fn gate_in_another_session_never_swallows_typing_and_the_event_carries_its
     // The Gate event names the session the reply must come from.
     match a.pending_events.pop_front() {
         Some(AppEvent::Gate(Some(g))) => assert_eq!(g.session_id, s_a.id),
-        other => panic!("expected Gate(Some) event, got something else"),
+        _other => panic!("expected Gate(Some) event, got something else"),
     }
     // View the other session: Enter must send a normal message, not answer
     // A's parked gate.
@@ -2312,7 +2341,7 @@ async fn gate_in_another_session_never_swallows_typing_and_the_event_carries_its
 fn snapshot_serializes_sessions_models_settings_and_tasks() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());
-    let snap = a.snapshot();
+    let snap = a.snapshot().unwrap();
     let json = serde_json::to_string(&snap).unwrap();
     assert!(json.contains("\"sessions\""));
     assert!(json.contains("\"models\""));

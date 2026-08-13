@@ -7,10 +7,11 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use super::{
-    App, Popup, SEARCH_PROVIDERS, SETTINGS_GROUPS, SettingsField, SettingsRow, VERBOSITY_LEVELS,
+    App, OCR_ENGINES, Popup, SEARCH_PROVIDERS, SETTINGS_GROUPS, SettingsField, SettingsRow,
+    VERBOSITY_LEVELS,
 };
 
 impl App {
@@ -254,9 +255,17 @@ impl App {
     }
 
     /// Set one named setting by key, persisting it and applying it live —
-    /// the `SetSetting` command the host (and later the TUI) uses. Unknown
-    /// keys are ignored like unknown rows on load.
+    /// the `SetSetting` command the host (and later the TUI) uses. Unlike
+    /// `load_settings` (which ignores unknown persisted rows), this fails
+    /// fast: an unknown key or an invalid value for a constrained key is an
+    /// error, never a silent no-op reported as success.
     pub fn set_setting(&mut self, key: &str, value: &str) -> Result<()> {
+        if !SETTING_KEYS.contains(&key) {
+            bail!("unknown setting: {key}");
+        }
+        if !valid_setting_value(key, value) {
+            bail!("invalid value for {key}: {value:?}");
+        }
         self.apply_setting(key, value);
         if key == "blocked_domains" {
             // Per-space (not a db setting): lives next to the space's other
@@ -271,5 +280,50 @@ impl App {
         self.refresh_toolbox();
         self.push_status(format!("{key} set"));
         Ok(())
+    }
+}
+
+/// Every key `set_setting` accepts — the same keys `apply_setting` (and the
+/// `blocked_domains` special case) can actually apply.
+const SETTING_KEYS: [&str; 21] = [
+    "show_stats",
+    "show_reasoning",
+    "hide_hints",
+    "usage_range",
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "memory_model",
+    "transcriber_model",
+    "ocr_model",
+    "ocr_engine",
+    "local_ocr_model",
+    "embedding_model",
+    "image_gen_model",
+    "video_gen_model",
+    "compact_threshold",
+    "searxng_url",
+    "verbosity",
+    "langsearch_key",
+    "search_provider",
+    "blocked_domains",
+];
+
+/// Whether `value` is one `apply_setting` will actually apply for `key` —
+/// constrained keys must carry valid values, so a typo'd value can't be
+/// persisted as a no-op while reporting success.
+fn valid_setting_value(key: &str, value: &str) -> bool {
+    match key {
+        "show_stats" | "show_reasoning" | "hide_hints" => matches!(value, "0" | "1"),
+        "temperature" | "top_p" => value.parse::<f32>().is_ok(),
+        "max_tokens" => value.parse::<u32>().is_ok(),
+        "compact_threshold" => value.parse::<u8>().is_ok(),
+        "usage_range" => crate::db::UsageRange::CYCLE
+            .iter()
+            .any(|r| r.key() == value),
+        "ocr_engine" => OCR_ENGINES.contains(&value),
+        "verbosity" => VERBOSITY_LEVELS.contains(&value),
+        "search_provider" => SEARCH_PROVIDERS.contains(&value),
+        _ => true, // free-form strings
     }
 }
