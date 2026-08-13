@@ -305,6 +305,14 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
                 required_array(&value, "image_ids")?;
                 "copy_images_to_app"
             }
+            "init" => {
+                required_arg(&value, "app")?;
+                "init_app"
+            }
+            "build" => {
+                required_arg(&value, "app")?;
+                "build_app"
+            }
             other => return Err(format!("invalid action for app: {other}")),
         },
         "app_inspect" => match action("action")? {
@@ -809,11 +817,11 @@ impl ToolBox {
         if self.apps.is_some() {
             defs.push(tool_def(
                 "app",
-                "Build and manage locally served web apps. action=read returns hash-lines for safe editing and action=search greps non-ignored files; action=write replaces complete content, action=patch applies hash-line edits with stale-hash rejection, and action=diff previews a complete candidate without writing; action=list shows conversation/space images and action=copy_file/copy_images bring user data into an app (images go to _images/, text files to the app KV store).",
+                "Build and manage locally served web apps. action=read returns hash-lines for safe editing and action=search greps non-ignored files; action=write replaces complete content, action=patch applies hash-line edits with stale-hash rejection, and action=diff previews a complete candidate without writing; action=list shows conversation/space images and action=copy_file/copy_images bring user data into an app (images go to _images/, text files to the app KV store); action=init scaffolds a React starter (framework astro = Astro + React islands, vite-react = Vite SPA; default astro) and action=build compiles the app — it installs missing deps from package.json, runs the framework's static build with --base=/<app-uuid>/ (so asset links resolve under the app's URL), and serves the result from dist/ (build errors come back here for you to fix; requires node/npm on this machine).",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "enum": ["read", "search", "write", "patch", "diff", "list", "copy_file", "copy_images"] },
+                        "action": { "type": "string", "enum": ["read", "search", "write", "patch", "diff", "list", "copy_file", "copy_images", "init", "build"] },
                         "app": { "type": "string", "description": "app name or UUID" },
                         "path": { "type": "string", "description": "file path within the app" },
                         "pattern": { "type": "string", "description": "case-insensitive search text for search" },
@@ -821,6 +829,7 @@ impl ToolBox {
                         "edits": { "type": "array", "description": "hash-line edits for patch", "items": { "type": "object", "properties": { "hash": { "type": "string" }, "new": { "type": ["string", "null"] } }, "required": ["hash"] } },
                         "file_name": { "type": "string", "description": "imported file name for copy_file" },
                         "image_ids": { "type": "array", "items": { "type": "string" }, "description": "image IDs for copy_images" },
+                        "framework": { "type": "string", "enum": ["astro", "vite-react"], "description": "starter template for init (default astro)" },
                         "offset": { "type": "integer" },
                         "limit": { "type": "integer", "description": "maximum 200 lines" },
                         "compact": { "type": "boolean", "description": "return locations only for search (default true)" }
@@ -923,6 +932,25 @@ impl ToolBox {
         match &self.apps {
             Some(ctx) => format!("live at http://127.0.0.1:{}/{}/", ctx.server_port, uuid),
             None => String::new(),
+        }
+    }
+
+    /// The build tool a package.json declares (dependencies or
+    /// devDependencies), if any: "astro" or "vite".
+    #[must_use]
+    fn declared_build_tool(pkg: &serde_json::Value) -> Option<&'static str> {
+        let mut deps: Vec<String> = Vec::new();
+        for key in ["dependencies", "devDependencies"] {
+            if let Some(obj) = pkg.get(key).and_then(serde_json::Value::as_object) {
+                deps.extend(obj.keys().cloned());
+            }
+        }
+        if deps.iter().any(|d| d == "astro") {
+            Some("astro")
+        } else if deps.iter().any(|d| d == "vite") {
+            Some("vite")
+        } else {
+            None
         }
     }
 
@@ -1980,6 +2008,120 @@ impl ToolBox {
                             }
                         }
                         serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
+                    }
+                };
+                (result, status)
+            }
+            "init_app" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let app = v
+                    .get("app")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let framework = v
+                    .get("framework")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("astro");
+                let status = format!("Scaffolding {app} ({framework})…");
+                let result = match self.resolve_app(&app) {
+                    Err(e) => e,
+                    Ok((uuid, app_dir)) => {
+                        match crate::app_templates::scaffold(&app_dir, framework) {
+                            Err(e) => e,
+                            Ok(files) => format!(
+                                "scaffolded {app} with the {framework} starter ({}) — edit with read/patch/write, then `app action=build` (installs deps + compiles to dist/). {}",
+                                files.join(", "),
+                                self.app_link(&uuid),
+                            ),
+                        }
+                    }
+                };
+                (result, status)
+            }
+            "build_app" => {
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let app = v
+                    .get("app")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let status = format!("Building {app}…");
+                let result = match self.resolve_app(&app) {
+                    Err(e) => e,
+                    Ok((uuid, app_dir)) => {
+                        let pkg_json = app_dir.join("package.json");
+                        let Some(pkg) = std::fs::read_to_string(&pkg_json)
+                            .ok()
+                            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                        else {
+                            return (
+                                "no package.json — write one (or `app action=init` to scaffold a React/Astro or React/Vite app) before building".to_string(),
+                                status,
+                            );
+                        };
+                        let Some(tool) = Self::declared_build_tool(&pkg) else {
+                            return (
+                                "no build step detected (package.json declares neither astro nor vite) — the app is served as-is".to_string(),
+                                status,
+                            );
+                        };
+                        // Deps declared but not installed: `npm install` from
+                        // package.json first, so init → build just works.
+                        let mut npm_err: Option<String> = None;
+                        let bin = app_dir.join("node_modules").join(".bin").join(tool);
+                        if !bin.exists() {
+                            let refs: Vec<&std::ffi::OsStr> =
+                                ["install", "--no-audit", "--no-fund"]
+                                    .iter()
+                                    .map(std::ffi::OsStr::new)
+                                    .collect();
+                            match run_cmd("npm".as_ref(), &refs, &app_dir, 600).await {
+                                Ok(out) if out.status.success() => {}
+                                Ok(out) => npm_err = Some(format_output(&out)),
+                                Err(e) => npm_err = Some(e),
+                            }
+                        }
+                        if let Some(err) = npm_err {
+                            return (
+                                format!(
+                                    "cannot build {app}: deps from package.json are missing and `npm install` failed:\n{err}"
+                                ),
+                                status,
+                            );
+                        }
+                        // Absolute base: the app is served at /<uuid>/ — pass it
+                        // on the CLI so asset links resolve regardless of the
+                        // framework's config (relative bases are unreliable).
+                        let base_arg = format!("/{uuid}/");
+                        let build_args =
+                            ["--no-install", tool, "build", "--base", base_arg.as_str()];
+                        let refs: Vec<&std::ffi::OsStr> =
+                            build_args.iter().map(std::ffi::OsStr::new).collect();
+                        match run_cmd("npx".as_ref(), &refs, &app_dir, 600).await {
+                            Ok(out) if out.status.success() => {
+                                // Only flip the served dir when the build
+                                // really produced dist/ — a framework whose
+                                // outDir is configured elsewhere exits 0
+                                // without it, and serving dist/ then would
+                                // 404 the whole app.
+                                if !app_dir.join("dist").is_dir() {
+                                    return (
+                                        "build reported success but produced no dist/ — the \
+framework's output directory is configured elsewhere (outDir/base); build output \
+must land in dist/ for the app server to serve it"
+                                            .to_string(),
+                                        status,
+                                    );
+                                }
+                                if let Some(ctx) = &self.apps {
+                                    ctx.registry.set_served_from(&uuid, "dist");
+                                }
+                                format!("build ok — dist/ is live at {}", self.app_link(&uuid))
+                            }
+                            Ok(out) => format!("build failed:\n{}", format_output(&out)),
+                            Err(e) => e,
+                        }
                     }
                 };
                 (result, status)
@@ -3540,7 +3682,9 @@ fn grep_dir(
         }
         let name = entry.file_name();
         if path.is_dir() {
-            if name != "node_modules" && name != ".venv" && name != ".git" {
+            // node_modules/.venv/.git are dependencies; dist/ is derived
+            // build output (framework apps) — never search inside any of them.
+            if name != "node_modules" && name != ".venv" && name != ".git" && name != "dist" {
                 grep_dir(root, &path, pattern, out);
             }
         } else if let Ok(text) = std::fs::read_to_string(&path) {
@@ -6230,6 +6374,20 @@ mod tests {
         for t in ["app"] {
             assert!(names.contains(&t.to_string()), "missing {t}");
         }
+        // The app tool's action surface includes init/build.
+        let defs = tb.defs();
+        let app_def = defs.iter().find(|d| d.name == "app").unwrap();
+        let actions = app_def
+            .parameters
+            .get("properties")
+            .and_then(|p| p.get("action"))
+            .and_then(|a| a.get("enum"))
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let actions: Vec<&str> = actions.iter().filter_map(|a| a.as_str()).collect();
+        for a in ["init", "build"] {
+            assert!(actions.contains(&a), "missing {a}");
+        }
         let empty = ToolBox::new(
             PathBuf::new(),
             None,
@@ -6242,6 +6400,163 @@ mod tests {
         );
         let names: Vec<String> = empty.defs().iter().map(|d| d.name.clone()).collect();
         assert!(!names.contains(&"app".to_string()));
+    }
+
+    #[tokio::test]
+    async fn init_scaffolds_astro_and_vite_templates() {
+        let (tb, dir) = apps_toolbox();
+        let (result, _) = tb
+            .run("init_app", r#"{"app":"site","framework":"astro"}"#)
+            .await;
+        assert!(
+            result.contains("scaffolded site with the astro starter"),
+            "{result}"
+        );
+        assert!(result.contains("app action=build"), "{result}");
+        assert!(
+            result.contains("live at http://127.0.0.1:9999/"),
+            "{result}"
+        );
+        assert!(dir.join("site/package.json").is_file());
+        assert!(dir.join("site/src/pages/index.astro").is_file());
+        assert!(dir.join("site/src/components/Counter.tsx").is_file());
+        // Derived dirs are gitignored so the editing tools leave them alone.
+        assert!(dir.join("site/.gitignore").is_file());
+        let pkg = std::fs::read_to_string(dir.join("site/package.json")).unwrap();
+        assert!(pkg.contains("astro build"), "{pkg}");
+
+        let (result, _) = tb
+            .run("init_app", r#"{"app":"spa","framework":"vite-react"}"#)
+            .await;
+        assert!(result.contains("vite-react"), "{result}");
+        assert!(dir.join("spa/src/App.tsx").is_file());
+        assert!(dir.join("spa/vite.config.js").is_file());
+
+        // Unknown framework rejected; existing apps are never clobbered.
+        let (result, _) = tb
+            .run("init_app", r#"{"app":"x","framework":"svelte"}"#)
+            .await;
+        assert!(result.contains("unknown framework"), "{result}");
+        let (result, _) = tb
+            .run("init_app", r#"{"app":"site","framework":"astro"}"#)
+            .await;
+        assert!(result.contains("already exists"), "{result}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn build_app_guides_instead_of_failing_obscurely() {
+        let (tb, dir) = apps_toolbox();
+        // No package.json → point the model at init.
+        let (result, _) = tb.run("build_app", r#"{"app":"bare"}"#).await;
+        assert!(result.contains("no package.json"), "{result}");
+
+        // Plain package.json without a bundler → served as-is.
+        std::fs::create_dir_all(dir.join("plain")).unwrap();
+        std::fs::write(
+            dir.join("plain/package.json"),
+            r#"{"name":"plain","private":true}"#,
+        )
+        .unwrap();
+        let (result, _) = tb.run("build_app", r#"{"app":"plain"}"#).await;
+        assert!(result.contains("no build step"), "{result}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The build tool shells out to `npx`; false on machines without node.
+    async fn npx_available() -> bool {
+        tokio::process::Command::new("npx")
+            .arg("--version")
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn build_runs_the_declared_tool_and_marks_dist_served() {
+        if !npx_available().await {
+            return; // no node/npm on this machine — skip
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let (tb, dir) = apps_toolbox();
+        let app = dir.join("built");
+        std::fs::create_dir_all(app.join("node_modules/.bin")).unwrap();
+        std::fs::write(
+            app.join("package.json"),
+            r#"{"name":"built","dependencies":{"astro":"^5.0.0"}}"#,
+        )
+        .unwrap();
+        // A fake `astro` bin: builds dist/ without node or the network.
+        std::fs::write(
+            app.join("node_modules/.bin/astro"),
+            "#!/bin/sh\nmkdir -p dist\necho '<h1>ok</h1>' > dist/index.html\necho \"$*\" > build-args.txt\necho 'built ok'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            app.join("node_modules/.bin/astro"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        let (result, _) = tb.run("build_app", r#"{"app":"built"}"#).await;
+        assert!(result.contains("build ok"), "{result}");
+        assert!(
+            result.contains("live at http://127.0.0.1:9999/"),
+            "{result}"
+        );
+        assert!(app.join("dist/index.html").is_file());
+
+        // The build ran with the app's absolute base so asset links resolve.
+        let ctx = tb.apps.as_ref().unwrap();
+        let uuid = ctx.registry.resolve("default", "built").unwrap();
+        let args = std::fs::read_to_string(app.join("build-args.txt")).unwrap();
+        assert!(args.contains(&format!("--base /{uuid}/")), "{args}");
+
+        // The registry now serves the app from dist/.
+        assert_eq!(
+            ctx.registry.lookup(&uuid).unwrap().served_from.as_deref(),
+            Some("dist")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn build_without_dist_output_never_marks_dist_served() {
+        if !npx_available().await {
+            return; // no node/npm on this machine — skip
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let (tb, dir) = apps_toolbox();
+        let app = dir.join("misbuilt");
+        std::fs::create_dir_all(app.join("node_modules/.bin")).unwrap();
+        std::fs::write(
+            app.join("package.json"),
+            r#"{"name":"misbuilt","dependencies":{"astro":"^5.0.0"}}"#,
+        )
+        .unwrap();
+        // A fake `astro` bin that exits 0 but never writes dist/ (as if the
+        // framework's outDir were configured elsewhere).
+        std::fs::write(
+            app.join("node_modules/.bin/astro"),
+            "#!/bin/sh\necho 'build ok'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            app.join("node_modules/.bin/astro"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        let (result, _) = tb.run("build_app", r#"{"app":"misbuilt"}"#).await;
+        assert!(result.contains("produced no dist/"), "{result}");
+        // The app is not marked served-from-dist, so nothing 404s.
+        let ctx = tb.apps.as_ref().unwrap();
+        let uuid = ctx.registry.resolve("default", "misbuilt").unwrap();
+        assert_eq!(ctx.registry.lookup(&uuid).unwrap().served_from, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

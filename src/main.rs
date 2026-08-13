@@ -1,4 +1,5 @@
 mod app;
+mod app_templates;
 mod appserver;
 mod citations;
 mod cli;

@@ -21,6 +21,10 @@ const PORT: u16 = 8642;
 pub struct AppEntry {
     pub space: String,
     pub name: String,
+    /// Subdirectory the app's files are served from (e.g. "dist" after a
+    /// framework build). None = served from the app root (classic apps).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_from: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +74,7 @@ impl AppRegistry {
                                 AppEntry {
                                     space: space_name.clone(),
                                     name: app_name,
+                                    served_from: None,
                                 },
                             );
                         }
@@ -94,6 +99,7 @@ impl AppRegistry {
                 AppEntry {
                     space: space.to_string(),
                     name: name.to_string(),
+                    served_from: None,
                 },
             );
         }
@@ -112,6 +118,18 @@ impl AppRegistry {
             .iter()
             .find(|(_, e)| e.space == space && e.name == name)
             .map(|(u, _)| u.clone())
+    }
+
+    /// Record that an app's served files live under `subdir` (e.g. "dist")
+    /// after a successful framework build.
+    pub fn set_served_from(&self, uuid: &str, subdir: &str) {
+        {
+            let mut map = self.inner.write().unwrap();
+            if let Some(entry) = map.get_mut(uuid) {
+                entry.served_from = Some(subdir.to_string());
+            }
+        }
+        let _ = self.save();
     }
 
     pub fn rename_space(&self, old: &str, new: &str) {
@@ -307,15 +325,35 @@ fn resolve(spaces_root: &Path, registry: &AppRegistry, raw_path: &str) -> Option
         return app_dir.is_dir().then_some(app_dir);
     }
 
-    let (space, app, path_start) = if let Some(entry) = registry.lookup(segs[0]) {
-        (entry.space, entry.name, 1usize)
+    let (space, app, path_start, served_from) = if let Some(entry) = registry.lookup(segs[0]) {
+        (entry.space, entry.name, 1usize, entry.served_from)
     } else {
         if segs.len() < 2 {
             return None;
         }
-        (segs[0].to_string(), segs[1].to_string(), 2)
+        let served_from = registry
+            .resolve(segs[0], segs[1])
+            .and_then(|uuid| registry.lookup(&uuid))
+            .and_then(|entry| entry.served_from);
+        (
+            segs[0].to_string(),
+            segs[1].to_string(),
+            2usize,
+            served_from,
+        )
     };
     let mut file = spaces_root.join(&space).join("apps").join(&app);
+    if let Some(sub) = served_from {
+        // User data written to the app root by copy_images (_images/) and
+        // the upload API (_uploads/) stays there even when the app is
+        // served from dist/ after a framework build.
+        let root_data = segs
+            .get(path_start)
+            .is_some_and(|s| matches!(*s, "_images" | "_uploads"));
+        if !root_data {
+            file.push(sub);
+        }
+    }
     for seg in &segs[path_start..] {
         file.push(seg);
     }
@@ -694,6 +732,57 @@ mod tests {
 
         let f = resolve(root, &reg, &format!("/{uuid}")).unwrap();
         assert!(f.ends_with("deck/index.html"));
+    }
+
+    #[test]
+    fn resolve_uses_served_from_after_build() {
+        let root = &setup();
+        // Simulate a built app: the real files live in dist/.
+        let dist = root.join("default/apps/deck/dist");
+        std::fs::create_dir_all(&dist).unwrap();
+        std::fs::write(dist.join("index.html"), "<h1>built</h1>").unwrap();
+        let reg = AppRegistry::load(root);
+        // Use the entry the load-time orphan scan created — assign() would
+        // add a second UUID for the same app (test-only artifact).
+        let uuid = reg.resolve("default", "deck").unwrap();
+        reg.set_served_from(&uuid, "dist");
+
+        let f = resolve(root, &reg, &format!("/{uuid}/")).unwrap();
+        assert!(f.ends_with("deck/dist/index.html"), "{f:?}");
+        let f = resolve(root, &reg, "/default/deck/").unwrap();
+        assert!(f.ends_with("deck/dist/index.html"), "{f:?}");
+        // Source files outside dist are no longer served.
+        assert!(resolve(root, &reg, "/default/deck/style.css").is_none());
+        // The KV API still resolves to the app root.
+        assert!(resolve(root, &reg, &format!("/{uuid}/_api/")).is_some());
+        // copy_images (_images/) and upload (_uploads/) user data stay in
+        // the app root and keep resolving in both URL forms.
+        let images = root.join("default/apps/deck/_images");
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("pic.png"), "x").unwrap();
+        let uploads = root.join("default/apps/deck/_uploads");
+        std::fs::create_dir_all(&uploads).unwrap();
+        std::fs::write(uploads.join("f.txt"), "x").unwrap();
+        assert!(resolve(root, &reg, &format!("/{uuid}/_images/pic.png")).is_some());
+        assert!(resolve(root, &reg, "/default/deck/_images/pic.png").is_some());
+        assert!(resolve(root, &reg, &format!("/{uuid}/_uploads/f.txt")).is_some());
+    }
+
+    #[test]
+    fn served_from_persists_across_registry_reloads() {
+        let root = &setup();
+        let reg = AppRegistry::load(root);
+        let uuid = reg.assign("default", "deck");
+        reg.set_served_from(&uuid, "dist");
+        let reloaded = AppRegistry::load(root);
+        assert_eq!(
+            reloaded.lookup(&uuid).unwrap().served_from.as_deref(),
+            Some("dist")
+        );
+        // Classic apps round-trip with served_from unset.
+        let classic = reg.assign("default", "plain");
+        let reloaded = AppRegistry::load(root);
+        assert_eq!(reloaded.lookup(&classic).unwrap().served_from, None);
     }
 
     #[test]

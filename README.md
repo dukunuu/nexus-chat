@@ -113,7 +113,8 @@ key is enough; models are fetched from the catalogs.
 - **Tools for the model**: nine consolidated tools — `search` (web/academic/
   discussion), `fetch_url` (with PDF/YouTube extraction), `batch` (multi-op
   calls), `research_lookup`, `files`, `app` (build & edit web apps served on
-  `http://localhost:8642`), `scripts`, `skills`, and `media` (image/video
+  `http://localhost:8642`; `init` scaffolds Astro+React / Vite+React
+  starters, `build` compiles them with the framework's static build), `scripts`, `skills`, and `media` (image/video
   generation with ffmpeg transforms)
 - **Usage analytics**: `/usage` shows token/cache/cost analytics by backend
   and model, priced from a synced catalog
@@ -213,6 +214,11 @@ cargo test --bin nexus   # 468 tests, no network needed
 The pre-commit hook runs `scripts/check.sh` on every commit — a merge-ready
 change passes it. See [AGENTS.md](AGENTS.md) for conventions and a deeper
 module map.
+
+## Roadmap
+
+Multi-device (web + mobile) via a sync mesh, no 24/7 backend — see
+[`docs/roadmap.md`](docs/roadmap.md).
 
 ## Known limitations
 
