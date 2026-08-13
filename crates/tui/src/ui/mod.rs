@@ -13,7 +13,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
-use nexus_core::app::{App, Popup};
+use crate::app_view::AppView;
+use nexus_core::app::Popup;
 
 pub mod citations_style;
 pub mod history;
@@ -22,7 +23,7 @@ pub mod popups;
 
 use history::render_history;
 
-pub fn render(f: &mut Frame, app: &mut App) {
+pub fn render(f: &mut Frame, app: &mut AppView) {
     // Grow the input box with its wrapped content (1–20 rows) plus 2 for the
     // border. `measure` wants the width the widget renders at, i.e. inside the
     // border (full width - 2).
@@ -71,7 +72,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
 }
 
-pub fn dim(s: impl Into<String>, theme: &nexus_core::theme::Theme) -> Span<'static> {
+pub fn dim(s: impl Into<String>, theme: &crate::theme::Theme) -> Span<'static> {
     Span::styled(s.into(), Style::default().fg(theme.fg_dim))
 }
 
@@ -84,7 +85,7 @@ pub fn to_color(c: nexus_core::app::SpinnerColor) -> Color {
     }
 }
 
-fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
+fn render_input(f: &mut Frame, app: &mut AppView, area: Rect) {
     let hint = if app.settings.hide_hints {
         String::new()
     } else if app.viewing_stream() {
@@ -145,7 +146,7 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
 /// input box. `/name` in cyan, ≤20-char description dimmed alongside.
 // Terminal popup geometry — n/h/w/y/x are idiomatic for rect math.
 #[allow(clippy::many_single_char_names)]
-fn render_command_popup(f: &mut Frame, app: &App, input_area: Rect) {
+fn render_command_popup(f: &mut Frame, app: &AppView, input_area: Rect) {
     let matches = app.command_matches();
     if matches.is_empty() {
         return;
@@ -207,7 +208,7 @@ fn render_command_popup(f: &mut Frame, app: &App, input_area: Rect) {
 /// `@` file autocomplete: space files matching the text after `@`.
 // Terminal popup geometry — n/h/w/y/x are idiomatic for rect math.
 #[allow(clippy::many_single_char_names)]
-fn render_at_popup(f: &mut Frame, app: &App, input_area: Rect) {
+fn render_at_popup(f: &mut Frame, app: &AppView, input_area: Rect) {
     let Some((ref matches, selected, _)) = app.at_state else {
         return;
     };
@@ -268,7 +269,7 @@ fn render_at_popup(f: &mut Frame, app: &App, input_area: Rect) {
 /// A filling context-usage bar drawn as a gradient: each filled cell is
 /// coloured by its position, green (fresh) sliding through yellow to red
 /// (refill) as the bar fills toward the right.
-fn render_context_bar(f: &mut Frame, app: &App, area: Rect) {
+fn render_context_bar(f: &mut Frame, app: &AppView, area: Rect) {
     let Some(limit) = app.context_limit() else {
         return;
     };
@@ -315,7 +316,7 @@ fn gradient(t: f64) -> Color {
 
 /// `"34% 44k/128k"` for the status line, or None when unavailable. Appends
 /// the last request's prompt-cache hit rate when one was reported.
-fn context_label(app: &App) -> Option<String> {
+fn context_label(app: &AppView) -> Option<String> {
     let limit = app.context_limit()?;
     let used = app.context_used();
     let pct = if limit > 0 {
@@ -359,7 +360,7 @@ fn fmt_cost(cost: Option<f64>) -> String {
     }
 }
 
-fn render_status(f: &mut Frame, app: &App, area: Rect) {
+fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
     use nexus_core::db::DEFAULT_SPACE;
     let model = app.current_model.as_deref().unwrap_or("(no model)");
     let space_tag = if app.active_space.name == DEFAULT_SPACE {
@@ -423,7 +424,7 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
 /// Persistent, direct-click targets for completed chat tasks. The queue keeps
 /// every completion; only the newest five are painted to avoid covering a
 /// small terminal.
-fn render_notifications(f: &mut Frame, app: &mut App, area: Rect) {
+fn render_notifications(f: &mut Frame, app: &mut AppView, area: Rect) {
     app.notification_areas.clear();
     let rows = app.notifications.len().min(5) as u16;
     if rows == 0 || area.width == 0 || area.height == 0 {

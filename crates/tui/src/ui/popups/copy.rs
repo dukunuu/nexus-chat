@@ -4,11 +4,11 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState};
 
-use nexus_core::app::App;
+use crate::app_view::AppView;
 
 use super::chrome;
 
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &AppView) {
     let area = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
     let hint = if app.copy_options.is_empty() {
         "Esc close".to_string()
@@ -60,7 +60,7 @@ pub fn render(f: &mut Frame, app: &App) {
     );
 }
 
-pub fn handle_key(app: &mut App, key: KeyEvent) {
+pub fn handle_key(app: &mut AppView, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => app.popup = nexus_core::app::Popup::None,
         KeyCode::Enter => app.confirm_copy(),

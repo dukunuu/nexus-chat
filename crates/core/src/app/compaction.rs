@@ -208,7 +208,7 @@ impl App {
                         created_at: anchor,
                     },
                 );
-                self.invalidate_history_cache();
+                self.push_history_invalidated();
             }
         }
         if self
@@ -283,7 +283,7 @@ impl App {
                 created_at: Some(anchor),
             },
         );
-        self.invalidate_history_cache();
+        self.push_history_invalidated();
     }
 
     /// System/memory/conversation token estimate for the context breakdown
@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(digest.content, "digest text");
         let last_compacted = stored.iter().find(|m| m.content == "u1").unwrap();
         assert_eq!(digest.created_at, last_compacted.created_at);
-        assert!(a.status.contains("compacted"), "{}", a.status);
+        assert!(a.last_status().contains("compacted"), "{}", a.last_status());
     }
 
     #[test]

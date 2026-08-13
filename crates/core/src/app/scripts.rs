@@ -7,13 +7,12 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
-use anyhow::{Context, Result};
-
-use super::{App, ScriptMeta, ScriptsMode};
+use super::App;
 
 impl App {
     /// Read the space's scripts dir and populate `scripts_cache`. A missing or
-    /// empty dir produces an empty cache, never an error.
+    /// empty dir produces an empty cache, never an error. The scripts popup's
+    /// flow (selection/edit state, $EDITOR handoff) lives in the view layer.
     pub fn refresh_scripts(&mut self) {
         let dir = self.space.scripts_dir(&self.active_space.name);
         let _ = std::fs::create_dir_all(&dir);
@@ -35,7 +34,7 @@ impl App {
                         })
                         .map(|dt| dt.to_rfc3339())
                         .unwrap_or_default();
-                    Some(ScriptMeta {
+                    Some(super::ScriptMeta {
                         name: e.file_name().to_string_lossy().to_string(),
                         size: meta.len(),
                         modified,
@@ -46,93 +45,51 @@ impl App {
         self.scripts_cache.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    pub fn move_scripts_selection(&mut self, delta: i32) {
-        self.scripts_selected =
-            super::clamp_cursor(self.scripts_selected, self.scripts_cache.len(), delta);
-    }
-
-    /// Enter in Browse: open the script in $EDITOR.
-    pub fn open_selected_script(&mut self) {
-        let Some(s) = self.scripts_cache.get(self.scripts_selected) else {
-            return;
-        };
-        let path = self
-            .space
-            .scripts_dir(&self.active_space.name)
-            .join(&s.name);
-        self.pending_editor = Some(super::PendingEditor::ScriptFile(path));
-    }
-
-    /// Ctrl+N: switch to Create mode.
-    pub fn start_script_create(&mut self) {
-        self.scripts_edit.clear();
-        self.scripts_mode = ScriptsMode::Create;
-    }
-
-    /// Enter in Create mode: create the file and open in $EDITOR.
-    pub fn confirm_script_create(&mut self) -> Result<()> {
-        let name = self.scripts_edit.trim().to_string();
-        self.scripts_mode = ScriptsMode::Browse;
-        if name.is_empty() {
-            return Ok(());
-        }
+    /// Domain half of script create: touch the file (if absent) and refresh
+    /// the cache. Returns the created path. The view owns the edit buffer and
+    /// the $EDITOR handoff.
+    pub fn ensure_script_file(&mut self, name: &str) -> anyhow::Result<std::path::PathBuf> {
+        use anyhow::Context as _;
         let dir = self.space.scripts_dir(&self.active_space.name);
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        let path = dir.join(&name);
+        let path = dir.join(name);
         if !path.exists() {
             std::fs::write(&path, "").with_context(|| format!("creating {}", path.display()))?;
         }
         self.refresh_scripts();
-        self.pending_editor = Some(super::PendingEditor::ScriptFile(path));
-        self.push_status(format!("created {name}"));
-        Ok(())
+        Ok(path)
     }
 
-    /// Ctrl+R in Browse: pre-fill the edit line with the current name.
-    pub fn start_script_rename(&mut self) {
-        if let Some(s) = self.scripts_cache.get(self.scripts_selected) {
-            self.scripts_edit = s.name.clone();
-            self.scripts_mode = ScriptsMode::Rename;
-        }
-    }
-
-    /// Enter in Rename mode: rename the file on disk.
-    pub fn confirm_script_rename(&mut self) -> Result<()> {
-        let new = self.scripts_edit.trim().to_string();
-        self.scripts_mode = ScriptsMode::Browse;
-        let Some(s) = self.scripts_cache.get(self.scripts_selected).cloned() else {
-            return Ok(());
-        };
-        if new.is_empty() || new == s.name {
-            return Ok(());
-        }
+    /// Domain half of script rename: move the file on disk. Returns an error
+    /// message string when the target already exists (the view turns it into
+    /// a status line); Ok otherwise.
+    pub fn rename_script_file(&mut self, from: &str, to: &str) -> anyhow::Result<()> {
+        use anyhow::Context as _;
         let dir = self.space.scripts_dir(&self.active_space.name);
-        let from = dir.join(&s.name);
-        let to = dir.join(&new);
-        if to.exists() {
-            self.push_status(format!("{new} already exists"));
-            return Ok(());
+        let from_path = dir.join(from);
+        let to_path = dir.join(to);
+        if to_path.exists() {
+            anyhow::bail!("{to} already exists");
         }
-        std::fs::rename(&from, &to)
-            .with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
+        std::fs::rename(&from_path, &to_path).with_context(|| {
+            format!("renaming {} to {}", from_path.display(), to_path.display())
+        })?;
         self.refresh_scripts();
-        self.push_status(format!("renamed {} → {new}", s.name));
         Ok(())
     }
 
-    /// Ctrl+D confirm: delete the script file from disk.
-    pub fn confirm_script_delete(&mut self) -> Result<()> {
+    /// Domain half of script delete: remove the file from disk and refresh.
+    /// Returns whether a row existed.
+    pub fn delete_script_file(&mut self, name: &str) -> anyhow::Result<bool> {
+        use anyhow::Context as _;
         let dir = self.space.scripts_dir(&self.active_space.name);
-        if let Some(s) = self.scripts_cache.get(self.scripts_selected).cloned() {
-            let path = dir.join(&s.name);
-            if path.exists() {
-                std::fs::remove_file(&path)
-                    .with_context(|| format!("removing {}", path.display()))?;
-            }
-            self.push_status(format!("removed {}", s.name));
+        let path = dir.join(name);
+        if path.exists() {
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
             self.refresh_scripts();
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        self.scripts_mode = ScriptsMode::Browse;
-        Ok(())
     }
 }

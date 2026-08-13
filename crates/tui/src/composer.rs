@@ -1,6 +1,8 @@
-//! The message composer: text editing, OS-clipboard cut/copy/paste, and
-//! slash-command autocomplete. `App` owns the `TextArea`; this module holds
-//! everything that operates on it.
+//! The composer half of the old core `input.rs` (2e split): everything that
+//! operates on the view-owned `TextArea` — text editing, OS-clipboard
+//! cut/copy/paste, slash-command autocomplete, and `@`-file autocomplete.
+//! The pure command catalog (`COMMANDS`, `fuzzy_score`) stayed in core
+//! (`nexus_core::app::commands`).
 
 // Casts here are on terminal-bounded values (u16/u32 dims, byte colors,
 // glyph counts) — never on unbounded user data. JSON-derived indices in
@@ -17,201 +19,11 @@ use anyhow::Result;
 use ratatui::style::{Color, Style};
 use tui_textarea::{CursorMove, TextArea};
 
-use crate::app::App;
+use nexus_core::app::{AppCommand, Match, Popup};
+
+use crate::app_view::AppView;
 
 const COMPOSER_MULTI_CLICK: Duration = Duration::from_millis(400);
-
-/// A slash command: canonical `name`, a short (≤20 char) `desc`, and alias
-/// keywords. Names, aliases, and the description are all fuzzy-searchable, so
-/// typing `/history` surfaces `session`.
-pub struct Command {
-    pub name: &'static str,
-    pub desc: &'static str,
-    pub aliases: &'static [&'static str],
-}
-
-/// One row of the slash-command autocomplete.
-pub enum Match {
-    Builtin(&'static Command),
-}
-
-impl Match {
-    pub const fn name(&self) -> &str {
-        match self {
-            Self::Builtin(c) => c.name,
-        }
-    }
-
-    pub const fn desc(&self) -> &str {
-        match self {
-            Self::Builtin(c) => c.desc,
-        }
-    }
-}
-
-pub const COMMANDS: &[Command] = &[
-    Command {
-        name: "new",
-        desc: "start new chat",
-        aliases: &["chat", "clear"],
-    },
-    Command {
-        name: "compact",
-        desc: "summarize old messages",
-        aliases: &["compaction", "summarize"],
-    },
-    Command {
-        name: "session",
-        desc: "switch sessions",
-        aliases: &["sessions", "history", "resume", "continue", "switch"],
-    },
-    Command {
-        name: "space",
-        desc: "switch spaces",
-        aliases: &["spaces", "project", "workspace"],
-    },
-    Command {
-        name: "model",
-        desc: "pick a model",
-        aliases: &["models", "llm"],
-    },
-    Command {
-        name: "login",
-        desc: "pick a backend to log into",
-        aliases: &[
-            "key",
-            "apikey",
-            "token",
-            "auth",
-            "codex",
-            "subscription",
-            "oauth",
-            "chatgpt",
-            "opencode",
-        ],
-    },
-    Command {
-        name: "swarm",
-        desc: "multi-persona roundtable roster",
-        aliases: &["swarms", "personas", "panel"],
-    },
-    Command {
-        name: "config",
-        desc: "settings & stats",
-        aliases: &["settings", "stats", "nerd", "params"],
-    },
-    Command {
-        name: "skills",
-        desc: "manage skills",
-        aliases: &["addskill"],
-    },
-    Command {
-        name: "files",
-        desc: "browse space files / images / scripts",
-        aliases: &[
-            "file", "attach", "upload", "docs", "image", "images", "img", "pictures", "script",
-            "scripts",
-        ],
-    },
-    Command {
-        name: "apps",
-        desc: "view space apps",
-        aliases: &["app", "webapps"],
-    },
-    Command {
-        name: "research",
-        desc: "deep multi-agent research (blank = scope topic from this chat)",
-        aliases: &["deep-research"],
-    },
-    Command {
-        name: "export",
-        desc: "write session's report + sources to a file",
-        aliases: &["save-report"],
-    },
-    Command {
-        name: "watch",
-        desc: "standing research, re-runs every 24h",
-        aliases: &["watches"],
-    },
-    Command {
-        name: "usage",
-        desc: "token/cache/cost analytics by backend and model",
-        aliases: &["analytics", "costs", "billing"],
-    },
-    Command {
-        name: "web",
-        desc: "toggle web answer mode (search-first, cited)",
-        aliases: &["websearch"],
-    },
-    Command {
-        name: "incognito",
-        desc: "toggle incognito (no persistence, no apps)",
-        aliases: &["private", "anon"],
-    },
-    Command {
-        name: "copy",
-        desc: "copy last reply",
-        aliases: &["yank", "clip"],
-    },
-    Command {
-        name: "quit",
-        desc: "exit the app",
-        aliases: &["q", "exit"],
-    },
-];
-
-/// Subsequence fuzzy score, case-insensitive. `None` if `needle` isn't a
-/// subsequence of `hay`; higher is a better match (bonuses for contiguous runs
-/// and matching at the start).
-pub fn fuzzy_score(hay: &str, needle: &str) -> Option<i32> {
-    let hay = hay.to_lowercase();
-    let needle = needle.to_lowercase();
-    let mut chars = hay.chars();
-    let mut score = 0i32;
-    let mut prev_matched = false;
-    let mut pos = 0i32;
-    for nc in needle.chars() {
-        loop {
-            let hc = chars.next()?;
-            if hc == nc {
-                score += 1;
-                if prev_matched {
-                    score += 2;
-                }
-                if pos == 0 {
-                    score += 3;
-                }
-                prev_matched = true;
-                pos += 1;
-                break;
-            }
-            prev_matched = false;
-            pos += 1;
-        }
-    }
-    Some(score)
-}
-
-/// Best fuzzy score of `needle` across a command's name/aliases/desc, with the
-/// name weighted highest and the description lowest.
-fn command_score(c: &Command, needle: &str) -> Option<i32> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    let mut best: Option<i32> = None;
-    let mut upd = |s: &str, bonus: i32| {
-        if let Some(sc) = fuzzy_score(s, needle) {
-            let v = sc + bonus;
-            best = Some(best.map_or(v, |b| b.max(v)));
-        }
-    };
-    upd(c.name, 100);
-    for a in c.aliases {
-        upd(a, 50);
-    }
-    upd(c.desc, 0);
-    best
-}
 
 /// A composer `TextArea` with sane styling: no underlined cursor line, and a
 /// selection highlight that keeps the text readable (default is a blank white bg).
@@ -229,7 +41,7 @@ pub fn new_textarea() -> TextArea<'static> {
 /// it: `"copied {n} chars"` on success, `"clipboard unavailable"` if there's
 /// no clipboard or the set failed, or an empty string if `text` was empty
 /// (callers should leave the existing status untouched in that case).
-pub fn copy_to_clipboard(clipboard: &mut Option<arboard::Clipboard>, text: &str) -> String {
+pub(crate) fn copy_to_clipboard(clipboard: &mut Option<arboard::Clipboard>, text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
@@ -257,7 +69,7 @@ fn pasted_file_path(text: &str) -> Option<std::path::PathBuf> {
     path.is_file().then_some(path)
 }
 
-impl App {
+impl AppView {
     /// Current composer text, newlines joined.
     pub fn input_text(&self) -> String {
         self.input.lines().join("\n")
@@ -271,7 +83,7 @@ impl App {
         self.input.set_lines(lines, (row, col));
     }
 
-    pub(crate) fn clear_input(&mut self) {
+    pub fn clear_input(&mut self) {
         self.input = new_textarea();
     }
 
@@ -328,7 +140,7 @@ impl App {
     /// bracketed paste and an explicit Ctrl+V (some terminals send neither
     /// reliably for every popup, so both paths funnel through here).
     pub fn paste(&mut self, text: &str) {
-        use crate::app::{AppsMode, Popup, SessionMode, SkillsMode, SpaceMode};
+        use nexus_core::app::{AppsMode, FilesMode, SessionMode, SkillsMode, SpaceMode};
         if text.is_empty() {
             return;
         }
@@ -336,7 +148,7 @@ impl App {
             Popup::None => {
                 // A dropped/pasted file path becomes an import offer instead of text.
                 if let Some(path) = pasted_file_path(text) {
-                    self.open_files_popup(crate::app::FilesTab::Files);
+                    self.open_files_popup(nexus_core::app::FilesTab::Files);
                     self.start_files_add();
                     self.files_edit = path.to_string_lossy().to_string();
                     self.push_status(
@@ -357,23 +169,23 @@ impl App {
                 self.skills_edit.push_str(text);
             }
             Popup::Apps if self.apps_mode == AppsMode::EditFile => self.apps_edit.push_str(text),
-            Popup::Files if self.files_mode == crate::app::FilesMode::Add => {
+            Popup::Files if self.files_mode == FilesMode::Add => {
                 self.files_edit.push_str(text);
             }
             Popup::Files
-                if self.files_tab == crate::app::FilesTab::Scripts
-                    && self.scripts_mode == crate::app::ScriptsMode::Create =>
+                if self.files_tab == nexus_core::app::FilesTab::Scripts
+                    && self.scripts_mode == nexus_core::app::ScriptsMode::Create =>
             {
                 self.scripts_edit.push_str(text);
             }
-            Popup::Files if self.files_mode == crate::app::FilesMode::Pick => {
+            Popup::Files if self.files_mode == FilesMode::Pick => {
                 for c in text.chars().filter(|c| !c.is_control()) {
                     self.picker_filter_push(c);
                 }
             }
             Popup::Settings => {
                 if let Some(i) = self.text_index() {
-                    use crate::app::SettingsField;
+                    use nexus_core::app::SettingsField;
                     let numeric = !matches!(
                         self.settings_field(),
                         Some(
@@ -402,7 +214,7 @@ impl App {
     pub fn paste_from_clipboard(&mut self) {
         // An image on the clipboard (screenshot, copied picture) beats text —
         // but only for the composer; popup fields are text-only.
-        if self.popup == crate::app::Popup::None
+        if self.popup == Popup::None
             && let Some(img) = self.clipboard.as_mut().and_then(|cb| cb.get_image().ok())
         {
             if let Some(md) = self.save_clipboard_image(img.width, img.height, &img.bytes) {
@@ -525,9 +337,9 @@ impl App {
         if rest.contains(char::is_whitespace) {
             return Vec::new();
         }
-        let mut scored: Vec<(i32, Match)> = COMMANDS
+        let mut scored: Vec<(i32, Match)> = nexus_core::app::COMMANDS
             .iter()
-            .filter_map(|c| command_score(c, rest).map(|s| (s, Match::Builtin(c))))
+            .filter_map(|c| nexus_core::app::command_score(c, rest).map(|s| (s, Match::Builtin(c))))
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name().cmp(b.1.name())));
         scored.into_iter().map(|(_, m)| m).collect()
@@ -589,7 +401,7 @@ impl App {
         Some((rest.to_string(), at))
     }
 
-    /// Compute @-autocomplete matches from `files_cache`.
+    /// Compute @-autocomplete matches from the space's file cache.
     pub fn refresh_at_matches(&mut self) {
         let Some((query, at_offset)) = self.at_query() else {
             self.at_state = None;
@@ -606,7 +418,7 @@ impl App {
             return;
         }
         let lower = query.to_lowercase();
-        let mut scored: Vec<(i32, &crate::db::FileRow)> = self
+        let mut scored: Vec<(i32, &nexus_core::db::FileRow)> = self
             .files_cache
             .iter()
             .filter_map(|f| {
@@ -615,7 +427,7 @@ impl App {
                     100 - (name_lower.len() as i32)
                 } else if let Some(idx) = name_lower.find(&lower) {
                     50 - idx as i32
-                } else if crate::input::fuzzy_score(&query, &f.name).is_some() {
+                } else if nexus_core::app::fuzzy_score(&query, &f.name).is_some() {
                     10
                 } else {
                     return None;
@@ -624,7 +436,8 @@ impl App {
             })
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name.cmp(&b.1.name)));
-        let matches: Vec<crate::db::FileRow> = scored.into_iter().map(|(_, f)| f.clone()).collect();
+        let matches: Vec<nexus_core::db::FileRow> =
+            scored.into_iter().map(|(_, f)| f.clone()).collect();
         if matches.is_empty() {
             self.at_state = None;
             return;
@@ -663,20 +476,100 @@ impl App {
         }
         *selected = (*selected as i32 + delta).rem_euclid(n) as usize;
     }
+
+    /// Send the composer's current text (Enter): clear, then route through
+    /// `run_command` for `/`-commands or `Send` for plain messages. Domain
+    /// failure paths restore the text via `AppEvent::ComposerSet`.
+    pub fn submit(&mut self) -> Result<()> {
+        let text = self.input_text();
+        self.clear_input();
+        self.sel.clear(); // history line indices are about to shift
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(());
+        }
+        if let Some(cmd) = text.strip_prefix('/') {
+            self.run_command(cmd)?;
+        } else {
+            self.core.send_message(text.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// The command seam's view front: parse into the seam, then execute with
+    /// view interception (popup opens, quit). Unknown commands surface as a
+    /// status line rather than an error.
+    pub fn run_command(&mut self, cmd: &str) -> Result<()> {
+        match self.core.parse_command(cmd) {
+            Ok(cmd) => self.execute(cmd),
+            Err(message) => {
+                self.push_status(message);
+                Ok(())
+            }
+        }
+    }
+
+    /// Execute one command, intercepting the view-only intents (quit, popup
+    /// opens, the watch picker) and delegating everything else to the domain
+    /// `App::execute`.
+    pub fn execute(&mut self, cmd: AppCommand) -> Result<()> {
+        match cmd {
+            AppCommand::Quit => self.should_quit = true,
+            AppCommand::OpenSessionPicker => self.open_session_picker()?,
+            AppCommand::OpenSpacePicker => {
+                self.open_space_picker()?;
+            }
+            AppCommand::OpenModelPicker => self.open_model_picker(),
+            AppCommand::OpenLogin => self.open_login_popup(),
+            AppCommand::OpenSwarm => self.open_swarm_popup(),
+            AppCommand::OpenSettings => self.open_settings(),
+            AppCommand::OpenCopyMenu => self.open_copy_menu(),
+            AppCommand::OpenSkills => self.open_skills_popup(),
+            AppCommand::OpenFiles { tab } => {
+                if self.core.incognito {
+                    self.push_status("not available in incognito mode");
+                } else {
+                    self.open_files_popup(tab);
+                }
+            }
+            AppCommand::OpenApps => {
+                if self.core.incognito {
+                    self.push_status("apps not available in incognito mode");
+                } else {
+                    self.open_apps_popup();
+                }
+            }
+            AppCommand::OpenUsage => self.open_usage_popup(),
+            AppCommand::Watch { topic } => {
+                if !self.core.is_research_session() {
+                    self.push_status(
+                        "watch is only available in research sessions — use /research first",
+                    );
+                } else if let Some(t) = topic {
+                    self.core.create_watch(&t);
+                } else {
+                    self.open_watch_picker()?;
+                }
+            }
+            other => self.core.execute(other)?,
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Db;
-    use crate::space::Space;
+    use nexus_core::app::App;
+    use nexus_core::db::Db;
+    use nexus_core::space::Space;
 
-    fn test_app() -> App {
+    fn test_app() -> AppView {
         let db = Db::open_in_memory().unwrap();
         let space = Space {
             root: std::env::temp_dir().join(format!("nexus-input-test-{}", uuid::Uuid::new_v4())),
         };
-        App::new(db, Some("k"), space)
+        AppView::new(App::new(db, Some("k"), space))
     }
 
     #[test]
@@ -745,7 +638,7 @@ mod tests {
     #[test]
     fn paste_goes_into_key_popup_field() {
         let mut a = test_app();
-        a.popup = crate::app::Popup::Key;
+        a.popup = Popup::Key;
         a.paste("sk-or-abc123");
         assert_eq!(a.key_input, "sk-or-abc123");
     }
@@ -753,8 +646,8 @@ mod tests {
     #[test]
     fn paste_goes_into_files_add_field() {
         let mut a = test_app();
-        a.popup = crate::app::Popup::Files;
-        a.files_mode = crate::app::FilesMode::Add;
+        a.popup = Popup::Files;
+        a.files_mode = nexus_core::app::FilesMode::Add;
         a.paste("/tmp/report.pdf");
         assert_eq!(a.files_edit, "/tmp/report.pdf");
     }
@@ -762,8 +655,8 @@ mod tests {
     #[test]
     fn paste_in_picker_mode_feeds_the_filter() {
         let mut a = test_app();
-        a.popup = crate::app::Popup::Files;
-        a.files_mode = crate::app::FilesMode::Pick;
+        a.popup = Popup::Files;
+        a.files_mode = nexus_core::app::FilesMode::Pick;
         a.paste("doc");
         assert_eq!(a.picker_filter, "doc");
     }
@@ -771,7 +664,7 @@ mod tests {
     #[test]
     fn paste_into_numeric_settings_field_filters_non_numeric_chars() {
         let mut a = test_app();
-        a.popup = crate::app::Popup::Settings;
+        a.popup = Popup::Settings;
         a.settings_selected = 6; // Temperature (numeric)
         a.paste("0.7abc");
         assert_eq!(a.settings_inputs[0], "0.7");
@@ -780,7 +673,7 @@ mod tests {
     #[test]
     fn paste_into_url_settings_field_keeps_full_text() {
         let mut a = test_app();
-        a.popup = crate::app::Popup::Settings;
+        a.popup = Popup::Settings;
         a.settings_selected = 15; // SearxngUrl (free text)
         a.paste("http://localhost:8080");
         assert_eq!(a.settings_inputs[4], "http://localhost:8080");
@@ -793,20 +686,100 @@ mod tests {
         std::fs::write(&src, "x").unwrap();
 
         a.paste(&src.to_string_lossy());
-        assert_eq!(a.popup, crate::app::Popup::Files);
-        assert!(a.files_mode == crate::app::FilesMode::Add);
+        assert_eq!(a.popup, Popup::Files);
+        assert!(a.files_mode == nexus_core::app::FilesMode::Add);
         assert_eq!(a.files_edit, src.to_string_lossy());
         assert!(a.input_text().is_empty()); // path did not land in the composer
 
         // file:// URIs and quoted paths (file-manager drag/drop) work too.
         let mut a = test_app();
         a.paste(&format!("file://{}", src.to_string_lossy()));
-        assert_eq!(a.popup, crate::app::Popup::Files);
+        assert_eq!(a.popup, Popup::Files);
 
         // Ordinary text is untouched.
         let mut a = test_app();
         a.paste("/not/a/real/path and some prose");
-        assert_eq!(a.popup, crate::app::Popup::None);
+        assert_eq!(a.popup, Popup::None);
         assert_eq!(a.input_text(), "/not/a/real/path and some prose");
+    }
+
+    #[test]
+    fn submit_routes_slash_commands_through_run_command() {
+        let mut a = test_app();
+        a.set_input("/unknowncmd");
+        a.submit().unwrap();
+        // Unknown command: status line, nothing sent, composer cleared.
+        assert!(a.last_status().contains("unknown command"));
+        assert!(a.session.is_none());
+        assert!(a.input_text().is_empty());
+    }
+
+    #[tokio::test]
+    async fn submit_clears_composer_and_sends() {
+        let mut a = test_app();
+        a.current_model = Some("a/one".into());
+        a.set_input("hello");
+        a.submit().unwrap();
+        assert!(a.session.is_some());
+        assert!(a.input_text().is_empty());
+        assert_eq!(a.core.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_command_executes_through_the_seam() {
+        let mut a = test_app();
+        a.run_command("model").unwrap();
+        assert_eq!(a.popup, Popup::Model);
+        a.run_command("quit").unwrap();
+        assert!(a.should_quit);
+        // Unknown commands surface as a status line, not an error.
+        a.run_command("bogus").unwrap();
+        assert!(a.last_status().contains("unknown command"));
+    }
+
+    #[test]
+    fn accept_command_fill_vs_run() {
+        // Tab fills the composer with the canonical command, doesn't run it.
+        let mut a = test_app();
+        a.set_input("/hist");
+        a.accept_command(false).unwrap();
+        assert_eq!(a.input_text(), "/session ");
+
+        // Enter on the "new" alias runs it, clearing the composer.
+        let mut b = test_app();
+        b.current_model = Some("a/one".into());
+        let space_id = b.active_space.id.clone();
+        b.session = Some(
+            b.db.create_session("old chat", "a/one", &space_id, "chat")
+                .unwrap(),
+        );
+        b.set_input("/clear");
+        b.accept_command(true).unwrap();
+        assert!(b.input_text().is_empty());
+        assert!(b.session.is_none()); // /new clears the view; no row created until a message is sent
+    }
+
+    #[test]
+    fn command_autocomplete_fuzzy_matches_names_aliases_and_desc() {
+        let mut a = test_app();
+        a.skills.clear(); // isolate this test from installed skills
+
+        // Bare "/" lists everything; a space closes the popup.
+        a.set_input("/");
+        assert_eq!(a.command_matches().len(), nexus_core::app::COMMANDS.len());
+        a.set_input("/new foo");
+        assert!(a.command_matches().is_empty());
+
+        // Alias fuzzy-matches to the canonical command.
+        a.set_input("/history");
+        assert_eq!(a.command_matches()[0].name(), "session");
+
+        // Description is searchable ("stats" -> config).
+        a.set_input("/stats");
+        assert_eq!(a.command_matches()[0].name(), "config");
+
+        // Non-subsequence garbage matches nothing.
+        a.set_input("/zzzz");
+        assert!(a.command_matches().is_empty());
     }
 }

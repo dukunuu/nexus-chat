@@ -155,8 +155,7 @@ fn plain_text_segment(content: &str) -> String {
         let plain = strip_inline(line);
         match classify_line(&plain) {
             Block::Drop => {}
-            Block::Header(rest) => out.push(rest),
-            Block::List(rest) => out.push(rest),
+            Block::Header(rest) | Block::List(rest) => out.push(rest),
             Block::Plain => out.push(plain),
         }
     }
@@ -291,7 +290,7 @@ fn find_run(chars: &[char], from: usize, run: usize, marker: char) -> Option<usi
 }
 
 /// Length of an emphasis marker run at `i` (`*`/`_`), capped at 2 — a run of
-/// 3+ is left alone (CommonMark treats `***` as strong+em).
+/// 3+ is left alone ( treats a triple run as strong+em).
 fn emphasis_run(chars: &[char], i: usize) -> Option<usize> {
     let c = chars[i];
     let run = chars[i..].iter().take_while(|&&x| x == c).count();

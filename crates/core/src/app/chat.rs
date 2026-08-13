@@ -18,22 +18,9 @@ use crate::provider::{ChatMessage, ChatParams, StreamEvent, ToolCall, Usage};
 use super::{App, SPINNER_COLORS, SpinnerColor, THINKING, parse_topic, verbosity_clause};
 
 impl App {
-    pub fn submit(&mut self) -> Result<()> {
-        let text = self.input_text();
-        self.clear_input();
-        self.sel.clear(); // history line indices are about to shift
-        let text = text.trim();
-        if text.is_empty() {
-            return Ok(());
-        }
-        if let Some(cmd) = text.strip_prefix('/') {
-            self.run_command(cmd)?;
-        } else {
-            self.send_message(text.to_string())?;
-        }
-        Ok(())
-    }
-
+    /// Send one chat message. `AppView::submit` is the composer front — it
+    /// reads the `TextArea` and routes through `run_command` / `Send` — so this
+    /// is the domain half: validation, session auto-creation, persistence.
     pub fn send_message(&mut self, text: String) -> Result<()> {
         if let Some(session) = self.session.as_ref()
             && let Some(task) = self.chat_task_for_session(&session.id)
@@ -42,7 +29,7 @@ impl App {
                 "wait — response still streaming in: {}",
                 task.session_title
             ));
-            self.set_input(&text);
+            self.push_composer_set(&text);
             return Ok(());
         }
         if self.chat_task_count() >= super::MAX_CHAT_TASKS {
@@ -50,17 +37,17 @@ impl App {
                 "chat task limit reached ({})",
                 super::MAX_CHAT_TASKS
             ));
-            self.set_input(&text);
+            self.push_composer_set(&text);
             return Ok(());
         }
         if !self.backends.any() {
             self.push_status("set your API key first with /login".to_string());
-            self.set_input(&text);
+            self.push_composer_set(&text);
             return Ok(());
         }
         let Some(model) = self.current_model.clone() else {
             self.push_status("pick a model first with /model".to_string());
-            self.set_input(&text);
+            self.push_composer_set(&text);
             return Ok(());
         };
 
@@ -325,8 +312,9 @@ impl App {
         self.thinking_idx = thinking_idx;
         self.spinner_color = spinner_color;
         self.push_status(reasoning_warning.unwrap_or_default());
-        self.scroll = 0;
-        self.prev_total = 0;
+        // New content is about to arrive below the conversation: the view
+        // resets its scroll/pinning baseline (AppEvent::ViewportReset).
+        self.push_viewport_reset();
         Ok(())
     }
 
@@ -884,12 +872,13 @@ impl App {
     /// text selection (via the `open` crate), resolved against the Sources
     /// list of the message the selection belongs to. Every miss surfaces as
     /// a status message rather than doing nothing silently.
+    /// `owner` is the message index at the selection start, computed by the
+    /// view layer from its `HistorySel` state.
     /// Ctrl+O: navigate to the session linked in a `session_link` message
     /// under the text selection. Expects the message content's first line to
     /// be the target session id.
-    pub fn open_session_link(&mut self) {
-        let idx = self.sel.owner_at_selection_start();
-        let Some(msg) = idx.and_then(|i| self.messages.get(i)) else {
+    pub fn open_session_link(&mut self, owner: Option<usize>) {
+        let Some(msg) = owner.and_then(|i| self.messages.get(i)) else {
             self.push_status(
                 "select text on a session link message, then press Ctrl+O".to_string(),
             );
@@ -914,55 +903,17 @@ impl App {
         }
     }
 
-    /// Force a full history cache rebuild on the next frame. Used when
-    /// in-place message edits would otherwise leave stale wrapped content.
-    pub fn invalidate_history_cache(&mut self) {
-        if let Some(sid) = self.session.as_ref().map(|s| s.id.clone()) {
-            self.session_caches.remove(&sid);
-        }
-        self.history_cache = crate::history_cache::HistoryCache::default();
-    }
-
-    /// If the given rendered line index is an image or video thumbnail line,
-    /// open it in the default OS viewer. For video thumbnails (`_first.png`),
-    /// opens the sibling `.mp4` instead.
-    pub fn open_image_at_line(&self, line: usize) -> bool {
-        if let Some(Some(path)) = self.history_cache.image_at_line.get(line) {
-            let p = std::path::Path::new(path);
-            let open_path = if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                // Check for sibling video: abc123_first.png → abc123.mp4 or _stitch_abc123.mp4
-                if let Some(base) = stem
-                    .strip_suffix("_first")
-                    .or_else(|| stem.strip_suffix("_last"))
-                {
-                    let dir = p.parent().unwrap_or_else(|| std::path::Path::new(""));
-                    let direct = dir.join(format!("{base}.mp4"));
-                    let stitched = dir.join(format!("_stitch_{base}.mp4"));
-                    if direct.exists() {
-                        direct.to_string_lossy().to_string()
-                    } else if stitched.exists() {
-                        stitched.to_string_lossy().to_string()
-                    } else {
-                        path.clone()
-                    }
-                } else {
-                    path.clone()
-                }
-            } else {
-                path.clone()
-            };
-            let _ = open::that_detached(&open_path);
-            true
-        } else {
-            false
-        }
-    }
-
     /// Pin or discard the `[n]` source under the current history selection
     /// (same selection→citation resolution as `open_citation_under_selection`).
     /// Flags are keyed by the message's normalized URL, session-scoped.
-    pub fn flag_source_under_selection(&mut self, flag: Option<&str>) {
-        let Some(selected) = self.sel.selected_text() else {
+    /// `selected`/`owner` come from the view's `HistorySel` state.
+    pub fn flag_source_under_selection(
+        &mut self,
+        flag: Option<&str>,
+        selected: Option<String>,
+        owner: Option<usize>,
+    ) {
+        let Some(selected) = selected else {
             self.push_status("select a [n] citation, then press x".to_string());
             return;
         };
@@ -970,11 +921,7 @@ impl App {
             self.push_status("no [n] citation in the current selection".to_string());
             return;
         };
-        let Some(msg) = self
-            .sel
-            .owner_at_selection_start()
-            .and_then(|i| self.messages.get(i))
-        else {
+        let Some(msg) = owner.and_then(|i| self.messages.get(i)) else {
             self.push_status("no [n] citation in the current selection".to_string());
             return;
         };
@@ -1025,8 +972,8 @@ impl App {
         self.session = None;
         self.messages.clear();
         self.context_total = None;
-        self.scroll = 0;
-        self.set_input("");
+        self.push_composer_clear();
+        self.push_viewport_reset();
         self.cleanup_incognito_images();
         self.incognito = !self.incognito;
         self.push_status(if self.incognito {

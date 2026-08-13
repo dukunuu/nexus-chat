@@ -9,7 +9,7 @@
 )]
 use anyhow::{Context, Result};
 
-use super::{App, ImageMeta, ImagesMode};
+use super::{App, ImageMeta};
 
 /// Raster formats the app can render inline (plus `svg`, which the system
 /// viewer opens even though the half-block renderer can't draw it).
@@ -61,38 +61,20 @@ impl App {
         self.images_cache.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    pub fn move_images_selection(&mut self, delta: i32) {
-        self.images_selected =
-            super::clamp_cursor(self.images_selected, self.images_cache.len(), delta);
-    }
-
-    /// Enter in Browse: open the image in the system viewer.
-    pub fn open_selected_image(&mut self) {
-        let Some(img) = self.images_cache.get(self.images_selected) else {
-            return;
-        };
-        let path = self
-            .space
-            .files_dir(&self.active_space.name)
-            .join(&img.name);
-        let _ = open::that_detached(&path);
-        self.push_status(format!("opened {}", img.name));
-    }
-
-    /// Ctrl+D confirm: delete the image file from disk and refresh.
-    pub fn confirm_images_delete(&mut self) -> Result<()> {
+    /// The popup's confirm-delete lives in the view; this is the disk half:
+    /// remove the file (if any) and refresh the cache. Returns whether a row
+    /// existed. `images_mode` reset is the view's job.
+    pub fn delete_image_file(&mut self, name: &str) -> Result<bool> {
         let dir = self.space.files_dir(&self.active_space.name);
-        if let Some(img) = self.images_cache.get(self.images_selected).cloned() {
-            let path = dir.join(&img.name);
-            if path.exists() {
-                std::fs::remove_file(&path)
-                    .with_context(|| format!("removing {}", path.display()))?;
-            }
-            self.push_status(format!("removed {}", img.name));
+        let path = dir.join(name);
+        if path.exists() {
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            self.push_status(format!("removed {name}"));
             self.refresh_images();
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        self.images_mode = ImagesMode::Browse;
-        Ok(())
     }
 }
 

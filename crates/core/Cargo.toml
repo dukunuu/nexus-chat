@@ -20,19 +20,15 @@ name = "nexus_core"
 # Enabled from the TUI crate's dev-dependencies only.
 test-helpers = []
 
-[dependencies]
-# ── Interim TUI deps (Phase 2a → 2e) ──────────────────────────────────────
-# The App struct still carries view state (composer, theme, render caches,
-# clipboard) until step 2e moves UI state into the TUI crate. These are
-# removed then; nothing in this crate's *own* modules should gain new
-# ratatui/crossterm/arboard usage in the meantime.
-ratatui = { workspace = true }
-crossterm = { workspace = true }
-tui-textarea-2 = { workspace = true }
-arboard = { workspace = true }
+[dev-dependencies]
+# Core's own tests use the same `test-helpers` (event-drain assertions on
+# `App::last_status`/`drain_composer_sets`).
+nexus-chat-core = { path = ".", features = ["test-helpers"] }
 
+[dependencies]
 # ── Core deps ─────────────────────────────────────────────────────────────
 anyhow = { workspace = true }
+arboard = { workspace = true }  # device-code login copies the URL to the OS clipboard (config.rs)
 base64 = { workspace = true }
 chrono = { workspace = true }
 directories = { workspace = true }

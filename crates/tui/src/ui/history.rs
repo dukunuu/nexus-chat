@@ -17,13 +17,13 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use super::{dim, fmt_cost, to_color};
+use crate::app_view::AppView;
+use crate::history_cache::HistoryCache;
 use crate::ui::markdown::line_text;
-use nexus_core::app::App;
 use nexus_core::db::Message;
-use nexus_core::history_cache::HistoryCache;
 
 #[allow(clippy::too_many_lines)] // whole conversation view: header, day dividers, cards, stats
-pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
+pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
     // Borderless: the conversation fills the whole pane minus the rightmost
     // column, which is the scrollbar gutter (always reserved so lines don't
     // shift when the scrollbar appears).
@@ -299,7 +299,7 @@ fn render_scrollbar(
     area: Rect,
     total: usize,
     top: usize,
-    theme: &nexus_core::theme::Theme,
+    theme: &crate::theme::Theme,
 ) {
     let track = area.height as usize;
     if track == 0 {
@@ -363,7 +363,7 @@ fn find_line(
 /// Bring the cached wrapped prefix up to date: reset on width/flag/session
 /// change, then wrap only messages not yet cached. Stored messages are
 /// append-only, so this is O(new messages) per frame instead of O(all).
-fn sync_cache(app: &mut App, width: usize) {
+fn sync_cache(app: &mut AppView, width: usize) {
     let key = (
         app.session.as_ref().map(|s| s.id.clone()),
         width,
@@ -373,7 +373,11 @@ fn sync_cache(app: &mut App, width: usize) {
         app.settings.show_stats,
         app.theme_gen,
     );
-    let c = &mut app.history_cache;
+    // Work on a detached cache: the wrap pass reads the domain half
+    // (messages, settings, space) through the `AppView` deref, which borrows
+    // the whole view — it can't overlap a borrow of a view field.
+    let mut cache = std::mem::take(&mut app.history_cache);
+    let c = &mut cache;
     if c.key != key || app.messages.len() < c.msg_count {
         if c.key.0 != key.0 {
             // Session changed — save old cache for later reuse.
@@ -477,12 +481,13 @@ fn sync_cache(app: &mut App, width: usize) {
         c.plain.extend(new_plain);
     }
     c.msg_count = app.messages.len();
+    app.history_cache = cache;
 }
 
 /// The empty start screen: a rounded panel holding the gradient banner, a
 /// random greeting, a live clock, quick-start chips, and the most recent
 /// sessions.
-fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
+fn render_welcome(f: &mut Frame, app: &AppView, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     // Per-line gradient across the accent ramp: accent -> accent2.
     let banner_lines: Vec<&str> = app.banner.lines().collect();
@@ -574,7 +579,7 @@ fn ramp(a: Color, b: Color, t: f32) -> Color {
 }
 
 /// `[ /cmd ]` chips in a dim bracket style, separated by two spaces.
-fn chip_row(cmds: &[&str], theme: &nexus_core::theme::Theme) -> Line<'static> {
+fn chip_row(cmds: &[&str], theme: &crate::theme::Theme) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, cmd) in cmds.iter().enumerate() {
         if i > 0 {
@@ -592,12 +597,7 @@ fn chip_row(cmds: &[&str], theme: &nexus_core::theme::Theme) -> Line<'static> {
 
 /// A centered `── label ──` rule, used for day dividers and the welcome
 /// screen's recent-sessions header.
-fn rule_line(
-    out: &mut Vec<Line<'static>>,
-    label: &str,
-    width: usize,
-    theme: &nexus_core::theme::Theme,
-) {
+fn rule_line(out: &mut Vec<Line<'static>>, label: &str, width: usize, theme: &crate::theme::Theme) {
     let label = format!(" {label} ");
     let dashes = width.saturating_sub(label.chars().count());
     let line = format!(
@@ -672,7 +672,7 @@ fn push_user_card(
     image_at_line: &mut Vec<Option<String>>,
     content: &str,
     width: usize,
-    theme: &nexus_core::theme::Theme,
+    theme: &crate::theme::Theme,
     created_at: Option<&str>,
     images_dir: &std::path::Path,
     image_cache: &mut HashMap<(String, usize), Vec<Line<'static>>>,
@@ -681,7 +681,7 @@ fn push_user_card(
         .clamp(24, 64)
         .min(width.saturating_sub(6).max(24));
     let inner = card_w.saturating_sub(4);
-    let bg = nexus_core::theme::blend(theme.bg, theme.user_msg, 0.08);
+    let bg = crate::theme::blend(theme.bg, theme.user_msg, 0.08);
     let bg_style = Style::default().bg(bg);
 
     let mut card: Vec<Line<'static>> = Vec::new();
@@ -756,7 +756,7 @@ fn push_tool_call(
     expanded: bool,
     settings: &nexus_core::app::Settings,
     width: usize,
-    theme: &nexus_core::theme::Theme,
+    theme: &crate::theme::Theme,
 ) {
     let v: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
     let field = |k: &str| {
@@ -796,7 +796,7 @@ fn push_compaction(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
-    theme: &nexus_core::theme::Theme,
+    theme: &crate::theme::Theme,
 ) {
     out.push(Line::from(vec![
         Span::styled("📄 ", Style::default().fg(theme.accent2)),
@@ -820,7 +820,7 @@ fn push_research_stage(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
-    theme: &nexus_core::theme::Theme,
+    theme: &crate::theme::Theme,
 ) {
     let mut first = true;
     for line in wrap_plain(content, width.saturating_sub(2)) {
@@ -843,7 +843,7 @@ fn push_error(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
-    theme: &nexus_core::theme::Theme,
+    theme: &crate::theme::Theme,
 ) {
     let style = Style::default().fg(theme.error);
     let mut first = true;
@@ -872,7 +872,7 @@ fn push_survey_section(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
-    theme: &nexus_core::theme::Theme,
+    theme: &crate::theme::Theme,
 ) {
     let mut first = true;
     for line in wrap_plain(content, width.saturating_sub(2)) {
@@ -903,7 +903,7 @@ fn push_research_plan(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
-    theme: &nexus_core::theme::Theme,
+    theme: &crate::theme::Theme,
 ) {
     let mut first = true;
     for line in wrap_plain(content, width.saturating_sub(2)) {
@@ -935,7 +935,7 @@ fn push_assistant_stored(
     width: usize,
     code: &mut Vec<Option<usize>>,
     blocks: &mut Vec<String>,
-    theme: &nexus_core::theme::Theme,
+    theme: &crate::theme::Theme,
     images_dir: &std::path::Path,
     image_cache: &mut HashMap<(String, usize), Vec<Line<'static>>>,
 ) {
@@ -1059,7 +1059,7 @@ fn push_session_link(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
-    theme: &nexus_core::theme::Theme,
+    theme: &crate::theme::Theme,
 ) {
     let (sid, label) = match content.split_once('\n') {
         Some((sid, rest)) => (sid.to_string(), rest.trim().to_string()),
@@ -1107,7 +1107,7 @@ fn push_session_link(
 /// color, the thinking block when present, then the live markdown stream.
 fn push_assistant_streaming(
     out: &mut Vec<Line<'static>>,
-    app: &App,
+    app: &AppView,
     width: usize,
     code: &mut Vec<Option<usize>>,
     blocks: &mut Vec<String>,
@@ -1189,7 +1189,7 @@ fn render_markdown_images(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
-    theme: &nexus_core::theme::Theme,
+    theme: &crate::theme::Theme,
     images_dir: &std::path::Path,
     image_at_line: &mut Vec<Option<String>>,
     image_cache: &mut HashMap<(String, usize), Vec<Line<'static>>>,
@@ -1319,6 +1319,7 @@ fn wrap_plain(content: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nexus_core::app::App;
     use nexus_core::db::{Db, Message};
 
     fn msg(role: &str, content: &str) -> Message {
@@ -1336,16 +1337,16 @@ mod tests {
         }
     }
 
-    fn test_app() -> App {
+    fn test_app() -> AppView {
         let db = Db::open_in_memory().unwrap();
         let space = nexus_core::space::Space {
             root: std::env::temp_dir().join(format!("nexus-hist-{}", uuid::Uuid::new_v4())),
         };
-        App::new(db, Some("k"), space)
+        AppView::new(App::new(db, Some("k"), space))
     }
 
     /// Build an app with a session and a manually-inserted streaming task.
-    fn streaming_app(thinking: &str, buffer: &str) -> App {
+    fn streaming_app(thinking: &str, buffer: &str) -> AppView {
         let mut a = test_app();
         let space = a.active_space.id.clone();
         let s =
@@ -1507,7 +1508,7 @@ mod tests {
 
     /// A conversation tall enough to overflow the history pane, with one
     /// tool-call block whose detail toggle produces a large line delta.
-    fn tall_tool_call_app() -> App {
+    fn tall_tool_call_app() -> AppView {
         let mut a = test_app();
         for i in 0..60 {
             a.messages.push(msg(
@@ -1760,7 +1761,7 @@ mod tests {
     /// A tall conversation with reasoning traces on many assistant messages,
     /// so a show-reasoning toggle re-wraps content above and below the
     /// viewport, not just below it.
-    fn tall_reasoning_app() -> App {
+    fn tall_reasoning_app() -> AppView {
         let mut a = test_app();
         for i in 0..40 {
             a.messages.push(msg(
@@ -2005,6 +2006,7 @@ mod tests {
 #[cfg(test)]
 mod card_tint_tests {
     use super::*;
+    use nexus_core::app::App;
     use nexus_core::db::{Db, Message};
     use nexus_core::space::Space;
 
@@ -2014,7 +2016,7 @@ mod card_tint_tests {
         let space = Space {
             root: std::env::temp_dir().join(format!("nexus-tint-{}", uuid::Uuid::new_v4())),
         };
-        let mut app = App::new(db, Some("k"), space);
+        let mut app = AppView::new(App::new(db, Some("k"), space));
         app.messages.push(Message {
             role: "user".into(),
             content: "a short note".into(),
@@ -2032,7 +2034,7 @@ mod card_tint_tests {
         terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let buf = terminal.backend().buffer();
         // The card occupies the right side: find a "a" of "a short note".
-        let expected_bg = nexus_core::theme::blend(app.theme.bg, app.theme.user_msg, 0.08);
+        let expected_bg = crate::theme::blend(app.theme.bg, app.theme.user_msg, 0.08);
         let mut painted = 0;
         let mut rightmost = 0;
         for y in 0..buf.area.height {

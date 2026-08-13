@@ -265,8 +265,16 @@ impl App {
             topic,
             gated: !approve,
         })?;
+        // The execute above may have refused with a status line (already
+        // running, no model, …) — surface the last one if no job started.
+        let mut refusal = String::new();
+        while let Some(ev) = self.pop_pending_event() {
+            if let AppEvent::Status(s) = ev {
+                refusal = s;
+            }
+        }
         if self.research_rx.is_none() {
-            bail!("research didn't start: {}", self.status);
+            bail!("research didn't start: {refusal}");
         }
 
         let mut report: Option<String> = None;

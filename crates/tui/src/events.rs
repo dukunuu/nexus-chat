@@ -9,27 +9,29 @@ use ratatui::layout::{Position, Rect};
 
 use tui_textarea::CursorMove;
 
+use crate::app_view::AppView;
 use crate::ui;
-use nexus_core::app::{App, AppEvent, ModelPanel, MouseTarget, Popup};
+use nexus_core::app::{AppEvent, ModelPanel, MouseTarget, Popup};
 
 /// Ctrl+E/Ctrl+K in the space picker edit that space's instructions/memory
 /// file. Returns the path to open, if the key matches and one resolves.
-fn edit_file_target(app: &App, key: &KeyEvent) -> Option<std::path::PathBuf> {
+fn edit_file_target(app: &AppView, key: &KeyEvent) -> Option<std::path::PathBuf> {
     if !(app.popup == Popup::Space
         && app.space_mode == nexus_core::app::SpaceMode::Browse
         && key.modifiers.contains(KeyModifiers::CONTROL))
     {
         return None;
     }
+    let (instructions, memory) = app.space_edit_target();
     match key.code {
-        KeyCode::Char('e') => app.instructions_path_for_selected(),
-        KeyCode::Char('k') => app.memory_path_for_selected(),
+        KeyCode::Char('e') => instructions,
+        KeyCode::Char('k') => memory,
         _ => None,
     }
 }
 
 /// Ctrl+E in the skills popup opens the highlighted skill's SKILL.md.
-fn skill_edit_target(app: &App, key: &KeyEvent) -> Option<std::path::PathBuf> {
+fn skill_edit_target(app: &AppView, key: &KeyEvent) -> Option<std::path::PathBuf> {
     if !(app.popup == Popup::Skills
         && app.skills_mode == nexus_core::app::SkillsMode::Browse
         && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -41,7 +43,7 @@ fn skill_edit_target(app: &App, key: &KeyEvent) -> Option<std::path::PathBuf> {
 }
 
 /// Ctrl+E in the settings popup opens the app's base system prompt.
-fn system_prompt_edit_target(app: &App, key: &KeyEvent) -> Option<std::path::PathBuf> {
+fn system_prompt_edit_target(app: &AppView, key: &KeyEvent) -> Option<std::path::PathBuf> {
     if !(app.popup == Popup::Settings
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && key.code == KeyCode::Char('e'))
@@ -51,7 +53,7 @@ fn system_prompt_edit_target(app: &App, key: &KeyEvent) -> Option<std::path::Pat
     nexus_core::config::system_prompt_path().ok()
 }
 
-pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
+pub async fn run(mut app: AppView, terminal: &mut DefaultTerminal) -> Result<()> {
     let result = run_loop(&mut app, terminal).await;
     app.cancel_chat_tasks();
     result
@@ -59,12 +61,18 @@ pub async fn run(mut app: App, terminal: &mut DefaultTerminal) -> Result<()> {
 
 // Long by design (event loop).
 #[allow(clippy::too_many_lines)]
-async fn run_loop(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
+async fn run_loop(app: &mut AppView, terminal: &mut DefaultTerminal) -> Result<()> {
     let mut reader = EventStream::new();
     // Cheap poll for an omarchy theme switch (symlink target change) so a
     // `omarchy theme set` while nexus-chat is running takes effect live.
     let mut theme_poll = tokio::time::interval(std::time::Duration::from_secs(2));
     loop {
+        // Locally-queued UI feedback (status lines, composer restore,
+        // viewport resets) applies before the draw so it lands on the same
+        // frame as the action that caused it.
+        while let Some(ev) = app.pop_pending_event() {
+            app.apply_event(&ev);
+        }
         terminal.draw(|f| ui::render(f, app))?;
         if app.should_quit {
             break;
@@ -91,7 +99,7 @@ async fn run_loop(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
                                 edit_in_external_editor(terminal, &path)?;
                                 app.reload_compact_summary(&path)?;
                             }
-                            None => app.status = "session hasn't been compacted yet".to_string(),
+                            None => app.push_status("session hasn't been compacted yet".to_string()),
                         }
                     } else {
                         handle_key(app, k)?;
@@ -101,18 +109,18 @@ async fn run_loop(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
                             match edit {
                                 nexus_core::app::PendingEditor::AppFile(path) => {
                                     if let Err(e) = edit_in_external_editor(terminal, &path) {
-                                        app.status = format!("editor failed: {e}");
+                                        app.push_status(format!("editor failed: {e}"));
                                     }
                                 }
                                 nexus_core::app::PendingEditor::Persona(path) => {
                                     match edit_in_external_editor(terminal, &path) {
                                         Ok(()) => app.apply_swarm_persona_editor(&path)?,
-                                        Err(e) => app.status = format!("editor failed: {e}"),
+                                        Err(e) => app.push_status(format!("editor failed: {e}")),
                                     }
                                 }
                                 nexus_core::app::PendingEditor::ScriptFile(path) => {
                                     if let Err(e) = edit_in_external_editor(terminal, &path) {
-                                        app.status = format!("editor failed: {e}");
+                                        app.push_status(format!("editor failed: {e}"));
                                     }
                                     app.refresh_scripts();
                                 }
@@ -133,27 +141,57 @@ async fn run_loop(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
                 Some(Err(e)) => return Err(e.into()),
                 None => break,
             },
-            event = app.next_event() => match event {
-                // push_status already synced the status field; the event is
-                // for seam consumers (2e moves the field out entirely). The
-                // TUI banner lands in 2e; until then the gate prompt is
-                // driven by the existing status text + guard clause.
-                AppEvent::Status(_) | AppEvent::Gate(_) | AppEvent::Stream(None) => {}
-                AppEvent::Stream(Some((task_id, e))) => app.on_chat_event(task_id, e)?,
-                AppEvent::Models(r) => app.on_models_result(r),
-                AppEvent::Title(t) => app.on_title_result(t),
-                AppEvent::Memory(m) => app.on_memory_result(m),
-                AppEvent::Compact(c) => app.on_compact_result(c),
-                AppEvent::SkillInstall(r) => app.on_skill_install_result(r),
-                AppEvent::Ocr(r) => app.on_ocr_done(r),
-                AppEvent::Embed(r) => app.on_embed_done(r),
-                AppEvent::OcrPull(r) => app.on_ocr_pull(r),
-                AppEvent::Research(r) => app.on_research_done(r),
-                AppEvent::ResearchTopic(r) => app.on_research_topic_derived(r),
-                AppEvent::Login(r) => app.on_login_result(r),
-                AppEvent::UpdateCheck(r) => app.on_update_check(r),
-                AppEvent::Swarm(r) => app.on_swarm_update(r),
-            },
+            event = app.next_event() => {
+                // View-side events (status line, composer restore, viewport
+                // reset) apply to the view layer; domain events go to their
+                // handlers, which may push more pending events in turn.
+                app.apply_event(&event);
+                match event {
+                    AppEvent::Status(_)
+                    | AppEvent::Gate(_)
+                    | AppEvent::Stream(None)
+                    | AppEvent::ComposerSet(_)
+                    | AppEvent::ComposerClear
+                    | AppEvent::ViewportReset
+                    | AppEvent::HistoryInvalidated
+                    | AppEvent::OpenLoginPopup => {}
+                    AppEvent::Stream(Some((task_id, e))) => app.on_chat_event(task_id, e)?,
+                    AppEvent::Models(r) => {
+                        app.on_models_result(r);
+                        // First key just landed and nothing picked yet → jump
+                        // into the picker (the domain can't open popups).
+                        if !app.core.models.is_empty()
+                            && app.core.current_model.is_none()
+                            && app.popup == Popup::None
+                        {
+                            app.open_model_picker();
+                        }
+                    }
+                    AppEvent::Title(t) => app.on_title_result(t),
+                    AppEvent::Memory(m) => app.on_memory_result(m),
+                    AppEvent::Compact(c) => app.on_compact_result(c),
+                    AppEvent::SkillInstall(r) => app.on_skill_install_result(r),
+                    AppEvent::Ocr(r) => app.on_ocr_done(r),
+                    AppEvent::Embed(r) => app.on_embed_done(r),
+                    AppEvent::OcrPull(r) => app.on_ocr_pull(r),
+                    AppEvent::Research(r) => {
+                        app.on_research_done(r);
+                        // The job's channel closed: close the live view and
+                        // clear its steer input (view state the domain no
+                        // longer owns).
+                        if app.core.research_rx.is_none() {
+                            app.core.research_live_input.clear();
+                            if app.popup == Popup::ResearchLive {
+                                app.popup = Popup::None;
+                            }
+                        }
+                    }
+                    AppEvent::ResearchTopic(r) => app.on_research_topic_derived(r),
+                    AppEvent::Login(r) => app.on_login_result(r),
+                    AppEvent::UpdateCheck(r) => app.on_update_check(r),
+                    AppEvent::Swarm(r) => app.on_swarm_update(r),
+                }
+            }
             () = async {
                 if streaming {
                     tokio::time::sleep(std::time::Duration::from_millis(120)).await;
@@ -169,9 +207,9 @@ async fn run_loop(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
                 }
             } => {
                 match app.sel.check_long_press() {
-                    Some(nexus_core::selection::LongPress::Code(text)) => app.copy_text(&text),
-                    Some(nexus_core::selection::LongPress::Message(idx)) => app.copy_message(idx),
-                    Some(nexus_core::selection::LongPress::Url(url)) => app.copy_text(&url),
+                    Some(crate::selection::LongPress::Code(text)) => app.copy_text(&text),
+                    Some(crate::selection::LongPress::Message(idx)) => app.copy_message(idx),
+                    Some(crate::selection::LongPress::Url(url)) => app.copy_text(&url),
                     None => {}
                 }
             }
@@ -184,9 +222,9 @@ async fn run_loop(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
                 }
             } => {}
             _ = theme_poll.tick() => {
-                let target = nexus_core::theme::current_link_target();
+                let target = crate::theme::current_link_target();
                 if target != app.theme_link {
-                    app.theme = nexus_core::theme::load();
+                    app.theme = crate::theme::load();
                     app.theme_link = target;
                     app.theme_gen = app.theme_gen.wrapping_add(1);
                 }
@@ -196,7 +234,7 @@ async fn run_loop(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
     Ok(())
 }
 
-fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
     // Ctrl+C always quits. Selecting text (mouse drag, in the composer or
     // history) copies it on release, so Ctrl+C doesn't need to double as copy.
     if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -282,7 +320,7 @@ fn edit_in_external_editor(terminal: &mut DefaultTerminal, path: &std::path::Pat
 
 // Long by design (key dispatch).
 #[allow(clippy::too_many_lines)]
-fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
+fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
@@ -377,10 +415,16 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         // composer typing is untouched (the guard fires only while a
         // selection exists).
         KeyCode::Char('p') if !ctrl && !shift && app.sel.selected_text().is_some() => {
-            app.flag_source_under_selection(Some("pinned"));
+            let selected = app.sel.selected_text();
+            let owner = app.sel.owner_at_selection_start();
+            app.core
+                .flag_source_under_selection(Some("pinned"), selected, owner);
         }
         KeyCode::Char('x') if !ctrl && !shift && app.sel.selected_text().is_some() => {
-            app.flag_source_under_selection(Some("discarded"));
+            let selected = app.sel.selected_text();
+            let owner = app.sel.owner_at_selection_start();
+            app.core
+                .flag_source_under_selection(Some("discarded"), selected, owner);
         }
         // Ctrl+↑ opens the live research-activity view (per-searcher
         // reasoning/tool calls) — only while a research job is running.
@@ -445,7 +489,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
 
 /// Mouse in the main view (no popup): composer click/drag places the cursor and
 /// selects; history click/drag/double/triple selects text; wheel scrolls.
-fn handle_input_mouse(app: &mut App, m: MouseEvent) {
+fn handle_input_mouse(app: &mut AppView, m: MouseEvent) {
     let over_input = app.input_inner.contains(Position::new(m.column, m.row));
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
@@ -499,10 +543,10 @@ fn handle_input_mouse(app: &mut App, m: MouseEvent) {
                     let p = app.sel.pos_at(m.column, m.row);
                     let was_image = p.is_some_and(|p| app.open_image_at_line(p.0));
                     match app.sel.on_up(p) {
-                        Some(nexus_core::selection::Action::Copy(text)) => app.copy_text(&text),
-                        Some(nexus_core::selection::Action::OpenUrl(url)) => {
+                        Some(crate::selection::Action::Copy(text)) => app.copy_text(&text),
+                        Some(crate::selection::Action::OpenUrl(url)) => {
                             let _ = open::that_detached(&url);
-                            app.status = format!("opened {url}");
+                            app.push_status(format!("opened {url}"));
                         }
                         None if !was_image && p.is_some() => {
                             // Click without drag on a non-image line: open URLs or start selection.
@@ -531,7 +575,7 @@ fn handle_input_mouse(app: &mut App, m: MouseEvent) {
 /// Move the composer cursor to the clicked cell. ponytail: screen row/col mapped
 /// straight to data line/char — exact when the composer isn't wrapped/scrolled
 /// (tui-textarea keeps its screen<->data map private).
-fn composer_jump(app: &mut App, m: MouseEvent) {
+fn composer_jump(app: &mut AppView, m: MouseEvent) {
     let row = m.row.saturating_sub(app.input_inner.y);
     let col = m.column.saturating_sub(app.input_inner.x);
     app.input.move_cursor(CursorMove::Jump(row, col));
@@ -539,7 +583,7 @@ fn composer_jump(app: &mut App, m: MouseEvent) {
 
 /// Route mouse events: composer click/drag when no popup is open, else the
 /// model picker (the only interactive popup).
-fn handle_mouse(app: &mut App, m: MouseEvent, screen: Rect) -> Result<()> {
+fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
     if app.popup == Popup::None {
         if m.kind == MouseEventKind::Down(MouseButton::Left) {
             let pos = Position::new(m.column, m.row);

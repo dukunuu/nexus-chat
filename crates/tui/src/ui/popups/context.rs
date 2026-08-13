@@ -4,13 +4,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use nexus_core::app::{App, Popup};
+use crate::app_view::AppView;
+use nexus_core::app::Popup;
 
 use super::chrome;
 
 /// Context breakdown popup (Ctrl+I): estimated tokens spent on system
 /// instructions, memory, conversation, and (pending) skills.
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &AppView) {
     let area = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
     let b = app.context_breakdown();
     let dim = Style::default().fg(app.theme.fg_dim);
@@ -74,7 +75,7 @@ pub fn render(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-pub fn handle_key(app: &mut App, key: KeyEvent) {
+pub fn handle_key(app: &mut AppView, key: KeyEvent) {
     if key.code == KeyCode::Esc {
         app.popup = Popup::None;
     }
