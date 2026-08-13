@@ -17,10 +17,10 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use super::{dim, fmt_cost, to_color};
+use crate::ui::markdown::line_text;
 use nexus_core::app::App;
 use nexus_core::db::Message;
 use nexus_core::history_cache::HistoryCache;
-use nexus_core::markdown::line_text;
 
 #[allow(clippy::too_many_lines)] // whole conversation view: header, day dividers, cards, stats
 pub(super) fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
@@ -1024,7 +1024,7 @@ fn push_assistant_stored(
     );
 
     let mut rendered =
-        nexus_core::markdown::render(&strip_markdown_images(content), width.saturating_sub(2));
+        crate::ui::markdown::render(&strip_markdown_images(content), width.saturating_sub(2));
     rendered.lines = crate::ui::citations_style::style_citations(rendered.lines, theme.accent);
     rendered.lines = crate::ui::citations_style::style_confidence_tags(rendered.lines);
     push_rendered(out, code, blocks, rendered, Some(rail));
@@ -1146,7 +1146,7 @@ fn push_assistant_streaming(
 
     let buf = app.active_streaming_text().unwrap_or("");
     let mut rendered =
-        nexus_core::markdown::render(&strip_markdown_images(buf), width.saturating_sub(2));
+        crate::ui::markdown::render(&strip_markdown_images(buf), width.saturating_sub(2));
     rendered.lines = crate::ui::citations_style::style_citations(rendered.lines, app.theme.accent);
     rendered.lines = crate::ui::citations_style::style_confidence_tags(rendered.lines);
     push_rendered(out, code, blocks, rendered, Some(rail));
@@ -1160,7 +1160,7 @@ fn push_rendered(
     out: &mut Vec<Line<'static>>,
     code: &mut Vec<Option<usize>>,
     blocks: &mut Vec<String>,
-    r: nexus_core::markdown::Rendered,
+    r: crate::ui::markdown::Rendered,
     rail: Option<Span<'static>>,
 ) {
     code.resize(out.len(), None); // align past any dot/reasoning lines

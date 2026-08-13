@@ -1832,7 +1832,9 @@ dependencies = [
  "textwrap",
  "tokio",
  "toml",
+ "tui-markdown",
  "tui-textarea-2",
+ "unicode-width",
  "uuid",
  "zip",
 ]
@@ -1859,12 +1861,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "textwrap",
  "tokio",
  "toml",
- "tui-markdown",
  "tui-textarea-2",
- "unicode-width",
  "uuid",
  "zip",
 ]

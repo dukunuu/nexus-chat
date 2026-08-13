@@ -30,9 +30,6 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 tui-textarea-2 = { workspace = true }
 arboard = { workspace = true }
-tui-markdown = { workspace = true }
-textwrap = { workspace = true }
-unicode-width = { workspace = true }
 
 # ── Core deps ─────────────────────────────────────────────────────────────
 anyhow = { workspace = true }

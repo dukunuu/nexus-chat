@@ -17,6 +17,7 @@ use nexus_core::app::{App, Popup};
 
 pub mod citations_style;
 pub mod history;
+pub mod markdown;
 pub mod popups;
 
 use history::render_history;
