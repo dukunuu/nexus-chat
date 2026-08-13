@@ -5928,7 +5928,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn new_wires_searxng_url_and_langsearch_key() {
         let tb = ToolBox::new(
             PathBuf::new(),
@@ -5946,6 +5945,7 @@ mod tests {
         assert!(!tb.supports_images());
     }
 
+    #[test]
     fn defs_include_file_tools_only_when_files_exist() {
         let (tb, ..) = files_toolbox();
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();
