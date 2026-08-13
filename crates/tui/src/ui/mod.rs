@@ -1,0 +1,494 @@
+// Casts here are on terminal-bounded values (u16/u32 dims, byte colors,
+// glyph counts) — never on unbounded user data. JSON-derived indices in
+// provider/tools go through try_from instead.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+
+use nexus_core::app::{App, Popup};
+
+pub mod citations_style;
+pub mod history;
+pub mod popups;
+
+use history::render_history;
+
+pub fn render(f: &mut Frame, app: &mut App) {
+    // Grow the input box with its wrapped content (1–20 rows) plus 2 for the
+    // border. `measure` wants the width the widget renders at, i.e. inside the
+    // border (full width - 2).
+    let inner_w = f.area().width.saturating_sub(2);
+    let content_rows = app.input.measure(inner_w).preferred_rows;
+    let input_h = content_rows.saturating_add(2);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),          // history
+            Constraint::Length(input_h), // input (auto-height, max 22)
+            Constraint::Length(1),       // status (with inline context bar)
+        ])
+        .split(f.area());
+
+    render_history(f, app, chunks[0]);
+    render_input(f, app, chunks[1]);
+    render_status(f, app, chunks[2]);
+    // Autocomplete floats above the input; only when no modal popup is open.
+    if app.popup == Popup::None {
+        render_command_popup(f, app, chunks[1]);
+        render_at_popup(f, app, chunks[1]);
+        render_notifications(f, app, chunks[0]);
+    } else {
+        app.notification_areas.clear();
+    }
+
+    match app.popup {
+        Popup::Model => popups::model::render(f, app),
+        Popup::Session => popups::session::render(f, app),
+        Popup::Copy => popups::copy::render(f, app),
+        Popup::Key => popups::key::render(f, app),
+        Popup::Settings => popups::settings::render(f, app),
+        Popup::Space => popups::space::render(f, app),
+        Popup::Context => popups::context::render(f, app),
+        Popup::Skills => popups::skills::render(f, app),
+        Popup::Files => popups::files::render(f, app),
+        Popup::Apps => popups::apps::render(f, app),
+        Popup::Watch => popups::watches::render(f, app),
+        Popup::ResearchLive => popups::research_live::render(f, app),
+        Popup::Swarm => popups::swarm::render(f, app),
+        Popup::Usage => popups::usage::render(f, app),
+        Popup::Login => popups::login::render(f, app),
+        Popup::None => {}
+    }
+}
+
+pub fn dim(s: impl Into<String>, theme: &nexus_core::theme::Theme) -> Span<'static> {
+    Span::styled(s.into(), Style::default().fg(theme.fg_dim))
+}
+
+/// Map core's abstract spinner palette onto terminal colors.
+pub fn to_color(c: nexus_core::app::SpinnerColor) -> Color {
+    match c {
+        nexus_core::app::SpinnerColor::Green => Color::Green,
+        nexus_core::app::SpinnerColor::Cyan => Color::Cyan,
+        nexus_core::app::SpinnerColor::Magenta => Color::Magenta,
+    }
+}
+
+fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
+    let hint = if app.settings.hide_hints {
+        String::new()
+    } else if app.viewing_stream() {
+        " …working (Esc to stop) ".to_string()
+    } else if app.is_streaming() {
+        format!(
+            " ⟳ {} chat{} running ",
+            app.chat_task_count(),
+            if app.chat_task_count() == 1 { "" } else { "s" }
+        )
+    } else if app.compact_rx.is_some() {
+        // Compaction is a background job on this session — keep its state on
+        // the input bar for as long as it runs, not in a status message that
+        // the next event overwrites.
+        " ⟳ compacting… ".to_string()
+    } else if let Some((_, topic)) = app
+        .research_running
+        .as_ref()
+        .filter(|(id, _)| app.session.as_ref().is_none_or(|s| &s.id != id))
+    {
+        format!(" 🔎 researching: {topic} ")
+    } else {
+        " message (Enter to send, /help) ".to_string()
+    };
+    // Session title sits in the top-right corner of the input box; the
+    // border brightens while a stream or compaction is running so the active
+    // state reads at a glance.
+    let name = match &app.session {
+        Some(s) => s.title.clone(),
+        None => "nexus-chat".to_string(),
+    };
+    let border_color = if app.is_streaming() || app.compact_rx.is_some() {
+        to_color(app.spinner_color())
+    } else {
+        app.theme.border_dim
+    };
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title_top(Line::from(hint));
+    block = block.title_top(
+        Line::from(Span::styled(
+            format!(" {name} "),
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .right_aligned(),
+    );
+    let inner = block.inner(area);
+    app.input_inner = inner; // remembered for mouse click -> cursor mapping
+    f.render_widget(block, area);
+    // The editor draws its own cursor + selection highlight inside the border.
+    f.render_widget(&app.input, inner);
+}
+
+/// Slash-command autocomplete: a fuzzy-ranked list floating just above the
+/// input box. `/name` in cyan, ≤20-char description dimmed alongside.
+// Terminal popup geometry — n/h/w/y/x are idiomatic for rect math.
+#[allow(clippy::many_single_char_names)]
+fn render_command_popup(f: &mut Frame, app: &App, input_area: Rect) {
+    let matches = app.command_matches();
+    if matches.is_empty() {
+        return;
+    }
+    let hints = !app.settings.hide_hints;
+    let title_rows = u16::from(hints);
+    let n = matches.len() as u16;
+    let h = n + title_rows;
+    let w = input_area.width; // full width, no border
+    let y = input_area.y.saturating_sub(h);
+    let area = Rect {
+        x: input_area.x,
+        y,
+        width: w,
+        height: h,
+    };
+
+    // Pad the `/name` column so every description starts at the same column.
+    let name_w = matches
+        .iter()
+        .map(|c| c.name().chars().count())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let items: Vec<ListItem> = matches
+        .iter()
+        .map(|c| {
+            let name = format!("/{}", c.name());
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{name:<name_w$}"),
+                    Style::default().fg(app.theme.accent),
+                ),
+                Span::raw("   "),
+                Span::styled(c.desc().to_string(), Style::default().fg(app.theme.fg_dim)),
+            ]))
+        })
+        .collect();
+
+    let mut block = Block::default();
+    if hints {
+        block = block.title(Line::from(Span::styled(
+            "commands (Tab fill · Enter run)",
+            Style::default().fg(app.theme.fg_dim),
+        )));
+    }
+    let mut state = ListState::default();
+    state.select(Some(app.command_selected()));
+    // Mark the selection by making its text bold + an arrow — no inverse/white bg.
+    let list = List::new(items)
+        .block(block)
+        .highlight_symbol("› ")
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+
+    f.render_widget(Clear, area);
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+/// `@` file autocomplete: space files matching the text after `@`.
+// Terminal popup geometry — n/h/w/y/x are idiomatic for rect math.
+#[allow(clippy::many_single_char_names)]
+fn render_at_popup(f: &mut Frame, app: &App, input_area: Rect) {
+    let Some((ref matches, selected, _)) = app.at_state else {
+        return;
+    };
+    let n = matches.len() as u16;
+    let h = n.min(10) + 1; // max 10 rows + title
+    let w = input_area.width.min(60);
+    let x = input_area.x;
+    let y = input_area.y.saturating_sub(h);
+    let area = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+
+    let name_w = matches
+        .iter()
+        .map(|f| f.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let items: Vec<ListItem> = matches
+        .iter()
+        .take(10)
+        .map(|f| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:<name_w$}", f.name),
+                    Style::default().fg(app.theme.fg),
+                ),
+                Span::styled(
+                    format!(
+                        "  {}  {}",
+                        nexus_core::app::human_size(f.size.unsigned_abs()),
+                        f.status
+                    ),
+                    Style::default().fg(app.theme.fg_dim),
+                ),
+            ]))
+        })
+        .collect();
+
+    let block = Block::default().title(Line::from(Span::styled(
+        "files (Tab insert · Esc cancel)",
+        Style::default().fg(app.theme.fg_dim),
+    )));
+    let mut state = ListState::default();
+    state.select(Some(selected.min(items.len().saturating_sub(1))));
+    let list = List::new(items)
+        .block(block)
+        .highlight_symbol("› ")
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+
+    f.render_widget(Clear, area);
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+/// A filling context-usage bar drawn as a gradient: each filled cell is
+/// coloured by its position, green (fresh) sliding through yellow to red
+/// (refill) as the bar fills toward the right.
+fn render_context_bar(f: &mut Frame, app: &App, area: Rect) {
+    let Some(limit) = app.context_limit() else {
+        return;
+    };
+    let ratio = if limit > 0 {
+        (app.context_used() as f64 / limit as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let width = area.width as usize;
+    if width == 0 {
+        return;
+    }
+    let filled = (ratio * width as f64).round() as usize;
+
+    let mut spans: Vec<Span> = Vec::with_capacity(width);
+    for x in 0..width {
+        if x < filled {
+            // Position along the whole bar → gradient stop.
+            let t = if width > 1 {
+                x as f64 / (width - 1) as f64
+            } else {
+                0.0
+            };
+            spans.push(Span::styled("█", Style::default().fg(gradient(t))));
+        } else {
+            spans.push(Span::styled("░", Style::default().fg(app.theme.border_dim)));
+        }
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Green → yellow → red gradient for `t` in 0.0..=1.0.
+fn gradient(t: f64) -> Color {
+    // Two linear segments: green→yellow (0..0.5), yellow→red (0.5..1).
+    let (r, g) = if t < 0.5 {
+        let k = t / 0.5;
+        ((40.0 + k * 190.0) as u8, 200u8) // 40→230 red, green steady
+    } else {
+        let k = (t - 0.5) / 0.5;
+        (230u8, (200.0 - k * 190.0) as u8) // red steady, green 200→10
+    };
+    Color::Rgb(r, g, 40)
+}
+
+/// `"34% 44k/128k"` for the status line, or None when unavailable. Appends
+/// the last request's prompt-cache hit rate when one was reported.
+fn context_label(app: &App) -> Option<String> {
+    let limit = app.context_limit()?;
+    let used = app.context_used();
+    let pct = if limit > 0 {
+        used as f64 / limit as f64 * 100.0
+    } else {
+        0.0
+    };
+    let mut label = format!("{pct:.0}% {}/{}", humanize(used), humanize(limit));
+    if let Some(rate) = app.last_cache_rate {
+        let _ =
+            std::fmt::Write::write_fmt(&mut label, format_args!(" · {:.0}% cached", rate * 100.0));
+    }
+    Some(label)
+}
+
+/// Compact token counts: 940, 1.2k, 128k, 1.0m.
+fn humanize(n: u64) -> String {
+    if n < 1000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        format!("{:.1}m", n as f64 / 1_000_000.0)
+    }
+}
+
+/// `$0.0042`, `$1.23`, `$0.000012`, or `—` when the price is unknown.
+/// Small-but-real costs keep enough decimals that they never read `$0.0000`.
+fn fmt_cost(cost: Option<f64>) -> String {
+    match cost {
+        Some(c) if c > 0.0 && c < 1.0 => {
+            let four = format!("${c:.4}");
+            if four == "$0.0000" {
+                format!("${c:.6}")
+            } else {
+                four
+            }
+        }
+        Some(c) => format!("${c:.2}"),
+        None => "—".to_string(),
+    }
+}
+
+fn render_status(f: &mut Frame, app: &App, area: Rect) {
+    use nexus_core::db::DEFAULT_SPACE;
+    let model = app.current_model.as_deref().unwrap_or("(no model)");
+    let space_tag = if app.active_space.name == DEFAULT_SPACE {
+        String::new()
+    } else {
+        format!("[{}] ", app.active_space.name)
+    };
+    let web_tag = if app.web_mode { "🌐 web " } else { "" };
+    let incog_tag = if app.incognito { "🕶️ " } else { "" };
+    let show_bar = app.settings.show_stats && app.context_limit().is_some();
+
+    // Model badge: accent bold; the rest dim.
+    let badge = |m: &str| {
+        Line::from(vec![
+            Span::styled(
+                m.to_string(),
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  |  ", Style::default().fg(app.theme.border_dim)),
+        ])
+    };
+
+    if !show_bar {
+        let mut line = badge(&format!("{space_tag}{incog_tag}{web_tag}{model}"));
+        line.spans.push(Span::styled(
+            app.status.clone(),
+            Style::default().fg(app.theme.fg_dim),
+        ));
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
+    // Model badge, then the gradient context bar beside it, then numbers + status.
+    let model_s = format!("{incog_tag}{web_tag}{model}");
+    let model_w = model_s.chars().count() as u16 + 6;
+    let gauge_w = 18u16.min(area.width.saturating_sub(model_w + 4));
+    let cols = Layout::horizontal([
+        Constraint::Length(model_w),
+        Constraint::Length(gauge_w),
+        Constraint::Min(0),
+    ])
+    .split(area);
+
+    f.render_widget(badge(&model_s), cols[0]);
+    render_context_bar(f, app, cols[1]);
+    let tail = match context_label(app) {
+        Some(l) => format!(" {l}  |  {}", app.status),
+        None => format!("  |  {}", app.status),
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            tail,
+            Style::default().fg(app.theme.fg_dim),
+        ))),
+        cols[2],
+    );
+}
+
+/// Persistent, direct-click targets for completed chat tasks. The queue keeps
+/// every completion; only the newest five are painted to avoid covering a
+/// small terminal.
+fn render_notifications(f: &mut Frame, app: &mut App, area: Rect) {
+    app.notification_areas.clear();
+    let rows = app.notifications.len().min(5) as u16;
+    if rows == 0 || area.width == 0 || area.height == 0 {
+        return;
+    }
+    let width = area.width.min(64);
+    let x = area.x + area.width.saturating_sub(width);
+    let start = app.notifications.len().saturating_sub(rows as usize);
+    let y = area.y + area.height.saturating_sub(rows);
+    for (offset, index) in (start..app.notifications.len()).enumerate() {
+        let rect = Rect {
+            x,
+            y: y + offset as u16,
+            width,
+            height: 1,
+        };
+        let notification = &app.notifications[index];
+        let glyph = if notification.success { "✓ " } else { "× " };
+        let color = if notification.success {
+            app.theme.success
+        } else {
+            app.theme.error
+        };
+        let label = format!("{glyph}{} — {}", notification.title, notification.text);
+        let label: String = label.chars().take(width as usize).collect();
+        f.render_widget(Clear, rect);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                label,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))),
+            rect,
+        );
+        app.notification_areas.push((rect, index));
+    }
+}
+
+/// Short absolute timestamp from an rfc3339 string (falls back to the raw text).
+pub(super) fn fmt_created(rfc3339: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(rfc3339).map_or_else(
+        |_| rfc3339.to_string(),
+        |dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%b %-d, %H:%M")
+                .to_string()
+        },
+    )
+}
+
+/// A rect `pct_w` × `pct_h` percent of `area`, centered.
+fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
+    let v = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - pct_h) / 2),
+            Constraint::Percentage(pct_h),
+            Constraint::Percentage((100 - pct_h) / 2),
+        ])
+        .split(area);
+    let h = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - pct_w) / 2),
+            Constraint::Percentage(pct_w),
+            Constraint::Percentage((100 - pct_w) / 2),
+        ])
+        .split(v[1]);
+    h[1]
+}

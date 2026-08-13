@@ -64,7 +64,11 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish
+        # nexus-core first — the TUI crate depends on it. Both packages ride
+        # the same workspace version, so a single tag covers both.
+        run: |
+          cargo publish -p nexus-core
+          cargo publish -p nexus-chat
 
       - name: Build release binary
         run: cargo build --release --bin nexus
