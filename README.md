@@ -174,31 +174,32 @@ answers the gate; a reply with edits is folded in once by the approval agent.
 
 ## Architecture
 
+Two-crate workspace: the engine and the terminal frontend.
+
 ```
-src/
-├── main.rs          bootstrap: config, space, db, App, event loop
-├── app/             the state machine (one module per feature)
-│   ├── mod.rs       App struct, popups, settings, run_command, gate plumbing
-│   ├── chat.rs      request lifecycle: history build, streaming, tool loop
-│   ├── research.rs  the research pipeline: survey → plan → searchers → …
-│   ├── swarm.rs     multi-persona roundtable
-│   ├── watches.rs   standing research jobs
-│   ├── usage.rs     usage/cost analytics
+crates/core/        nexus-core — no UI, drives TUI + CLI + the future host API
+├── src/app/        the state machine (one module per feature)
+│   ├── mod.rs      App struct, gates, commands, boot, snapshot, event stream
+│   ├── commands.rs AppCommand seam (parsed from /-commands, executed)
+│   ├── chat.rs     request lifecycle: history build, streaming, tool loop
+│   ├── research.rs the research pipeline: survey → plan → searchers → …
+│   ├── swarm.rs    multi-persona roundtable
+│   ├── watches.rs  standing research jobs
+│   ├── usage.rs    usage/cost analytics
 │   ├── sessions.rs, spaces.rs, models.rs, backends.rs, memory.rs
 │   ├── files.rs, images.rs, scripts.rs, apps.rs   space artifacts
 │   ├── skills_popup.rs, compaction.rs, export.rs, copy.rs, transcribe.rs
-│   └── tests.rs     app-level integration tests
-├── provider/
-│   ├── mod.rs       message shapes, tool-call wire format, events
+│   └── tests.rs    app-level integration tests
+├── src/provider/   message shapes, tool-call wire format, events
 │   └── openrouter.rs  one client for all OpenAI-wire backends (OR/OpenAI/…)
-├── tools.rs         the model's tools: search, fetch, python, video, apps…
-├── skills.rs, extract.rs, citations.rs   tool support
-├── db.rs            SQLite: sessions, messages, usage, citations, model prefs
-├── appserver.rs     localhost static server for model-created apps (port 8642)
-├── ui/              ratatui rendering: history, popups, theme, markdown
-├── input.rs         composer, @-autocomplete, command catalog
-├── events.rs        key/mouse handling, clipboard
-└── config.rs, space.rs   credentials, spaces layout
+├── src/tools.rs    the model's tools: search, fetch, python, video, apps…
+├── src/skills.rs, extract.rs, citations.rs   tool support
+├── src/db.rs       SQLite: sessions, messages, usage, citations, model prefs
+├── src/appserver.rs  localhost static server for model-created apps (8642)
+└── src/config.rs, space.rs, theme.rs, input.rs   credentials, spaces, composer
+crates/tui/         nexus-chat — the `nexus` binary
+└── src/            main.rs bootstrap, cli.rs subcommands, events.rs loop,
+                    ui/ ratatui rendering (history, popups), markdown.rs
 ```
 
 Data lives under the XDG data dir: `spaces/<space>/` holds the per-space
@@ -208,7 +209,7 @@ SQLite db, files, scripts, apps, and generated media.
 
 ```sh
 scripts/check.sh          # fmt + clippy (-D warnings, pedantic) + cargo-audit + tests
-cargo test --bin nexus   # 468 tests, no network needed
+cargo test --workspace    # 500+ tests, no network needed
 ```
 
 The pre-commit hook runs `scripts/check.sh` on every commit — a merge-ready

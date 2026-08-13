@@ -15,9 +15,9 @@ client. The binary is named `nexus` (package name `nexus-chat`).
 ## Commands
 
 ```sh
-cargo build                    # build (binary: nexus)
+cargo build                    # build the workspace (binary: nexus)
 cargo run                      # run the TUI
-cargo test --bin nexus         # 468 tests; none touch the network
+cargo test --workspace         # 500+ tests; none touch the network
 scripts/check.sh               # THE gate: fmt + clippy + audit + tests
 scripts/check.sh --fix         # auto-fix fmt/clippy, then run the gate
 ```
@@ -37,8 +37,8 @@ code that fails `cargo clippy -- -D warnings -W clippy::pedantic`.**
   (explicit lifetimes where needed, `#[must_use]` on pure fns, docs on public
   items, no `unwrap()` on fallible paths). Prefer params structs over
   `too_many_arguments` allows.
-- **Tests**: app-level integration tests live in `src/app/tests.rs` and
-  `src/ui/popups/tests.rs` (ratatui `TestBackend` snapshot style). Keep tests
+- **Tests**: app-level integration tests live in `crates/core/src/app/tests.rs` and
+  `crates/tui/src/ui/popups/tests.rs` (ratatui `TestBackend` snapshot style). Keep tests
   hermetic — no network, no real key material, no XDG writes (use temp dirs).
 - **Commit style**: lowercase conventional prefix, imperative, em-dash
   detail. Examples from history: `feat:`, `fix:`, `design:`, `docs:`,
@@ -57,19 +57,27 @@ The README has the full tree; the parts agents touch most:
 
 | Path | What lives there |
 |---|---|
-| `src/app/mod.rs` | `App` struct, popup state, `run_command`, gate plumbing |
-| `src/app/chat.rs` | request lifecycle: history build, streaming, tool loop |
-| `src/app/research.rs` | research pipeline: survey → plan → searchers → synthesis → critic → verifier → writer |
-| `src/app/swarm.rs`, `watches.rs` | roundtable / standing jobs |
-| `src/app/usage.rs` | usage & cost analytics (`/usage`) |
-| `src/app/sessions.rs`, `spaces.rs`, `models.rs`, `memory.rs` | state backends |
-| `src/provider/openrouter.rs` | the single client for all OpenAI-wire backends — message shapes, tool-call wire format, events are in `provider/mod.rs` |
-| `src/tools.rs` | the model's tools (search, fetch, batch, files, app, scripts, skills, media) |
-| `src/db.rs` | SQLite (rusqlite bundled): sessions, messages, usage, citations, model prefs |
-| `src/appserver.rs` | localhost static server for model-created apps (port 8642) |
-| `src/ui/` | ratatui rendering; `history.rs` is the main view, `popups/` one module per popup |
-| `src/input.rs`, `events.rs` | composer, command catalog, key/mouse handling |
-| `src/config.rs`, `space.rs` | credentials + spaces layout (XDG dirs) |
+| `crates/core/src/app/mod.rs` | `App` struct, popup state, gate plumbing, `boot()`, `snapshot()` |
+| `crates/core/src/app/commands.rs` | `AppCommand` seam: `parse_command` + `execute` (the `/`-string front is `run_command`) |
+| `crates/core/src/app/chat.rs` | request lifecycle: history build, streaming, tool loop |
+| `crates/core/src/app/research.rs` | research pipeline: survey → plan → searchers → synthesis → critic → verifier → writer |
+| `crates/core/src/app/swarm.rs`, `watches.rs` | roundtable / standing jobs |
+| `crates/core/src/app/usage.rs` | usage & cost analytics (`/usage`) |
+| `crates/core/src/app/sessions.rs`, `spaces.rs`, `models.rs`, `memory.rs` | state backends |
+| `crates/core/src/provider/openrouter.rs` | the single client for all OpenAI-wire backends — message shapes, tool-call wire format, events are in `provider/mod.rs` |
+| `crates/core/src/tools.rs` | the model's tools + the `ToolExecutor` seam (`defs`/`is_read_only`/`run`) |
+| `crates/core/src/db.rs` | SQLite (rusqlite bundled): sessions, messages, usage, citations, model prefs |
+| `crates/core/src/appserver.rs` | localhost static server for model-created apps (port 8642) |
+| `crates/tui/src/ui/` | ratatui rendering; `history.rs` is the main view, `popups/` one module per popup |
+| `crates/core/src/input.rs` (interim: the composer impl rides with `App` until 2e) | composer, command catalog |
+| `crates/core/src/config.rs`, `space.rs` | credentials + spaces layout (XDG dirs) |
+
+> Phase 2 status: the workspace split (2a), `ToolExecutor` seam (2b),
+> command/event seam (2c), CLI on the seam (2d), and the status-event
+> conversion are landed. 2e (moving view state into a TUI-side wrapper) is
+> next — until then `App` still carries TUI-typed fields (composer, theme,
+> render caches, clipboard) and core keeps the interim TUI deps listed in
+> `crates/core/Cargo.toml`.
 
 ## Things to know before changing code
 
@@ -83,9 +91,9 @@ The README has the full tree; the parts agents touch most:
 - **Batch discipline**: models are encouraged to use the `batch` tool for
   independent operations; `batch` validates nesting, sizes, and read-only
   classification (see `tools.rs` tests).
-- **Model-facing text**: `assets/system-prompt-base.md` is the base prompt
+- **Model-facing text**: `crates/core/assets/system-prompt-base.md` is the base prompt
   bundled into every session; changes there affect all backends.
-- **Skills**: `assets/find-skills-SKILL.md` is the model-facing skill for
+- **Skills**: `crates/core/assets/find-skills-SKILL.md` is the model-facing skill for
   discovering/installing skills. Skills are SKILL.md packs with sandboxed
   Python virtualenvs (`src/skills.rs`).
 - **Don't commit agent tooling**: `.claude/`, `.superpowers/`,
