@@ -340,9 +340,14 @@ async fn build_app(model: Option<&str>, space_name: Option<&str>) -> Result<app:
     let saved = config::load_all_providers().await?;
     let mut app = nexus_core::boot(saved).await?;
     if let Some(name) = space_name {
-        app.switch_space_cli(name)?;
+        app.execute(nexus_core::app::AppCommand::SwitchSpace {
+            name: name.to_string(),
+        })?;
     }
     if let Some(m) = model {
+        // Direct poke: no model catalog is fetched headless, so SetModel's
+        // resolution has nothing to resolve against. The next turn validates
+        // the backend.
         app.current_model = Some(m.to_string());
     }
     Ok(app)
@@ -391,7 +396,8 @@ async fn ask(
     };
     let mut app = build_app(model.as_deref(), space_name.as_deref()).await?;
     if web {
-        app.web_mode = true;
+        // Boot always starts with web mode off, so the toggle is absolute here.
+        app.execute(nexus_core::app::AppCommand::ToggleWeb)?;
     }
     let outcome = app
         .ask_headless(

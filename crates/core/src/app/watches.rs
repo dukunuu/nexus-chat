@@ -161,7 +161,10 @@ impl super::App {
             let prior_session_id = s.id.clone();
             self.active_space = space_row;
             self.session = Some(s);
-            self.start_research_with_gate(&w.topic, false);
+            let _ = self.execute(super::AppCommand::RunResearch {
+                topic: w.topic.clone(),
+                gated: false,
+            });
             // `start_research_with_gate` only allows one job at a time —
             // for the 2nd+ due watch in the startup loop, `research_rx.is_some()`
             // is still set from the first watch's job (it isn't cleared until

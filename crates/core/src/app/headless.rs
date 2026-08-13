@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use crate::db::{Watch, stage_content};
 use crate::provider::{StreamEvent, Usage};
 
-use super::{App, AppEvent};
+use super::{App, AppCommand, AppEvent};
 
 /// Per-turn behavior switches for the headless drivers.
 #[derive(Default, Clone, Copy)]
@@ -90,7 +90,9 @@ impl App {
         if self.current_model.is_none() {
             bail!("no model selected — pass --model, or pick one in the TUI first");
         }
-        self.send_message(prompt)?;
+        // Drive through the seam, like the host API will: boot → command →
+        // event drain. The guard checks above already validated the preconditions.
+        self.execute(AppCommand::Send { text: prompt })?;
 
         let mut usage: Option<Usage> = None;
         let mut last_status = String::new();
@@ -259,7 +261,10 @@ impl App {
             bail!("no model selected — pass --model, or pick one in the TUI first");
         }
         let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
-        self.start_research_with_gate(&topic, !approve);
+        self.execute(AppCommand::RunResearch {
+            topic,
+            gated: !approve,
+        })?;
         if self.research_rx.is_none() {
             bail!("research didn't start: {}", self.status);
         }
@@ -301,7 +306,7 @@ impl App {
                         if std::io::stdin().read_line(&mut reply)? == 0 {
                             bail!("research needs your input — stdin closed");
                         }
-                        self.reply_to_survey_gate(&reply);
+                        self.execute(AppCommand::AnswerGate { text: reply })?;
                     }
                 }
                 AppEvent::Research(None) => break,

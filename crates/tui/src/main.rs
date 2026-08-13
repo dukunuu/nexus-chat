@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
             && let Some(row) = rows.into_iter().find(|s| s.id == space_id)
         {
             app.set_active_space(row);
-            let _ = app.switch_to_session_by_id(&session.id);
+            let _ = app.execute(nexus_core::app::AppCommand::ResolveSession { id: session.id });
         }
     }
     app.spawn_update_check(); // once a day: is a newer release out?
