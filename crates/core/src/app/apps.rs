@@ -32,7 +32,9 @@ impl App {
         };
         self.apps_edit = "index.html".to_string();
         self.apps_mode = AppsMode::EditFile;
-        self.status = format!("edit {name}/ (type filename, Enter to open in $EDITOR)");
+        self.push_status(format!(
+            "edit {name}/ (type filename, Enter to open in $EDITOR)"
+        ));
     }
 
     /// Confirm in `EditFile`: open the typed path in $EDITOR.
@@ -42,7 +44,7 @@ impl App {
         };
         let file = self.apps_edit.trim().to_string();
         if file.is_empty() || file.starts_with('/') || file.contains("..") {
-            self.status = format!("invalid path: {file}");
+            self.push_status(format!("invalid path: {file}"));
             return;
         }
         let path = self
@@ -51,7 +53,7 @@ impl App {
             .join(&name)
             .join(&file);
         if !path.is_file() {
-            self.status = format!("no such file: {name}/{file}");
+            self.push_status(format!("no such file: {name}/{file}"));
             return;
         }
         self.pending_editor = Some(crate::app::PendingEditor::AppFile(path));
@@ -66,9 +68,9 @@ impl App {
         match self.app_url(name) {
             Some(url) => {
                 let _ = open::that_detached(&url);
-                self.status = format!("opened {url}");
+                self.push_status(format!("opened {url}"));
             }
-            None => self.status = "app server not running".to_string(),
+            None => self.push_status("app server not running".to_string()),
         }
     }
 
@@ -77,7 +79,7 @@ impl App {
         if let Some(name) = self.apps_cache.get(self.apps_selected).cloned() {
             let dir = self.space.apps_dir(&self.active_space.name).join(&name);
             std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
-            self.status = format!("removed app {name}");
+            self.push_status(format!("removed app {name}"));
             self.apps_cache = self.list_apps();
             self.apps_selected = self
                 .apps_selected

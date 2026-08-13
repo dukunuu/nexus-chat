@@ -387,7 +387,7 @@ impl App {
                 })
                 .collect(),
             Err(e) => {
-                self.status = format!("cannot read {}: {e}", self.picker_dir.display());
+                self.push_status(format!("cannot read {}: {e}", self.picker_dir.display()));
                 Vec::new()
             }
         };
@@ -449,8 +449,8 @@ impl App {
             return;
         }
         match self.import_file(&path) {
-            Ok(n) => self.status = format!("imported {n}"),
-            Err(e) => self.status = format!("import failed: {e}"),
+            Ok(n) => self.push_status(format!("imported {n}")),
+            Err(e) => self.push_status(format!("import failed: {e}")),
         }
         self.files_mode = super::FilesMode::Browse;
     }
@@ -662,7 +662,7 @@ impl App {
     /// benchmark leader).
     pub fn ocr_local_install(&mut self, arg: &str) {
         if self.ocr_pull_rx.is_some() {
-            self.status = "an OCR model pull is already running".to_string();
+            self.push_status("an OCR model pull is already running".to_string());
             return;
         }
         let model = if arg.is_empty() {
@@ -679,13 +679,15 @@ impl App {
         {
             self.ocr_engine = "local".to_string();
             let _ = self.db.set_setting("ocr_engine", "local");
-            self.status = format!("(test) local OCR: {model}");
+            self.push_status(format!("(test) local OCR: {model}"));
         }
         #[cfg(not(test))]
         {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             self.ocr_pull_rx = Some(rx);
-            self.status = format!("pulling {model} via ollama… (keeps running in background)");
+            self.push_status(format!(
+                "pulling {model} via ollama… (keeps running in background)"
+            ));
             tokio::spawn(async move {
                 let result = match tokio::process::Command::new("ollama")
                 .args(["pull", &model])
@@ -723,11 +725,11 @@ impl App {
             Ok(model) => {
                 self.ocr_engine = "local".to_string();
                 let _ = self.db.set_setting("ocr_engine", "local");
-                self.status = format!(
+                self.push_status(format!(
                     "local OCR ready: {model} via ollama — Ctrl+O a file in /files to re-run it"
-                );
+                ));
             }
-            Err(e) => self.status = e,
+            Err(e) => self.push_status(e),
         }
     }
 
@@ -745,7 +747,7 @@ impl App {
         let _ = self
             .db
             .upsert_file(&self.active_space.id, &f.name, "", 0, "re-extracting");
-        self.status = format!("re-extracting: {}", f.name);
+        self.push_status(format!("re-extracting: {}", f.name));
         self.rescan_files();
     }
 
@@ -762,7 +764,7 @@ impl App {
             .unwrap_or("")
             .to_lowercase();
         if ext != "pdf" && !crate::extract::is_image_ext(&ext) {
-            self.status = format!("only PDFs and images support OCR: {}", f.name);
+            self.push_status(format!("only PDFs and images support OCR: {}", f.name));
             return;
         }
         let path = self.space.files_dir(&self.active_space.name).join(&f.name);
@@ -774,7 +776,7 @@ impl App {
             .db
             .list_files(&self.active_space.id)
             .unwrap_or_default();
-        self.status = format!("ocr queued: {}", f.name);
+        self.push_status(format!("ocr queued: {}", f.name));
     }
 
     /// Embed the next file whose chunks lack vectors, one file per job (the
@@ -852,7 +854,7 @@ impl App {
             }
             Err(e) => {
                 let _ = self.db.set_file_status(&file_id, "ok");
-                self.status = format!("embedding failed: {e}");
+                self.push_status(format!("embedding failed: {e}"));
             }
         }
         if space_id == self.active_space.id {
@@ -885,7 +887,7 @@ impl App {
                 // Keep the "ocr" prefix — the stale-check above depends on it.
                 let _ = self.db.set_file_status(&f.id, &format!("ocr: {s}"));
                 if space_id == self.active_space.id {
-                    self.status = format!("ocr {name}: {s}");
+                    self.push_status(format!("ocr {name}: {s}"));
                 }
             }
             OcrUpdate::Progress(done, total, failed) => {
@@ -898,7 +900,7 @@ impl App {
                     .db
                     .set_file_status(&f.id, &format!("ocr {done}/{total}{tail}"));
                 if space_id == self.active_space.id {
-                    self.status = format!("ocr {name}: {done}/{total} pages{tail}");
+                    self.push_status(format!("ocr {name}: {done}/{total} pages{tail}"));
                 }
             }
             OcrUpdate::Done(Ok((text, errors))) if text.trim().is_empty() => {
@@ -911,7 +913,7 @@ impl App {
                 };
                 let _ = self.db.set_file_status(&f.id, &status);
                 if space_id == self.active_space.id {
-                    self.status = format!("ocr {name}: {status}");
+                    self.push_status(format!("ocr {name}: {status}"));
                 }
             }
             OcrUpdate::Done(Ok((text, errors))) => {
@@ -941,20 +943,20 @@ impl App {
                             .db
                             .replace_file_ref_in_messages(&space_id, &f.name, &new_name);
                         if space_id == self.active_space.id {
-                            self.status = format!("ocr done: {new_name}");
+                            self.push_status(format!("ocr done: {new_name}"));
                         }
                         // f.name needs the updated name for the message below.
                     } else if space_id == self.active_space.id {
-                        self.status = format!("ocr done: {name}");
+                        self.push_status(format!("ocr done: {name}"));
                     }
                 } else if space_id == self.active_space.id {
-                    self.status = format!("ocr done: {name}");
+                    self.push_status(format!("ocr done: {name}"));
                 }
             }
             OcrUpdate::Done(Err(msg)) => {
                 let _ = self.db.set_file_status(&f.id, &msg);
                 if space_id == self.active_space.id {
-                    self.status = format!("ocr {name}: {msg}");
+                    self.push_status(format!("ocr {name}: {msg}"));
                 }
             }
         }
@@ -992,7 +994,7 @@ impl App {
                     .with_context(|| format!("removing {}", disk.display()))?;
             }
             self.db.delete_file(&f.id)?;
-            self.status = format!("removed {}", f.name);
+            self.push_status(format!("removed {}", f.name));
             self.rescan_files();
         }
         self.files_mode = super::FilesMode::Browse;
@@ -1036,12 +1038,12 @@ impl App {
         }
         let path = std::path::PathBuf::from(&raw);
         if !path.is_file() {
-            self.status = format!("not a file: {raw}");
+            self.push_status(format!("not a file: {raw}"));
             return;
         }
         match self.import_file(&path) {
-            Ok(name) => self.status = format!("imported {name}"),
-            Err(e) => self.status = format!("import failed: {e}"),
+            Ok(name) => self.push_status(format!("imported {name}")),
+            Err(e) => self.push_status(format!("import failed: {e}")),
         }
     }
 
@@ -1065,12 +1067,12 @@ impl App {
             return Ok(());
         }
         if new.contains(['/', '\\']) || new == "." || new == ".." {
-            self.status = format!("invalid name: {new}");
+            self.push_status(format!("invalid name: {new}"));
             return Ok(());
         }
         let dir = self.space.files_dir(&self.active_space.name);
         if dir.join(&new).exists() {
-            self.status = format!("{new} already exists");
+            self.push_status(format!("{new} already exists"));
             return Ok(());
         }
         std::fs::rename(dir.join(&f.name), dir.join(&new))
@@ -1081,7 +1083,7 @@ impl App {
             .iter()
             .position(|f| f.name == new)
             .unwrap_or(self.files_selected);
-        self.status = format!("renamed {} to {new}", f.name);
+        self.push_status(format!("renamed {} to {new}", f.name));
         Ok(())
     }
 
@@ -1095,7 +1097,7 @@ impl App {
             } else {
                 let _ = open::that_detached(&path);
             }
-            self.status = format!("opened {}", f.name);
+            self.push_status(format!("opened {}", f.name));
         }
     }
 

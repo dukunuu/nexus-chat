@@ -76,7 +76,7 @@ impl App {
             .files_dir(&self.active_space.name)
             .join(&img.name);
         let _ = open::that_detached(&path);
-        self.status = format!("opened {}", img.name);
+        self.push_status(format!("opened {}", img.name));
     }
 
     /// Ctrl+D confirm: delete the image file from disk and refresh.
@@ -88,7 +88,7 @@ impl App {
                 std::fs::remove_file(&path)
                     .with_context(|| format!("removing {}", path.display()))?;
             }
-            self.status = format!("removed {}", img.name);
+            self.push_status(format!("removed {}", img.name));
             self.refresh_images();
         }
         self.images_mode = ImagesMode::Browse;

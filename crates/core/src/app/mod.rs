@@ -1305,7 +1305,7 @@ impl App {
         if let Some((id, _)) = self.last_used.iter().max_by(|a, b| a.1.cmp(b.1)) {
             let id = id.clone();
             if self.backends.any() {
-                self.status = format!("model: {id} — type a message, /model to change");
+                self.push_status(format!("model: {id} — type a message, /model to change"));
             }
             self.current_model = Some(id);
         }
@@ -1491,10 +1491,10 @@ impl App {
         if !crate::update::version_gt(&latest, crate::update::CURRENT) {
             return;
         }
-        self.status = format!(
+        self.push_status(format!(
             "update available: v{latest} (you have {}) — run `cargo install nexus-chat`",
             crate::update::CURRENT
-        );
+        ));
         self.notifications.push_back(ChatNotification {
             session_id: String::new(),
             title: "update available".to_string(),
@@ -1742,7 +1742,7 @@ impl App {
                 // and heals any legacy per-token-shaped catalog).
                 let _ = self.db.backfill_usage_costs();
                 self.models = models;
-                self.status = format!("loaded {n} models");
+                self.push_status(format!("loaded {n} models"));
                 // First key just landed and nothing picked yet → jump into the picker.
                 if !self.models.is_empty()
                     && self.current_model.is_none()
@@ -1751,7 +1751,7 @@ impl App {
                     self.open_model_picker();
                 }
             }
-            Err(e) => self.status = format!("model fetch failed: {e}"),
+            Err(e) => self.push_status(format!("model fetch failed: {e}")),
         }
     }
 

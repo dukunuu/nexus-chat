@@ -84,7 +84,7 @@ impl App {
         }
         self.refresh_scripts();
         self.pending_editor = Some(super::PendingEditor::ScriptFile(path));
-        self.status = format!("created {name}");
+        self.push_status(format!("created {name}"));
         Ok(())
     }
 
@@ -110,13 +110,13 @@ impl App {
         let from = dir.join(&s.name);
         let to = dir.join(&new);
         if to.exists() {
-            self.status = format!("{new} already exists");
+            self.push_status(format!("{new} already exists"));
             return Ok(());
         }
         std::fs::rename(&from, &to)
             .with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
         self.refresh_scripts();
-        self.status = format!("renamed {} → {new}", s.name);
+        self.push_status(format!("renamed {} → {new}", s.name));
         Ok(())
     }
 
@@ -129,7 +129,7 @@ impl App {
                 std::fs::remove_file(&path)
                     .with_context(|| format!("removing {}", path.display()))?;
             }
-            self.status = format!("removed {}", s.name);
+            self.push_status(format!("removed {}", s.name));
             self.refresh_scripts();
         }
         self.scripts_mode = ScriptsMode::Browse;

@@ -57,7 +57,7 @@ pub enum SwarmUpdate {
 impl App {
     pub fn open_swarm_popup(&mut self) {
         let Some(session) = &self.session else {
-            self.status = "start a chat first, then /swarm".to_string();
+            self.push_status("start a chat first, then /swarm".to_string());
             return;
         };
         self.swarm_cache = self.db.list_swarm_personas(&session.id).unwrap_or_default();
@@ -79,7 +79,7 @@ impl App {
         let on = !session.swarm_mode;
         session.swarm_mode = on;
         self.db.set_session_swarm_mode(&session.id, on)?;
-        self.status = format!("swarm mode: {}", if on { "ON" } else { "OFF" });
+        self.push_status(format!("swarm mode: {}", if on { "ON" } else { "OFF" }));
         Ok(())
     }
 
@@ -108,7 +108,7 @@ impl App {
         )?;
         self.swarm_popup_mode = SwarmPopupMode::Browse;
         self.pending_editor = Some(super::PendingEditor::Persona(path));
-        self.status = "opening persona in $EDITOR…".to_string();
+        self.push_status("opening persona in $EDITOR…".to_string());
         Ok(())
     }
 
@@ -123,7 +123,7 @@ impl App {
                     *row = persona;
                 }
                 self.save_swarm_roster()?;
-                self.status = "persona saved".to_string();
+                self.push_status("persona saved".to_string());
             }
             Err(e) => {
                 if self
@@ -134,7 +134,7 @@ impl App {
                     self.swarm_cache.remove(self.swarm_selected);
                     self.save_swarm_roster()?;
                 }
-                self.status = format!("persona edit ignored: {e}");
+                self.push_status(format!("persona edit ignored: {e}"));
             }
         }
         Ok(())
@@ -167,7 +167,7 @@ impl App {
             return;
         };
         if self.swarm_rx.is_some() {
-            self.status = "a swarm turn is already running".to_string();
+            self.push_status("a swarm turn is already running".to_string());
             return;
         }
         let default_model = self.current_model.clone().unwrap_or_default();
@@ -193,7 +193,7 @@ impl App {
 
         let (tx, rx) = mpsc::unbounded_channel();
         self.swarm_rx = Some(rx);
-        self.status = "swarm: starting…".to_string();
+        self.push_status("swarm: starting…".to_string());
 
         let swarm_session_id = session.id.clone();
         let task = tokio::spawn(run_swarm_turn(SwarmTurnOptions {
@@ -226,10 +226,10 @@ impl App {
                     .db
                     .upsert_research_stage_message(&id, "swarm", "stopped by user");
             }
-            self.status = "swarm stopped".to_string();
+            self.push_status("swarm stopped".to_string());
             self.popup = Popup::None;
         } else {
-            self.status = "no swarm is running".to_string();
+            self.push_status("no swarm is running".to_string());
         }
     }
 
@@ -251,8 +251,9 @@ impl App {
                 let _ = self.db.save_swarm_personas(&session_id, &personas);
                 if viewing {
                     self.swarm_cache = personas;
-                    self.status =
-                        "swarm: roster suggested — starting the conversation…".to_string();
+                    self.push_status(
+                        "swarm: roster suggested — starting the conversation…".to_string(),
+                    );
                 }
             }
             SwarmUpdate::Progress(s) => {
@@ -281,7 +282,7 @@ impl App {
                             created_at: None,
                         });
                     }
-                    self.status = format!("swarm: {s}");
+                    self.push_status(format!("swarm: {s}"));
                 }
             }
             SwarmUpdate::Reply {
@@ -319,7 +320,7 @@ impl App {
                     if !self.swarm_cache.iter().any(|p| p.name == persona.name) {
                         self.swarm_cache.push(persona.clone());
                     }
-                    self.status = format!("swarm: {} joined the conversation", persona.name);
+                    self.push_status(format!("swarm: {} joined the conversation", persona.name));
                 }
             }
             SwarmUpdate::Synthesis(content) => {
@@ -346,7 +347,7 @@ impl App {
                         persona: None,
                         created_at: None,
                     });
-                    self.status = "swarm turn complete".to_string();
+                    self.push_status("swarm turn complete".to_string());
                     self.maybe_generate_title();
                     self.maybe_extract_memory();
                     self.maybe_compact();
@@ -371,7 +372,7 @@ impl App {
                         persona: None,
                         created_at: None,
                     });
-                    self.status = format!("swarm error: {e}");
+                    self.push_status(format!("swarm error: {e}"));
                 }
             }
         }

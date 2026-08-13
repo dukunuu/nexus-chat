@@ -109,7 +109,7 @@ impl App {
             if self.active_space.id == s.id {
                 self.switch_to_default_space()?;
             }
-            self.status = format!("deleted space: {}", s.name);
+            self.push_status(format!("deleted space: {}", s.name));
         }
         self.space_mode = SpaceMode::Browse;
         let len = self.filtered_spaces().len();
@@ -140,7 +140,7 @@ impl App {
         self.cleanup_incognito_images();
         self.rescan_files();
         self.refresh_toolbox();
-        self.status = format!("space: {}", self.active_space.name);
+        self.push_status(format!("space: {}", self.active_space.name));
     }
 
     /// Path to the highlighted space's instructions file, creating a stub with

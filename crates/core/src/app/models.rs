@@ -174,7 +174,7 @@ impl App {
             return;
         }
         if self.models.is_empty() {
-            self.status = "loading models…".to_string();
+            self.push_status("loading models…".to_string());
             self.fetch_models();
             self.popup = Popup::Model;
             return;
@@ -243,7 +243,7 @@ impl App {
         }
         self.key_target = target;
         self.key_input.clear();
-        self.status = format!("paste your {label} API key, then Enter");
+        self.push_status(format!("paste your {label} API key, then Enter"));
         self.popup = Popup::Key;
     }
 
@@ -259,7 +259,7 @@ impl App {
 
     fn activate_key(&mut self, target: KeyTarget, tag: &str, key: String) {
         if let Err(e) = config::save_provider_key(tag, &key) {
-            self.status = format!("could not save key: {e}");
+            self.push_status(format!("could not save key: {e}"));
         }
         let (backend_tag, provider) = match target {
             KeyTarget::OpenRouter => (
@@ -276,7 +276,7 @@ impl App {
         }
         self.backends.set(backend_tag, provider);
         self.popup = Popup::None;
-        self.status = "key saved, loading models…".to_string();
+        self.push_status("key saved, loading models…".to_string());
         self.fetch_models();
     }
 
@@ -287,7 +287,7 @@ impl App {
         self.login_rx = None;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.login_rx = Some(rx);
-        self.status = "starting OpenAI Codex login…".to_string();
+        self.push_status("starting OpenAI Codex login…".to_string());
         tokio::spawn(async move {
             let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let forward = tx.clone();
@@ -305,7 +305,7 @@ impl App {
 
     pub fn on_login_result(&mut self, msg: Option<LoginMsg>) {
         match msg {
-            Some(LoginMsg::Status(s)) => self.status = s,
+            Some(LoginMsg::Status(s)) => self.push_status(s),
             Some(LoginMsg::Done(Ok(creds))) => {
                 self.login_rx = None;
                 self.backends.set(
@@ -313,13 +313,13 @@ impl App {
                     OpenRouter::openai_codex(creds.access.clone()),
                 );
                 self.saved.codex = Some(creds);
-                self.status = "OpenAI Codex login saved, loading models…".to_string();
+                self.push_status("OpenAI Codex login saved, loading models…".to_string());
                 self.fetch_models();
                 self.refresh_toolbox();
             }
             Some(LoginMsg::Done(Err(e))) => {
                 self.login_rx = None;
-                self.status = format!("OpenAI Codex login failed: {e}");
+                self.push_status(format!("OpenAI Codex login failed: {e}"));
             }
             None => self.login_rx = None,
         }
@@ -331,7 +331,7 @@ impl App {
         let key = std::mem::take(&mut self.key_input);
         let key = key.trim().to_string();
         if key.is_empty() {
-            self.status = "no key entered".to_string();
+            self.push_status("no key entered".to_string());
             self.popup = Popup::None;
             return;
         }
@@ -503,9 +503,9 @@ impl App {
             if self.reasoning.contains_key(&id) {
                 self.db.set_reasoning(&id, None)?;
                 self.reasoning.remove(&id);
-                self.status = format!("cleared stale reasoning setting: {id}");
+                self.push_status(format!("cleared stale reasoning setting: {id}"));
             } else {
-                self.status = format!("{id} has no reasoning setting");
+                self.push_status(format!("{id} has no reasoning setting"));
             }
             return Ok(());
         }
@@ -539,15 +539,15 @@ impl App {
         match next {
             Some("none") => {
                 self.reasoning.insert(id.clone(), "none".to_string());
-                self.status = format!("reasoning off (accepts {accepted}): {id}");
+                self.push_status(format!("reasoning off (accepts {accepted}): {id}"));
             }
             Some(effort) => {
                 self.reasoning.insert(id.clone(), effort.to_string());
-                self.status = format!("reasoning {effort} (accepts {accepted}): {id}");
+                self.push_status(format!("reasoning {effort} (accepts {accepted}): {id}"));
             }
             None => {
                 self.reasoning.remove(&id);
-                self.status = format!("reasoning off (accepts {accepted}): {id}");
+                self.push_status(format!("reasoning off (accepts {accepted}): {id}"));
             }
         }
         Ok(())
@@ -626,10 +626,10 @@ impl App {
         let now_fav = self.db.toggle_favorite(&id)?;
         if now_fav {
             self.favorites.insert(id.clone());
-            self.status = format!("★ favorited {id}");
+            self.push_status(format!("★ favorited {id}"));
         } else {
             self.favorites.remove(&id);
-            self.status = format!("unfavorited {id}");
+            self.push_status(format!("unfavorited {id}"));
         }
         self.clamp_selection(ModelPanel::Favorites);
         self.clamp_selection(ModelPanel::Available);
@@ -679,38 +679,38 @@ impl App {
                 self.db.mark_model_used(id)?;
                 self.last_used
                     .insert(id.to_string(), Utc::now().to_rfc3339());
-                self.status = format!("model: {id}");
+                self.push_status(format!("model: {id}"));
                 self.popup = Popup::None;
             }
             ModelPickTarget::Memory => {
                 self.memory_model = id.to_string();
                 self.db.set_setting("memory_model", id)?;
-                self.status = format!("memory model: {id}");
+                self.push_status(format!("memory model: {id}"));
                 // Picked from inside /config — return there rather than closing.
                 self.popup = Popup::Settings;
             }
             ModelPickTarget::Transcriber => {
                 self.transcriber_model = id.to_string();
                 self.db.set_setting("transcriber_model", id)?;
-                self.status = format!("image model: {id}");
+                self.push_status(format!("image model: {id}"));
                 self.popup = Popup::Settings;
             }
             ModelPickTarget::Ocr => {
                 self.ocr_model = id.to_string();
                 self.db.set_setting("ocr_model", id)?;
-                self.status = format!("OCR model: {id}");
+                self.push_status(format!("OCR model: {id}"));
                 self.popup = Popup::Settings;
             }
             ModelPickTarget::ImageGen => {
                 self.image_gen_model = id.to_string();
                 self.db.set_setting("image_gen_model", id)?;
-                self.status = format!("image gen model: {id}");
+                self.push_status(format!("image gen model: {id}"));
                 self.popup = Popup::Settings;
             }
             ModelPickTarget::VideoGen => {
                 self.video_gen_model = id.to_string();
                 self.db.set_setting("video_gen_model", id)?;
-                self.status = format!("video gen model: {id}");
+                self.push_status(format!("video gen model: {id}"));
                 self.popup = Popup::Settings;
             }
             ModelPickTarget::SwarmPersona(row) => {
@@ -720,7 +720,7 @@ impl App {
                 if let Some(session) = &self.session {
                     let _ = self.db.save_swarm_personas(&session.id, &self.swarm_cache);
                 }
-                self.status = format!("persona model: {id}");
+                self.push_status(format!("persona model: {id}"));
                 self.popup = Popup::Swarm;
             }
         }
@@ -732,7 +732,7 @@ impl App {
     pub fn clear_memory_model(&mut self) -> Result<()> {
         self.memory_model.clear();
         self.db.set_setting("memory_model", "")?;
-        self.status = "memory model cleared — extraction disabled".to_string();
+        self.push_status("memory model cleared — extraction disabled".to_string());
         Ok(())
     }
 
@@ -741,7 +741,7 @@ impl App {
     pub fn clear_transcriber_model(&mut self) -> Result<()> {
         self.transcriber_model.clear();
         self.db.set_setting("transcriber_model", "")?;
-        self.status = "image model cleared — image descriptions disabled".to_string();
+        self.push_status("image model cleared — image descriptions disabled".to_string());
         Ok(())
     }
 
@@ -749,7 +749,7 @@ impl App {
     pub fn clear_ocr_model(&mut self) -> Result<()> {
         self.ocr_model.clear();
         self.db.set_setting("ocr_model", "")?;
-        self.status = "OCR model cleared — scanned PDFs use tesseract".to_string();
+        self.push_status("OCR model cleared — scanned PDFs use tesseract".to_string());
         Ok(())
     }
 
@@ -757,7 +757,7 @@ impl App {
     pub fn clear_image_gen_model(&mut self) -> Result<()> {
         self.image_gen_model.clear();
         self.db.set_setting("image_gen_model", "")?;
-        self.status = "image gen model cleared — generation disabled".to_string();
+        self.push_status("image gen model cleared — generation disabled".to_string());
         Ok(())
     }
 
@@ -765,7 +765,7 @@ impl App {
     pub fn clear_video_gen_model(&mut self) -> Result<()> {
         self.video_gen_model.clear();
         self.db.set_setting("video_gen_model", "")?;
-        self.status = "video gen model cleared — generation disabled".to_string();
+        self.push_status("video gen model cleared — generation disabled".to_string());
         Ok(())
     }
 }

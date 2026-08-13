@@ -5,7 +5,7 @@ impl App {
     pub fn copy_text(&mut self, text: &str) {
         let msg = crate::input::copy_to_clipboard(&mut self.clipboard, text);
         if !msg.is_empty() {
-            self.status = msg;
+            self.push_status(msg);
         }
     }
 
@@ -29,7 +29,7 @@ impl App {
     pub fn open_copy_menu(&mut self) {
         let opts = {
             let Some(msg) = self.messages.iter().rev().find(|m| m.role == "assistant") else {
-                self.status = "no response to copy".into();
+                self.push_status("no response to copy");
                 return;
             };
             let mut opts = vec![CopyOption {

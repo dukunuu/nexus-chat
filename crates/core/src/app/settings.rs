@@ -36,8 +36,10 @@ impl App {
             std::fs::read_to_string(self.space.blocked_domains_path(&self.active_space.name))
                 .unwrap_or_default(),
         ];
-        self.status = "↑/↓ field · type to edit · Space toggles · Ctrl+E system prompt · Esc saves"
-            .to_string();
+        self.push_status(
+            "↑/↓ field · type to edit · Space toggles · Ctrl+E system prompt · Esc saves"
+                .to_string(),
+        );
         self.popup = Popup::Settings;
     }
 
@@ -150,11 +152,11 @@ impl App {
                 "0"
             },
         )?;
-        self.status = if self.settings.show_reasoning {
+        self.push_status(if self.settings.show_reasoning {
             "reasoning expanded".to_string()
         } else {
             "reasoning collapsed".to_string()
-        };
+        });
         Ok(())
     }
 
@@ -247,7 +249,7 @@ impl App {
         );
         self.refresh_toolbox();
         self.popup = Popup::None;
-        self.status = "settings saved".to_string();
+        self.push_status("settings saved".to_string());
         Ok(())
     }
 

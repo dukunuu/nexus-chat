@@ -74,19 +74,19 @@ impl App {
     /// threshold. No-ops with a status message if there's nothing to compact.
     pub fn force_compact(&mut self) {
         if self.compact_rx.is_some() {
-            self.status = "already compacting…".to_string();
+            self.push_status("already compacting…".to_string());
             return;
         }
         if self.is_streaming() {
-            self.status = "wait for the current response to finish".to_string();
+            self.push_status("wait for the current response to finish".to_string());
             return;
         }
         let Some(session) = self.session.as_ref() else {
-            self.status = "no active session to compact".to_string();
+            self.push_status("no active session to compact".to_string());
             return;
         };
         if session.compact_through as usize >= self.messages.len() {
-            self.status = "nothing new to compact".to_string();
+            self.push_status("nothing new to compact".to_string());
             return;
         }
         let pct = self.context_limit().filter(|&l| l > 0).map_or(0, |l| {
@@ -106,14 +106,16 @@ impl App {
             if let Some(m) = self.current_model.clone() {
                 m
             } else {
-                self.status = "pick a model first with /model".to_string();
+                self.push_status("pick a model first with /model".to_string());
                 return;
             }
         } else {
             self.memory_model.clone()
         };
         let Some((provider, raw_model)) = self.resolve_model_backend(&model) else {
-            self.status = format!("model backend unavailable: {model} — pick another with /model");
+            self.push_status(format!(
+                "model backend unavailable: {model} — pick another with /model"
+            ));
             return;
         };
         let Some(session) = self.session.as_ref() else {
@@ -236,10 +238,10 @@ impl App {
             .context_limit()
             .filter(|&l| l > 0)
             .map(|l| self.context_used() * 100 / l);
-        self.status = match after_pct {
+        self.push_status(match after_pct {
             Some(after) => format!("compacted: {before_pct}% → {after}%"),
             None => "compacted".to_string(),
-        };
+        });
     }
 
     /// Sessions compacted before compaction rows existed (or loaded from a
@@ -366,7 +368,7 @@ impl App {
         if let Some(s) = self.session.as_mut() {
             s.compact_summary = Some(text);
         }
-        self.status = "compaction digest updated".to_string();
+        self.push_status("compaction digest updated".to_string());
         Ok(())
     }
 }

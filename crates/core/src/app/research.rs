@@ -1568,16 +1568,16 @@ impl super::App {
     /// if no research job is running.
     pub fn steer_research(&mut self, text: &str) {
         if text.is_empty() {
-            self.status = "usage: /steer <what to also look into>".to_string();
+            self.push_status("usage: /steer <what to also look into>".to_string());
             return;
         }
         match &self.research_steer_tx {
             // Hard bound: refuse once the queue is full — this also bounds
             // the unbounded channel and the retained log.
             Some(_) if self.research_steer_log.len() >= MAX_QUEUED_STEERS => {
-                self.status = format!(
+                self.push_status(format!(
                     "steer queue full ({MAX_QUEUED_STEERS} pending) — wait for the next round"
-                );
+                ));
             }
             Some(tx) if tx.send(text.to_string()).is_ok() => {
                 // Keep a log so the live popup can show what's queued vs.
@@ -1597,9 +1597,9 @@ impl super::App {
                 self.research_steer_log.push((pos, text.to_string()));
                 self.research_steer_log
                     .retain(|(p, _)| !self.research_steer_acked.contains(p));
-                self.status = format!("queued steer: {text}");
+                self.push_status(format!("queued steer: {text}"));
             }
-            _ => self.status = "no research job is running".to_string(),
+            _ => self.push_status("no research job is running".to_string()),
         }
     }
 
@@ -1610,19 +1610,21 @@ impl super::App {
     /// still lets you bail or edit before searchers run.
     pub fn start_research_from_chat(&mut self) {
         if self.research_topic_rx.is_some() {
-            self.status = "already scoping a topic from this chat…".to_string();
+            self.push_status("already scoping a topic from this chat…".to_string());
             return;
         }
         if self.research_rx.is_some() {
-            self.status = "a research job is already running".to_string();
+            self.push_status("a research job is already running".to_string());
             return;
         }
         let Some(model) = self.current_model.clone() else {
-            self.status = "no model configured — set one in /login or /model".to_string();
+            self.push_status("no model configured — set one in /login or /model".to_string());
             return;
         };
         let Some((provider, raw_model)) = self.resolve_model_backend(&model) else {
-            self.status = format!("model backend unavailable: {model} — pick another with /model");
+            self.push_status(format!(
+                "model backend unavailable: {model} — pick another with /model"
+            ));
             return;
         };
         let convo: String = self
@@ -1644,12 +1646,14 @@ impl super::App {
             .collect::<Vec<_>>()
             .join("\n");
         if convo.trim().is_empty() {
-            self.status = "nothing to scope yet — chat first, or use /research <topic>".to_string();
+            self.push_status(
+                "nothing to scope yet — chat first, or use /research <topic>".to_string(),
+            );
             return;
         }
         let (tx, rx) = mpsc::unbounded_channel();
         self.research_topic_rx = Some(rx);
-        self.status = "scoping a research topic from this chat…".to_string();
+        self.push_status("scoping a research topic from this chat…".to_string());
         tokio::spawn(async move {
             let prompt = format!(
                 "Based on this conversation, reply with ONLY a single-line research topic \
@@ -1673,8 +1677,10 @@ impl super::App {
         let Some(result) = r else { return };
         match result {
             Ok(topic) if !topic.is_empty() => self.start_research_with_gate(&topic, true),
-            Ok(_) => self.status = "couldn't derive a topic — try /research <topic>".to_string(),
-            Err(e) => self.status = format!("topic scoping failed: {e}"),
+            Ok(_) => {
+                self.push_status("couldn't derive a topic — try /research <topic>".to_string());
+            }
+            Err(e) => self.push_status(format!("topic scoping failed: {e}")),
         }
     }
 
@@ -1690,21 +1696,23 @@ impl super::App {
     pub fn start_research_with_gate(&mut self, topic: &str, gated: bool) {
         let topic = topic.trim().to_string();
         if topic.is_empty() {
-            self.status = "usage: /research <topic>".to_string();
+            self.push_status("usage: /research <topic>".to_string());
             return;
         }
         if self.research_rx.is_some() {
-            self.status = "a research job is already running".to_string();
+            self.push_status("a research job is already running".to_string());
             return;
         }
         // Research inherits the session's model (or the global default) —
         // there is no separate researcher-model setting anymore.
         let Some(model) = self.current_model.clone() else {
-            self.status = "no model configured — set one in /login or /model".to_string();
+            self.push_status("no model configured — set one in /login or /model".to_string());
             return;
         };
         let Some((provider, raw_research_model)) = self.resolve_model_backend(&model) else {
-            self.status = format!("model backend unavailable: {model} — pick another with /model");
+            self.push_status(format!(
+                "model backend unavailable: {model} — pick another with /model"
+            ));
             return;
         };
         let title = super::chat::title_from(&topic);
@@ -1735,7 +1743,7 @@ impl super::App {
             {
                 Ok(s) => s,
                 Err(e) => {
-                    self.status = format!("could not start research session: {e}");
+                    self.push_status(format!("could not start research session: {e}"));
                     return;
                 }
             };
@@ -1828,7 +1836,7 @@ impl super::App {
         let (tx, rx) = mpsc::unbounded_channel();
         self.research_rx = Some(rx);
         self.research_running = Some((session.id.clone(), topic.clone()));
-        self.status = format!("researching: {topic} · Ctrl+↑ agents");
+        self.push_status(format!("researching: {topic} · Ctrl+↑ agents"));
 
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         self.research_steer_tx = Some(steer_tx);
@@ -1904,10 +1912,10 @@ impl super::App {
             // session can't keep unbounded text after research stops.
             self.research_steer_log.clear();
             self.research_steer_acked.clear();
-            self.status = "research stopped".to_string();
+            self.push_status("research stopped".to_string());
             self.popup = super::Popup::None;
         } else {
-            self.status = "no research job is running".to_string();
+            self.push_status("no research job is running".to_string());
         }
     }
 
@@ -1991,7 +1999,7 @@ impl super::App {
                 Err(e) => {
                     self.set_survey_gate(Some(gate));
                     self.set_input(text);
-                    self.status = format!("couldn't save your reply — {e}");
+                    self.push_status(format!("couldn't save your reply — {e}"));
                     return;
                 }
             }
@@ -2004,13 +2012,13 @@ impl super::App {
             // in the composer rather than eating the user's typing.
             let rollback_error = saved_id.and_then(|id| self.db.delete_message(&id).err());
             self.set_input(text);
-            self.status = match rollback_error {
+            self.push_status(match rollback_error {
                 Some(e) => format!(
                     "the job stopped waiting and the saved reply could not be rolled back: {e} — text restored to the composer"
                 ),
                 None => "the job is no longer waiting for a reply — text restored to the composer"
                     .to_string(),
-            };
+            });
             return;
         }
         if !text.trim().is_empty()
@@ -2034,17 +2042,15 @@ impl super::App {
         }
         match gate.phase {
             SurveyPhase::Clarify { round } => {
-                self.status = format!(
+                self.push_status(format!(
                     "answer noted (round {round}) — checking for follow-ups… · Ctrl+↑ agents"
-                );
+                ));
             }
-            SurveyPhase::Approve { rework } => {
-                self.status = if rework {
-                    "revision folded in — continuing… · Ctrl+↑ agents".to_string()
-                } else {
-                    "plan reply sent — continuing… · Ctrl+↑ agents".to_string()
-                }
-            }
+            SurveyPhase::Approve { rework } => self.push_status(if rework {
+                "revision folded in — continuing… · Ctrl+↑ agents".to_string()
+            } else {
+                "plan reply sent — continuing… · Ctrl+↑ agents".to_string()
+            }),
         }
     }
 
@@ -2136,10 +2142,10 @@ impl super::App {
                 }
                 self.mirror_stage(&session_id, &label, &detail);
                 if viewing {
-                    self.status = format!(
+                    self.push_status(format!(
                         "research: {} · Ctrl+↑ agents",
                         crate::db::stage_content(&label, &detail)
-                    );
+                    ));
                 }
             }
             ResearchUpdate::SurveyReady { questions, round } => {
@@ -2171,12 +2177,16 @@ impl super::App {
                     && let Err(e) = self.db.add_survey_message(&session_id, &content)
                 {
                     self.stop_research();
-                    self.status = format!("couldn't persist the survey — research stopped: {e}");
+                    self.push_status(format!(
+                        "couldn't persist the survey — research stopped: {e}"
+                    ));
                     return;
                 }
                 let Some(tx) = self.survey_reply_tx.clone() else {
                     self.stop_research();
-                    self.status = "survey reply channel unavailable — research stopped".to_string();
+                    self.push_status(
+                        "survey reply channel unavailable — research stopped".to_string(),
+                    );
                     return;
                 };
                 self.set_survey_gate(Some(SurveyGate {
@@ -2200,16 +2210,18 @@ impl super::App {
                         persona: None,
                         created_at: None,
                     });
-                    self.status = format!("survey round {round} — answer in chat · Ctrl+↑ agents");
+                    self.push_status(format!(
+                        "survey round {round} — answer in chat · Ctrl+↑ agents"
+                    ));
                 } else {
                     // The gate is parked off-screen: mark the job's session
                     // unread and say where input is needed. In incognito the
                     // prompt will be restored from SurveyGate when opened.
                     self.unread.insert(session_id.clone());
-                    self.status = format!(
+                    self.push_status(format!(
                         "research is waiting on you — survey round {round} for \"{topic}\": \
                          open that session and answer in chat"
-                    );
+                    ));
                 }
             }
             ResearchUpdate::PlanReady { questions, rework } => {
@@ -2232,13 +2244,14 @@ impl super::App {
                     && let Err(e) = self.db.add_research_plan_message(&session_id, &content)
                 {
                     self.stop_research();
-                    self.status = format!("couldn't persist the plan — research stopped: {e}");
+                    self.push_status(format!("couldn't persist the plan — research stopped: {e}"));
                     return;
                 }
                 let Some(tx) = self.survey_reply_tx.clone() else {
                     self.stop_research();
-                    self.status =
-                        "plan approval channel unavailable — research stopped".to_string();
+                    self.push_status(
+                        "plan approval channel unavailable — research stopped".to_string(),
+                    );
                     return;
                 };
                 self.set_survey_gate(Some(SurveyGate {
@@ -2281,21 +2294,21 @@ impl super::App {
                         persona: None,
                         created_at: None,
                     });
-                    self.status = if rework {
+                    self.push_status(if rework {
                         "revised plan ready — reply to approve".to_string()
                     } else {
                         "research plan ready — reply to approve or change · Ctrl+↑ agents"
                             .to_string()
-                    };
+                    });
                 } else {
                     // The gate is parked off-screen: mark the job's session
                     // unread and say where input is needed. An incognito plan
                     // is restored from SurveyGate rather than the database.
                     self.unread.insert(session_id.clone());
-                    self.status = format!(
+                    self.push_status(format!(
                         "research is waiting on you — plan approval for \"{topic}\": \
                          open that session and reply \"approve\""
-                    );
+                    ));
                 }
             }
             ResearchUpdate::Done(Ok(report)) => {
@@ -2352,11 +2365,11 @@ impl super::App {
                         persona: None,
                         created_at: None,
                     });
-                    self.status = "research complete".to_string();
+                    self.push_status("research complete".to_string());
                 } else {
                     self.unread.insert(session_id);
                     if let Some((_, topic)) = &self.research_running {
-                        self.status = format!("✓ research ready: {topic}");
+                        self.push_status(format!("✓ research ready: {topic}"));
                     }
                 }
             }
@@ -2386,7 +2399,7 @@ impl super::App {
                         created_at: None,
                     });
                 }
-                self.status = msg;
+                self.push_status(msg);
             }
         }
     }

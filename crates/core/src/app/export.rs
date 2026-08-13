@@ -33,7 +33,7 @@ impl super::App {
     /// session has no research report yet.
     pub fn export_report(&mut self) -> Result<()> {
         let Some(session) = &self.session else {
-            self.status = "no active session".to_string();
+            self.push_status("no active session".to_string());
             return Ok(());
         };
         let Some(report) = self
@@ -43,7 +43,7 @@ impl super::App {
             .find(|m| m.role == "assistant")
             .map(|m| m.content.clone())
         else {
-            self.status = "nothing to export — no assistant reply yet".to_string();
+            self.push_status("nothing to export — no assistant reply yet".to_string());
             return Ok(());
         };
         let citations = self.db.search_citations(&self.active_space.id, None)?;
@@ -67,7 +67,7 @@ impl super::App {
         let slug = super::sessions::slugify(&session.title);
         let path = dir.join(format!("{slug}.md"));
         std::fs::write(&path, assembled)?;
-        self.status = format!("exported to {}", path.display());
+        self.push_status(format!("exported to {}", path.display()));
         Ok(())
     }
 }

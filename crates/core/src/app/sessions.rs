@@ -27,13 +27,13 @@ impl App {
         self.context_total = None;
         self.scroll = 0;
         self.cleanup_incognito_images();
-        self.status = "new chat — send a message to start it".to_string();
+        self.push_status("new chat — send a message to start it".to_string());
     }
 
     pub fn open_session_picker(&mut self) -> Result<()> {
         self.sessions_cache = self.db.list_sessions(&self.active_space.id)?;
         if self.sessions_cache.is_empty() {
-            self.status = "no sessions yet — send a message to start one".to_string();
+            self.push_status("no sessions yet — send a message to start one".to_string());
             return Ok(());
         }
         self.session_selected = 0;
@@ -115,7 +115,7 @@ impl App {
                 self.scroll = 0;
                 self.cleanup_incognito_images();
             }
-            self.status = format!("deleted: {}", s.title);
+            self.push_status(format!("deleted: {}", s.title));
         }
         self.session_mode = SessionMode::Browse;
         let len = self.filtered_sessions().len();
@@ -133,13 +133,13 @@ impl App {
             .get_session(id)?
             .or_else(|| self.sessions_cache.iter().find(|s| s.id == id).cloned())
         else {
-            self.status = format!("session not found: {id}");
+            self.push_status(format!("session not found: {id}"));
             return Ok(());
         };
         self.messages = self.db.load_messages(&s.id)?;
         self.unread.remove(&s.id);
         self.notifications.retain(|n| n.session_id != s.id);
-        self.status = format!("switched to: {}", s.title);
+        self.push_status(format!("switched to: {}", s.title));
         self.current_model = Some(s.model.clone());
         self.web_mode = s.web_mode;
         self.session = Some(s);
@@ -158,7 +158,7 @@ impl App {
             self.messages = self.db.load_messages(&s.id)?;
             self.unread.remove(&s.id);
             self.notifications.retain(|n| n.session_id != s.id);
-            self.status = format!("switched to: {}", s.title);
+            self.push_status(format!("switched to: {}", s.title));
             self.current_model = Some(s.model.clone());
             self.web_mode = s.web_mode;
             self.session = Some(s);

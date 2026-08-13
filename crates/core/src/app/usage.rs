@@ -28,7 +28,7 @@ impl App {
             .as_ref()
             .is_some_and(|d| d.totals.requests == 0)
         {
-            self.status = self.usage_range.empty_message().to_string();
+            self.push_status(self.usage_range.empty_message().to_string());
         }
     }
 

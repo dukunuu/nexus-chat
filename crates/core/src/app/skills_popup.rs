@@ -40,13 +40,13 @@ impl App {
         let spec = self.skills_edit.trim().to_string();
         self.skills_mode = SkillsMode::Browse;
         let Some((owner, repo, path)) = crate::skills::parse_gh_shorthand(&spec) else {
-            self.status = format!("expected owner/repo/path, got: {spec}");
+            self.push_status(format!("expected owner/repo/path, got: {spec}"));
             return;
         };
         let dest = crate::skills::skills_dir(&self.space.root);
         let (tx, rx) = mpsc::unbounded_channel();
         self.skills_rx = Some(rx);
-        self.status = format!("installing {spec}…");
+        self.push_status(format!("installing {spec}…"));
         tokio::spawn(async move {
             let client = reqwest::Client::new();
             let result = crate::skills::install_from_github(&client, &owner, &repo, &path, &dest)
@@ -61,9 +61,9 @@ impl App {
         match result {
             Some(Ok(name)) => {
                 self.reload_skills();
-                self.status = format!("installed skill: {name}");
+                self.push_status(format!("installed skill: {name}"));
             }
-            Some(Err(e)) => self.status = format!("skill install failed: {e}"),
+            Some(Err(e)) => self.push_status(format!("skill install failed: {e}")),
             None => {}
         }
     }
@@ -73,7 +73,7 @@ impl App {
             let name = skill.name.clone();
             let _ = std::fs::remove_dir_all(&skill.dir);
             self.reload_skills();
-            self.status = format!("removed skill: {name}");
+            self.push_status(format!("removed skill: {name}"));
         }
         self.skills_mode = SkillsMode::Browse;
     }

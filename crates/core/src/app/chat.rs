@@ -38,22 +38,28 @@ impl App {
         if let Some(session) = self.session.as_ref()
             && let Some(task) = self.chat_task_for_session(&session.id)
         {
-            self.status = format!("wait — response still streaming in: {}", task.session_title);
+            self.push_status(format!(
+                "wait — response still streaming in: {}",
+                task.session_title
+            ));
             self.set_input(&text);
             return Ok(());
         }
         if self.chat_task_count() >= super::MAX_CHAT_TASKS {
-            self.status = format!("chat task limit reached ({})", super::MAX_CHAT_TASKS);
+            self.push_status(format!(
+                "chat task limit reached ({})",
+                super::MAX_CHAT_TASKS
+            ));
             self.set_input(&text);
             return Ok(());
         }
         if !self.backends.any() {
-            self.status = "set your API key first with /login".to_string();
+            self.push_status("set your API key first with /login".to_string());
             self.set_input(&text);
             return Ok(());
         }
         let Some(model) = self.current_model.clone() else {
-            self.status = "pick a model first with /model".to_string();
+            self.push_status("pick a model first with /model".to_string());
             self.set_input(&text);
             return Ok(());
         };
@@ -236,7 +242,9 @@ impl App {
             return Ok(());
         };
         let Some((provider, raw_model)) = self.resolve_model_backend(&model) else {
-            self.status = format!("model backend unavailable: {model} — pick another with /model");
+            self.push_status(format!(
+                "model backend unavailable: {model} — pick another with /model"
+            ));
             return Ok(());
         };
         let history = self.build_history();
@@ -316,7 +324,7 @@ impl App {
         self.spinner_frame = 0;
         self.thinking_idx = thinking_idx;
         self.spinner_color = spinner_color;
-        self.status = reasoning_warning.unwrap_or_default();
+        self.push_status(reasoning_warning.unwrap_or_default());
         self.scroll = 0;
         self.prev_total = 0;
         Ok(())
@@ -611,11 +619,11 @@ impl App {
             reasoning.push_str(&inline);
         }
         if buf.is_empty() && error.is_none() {
-            self.status = if stopped {
+            self.push_status(if stopped {
                 "response stopped".to_string()
             } else {
                 "response finished without text".to_string()
-            };
+            });
             return Ok(());
         }
         // Some reasoning models (routed without the separate `reasoning` delta
@@ -715,11 +723,11 @@ impl App {
             } else if !task.incognito {
                 self.unread.insert(task.session_id.clone());
             }
-            self.status = if viewing {
+            self.push_status(if viewing {
                 msg.clone()
             } else {
                 format!("stream error in {}: {error}", task.session_title)
-            };
+            });
             if !viewing && !task.incognito {
                 super::send_system_notification(
                     &format!("Chat failed: {}", task.session_title),
@@ -735,17 +743,17 @@ impl App {
                 });
             }
         } else if stopped {
-            self.status = "response stopped".to_string();
+            self.push_status("response stopped".to_string());
         } else {
             if !viewing && !task.incognito {
                 self.unread.insert(task.session_id.clone());
-                self.status = format!("✓ response ready in: {}", task.session_title);
+                self.push_status(format!("✓ response ready in: {}", task.session_title));
                 super::send_system_notification(
                     &format!("Chat ready: {}", task.session_title),
                     "response complete",
                 );
             } else if viewing {
-                self.status = "response complete".to_string();
+                self.push_status("response complete".to_string());
             }
             if !viewing && !task.incognito {
                 self.notifications.push_back(super::ChatNotification {
@@ -882,11 +890,15 @@ impl App {
     pub fn open_session_link(&mut self) {
         let idx = self.sel.owner_at_selection_start();
         let Some(msg) = idx.and_then(|i| self.messages.get(i)) else {
-            self.status = "select text on a session link message, then press Ctrl+O".to_string();
+            self.push_status(
+                "select text on a session link message, then press Ctrl+O".to_string(),
+            );
             return;
         };
         if msg.role != "session_link" {
-            self.status = "select text on a session link message, then press Ctrl+O".to_string();
+            self.push_status(
+                "select text on a session link message, then press Ctrl+O".to_string(),
+            );
             return;
         }
         let Some(target) = msg
@@ -894,11 +906,11 @@ impl App {
             .split_once('\n')
             .map(|(s, _)| s.trim().to_string())
         else {
-            self.status = "malformed session link".to_string();
+            self.push_status("malformed session link".to_string());
             return;
         };
         if let Err(e) = self.switch_to_session_by_id(&target) {
-            self.status = format!("session switch failed: {e}");
+            self.push_status(format!("session switch failed: {e}"));
         }
     }
 
@@ -951,11 +963,11 @@ impl App {
     /// Flags are keyed by the message's normalized URL, session-scoped.
     pub fn flag_source_under_selection(&mut self, flag: Option<&str>) {
         let Some(selected) = self.sel.selected_text() else {
-            self.status = "select a [n] citation, then press x".to_string();
+            self.push_status("select a [n] citation, then press x".to_string());
             return;
         };
         let Some(n) = crate::citations::citation_number_in(&selected) else {
-            self.status = "no [n] citation in the current selection".to_string();
+            self.push_status("no [n] citation in the current selection".to_string());
             return;
         };
         let Some(msg) = self
@@ -963,16 +975,16 @@ impl App {
             .owner_at_selection_start()
             .and_then(|i| self.messages.get(i))
         else {
-            self.status = "no [n] citation in the current selection".to_string();
+            self.push_status("no [n] citation in the current selection".to_string());
             return;
         };
         let citations = crate::citations::parse_citations(&msg.content);
         let Some((_, url)) = citations.iter().find(|(num, _)| *num == n) else {
-            self.status = format!("no source [{n}] in this message");
+            self.push_status(format!("no source [{n}] in this message"));
             return;
         };
         let Some(session) = &self.session else {
-            self.status = "no active session".to_string();
+            self.push_status("no active session".to_string());
             return;
         };
         let url_norm = crate::tools::normalize_url(url);
@@ -983,10 +995,10 @@ impl App {
         };
         match self.db.set_source_flag(&session.id, &url_norm, flag) {
             Ok(()) => {
-                self.status = format!("{verb} [{n}]: {url}");
+                self.push_status(format!("{verb} [{n}]: {url}"));
                 self.refresh_toolbox();
             }
-            Err(e) => self.status = format!("flag failed: {e}"),
+            Err(e) => self.push_status(format!("flag failed: {e}")),
         }
     }
 
@@ -999,11 +1011,11 @@ impl App {
             session.web_mode = self.web_mode;
             let _ = self.db.set_session_web_mode(&session.id, self.web_mode);
         }
-        self.status = if self.web_mode {
+        self.push_status(if self.web_mode {
             "🌐 web mode on".to_string()
         } else {
             "web mode off".to_string()
-        };
+        });
     }
 
     pub fn toggle_incognito(&mut self) -> Result<()> {
@@ -1017,11 +1029,11 @@ impl App {
         self.set_input("");
         self.cleanup_incognito_images();
         self.incognito = !self.incognito;
-        self.status = if self.incognito {
+        self.push_status(if self.incognito {
             "incognito mode — nothing persists, no apps".to_string()
         } else {
             "incognito mode off".to_string()
-        };
+        });
         Ok(())
     }
 
@@ -1038,7 +1050,7 @@ impl App {
     pub fn reload_base_system_prompt(&mut self) {
         if let Ok(text) = crate::config::load_system_prompt() {
             self.base_system_prompt = text;
-            self.status = "system prompt reloaded".to_string();
+            self.push_status("system prompt reloaded".to_string());
         }
     }
 

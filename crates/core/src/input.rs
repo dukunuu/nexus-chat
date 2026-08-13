@@ -283,7 +283,7 @@ impl App {
         self.input.cancel_selection();
         let msg = copy_to_clipboard(&mut self.clipboard, &text);
         if !msg.is_empty() {
-            self.status = msg;
+            self.push_status(msg);
         }
     }
 
@@ -310,7 +310,7 @@ impl App {
         };
         let msg = copy_to_clipboard(&mut self.clipboard, &text);
         if !msg.is_empty() {
-            self.status = msg;
+            self.push_status(msg);
         }
     }
 
@@ -339,7 +339,9 @@ impl App {
                     self.open_files_popup(crate::app::FilesTab::Files);
                     self.start_files_add();
                     self.files_edit = path.to_string_lossy().to_string();
-                    self.status = "import this file? Enter to confirm · Esc to cancel".to_string();
+                    self.push_status(
+                        "import this file? Enter to confirm · Esc to cancel".to_string(),
+                    );
                     return;
                 }
                 self.input.insert_str(text);
@@ -405,7 +407,7 @@ impl App {
         {
             if let Some(md) = self.save_clipboard_image(img.width, img.height, &img.bytes) {
                 self.input.insert_str(&md);
-                self.status = "image attached as markdown".to_string();
+                self.push_status("image attached as markdown".to_string());
             }
             return;
         }

@@ -57,7 +57,7 @@ impl super::App {
         let bytes = match encode_png(width, height, bytes) {
             Ok(b) => b,
             Err(e) => {
-                self.status = format!("could not encode image: {e}");
+                self.push_status(format!("could not encode image: {e}"));
                 return None;
             }
         };
@@ -72,14 +72,14 @@ impl super::App {
         } else {
             let dir = self.space.files_dir(&self.active_space.name);
             if let Err(e) = std::fs::create_dir_all(&dir) {
-                self.status = format!("could not create {}: {e}", dir.display());
+                self.push_status(format!("could not create {}: {e}", dir.display()));
                 return None;
             }
             (dir, format!("{}.png", uuid::Uuid::new_v4()))
         };
         let path = dir.join(&filename);
         if let Err(e) = std::fs::write(&path, &bytes) {
-            self.status = format!("could not write {}: {e}", path.display());
+            self.push_status(format!("could not write {}: {e}", path.display()));
             return None;
         }
         if !self.incognito {

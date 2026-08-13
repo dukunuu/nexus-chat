@@ -73,20 +73,20 @@ impl super::App {
     /// session, and kick off the first run immediately (ungated).
     pub fn create_watch(&mut self, topic: &str) {
         if topic.is_empty() {
-            self.status = "usage: /watch <topic>".to_string();
+            self.push_status("usage: /watch <topic>".to_string());
             return;
         }
         self.start_research_with_gate(topic, false);
         let Some(session) = &self.session else {
-            self.status = "could not start watch: no session created".to_string();
+            self.push_status("could not start watch: no session created".to_string());
             return;
         };
         match self
             .db
             .create_watch(&self.active_space.id, topic, 24, &session.id)
         {
-            Ok(_) => self.status = format!("watching: {topic} (every 24h)"),
-            Err(e) => self.status = format!("watch creation failed: {e}"),
+            Ok(_) => self.push_status(format!("watching: {topic} (every 24h)")),
+            Err(e) => self.push_status(format!("watch creation failed: {e}")),
         }
     }
 
@@ -100,7 +100,7 @@ impl super::App {
             self.messages = self.db.load_messages(&s.id)?;
             self.unread.remove(&s.id);
             self.current_model = Some(s.model.clone());
-            self.status = format!("switched to: {}", s.title);
+            self.push_status(format!("switched to: {}", s.title));
             self.web_mode = s.web_mode;
             self.session = Some(s);
             self.backfill_compaction_row();
@@ -122,7 +122,7 @@ impl super::App {
             self.watch_selected = self
                 .watch_selected
                 .min(self.watches_cache.len().saturating_sub(1));
-            self.status = format!("deleted watch: {}", w.topic);
+            self.push_status(format!("deleted watch: {}", w.topic));
         }
     }
 
