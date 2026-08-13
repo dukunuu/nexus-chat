@@ -17,7 +17,7 @@ use crate::app::backends::Backends;
 use crate::db::Persona;
 use crate::provider::openrouter::OpenRouter;
 use crate::provider::{ChatMessage, ChatParams, StreamEvent};
-use crate::tools::ToolBox;
+use crate::tools::ToolExecutor;
 
 /// Maximum complete panel rounds before synthesis. Every persona present at
 /// the start of a round gets one response opportunity in that round.
@@ -418,7 +418,7 @@ pub struct SwarmTurnOptions {
     pub default_provider: OpenRouter,
     pub raw_default_model: String,
     pub base_history: Vec<ChatMessage>,
-    pub toolbox: Arc<ToolBox>,
+    pub toolbox: Arc<dyn ToolExecutor>,
     pub user_message: String,
     pub session_id: String,
     pub tx: mpsc::UnboundedSender<SwarmMsg>,

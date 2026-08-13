@@ -453,6 +453,62 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
     Ok((mapped.to_string(), args.to_string()))
 }
 
+/// The tool-calling seam: everything an agent loop needs from the tool
+/// layer — definitions for the request, read-only classification for
+/// parallelizing independent calls, and execution. `ToolBox` is the local
+/// implementation; a Phase 4 remote implementation (nexus host) speaks the
+/// same methods over the wire, and the loops don't know the difference.
+/// `supports_images`/`space_files_dir` are required because the tool loop
+/// injects image references from tool results as vision content (the host
+/// that runs the tools is the only one who knows the model's vision
+/// support and where the space's files live).
+pub trait ToolExecutor: Send + Sync + 'static {
+    /// Tool definitions to attach to the request (see `ToolBox::defs`).
+    fn defs(&self) -> Vec<ToolDef>;
+    /// Whether a call is read-only (see `is_read_only_tool`) — parallel
+    /// calls run concurrently only when every one of them is.
+    fn is_read_only(&self, name: &str, args: &str) -> bool;
+    /// Run one tool call, returning `(result, status-label)`. Boxed future
+    /// so the trait stays dyn-compatible (the loops hold `Arc<dyn
+    /// ToolExecutor>`).
+    fn run<'a>(
+        &'a self,
+        name: &'a str,
+        args: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (String, String)> + Send + 'a>>;
+    /// Whether the current model accepts image inputs.
+    fn supports_images(&self) -> bool;
+    /// The active space's files dir, for resolving image references in tool
+    /// results.
+    fn space_files_dir(&self) -> Option<std::path::PathBuf>;
+}
+
+impl ToolExecutor for ToolBox {
+    fn defs(&self) -> Vec<ToolDef> {
+        ToolBox::defs(self)
+    }
+
+    fn is_read_only(&self, name: &str, args: &str) -> bool {
+        is_read_only_tool(name, args)
+    }
+
+    fn run<'a>(
+        &'a self,
+        name: &'a str,
+        args: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (String, String)> + Send + 'a>> {
+        Box::pin(ToolBox::run(self, name, args))
+    }
+
+    fn supports_images(&self) -> bool {
+        self.supports_images
+    }
+
+    fn space_files_dir(&self) -> Option<std::path::PathBuf> {
+        Some(self.space_files_dir.clone())
+    }
+}
+
 impl ToolBox {
     /// All config knobs; kept flat because ~17 test call sites construct
     /// this with inline `None`/default args — a config struct would churn
@@ -5872,6 +5928,24 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn new_wires_searxng_url_and_langsearch_key() {
+        let tb = ToolBox::new(
+            PathBuf::new(),
+            Some("http://localhost:8080".to_string()),
+            Some("key-1".to_string()),
+            "auto".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(tb.searxng_url.as_deref(), Some("http://localhost:8080"));
+        assert_eq!(tb.langsearch_key.as_deref(), Some("key-1"));
+        // The seam exposes the same wiring contract the App relies on.
+        assert!(!tb.supports_images());
+    }
+
     fn defs_include_file_tools_only_when_files_exist() {
         let (tb, ..) = files_toolbox();
         let names: Vec<String> = tb.defs().iter().map(|d| d.name.clone()).collect();

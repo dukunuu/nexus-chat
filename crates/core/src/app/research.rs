@@ -560,7 +560,7 @@ use tokio::sync::mpsc;
 
 use crate::provider::openrouter::OpenRouter;
 use crate::provider::{ChatParams, StreamEvent};
-use crate::tools::ToolBox;
+use crate::tools::{ToolBox, ToolExecutor};
 
 use super::ResearchMsg;
 use super::{SurveyGate, SurveyPhase};
@@ -666,7 +666,7 @@ async fn plan(
 /// research pipeline: the tool box, the job's stage-update channel, and the
 /// job's session/space identity.
 pub struct SearcherCtx<'a> {
-    pub toolbox: Arc<ToolBox>,
+    pub toolbox: Arc<dyn ToolExecutor>,
     pub tx: &'a mpsc::UnboundedSender<ResearchMsg>,
     pub ids: &'a (String, String, String),
 }
@@ -759,7 +759,7 @@ async fn verify_with_quote_check(
     provider: &OpenRouter,
     model: &str,
     messages: Vec<ChatMessage>,
-    cache_only_toolbox: Arc<ToolBox>,
+    cache_only_toolbox: Arc<dyn ToolExecutor>,
     tx: &mpsc::UnboundedSender<ResearchMsg>,
     ids: &(String, String, String),
 ) -> String {
@@ -820,7 +820,7 @@ async fn verify_with_quote_check(
 async fn run_searchers(
     provider: &OpenRouter,
     model: &str,
-    toolbox: &Arc<ToolBox>,
+    toolbox: &Arc<dyn ToolExecutor>,
     items: &[(String, String)],
     tx: &mpsc::UnboundedSender<ResearchMsg>,
     ids: &(String, String, String),
@@ -885,7 +885,7 @@ pub struct ResearchOptions {
     pub topic: String,
     pub reply_rx: Option<mpsc::UnboundedReceiver<String>>,
     pub steer_rx: mpsc::UnboundedReceiver<String>,
-    pub toolbox: Arc<ToolBox>,
+    pub toolbox: Arc<dyn ToolExecutor>,
     pub tx: mpsc::UnboundedSender<ResearchMsg>,
     pub session_id: String,
     pub space_id: String,

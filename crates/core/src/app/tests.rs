@@ -989,7 +989,6 @@ fn searxng_url_setting_persists_and_enables_search_tool() {
     // search always works (DuckDuckGo fallback needs no config); only
     // the backend it uses depends on this setting.
     assert!(a.toolbox.defs().iter().any(|t| t.name == "search"));
-    assert!(a.toolbox.searxng_url.is_none());
 
     a.popup = Popup::Settings;
     a.settings_selected = 15; // SearxngUrl
@@ -999,10 +998,8 @@ fn searxng_url_setting_persists_and_enables_search_tool() {
     a.save_settings().unwrap();
 
     assert_eq!(a.searxng_url, "http://localhost:8080"); // trailing slash trimmed
-    assert_eq!(
-        a.toolbox.searxng_url.as_deref(),
-        Some("http://localhost:8080")
-    );
+    // The toolbox sits behind the `ToolExecutor` seam now — the URL wiring
+    // itself is covered by tools::tests::new_wires_searxng_url_and_langsearch_key.
     assert!(!a.skills.iter().any(|s| s.name == "web-search")); // /web injects prompt text directly
 
     let reloaded = a.db.load_settings().unwrap();

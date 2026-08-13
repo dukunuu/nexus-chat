@@ -14,7 +14,7 @@ impl App {
     }
 
     pub fn reload_skills(&mut self) {
-        self.skills = crate::skills::load_skills(&self.toolbox.skills_dir);
+        self.skills = crate::skills::load_skills(&crate::skills::skills_dir(&self.space.root));
         let len = self.skills.len();
         self.skills_selected = self.skills_selected.min(len.saturating_sub(1));
     }
@@ -43,7 +43,7 @@ impl App {
             self.status = format!("expected owner/repo/path, got: {spec}");
             return;
         };
-        let dest = self.toolbox.skills_dir.clone();
+        let dest = crate::skills::skills_dir(&self.space.root);
         let (tx, rx) = mpsc::unbounded_channel();
         self.skills_rx = Some(rx);
         self.status = format!("installing {spec}…");

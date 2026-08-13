@@ -22,7 +22,7 @@ use super::{
     ChatMessage, ChatParams, Model, ModelPricing, ReasoningEffort, StreamEvent, ToolCall, ToolDef,
     Usage,
 };
-use crate::tools::ToolBox;
+use crate::tools::ToolExecutor;
 
 const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
@@ -1298,7 +1298,7 @@ impl OpenRouter {
         messages: Vec<ChatMessage>,
         params: ChatParams,
         tools: Vec<ToolDef>,
-        toolbox: Arc<ToolBox>,
+        toolbox: Arc<dyn ToolExecutor>,
         max_tool_iters: usize,
     ) -> (
         mpsc::UnboundedReceiver<StreamEvent>,
@@ -1327,7 +1327,7 @@ impl OpenRouter {
         mut messages: Vec<ChatMessage>,
         params: ChatParams,
         tools: Vec<ToolDef>,
-        toolbox: Arc<ToolBox>,
+        toolbox: Arc<dyn ToolExecutor>,
         max_tool_iters: usize,
         tx: &mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<()> {
@@ -1374,9 +1374,10 @@ impl OpenRouter {
                     // sequential so writes to the same file can't race.
                     // Results are zipped back into call order either way.
                     let results: Vec<(String, String)> = if calls.len() > 1
-                        && calls.iter().all(|call| {
-                            crate::tools::is_read_only_tool(&call.name, &call.arguments)
-                        }) {
+                        && calls
+                            .iter()
+                            .all(|call| toolbox.is_read_only(&call.name, &call.arguments))
+                    {
                         futures_util::future::join_all(calls.iter().map(|call| {
                             let toolbox = toolbox.clone();
                             async move { toolbox.run(&call.name, &call.arguments).await }
@@ -1428,9 +1429,9 @@ impl OpenRouter {
                         // from the tool result and inject them as a user
                         // message so the vision model can see them on the
                         // next stream request.
-                        if toolbox.supports_images
-                            && let Some(imgs) =
-                                extract_tool_images(&result, &toolbox.space_files_dir)
+                        if toolbox.supports_images()
+                            && let Some(files_dir) = toolbox.space_files_dir()
+                            && let Some(imgs) = extract_tool_images(&result, &files_dir)
                         {
                             messages.push(ChatMessage {
                                 role: "user".to_string(),

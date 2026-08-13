@@ -780,7 +780,7 @@ pub struct App {
     pub research_topic_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
     /// Composer buffer for the live research-activity view's steer input.
     pub research_live_input: String,
-    pub toolbox: std::sync::Arc<crate::tools::ToolBox>,
+    pub toolbox: std::sync::Arc<dyn crate::tools::ToolExecutor>,
     /// Local static server for model-created apps (None if it failed to bind).
     pub app_server: Option<crate::appserver::AppServer>,
     pub skills_mode: SkillsMode,
@@ -1347,9 +1347,12 @@ impl App {
             (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
         let key = (!self.langsearch_key.trim().is_empty())
             .then(|| self.langsearch_key.trim().to_string());
-        crate::skills::install_builtin(&self.toolbox.skills_dir);
+        // The toolbox sits behind the `ToolExecutor` seam now, so the skills
+        // dir comes from the space layout instead of off the old toolbox.
+        let skills_dir = crate::skills::skills_dir(&self.space.root);
+        crate::skills::install_builtin(&skills_dir);
         let mut toolbox = crate::tools::ToolBox::new(
-            self.toolbox.skills_dir.clone(),
+            skills_dir.clone(),
             url,
             key,
             self.search_provider.clone(),

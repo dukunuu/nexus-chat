@@ -2,8 +2,10 @@ pub mod openrouter;
 
 use serde::{Deserialize, Serialize};
 
-/// A tool the model may call, in `OpenAI` function-calling shape.
-#[derive(Debug, Clone, Serialize)]
+/// A tool the model may call, in `OpenAI` function-calling shape. Serde
+/// derives so the Phase 4 remote `ToolExecutor` can ship the same wire
+/// shape without churning this type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDef {
     pub name: String,
     pub description: String,

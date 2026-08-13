@@ -116,22 +116,43 @@ are space-agnostic:
   cleanly, sync groundwork (identity, tombstones, cursors, versions)
   complete for Phase 3; all tests green, `scripts/check.sh` clean.
 
-### Phase 2 — `nexus-core` extraction (the big one)
+### Phase 2 — `nexus-core` extraction
 
-- Move `app/`, `provider/`, `tools/`, `db.rs`, `space.rs`, `config.rs` into
-  a library crate — no ratatui/crossterm deps.
-- Define the seam: `AppCommand` enum (send, cancel, steer, research, switch
-  space, …) and `AppEvent` stream (`StreamEvent` + task status + session
-  updates).
-- Introduce the `ToolExecutor` trait now — local impl today, remote impl in
-  Phase 4.
-- `app` tool gains `init`/`build`: embedded Astro+React and Vite+React
-  starters, static framework builds served from `dist/` (appserver
-  `served_from` registry field). Build is node-dependent — the first
-  "hands" tool: runs on the hub, degrades elsewhere. `node_modules/` and
-  `dist/` are device-local derived artifacts (never synced).
-- TUI becomes a thin consumer of the core; behavior identical.
-- **Exit**: TUI works exactly as before, from the lib; tests green.
+Library crate with zero TUI deps; one seam: `AppCommand` in, `AppEvent` +
+`CoreSnapshot` out. The `AppEvent` enum and headless CLI boot already
+exist — this formalizes them (audit: `cli.rs::build_app` already boots the
+same `App`; `AppEvent` already carries Stream/Models/Title/Research/Swarm…).
+
+- **2a Workspace split**: `crates/core` (app/ logic, provider, tools, db,
+  space, config, appserver, extract, citations, skills, update) +
+  `crates/tui` (bin `nexus`: ui/, input, events, theme, markdown,
+  selection, main). Dep triage: ratatui/crossterm/tui-*/arboard/
+  unicode-width → TUI; `ratatui::style::Color` in chat.rs → plain enum in
+  core; `open`/clipboard → TUI. Tests move with code.
+- **2b Seam**: `AppCommand` enum (Send/Cancel/Steer/AnswerGate/SwitchSpace/
+  SetModel/…) with `run_command` parsing `/`-strings into it; `AppEvent`
+  formalized + `Status` and `GateRequested` events (research survey/plan
+  gates become explicit events answered via `AnswerGate` — the plumbing
+  mobile/web need); `CoreSnapshot` (serde: sessions, models, settings,
+  tasks) designed now, consumed by the Phase 4 API unchanged; bootstrap
+  consolidated into one `core::boot()` for TUI and CLI.
+- **2c UI-state extraction (last)**: composer, popup/modes, scroll,
+  status→event, mouse/selection state move TUI-side; core keeps domain
+  state only.
+- **2d `ToolExecutor` trait**: defs/is_read_only/run; `ToolBox` +
+  research-restricted impls; agent loops call the trait — remote impl
+  lands in Phase 4.
+- **2e CLI on the seam** (canary): ask/chat/research/watch-run rebuilt on
+  commands/events; `app/tests.rs` (2.2k lines) re-wired to the seam;
+  popup snapshot tests against a thin TUI wrapper (`Core` + view state).
+- **2f Docs/CI/publish**: `check.sh` builds the workspace; `nexus-core`
+  crate metadata for publishing (mobile FFI path later); README/AGENTS
+  tree updates.
+- **Sequencing**: 2a → 2d → 2b → 2e → 2c → 2f; each step lands green, TUI
+  is the canary throughout.
+- **Exit**: core builds with zero TUI deps; TUI behavior identical
+  (snapshot tests green); `nexus ask/chat/research` work through the seam;
+  `CoreSnapshot` shape documented.
 
 ### Phase 3 — Merge engine + changeset sync
 
