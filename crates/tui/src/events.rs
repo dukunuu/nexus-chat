@@ -134,10 +134,12 @@ async fn run_loop(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
                 None => break,
             },
             event = app.next_event() => match event {
+                // push_status already synced the status field; the event is
+                // for seam consumers (2e moves the field out entirely). The
+                // TUI banner lands in 2e; until then the gate prompt is
+                // driven by the existing status text + guard clause.
+                AppEvent::Status(_) | AppEvent::Gate(_) | AppEvent::Stream(None) => {}
                 AppEvent::Stream(Some((task_id, e))) => app.on_chat_event(task_id, e)?,
-                // The central chat sender lives on App, so this only occurs
-                // during shutdown and must not finalize an unrelated task.
-                AppEvent::Stream(None) => {}
                 AppEvent::Models(r) => app.on_models_result(r),
                 AppEvent::Title(t) => app.on_title_result(t),
                 AppEvent::Memory(m) => app.on_memory_result(m),

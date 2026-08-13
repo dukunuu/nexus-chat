@@ -1709,7 +1709,7 @@ impl super::App {
         };
         let title = super::chat::title_from(&topic);
         // Hygiene: no gate or reply channel from a previous job may linger.
-        self.survey_gate = None;
+        self.set_survey_gate(None);
         self.survey_reply_tx = None;
 
         // Check if there's a conversation to migrate to the research session.
@@ -1885,7 +1885,7 @@ impl super::App {
     /// Abort the active research pipeline, including survey/searcher/tool
     /// streams spawned under its orchestration task.
     pub fn stop_research(&mut self) {
-        self.survey_gate = None;
+        self.set_survey_gate(None);
         if let Some(abort) = self.research_abort.take() {
             abort.abort();
         }
@@ -1897,7 +1897,7 @@ impl super::App {
                     "stopped by user",
                 );
             }
-            self.survey_gate = None;
+            self.set_survey_gate(None);
             self.survey_reply_tx = None;
             self.research_steer_tx = None;
             // Retained steer state belongs to the job: drop it so a long
@@ -1962,10 +1962,24 @@ impl super::App {
     /// to the model, since the survey/plan rows it answers are excluded too:
     /// a bare "the second option" or "drop Q2" must not leak into model
     /// history without its context.
+    /// Arm or clear the parked gate, emitting a `Gate` event either way.
+    /// The event carries the session id so consumers can compare it against
+    /// the viewed session — a gate in another session must never swallow
+    /// typing.
+    pub fn set_survey_gate(&mut self, gate: Option<SurveyGate>) {
+        let state = gate.as_ref().map(|g| super::GateState {
+            session_id: g.session_id.clone(),
+            phase: g.phase.clone(),
+        });
+        self.survey_gate = gate;
+        self.pending_events.push_back(super::AppEvent::Gate(state));
+    }
+
     pub fn reply_to_survey_gate(&mut self, text: &str) {
         let Some(gate) = self.survey_gate.take() else {
             return;
         };
+        self.pending_events.push_back(super::AppEvent::Gate(None));
         // Persist before acknowledging: the pipeline and the transcript must
         // never incorporate a reply the database didn't record (a locked or
         // full db would otherwise silently lose the answer on reload). On a
@@ -1975,7 +1989,7 @@ impl super::App {
             match self.db.add_gate_reply_message(&gate.session_id, text) {
                 Ok(id) => Some(id),
                 Err(e) => {
-                    self.survey_gate = Some(gate);
+                    self.set_survey_gate(Some(gate));
                     self.set_input(text);
                     self.status = format!("couldn't save your reply — {e}");
                     return;
@@ -2093,7 +2107,7 @@ impl super::App {
             self.research_rx = None;
             self.research_abort = None;
             self.research_running = None;
-            self.survey_gate = None;
+            self.set_survey_gate(None);
             self.survey_reply_tx = None;
             self.research_steer_tx = None;
             // Retained steer state belongs to the job: drop it when the job
@@ -2165,13 +2179,13 @@ impl super::App {
                     self.status = "survey reply channel unavailable — research stopped".to_string();
                     return;
                 };
-                self.survey_gate = Some(SurveyGate {
+                self.set_survey_gate(Some(SurveyGate {
                     session_id: session_id.clone(),
                     reply_tx: tx,
                     phase: SurveyPhase::Clarify { round },
                     prompt_role: "survey".to_string(),
                     prompt_content: content.clone(),
-                });
+                }));
 
                 if viewing {
                     self.messages.push(crate::db::Message {
@@ -2227,13 +2241,13 @@ impl super::App {
                         "plan approval channel unavailable — research stopped".to_string();
                     return;
                 };
-                self.survey_gate = Some(SurveyGate {
+                self.set_survey_gate(Some(SurveyGate {
                     session_id: session_id.clone(),
                     reply_tx: tx,
                     phase: SurveyPhase::Approve { rework },
                     prompt_role: "research_plan".to_string(),
                     prompt_content: content.clone(),
-                });
+                }));
 
                 // A byproduct record in the space's files, like the report:
                 // the conversation is the edit surface, the file is history.

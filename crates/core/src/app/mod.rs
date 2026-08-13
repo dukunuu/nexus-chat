@@ -18,7 +18,7 @@ use tui_textarea::TextArea;
 use crate::config;
 use crate::db::{DEFAULT_SPACE, Db, Message, Session, Space as SpaceRow};
 use crate::filter_input::FilterInput;
-use crate::input::{COMMANDS, new_textarea};
+use crate::input::new_textarea;
 use crate::provider::openrouter::OpenRouter;
 use crate::provider::{BackendTag, Model, StreamEvent, Usage};
 use crate::space::Space;
@@ -27,6 +27,7 @@ use crate::theme::Theme;
 mod apps;
 mod backends;
 mod chat;
+mod commands;
 mod compaction;
 mod copy;
 pub mod export;
@@ -40,6 +41,7 @@ mod scripts;
 mod sessions;
 mod settings;
 mod skills_popup;
+mod snapshot;
 mod spaces;
 mod swarm;
 #[cfg(test)]
@@ -49,6 +51,7 @@ pub mod usage;
 mod watches;
 pub use backends::{Backends, composite_id};
 pub use chat::human_size;
+pub use commands::AppCommand;
 
 #[cfg(test)]
 use chat::split_inline_reasoning;
@@ -80,7 +83,7 @@ pub fn fuzzy_filter_sorted<T>(items: &[T], score_fn: impl Fn(&T) -> Option<i32>)
 }
 
 /// Which tab in the `/files` popup is active.
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum FilesTab {
     Files,
     Images,
@@ -545,6 +548,14 @@ pub const MAX_CHAT_TASKS: usize = 10;
 
 pub type ChatTaskId = u64;
 
+/// Identity of a parked survey/plan gate, as surfaced on the event stream.
+pub struct GateState {
+    /// The session the reply must come from.
+    pub session_id: String,
+    /// Which phase is waiting (drives the prompt shown).
+    pub phase: SurveyPhase,
+}
+
 /// One event routed from a provider stream to its originating chat task.
 pub struct ChatEvent {
     pub task_id: ChatTaskId,
@@ -618,6 +629,7 @@ pub struct SurveyGate {
 /// What a parked survey gate is waiting for — drives the status line and
 /// which phase's reply is routed. Mode-agnostic: `Clarify` is any
 /// clarifying-question round, `Approve` any presented-artifact approval.
+#[derive(Clone)]
 pub enum SurveyPhase {
     /// A clarifying-question round (1-based).
     Clarify { round: u8 },
@@ -650,6 +662,14 @@ impl Drop for AbortOnDrop {
 }
 
 pub enum AppEvent {
+    /// A one-line status update from a domain path (the 2e step converts the
+    /// `status` field writes into these; the field still exists until then).
+    Status(String),
+    /// A survey/plan gate armed (`Some`) or cleared (`None`). `GateState`
+    /// carries the session id the reply must come from, so a gate in another
+    /// session can never swallow typing — the consumer compares the payload
+    /// against the viewed session.
+    Gate(Option<GateState>),
     Stream(Option<(ChatTaskId, StreamEvent)>),
     Models(Option<ModelsResult>),
     /// A generated session topic: (session id, title, slug).
@@ -893,6 +913,9 @@ pub struct App {
     pub next_chat_task_id: ChatTaskId,
     /// Completed task notifications, kept independently of the one-line status.
     pub notifications: VecDeque<ChatNotification>,
+    /// Queued `Status`/`Gate` events, drained by `next_event` before the
+    /// channel sources. The TUI/CLI/host consume the same stream either way.
+    pub(crate) pending_events: VecDeque<AppEvent>,
     /// Screen rectangles for the currently rendered notification rows.
     pub notification_areas: Vec<(Rect, usize)>,
     /// Sessions holding a response that finished while the user was elsewhere.
@@ -1204,6 +1227,7 @@ impl App {
             chat_tasks: HashMap::new(),
             next_chat_task_id: 0,
             notifications: VecDeque::new(),
+            pending_events: VecDeque::new(),
             notification_areas: Vec::new(),
             unread: std::collections::HashSet::new(),
             context_total: None,
@@ -1293,50 +1317,56 @@ impl App {
             return;
         };
         for (k, v) in kv {
-            match k.as_str() {
-                "show_stats" => self.settings.show_stats = v == "1",
-                "show_reasoning" => self.settings.show_reasoning = v == "1",
-                "hide_hints" => self.settings.hide_hints = v == "1",
-                "usage_range" => self.usage_range = crate::db::UsageRange::from_key(&v),
-                "temperature" => self.settings.temperature = v.parse().ok(),
-                "top_p" => self.settings.top_p = v.parse().ok(),
-                "max_tokens" => self.settings.max_tokens = v.parse().ok(),
-                "memory_model" => self.memory_model = v,
-                "transcriber_model" => self.transcriber_model = v,
-                "ocr_model" => self.ocr_model = v,
-                "ocr_engine" if OCR_ENGINES.contains(&v.as_str()) => self.ocr_engine = v,
-                "local_ocr_model" => self.local_ocr_model = v,
-                "embedding_model" => self.embedding_model = v,
-                // Migrate the old defaults: flux-dev is no longer in
-                // OpenRouter's image catalog, and Veo Lite is the lower
-                // quality tier.
-                "image_gen_model" => {
-                    self.image_gen_model = match v.as_str() {
-                        "black-forest-labs/flux-dev" => "openai/gpt-image-2".to_string(),
-                        _ => v,
-                    }
-                }
-                "video_gen_model" => {
-                    self.video_gen_model = match v.as_str() {
-                        "google/veo-3.1-lite" => "google/veo-3.1".to_string(),
-                        _ => v,
-                    }
-                }
-                "compact_threshold" => {
-                    if let Ok(t) = v.parse() {
-                        self.settings.compact_threshold = t;
-                    }
-                }
-                "searxng_url" => self.searxng_url = v,
-                "verbosity" if VERBOSITY_LEVELS.contains(&v.as_str()) => self.verbosity = v,
-                "langsearch_key" => self.langsearch_key = v,
-                "search_provider" if SEARCH_PROVIDERS.contains(&v.as_str()) => {
-                    self.search_provider = v;
-                }
-                _ => {}
-            }
+            self.apply_setting(&k, &v);
         }
         self.refresh_toolbox();
+    }
+
+    /// Apply one persisted setting key to live state. Shared by
+    /// `load_settings` and the `SetSetting` command.
+    fn apply_setting(&mut self, k: &str, v: &str) {
+        match k {
+            "show_stats" => self.settings.show_stats = v == "1",
+            "show_reasoning" => self.settings.show_reasoning = v == "1",
+            "hide_hints" => self.settings.hide_hints = v == "1",
+            "usage_range" => self.usage_range = crate::db::UsageRange::from_key(v),
+            "temperature" => self.settings.temperature = v.parse().ok(),
+            "top_p" => self.settings.top_p = v.parse().ok(),
+            "max_tokens" => self.settings.max_tokens = v.parse().ok(),
+            "memory_model" => self.memory_model = v.to_string(),
+            "transcriber_model" => self.transcriber_model = v.to_string(),
+            "ocr_model" => self.ocr_model = v.to_string(),
+            "ocr_engine" if OCR_ENGINES.contains(&v) => self.ocr_engine = v.to_string(),
+            "local_ocr_model" => self.local_ocr_model = v.to_string(),
+            "embedding_model" => self.embedding_model = v.to_string(),
+            // Migrate the old defaults: flux-dev is no longer in
+            // OpenRouter's image catalog, and Veo Lite is the lower
+            // quality tier.
+            "image_gen_model" => {
+                self.image_gen_model = match v {
+                    "black-forest-labs/flux-dev" => "openai/gpt-image-2".to_string(),
+                    _ => v.to_string(),
+                }
+            }
+            "video_gen_model" => {
+                self.video_gen_model = match v {
+                    "google/veo-3.1-lite" => "google/veo-3.1".to_string(),
+                    _ => v.to_string(),
+                }
+            }
+            "compact_threshold" => {
+                if let Ok(t) = v.parse() {
+                    self.settings.compact_threshold = t;
+                }
+            }
+            "searxng_url" => self.searxng_url = v.to_string(),
+            "verbosity" if VERBOSITY_LEVELS.contains(&v) => self.verbosity = v.to_string(),
+            "langsearch_key" => self.langsearch_key = v.to_string(),
+            "search_provider" if SEARCH_PROVIDERS.contains(&v) => {
+                self.search_provider = v.to_string();
+            }
+            _ => {}
+        }
     }
 
     /// Rebuild the toolbox from the current `searxng_url`, so a settings
@@ -1541,9 +1571,22 @@ impl App {
 
     // --- async event sources (drained by the event loop) ---
 
+    /// Queue a one-line status update: keeps the `status` field in sync for
+    /// the TUI's direct reads (until 2e) and emits `AppEvent::Status` for
+    /// the seam consumers.
+    pub fn push_status(&mut self, s: impl Into<String>) {
+        let s = s.into();
+        self.status.clone_from(&s);
+        self.pending_events.push_back(AppEvent::Status(s));
+    }
+
     /// Next background event from either the streaming task or a model fetch.
     /// Pends on an idle source, so it only resolves when something happens.
     pub async fn next_event(&mut self) -> AppEvent {
+        // Locally-queued events (status lines, gate arming) drain first.
+        if let Some(ev) = self.pending_events.pop_front() {
+            return ev;
+        }
         tokio::select! {
             ev = self.chat_event_rx.recv() => {
                 AppEvent::Stream(ev.map(|event| (event.task_id, event.event)))
@@ -1713,97 +1756,6 @@ impl App {
     }
 
     // --- input handling ---
-
-    pub fn run_command(&mut self, cmd: &str) -> Result<()> {
-        // `/research! <topic>` = research without the plan-approval gate.
-        // Handled before command lookup: the `!` makes the token miss COMMANDS.
-        if let Some(rest) = cmd.strip_prefix("research!") {
-            self.start_research_with_gate(rest.trim(), false);
-            return Ok(());
-        }
-        let token = cmd.split_whitespace().next().unwrap_or("");
-        // Resolve aliases (e.g. "history" -> "session") to a canonical name.
-        let canonical = COMMANDS
-            .iter()
-            .find(|c| c.name == token || c.aliases.contains(&token))
-            .map_or(token, |c| c.name);
-        match canonical {
-            "quit" => self.should_quit = true,
-            "new" => self.new_session(),
-            "compact" => self.force_compact(),
-            "session" => self.open_session_picker()?,
-            "space" => self.open_space_picker()?,
-            "model" => self.open_model_picker(),
-            "login" => self.open_login_popup(),
-            "swarm" => self.open_swarm_popup(),
-            "config" => self.open_settings(),
-            "copy" => self.open_copy_menu(),
-            "skills" => self.open_skills_popup(),
-
-            "files" => {
-                if self.incognito {
-                    self.status = "not available in incognito mode".to_string();
-                } else {
-                    let tab = match token {
-                        t if t == "image" || t == "images" || t == "img" || t == "pictures" => {
-                            FilesTab::Images
-                        }
-                        t if t == "script" || t == "scripts" => FilesTab::Scripts,
-                        _ => FilesTab::Files,
-                    };
-                    self.open_files_popup(tab);
-                }
-            }
-            "apps" => {
-                if self.incognito {
-                    self.status = "apps not available in incognito mode".to_string();
-                } else {
-                    self.open_apps_popup();
-                }
-            }
-            "research" => {
-                let arg = cmd[token.len()..].trim();
-                if arg.is_empty() {
-                    self.start_research_from_chat();
-                } else {
-                    self.start_research(arg);
-                }
-            }
-            "export" => self.export_report()?,
-            "web" => self.toggle_web_mode(),
-            "incognito" => self.toggle_incognito()?,
-            "watch" => {
-                if self.is_research_session() {
-                    let arg = cmd[token.len()..].trim();
-                    if arg.is_empty() {
-                        self.open_watch_picker()?;
-                    } else {
-                        self.create_watch(arg);
-                    }
-                } else {
-                    self.status =
-                        "watch is only available in research sessions — use /research first"
-                            .to_string();
-                }
-            }
-            "usage" => self.open_usage_popup(),
-            other => {
-                if self.skills.iter().any(|s| s.name == other) {
-                    self.forced_skill = Some(other.to_string());
-                    let rest = cmd[token.len()..].trim().to_string();
-                    if rest.is_empty() {
-                        self.status = format!("skill {other} armed for next message");
-                    } else {
-                        self.send_message(rest)?;
-                    }
-                } else {
-                    self.status = format!("unknown command: /{other}");
-                }
-            }
-        }
-        Ok(())
-    }
-
     // --- nerd config (settings popup) ---
 
     /// Index into `settings_inputs` for any typed (non-toggle, non-picker) field.

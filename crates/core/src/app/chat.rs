@@ -552,17 +552,23 @@ impl App {
         Ok(())
     }
 
+    /// Cancel one in-flight chat task by id (kills any in-flight request and
+    /// tool loop) and keep whatever text already arrived.
+    pub fn cancel_chat_task(&mut self, task_id: super::ChatTaskId) -> Result<()> {
+        if let Some(task) = self.chat_tasks.remove(&task_id) {
+            task.abort.abort();
+            self.finish_chat_task_state(task, None, true)?;
+        }
+        Ok(())
+    }
+
     /// Esc while a response streams: abort the background chat task (kills any
     /// in-flight request and tool loop) and keep whatever text already arrived.
     pub fn stop_stream(&mut self) -> Result<()> {
         let Some(task_id) = self.active_chat_task().map(|task| task.id) else {
             return Ok(());
         };
-        if let Some(task) = self.chat_tasks.remove(&task_id) {
-            task.abort.abort();
-            self.finish_chat_task_state(task, None, true)?;
-        }
-        Ok(())
+        self.cancel_chat_task(task_id)
     }
 
     pub fn discard_chat_task(&mut self, session_id: &str) {

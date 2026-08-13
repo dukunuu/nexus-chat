@@ -669,7 +669,7 @@ impl App {
         Ok(())
     }
 
-    fn pick_model(&mut self, id: &str) -> Result<()> {
+    pub fn pick_model(&mut self, id: &str) -> Result<()> {
         match self.model_pick_target {
             ModelPickTarget::Session => {
                 self.current_model = Some(id.to_string());

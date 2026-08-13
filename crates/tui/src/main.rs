@@ -3,11 +3,7 @@ mod events;
 mod ui;
 
 use anyhow::Result;
-use nexus_core::app;
-use nexus_core::appserver;
 use nexus_core::config;
-use nexus_core::db;
-use nexus_core::space;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -18,19 +14,7 @@ async fn main() -> Result<()> {
     }
 
     let saved = config::load_all_providers().await?;
-    // A single bootstrap key just seeds App::new's "reasonable defaults"
-    // guess (utility model strings); rebuild_all_backends below populates
-    // every configured backend regardless of which one this picked.
-    let key = config::first_configured(&saved).map(|(_, k)| k);
-    let space = space::Space::open()?;
-    let space_root = space.spaces_root();
-    let db = db::Db::open(&space.db_path())?;
-
-    let mut app = app::App::new(db, key.as_deref(), space);
-    app.saved = saved;
-    app.rebuild_all_backends();
-    app.app_server = appserver::AppServer::start(space_root).await;
-    app.refresh_toolbox();
+    let mut app = nexus_core::boot(saved).await?;
 
     let mut terminal = ratatui::init();
     // Capture mouse so the model picker is clickable and the terminal doesn't do

@@ -18,7 +18,6 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 
 use nexus_core::app;
-use nexus_core::appserver;
 use nexus_core::config;
 use nexus_core::db;
 use nexus_core::provider::Model;
@@ -339,14 +338,7 @@ pub async fn run(cmd: Command) -> Result<()> {
 /// and apply the shared `--model` / `--space` overrides.
 async fn build_app(model: Option<&str>, space_name: Option<&str>) -> Result<app::App> {
     let saved = config::load_all_providers().await?;
-    let key = config::first_configured(&saved).map(|(_, k)| k);
-    let space = space::Space::open()?;
-    let db = db::Db::open(&space.db_path())?;
-    let mut app = app::App::new(db, key.as_deref(), space);
-    app.saved = saved;
-    app.rebuild_all_backends();
-    app.app_server = appserver::AppServer::start(app.space.spaces_root()).await;
-    app.refresh_toolbox();
+    let mut app = nexus_core::boot(saved).await?;
     if let Some(name) = space_name {
         app.switch_space_cli(name)?;
     }

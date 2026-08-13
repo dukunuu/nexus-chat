@@ -2181,3 +2181,142 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
             .any(|c| c.contains("balance speed and safety"))
     );
 }
+
+// ── Phase 2c: the command/event seam ─────────────────────────────────────
+
+#[test]
+fn parse_command_maps_the_slash_catalog_into_the_seam() {
+    let a = app_with_key();
+    assert_eq!(a.parse_command("new").unwrap(), AppCommand::NewSession);
+    assert_eq!(a.parse_command("web").unwrap(), AppCommand::ToggleWeb);
+    assert_eq!(
+        a.parse_command("research! rust async").unwrap(),
+        AppCommand::RunResearch {
+            topic: "rust async".into(),
+            gated: false
+        }
+    );
+    assert_eq!(
+        a.parse_command("research").unwrap(),
+        AppCommand::RunResearch {
+            topic: String::new(),
+            gated: true
+        }
+    );
+    assert_eq!(
+        a.parse_command("research kernels").unwrap(),
+        AppCommand::RunResearch {
+            topic: "kernels".into(),
+            gated: true
+        }
+    );
+    assert_eq!(
+        a.parse_command("image").unwrap(),
+        AppCommand::OpenFiles {
+            tab: FilesTab::Images
+        }
+    );
+    assert_eq!(
+        a.parse_command("watch").unwrap(),
+        AppCommand::Watch { topic: None }
+    );
+    assert_eq!(
+        a.parse_command("watch rust async").unwrap(),
+        AppCommand::Watch {
+            topic: Some("rust async".into())
+        }
+    );
+    // Incognito parses to an absolute on/off (toggle is the string front's
+    // choice) — the app starts off, so the command turns it on.
+    assert_eq!(
+        a.parse_command("incognito").unwrap(),
+        AppCommand::Incognito { on: true }
+    );
+    assert!(a.parse_command("nosuchcommand").is_err());
+    // Aliases resolve to the canonical command.
+    assert_eq!(
+        a.parse_command("history").unwrap(),
+        AppCommand::OpenSessionPicker
+    );
+}
+
+#[test]
+fn run_command_executes_through_the_seam() {
+    let mut a = app_with_key();
+    a.run_command("model").unwrap();
+    assert_eq!(a.popup, Popup::Model);
+    a.run_command("quit").unwrap();
+    assert!(a.should_quit);
+    // Unknown commands surface as a status line, not an error.
+    a.run_command("bogus").unwrap();
+    assert!(a.status.contains("unknown command"));
+}
+
+#[test]
+fn set_model_and_setting_commands_apply() {
+    let mut a = app_with_key();
+    a.execute(AppCommand::SetModel { id: "a/one".into() })
+        .unwrap();
+    assert_eq!(a.current_model.as_deref(), Some("a/one"));
+    a.execute(AppCommand::SetSetting {
+        key: "verbosity".into(),
+        value: "caveman".into(),
+    })
+    .unwrap();
+    assert_eq!(a.verbosity, "caveman");
+    assert!(
+        a.db.load_settings()
+            .unwrap()
+            .iter()
+            .any(|(k, v)| k == "verbosity" && v == "caveman")
+    );
+}
+
+#[tokio::test]
+async fn gate_in_another_session_never_swallows_typing_and_the_event_carries_its_session() {
+    let mut a = app_with_key();
+    let space = a.active_space.id.clone();
+    let s_a =
+        a.db.create_session("research A", "a/one", &space, "research")
+            .unwrap();
+    let s_b =
+        a.db.create_session("chat B", "a/one", &space, "chat")
+            .unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    a.set_survey_gate(Some(SurveyGate {
+        session_id: s_a.id.clone(),
+        reply_tx: tx,
+        phase: SurveyPhase::Clarify { round: 1 },
+        prompt_role: "survey".to_string(),
+        prompt_content: "q1?".to_string(),
+    }));
+    // The Gate event names the session the reply must come from.
+    match a.pending_events.pop_front() {
+        Some(AppEvent::Gate(Some(g))) => assert_eq!(g.session_id, s_a.id),
+        other => panic!("expected Gate(Some) event, got something else"),
+    }
+    // View the other session: Enter must send a normal message, not answer
+    // A's parked gate.
+    a.switch_to_session_by_id(&s_b.id).unwrap();
+    assert!(!a.survey_gate_targets_current_session());
+    a.set_input("hello B");
+    a.submit().unwrap();
+    let msg = a.messages.last().unwrap();
+    assert_eq!(msg.role, "user");
+    assert_eq!(msg.content, "hello B");
+    // The gate survives, still parked on A.
+    assert_eq!(a.survey_gate.as_ref().unwrap().session_id, s_a.id);
+}
+
+#[test]
+fn snapshot_serializes_sessions_models_settings_and_tasks() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    let snap = a.snapshot();
+    let json = serde_json::to_string(&snap).unwrap();
+    assert!(json.contains("\"sessions\""));
+    assert!(json.contains("\"models\""));
+    assert!(json.contains("\"settings\""));
+    assert!(json.contains("\"tasks\""));
+    assert!(json.contains("\"model\":\"a/one\""));
+}

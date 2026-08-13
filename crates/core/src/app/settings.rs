@@ -250,4 +250,24 @@ impl App {
         self.status = "settings saved".to_string();
         Ok(())
     }
+
+    /// Set one named setting by key, persisting it and applying it live —
+    /// the `SetSetting` command the host (and later the TUI) uses. Unknown
+    /// keys are ignored like unknown rows on load.
+    pub fn set_setting(&mut self, key: &str, value: &str) -> Result<()> {
+        self.apply_setting(key, value);
+        if key == "blocked_domains" {
+            // Per-space (not a db setting): lives next to the space's other
+            // config files so it travels with the space.
+            std::fs::write(
+                self.space.blocked_domains_path(&self.active_space.name),
+                value,
+            )?;
+        } else {
+            self.db.set_setting(key, value)?;
+        }
+        self.refresh_toolbox();
+        self.push_status(format!("{key} set"));
+        Ok(())
+    }
 }
