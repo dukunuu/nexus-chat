@@ -113,7 +113,12 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) {
         .modifiers
         .contains(crossterm::event::KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Char('x') if ctrl => app.stop_research(),
+        KeyCode::Char('x') if ctrl => {
+            app.stop_research();
+            // 2e: the domain no longer owns the popup — close it here (the
+            // old core `stop_research` did, and Esc also closes).
+            app.popup = nexus_core::app::Popup::None;
+        }
         KeyCode::Esc => app.popup = nexus_core::app::Popup::None,
         KeyCode::Enter => {
             let text = app.research_live_input.trim().to_string();

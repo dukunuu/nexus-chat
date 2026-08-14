@@ -558,3 +558,51 @@ mod watch_popup_tests {
         assert_eq!(a.watches_cache.len(), 1);
     }
 }
+
+/// 2e regression tests: `stop_research`/`stop_swarm` no longer own the popup
+/// (it's view state), so the popups' Ctrl+X handlers must close it
+/// themselves — the old core methods did, and the refactor dropped it.
+mod stop_closes_popup_tests {
+    use crate::app_view::AppView;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use nexus_core::app::{App, Popup};
+    use nexus_core::db::Db;
+    use nexus_core::space::Space;
+
+    fn test_space() -> Space {
+        Space {
+            root: std::env::temp_dir().join(format!("nexus-stop-test-{}", uuid::Uuid::new_v4())),
+        }
+    }
+
+    fn ctrl_x() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn research_live_ctrl_x_closes_the_popup() {
+        let db = Db::open_in_memory().unwrap();
+        let mut a = AppView::new(App::new(db, Some("k"), test_space()));
+        a.popup = Popup::ResearchLive;
+        a.core.research_live_input = "a steer".to_string();
+
+        crate::ui::popups::research_live::handle_key(&mut a, ctrl_x());
+
+        assert_eq!(a.popup, Popup::None);
+    }
+
+    #[test]
+    fn swarm_ctrl_x_closes_the_popup() {
+        let db = Db::open_in_memory().unwrap();
+        let mut a = AppView::new(App::new(db, Some("k"), test_space()));
+        // The Ctrl+X arm is gated on a running turn; hand it a live channel.
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        a.core.swarm_rx = Some(rx);
+        a.popup = Popup::Swarm;
+
+        crate::ui::popups::swarm::handle_key(&mut a, ctrl_x()).unwrap();
+
+        assert_eq!(a.popup, Popup::None);
+        assert!(a.core.swarm_rx.is_none()); // the turn was stopped
+    }
+}

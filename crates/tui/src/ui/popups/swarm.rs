@@ -127,7 +127,12 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
                 KeyCode::Char('e') if ctrl && !app.swarm_cache.is_empty() => {
                     app.queue_swarm_persona_editor(false)?;
                 }
-                KeyCode::Char('x') if ctrl && app.swarm_rx.is_some() => app.stop_swarm(),
+                KeyCode::Char('x') if ctrl && app.swarm_rx.is_some() => {
+                    app.stop_swarm();
+                    // 2e: the domain no longer owns the popup — close it
+                    // here (the old core `stop_swarm` did).
+                    app.popup = nexus_core::app::Popup::None;
+                }
                 KeyCode::Char('d') if ctrl && !app.swarm_cache.is_empty() => {
                     app.swarm_popup_mode = SwarmPopupMode::ConfirmDelete;
                 }
