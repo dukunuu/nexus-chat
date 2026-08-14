@@ -53,14 +53,16 @@ impl Space {
         self.root.join("nexus.db")
     }
 
-    fn space_dir(&self, name: &str) -> PathBuf {
-        self.root.join("spaces").join(name)
-    }
-
     /// Ensure `spaces/<name>/` exists, for a space just created in the db.
     pub fn ensure_space_dir(&self, name: &str) -> Result<()> {
         let dir = self.space_dir(name);
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))
+    }
+
+    /// `spaces/<name>/` — crate-internal (the sync engine renames space
+    /// dirs when a rename syncs across).
+    pub(crate) fn space_dir(&self, name: &str) -> PathBuf {
+        self.root.join("spaces").join(name)
     }
 
     pub fn memory_path(&self, name: &str) -> PathBuf {

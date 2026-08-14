@@ -26,6 +26,7 @@ pub mod markdown;
 pub mod provider;
 pub mod skills;
 pub mod space;
+pub mod sync;
 pub mod tools;
 pub mod update;
 

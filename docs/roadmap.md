@@ -156,12 +156,132 @@ same `App`; `AppEvent` already carries Stream/Models/Title/Research/Swarm…).
 
 ### Phase 3 — Merge engine + changeset sync
 
-- Changeset format: per-table id-diff (union for append-only, `updated_at`
-  LWW for the mutable surface), files by content hash.
-- Incremental push/pull with `sync_state` bookkeeping.
-- `nexus sync <peer>` CLI (transport-agnostic: Tailscale/SSH/file).
-- **Exit**: desktop ↔ laptop sync both directions, both work offline, no
-  data loss in a week of real use.
+One engine (`crates/core/src/sync.rs`), many transports. Every syncable
+row travels inside a `Changeset`; the merge rules are per-table and
+deliberately small (LWW on the mutable surface, union on append-only,
+tombstones for deletes, content-hash for files). No servers, no CRDTs —
+exactly-once-ish via idempotent apply plus the ack dance below.
+
+**Changeset format** (serde JSON):
+
+```rust
+struct Changeset {
+    device_id: String,          // sender (from device_meta, created on first sync)
+    device_name: String,        // "laptop" — for the receiver's log/status
+    ack: Option<Vec<PeerCursor>>, // "I imported up to here" (see ack design)
+    rows: Vec<RowChange>,       // { table, row: serde_json::Value }
+    tombstones: Vec<Tombstone>, // { origin_id, table_name, row_id, deleted_at }
+    files: Vec<FileChange>,     // { space_id, name, hash, size } — blobs follow
+    generated_at: String,
+}
+```
+
+`Tombstone.origin_id` is the sender's `sync_tombstones` AUTOINCREMENT id —
+the design sketch's Tombstone didn't carry a position, and the tombstone
+push/pull cursors need one.
+
+**Per-table sync rules (the engine's registry):**
+
+| Table | Cursor | Apply |
+|---|---|---|
+| sessions, model_prefs, spaces, files, watches, app_settings(scope='sync') | `updated_at` | LWW upsert: incoming wins iff `(updated_at, pk…) > (local updated_at, pk…)` — deterministic and convergent across devices; no origin columns |
+| messages | `(created_at, id)` tuple | INSERT OR IGNORE by uuid id |
+| usage_log, citations | `(created_at, sync_id)` tuple / AUTOINCREMENT id | INSERT OR IGNORE by `sync_id` (UNIQUE indexes from Phase 1 dedupe across devices) |
+| session_sources | `updated_at` | LWW upsert (composite-PK tiebreak) |
+| swarm_personas | none — versioned by the owning session's `updated_at` bump (Phase 1 decision) | roster rows travel attached to their session row; wholesale replace iff that session row wins LWW; persona tombstones are subsumed by the replace and never applied alone |
+| sync_tombstones | AUTOINCREMENT id | append-only, never deleted; deduped by `(table_name, row_id)` |
+| cache.db tables | — | never sync (structurally invisible to the engine) |
+
+LWW ties: equal `updated_at` on the same row (same nanosecond on two
+clocks — the clock-skew residual) keeps the local row on both sides. It
+is stable (never flip-flops) and accepted per the Phase 1 decision; the
+only origin-free alternative is an origin column, which the design
+rejects.
+
+**Tombstone application** (destructive by design — it's your own delete
+propagating): session tombstone → session row + its messages +
+session_sources; space tombstone → space row + space dir; file tombstone
+→ row + local blob. Incoming tombstones are also recorded locally
+(deduped by `(table_name, row_id)`) — that's what makes a delete
+transitive across a mesh of devices without every pair syncing directly;
+the ack prevents resends. Guards: the default space can never be
+tombstoned away, and `swarm_personas` tombstones are ignored (roster
+replace subsumes them). Known, accepted race: a device deletes a session
+while the other device is offline and keeps writing to it — the newer
+write revives the session via LWW; that's the newer evidence of intent
+winning.
+
+**Files**: metadata syncs as LWW rows; content syncs by hash — the
+receiver keeps the local blob when `files/<name>` matches, else pulls it
+via the transport's blob channel (`blobs/<space_id>/<name>` under a sync
+dir, or inside a zip bundle over ssh). Never re-sends identical content.
+A file row whose blob never arrives is dropped by the local rescan (the
+files table mirrors the disk) — so the supported flows (dir/ssh) always
+deliver blobs.
+
+**The ack design (exactly-once-ish without servers)**: an export does not
+advance `push_cursor`. The receiver imports, then replies with an ack
+changeset (its own export + `ack: [cursors it imported up to]`); only on
+ack receipt does the sender advance `push_cursor`. Idempotent apply
+(LWW / INSERT OR IGNORE) is the backstop for crashes mid-exchange —
+re-importing is safe. Cursor comparisons are table-aware (numeric for
+the AUTOINCREMENT tables; lexical RFC3339 elsewhere).
+
+**Transports** (all over the same engine):
+
+1. `nexus sync export [--peer <device-id>] [--dir DIR]` → changeset JSON
+   on stdout, blobs into `DIR/blobs/`.
+2. `nexus sync import [<file>] [--bundle]` → apply, print the reply
+   (your export + ack) on stdout. Reads stdin when no file is given;
+   detects zip bundles by magic bytes.
+3. `nexus sync <dir>` → bidirectional mailbox sync (import every foreign
+   `*.changeset.json` + its blobs, reply with your export + ack, consume
+   the mail). Works on a shared/USB/scp'd dir.
+4. `nexus sync ssh://user@host` → bundles your export (+ blobs) into a
+   zip, pipes it into `ssh host "nexus sync import --bundle"`, captures
+   the reply bundle — the Tailscale story for free. The remote's device
+   id is remembered in the local-scope `sync_ssh_peer` setting.
+5. HTTP/SSE transport comes with Phase 4 (`nexus host` exposes
+   `/v1/sync`); the engine doesn't care.
+
+First run: no cursors → full export of all syncable rows (new device
+bootstrap). `nexus status` prints the device id.
+
+**Where it lives**: `crates/core/src/sync.rs` (types, registry, engine,
+blobs, bundle), `crates/tui/src/cli.rs` (`nexus sync` subcommands, thin),
+`db.rs` (default-space deterministic id + `user_version` 2 migration).
+
+**Steps** (landed): 1 registry + types; 2 engine build/apply/ack;
+3 file blobs; 4 CLI export/import/dir/ssh + status device id;
+5 hermetic tests (two temp dirs): convergence both directions, LWW
+including equal-timestamp stability, idempotent re-import, tombstone
+propagation (session cascade, space+dir, file+blob), cursor/ack overlap
+(no resends), clock-skew loser, scope='local' never syncs, sync_id
+dedupe, cold-start full export, blob transfer/keep/missing, space-name
+collision (deterministic loser rename), default-space identity,
+swarm roster replace. 6 real-world soak: desktop ↔ laptop for a week —
+the exit criterion.
+
+**Exit**: `nexus sync` over dir + ssh works both directions; both
+devices work offline; no data loss (or divergence) across a week of
+mixed usage; `scripts/check.sh` green; all tests hermetic.
+
+**Open decisions — settled**:
+
+- `usage_log` **syncs** (yes): both devices' analytics visible
+  everywhere; it has `sync_id` already. Append-only — in-place cost
+  backfills don't re-export (accepted).
+- Space-delete propagation **removes the space dir on the peer**
+  (confirmed): it matches the local delete semantics; orphan dirs would
+  resurrect memory/instructions the user deleted.
+- Transport scope: dir + ssh in Phase 3; HTTP sync endpoint lands with
+  Phase 4's host.
+
+Known edges (documented, accepted): same-nanosecond LWW ties keep local;
+delete-vs-offline-write revives via LWW; duplicate space *names* across
+devices resolve by deterministically renaming the LWW loser
+(`<name>-<first8(id)>`, computed identically on both sides); a blob that
+never arrives is dropped by the rescan (warning printed).
 
 ### Phase 4 — `nexus host` (the daemon, in one subcommand)
 

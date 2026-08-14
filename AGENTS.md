@@ -69,6 +69,7 @@ The README has the full tree; the parts agents touch most:
 | `crates/core/src/provider/openrouter.rs` | the single client for all OpenAI-wire backends — message shapes, tool-call wire format, events are in `provider/mod.rs` |
 | `crates/core/src/tools.rs` | the model's tools + the `ToolExecutor` seam (`defs`/`is_read_only`/`run`) |
 | `crates/core/src/db.rs` | SQLite (rusqlite bundled): sessions, messages, usage, citations, model prefs |
+| `crates/core/src/sync.rs` | Phase 3 merge engine: changeset types, per-table registry (cursor + apply rules), build/apply/ack, file blobs + zip bundles |
 | `crates/core/src/appserver.rs` | localhost static server for model-created apps (port 8642) |
 | `crates/tui/src/app_view.rs` | `AppView`: wraps `App` (Deref) with all view state — composer, popup chrome/caches, render state, theme, status line |
 | `crates/tui/src/flows/` | popup flow methods moved out of core by 2e (`open_*_popup`, `move_*_selection`, `confirm_*`) |

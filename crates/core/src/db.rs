@@ -127,8 +127,10 @@ pub const DEFAULT_SPACE: &str = "default";
 /// Schema version of the durable db, tracked via `PRAGMA user_version`.
 /// Legacy dbs (never versioned) are 0 and get one-time column adds plus the
 /// device-local table move into `cache.db`; fresh dbs are created complete
-/// and stamped 1 immediately.
-const SCHEMA_VERSION: i64 = 1;
+/// and stamped 2 immediately. v2: the default space's sync identity becomes
+/// deterministic (id `default`) so two devices' default spaces merge as one
+/// LWW row instead of colliding by name.
+const SCHEMA_VERSION: i64 = 2;
 
 /// Columns added since the v1 schema. Fresh dbs declare them inline; legacy
 /// dbs get them via `user_version`-gated `ALTER TABLE` adds guarded by
@@ -392,6 +394,12 @@ impl Db {
         Ok(db)
     }
 
+    /// The underlying connection — crate-internal access for the sync
+    /// engine's per-table queries.
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     #[cfg(test)]
     pub fn conn_for_test(&self) -> &Connection {
         &self.conn
@@ -634,6 +642,39 @@ impl Db {
                     [],
                 )?;
             }
+            // Sync identity for the default space: fresh dbs insert it with
+            // the deterministic id `default` (see below), so two devices'
+            // default spaces are the *same* sync row and merge via LWW
+            // instead of colliding by name. Legacy dbs carry a random uuid
+            // there — renumber it once, moving every space_id reference
+            // (and any tombstone) with it.
+            let old_default: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT id FROM spaces WHERE name = ?1",
+                    [DEFAULT_SPACE],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(old) = old_default.filter(|id| id != DEFAULT_SPACE) {
+                let tx = self.conn.transaction()?;
+                for table in ["sessions", "files", "watches", "usage_log", "citations"] {
+                    tx.execute(
+                        &format!("UPDATE {table} SET space_id = ?1 WHERE space_id = ?2"),
+                        (DEFAULT_SPACE, &old),
+                    )?;
+                }
+                tx.execute(
+                    "UPDATE sync_tombstones SET row_id = ?1
+                     WHERE table_name = 'spaces' AND row_id = ?2",
+                    (DEFAULT_SPACE, &old),
+                )?;
+                tx.execute(
+                    "UPDATE spaces SET id = ?1 WHERE id = ?2",
+                    (DEFAULT_SPACE, &old),
+                )?;
+                tx.commit()?;
+            }
             self.conn
                 .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
         }
@@ -643,11 +684,14 @@ impl Db {
             .conn
             .execute_batch("DROP TABLE IF EXISTS message_images;");
         // Ensure the default space exists, then backfill any session left
-        // without a space (pre-spaces db, or a space that got deleted).
+        // without a space (pre-spaces db, or a space that got deleted). The
+        // default space's id is the deterministic string `default` (not a
+        // uuid) — it is the same sync row on every device, so Phase 3's LWW
+        // merge treats it as one row instead of a name collision.
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT OR IGNORE INTO spaces (id, name, created_at) VALUES (?1, ?2, ?3)",
-            (Uuid::new_v4().to_string(), DEFAULT_SPACE, &now),
+            (DEFAULT_SPACE, DEFAULT_SPACE, &now),
         )?;
         let default_id: String = self.conn.query_row(
             "SELECT id FROM spaces WHERE name = ?1",
@@ -773,6 +817,9 @@ impl Db {
                 // Per-device ui/timing state.
                 | "usage_range"
                 | "last_update_check"
+                // Which remote device the ssh transport last synced with —
+                // per-peer export cursors are device-local bookkeeping.
+                | "sync_ssh_peer"
         )
     }
 
@@ -3870,6 +3917,17 @@ mod tests {
         assert_eq!(v, SCHEMA_VERSION);
         assert!(has_column(db.raw(), "files", "mtime").unwrap());
 
+        // The v2 migration renumbered the legacy default space (id 'sp')
+        // to the deterministic `default` — every reference followed.
+        assert_eq!(db.default_space_id().unwrap(), DEFAULT_SPACE);
+        let files_space: String = db
+            .raw()
+            .query_row("SELECT space_id FROM files WHERE id = 'f1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(files_space, DEFAULT_SPACE);
+
         // Derived index state seeded from the legacy files row.
         let (mtime, status) = db
             .raw()
@@ -3884,15 +3942,16 @@ mod tests {
         // Device-local tables moved into the sibling cache.db, reachable
         // through the attached connection.
         assert!(cache_path_for(&db_path).is_file());
-        let hits = search_chunks(db.raw(), "sp", "hello", 8).unwrap();
+        let space = db.default_space_id().unwrap();
+        let hits = search_chunks(db.raw(), &space, "hello", 8).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(
-            file_text(db.raw(), "sp", "a.txt").unwrap().as_deref(),
+            file_text(db.raw(), &space, "a.txt").unwrap().as_deref(),
             Some("hello world")
         );
         let (_, text, _) = cache_get(db.raw(), "https://x.test/").unwrap().unwrap();
         assert_eq!(text, "cached body");
-        let hits = semantic_chunks(db.raw(), "sp", &[1.0, 0.0], 4).unwrap();
+        let hits = semantic_chunks(db.raw(), &space, &[1.0, 0.0], 4).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, "a.txt");
 
@@ -4137,6 +4196,70 @@ mod tests {
             tombstones("swarm_personas"),
             vec![format!("{sid}:0"), format!("{sid}:1")]
         );
+    }
+
+    /// A v1 db (Phase 1 layout: random uuid for the default space) gets
+    /// renumbered once on open: the default space becomes the deterministic
+    /// `default` row, and every space_id reference (and the tombstone)
+    /// follows — two devices' default spaces then merge as one LWW row.
+    #[test]
+    fn v1_default_space_renumbers_to_deterministic_id() {
+        let dir = std::env::temp_dir().join(format!("nexus-v1-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("nexus.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            let old = db.default_space_id().unwrap();
+            assert_eq!(old, DEFAULT_SPACE);
+            // Simulate a v1 db: random default id, rows pointing at it, a
+            // tombstone for it.
+            db.raw().execute("PRAGMA user_version = 1", []).unwrap();
+            db.raw()
+                .execute(
+                    "UPDATE spaces SET id = 'legacy-uuid' WHERE name = ?1",
+                    [DEFAULT_SPACE],
+                )
+                .unwrap();
+            db.raw()
+                .execute(
+                    "UPDATE sessions SET space_id = 'legacy-uuid' WHERE space_id = ?1",
+                    [&old],
+                )
+                .unwrap();
+            db.raw()
+                .execute(
+                    "INSERT INTO sync_tombstones (table_name, row_id, deleted_at)
+                     VALUES ('spaces', 'legacy-uuid', '2026-01-01T00:00:00Z')",
+                    [],
+                )
+                .unwrap();
+            let s = db.create_session("t", "m", &old, "chat").unwrap().id;
+            let _ = s;
+            drop(db);
+        }
+        // Reopen: the migration block re-runs (user_version 1 < 2) and
+        // renumbers everything.
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(db.default_space_id().unwrap(), DEFAULT_SPACE);
+        let n: i64 = db
+            .raw()
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE space_id = ?1",
+                [DEFAULT_SPACE],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "sessions followed the renumber");
+        let tomb: i64 = db
+            .raw()
+            .query_row(
+                "SELECT COUNT(*) FROM sync_tombstones WHERE table_name = 'spaces' AND row_id = ?1",
+                [DEFAULT_SPACE],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tomb, 1, "the space tombstone followed too");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

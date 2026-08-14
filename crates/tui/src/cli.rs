@@ -211,6 +211,15 @@ pub enum Command {
     /// Update to the latest release from crates.io — runs
     /// `cargo install nexus-chat` when a newer version exists.
     Update,
+    /// Sync with another device: export/import changesets, a shared-dir
+    /// mailbox, or over ssh. `nexus sync <dir>` and `nexus sync ssh://host`
+    /// are the two transports — see `nexus sync --help`.
+    Sync {
+        #[command(subcommand)]
+        cmd: Option<SyncCmd>,
+        /// A shared sync directory, or `ssh://user@host`.
+        target: Option<PathBuf>,
+    },
     /// Show data/config paths and which providers are configured.
     Status,
     /// Deeper diagnostics: db integrity, config, optional tools,
@@ -266,6 +275,31 @@ pub enum SkillsCmd {
     Install {
         /// `owner/repo[/path]` shorthand.
         skill: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SyncCmd {
+    /// Export a changeset (JSON on stdout). `--dir` also writes the file
+    /// blobs into `DIR/blobs/`. Without a peer, exports everything.
+    Export {
+        /// Which peer to export for (the other device's id, from its
+        /// changesets). Full export when unknown.
+        #[arg(long)]
+        peer: Option<String>,
+        /// Also write the blob payloads into this directory.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Import a changeset or bundle (stdin when no file is given) and
+    /// print the reply — your own export + ack — on stdout. Zip bundles
+    /// (the ssh transport) are detected by magic bytes.
+    Import {
+        /// Changeset JSON or bundle zip; stdin when omitted.
+        path: Option<PathBuf>,
+        /// Reply as a bundle (zip with blobs) instead of plain JSON.
+        #[arg(long)]
+        bundle: bool,
     },
 }
 
@@ -327,6 +361,7 @@ pub async fn run(cmd: Command) -> Result<()> {
         } => login(&provider, &key, check).await,
         Command::Skills { cmd } => skills(cmd).await,
         Command::Open { session } => open(&session),
+        Command::Sync { cmd, target } => sync_cmd(cmd, target.as_deref()),
         Command::Update => update().await,
         Command::Status => status(),
         Command::Doctor { network } => doctor(network).await,
@@ -1252,6 +1287,253 @@ async fn skills_install(spec: &str) -> Result<()> {
     Ok(())
 }
 
+// --- sync commands (Phase 3 merge engine) ---
+
+/// `nexus sync` dispatch: the export/import subcommands, or the positional
+/// target — a shared dir (mailbox sync) or `ssh://user@host`.
+fn sync_cmd(cmd: Option<SyncCmd>, target: Option<&Path>) -> Result<()> {
+    match cmd {
+        Some(SyncCmd::Export { peer, dir }) => sync_export(peer.as_deref(), dir.as_deref()),
+        Some(SyncCmd::Import { path, bundle }) => sync_import(path.as_deref(), bundle),
+        None => match target {
+            Some(t) => {
+                let spec = t.to_string_lossy();
+                if let Some(host) = spec.strip_prefix("ssh://") {
+                    sync_ssh(host)
+                } else if spec.contains('@') && !spec.contains('/') && !spec.contains('\\') {
+                    sync_ssh(&spec)
+                } else {
+                    sync_dir(t)
+                }
+            }
+            None => bail!(
+                "pass a sync directory, `ssh://user@host`, or a subcommand — `nexus sync --help`"
+            ),
+        },
+    }
+}
+
+/// `nexus sync export`: the changeset JSON on stdout; with `--dir`, the
+/// blobs go into `DIR/blobs/` too. The cursor advance waits for the peer's
+/// ack (see the roadmap's ack design).
+fn sync_export(peer: Option<&str>, dir: Option<&Path>) -> Result<()> {
+    let space = space::Space::open()?;
+    let db = db::Db::open(&space.db_path())?;
+    let cs = nexus_core::sync::build_changeset(&db, peer, &nexus_core::sync::device_name())?;
+    if let Some(dir) = dir {
+        let n = nexus_core::sync::export_blobs(&db, &space, &cs, dir)?;
+        eprintln!("wrote {n} blob(s) to {}", dir.join("blobs").display());
+    }
+    eprintln!(
+        "exported {} rows, {} tombstones, {} files{}",
+        cs.rows.len(),
+        cs.tombstones.len(),
+        cs.files.len(),
+        match peer {
+            Some(p) => format!(" for peer {p}"),
+            None => " (full export — first sync?)".to_string(),
+        }
+    );
+    out(serde_json::to_string(&cs)?);
+    Ok(())
+}
+
+/// `nexus sync import`: apply a changeset (or zip bundle) from a file or
+/// stdin, then print the reply — this device's export + ack — on stdout.
+/// The ssh transport pipes a bundle in and expects a bundle out
+/// (`--bundle`); plain JSON is the default for interactive use.
+fn sync_import(path: Option<&Path>, bundle_reply: bool) -> Result<()> {
+    let space = space::Space::open()?;
+    let db = db::Db::open(&space.db_path())?;
+    let bytes = if let Some(p) = path {
+        std::fs::read(p).with_context(|| format!("reading {}", p.display()))?
+    } else {
+        let mut buf = Vec::new();
+        std::io::stdin().read_to_end(&mut buf)?;
+        buf
+    };
+    let tmp = std::env::temp_dir().join(format!("nexus-import-{}", uuid::Uuid::new_v4()));
+    let (cs, blob_source) = if bytes.starts_with(b"PK") {
+        let bundle = tmp.join("in.bundle");
+        std::fs::create_dir_all(&tmp)?;
+        std::fs::write(&bundle, &bytes)?;
+        let unpacked = tmp.join("unpacked");
+        let cs = nexus_core::sync::unpack_bundle(&bundle, &unpacked)?;
+        (cs, Some(unpacked))
+    } else {
+        (
+            serde_json::from_slice(&bytes).context("parsing changeset JSON")?,
+            None,
+        )
+    };
+    let (summary, cursors) =
+        nexus_core::sync::apply_changeset(&db, &space, &cs, blob_source.as_deref())?;
+    print_sync_summary(&cs, &summary);
+    let mut reply = nexus_core::sync::build_changeset(
+        &db,
+        Some(&cs.device_id),
+        &nexus_core::sync::device_name(),
+    )?;
+    reply.ack = Some(cursors);
+    if bundle_reply {
+        // Zip writers need a seekable sink — write the reply bundle to a
+        // temp file, then stream it out.
+        let reply_path = tmp.join("reply.bundle");
+        nexus_core::sync::write_bundle(&db, &space, &reply, std::fs::File::create(&reply_path)?)?;
+        std::io::copy(
+            &mut std::fs::File::open(&reply_path)?,
+            &mut std::io::stdout(),
+        )?;
+    } else {
+        out(serde_json::to_string(&reply)?);
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(())
+}
+
+/// The import's log line — stderr, because stdout carries the reply.
+fn print_sync_summary(cs: &nexus_core::sync::Changeset, summary: &nexus_core::sync::ApplySummary) {
+    eprintln!(
+        "imported from {} ({}) — {} rows applied, {} skipped, {} tombstones, {} acks, {} files kept, {} pulled, {} missing",
+        short_id(&cs.device_id),
+        cs.device_name,
+        summary.rows_applied,
+        summary.rows_skipped,
+        summary.tombstones_applied,
+        summary.acks_applied,
+        summary.files_kept,
+        summary.files_pulled,
+        summary.files_missing.len(),
+    );
+    for w in &summary.warnings {
+        eprintln!("  warning: {w}");
+    }
+}
+
+/// Bidirectional mailbox sync over a shared directory: consume every
+/// foreign `*.changeset.json` (rows, tombstones, embedded acks, blobs),
+/// then leave this device's own changeset + blobs + ack behind for the
+/// peer to pick up. Works on a shared/USB/scp'd dir.
+fn sync_dir(dir: &Path) -> Result<()> {
+    let space = space::Space::open()?;
+    let db = db::Db::open(&space.db_path())?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let my_id = db.device_id()?;
+    let mut reply_cursors: Vec<nexus_core::sync::PeerCursor> = Vec::new();
+    let mut senders: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !name.ends_with(".changeset.json") {
+            continue;
+        }
+        let cs: nexus_core::sync::Changeset = serde_json::from_slice(&std::fs::read(entry.path())?)
+            .with_context(|| format!("parsing {}", entry.path().display()))?;
+        if cs.device_id == my_id {
+            // Our own stale mail — consume it unread.
+            let _ = std::fs::remove_file(entry.path());
+            continue;
+        }
+        let (summary, cursors) = nexus_core::sync::apply_changeset(&db, &space, &cs, Some(dir))?;
+        print_sync_summary(&cs, &summary);
+        reply_cursors.extend(cursors);
+        if !senders.contains(&cs.device_id) {
+            senders.push(cs.device_id);
+        }
+        // Consume the mail: the changeset and its blobs.
+        for fc in &cs.files {
+            let _ = std::fs::remove_file(dir.join("blobs").join(&fc.space_id).join(&fc.name));
+        }
+        std::fs::remove_file(entry.path())?;
+    }
+    // Our reply: an export for whoever we just imported from (a full
+    // export on a cold dir) plus the ack of what we took in. The peer is
+    // the mail's sender, not this run's reply cursors — on an ack-only
+    // round the cursors are empty but the push cursors were just advanced.
+    // With no mail at all (a solo re-run), fall back to the peer we most
+    // recently synced with so we don't blast a full export.
+    let peer: Option<String> = senders.first().cloned().or_else(|| {
+        db.load_sync_state()
+            .ok()?
+            .iter()
+            .filter(|s| s.push_cursor.is_some())
+            .max_by(|a, b| a.last_synced_at.cmp(&b.last_synced_at))
+            .map(|s| s.peer_id.clone())
+    });
+    let mut cs =
+        nexus_core::sync::build_changeset(&db, peer.as_deref(), &nexus_core::sync::device_name())?;
+    cs.ack = Some(reply_cursors);
+    let path = dir.join(format!("{my_id}.changeset.json"));
+    std::fs::write(&path, serde_json::to_vec(&cs)?)?;
+    let blobs = nexus_core::sync::export_blobs(&db, &space, &cs, dir)?;
+    eprintln!(
+        "exported {} rows, {} tombstones, {blobs} blob(s) → {}",
+        cs.rows.len(),
+        cs.tombstones.len(),
+        path.display()
+    );
+    Ok(())
+}
+
+/// Sync over ssh: bundle this device's export (+ blobs) into a zip, pipe
+/// it into `ssh host "nexus sync import --bundle"`, and apply the reply
+/// bundle (the peer's export + blobs + ack). The peer's device id is
+/// remembered in the local `sync_ssh_peer` setting — per-peer cursors
+/// live under it.
+fn sync_ssh(host: &str) -> Result<()> {
+    let space = space::Space::open()?;
+    let db = db::Db::open(&space.db_path())?;
+    let remote_peer: Option<String> = db
+        .load_settings()?
+        .into_iter()
+        .find(|(k, _)| k == "sync_ssh_peer")
+        .map(|(_, v)| v);
+    let mut cs = nexus_core::sync::build_changeset(
+        &db,
+        remote_peer.as_deref(),
+        &nexus_core::sync::device_name(),
+    )?;
+    // Carry our pull cursors for the remote — without the ack it would
+    // re-export everything on every round.
+    if let Some(peer) = &remote_peer {
+        cs.ack = Some(nexus_core::sync::build_ack(&db, peer)?);
+    }
+    let tmp = std::env::temp_dir().join(format!("nexus-ssh-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp)?;
+    let bundle = tmp.join("out.bundle");
+    let n = nexus_core::sync::write_bundle(&db, &space, &cs, std::fs::File::create(&bundle)?)?;
+    eprintln!(
+        "exported {} rows, {} tombstones, {n} blob(s)",
+        cs.rows.len(),
+        cs.tombstones.len()
+    );
+    let output = std::process::Command::new("ssh")
+        .arg(host)
+        .args(["nexus", "sync", "import", "--bundle"])
+        .stdin(std::process::Stdio::from(std::fs::File::open(&bundle)?))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .with_context(|| format!("running ssh {host}"))?;
+    if !output.status.success() {
+        bail!(
+            "ssh {host} failed ({}) — is `nexus` installed there?",
+            output.status
+        );
+    }
+    let reply_path = tmp.join("reply.bundle");
+    std::fs::write(&reply_path, &output.stdout)?;
+    let unpacked = tmp.join("unpacked");
+    let reply = nexus_core::sync::unpack_bundle(&reply_path, &unpacked)?;
+    let (summary, _) = nexus_core::sync::apply_changeset(&db, &space, &reply, Some(&unpacked))?;
+    print_sync_summary(&reply, &summary);
+    db.set_setting("sync_ssh_peer", &reply.device_id)?;
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(())
+}
+
 // --- status-ish commands ---
 
 fn status() -> Result<()> {
@@ -1268,6 +1550,7 @@ fn status() -> Result<()> {
     out(format!("data dir:  {}", dirs.data_dir().display()));
     out(format!("config:    {}", config::config_path()?.display()));
     out(format!("db:        {}", space.db_path().display()));
+    out(format!("device id: {}", db.device_id()?));
     let mark = |on: bool| if on { "✓" } else { "✗" };
     out(format!(
         "providers: openrouter {}  openai {}  opencode {}  codex {}",
