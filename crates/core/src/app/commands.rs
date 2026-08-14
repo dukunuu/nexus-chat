@@ -1,11 +1,206 @@
 //! The command seam: one enum for every user intent, parsed from the
 //! `/`-command line (or synthesized by the TUI keys, the CLI, or the Phase 4
 //! host). `run_command` stays the string front; everything that mutates the
-//! app goes through `App::execute`.
+//! app goes through `App::execute`. The slash-command catalog (`COMMANDS`,
+//! `Command`, `Match`, `fuzzy_score`) also lives here — it's the pure,
+//! dependency-free half of the old `input.rs`, which 2e split into this
+//! catalog plus the TUI's composer ops (`crates/tui/src/composer.rs`).
 
 use anyhow::Result;
 
 use super::{App, FilesTab};
+
+/// A slash command: canonical `name`, a short (≤20 char) `desc`, and alias
+/// keywords. Names, aliases, and the description are all fuzzy-searchable, so
+/// typing `/history` surfaces `session`.
+pub struct Command {
+    pub name: &'static str,
+    pub desc: &'static str,
+    pub aliases: &'static [&'static str],
+}
+
+/// One row of the slash-command autocomplete.
+pub enum Match {
+    Builtin(&'static Command),
+}
+
+impl Match {
+    pub const fn name(&self) -> &str {
+        match self {
+            Self::Builtin(c) => c.name,
+        }
+    }
+
+    pub const fn desc(&self) -> &str {
+        match self {
+            Self::Builtin(c) => c.desc,
+        }
+    }
+}
+
+pub const COMMANDS: &[Command] = &[
+    Command {
+        name: "new",
+        desc: "start new chat",
+        aliases: &["chat", "clear"],
+    },
+    Command {
+        name: "compact",
+        desc: "summarize old messages",
+        aliases: &["compaction", "summarize"],
+    },
+    Command {
+        name: "session",
+        desc: "switch sessions",
+        aliases: &["sessions", "history", "resume", "continue", "switch"],
+    },
+    Command {
+        name: "space",
+        desc: "switch spaces",
+        aliases: &["spaces", "project", "workspace"],
+    },
+    Command {
+        name: "model",
+        desc: "pick a model",
+        aliases: &["models", "llm"],
+    },
+    Command {
+        name: "login",
+        desc: "pick a backend to log into",
+        aliases: &[
+            "key",
+            "apikey",
+            "token",
+            "auth",
+            "codex",
+            "subscription",
+            "oauth",
+            "chatgpt",
+            "opencode",
+        ],
+    },
+    Command {
+        name: "swarm",
+        desc: "multi-persona roundtable roster",
+        aliases: &["swarms", "personas", "panel"],
+    },
+    Command {
+        name: "config",
+        desc: "settings & stats",
+        aliases: &["settings", "stats", "nerd", "params"],
+    },
+    Command {
+        name: "skills",
+        desc: "manage skills",
+        aliases: &["addskill"],
+    },
+    Command {
+        name: "files",
+        desc: "browse space files / images / scripts",
+        aliases: &[
+            "file", "attach", "upload", "docs", "image", "images", "img", "pictures", "script",
+            "scripts",
+        ],
+    },
+    Command {
+        name: "apps",
+        desc: "view space apps",
+        aliases: &["app", "webapps"],
+    },
+    Command {
+        name: "research",
+        desc: "deep multi-agent research (blank = scope topic from this chat)",
+        aliases: &["deep-research"],
+    },
+    Command {
+        name: "export",
+        desc: "write session's report + sources to a file",
+        aliases: &["save-report"],
+    },
+    Command {
+        name: "watch",
+        desc: "standing research, re-runs every 24h",
+        aliases: &["watches"],
+    },
+    Command {
+        name: "usage",
+        desc: "token/cache/cost analytics by backend and model",
+        aliases: &["analytics", "costs", "billing"],
+    },
+    Command {
+        name: "web",
+        desc: "toggle web answer mode (search-first, cited)",
+        aliases: &["websearch"],
+    },
+    Command {
+        name: "incognito",
+        desc: "toggle incognito (no persistence, no apps)",
+        aliases: &["private", "anon"],
+    },
+    Command {
+        name: "copy",
+        desc: "copy last reply",
+        aliases: &["yank", "clip"],
+    },
+    Command {
+        name: "quit",
+        desc: "exit the app",
+        aliases: &["q", "exit"],
+    },
+];
+
+/// Subsequence fuzzy score, case-insensitive. `None` if `needle` isn't a
+/// subsequence of `hay`; higher is a better match (bonuses for contiguous runs
+/// and matching at the start).
+pub fn fuzzy_score(hay: &str, needle: &str) -> Option<i32> {
+    let hay = hay.to_lowercase();
+    let needle = needle.to_lowercase();
+    let mut chars = hay.chars();
+    let mut score = 0i32;
+    let mut prev_matched = false;
+    let mut pos = 0i32;
+    for nc in needle.chars() {
+        loop {
+            let hc = chars.next()?;
+            if hc == nc {
+                score += 1;
+                if prev_matched {
+                    score += 2;
+                }
+                if pos == 0 {
+                    score += 3;
+                }
+                prev_matched = true;
+                pos += 1;
+                break;
+            }
+            prev_matched = false;
+            pos += 1;
+        }
+    }
+    Some(score)
+}
+
+/// Best fuzzy score of `needle` across a command's name/aliases/desc, with the
+/// name weighted highest and the description lowest.
+pub fn command_score(c: &Command, needle: &str) -> Option<i32> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let mut best: Option<i32> = None;
+    let mut upd = |s: &str, bonus: i32| {
+        if let Some(sc) = fuzzy_score(s, needle) {
+            let v = sc + bonus;
+            best = Some(best.map_or(v, |b| b.max(v)));
+        }
+    };
+    upd(c.name, 100);
+    for a in c.aliases {
+        upd(a, 50);
+    }
+    upd(c.desc, 0);
+    best
+}
 
 /// One user intent, in the seam's own words. Parsed from the `/`-command
 /// line (`App::parse_command`) or synthesized by the TUI keys, the CLI, or
@@ -87,7 +282,7 @@ impl App {
         }
         let token = cmd.split_whitespace().next().unwrap_or("");
         // Resolve aliases (e.g. "history" -> "session") to a canonical name.
-        let canonical = crate::input::COMMANDS
+        let canonical = COMMANDS
             .iter()
             .find(|c| c.name == token || c.aliases.contains(&token))
             .map_or(token, |c| c.name);
@@ -144,12 +339,29 @@ impl App {
         }
     }
 
-    /// Run one parsed command — the single mutation path for user intents.
-    /// The TUI/CLI/host all funnel through this; `run_command` is the
+    /// Run one parsed command — the mutation path for domain intents. The
+    /// TUI's `AppView::execute` intercepts the view-only commands (quit,
+    /// popup opens, the watch picker) before delegating here; headless
+    /// consumers only ever send domain commands. `run_command` is the
     /// `/`-string parse front.
     pub fn execute(&mut self, cmd: AppCommand) -> Result<()> {
         match cmd {
-            AppCommand::Quit => self.should_quit = true,
+            // View-only commands — the TUI's `AppView::execute` handles these
+            // (they need the popup/should-quit state the view owns). They
+            // land here only from headless consumers, which never send them.
+            AppCommand::Quit
+            | AppCommand::OpenSessionPicker
+            | AppCommand::OpenSpacePicker
+            | AppCommand::OpenModelPicker
+            | AppCommand::OpenLogin
+            | AppCommand::OpenSwarm
+            | AppCommand::OpenSettings
+            | AppCommand::OpenCopyMenu
+            | AppCommand::OpenSkills
+            | AppCommand::OpenFiles { .. }
+            | AppCommand::OpenApps
+            | AppCommand::OpenUsage
+            | AppCommand::Watch { .. } => {}
             AppCommand::Send { text } => self.send_message(text)?,
             AppCommand::Cancel { task } => match task {
                 Some(id) => self.cancel_chat_task(id)?,
@@ -159,32 +371,6 @@ impl App {
             AppCommand::AnswerGate { text } => self.reply_to_survey_gate(&text),
             AppCommand::NewSession => self.new_session(),
             AppCommand::Compact => self.force_compact(),
-            AppCommand::OpenSessionPicker => {
-                self.open_session_picker()?;
-            }
-            AppCommand::OpenSpacePicker => {
-                self.open_space_picker()?;
-            }
-            AppCommand::OpenModelPicker => self.open_model_picker(),
-            AppCommand::OpenLogin => self.open_login_popup(),
-            AppCommand::OpenSwarm => self.open_swarm_popup(),
-            AppCommand::OpenSettings => self.open_settings(),
-            AppCommand::OpenCopyMenu => self.open_copy_menu(),
-            AppCommand::OpenSkills => self.open_skills_popup(),
-            AppCommand::OpenFiles { tab } => {
-                if self.incognito {
-                    self.push_status("not available in incognito mode");
-                } else {
-                    self.open_files_popup(tab);
-                }
-            }
-            AppCommand::OpenApps => {
-                if self.incognito {
-                    self.push_status("apps not available in incognito mode");
-                } else {
-                    self.open_apps_popup();
-                }
-            }
             AppCommand::RunResearch { topic, gated } => {
                 if !gated {
                     self.start_research_with_gate(&topic, false);
@@ -203,18 +389,6 @@ impl App {
                     self.toggle_incognito()?;
                 }
             }
-            AppCommand::Watch { topic } => {
-                if !self.is_research_session() {
-                    self.push_status(
-                        "watch is only available in research sessions — use /research first",
-                    );
-                } else if let Some(t) = topic {
-                    self.create_watch(&t);
-                } else {
-                    self.open_watch_picker()?;
-                }
-            }
-            AppCommand::OpenUsage => self.open_usage_popup(),
             AppCommand::ArmSkill { name, rest } => {
                 self.forced_skill = Some(name.clone());
                 if let Some(text) = rest {

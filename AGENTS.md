@@ -59,8 +59,8 @@ The README has the full tree; the parts agents touch most:
 
 | Path | What lives there |
 |---|---|
-| `crates/core/src/app/mod.rs` | `App` struct, popup state, gate plumbing, `boot()`, `snapshot()` |
-| `crates/core/src/app/commands.rs` | `AppCommand` seam: `parse_command` + `execute` (the `/`-string front is `run_command`) |
+| `crates/core/src/app/mod.rs` | `App` struct (domain fields only), popup state, gate plumbing, `boot()`, `snapshot()` |
+| `crates/core/src/app/commands.rs` | `AppCommand` seam + `/`-command catalog (`COMMANDS`, `fuzzy_score`): `parse_command` + `execute` (the `/`-string front is `run_command`) |
 | `crates/core/src/app/chat.rs` | request lifecycle: history build, streaming, tool loop |
 | `crates/core/src/app/research.rs` | research pipeline: survey → plan → searchers → synthesis → critic → verifier → writer |
 | `crates/core/src/app/swarm.rs`, `watches.rs` | roundtable / standing jobs |
@@ -70,16 +70,22 @@ The README has the full tree; the parts agents touch most:
 | `crates/core/src/tools.rs` | the model's tools + the `ToolExecutor` seam (`defs`/`is_read_only`/`run`) |
 | `crates/core/src/db.rs` | SQLite (rusqlite bundled): sessions, messages, usage, citations, model prefs |
 | `crates/core/src/appserver.rs` | localhost static server for model-created apps (port 8642) |
-| `crates/tui/src/ui/` | ratatui rendering; `history.rs` is the main view, `popups/` one module per popup |
-| `crates/core/src/input.rs` (interim: the composer impl rides with `App` until 2e) | composer, command catalog |
+| `crates/tui/src/app_view.rs` | `AppView`: wraps `App` (Deref) with all view state — composer, popup chrome/caches, render state, theme, status line |
+| `crates/tui/src/flows/` | popup flow methods moved out of core by 2e (`open_*_popup`, `move_*_selection`, `confirm_*`) |
+| `crates/tui/src/composer.rs` | TextArea ops: editing, clipboard, slash/`@` autocomplete (catalog stays core) |
+| `crates/tui/src/ui/` | ratatui rendering; `history.rs` is the main view, `popups/` one module per popup, `markdown.rs` the styled renderer |
 | `crates/core/src/config.rs`, `space.rs` | credentials + spaces layout (XDG dirs) |
 
 > Phase 2 status: the workspace split (2a), `ToolExecutor` seam (2b),
 > command/event seam (2c), CLI on the seam (2d), and the status-event
-> conversion are landed. 2e (moving view state into a TUI-side wrapper) is
-> next — until then `App` still carries TUI-typed fields (composer, theme,
-> render caches, clipboard) and core keeps the interim TUI deps listed in
-> `crates/core/Cargo.toml`.
+> conversion are landed. **2e (view state extraction) is done**: `App` is
+> domain-only with zero TUI deps; the TUI's `AppView` owns the composer,
+> popup chrome, and render caches and feeds view feedback back via
+> `AppEvent` (`ComposerSet`/`ComposerClear`/`ViewportReset`/
+> `HistoryInvalidated`). Core still carries a few domain-coupled display
+> fields (documented in `app/mod.rs`): `context_total`/`last_cache_rate`
+> (auto-compaction), `unread`, `notifications`, the files/scripts/sessions
+> caches (system-prompt inputs), and the research steer/stage state.
 
 ## Things to know before changing code
 

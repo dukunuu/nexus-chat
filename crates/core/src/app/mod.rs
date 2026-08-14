@@ -11,25 +11,19 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::Result;
 use chrono::Utc;
-use ratatui::layout::Rect;
 use tokio::sync::mpsc;
-use tui_textarea::TextArea;
 
 use crate::config;
 use crate::db::{DEFAULT_SPACE, Db, Message, Session, Space as SpaceRow};
-use crate::filter_input::FilterInput;
-use crate::input::new_textarea;
 use crate::provider::openrouter::OpenRouter;
 use crate::provider::{BackendTag, Model, StreamEvent, Usage};
 use crate::space::Space;
-use crate::theme::Theme;
 
 mod apps;
 mod backends;
 mod chat;
 mod commands;
 mod compaction;
-mod copy;
 pub mod export;
 mod files;
 pub mod headless;
@@ -50,12 +44,13 @@ mod transcribe;
 pub mod usage;
 mod watches;
 pub use backends::{Backends, composite_id};
-pub use chat::human_size;
-pub use commands::AppCommand;
+pub use chat::{code_blocks, human_size, pick_greeting};
+pub use commands::{AppCommand, COMMANDS, Command, Match, command_score, fuzzy_score};
+pub use sessions::session_score;
+pub use swarm::parse_persona_editor;
 
 #[cfg(test)]
 use chat::split_inline_reasoning;
-use chat::{code_blocks, pick_greeting};
 #[cfg(test)]
 use memory::parse_memory_ops;
 use sessions::parse_topic;
@@ -402,9 +397,9 @@ pub enum SettingsRow {
     Field(SettingsField),
 }
 
-const VERBOSITY_LEVELS: [&str; 3] = ["normal", "concise", "caveman"];
+pub const VERBOSITY_LEVELS: [&str; 3] = ["normal", "concise", "caveman"];
 pub const OCR_ENGINES: [&str; 4] = ["auto", "tesseract", "vlm", "local"];
-const SEARCH_PROVIDERS: [&str; 4] = ["auto", "langsearch", "searxng", "duckduckgo"];
+pub const SEARCH_PROVIDERS: [&str; 4] = ["auto", "langsearch", "searxng", "duckduckgo"];
 
 /// Nerd config: footer toggles + core sampling parameters.
 #[derive(Debug, Clone)]
@@ -458,15 +453,6 @@ fn verbosity_clause(level: &str) -> &'static str {
 }
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-/// Built-in start-screen banner (override with `~/.config/nexus-chat/banner.txt`).
-const BANNER: &str = r"
-███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗
-████╗  ██║██╔════╝╚██╗██╔╝██║   ██║██╔════╝
-██╔██╗ ██║█████╗   ╚███╔╝ ██║   ██║███████╗
-██║╚██╗██║██╔══╝   ██╔██╗ ██║   ██║╚════██║
-██║ ╚████║███████╗██╔╝ ██╗╚██████╔╝███████║
-╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝";
 
 /// Greeting lines for the start screen; one is picked at random per launch.
 const GREETINGS: [&str; 8] = [
@@ -665,6 +651,22 @@ pub enum AppEvent {
     /// A one-line status update from a domain path (the 2e step converts the
     /// `status` field writes into these; the field still exists until then).
     Status(String),
+    /// The composer should be replaced with this text (e.g. a send-failure
+    /// path restoring the user's message). The view layer applies it to its
+    /// `TextArea`.
+    ComposerSet(String),
+    /// The composer should be cleared.
+    ComposerClear,
+    /// The view should reset its viewport state (scroll, selection, pinning
+    /// baseline) — pushed wherever domain code switches sessions, starts a
+    /// stream, or otherwise invalidates the rendered conversation.
+    ViewportReset,
+    /// The wrapped-history render cache must be rebuilt (in-place message
+    /// edits would otherwise leave stale wrapped content).
+    HistoryInvalidated,
+    /// A domain path fell back to "no backend configured" and wants the
+    /// login selector shown (e.g. a swarm turn with no resolvable model).
+    OpenLoginPopup,
     /// A survey/plan gate armed (`Some`) or cleared (`None`). `GateState`
     /// carries the session id the reply must come from, so a gate in another
     /// session can never swallow typing — the consumer compares the payload
@@ -717,11 +719,6 @@ pub struct App {
 
     /// The space the current/next session belongs to.
     pub active_space: SpaceRow,
-    pub spaces_cache: Vec<SpaceRow>,
-    pub space_selected: usize,
-    pub space_filter: FilterInput,
-    pub space_mode: SpaceMode,
-    pub space_edit: String,
     /// Model used for background memory extraction (empty = disabled).
     pub memory_model: String,
     /// Model used for image transcription (empty = disabled).
@@ -803,10 +800,6 @@ pub struct App {
     pub toolbox: std::sync::Arc<dyn crate::tools::ToolExecutor>,
     /// Local static server for model-created apps (None if it failed to bind).
     pub app_server: Option<crate::appserver::AppServer>,
-    pub skills_mode: SkillsMode,
-    pub skills_selected: usize,
-    /// GitHub `owner/repo/path` shorthand being typed in Install mode.
-    pub skills_edit: String,
     pub skills_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
     /// Background OCR updates: (`space_id`, file name, progress or final result).
     pub ocr_rx: Option<mpsc::UnboundedReceiver<(String, String, files::OcrUpdate)>>,
@@ -825,52 +818,27 @@ pub struct App {
     pub swarm_rx: Option<mpsc::UnboundedReceiver<swarm::SwarmMsg>>,
     pub swarm_abort: Option<tokio::task::AbortHandle>,
     pub swarm_session: Option<String>,
-    /// The active session's `/swarm` roster, cached for the popup.
+    /// The active session's `/swarm` roster, cached for the popup (kept in
+    /// sync by `on_swarm_update` while a turn runs; the view owns the cursor).
     pub swarm_cache: Vec<crate::db::Persona>,
-    pub swarm_selected: usize,
-    pub swarm_popup_mode: SwarmPopupMode,
     /// (session id, topic) of the `/research` job currently running, if any —
     /// cleared when its channel closes.
     pub research_running: Option<(String, String)>,
 
     /// The active space's imported files (refreshed by `rescan_files`).
     pub files_cache: Vec<crate::db::FileRow>,
-    pub files_selected: usize,
-    pub files_mode: FilesMode,
-    pub files_tab: FilesTab,
     /// The space's apps (`/apps` popup): names, cursor, and mode.
     pub apps_cache: Vec<String>,
-    pub apps_selected: usize,
-    pub apps_mode: AppsMode,
-    pub apps_edit: String,
-
-    /// The `/usage` popup: aggregates snapshot + recent-list cursor.
-    pub usage_data: Option<usage::UsageData>,
-    pub usage_scroll: usize,
-    /// Time window the `/usage` dashboard aggregates (`24h/7d/30d/all`).
-    pub usage_range: crate::db::UsageRange,
-
     /// The space's images (`/image` popup): cache and cursor.
     pub images_cache: Vec<ImageMeta>,
-    pub images_selected: usize,
-    pub images_mode: ImagesMode,
 
     /// The space's scripts (`/script` popup): cache, cursor, and edit buffer.
     pub scripts_cache: Vec<ScriptMeta>,
-    pub scripts_selected: usize,
-    pub scripts_mode: ScriptsMode,
-    pub scripts_edit: String,
     /// The space's standing research watches (`/watch` picker): cache + cursor.
     pub watches_cache: Vec<crate::db::Watch>,
-    pub watch_selected: usize,
-    pub watch_mode: WatchMode,
-    /// Path being typed/pasted in the files popup's Add mode.
-    pub files_edit: String,
-    /// Directory the file-picker browser is showing (remembered across opens).
-    pub picker_dir: std::path::PathBuf,
-    pub picker_entries: Vec<crate::app::files::PickerEntry>,
-    pub picker_filter: String,
-    pub picker_selected: usize,
+    /// Time window the `/usage` dashboard aggregates (`24h/7d/30d/all`) — a
+    /// persisted preference, applied by `apply_setting` on load.
+    pub usage_range: crate::db::UsageRange,
 
     /// Live model catalog (fetched on demand, never hardcoded).
     pub models: Vec<Model>,
@@ -886,26 +854,6 @@ pub struct App {
     pub session: Option<Session>,
     pub messages: Vec<Message>,
 
-    /// Message composer. A real editor: cursor movement, word-jump, selection,
-    /// cut/copy/paste, undo — all from tui-textarea's default keymap.
-    pub input: TextArea<'static>,
-    /// Long-lived OS clipboard handle. Kept alive so X11 keeps serving the
-    /// contents to clipboard managers (recreating per-op drops ownership in ~1ms).
-    pub clipboard: Option<arboard::Clipboard>,
-    /// The composer's inner (inside-border) rect from the last render, so mouse
-    /// clicks can be mapped to cursor positions.
-    pub input_inner: Rect,
-    /// Whether tool-call blocks show full arguments/results (Ctrl+T).
-    pub show_tool_detail: bool,
-    /// Wrapped-line cache for the transcript, so redraws don't re-render
-    /// markdown for the whole conversation every frame.
-    pub history_cache: crate::history_cache::HistoryCache,
-    /// Per-session history caches preserved across session switches so
-    /// switching back doesn't re-wrap every message from scratch.
-    pub session_caches: std::collections::HashMap<String, crate::history_cache::HistoryCache>,
-    /// External edit queued for the event loop, which owns terminal
-    /// suspension and knows which app callback should consume the saved file.
-    pub pending_editor: Option<PendingEditor>,
     /// Central event channel for all in-flight chat tasks.
     pub chat_event_tx: mpsc::UnboundedSender<ChatEvent>,
     pub chat_event_rx: mpsc::UnboundedReceiver<ChatEvent>,
@@ -916,8 +864,6 @@ pub struct App {
     /// Queued `Status`/`Gate` events, drained by `next_event` before the
     /// channel sources. The TUI/CLI/host consume the same stream either way.
     pub(crate) pending_events: VecDeque<AppEvent>,
-    /// Screen rectangles for the currently rendered notification rows.
-    pub notification_areas: Vec<(Rect, usize)>,
     /// Sessions holding a response that finished while the user was elsewhere.
     pub unread: std::collections::HashSet<String>,
     /// Exact conversation token total from the last completed response.
@@ -928,101 +874,17 @@ pub struct App {
     pub last_cache_rate: Option<f64>,
 
     pub settings: Settings,
+    /// What a confirmed model-picker selection is currently for (the active
+    /// session's model, a feature model from `/config`, or a swarm persona).
+    pub model_pick_target: ModelPickTarget,
     /// Animated "thinking" indicator shown while a response streams.
     pub spinner_frame: usize,
     pub thinking_idx: usize,
     pub spinner_color: SpinnerColor,
 
-    /// Color palette — the active omarchy theme when present, else the
-    /// built-in default. `theme_link` is the last-seen omarchy symlink
-    /// target, polled by the event loop to detect a theme switch.
-    pub theme: Theme,
-    pub theme_link: Option<std::path::PathBuf>,
-    /// Bumped every time `theme` changes, so the history render cache (which
-    /// bakes colors into cached `Line`s) knows to re-wrap on a theme switch.
-    pub theme_gen: usize,
-
-    pub popup: Popup,
-    pub model_filter: FilterInput,
-    /// Narrow the merged model list to one backend (Ctrl+P cycles it); `None` = all.
-    pub model_backend_filter: Option<BackendTag>,
-    pub model_focus: ModelPanel,
-    /// What a confirmed selection in the model picker is currently for.
-    pub model_pick_target: ModelPickTarget,
-    pub fav_selected: usize,
-    pub avail_selected: usize,
-    /// Last-rendered scroll offset of each model-picker panel (render state
-    /// stashed for click mapping; the TUI owns the ratatui `ListState`).
-    pub fav_offset: usize,
-    pub avail_offset: usize,
     pub sessions_cache: Vec<Session>,
-    pub session_selected: usize,
-    /// Fuzzy filter typed in the session picker (matches title, slug, and id).
-    pub session_filter: FilterInput,
-    /// Whether the picker is browsing, renaming, or confirming a delete.
-    pub session_mode: SessionMode,
-    /// Edit buffer while renaming a session.
-    pub session_edit: String,
-    /// (session id, preview text) of the last session the picker previewed
-    /// from the db — recomputed only when the selection moves.
-    pub session_preview: Option<(String, String)>,
     /// Background topic-generation result channel.
     title_rx: Option<mpsc::UnboundedReceiver<(String, String, String)>>,
-    /// `/copy` menu entries and the highlighted row.
-    pub copy_options: Vec<CopyOption>,
-    pub copy_selected: usize,
-    pub key_input: String,
-    /// Which backend the current `Popup::Key` entry is for.
-    pub key_target: KeyTarget,
-    /// Highlighted row in the `/login` provider selector.
-    pub login_selected: usize,
-    pub settings_selected: usize,
-    /// Text edit buffers for the numeric settings (temperature, `top_p`, `max_tokens`).
-    pub settings_inputs: [String; 8],
-    /// Indices into `SETTINGS_GROUPS` currently collapsed (hidden fields).
-    pub settings_collapsed: HashSet<usize>,
-
-    /// Highlighted row in the slash-command autocomplete popup.
-    pub cmd_selected: usize,
-    /// `@` file autocomplete: (matches, selected, cursor byte offset of `@`).
-    pub at_state: Option<(Vec<crate::db::FileRow>, usize, usize)>,
-
-    /// Start-screen banner (custom or built-in) and a greeting picked at launch.
-    pub banner: String,
-    pub greeting: &'static str,
-    /// Lines scrolled up from the bottom (0 = following the newest lines).
-    pub scroll: usize,
-    /// Max useful `scroll` (lines above the viewport), refreshed each render so
-    /// scrolling can be clamped instead of running off into empty space.
-    pub max_scroll: usize,
-    /// Total rendered lines from the previous render frame, used during streaming
-    /// to keep the viewport pinned when the user has scrolled up.
-    pub prev_total: usize,
-    /// Rendered text of the streaming tail from the last frame (empty when
-    /// not streaming). The tail re-renders from scratch every frame, so line
-    /// indices aren't stable — this lets the next frame re-find the line the
-    /// viewport was pinned to by content instead of by index.
-    pub prev_tail: Vec<String>,
-    /// One-shot flag: the user just toggled a display flag (Ctrl+R reasoning,
-    /// Ctrl+T tool detail), so the next frame's cache re-wrap must expand/
-    /// collapse in place — pin the viewport top even when following the bottom
-    /// of a live stream.
-    pub pin_viewport_top: bool,
-    /// Mouse text-selection over the history pane.
-    pub sel: crate::selection::HistorySel,
-    /// Which pane a mouse press is currently interacting with, so drag/release
-    /// route to the right place even when the cursor leaves the pane.
-    pub mouse_target: MouseTarget,
-    /// Composer double/triple-click tracking: (time, screen pos) of the last
-    /// press, and its click count (2 = word select, 3+ = line select), so a
-    /// drag that follows can extend by word/line instead of by char.
-    pub composer_click: Option<(std::time::Instant, (u16, u16))>,
-    pub composer_click_count: u8,
-    /// Data-space cursor position at the start of a word-mode composer drag,
-    /// so each drag step can re-select from that word outward.
-    pub composer_word_anchor: Option<(usize, usize)>,
-    pub status: String,
-    pub should_quit: bool,
 }
 
 impl App {
@@ -1146,9 +1008,6 @@ impl App {
             research_live_input: String::new(),
             toolbox,
             app_server: None,
-            skills_mode: SkillsMode::Browse,
-            skills_selected: 0,
-            skills_edit: String::new(),
             skills_rx: None,
             ocr_rx: None,
             embed_rx: None,
@@ -1161,41 +1020,14 @@ impl App {
             swarm_abort: None,
             swarm_session: None,
             swarm_cache: Vec::new(),
-            swarm_selected: 0,
-            swarm_popup_mode: SwarmPopupMode::Browse,
             research_running: None,
             files_cache: Vec::new(),
-            files_selected: 0,
-            files_mode: FilesMode::Browse,
-            files_tab: FilesTab::Files,
             apps_cache: Vec::new(),
-            apps_selected: 0,
-            apps_mode: AppsMode::Browse,
-            apps_edit: String::new(),
-            usage_data: None,
-            usage_scroll: 0,
-            usage_range: crate::db::UsageRange::default(),
             watches_cache: Vec::new(),
-            watch_selected: 0,
-            watch_mode: WatchMode::Browse,
             images_cache: Vec::new(),
-            images_selected: 0,
-            images_mode: ImagesMode::Browse,
             scripts_cache: Vec::new(),
-            scripts_selected: 0,
-            scripts_mode: ScriptsMode::Browse,
-            scripts_edit: String::new(),
-            files_edit: String::new(),
-            picker_dir: std::env::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")),
-            picker_entries: Vec::new(),
-            picker_filter: String::new(),
-            picker_selected: 0,
+            usage_range: crate::db::UsageRange::default(),
             active_space,
-            spaces_cache: Vec::new(),
-            space_selected: 0,
-            space_filter: FilterInput::default(),
-            space_mode: SpaceMode::Browse,
-            space_edit: String::new(),
             memory_model: utility_model.clone(),
             transcriber_model: utility_model.clone(),
             ocr_model: utility_model,
@@ -1216,71 +1048,24 @@ impl App {
             reasoning: HashMap::new(),
             session: None,
             messages: Vec::new(),
-            input: new_textarea(),
-            clipboard: arboard::Clipboard::new().ok(),
-            input_inner: Rect::default(),
-            show_tool_detail: false,
-            history_cache: crate::history_cache::HistoryCache::default(),
-            session_caches: std::collections::HashMap::new(),
-            pending_editor: None,
             chat_event_tx,
             chat_event_rx,
             chat_tasks: HashMap::new(),
             next_chat_task_id: 0,
             notifications: VecDeque::new(),
             pending_events: VecDeque::new(),
-            notification_areas: Vec::new(),
             unread: std::collections::HashSet::new(),
             context_total: None,
             last_cache_rate: None,
             settings: Settings::default(),
+            model_pick_target: ModelPickTarget::Session,
             spinner_frame: 0,
             thinking_idx: 0,
             spinner_color: SpinnerColor::Green,
-            theme: crate::theme::load(),
-            theme_link: crate::theme::current_link_target(),
-            theme_gen: 0,
-            popup: Popup::None,
-            model_filter: FilterInput::default(),
-            model_backend_filter: None,
-            model_focus: ModelPanel::Available,
-            model_pick_target: ModelPickTarget::Session,
-            fav_selected: 0,
-            avail_selected: 0,
-            fav_offset: 0,
-            avail_offset: 0,
             sessions_cache: Vec::new(),
-            session_selected: 0,
-            session_filter: FilterInput::default(),
-            session_mode: SessionMode::Browse,
-            session_edit: String::new(),
-            session_preview: None,
             title_rx: None,
-            copy_options: Vec::new(),
-            copy_selected: 0,
-            key_input: String::new(),
-            key_target: KeyTarget::OpenRouter,
-            login_selected: 0,
-            settings_selected: 0,
-            settings_inputs: Default::default(),
-            settings_collapsed: HashSet::new(),
-            cmd_selected: 0,
-            at_state: None,
-            banner: config::load_banner().unwrap_or_else(|| BANNER.trim_matches('\n').to_string()),
-            greeting: pick_greeting(),
-            scroll: 0,
-            max_scroll: 0,
-            prev_total: 0,
-            prev_tail: Vec::new(),
-            pin_viewport_top: false,
-            sel: crate::selection::HistorySel::default(),
-            mouse_target: MouseTarget::None,
-            composer_click: None,
-            composer_click_count: 0,
-            composer_word_anchor: None,
-            status,
-            should_quit: false,
         };
+        app.pending_events.push_back(AppEvent::Status(status));
         app.load_prefs();
         app.load_settings();
         app
@@ -1597,13 +1382,74 @@ impl App {
 
     // --- async event sources (drained by the event loop) ---
 
-    /// Queue a one-line status update: keeps the `status` field in sync for
-    /// the TUI's direct reads (until 2e) and emits `AppEvent::Status` for
-    /// the seam consumers.
+    /// Queue a one-line status update as `AppEvent::Status`. The 2e view
+    /// layer keeps its own `status` field, fed by these events; headless
+    /// consumers track them locally.
     pub fn push_status(&mut self, s: impl Into<String>) {
-        let s = s.into();
-        self.status.clone_from(&s);
-        self.pending_events.push_back(AppEvent::Status(s));
+        self.pending_events.push_back(AppEvent::Status(s.into()));
+    }
+
+    /// Ask the view to replace its composer contents (a send-failure path
+    /// restoring the user's message, a gate reply rolled back, …).
+    pub fn push_composer_set(&mut self, text: impl Into<String>) {
+        self.pending_events
+            .push_back(AppEvent::ComposerSet(text.into()));
+    }
+
+    /// Ask the view to clear its composer.
+    pub fn push_composer_clear(&mut self) {
+        self.pending_events.push_back(AppEvent::ComposerClear);
+    }
+
+    /// Ask the view to reset its viewport state (scroll, selection, pinning
+    /// baseline) — pushed wherever domain code switches sessions, starts a
+    /// stream, or otherwise invalidates the rendered conversation.
+    pub fn push_viewport_reset(&mut self) {
+        self.pending_events.push_back(AppEvent::ViewportReset);
+    }
+
+    /// Ask the view to rebuild its wrapped-history render cache (in-place
+    /// message edits would otherwise leave stale wrapped content).
+    pub fn push_history_invalidated(&mut self) {
+        self.pending_events.push_back(AppEvent::HistoryInvalidated);
+    }
+
+    /// Pop one locally-queued event (status lines, gate arming, composer
+    /// feedback). The view drains these before every draw so status changes
+    /// land on the same frame as the action that caused them; `next_event`
+    /// drains any remainder before blocking on the channel sources.
+    pub fn pop_pending_event(&mut self) -> Option<AppEvent> {
+        self.pending_events.pop_front()
+    }
+
+    /// Test helper: drain the pending event queue in one pass, returning
+    /// `(composer sets in order, last status line)` — the 2e status field and
+    /// the composer live in the view, so tests assert on the events.
+    #[cfg(feature = "test-helpers")]
+    pub fn drain_ui_events(&mut self) -> (Vec<String>, String) {
+        let mut sets = Vec::new();
+        let mut last = String::new();
+        while let Some(ev) = self.pop_pending_event() {
+            match ev {
+                AppEvent::ComposerSet(s) => sets.push(s),
+                AppEvent::Status(s) => last = s,
+                _ => {}
+            }
+        }
+        (sets, last)
+    }
+
+    /// Test helper: the last queued `Status` event, draining the queue.
+    #[cfg(feature = "test-helpers")]
+    pub fn last_status(&mut self) -> String {
+        self.drain_ui_events().1
+    }
+
+    /// Test helper: every queued `ComposerSet` payload, in order, draining
+    /// the queue (asserts composer-restore paths without a TextArea).
+    #[cfg(feature = "test-helpers")]
+    pub fn drain_composer_sets(&mut self) -> Vec<String> {
+        self.drain_ui_events().0
     }
 
     /// Next background event from either the streaming task or a model fetch.
@@ -1698,49 +1544,6 @@ impl App {
         }
     }
 
-    /// Fetch every configured backend's catalog concurrently and merge them
-    /// into one list. A backend that fails is dropped from the merge (its
-    /// error is only surfaced if *every* backend failed) — one flaky login
-    /// shouldn't blank out the models of the others.
-    fn fetch_models(&mut self) {
-        let providers: Vec<OpenRouter> = [
-            self.backends.openrouter.clone(),
-            self.backends.openai.clone(),
-            self.backends.opencode.clone(),
-            self.backends.codex.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        if providers.is_empty() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.models_rx = Some(rx);
-        tokio::spawn(async move {
-            let mut set = tokio::task::JoinSet::new();
-            for p in providers {
-                set.spawn(async move { p.list_models().await });
-            }
-            let mut merged = Vec::new();
-            let mut errors = Vec::new();
-            while let Some(joined) = set.join_next().await {
-                match joined {
-                    Ok(Ok(models)) => merged.extend(models),
-                    Ok(Err(e)) => errors.push(e.to_string()),
-                    Err(e) => errors.push(e.to_string()),
-                }
-            }
-            let result = if merged.is_empty() && !errors.is_empty() {
-                Err(errors.join("; "))
-            } else {
-                merged.sort_by(|a, b| a.id.cmp(&b.id));
-                Ok(merged)
-            };
-            let _ = tx.send(result);
-        });
-    }
-
     pub fn on_models_result(&mut self, result: Option<ModelsResult>) {
         self.models_rx = None;
         let result = match result {
@@ -1769,13 +1572,9 @@ impl App {
                 let _ = self.db.backfill_usage_costs();
                 self.models = models;
                 self.push_status(format!("loaded {n} models"));
-                // First key just landed and nothing picked yet → jump into the picker.
-                if !self.models.is_empty()
-                    && self.current_model.is_none()
-                    && self.popup == Popup::None
-                {
-                    self.open_model_picker();
-                }
+                // The 2e view layer opens the model picker here: it owns the
+                // `popup` state, and checks `models`/`current_model` after
+                // this handler runs.
             }
             Err(e) => self.push_status(format!("model fetch failed: {e}")),
         }
@@ -1783,32 +1582,6 @@ impl App {
 
     // --- input handling ---
     // --- nerd config (settings popup) ---
-
-    /// Index into `settings_inputs` for any typed (non-toggle, non-picker) field.
-    /// `None` both for non-text fields and when a group header is selected.
-    pub fn text_index(&self) -> Option<usize> {
-        match self.settings_field()? {
-            SettingsField::ShowStats
-            | SettingsField::ShowReasoning
-            | SettingsField::HideHints
-            | SettingsField::MemoryModel
-            | SettingsField::Verbosity
-            | SettingsField::SearchProvider
-            | SettingsField::TranscriberModel
-            | SettingsField::OcrModel
-            | SettingsField::OcrEngine
-            | SettingsField::ImageGenModel
-            | SettingsField::VideoGenModel => None,
-            SettingsField::Temperature => Some(0),
-            SettingsField::TopP => Some(1),
-            SettingsField::MaxTokens => Some(2),
-            SettingsField::CompactThreshold => Some(3),
-            SettingsField::SearxngUrl => Some(4),
-            SettingsField::LangsearchKey => Some(5),
-            SettingsField::BlockedDomains => Some(7),
-            SettingsField::EmbeddingModel => Some(6),
-        }
-    }
 
     /// Whether scanned PDFs should OCR through the `OpenRouter` vision model:
     /// explicit "vlm", or "auto" with an OCR model configured. ("local" and

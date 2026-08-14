@@ -6,7 +6,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState};
 
-use nexus_core::app::App;
+use crate::app_view::AppView;
 
 use super::chrome;
 
@@ -17,7 +17,7 @@ const ROWS: [(&str, &str); 4] = [
     ("Codex", "ChatGPT subscription — device-code login"),
 ];
 
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &AppView) {
     let area = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
     let inner = chrome::render_hinted(
         f,
@@ -69,7 +69,7 @@ pub fn render(f: &mut Frame, app: &App) {
     chrome::render_list(f, list, &mut state, inner, ROWS.len(), 3, &app.theme);
 }
 
-pub fn handle_key(app: &mut App, key: KeyEvent) {
+pub fn handle_key(app: &mut AppView, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => app.popup = nexus_core::app::Popup::None,
         KeyCode::Up => app.move_login_selection(-1),

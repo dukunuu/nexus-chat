@@ -4,13 +4,14 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use nexus_core::app::{App, Popup};
+use crate::app_view::AppView;
+use nexus_core::app::Popup;
 
 use super::chrome;
 
 /// API-key entry: a centered masked value under the input title, with the
 /// paste hint in the frame footer — same chrome family as every other popup.
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &AppView) {
     let outer = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
     let masked = "*".repeat(app.key_input.chars().count());
     let title = chrome::input_title(
@@ -58,7 +59,7 @@ pub fn render(f: &mut Frame, app: &App) {
     );
 }
 
-pub fn handle_key(app: &mut App, key: KeyEvent) {
+pub fn handle_key(app: &mut AppView, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => app.popup = Popup::Login,
         KeyCode::Enter => app.confirm_key(),

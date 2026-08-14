@@ -5,12 +5,13 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState};
 
-use nexus_core::app::{App, WatchMode};
+use crate::app_view::AppView;
+use nexus_core::app::WatchMode;
 
 use super::chrome;
 
 #[allow(clippy::too_many_lines)] // two-line rows + due/scheduled status
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &AppView) {
     let area = crate::ui::centered(f.area(), chrome::STANDARD.0, chrome::STANDARD.1);
     let dim = Style::default().fg(app.theme.fg_dim);
     let items: Vec<ListItem> = if app.watches_cache.is_empty() {
@@ -121,7 +122,7 @@ pub fn render(f: &mut Frame, app: &App) {
     );
 }
 
-pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
     match app.watch_mode {
         WatchMode::ConfirmDelete => match super::classify_confirm_delete_key(key) {
             Some(super::ConfirmDeleteAction::Yes) => {

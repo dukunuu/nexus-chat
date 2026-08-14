@@ -1684,13 +1684,6 @@ impl super::App {
         }
     }
 
-    /// Ctrl+↑: open the live per-searcher activity view. Caller already
-    /// gates this on a research job running.
-    pub fn open_research_live(&mut self) {
-        self.research_live_input.clear();
-        self.popup = super::Popup::ResearchLive;
-    }
-
     // Long by design (gate setup + mirroring).
     #[allow(clippy::too_many_lines)]
     pub fn start_research_with_gate(&mut self, topic: &str, gated: bool) {
@@ -1863,8 +1856,9 @@ impl super::App {
         let space_name = self.active_space.name.clone();
         self.session = Some(session.clone());
         self.context_total = None;
-        self.scroll = 0;
-        self.sel.clear(); // selection points into the previous session's lines
+        // Selection + scroll point into the previous session's lines; the
+        // view resets them on `ViewportReset`.
+        self.push_viewport_reset();
         self.refresh_toolbox();
 
         let embedding_model = self.embedding_model.trim().to_string();
@@ -1913,7 +1907,6 @@ impl super::App {
             self.research_steer_log.clear();
             self.research_steer_acked.clear();
             self.push_status("research stopped".to_string());
-            self.popup = super::Popup::None;
         } else {
             self.push_status("no research job is running".to_string());
         }
@@ -1998,7 +1991,7 @@ impl super::App {
                 Ok(id) => Some(id),
                 Err(e) => {
                     self.set_survey_gate(Some(gate));
-                    self.set_input(text);
+                    self.push_composer_set(text);
                     self.push_status(format!("couldn't save your reply — {e}"));
                     return;
                 }
@@ -2011,7 +2004,7 @@ impl super::App {
             // can't duplicate it in the transcript, then put the text back
             // in the composer rather than eating the user's typing.
             let rollback_error = saved_id.and_then(|id| self.db.delete_message(&id).err());
-            self.set_input(text);
+            self.push_composer_set(text);
             self.push_status(match rollback_error {
                 Some(e) => format!(
                     "the job stopped waiting and the saved reply could not be rolled back: {e} — text restored to the composer"
@@ -2086,7 +2079,7 @@ impl super::App {
                 // Stage rows update in place, so message count does not
                 // change and the wrapped transcript cache would otherwise
                 // keep rendering stale progress.
-                self.invalidate_history_cache();
+                self.push_history_invalidated();
             } else {
                 self.messages.push(crate::db::Message {
                     role: "research_stage".to_string(),
@@ -2123,9 +2116,7 @@ impl super::App {
             self.research_stage_rows.clear();
             self.research_incognito = false;
             self.research_live_input.clear();
-            if self.popup == super::Popup::ResearchLive {
-                self.popup = super::Popup::None;
-            }
+            // The view closes its live popup when the job's channel closes.
             return;
         };
         let viewing = self.session.as_ref().is_some_and(|s| s.id == session_id);
@@ -2946,7 +2937,8 @@ mod tests {
         a.reply_to_survey_gate("depth first");
         assert!(a.survey_gate.is_none());
         assert_eq!(rx.recv().await.unwrap(), "depth first");
-        assert!(a.status.contains("follow-ups"));
+        let (_, status) = a.drain_ui_events();
+        assert!(status.contains("follow-ups"));
     }
 
     #[tokio::test]
@@ -3007,12 +2999,14 @@ mod tests {
     fn start_research_rejects_blank_topic_and_missing_model() {
         let mut a = test_app();
         a.start_research("  ");
-        assert!(a.status.contains("usage:"));
+        let (_, status) = a.drain_ui_events();
+        assert!(status.contains("usage:"));
         assert!(a.research_rx.is_none());
 
         a.current_model = None;
         a.start_research("rust async runtimes");
-        assert!(a.status.contains("no model configured"));
+        let (_, status) = a.drain_ui_events();
+        assert!(status.contains("no model configured"));
         assert!(a.research_rx.is_none());
     }
 
@@ -3040,7 +3034,8 @@ mod tests {
         a.start_research("topic one");
         assert!(a.research_rx.is_some());
         a.start_research("topic two");
-        assert!(a.status.contains("already running"));
+        let (_, status) = a.drain_ui_events();
+        assert!(status.contains("already running"));
         // Still the first job's session.
         assert!(a.session.as_ref().unwrap().title.contains("topic one"));
     }
@@ -3074,7 +3069,8 @@ mod tests {
                 .iter()
                 .any(|m| m.role == "research_stage" && m.content == "planning")
         );
-        assert!(a.status.contains("planning"));
+        let (_, status) = a.drain_ui_events();
+        assert!(status.contains("planning"));
 
         // A second tick with the same label replaces the row, not appends.
         let space_id = a.active_space.id.clone();
@@ -3102,7 +3098,8 @@ mod tests {
             .collect();
         assert_eq!(visible_rows.len(), 1);
         assert_eq!(visible_rows[0].content, "planning: revised");
-        assert!(a.status.contains("Ctrl+↑ agents"));
+        let (_, status) = a.drain_ui_events();
+        assert!(status.contains("Ctrl+↑ agents"));
     }
 
     #[tokio::test]
@@ -3264,7 +3261,11 @@ mod tests {
         assert_eq!(a.research_steer_log.len(), MAX_QUEUED_STEERS);
         a.steer_research("overflow");
         assert_eq!(a.research_steer_log.len(), MAX_QUEUED_STEERS);
-        assert!(a.status.contains("steer queue full"), "{}", a.status);
+        assert!(
+            a.last_status().contains("steer queue full"),
+            "{}",
+            a.last_status()
+        );
     }
 
     #[tokio::test]
@@ -3412,7 +3413,8 @@ mod tests {
 
         assert!(a.survey_gate.is_none());
         // Composer restored, nothing persisted, nothing mirrored in memory.
-        assert!(a.input_text().contains("drop q2"), "{}", a.input_text());
+        let (sets, _) = a.drain_ui_events();
+        assert_eq!(sets, vec!["drop q2".to_string()]);
         let stored = a.db.load_messages(&session_id).unwrap();
         assert!(
             stored.iter().all(|m| m.role != "gate_reply"),
@@ -3454,8 +3456,9 @@ mod tests {
             a.unread.contains(&session_id),
             "session must be marked unread"
         );
-        assert!(a.status.contains("waiting on you"), "{}", a.status);
-        assert!(a.status.contains("survey round 1"), "{}", a.status);
+        let (_, status) = a.drain_ui_events();
+        assert!(status.contains("waiting on you"), "{status}");
+        assert!(status.contains("survey round 1"), "{status}");
     }
 
     #[tokio::test]
@@ -3575,7 +3578,8 @@ mod tests {
             ResearchUpdate::Done(Err("planner: network down".to_string())),
         )));
 
-        assert!(a.status.contains("network down"));
+        let (_, status) = a.drain_ui_events();
+        assert!(status.contains("network down"));
         let stored = a.db.load_messages(&session_id).unwrap();
         assert!(
             stored
@@ -3585,11 +3589,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_research_done_none_clears_state_and_closes_the_live_popup() {
+    async fn on_research_done_none_clears_domain_state() {
         let mut a = test_app();
         a.start_research("t");
         assert!(a.research_rx.is_some());
-        a.popup = super::super::Popup::ResearchLive;
         a.research_live_input = "late steer".to_string();
         a.research_stage_rows = vec!["writer: done".to_string()];
 
@@ -3597,7 +3600,6 @@ mod tests {
 
         assert!(a.research_rx.is_none());
         assert!(a.research_running.is_none());
-        assert_eq!(a.popup, super::super::Popup::None);
         assert!(a.research_live_input.is_empty());
         assert!(a.research_stage_rows.is_empty());
     }

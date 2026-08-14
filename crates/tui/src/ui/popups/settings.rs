@@ -5,7 +5,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState};
 
-use nexus_core::app::{App, SettingsRow};
+use crate::app_view::AppView;
+use nexus_core::app::SettingsRow;
 
 use super::chrome;
 
@@ -19,7 +20,7 @@ fn split_label(label: &'static str) -> (String, String) {
 
 // Long by design (settings renderer).
 #[allow(clippy::too_many_lines)]
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &AppView) {
     use nexus_core::app::{SETTINGS_GROUPS, SettingsField};
     let area = crate::ui::centered(f.area(), 64, 60);
 
@@ -138,7 +139,7 @@ pub fn render(f: &mut Frame, app: &App) {
     chrome::render_detail(f, detail_area, &desc, &app.theme);
 }
 
-pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
     use nexus_core::app::SettingsField;
     // The memory-model and transcriber-model rows are picked, not typed:
     // Enter opens the same model picker /model uses, Backspace clears it.

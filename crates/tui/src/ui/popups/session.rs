@@ -5,12 +5,12 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState};
 
-use nexus_core::app::App;
+use crate::app_view::AppView;
 
 use super::chrome;
 
 #[allow(clippy::too_many_lines)] // row design + preview strip
-pub fn render(f: &mut Frame, app: &mut App) {
+pub fn render(f: &mut Frame, app: &mut AppView) {
     use nexus_core::app::SessionMode;
     let area = crate::ui::centered(f.area(), chrome::TALL.0, chrome::TALL.1);
 
@@ -140,7 +140,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     );
 }
 
-pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
     use super::{
         ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key,
         classify_edit_key,

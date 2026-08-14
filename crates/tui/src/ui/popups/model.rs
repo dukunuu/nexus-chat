@@ -6,11 +6,12 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
 
+use crate::app_view::AppView;
 use crate::ui::popups::chrome;
-use nexus_core::app::{App, ModelPanel, Popup};
+use nexus_core::app::{ModelPanel, Popup};
 use nexus_core::provider::Model;
 
-pub fn render(f: &mut Frame, app: &mut App) {
+pub fn render(f: &mut Frame, app: &mut AppView) {
     let (fav_outer, avail_outer) = model_popup_areas(f.area());
     f.render_widget(Clear, fav_outer);
     f.render_widget(Clear, avail_outer);
@@ -111,7 +112,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.avail_offset = avail_state.offset();
 }
 
-fn model_items(app: &App, models: &[&Model], width: usize) -> Vec<ListItem<'static>> {
+fn model_items(app: &AppView, models: &[&Model], width: usize) -> Vec<ListItem<'static>> {
     models
         .iter()
         .map(|m| {
@@ -162,7 +163,7 @@ fn panel_list<'a>(
     hint: &str,
     focused: bool,
     width: u16,
-    app: &App,
+    app: &AppView,
 ) -> List<'a> {
     chrome::standard_list(items, &app.theme).block(chrome::hinted_block(
         title,
@@ -188,7 +189,7 @@ pub fn list_inner(outer: Rect) -> Rect {
     Block::default().borders(Borders::ALL).inner(outer)
 }
 
-pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         // Ctrl+P narrows noisy provider catalogs; Ctrl+S favorites; Ctrl+T cycles reasoning effort.

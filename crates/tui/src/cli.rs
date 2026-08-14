@@ -1161,7 +1161,15 @@ async fn models(backend: Option<&str>) -> Result<()> {
         .collect();
     if app.models.is_empty() {
         // The fetch itself failed — status carries "model fetch failed: …".
-        bail!("{}", app.status);
+        // The status is an event now (2e); drain locally-queued events and
+        // surface the last status line.
+        let mut status = String::new();
+        while let Some(ev) = app.pop_pending_event() {
+            if let app::AppEvent::Status(s) = ev {
+                status = s;
+            }
+        }
+        bail!("{status}");
     }
     if models.is_empty() {
         bail!("no models from backend {backend:?} — `nexus models` lists them");

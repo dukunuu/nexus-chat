@@ -12,7 +12,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 
-use super::{App, Popup, SwarmPopupMode};
+use super::App;
 use crate::app::backends::Backends;
 use crate::db::Persona;
 use crate::provider::openrouter::OpenRouter;
@@ -55,22 +55,6 @@ pub enum SwarmUpdate {
 }
 
 impl App {
-    pub fn open_swarm_popup(&mut self) {
-        let Some(session) = &self.session else {
-            self.push_status("start a chat first, then /swarm".to_string());
-            return;
-        };
-        self.swarm_cache = self.db.list_swarm_personas(&session.id).unwrap_or_default();
-        self.swarm_selected = 0;
-        self.swarm_popup_mode = SwarmPopupMode::Browse;
-        self.popup = Popup::Swarm;
-    }
-
-    pub fn move_swarm_selection(&mut self, delta: i32) {
-        self.swarm_selected =
-            super::clamp_cursor(self.swarm_selected, self.swarm_cache.len(), delta);
-    }
-
     /// Flip swarm mode for the active session.
     pub fn toggle_swarm_mode(&mut self) -> Result<()> {
         let Some(session) = &mut self.session else {
@@ -80,83 +64,6 @@ impl App {
         session.swarm_mode = on;
         self.db.set_session_swarm_mode(&session.id, on)?;
         self.push_status(format!("swarm mode: {}", if on { "ON" } else { "OFF" }));
-        Ok(())
-    }
-
-    /// Queue the selected persona (or a new row) as a small structured file
-    /// for `$EDITOR`. Format: `name`, `model`, `---`, then free-form blurb.
-    pub fn queue_swarm_persona_editor(&mut self, new: bool) -> Result<()> {
-        if new {
-            self.swarm_cache.push(Persona {
-                name: String::new(),
-                model: self.current_model.clone().unwrap_or_default(),
-                blurb: String::new(),
-            });
-            self.swarm_selected = self.swarm_cache.len() - 1;
-        }
-        let Some(persona) = self.swarm_cache.get(self.swarm_selected) else {
-            return Ok(());
-        };
-        let path =
-            std::env::temp_dir().join(format!("nexus-chat-persona-{}.md", uuid::Uuid::new_v4()));
-        std::fs::write(
-            &path,
-            format!(
-                "name: {}\nmodel: {}\n---\n{}\n",
-                persona.name, persona.model, persona.blurb
-            ),
-        )?;
-        self.swarm_popup_mode = SwarmPopupMode::Browse;
-        self.pending_editor = Some(super::PendingEditor::Persona(path));
-        self.push_status("opening persona in $EDITOR…".to_string());
-        Ok(())
-    }
-
-    /// Apply a persona file after `$EDITOR` exits. Leaving a newly-created row
-    /// unnamed cancels it; malformed existing edits leave the roster intact.
-    pub fn apply_swarm_persona_editor(&mut self, path: &std::path::Path) -> Result<()> {
-        let text = std::fs::read_to_string(path)?;
-        let _ = std::fs::remove_file(path);
-        match parse_persona_editor(&text) {
-            Ok(persona) => {
-                if let Some(row) = self.swarm_cache.get_mut(self.swarm_selected) {
-                    *row = persona;
-                }
-                self.save_swarm_roster()?;
-                self.push_status("persona saved".to_string());
-            }
-            Err(e) => {
-                if self
-                    .swarm_cache
-                    .get(self.swarm_selected)
-                    .is_some_and(|p| p.name.trim().is_empty())
-                {
-                    self.swarm_cache.remove(self.swarm_selected);
-                    self.save_swarm_roster()?;
-                }
-                self.push_status(format!("persona edit ignored: {e}"));
-            }
-        }
-        Ok(())
-    }
-
-    pub fn swarm_remove_row(&mut self) -> Result<()> {
-        if self.swarm_selected < self.swarm_cache.len() {
-            self.swarm_cache.remove(self.swarm_selected);
-        }
-        self.swarm_popup_mode = SwarmPopupMode::Browse;
-        self.save_swarm_roster()
-    }
-
-    fn save_swarm_roster(&mut self) -> Result<()> {
-        self.swarm_cache.retain(|p| !p.name.trim().is_empty());
-        if let Some(session) = &self.session {
-            self.db
-                .save_swarm_personas(&session.id, &self.swarm_cache)?;
-        }
-        self.swarm_selected = self
-            .swarm_selected
-            .min(self.swarm_cache.len().saturating_sub(1));
         Ok(())
     }
 
@@ -174,7 +81,8 @@ impl App {
         let Some((default_provider, raw_default_model)) =
             self.resolve_model_backend(&default_model)
         else {
-            self.open_login_popup();
+            self.pending_events
+                .push_back(super::AppEvent::OpenLoginPopup);
             return;
         };
         // The swarm meta agent has no separate model setting — it resolves on
@@ -214,8 +122,20 @@ impl App {
         self.swarm_session = Some(swarm_session_id);
     }
 
+    /// Domain half of the roster save: drop blank rows and persist. The
+    /// view clamps its cursor after calling this.
+    pub fn save_swarm_roster(&mut self) -> Result<()> {
+        self.swarm_cache.retain(|p| !p.name.trim().is_empty());
+        if let Some(session) = &self.session {
+            self.db
+                .save_swarm_personas(&session.id, &self.swarm_cache)?;
+        }
+        Ok(())
+    }
+
     /// Stop the running swarm immediately. Persona model/tool streams are
     /// children of the aborted orchestration task and are dropped with it.
+    /// The view closes its popup after calling this.
     pub fn stop_swarm(&mut self) {
         if let Some(abort) = self.swarm_abort.take() {
             abort.abort();
@@ -227,7 +147,6 @@ impl App {
                     .upsert_research_stage_message(&id, "swarm", "stopped by user");
             }
             self.push_status("swarm stopped".to_string());
-            self.popup = Popup::None;
         } else {
             self.push_status("no swarm is running".to_string());
         }
@@ -267,7 +186,7 @@ impl App {
                             && (m.content == "swarm" || m.content.starts_with("swarm:"))
                     }) {
                         row.content = text;
-                        self.invalidate_history_cache();
+                        self.push_history_invalidated();
                     } else {
                         self.messages.push(crate::db::Message {
                             role: "research_stage".to_string(),
@@ -379,7 +298,7 @@ impl App {
     }
 }
 
-fn parse_persona_editor(text: &str) -> Result<Persona, String> {
+pub fn parse_persona_editor(text: &str) -> Result<Persona, String> {
     let mut lines = text.lines();
     let name = lines
         .next()

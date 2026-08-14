@@ -10,14 +10,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::app_view::AppView;
+use crate::theme::Theme;
 use crate::ui::{fmt_cost, humanize};
-use nexus_core::app::App;
-use nexus_core::theme::Theme;
 
 use super::chrome;
 
 #[allow(clippy::too_many_lines)] // usage popup: window header, tables per section
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &AppView) {
     let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::WIDE.1);
     let Some(data) = &app.usage_data else {
         return;
@@ -190,7 +190,7 @@ pub fn render(f: &mut Frame, app: &App) {
 
 /// Hero summary: colored headline numbers plus a cache bar over all prompt
 /// tokens ever logged.
-fn render_summary(f: &mut Frame, app: &App, area: Rect) {
+fn render_summary(f: &mut Frame, app: &AppView, area: Rect) {
     let theme = &app.theme;
     let Some(data) = &app.usage_data else { return };
     let t = &data.totals;
@@ -348,7 +348,7 @@ fn fmt_cost_agg(cost: f64) -> String {
     }
 }
 
-pub fn handle_key(app: &mut App, key: KeyEvent) {
+pub fn handle_key(app: &mut AppView, key: KeyEvent) {
     use nexus_core::app::Popup;
     match key.code {
         KeyCode::Esc => app.popup = Popup::None,

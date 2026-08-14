@@ -32,12 +32,6 @@ pub enum OcrUpdate {
     Done(std::result::Result<(String, Vec<(usize, String)>), String>),
 }
 
-/// One row of the file-picker browser.
-pub struct PickerEntry {
-    pub name: String,
-    pub is_dir: bool,
-}
-
 /// Which service transcribes a rendered page image.
 #[derive(Clone)]
 pub enum OcrBackend {
@@ -366,95 +360,6 @@ async fn ocr_image_vlm(
 }
 
 impl App {
-    /// Enter the picker at `picker_dir` (home on first open, remembered after).
-    pub fn open_file_picker(&mut self) {
-        self.picker_filter.clear();
-        self.picker_selected = 0;
-        self.reload_picker_entries();
-        self.files_mode = super::FilesMode::Pick;
-    }
-
-    /// Re-read the current directory: dirs first, then files, both alphabetical.
-    /// Unreadable dirs just yield an empty list (status explains).
-    fn reload_picker_entries(&mut self) {
-        let mut entries: Vec<PickerEntry> = match std::fs::read_dir(&self.picker_dir) {
-            Ok(rd) => rd
-                .flatten()
-                .filter_map(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    let is_dir = e.file_type().ok()?.is_dir();
-                    Some(PickerEntry { name, is_dir })
-                })
-                .collect(),
-            Err(e) => {
-                self.push_status(format!("cannot read {}: {e}", self.picker_dir.display()));
-                Vec::new()
-            }
-        };
-        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
-        self.picker_entries = entries;
-    }
-
-    /// Entries matching the fuzzy filter (all of them, dirs first, when empty).
-    pub fn filtered_picker_entries(&self) -> Vec<&PickerEntry> {
-        use crate::input::fuzzy_score;
-        let needle = self.picker_filter.trim();
-        if needle.is_empty() {
-            return self.picker_entries.iter().collect();
-        }
-        super::fuzzy_filter_sorted(&self.picker_entries, |e| fuzzy_score(&e.name, needle))
-    }
-
-    pub fn move_picker_selection(&mut self, delta: i32) {
-        self.picker_selected = super::clamp_cursor(
-            self.picker_selected,
-            self.filtered_picker_entries().len(),
-            delta,
-        );
-    }
-
-    pub fn picker_filter_push(&mut self, c: char) {
-        self.picker_filter.push(c);
-        self.picker_selected = 0;
-    }
-
-    /// Backspace erases the filter first; on an empty filter it goes up a level.
-    pub fn picker_backspace(&mut self) {
-        if !self.picker_filter.is_empty() {
-            self.picker_filter.pop();
-            self.picker_selected = 0;
-            return;
-        }
-        if let Some(parent) = self.picker_dir.parent().map(std::path::Path::to_path_buf) {
-            self.picker_dir = parent;
-            self.picker_selected = 0;
-            self.reload_picker_entries();
-        }
-    }
-
-    /// Enter descends into a directory, or imports the selected file.
-    pub fn picker_enter(&mut self) {
-        let filtered = self.filtered_picker_entries();
-        let Some(entry) = filtered.get(self.picker_selected) else {
-            return;
-        };
-        let name = entry.name.clone();
-        let is_dir = entry.is_dir;
-        let path = self.picker_dir.join(&name);
-        if is_dir {
-            self.picker_dir = path;
-            self.picker_filter.clear();
-            self.picker_selected = 0;
-            self.reload_picker_entries();
-            return;
-        }
-        match self.import_file(&path) {
-            Ok(n) => self.push_status(format!("imported {n}")),
-            Err(e) => self.push_status(format!("import failed: {e}")),
-        }
-        self.files_mode = super::FilesMode::Browse;
-    }
-
     /// Sync the active space's files directory with the db: new or changed
     /// files (by sha256) are re-extracted and re-indexed, rows for deleted
     /// files are dropped, and `files_cache` is refreshed. Best-effort: a
@@ -562,9 +467,6 @@ impl App {
             .db
             .list_files(&self.active_space.id)
             .unwrap_or_default();
-        self.files_selected = self
-            .files_selected
-            .min(self.files_cache.len().saturating_sub(1));
     }
 
     /// OCR queued scanned PDFs sequentially off the UI thread. One batch at a
@@ -733,12 +635,11 @@ impl App {
         }
     }
 
-    /// Ctrl+O in /files: throw away the selected file's extracted text (and
-    /// vectors, via `set_file_chunks`) and re-index it from disk with the
-    /// current OCR engine — how a tesseract-mangled book gets redone after
-    /// configuring a VLM, without re-importing.
-    pub fn reextract_selected_file(&mut self) {
-        let Some(f) = self.files_cache.get(self.files_selected).cloned() else {
+    /// The `reextract`/`reocr`/delete popup flows live in the view layer;
+    /// this is the re-extract half: zero the selected file's chunks and
+    /// hash/size so the next rescan re-indexes from disk.
+    pub fn reextract_file(&mut self, name: &str) {
+        let Some(f) = self.files_cache.iter().find(|f| f.name == name).cloned() else {
             return;
         };
         let _ = self.db.set_file_chunks(&f.id, &[]);
@@ -751,11 +652,12 @@ impl App {
         self.rescan_files();
     }
 
-    /// Force OCR on the selected file, bypassing text extraction entirely.
+    /// The `reocr` popup flow lives in the view layer; this is the OCR half:
+    /// force an OCR pass on one file, bypassing text extraction entirely.
     /// Useful when `pdf_extract` gives unreliable text and you want VLM OCR
     /// output instead.
-    pub fn reocr_selected_file(&mut self) {
-        let Some(f) = self.files_cache.get(self.files_selected).cloned() else {
+    pub fn reocr_file(&mut self, name: &str) {
+        let Some(f) = self.files_cache.iter().find(|f| f.name == name).cloned() else {
             return;
         };
         let ext = std::path::Path::new(&f.name)
@@ -962,9 +864,6 @@ impl App {
         }
         if space_id == self.active_space.id {
             self.files_cache = self.db.list_files(&space_id).unwrap_or_default();
-            self.files_selected = self
-                .files_selected
-                .min(self.files_cache.len().saturating_sub(1));
         }
     }
 
@@ -985,120 +884,42 @@ impl App {
         Ok(name)
     }
 
-    /// Delete the highlighted file: disk copy and index rows both go.
-    pub fn confirm_files_delete(&mut self) -> Result<()> {
-        if let Some(f) = self.files_cache.get(self.files_selected).cloned() {
-            let disk = self.space.files_dir(&self.active_space.name).join(&f.name);
-            if disk.exists() {
-                std::fs::remove_file(&disk)
-                    .with_context(|| format!("removing {}", disk.display()))?;
-            }
-            self.db.delete_file(&f.id)?;
-            self.push_status(format!("removed {}", f.name));
-            self.rescan_files();
+    /// Domain half of the files popup's delete: remove the disk copy and
+    /// index rows, refresh the cache. The view owns the mode/selection state.
+    pub fn delete_file(&mut self, name: &str) -> Result<()> {
+        let Some(f) = self.files_cache.iter().find(|f| f.name == name).cloned() else {
+            return Ok(());
+        };
+        let disk = self.space.files_dir(&self.active_space.name).join(&f.name);
+        if disk.exists() {
+            std::fs::remove_file(&disk).with_context(|| format!("removing {}", disk.display()))?;
         }
-        self.files_mode = super::FilesMode::Browse;
+        self.db.delete_file(&f.id)?;
+        self.push_status(format!("removed {}", f.name));
+        self.rescan_files();
         Ok(())
     }
 
-    pub fn open_files_popup(&mut self, tab: super::FilesTab) {
-        self.files_tab = tab;
-        match tab {
-            super::FilesTab::Images => {
-                self.refresh_images();
-            }
-            super::FilesTab::Scripts => {
-                self.refresh_scripts();
-            }
-            super::FilesTab::Files => {
-                self.rescan_files();
-            }
-        }
-        self.files_mode = super::FilesMode::Browse;
-        self.popup = super::Popup::Files;
-    }
-
-    pub fn move_files_selection(&mut self, delta: i32) {
-        self.files_selected =
-            super::clamp_cursor(self.files_selected, self.files_cache.len(), delta);
-    }
-
-    pub fn start_files_add(&mut self) {
-        self.files_edit.clear();
-        self.files_mode = super::FilesMode::Add;
-    }
-
-    /// Import the path typed/pasted in Add mode. Bad paths report in the status
-    /// line and return to Browse (nothing to roll back).
-    pub fn confirm_files_add(&mut self) {
-        let raw = self.files_edit.trim().to_string();
-        self.files_mode = super::FilesMode::Browse;
-        if raw.is_empty() {
-            return;
-        }
-        let path = std::path::PathBuf::from(&raw);
-        if !path.is_file() {
-            self.push_status(format!("not a file: {raw}"));
-            return;
-        }
-        match self.import_file(&path) {
-            Ok(name) => self.push_status(format!("imported {name}")),
-            Err(e) => self.push_status(format!("import failed: {e}")),
-        }
-    }
-
-    /// Ctrl+R in Browse: pre-fill the edit line with the current name.
-    pub fn start_files_rename(&mut self) {
-        if let Some(f) = self.files_cache.get(self.files_selected) {
-            self.files_edit = f.name.clone();
-            self.files_mode = super::FilesMode::Rename;
-        }
-    }
-
-    /// Rename the highlighted file on disk; the rescan swaps the index rows
-    /// (old name dropped, new name re-extracted).
-    pub fn confirm_files_rename(&mut self) -> Result<()> {
-        let new = self.files_edit.trim().to_string();
-        self.files_mode = super::FilesMode::Browse;
-        let Some(f) = self.files_cache.get(self.files_selected).cloned() else {
-            return Ok(());
-        };
-        if new.is_empty() || new == f.name {
+    /// Domain half of the files popup's rename: move the file on disk; the
+    /// rescan swaps the index rows (old name dropped, new name re-extracted).
+    /// Returns an error message string when the target already exists or the
+    /// name is invalid; the view turns it into a status line.
+    pub fn rename_file(&mut self, name: &str, new: &str) -> Result<()> {
+        if new.is_empty() || new == name {
             return Ok(());
         }
         if new.contains(['/', '\\']) || new == "." || new == ".." {
-            self.push_status(format!("invalid name: {new}"));
-            return Ok(());
+            anyhow::bail!("invalid name: {new}");
         }
         let dir = self.space.files_dir(&self.active_space.name);
-        if dir.join(&new).exists() {
-            self.push_status(format!("{new} already exists"));
-            return Ok(());
+        if dir.join(new).exists() {
+            anyhow::bail!("{new} already exists");
         }
-        std::fs::rename(dir.join(&f.name), dir.join(&new))
-            .with_context(|| format!("renaming {} to {new}", f.name))?;
+        std::fs::rename(dir.join(name), dir.join(new))
+            .with_context(|| format!("renaming {name} to {new}"))?;
         self.rescan_files();
-        self.files_selected = self
-            .files_cache
-            .iter()
-            .position(|f| f.name == new)
-            .unwrap_or(self.files_selected);
-        self.push_status(format!("renamed {} to {new}", f.name));
+        self.push_status(format!("renamed {name} to {new}"));
         Ok(())
-    }
-
-    /// Open the highlighted file in the system viewer (Enter in Browse).
-    pub fn open_selected_file(&mut self) {
-        if let Some(f) = self.files_cache.get(self.files_selected) {
-            let path = self.space.files_dir(&self.active_space.name).join(&f.name);
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if ext == "md" {
-                self.pending_editor = Some(super::PendingEditor::ScriptFile(path));
-            } else {
-                let _ = open::that_detached(&path);
-            }
-            self.push_status(format!("opened {}", f.name));
-        }
     }
 
     /// If `f` is a pasted image (UUID.ext), generate a descriptive name
@@ -1199,7 +1020,8 @@ mod tests {
             .unwrap();
         a.on_embed_done(Some((space.clone(), id.clone(), Err("offline".into()))));
         assert!(a.embed_rx.is_none());
-        assert!(a.status.contains("embedding failed"));
+        let (_, status) = a.drain_ui_events();
+        assert!(status.contains("embedding failed"));
         assert_eq!(a.db.list_files(&space).unwrap()[0].status, "ok");
     }
 
@@ -1311,10 +1133,12 @@ mod tests {
         let mut a = test_app();
         a.on_ocr_pull(Some(Ok("glm-ocr".to_string())));
         assert_eq!(a.ocr_engine, "local");
-        assert!(a.status.contains("local OCR ready"));
+        let (_, status) = a.drain_ui_events();
+        assert!(status.contains("local OCR ready"));
         a.on_ocr_pull(Some(Err("ollama not installed — get it".to_string())));
         assert_eq!(a.ocr_engine, "local"); // engine untouched on failure
-        assert!(a.status.contains("ollama not installed"));
+        let (_, status) = a.drain_ui_events();
+        assert!(status.contains("ollama not installed"));
     }
 
     #[test]
@@ -1344,7 +1168,7 @@ mod tests {
             a.db.list_files(&space).unwrap()[0].status,
             "ocr 5/10 (2 failed)"
         );
-        assert!(a.status.contains("5/10 pages (2 failed)"));
+        assert!(a.last_status().contains("5/10 pages (2 failed)"));
 
         // Partial success keeps the first failure's reason in the status.
         a.on_ocr_done(Some((
@@ -1393,9 +1217,12 @@ mod tests {
         a.db.set_file_chunks(&id, &[("p1".into(), "garbage".into())])
             .unwrap();
 
-        a.files_selected = 0;
-        a.reextract_selected_file();
-        assert!(a.status.contains("re-extracting"), "{}", a.status);
+        a.reextract_file("doc.txt");
+        assert!(
+            a.last_status().contains("re-extracting"),
+            "{}",
+            a.last_status()
+        );
         let texts = a.db.file_chunk_texts(&id).unwrap();
         assert_eq!(texts.len(), 1);
         assert!(texts[0].1.contains("real content"), "{texts:?}");
@@ -1464,44 +1291,19 @@ mod tests {
         std::fs::write(dir.join("old.txt"), "searchable content").unwrap();
         std::fs::write(dir.join("taken.txt"), "x").unwrap();
         a.rescan_files();
-        a.files_selected = a
-            .files_cache
-            .iter()
-            .position(|f| f.name == "old.txt")
-            .unwrap();
 
         // Collides with an existing name: rejected, nothing moves.
-        a.start_files_rename();
-        assert_eq!(a.files_edit, "old.txt");
-        a.files_edit = "taken.txt".to_string();
-        a.confirm_files_rename().unwrap();
-        assert!(a.status.contains("already exists"));
+        assert!(a.rename_file("old.txt", "taken.txt").is_err());
         assert!(dir.join("old.txt").exists());
 
         // Bad name rejected.
-        a.files_selected = a
-            .files_cache
-            .iter()
-            .position(|f| f.name == "old.txt")
-            .unwrap();
-        a.start_files_rename();
-        a.files_edit = "../evil.txt".to_string();
-        a.confirm_files_rename().unwrap();
-        assert!(a.status.contains("invalid name"));
+        assert!(a.rename_file("old.txt", "../evil.txt").is_err());
 
-        // Valid rename: disk moves, index follows, cursor tracks the file.
-        a.files_selected = a
-            .files_cache
-            .iter()
-            .position(|f| f.name == "old.txt")
-            .unwrap();
-        a.start_files_rename();
-        a.files_edit = "new.txt".to_string();
-        a.confirm_files_rename().unwrap();
+        // Valid rename: disk moves, index follows.
+        a.rename_file("old.txt", "new.txt").unwrap();
         assert!(!dir.join("old.txt").exists());
         assert!(dir.join("new.txt").exists());
         assert!(a.files_cache.iter().any(|f| f.name == "new.txt"));
-        assert_eq!(a.files_cache[a.files_selected].name, "new.txt");
     }
 
     #[test]
@@ -1511,108 +1313,26 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("gone.txt"), "bye").unwrap();
         a.rescan_files();
-        a.files_selected = 0;
-        a.confirm_files_delete().unwrap();
+        a.delete_file("gone.txt").unwrap();
         assert!(a.files_cache.is_empty());
         assert!(!dir.join("gone.txt").exists());
     }
 
     #[test]
-    fn files_command_opens_popup_and_rescans() {
-        let mut a = test_app();
-        let dir = a.space.files_dir(&a.active_space.name);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("seen.txt"), "content").unwrap();
-        a.run_command("files").unwrap();
-        assert_eq!(a.popup, crate::app::Popup::Files);
-        assert_eq!(a.files_cache.len(), 1);
-        assert!(a.files_mode == crate::app::FilesMode::Browse);
-    }
-
-    #[test]
-    fn confirm_files_add_imports_typed_path() {
+    fn import_file_copies_and_indexes_typed_path() {
         let mut a = test_app();
         let src = std::env::temp_dir().join(format!("nexus-add-{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&src, "typed in").unwrap();
-        a.start_files_add();
-        assert!(a.files_mode == crate::app::FilesMode::Add);
-        a.files_edit = src.to_string_lossy().to_string();
-        a.confirm_files_add();
-        assert!(a.files_mode == crate::app::FilesMode::Browse);
+        let name = a.import_file(&src).unwrap();
         assert_eq!(a.files_cache.len(), 1);
+        assert_eq!(a.files_cache[0].name, name);
 
-        // A bad path reports in status and stays recoverable.
-        a.start_files_add();
-        a.files_edit = "/definitely/not/a/file".to_string();
-        a.confirm_files_add();
-        assert!(a.status.contains("not a file"));
+        // A bad path is an error, and the cache stays unchanged.
+        assert!(
+            a.import_file(std::path::Path::new("/definitely/not/a/file"))
+                .is_err()
+        );
         assert_eq!(a.files_cache.len(), 1);
-    }
-
-    #[test]
-    fn picker_lists_dirs_first_descends_and_imports() {
-        let mut a = test_app();
-        let root = std::env::temp_dir().join(format!("nexus-pick-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(root.join("subdir")).unwrap();
-        std::fs::write(root.join("bbb.txt"), "file b").unwrap();
-        std::fs::write(root.join("aaa.txt"), "file a").unwrap();
-
-        a.picker_dir = root.clone();
-        a.open_file_picker();
-        assert!(a.files_mode == crate::app::FilesMode::Pick);
-        let names: Vec<&str> = a
-            .filtered_picker_entries()
-            .iter()
-            .map(|e| e.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["subdir", "aaa.txt", "bbb.txt"]); // dirs first, then alpha
-
-        // Enter on a dir descends and reloads.
-        a.picker_selected = 0;
-        a.picker_enter();
-        assert_eq!(a.picker_dir, root.join("subdir"));
-        assert!(a.filtered_picker_entries().is_empty());
-
-        // Backspace with empty filter ascends.
-        a.picker_backspace();
-        assert_eq!(a.picker_dir, root);
-
-        // Enter on a file imports it and returns to Browse.
-        let idx = a
-            .filtered_picker_entries()
-            .iter()
-            .position(|e| e.name == "aaa.txt")
-            .unwrap();
-        a.picker_selected = idx;
-        a.picker_enter();
-        assert!(a.files_mode == crate::app::FilesMode::Browse);
-        assert!(a.files_cache.iter().any(|f| f.name == "aaa.txt"));
-    }
-
-    #[test]
-    fn picker_filter_fuzzy_matches_and_backspace_edits_filter_first() {
-        let mut a = test_app();
-        let root = std::env::temp_dir().join(format!("nexus-pick-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("report-2026.pdf"), "x").unwrap();
-        std::fs::write(root.join("notes.md"), "y").unwrap();
-        a.picker_dir = root.clone();
-        a.open_file_picker();
-
-        a.picker_filter_push('r');
-        a.picker_filter_push('p');
-        a.picker_filter_push('t');
-        let names: Vec<&str> = a
-            .filtered_picker_entries()
-            .iter()
-            .map(|e| e.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["report-2026.pdf"]); // fuzzy subsequence "rpt"
-
-        // Backspace edits the filter (does NOT ascend while filter non-empty).
-        a.picker_backspace();
-        assert_eq!(a.picker_filter, "rp");
-        assert_eq!(a.picker_dir, root);
     }
 
     #[tokio::test]
@@ -1677,7 +1397,7 @@ mod tests {
             OcrUpdate::Progress(3, 10, 0),
         )));
         assert_eq!(a.files_cache[0].status, "ocr 3/10");
-        assert!(a.status.contains("3/10"), "{}", a.status);
+        assert!(a.last_status().contains("3/10"), "{}", a.last_status());
 
         // Progress for a file mid-way is still non-terminal: a Done after it applies.
         a.on_ocr_done(Some((

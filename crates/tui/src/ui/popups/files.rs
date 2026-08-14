@@ -14,11 +14,12 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState};
 
-use nexus_core::app::{App, FilesMode, FilesTab, ImagesMode, ScriptsMode};
+use crate::app_view::AppView;
+use nexus_core::app::{FilesMode, FilesTab, ImagesMode, ScriptsMode};
 
 use super::chrome;
 
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &AppView) {
     match app.files_tab {
         FilesTab::Files => render_files(f, app),
         FilesTab::Images => render_images(f, app),
@@ -27,7 +28,7 @@ pub fn render(f: &mut Frame, app: &App) {
 }
 
 #[allow(clippy::too_many_lines)] // tabs + picker + browse rows
-fn render_files(f: &mut Frame, app: &App) {
+fn render_files(f: &mut Frame, app: &AppView) {
     use nexus_core::app::FilesMode;
     let area = crate::ui::centered(f.area(), 64, 60);
 
@@ -153,7 +154,7 @@ fn render_files(f: &mut Frame, app: &App) {
     );
 }
 
-fn render_images(f: &mut Frame, app: &App) {
+fn render_images(f: &mut Frame, app: &AppView) {
     let area = crate::ui::centered(f.area(), 64, 60);
     let dim = Style::default().fg(app.theme.fg_dim);
 
@@ -222,7 +223,7 @@ fn render_images(f: &mut Frame, app: &App) {
     );
 }
 
-fn render_scripts(f: &mut Frame, app: &App) {
+fn render_scripts(f: &mut Frame, app: &AppView) {
     let area = crate::ui::centered(f.area(), 64, 60);
     let dim = Style::default().fg(app.theme.fg_dim);
 
@@ -319,7 +320,7 @@ fn render_scripts(f: &mut Frame, app: &App) {
     );
 }
 
-pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
     // Tab switches tab
     if key.code == KeyCode::Tab {
         app.files_tab = match app.files_tab {
@@ -344,7 +345,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     }
 }
 
-fn handle_files_key(app: &mut App, key: KeyEvent) -> Result<()> {
+fn handle_files_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
     use super::{
         BrowseAction, ConfirmDeleteAction, EditAction, classify_browse_key,
         classify_confirm_delete_key, classify_edit_key,
@@ -355,7 +356,9 @@ fn handle_files_key(app: &mut App, key: KeyEvent) -> Result<()> {
             Some(EditAction::Save) if app.files_mode == FilesMode::Add => {
                 app.confirm_files_add();
             }
-            Some(EditAction::Save) => app.confirm_files_rename()?,
+            Some(EditAction::Save) => {
+                app.confirm_files_rename();
+            }
             Some(EditAction::Backspace) => {
                 app.files_edit.pop();
             }
@@ -411,7 +414,7 @@ fn handle_files_key(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
-fn handle_images_key(app: &mut App, key: KeyEvent) -> Result<()> {
+fn handle_images_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
     use super::{
         BrowseAction, ConfirmDeleteAction, classify_browse_key, classify_confirm_delete_key,
     };
@@ -440,7 +443,7 @@ fn handle_images_key(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
-fn handle_scripts_key(app: &mut App, key: KeyEvent) -> Result<()> {
+fn handle_scripts_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
     use super::{
         BrowseAction, ConfirmDeleteAction, EditAction, classify_browse_key,
         classify_confirm_delete_key, classify_edit_key,
@@ -456,7 +459,9 @@ fn handle_scripts_key(app: &mut App, key: KeyEvent) -> Result<()> {
             Some(EditAction::Save) if app.scripts_mode == ScriptsMode::Create => {
                 app.confirm_script_create()?;
             }
-            Some(EditAction::Save) => app.confirm_script_rename()?,
+            Some(EditAction::Save) => {
+                app.confirm_script_rename();
+            }
             Some(EditAction::Backspace) => {
                 app.scripts_edit.pop();
             }

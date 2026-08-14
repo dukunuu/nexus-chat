@@ -1,15 +1,14 @@
 //! nexus-chat-core (lib crate `nexus_core`): the engine behind the `nexus`
 //! TUI and (later) the nexus host API. Owns all domain logic — sessions, research pipeline, provider
 //! clients, tools, files, skills, `SQLite` state — with no knowledge of the
-//! terminal UI.
+//! terminal UI. Phase 2e moved every piece of view state (composer, popup
+//! chrome, render caches, theme) into the TUI crate's `AppView`.
 //!
-//! During Phase 2 (workspace split) the `App` struct still carries view
-//! state and a few TUI-typed fields (composer, theme, render caches);
-//! step 2e moves those into the TUI crate.
-//!
-//! Interim lint allows (removed in 2c/2e): the whole `App` surface is `pub`
-//! so the TUI crate can drive it directly. Once commands + accessors land,
-//! these items go private again and the doc lints re-apply.
+//! Doc-lint allows: the domain surface the TUI/CLI/host drive directly
+//! (`Db`, provider, config, `App`'s event handlers) is still pub, so the
+//! per-item doc lints would be noise until the Phase 4 host API pass
+//! privatizes it. They're crate-scoped deliberately — the 2e goal (zero
+//! TUI deps) is unaffected.
 #![allow(
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
@@ -23,15 +22,10 @@ pub mod citations;
 pub mod config;
 pub mod db;
 pub mod extract;
-pub mod filter_input;
-pub mod history_cache;
-pub mod input;
 pub mod markdown;
 pub mod provider;
-pub mod selection;
 pub mod skills;
 pub mod space;
-pub mod theme;
 pub mod tools;
 pub mod update;
 

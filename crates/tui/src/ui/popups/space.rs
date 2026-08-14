@@ -5,11 +5,11 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState};
 
-use nexus_core::app::App;
+use crate::app_view::AppView;
 
 use super::chrome;
 
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &AppView) {
     use nexus_core::app::SpaceMode;
     use nexus_core::db::DEFAULT_SPACE;
     let area = crate::ui::centered(f.area(), chrome::STANDARD.0, chrome::STANDARD.1);
@@ -96,7 +96,7 @@ pub fn render(f: &mut Frame, app: &App) {
     chrome::render_list(f, list, &mut state, inner, spaces.len(), 1, &app.theme);
 }
 
-pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
     use super::{
         ConfirmDeleteAction, EditAction, classify_browse_key, classify_confirm_delete_key,
         classify_edit_key,

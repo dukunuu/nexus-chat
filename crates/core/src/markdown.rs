@@ -1,232 +1,29 @@
-//! Markdown rendering for the history pane. `tui_markdown` styles inline
-//! emphasis/code and highlights fenced code, but leaves block markers as literal
-//! text (`# `, `- `, ```` ``` ````). We strip those so the display — and anything
-//! copied from it — is clean text.
+//! Plain-text markdown helpers for the core crate: `to_plain` (markers
+//! stripped, for clipboard copy) and the GFM pipe-table splitter shared
+//! with the TUI's styled renderer (`crates/tui/src/ui/markdown.rs`). This
+//! module is deliberately free of ratatui/tui-markdown — styled rendering
+//! lives in the TUI crate.
 
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use tui_markdown::{DefaultStyleSheet, Options, StyleSheet};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
-/// The plain text of a rendered line (all spans concatenated).
-pub fn line_text(line: &Line) -> String {
-    line.spans.iter().map(|s| s.content.as_ref()).collect()
-}
-
-/// Terminal column width of one char (0 for combining marks, 2 for CJK/emoji).
-fn char_width(c: char) -> usize {
-    c.width().unwrap_or(0)
-}
-
-/// `tui_markdown`'s default inline-code style is white-on-black, which is
-/// invisible against the (very common) black-background terminal. Everything
-/// else defers to the library's own defaults.
-#[derive(Clone, Copy, Debug, Default)]
-struct NexusStyleSheet;
-
-impl StyleSheet for NexusStyleSheet {
-    fn heading(&self, level: u8) -> Style {
-        DefaultStyleSheet.heading(level)
-    }
-    fn code(&self) -> Style {
-        Style::new().fg(Color::Yellow).bg(Color::DarkGray)
-    }
-    fn link(&self) -> Style {
-        DefaultStyleSheet.link()
-    }
-    fn blockquote(&self) -> Style {
-        DefaultStyleSheet.blockquote()
-    }
-    fn heading_meta(&self) -> Style {
-        DefaultStyleSheet.heading_meta()
-    }
-    fn metadata_block(&self) -> Style {
-        DefaultStyleSheet.metadata_block()
-    }
-}
-
-fn md_options() -> Options<NexusStyleSheet> {
-    Options::new(NexusStyleSheet)
-}
-
-/// Rendered markdown: styled/wrapped `lines`, plus, per line, which fenced code
-/// block it belongs to (`code[i]`), and the raw text of each block (`blocks`).
-#[derive(Default)]
-pub struct Rendered {
-    pub lines: Vec<Line<'static>>,
-    pub code: Vec<Option<usize>>,
-    pub blocks: Vec<String>,
-}
-
-impl Rendered {
-    fn push(&mut self, line: Line<'static>, code: Option<usize>) {
-        self.lines.push(line);
-        self.code.push(code);
-    }
-}
-
-/// Render `content` to styled, width-wrapped lines. Fenced code blocks get a box
-/// drawn around them and are tracked so a long-press can copy the raw code.
-/// GFM pipe tables — which `tui_markdown` doesn't support (it just warns and
-/// drops them) — are pulled out and rendered as a bordered, column-aligned
-/// table before the rest of the content goes through the normal pipeline.
-pub fn render(content: &str, width: usize) -> Rendered {
-    let mut r = Rendered::default();
-    for seg in split_tables(content) {
-        match seg {
-            Segment::Table(rows, aligns) => render_table(&mut r, &rows, &aligns, width),
-            Segment::Text(text) => render_text(&mut r, &text, width),
-        }
-    }
-    r
-}
-
-fn render_text(r: &mut Rendered, content: &str, width: usize) {
-    let text = tui_markdown::from_str_with_options(content, &md_options());
-    let mut in_code = false;
-    let mut raw: Vec<String> = Vec::new();
-
-    for line in &text.lines {
-        let plain = line_text(line);
-        let unstyled = line.spans.iter().all(|s| s.style == Style::default());
-
-        // Fence line toggles a code block; the fence itself isn't shown.
-        if unstyled && plain.trim_start().starts_with("```") {
-            if in_code {
-                in_code = false;
-                push_code_border(r, width, false);
-                r.blocks.push(raw.join("\n"));
-            } else {
-                in_code = true;
-                raw.clear();
-                push_code_border(r, width, true);
-            }
-            continue;
-        }
-
-        if in_code {
-            raw.push(plain);
-            push_code_content(r, line, width);
-            continue;
-        }
-
-        let id = None;
-        match classify(line, &plain) {
-            Block::Drop => {}
-            Block::Header(body) => {
-                let styled = Span::styled(
-                    body,
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                );
-                for l in wrap_styled_line(&Line::from(styled), width) {
-                    r.push(l, id);
-                }
-            }
-            Block::List(body) => {
-                for l in wrap_styled_line(&Line::from(body), width) {
-                    r.push(l, id);
-                }
-            }
-            Block::Plain => {
-                for l in wrap_styled_line(line, width) {
-                    r.push(l, id);
-                }
-            }
-        }
-    }
-
-    // Unterminated block (e.g. mid-stream): close it so metadata stays valid.
-    if in_code {
-        push_code_border(r, width, false);
-        r.blocks.push(raw.join("\n"));
-    }
-}
-
-fn border_style() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
-
-/// Top (`top=true`) or bottom rule of a code box, tagged with the current block id.
-fn push_code_border(r: &mut Rendered, width: usize, top: bool) {
-    let id = Some(r.blocks.len());
-    if width < 2 {
-        r.push(Line::from(""), id);
-        return;
-    }
-    let (l, rt) = if top { ('┌', '┐') } else { ('└', '┘') };
-    let bar = format!("{l}{}{rt}", "─".repeat(width - 2));
-    r.push(Line::from(Span::styled(bar, border_style())), id);
-}
-
-/// A code content line: wrapped to the box interior, framed with `│ … │`.
-fn push_code_content(r: &mut Rendered, line: &Line, width: usize) {
-    let id = Some(r.blocks.len());
-    let interior = width.saturating_sub(4).max(1);
-    for row in wrap_styled_line(line, interior) {
-        let used: usize = row.spans.iter().map(|s| s.content.width()).sum();
-        let pad = interior.saturating_sub(used);
-        let mut spans: Vec<Span<'static>> = vec![Span::styled("│ ", border_style())];
-        spans.extend(row.spans);
-        spans.push(Span::styled(
-            format!("{} │", " ".repeat(pad)),
-            border_style(),
-        ));
-        r.push(Line::from(spans), id);
-    }
-}
-
-/// Plain text of `content` with markdown markers stripped (for clipboard copy).
-/// Tables are reconstructed as clean GFM markdown rather than run through
-/// `tui_markdown` (which doesn't support them).
-pub fn to_plain(content: &str) -> String {
-    split_tables(content)
-        .into_iter()
-        .map(|seg| match seg {
-            Segment::Table(rows, aligns) => plain_table(&rows, &aligns),
-            Segment::Text(text) => plain_text_segment(&text),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn plain_text_segment(content: &str) -> String {
-    let text = tui_markdown::from_str(content);
-    let mut lines: Vec<String> = Vec::new();
-    for line in &text.lines {
-        let plain = line_text(line);
-        match classify(line, &plain) {
-            Block::Drop => {}
-            Block::Header(r) | Block::List(r) => lines.push(r),
-            Block::Plain => lines.push(plain),
-        }
-    }
-    lines.join("\n")
-}
-
-// --- GFM pipe tables ---
-//
-// `tui_markdown` doesn't support tables (it warns and drops them), so we pull
-// table blocks out of the raw source ourselves — skipping anything inside a
-// fenced code block — and render/copy them directly from the parsed cells.
-
+/// One table cell's horizontal alignment, parsed from the GFM delimiter row.
 #[derive(Clone, Copy)]
-enum Align {
+pub enum TableAlign {
     Left,
     Center,
     Right,
 }
 
-enum Segment {
+/// A chunk of `content`: plain text, or a parsed GFM pipe table.
+pub enum TableSegment {
     Text(String),
-    Table(Vec<Vec<String>>, Vec<Align>),
+    Table(Vec<Vec<String>>, Vec<TableAlign>),
 }
 
 /// Split `content` into text and table segments. A table starts at a header
 /// row immediately followed by a valid delimiter row (`| --- | :---: |`), and
-/// continues while subsequent lines still look like table rows.
-fn split_tables(content: &str) -> Vec<Segment> {
+/// continues while subsequent lines still look like table rows. Shared by
+/// `to_plain` here and the TUI's styled `render` — both skip anything inside
+/// a fenced code block.
+pub fn split_tables(content: &str) -> Vec<TableSegment> {
     let lines: Vec<&str> = content.lines().collect();
     let mut segments = Vec::new();
     let mut buf: Vec<&str> = Vec::new();
@@ -242,7 +39,7 @@ fn split_tables(content: &str) -> Vec<Segment> {
         }
         if !in_fence && is_delimiter_row(lines.get(i + 1)) && looks_like_row(line) {
             if !buf.is_empty() {
-                segments.push(Segment::Text(std::mem::take(&mut buf).join("\n")));
+                segments.push(TableSegment::Text(std::mem::take(&mut buf).join("\n")));
             }
             let aligns = parse_aligns(lines[i + 1]);
             let mut rows = vec![split_cells(line)];
@@ -251,7 +48,7 @@ fn split_tables(content: &str) -> Vec<Segment> {
                 rows.push(split_cells(lines[j]));
                 j += 1;
             }
-            segments.push(Segment::Table(rows, aligns));
+            segments.push(TableSegment::Table(rows, aligns));
             i = j;
             continue;
         }
@@ -259,7 +56,7 @@ fn split_tables(content: &str) -> Vec<Segment> {
         i += 1;
     }
     if !buf.is_empty() {
-        segments.push(Segment::Text(buf.join("\n")));
+        segments.push(TableSegment::Text(buf.join("\n")));
     }
     segments
 }
@@ -284,15 +81,15 @@ fn is_delimiter_row(line: Option<&&str>) -> bool {
         })
 }
 
-fn parse_aligns(delim_line: &str) -> Vec<Align> {
+fn parse_aligns(delim_line: &str) -> Vec<TableAlign> {
     split_cells(delim_line)
         .iter()
         .map(|c| {
             let c = c.trim();
             match (c.starts_with(':'), c.ends_with(':')) {
-                (true, true) => Align::Center,
-                (false, true) => Align::Right,
-                _ => Align::Left,
+                (true, true) => TableAlign::Center,
+                (false, true) => TableAlign::Right,
+                _ => TableAlign::Left,
             }
         })
         .collect()
@@ -309,7 +106,7 @@ fn split_cells(line: &str) -> Vec<String> {
 
 /// Reconstruct a clean, standard GFM table from parsed cells — nicer to paste
 /// elsewhere than whatever mangled text `tui_markdown` would have produced.
-fn plain_table(rows: &[Vec<String>], aligns: &[Align]) -> String {
+fn plain_table(rows: &[Vec<String>], aligns: &[TableAlign]) -> String {
     let Some(header) = rows.first() else {
         return String::new();
     };
@@ -317,9 +114,9 @@ fn plain_table(rows: &[Vec<String>], aligns: &[Align]) -> String {
     let delim: Vec<&str> = aligns
         .iter()
         .map(|a| match a {
-            Align::Left => "---",
-            Align::Right => "---:",
-            Align::Center => ":---:",
+            TableAlign::Left => "---",
+            TableAlign::Right => "---:",
+            TableAlign::Center => ":---:",
         })
         .collect();
     out.push(format!("| {} |", delim.join(" | ")));
@@ -329,108 +126,40 @@ fn plain_table(rows: &[Vec<String>], aligns: &[Align]) -> String {
     out.join("\n")
 }
 
-/// Render a parsed table as a bordered, column-aligned box. Cell text still
-/// gets inline styling (bold/italic/code) via `tui_markdown`, and wraps within
-/// its column if the table doesn't fit `width`.
-fn render_table(r: &mut Rendered, rows: &[Vec<String>], aligns: &[Align], width: usize) {
-    let ncols = rows.iter().map(Vec::len).max().unwrap_or(0);
-    if ncols == 0 {
-        return;
-    }
-    let mut colw = vec![1usize; ncols];
-    for row in rows {
-        for (i, cell) in row.iter().enumerate() {
-            colw[i] = colw[i].max(cell.width().max(1));
-        }
-    }
-    // Shrink the widest columns to fit `width` (border + " x " padding per
-    // column), down to a 3-char floor so cells stay legible.
-    let overhead = (ncols + 1) + 2 * ncols;
-    let avail = width.saturating_sub(overhead);
-    let min_w = 3;
-    while colw.iter().sum::<usize>() > avail && colw.iter().any(|&w| w > min_w) {
-        let idx = colw.iter().enumerate().max_by_key(|&(_, &w)| w).unwrap().0;
-        colw[idx] -= 1;
-    }
-
-    let border = |l: char, mid: char, right: char| -> Line<'static> {
-        let mut s = String::from(l);
-        for (i, w) in colw.iter().enumerate() {
-            s.push_str(&"─".repeat(w + 2));
-            s.push(if i + 1 == colw.len() { right } else { mid });
-        }
-        Line::from(Span::styled(s, border_style()))
-    };
-
-    r.push(border('┌', '┬', '┐'), None);
-    for (ri, row) in rows.iter().enumerate() {
-        push_table_row(r, row, aligns, &colw, ri == 0);
-        if ri == 0 {
-            r.push(border('├', '┼', '┤'), None);
-        }
-    }
-    r.push(border('└', '┴', '┘'), None);
-}
-
-/// One logical table row, possibly wrapping to several physical lines if a
-/// cell doesn't fit its column.
-fn push_table_row(
-    r: &mut Rendered,
-    row: &[String],
-    aligns: &[Align],
-    colw: &[usize],
-    is_header: bool,
-) {
-    let wrapped: Vec<Vec<Line<'static>>> = (0..colw.len())
-        .map(|i| {
-            let mut spans = styled_cell(row.get(i).map_or("", String::as_str));
-            if is_header {
-                for s in &mut spans {
-                    s.style = s.style.add_modifier(Modifier::BOLD);
-                }
-            }
-            wrap_styled_line(&Line::from(spans), colw[i])
-        })
-        .collect();
-    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
-
-    for li in 0..height {
-        let mut spans: Vec<Span<'static>> = vec![Span::styled("│", border_style())];
-        for (i, w) in colw.iter().enumerate() {
-            let cell = wrapped[i].get(li);
-            let used: usize = cell.map_or(0, |l| l.spans.iter().map(|s| s.content.width()).sum());
-            let pad = w.saturating_sub(used);
-            let (lpad, rpad) = match aligns.get(i).copied().unwrap_or(Align::Left) {
-                Align::Left => (0, pad),
-                Align::Right => (pad, 0),
-                Align::Center => (pad / 2, pad - pad / 2),
-            };
-            spans.push(Span::raw(format!(" {}", " ".repeat(lpad))));
-            if let Some(l) = cell {
-                spans.extend(l.spans.clone());
-            }
-            spans.push(Span::raw(format!("{} ", " ".repeat(rpad))));
-            spans.push(Span::styled("│", border_style()));
-        }
-        r.push(Line::from(spans), None);
-    }
-}
-
-/// Inline-styled spans for one table cell (bold/italic/code), via
-/// `tui_markdown`'s single-line rendering of the cell's own text.
-fn styled_cell(text: &str) -> Vec<Span<'static>> {
-    let rendered = tui_markdown::from_str_with_options(text, &md_options());
-    rendered
-        .lines
+/// Plain text of `content` with markdown markers stripped (for clipboard
+/// copy). Tables are reconstructed as clean GFM markdown rather than mangled.
+pub fn to_plain(content: &str) -> String {
+    split_tables(content)
         .into_iter()
-        .next()
-        .map(|l| {
-            l.spans
-                .into_iter()
-                .map(|s| Span::styled(s.content.into_owned(), s.style))
-                .collect()
+        .map(|seg| match seg {
+            TableSegment::Table(rows, aligns) => plain_table(&rows, &aligns),
+            TableSegment::Text(text) => plain_text_segment(&text),
         })
-        .unwrap_or_default()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn plain_text_segment(content: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_fence = false;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue; // fence lines themselves are dropped
+        }
+        if in_fence {
+            out.push(line.to_string()); // code content verbatim
+            continue;
+        }
+        let plain = strip_inline(line);
+        match classify_line(&plain) {
+            Block::Drop => {}
+            Block::Header(rest) | Block::List(rest) => out.push(rest),
+            Block::Plain => out.push(plain),
+        }
+    }
+    out.join("\n")
 }
 
 enum Block {
@@ -440,14 +169,9 @@ enum Block {
     Plain,
 }
 
-/// Decide how a rendered markdown line should be treated. Only *unstyled* lines
-/// are candidates for block-marker stripping — styled ones are inline-formatted
-/// or syntax-highlighted code, which we leave untouched.
-fn classify(line: &Line, plain: &str) -> Block {
-    let unstyled = line.spans.iter().all(|s| s.style == Style::default());
-    if !unstyled {
-        return Block::Plain;
-    }
+/// Decide how a plain markdown line should be treated for copying: block
+/// markers (`#`, `-`) are stripped, fence lines dropped, everything else kept.
+fn classify_line(plain: &str) -> Block {
     let trimmed = plain.trim_start();
     if trimmed.starts_with("```") {
         return Block::Drop;
@@ -483,197 +207,101 @@ fn list_rest(plain: &str) -> Option<String> {
     None
 }
 
-/// Word-wrap a styled `Line` to `width` terminal columns, preserving per-span
-/// styling. Wraps by display width (CJK/emoji are 2 columns), not char count,
-/// so wide-glyph content — like a Japanese vocab table — doesn't overflow its
-/// budget. Mouse selection still maps by char index (`selection.rs`), which
-/// stays a close-enough approximation for wide glyphs, same as before.
-fn wrap_styled_line(line: &Line, width: usize) -> Vec<Line<'static>> {
-    let width = width.max(1);
-    let chars: Vec<(char, Style)> = line
-        .spans
-        .iter()
-        .flat_map(|sp| sp.content.chars().map(|c| (c, sp.style)))
-        .collect();
-
-    let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
-    let mut cur: Vec<(char, Style)> = Vec::new();
-    let mut word: Vec<(char, Style)> = Vec::new();
-
-    for (c, st) in chars {
-        if c == ' ' {
-            place_word(&mut rows, &mut cur, &mut word, width);
-            if !cur.is_empty() {
-                if width_of(&cur) < width {
-                    cur.push((' ', st));
-                } else {
-                    rows.push(std::mem::take(&mut cur));
-                }
-            }
-        } else {
-            word.push((c, st));
+/// Strip inline markdown markers from one line, keeping the plain text:
+/// `**bold**`/`*italic*`/`_em_`/`__strong__`/`` `code` ``/`[text](url)`/
+/// `![alt](url)`/`~~strike~~`. Unmatched markers are left as literal text
+/// (same as `tui_markdown`'s conservative behavior).
+fn strip_inline(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // `![alt](url)` → `alt`.
+        if c == '!'
+            && chars.get(i + 1) == Some(&'[')
+            && let Some((alt, rest)) = take_link(&chars, i + 1)
+        {
+            out.push_str(&alt);
+            i = rest;
+            continue;
         }
+        // `[text](url)` → `text`.
+        if c == '['
+            && let Some((link_text, rest)) = take_link(&chars, i)
+        {
+            out.push_str(&link_text);
+            i = rest;
+            continue;
+        }
+        // `` `code` `` → `code` (a run of backticks closes a run of the same
+        // length, per CommonMark).
+        if c == '`' {
+            let run = chars[i..].iter().take_while(|&&x| x == '`').count();
+            if let Some(close) = find_run(&chars, i + run, run, '`') {
+                let code: String = chars[i + run..close].iter().collect();
+                out.push_str(code.trim());
+                i = close + run;
+                continue;
+            }
+        }
+        // `~~strike~~`.
+        if c == '~'
+            && chars.get(i + 1) == Some(&'~')
+            && let Some(close) = find_run(&chars, i + 2, 2, '~')
+        {
+            out.push_str(&chars[i + 2..close].iter().collect::<String>());
+            i = close + 2;
+            continue;
+        }
+        // `**bold**`, `*italic*`, `__strong__`, `_em_`.
+        if (c == '*' || c == '_')
+            && let Some(run) = emphasis_run(&chars, i)
+            && let Some(close) = find_run(&chars, i + run, run, c)
+        {
+            out.push_str(&chars[i + run..close].iter().collect::<String>());
+            i = close + run;
+            continue;
+        }
+        out.push(c);
+        i += 1;
     }
-    place_word(&mut rows, &mut cur, &mut word, width);
-    if !cur.is_empty() {
-        rows.push(cur);
-    }
-    if rows.is_empty() {
-        rows.push(Vec::new());
-    }
-    rows.into_iter().map(row_to_line).collect()
+    out
 }
 
-/// Total display width of a run of styled chars.
-fn width_of(v: &[(char, Style)]) -> usize {
-    v.iter().map(|&(c, _)| char_width(c)).sum()
+/// `[text](url)` starting at `open` (the `[`): returns `(text, index after ')')`.
+fn take_link(chars: &[char], open: usize) -> Option<(String, usize)> {
+    let close = chars[open..].iter().position(|&c| c == ']')? + open;
+    if chars.get(close + 1) != Some(&'(') {
+        return None;
+    }
+    let end = chars[close + 2..].iter().position(|&c| c == ')')? + close + 2;
+    Some((chars[open + 1..close].iter().collect(), end + 1))
 }
 
-/// Flush the accumulated `word` into the current row, wrapping (and hard-breaking
-/// over-long words) as needed. All measured in display columns.
-fn place_word(
-    rows: &mut Vec<Vec<(char, Style)>>,
-    cur: &mut Vec<(char, Style)>,
-    word: &mut Vec<(char, Style)>,
-    width: usize,
-) {
-    if word.is_empty() {
-        return;
+/// Index of a run of `run` copies of `marker` starting at or after `from`.
+fn find_run(chars: &[char], from: usize, run: usize, marker: char) -> Option<usize> {
+    if run == 0 {
+        return None;
     }
-    let w = std::mem::take(word);
-    if width_of(&w) > width {
-        if !cur.is_empty() {
-            rows.push(std::mem::take(cur));
-        }
-        let mut chunk = Vec::new();
-        let mut chunk_w = 0;
-        for ch in w {
-            let cw = char_width(ch.0);
-            if chunk_w + cw > width && !chunk.is_empty() {
-                rows.push(std::mem::take(&mut chunk));
-                chunk_w = 0;
-            }
-            chunk.push(ch);
-            chunk_w += cw;
-        }
-        *cur = chunk;
-    } else {
-        if width_of(cur) + width_of(&w) > width {
-            rows.push(std::mem::take(cur));
-        }
-        cur.extend(w);
-    }
+    let start = chars[from..].iter().position(|&x| x == marker)? + from;
+    let len = chars[start..].iter().take_while(|&&x| x == marker).count();
+    (len >= run).then_some(start)
 }
 
-/// Rebuild an owned `Line` from a row of styled chars, merging same-style runs.
-fn row_to_line(row: Vec<(char, Style)>) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut buf = String::new();
-    let mut cur_style: Option<Style> = None;
-    for (c, st) in row {
-        if cur_style == Some(st) {
-            buf.push(c);
-        } else {
-            if let Some(s) = cur_style {
-                spans.push(Span::styled(std::mem::take(&mut buf), s));
-            }
-            buf.push(c);
-            cur_style = Some(st);
-        }
-    }
-    if let Some(s) = cur_style {
-        spans.push(Span::styled(buf, s));
-    }
-    Line::from(spans)
+/// Length of an emphasis marker run at `i` (`*`/`_`), capped at 2 — a run of
+/// 3+ is left alone ( treats a triple run as strong+em).
+fn emphasis_run(chars: &[char], i: usize) -> Option<usize> {
+    let c = chars[i];
+    let run = chars[i..].iter().take_while(|&&x| x == c).count();
+    (run == 1 || run == 2).then_some(run)
 }
 
 #[cfg(test)]
-mod inline_code_tests {
-    use super::*;
-
-    #[test]
-    fn inline_code_is_visible_on_a_black_background_terminal() {
-        let r = render("run `cargo test` now", 80);
-        let code_span = r.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.as_ref() == "cargo test");
-        let span = code_span.expect("inline code span not found");
-        // Not the library default (white-on-black — invisible on a black bg).
-        assert_ne!(
-            span.style,
-            Style::default().fg(Color::White).bg(Color::Black)
-        );
-        assert_eq!(span.style.bg, Some(Color::DarkGray));
-    }
-}
-
-#[cfg(test)]
-mod table_tests {
+mod to_plain_tests {
     use super::*;
 
     const TABLE: &str = "| Name | Age |\n| --- | ---: |\n| Alice | 30 |\n| Bob | 7 |";
-
-    #[test]
-    fn cjk_columns_stay_aligned() {
-        // Double-width glyphs must not desync the border from the content —
-        // every row's rendered display width has to match the border's.
-        let table = "| 単語 | 読み |\n| --- | --- |\n| 会う | あう |\n| 会社 | かいしゃ |";
-        let r = render(table, 40);
-        let widths: Vec<usize> = r
-            .lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.width()).sum())
-            .collect();
-        assert!(
-            widths.windows(2).all(|w| w[0] == w[1]),
-            "row widths: {widths:?}"
-        );
-    }
-
-    #[test]
-    fn detects_table_and_leaves_surrounding_text_alone() {
-        let content = format!("before\n\n{TABLE}\n\nafter");
-        let segs = split_tables(&content);
-        assert_eq!(segs.len(), 3);
-        assert!(matches!(&segs[0], Segment::Text(t) if t.trim() == "before"));
-        match &segs[1] {
-            Segment::Table(rows, aligns) => {
-                assert_eq!(
-                    rows,
-                    &[
-                        vec!["Name".to_string(), "Age".to_string()],
-                        vec!["Alice".to_string(), "30".to_string()],
-                        vec!["Bob".to_string(), "7".to_string()],
-                    ]
-                );
-                assert!(matches!(aligns[0], Align::Left));
-                assert!(matches!(aligns[1], Align::Right));
-            }
-            Segment::Text(_) => panic!("expected a table segment"),
-        }
-        assert!(matches!(&segs[2], Segment::Text(t) if t.trim() == "after"));
-    }
-
-    #[test]
-    fn pipes_inside_a_fenced_code_block_are_not_a_table() {
-        let content = "```\n| not | a | table |\n| --- | --- |\n```";
-        let segs = split_tables(content);
-        assert_eq!(segs.len(), 1);
-        assert!(matches!(&segs[0], Segment::Text(_)));
-    }
-
-    #[test]
-    fn render_produces_a_bordered_box_with_header_separator() {
-        let r = render(TABLE, 40);
-        let text: Vec<String> = r.lines.iter().map(line_text).collect();
-        // top border, header, header/body separator, 2 data rows, bottom border.
-        assert_eq!(text.len(), 6);
-        assert!(text[0].starts_with('┌') && text[0].ends_with('┐'));
-        assert!(text[1].contains("Name") && text[1].contains("Age"));
-        assert!(text[2].starts_with('├') && text[2].ends_with('┤'));
-        assert!(text[5].starts_with('└') && text[5].ends_with('┘'));
-    }
 
     #[test]
     fn to_plain_reconstructs_clean_markdown_table() {
@@ -682,5 +310,64 @@ mod table_tests {
             plain,
             "| Name | Age |\n| --- | ---: |\n| Alice | 30 |\n| Bob | 7 |"
         );
+    }
+
+    #[test]
+    fn detects_table_and_leaves_surrounding_text_alone() {
+        let content = format!("before\n\n{TABLE}\n\nafter");
+        let segs = split_tables(&content);
+        assert_eq!(segs.len(), 3);
+        assert!(matches!(&segs[0], TableSegment::Text(t) if t.trim() == "before"));
+        match &segs[1] {
+            TableSegment::Table(rows, aligns) => {
+                assert_eq!(
+                    rows,
+                    &[
+                        vec!["Name".to_string(), "Age".to_string()],
+                        vec!["Alice".to_string(), "30".to_string()],
+                        vec!["Bob".to_string(), "7".to_string()],
+                    ]
+                );
+                assert!(matches!(aligns[0], TableAlign::Left));
+                assert!(matches!(aligns[1], TableAlign::Right));
+            }
+            TableSegment::Text(_) => panic!("expected a table segment"),
+        }
+        assert!(matches!(&segs[2], TableSegment::Text(t) if t.trim() == "after"));
+    }
+
+    #[test]
+    fn pipes_inside_a_fenced_code_block_are_not_a_table() {
+        let content = "```\n| not | a | table |\n| --- | --- |\n```";
+        let segs = split_tables(content);
+        assert_eq!(segs.len(), 1);
+        assert!(matches!(&segs[0], TableSegment::Text(_)));
+    }
+
+    #[test]
+    fn strips_headers_lists_and_inline_markers() {
+        let plain = to_plain("# Big\n\n- one\n- two\n\nrun `cargo test` and **see** *it* work");
+        assert_eq!(
+            plain,
+            "Big\n\n• one\n• two\n\nrun cargo test and see it work"
+        );
+    }
+
+    #[test]
+    fn links_become_their_text_and_images_their_alt() {
+        let plain = to_plain("see [the docs](https://example.com) or ![diagram](x.png)");
+        assert_eq!(plain, "see the docs or diagram");
+    }
+
+    #[test]
+    fn unmatched_markers_stay_literal() {
+        assert_eq!(to_plain("a * lone star"), "a * lone star");
+        assert_eq!(to_plain("2 * 3 = 6"), "2 * 3 = 6");
+    }
+
+    #[test]
+    fn fenced_code_keeps_content_verbatim_and_drops_fences() {
+        let md = "```rust\nfn main() { println!(\"hi\"); }\n```\nafter";
+        assert_eq!(to_plain(md), "fn main() { println!(\"hi\"); }\nafter");
     }
 }

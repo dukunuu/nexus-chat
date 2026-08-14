@@ -4,7 +4,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::ListItem;
 
-use nexus_core::app::App;
+use crate::app_view::AppView;
 
 use super::chrome;
 
@@ -13,7 +13,7 @@ use super::chrome;
 /// Status/ToolCall events arrive — see `run_searcher` in `app/research.rs`),
 /// isolated into their own view plus a steer input line and a queued-steers
 /// section (steers not yet picked up at a round boundary).
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &AppView) {
     let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::WIDE.1);
 
     let dim = Style::default().fg(app.theme.fg_dim);
@@ -108,7 +108,7 @@ pub fn render(f: &mut Frame, app: &App) {
     f.render_widget(list, inner);
 }
 
-pub fn handle_key(app: &mut App, key: KeyEvent) {
+pub fn handle_key(app: &mut AppView, key: KeyEvent) {
     let ctrl = key
         .modifiers
         .contains(crossterm::event::KeyModifiers::CONTROL);

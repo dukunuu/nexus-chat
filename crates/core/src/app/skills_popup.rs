@@ -1,44 +1,21 @@
 use super::App;
-use super::{Popup, SkillsMode};
 use tokio::sync::mpsc;
 
 impl App {
-    /// List installed skills in the status line. Replaced by a real popup in
-    /// a later phase; `/skills` needs *something* to do meanwhile.
-    pub fn open_skills_popup(&mut self) {
-        self.skills_mode = SkillsMode::Browse;
-        self.skills_selected = self
-            .skills_selected
-            .min(self.skills.len().saturating_sub(1));
-        self.popup = Popup::Skills;
-    }
-
+    /// Re-read installed skills from disk (after an install/remove, or a
+    /// Ctrl+E hand-edit of a SKILL.md). The view re-clamps its cursor after
+    /// calling this.
     pub fn reload_skills(&mut self) {
         self.skills = crate::skills::load_skills(&crate::skills::skills_dir(&self.space.root));
-        let len = self.skills.len();
-        self.skills_selected = self.skills_selected.min(len.saturating_sub(1));
     }
 
-    pub fn move_skills_selection(&mut self, delta: i32) {
-        self.skills_selected = super::clamp_cursor(self.skills_selected, self.skills.len(), delta);
-    }
-
-    pub fn start_skill_install(&mut self) {
-        self.skills_edit.clear();
-        self.skills_mode = SkillsMode::Install;
-    }
-
-    pub fn start_skill_remove(&mut self) {
-        if self.skills.get(self.skills_selected).is_some() {
-            self.skills_mode = SkillsMode::ConfirmRemove;
-        }
-    }
-
-    /// Parse the typed `owner/repo/path` (or `owner/repo`) and kick off the
-    /// background GitHub fetch. Same bg-task shape as memory extraction.
-    pub fn confirm_skill_install(&mut self) {
-        let spec = self.skills_edit.trim().to_string();
-        self.skills_mode = SkillsMode::Browse;
+    /// Domain half of `/skills` install: parse the typed `owner/repo/path`
+    /// (or `owner/repo`) and kick off the background GitHub fetch. Same
+    /// bg-task shape as memory extraction. The view owns the edit buffer and
+    /// mode; `Ok(())` means the task started (or the spec was invalid — the
+    /// message is pushed as a status line).
+    pub fn start_skill_install(&mut self, spec: &str) {
+        let spec = spec.trim().to_string();
         let Some((owner, repo, path)) = crate::skills::parse_gh_shorthand(&spec) else {
             self.push_status(format!("expected owner/repo/path, got: {spec}"));
             return;
@@ -66,22 +43,5 @@ impl App {
             Some(Err(e)) => self.push_status(format!("skill install failed: {e}")),
             None => {}
         }
-    }
-
-    pub fn confirm_skill_remove(&mut self) {
-        if let Some(skill) = self.skills.get(self.skills_selected) {
-            let name = skill.name.clone();
-            let _ = std::fs::remove_dir_all(&skill.dir);
-            self.reload_skills();
-            self.push_status(format!("removed skill: {name}"));
-        }
-        self.skills_mode = SkillsMode::Browse;
-    }
-
-    /// Path to the highlighted skill's SKILL.md, for Ctrl+E in the skills popup.
-    pub fn skill_edit_path_for_selected(&self) -> Option<std::path::PathBuf> {
-        self.skills
-            .get(self.skills_selected)
-            .map(|s| s.dir.join("SKILL.md"))
     }
 }

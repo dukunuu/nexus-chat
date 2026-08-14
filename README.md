@@ -177,10 +177,10 @@ answers the gate; a reply with edits is folded in once by the approval agent.
 Two-crate workspace: the engine and the terminal frontend.
 
 ```
-crates/core/        nexus-chat-core (lib crate `nexus_core`) — no UI, drives TUI + CLI + the future host API
+crates/core/        nexus-chat-core (lib crate `nexus_core`) — domain only, zero TUI deps; drives TUI + CLI + the future host API
 ├── src/app/        the state machine (one module per feature)
-│   ├── mod.rs      App struct, gates, commands, boot, snapshot, event stream
-│   ├── commands.rs AppCommand seam (parsed from /-commands, executed)
+│   ├── mod.rs      App struct (domain fields only), gates, commands, boot, snapshot, event stream
+│   ├── commands.rs AppCommand seam + the /-command catalog (COMMANDS, fuzzy_score)
 │   ├── chat.rs     request lifecycle: history build, streaming, tool loop
 │   ├── research.rs the research pipeline: survey → plan → searchers → …
 │   ├── swarm.rs    multi-persona roundtable
@@ -188,7 +188,7 @@ crates/core/        nexus-chat-core (lib crate `nexus_core`) — no UI, drives T
 │   ├── usage.rs    usage/cost analytics
 │   ├── sessions.rs, spaces.rs, models.rs, backends.rs, memory.rs
 │   ├── files.rs, images.rs, scripts.rs, apps.rs   space artifacts
-│   ├── skills_popup.rs, compaction.rs, export.rs, copy.rs, transcribe.rs
+│   ├── skills_popup.rs, compaction.rs, export.rs, transcribe.rs
 │   └── tests.rs    app-level integration tests
 ├── src/provider/   message shapes, tool-call wire format, events
 │   └── openrouter.rs  one client for all OpenAI-wire backends (OR/OpenAI/…)
@@ -196,10 +196,14 @@ crates/core/        nexus-chat-core (lib crate `nexus_core`) — no UI, drives T
 ├── src/skills.rs, extract.rs, citations.rs   tool support
 ├── src/db.rs       SQLite: sessions, messages, usage, citations, model prefs
 ├── src/appserver.rs  localhost static server for model-created apps (8642)
-└── src/config.rs, space.rs, theme.rs, input.rs   credentials, spaces, composer
+├── src/markdown.rs pure to_plain copy path + the shared GFM table splitter
+└── src/config.rs, space.rs   credentials, spaces
 crates/tui/         nexus-chat — the `nexus` binary
 └── src/            main.rs bootstrap, cli.rs subcommands, events.rs loop,
-                    ui/ ratatui rendering (history, popups), markdown.rs
+                    app_view.rs (AppView: composer, popup chrome, render state —
+                    wraps App via Deref), flows/ (popup flow methods), composer.rs,
+                    theme.rs, selection.rs, filter_input.rs, history_cache.rs,
+                    ui/ ratatui rendering (history, popups), ui/markdown.rs
 ```
 
 Data lives under the XDG data dir: `spaces/<space>/` holds the per-space

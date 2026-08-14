@@ -1,15 +1,16 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
+use crate::app_view::AppView;
 use nexus_core::app::{App, ChatNotification, CopyOption, SettingsField, SettingsRow};
 use nexus_core::db::Db;
 use nexus_core::space::Space;
 
-fn test_app() -> App {
+fn test_app() -> AppView {
     let db = Db::open_in_memory().unwrap();
     let root = std::env::temp_dir().join(format!("nexus-popup-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join("spaces")).unwrap();
-    App::new(db, Some("k"), Space { root })
+    AppView::new(App::new(db, Some("k"), Space { root }))
 }
 
 fn render_to_string(width: u16, height: u16, render: impl FnOnce(&mut ratatui::Frame)) -> String {
@@ -285,17 +286,17 @@ fn new_session_welcome_screen_drops_the_previous_sessions_click_layout() {
 #[cfg(test)]
 mod usage_render_tests {
     use super::super::usage::render;
-    use nexus_core::app::App;
-    use nexus_core::app::usage::UsageData;
+    use crate::app_view::AppView;
+    use nexus_core::app::{App, usage::UsageData};
     use nexus_core::db::{Db, UsageByBackend, UsageByModel, UsageRow, UsageTotals};
     use nexus_core::space::Space;
 
-    fn populated_app() -> App {
+    fn populated_app() -> AppView {
         let db = Db::open_in_memory().unwrap();
         let space = Space {
             root: std::env::temp_dir().join(format!("nexus-usage-{}", uuid::Uuid::new_v4())),
         };
-        let mut app = App::new(db, Some("k"), space);
+        let mut app = AppView::new(App::new(db, Some("k"), space));
         app.usage_data = Some(UsageData {
             totals: UsageTotals {
                 requests: 28_172,
@@ -360,7 +361,7 @@ mod usage_render_tests {
     }
 
     /// Render the popup alone and return the buffer rows as strings.
-    fn render_rows(app: &App) -> Vec<String> {
+    fn render_rows(app: &AppView) -> Vec<String> {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
         terminal.draw(|f| render(f, app)).unwrap();
@@ -487,6 +488,7 @@ mod usage_render_tests {
 /// crate (ui/popups/watches.rs); the state it drives lives in core — this
 /// is the first seam test: TUI keys driving core state through the popup.
 mod watch_popup_tests {
+    use crate::app_view::AppView;
     use nexus_core::app::{App, WatchMode};
     use nexus_core::db::Db;
     use nexus_core::space::Space;
@@ -500,7 +502,7 @@ mod watch_popup_tests {
     #[test]
     fn watch_picker_ctrl_d_confirms_with_a_second_press() {
         let db = Db::open_in_memory().unwrap();
-        let mut a = App::new(db, Some("k"), test_space());
+        let mut a = AppView::new(App::new(db, Some("k"), test_space()));
         let space = a.active_space.id.clone();
         let session = a.db.create_session("watch", "a/b", &space, "chat").unwrap();
         let _ =
@@ -534,7 +536,7 @@ mod watch_popup_tests {
     #[test]
     fn watch_picker_escape_cancels_delete_confirmation() {
         let db = Db::open_in_memory().unwrap();
-        let mut a = App::new(db, Some("k"), test_space());
+        let mut a = AppView::new(App::new(db, Some("k"), test_space()));
         let space = a.active_space.id.clone();
         let session = a.db.create_session("watch", "a/b", &space, "chat").unwrap();
         let _ =

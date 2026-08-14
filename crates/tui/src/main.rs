@@ -1,9 +1,18 @@
+mod app_view;
 mod cli;
+mod composer;
 mod events;
+mod filter_input;
+mod flows;
+mod history_cache;
+mod selection;
+mod theme;
 mod ui;
 
 use anyhow::Result;
 use nexus_core::config;
+
+use app_view::AppView;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -14,7 +23,8 @@ async fn main() -> Result<()> {
     }
 
     let saved = config::load_all_providers().await?;
-    let mut app = nexus_core::boot(saved).await?;
+    let app = nexus_core::boot(saved).await?;
+    let mut app = AppView::new(app);
 
     let mut terminal = ratatui::init();
     // Capture mouse so the model picker is clickable and the terminal doesn't do

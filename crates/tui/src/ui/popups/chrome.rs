@@ -18,8 +18,8 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
 };
 
-use nexus_core::app::App;
-use nexus_core::theme::{Theme, blend};
+use crate::app_view::AppView;
+use crate::theme::{Theme, blend};
 
 /// Canonical popup sizes — every popup picks one so the whole family reads
 /// as the same design: small prompts, standard lists, tall lists, wide
@@ -67,7 +67,7 @@ pub fn popup_block_focused<'a>(
 pub fn hinted_block<'a>(
     title: impl Into<Line<'a>>,
     hint: &str,
-    app: &App,
+    app: &AppView,
     focused: bool,
     tone: Tone,
     width: u16,
@@ -114,7 +114,7 @@ pub fn render_hinted<'a>(
     area: Rect,
     title: impl Into<Line<'a>>,
     hint: &str,
-    app: &App,
+    app: &AppView,
     focused: bool,
     tone: Tone,
 ) -> Rect {
@@ -208,7 +208,7 @@ pub fn count_hint(n: usize, label: &str) -> String {
     format!("{n} {label}{} · ", if n == 1 { "" } else { "s" })
 }
 
-fn titled_line(app: &App, text: impl Into<String>, color: Color, hint: &str) -> Line<'static> {
+fn titled_line(app: &AppView, text: impl Into<String>, color: Color, hint: &str) -> Line<'static> {
     let text = text.into();
     let mut spans = vec![Span::styled(
         format!(" {text} "),
@@ -227,7 +227,7 @@ fn titled_line(app: &App, text: impl Into<String>, color: Color, hint: &str) -> 
 /// (accent2) + `label` alone when the filter is empty, `label: <filter>▏`
 /// (live cursor) while typing.
 pub fn filter_title(
-    app: &App,
+    app: &AppView,
     glyph: &str,
     label: impl Into<String>,
     filter: &str,
@@ -254,7 +254,7 @@ pub fn filter_title(
 /// The standard popup title: a per-popup glyph (accent2) + bold accent name.
 /// Every popup picks its own glyph so the family reads distinct at a glance
 /// while staying visually identical in frame.
-pub fn popup_title(app: &App, glyph: &str, name: impl Into<String>) -> Line<'static> {
+pub fn popup_title(app: &AppView, glyph: &str, name: impl Into<String>) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!(" {glyph} "), Style::default().fg(app.theme.accent2)),
         Span::styled(
@@ -268,7 +268,7 @@ pub fn popup_title(app: &App, glyph: &str, name: impl Into<String>) -> Line<'sta
 
 /// A title for text-entry popups: label + live value + trailing cursor.
 pub fn input_title(
-    app: &App,
+    app: &AppView,
     label: impl Into<String>,
     value: impl AsRef<str>,
     hint: &str,
@@ -293,12 +293,17 @@ pub fn input_title(
     Line::from(spans)
 }
 
-fn confirmish_title(app: &App, text: impl Into<String>, color: Color, hint: &str) -> Line<'static> {
+fn confirmish_title(
+    app: &AppView,
+    text: impl Into<String>,
+    color: Color,
+    hint: &str,
+) -> Line<'static> {
     titled_line(app, text, color, hint)
 }
 
 /// Destructive prompt title (error color).
-pub fn danger_title(app: &App, text: impl Into<String>, hint: &str) -> Line<'static> {
+pub fn danger_title(app: &AppView, text: impl Into<String>, hint: &str) -> Line<'static> {
     confirmish_title(app, text, app.theme.error, hint)
 }
 

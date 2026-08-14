@@ -55,19 +55,6 @@ pub fn new_sources_since(new_report: &str, previous_citations: &[String]) -> Vec
 }
 
 impl super::App {
-    pub fn open_watch_picker(&mut self) -> anyhow::Result<()> {
-        self.watches_cache = self.db.list_watches(&self.active_space.id)?;
-        self.watch_selected = 0;
-        self.watch_mode = super::WatchMode::Browse;
-        self.popup = super::Popup::Watch;
-        Ok(())
-    }
-
-    pub fn move_watch_selection(&mut self, delta: i32) {
-        self.watch_selected =
-            super::clamp_cursor(self.watch_selected, self.watches_cache.len(), delta);
-    }
-
     /// `/watch <topic>` with no existing watch of that exact topic in this
     /// space: create one (fixed 24h interval) plus its own research
     /// session, and kick off the first run immediately (ungated).
@@ -90,40 +77,16 @@ impl super::App {
         }
     }
 
-    /// Enter on the watch picker: jump to the watch's own research session,
-    /// mirroring `confirm_session`'s session-switch shape (load messages, set
-    /// `self.session`, refresh the toolbox, reset scroll/context state).
-    pub fn confirm_watch_session(&mut self) -> anyhow::Result<()> {
-        if let Some(w) = self.watches_cache.get(self.watch_selected).cloned()
-            && let Some(s) = self.db.get_session(&w.session_id)?
-        {
-            self.messages = self.db.load_messages(&s.id)?;
-            self.unread.remove(&s.id);
-            self.current_model = Some(s.model.clone());
-            self.push_status(format!("switched to: {}", s.title));
-            self.web_mode = s.web_mode;
-            self.session = Some(s);
-            self.backfill_compaction_row();
-            self.restore_survey_gate_prompt();
-            self.refresh_toolbox();
-            self.context_total = None;
-            self.scroll = 0;
-            self.sel.clear(); // selection points into the previous session's lines
-            self.cleanup_incognito_images();
+    /// The watch picker's confirm/delete flows live in the view layer; this
+    /// is the delete half: drop the row from the db and refresh the cache.
+    /// Returns whether a row existed.
+    pub fn delete_watch(&mut self, id: &str) -> anyhow::Result<bool> {
+        let existed = self.watches_cache.iter().any(|w| w.id == id);
+        if existed {
+            let _ = self.db.delete_watch(id);
+            self.watches_cache.retain(|x| x.id != id);
         }
-        self.popup = super::Popup::None;
-        Ok(())
-    }
-
-    pub fn delete_selected_watch(&mut self) {
-        if let Some(w) = self.watches_cache.get(self.watch_selected).cloned() {
-            let _ = self.db.delete_watch(&w.id);
-            self.watches_cache.retain(|x| x.id != w.id);
-            self.watch_selected = self
-                .watch_selected
-                .min(self.watches_cache.len().saturating_sub(1));
-            self.push_status(format!("deleted watch: {}", w.topic));
-        }
+        Ok(existed)
     }
 
     /// Startup hook: re-run every due watch (across all spaces) in the
