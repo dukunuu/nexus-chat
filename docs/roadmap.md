@@ -50,7 +50,7 @@ No CRDTs, no conflicts to resolve.
 | Sync engine | Rust, custom union-merge | schema is 90% append-only with UUID PKs; cr-sqlite is the upgrade path if it ever bites |
 | Web UI | thin browser client → local daemon | browsers can't run the core's host tools |
 | Mobile | Flutter, thin client first | flutter_rust_bridge keeps the full-replica/offline path open |
-| Exposure | named Cloudflare tunnel; `cloudflared` as a managed sidecar, setup automated via the official `cloudflare-rs` v4 API crate | quick tunnels change URL on restart — useless for a configured client; no embeddable official tunnel SDK exists |
+| Exposure | named Cloudflare tunnel; `cloudflared` as a managed sidecar, setup automated via direct Cloudflare v4 API calls (the existing reqwest client) | quick tunnels change URL on restart — useless for a configured client; no embeddable official tunnel SDK exists |
 | Deployment | laptop as hub (free, data stays home) | VM / home box is a deployment change, not an architecture change |
 
 ## Phases
@@ -286,32 +286,68 @@ never arrives is dropped by the rescan (warning printed).
 ### Phase 4 — `nexus host` (the daemon, in one subcommand)
 
 One command turns the current machine into the hub. Runs headless-core +
-HTTP/SSE API, then manages everything around it:
+HTTP/SSE API, then manages everything around it. Two API surfaces:
 
-- HTTP API: sessions/messages/models/spaces; `POST message` → SSE stream
-  of `StreamEvent`; `/v1/events` global feed; cancel/steer; watches;
-  `/apps/*`.
-- Worker mode: JSON-RPC tool execution + capability advertisement (the
-  remote `ToolExecutor` impl).
-- Auth: bearer token; tunnel exposes the port, the token gates it.
+**Provider gateway** (model access — stock OpenAI SDKs work unchanged):
+
+- `POST /v1/chat/completions` — streaming reverse proxy: route by `model`
+  through the existing `Backends`/models mapping (the TUI's dispatch
+  logic), with an optional `x-nexus-backend` override header; inject the
+  upstream key from `config.toml`/env; **byte-passthrough** the SSE
+  response (`[DONE]` included). No parse/re-emit — all backends are
+  OpenAI-wire already, so tool-call deltas, reasoning, and usage pass
+  through risk-free. Non-streaming JSON passes through too.
+- `GET /v1/models` — aggregated catalog from the core registry (OpenAI SDK
+  model pickers see what is routable).
+- `GET /v1/backends` — backend list: tag, configured (key present),
+  default, model count — the model→backend routing table made visible.
+- Auth layering: one host token in (the same `Authorization: Bearer`
+  header OpenAI SDKs already send); upstream keys never leave the hub,
+  never logged, never returned.
+- Usage accounting: proxied calls feed the existing `usage_log`.
+
+**Session API** (nexus state — what a web/mobile UI renders), all on the
+existing seam:
+
+- `GET /v1/snapshot` → serde `CoreSnapshot`; `POST /v1/command` →
+  `AppCommand`; `GET /v1/events` → SSE of `AppEvent` + `ChatEvent`/
+  `StreamEvent` frames; `POST /v1/sync` → `Changeset` in, reply `Changeset`
+  out (the sync engine's HTTP transport); `/apps/*` with a `public_base`
+  override so tunneled app URLs point at the tunnel host, not 127.0.0.1.
+- Worker: `GET /v1/tools` capability advertisement + `POST /v1/tools/run`
+  JSON-RPC — the remote `ToolExecutor` impl from Phase 2d.
+
+**Process management**:
+
+- **Auth**: bearer token generated on first run, stored in `config.toml`
+  (machine-local, never syncs); gates every route including `/apps/*`.
 - **Tunnel management**: spawns the official `cloudflared` binary as a
   sidecar (config written by the daemon), health-checks the URL, restarts
-  it on failure. Not embedded — updates come from brew/apt independently.
-- **`nexus host --setup`**: non-interactive provisioning via the official
-  `cloudflare-rs` v4 API crate — API token → create named tunnel + DNS
-  record + credentials file; no `cloudflared tunnel login` needed.
-- **Sleep guard**: pmset/caffeinate while hosting, released on exit; warns
-  on battery.
-- **QR enrollment**: prints an ASCII QR encoding
-  `nexus://host=<url>&token=…` — the mobile app scans once, done.
+  it on failure; quick-tunnel fallback when no named tunnel. Not embedded —
+  updates come from brew/apt independently.
+- **`nexus host --setup`**: non-interactive provisioning via direct
+  Cloudflare v4 API calls with the existing reqwest client (revision: the
+  `cloudflare-rs` crate is dropped — it wraps four REST calls in a second
+  blocking reqwest tree): API token → create named tunnel + DNS record +
+  credentials file; no `cloudflared tunnel login` needed.
+- **Sleep guard**: pmset/caffeinate (macOS) / systemd-inhibit (Linux)
+  while hosting, released on exit; warns on battery.
+- **QR enrollment**: ASCII QR encoding `nexus://host=<url>&token=…` — the
+  mobile app scans once, done.
 - Laptop service setup: launchd/systemd wrapper; charge cap note.
-- TUI gets `--remote <url>` mode — dogfoods the API.
-- **Exit**: browser on the phone reaches the laptop's daemon through the
-  tunnel, streams a chat, runs python via the worker.
+- `--remote <url>` TUI mode moves to Phase 5 with the web UI — both are
+  new frontends on this API and share the snapshot/event-driven render
+  work.
+- **Exit**: phone browser/curl reaches the daemon through the tunnel,
+  streams a chat through the gateway with a stock OpenAI SDK, and runs
+  python via the worker.
 
 ### Phase 5 — Web UI
 
-- Thin client: sessions list, chat view, SSE streaming, markdown rendering.
+- Thin client: sessions list, chat view, SSE streaming, markdown
+  rendering; raw chat widgets use stock OpenAI SDKs against the Phase 4
+  gateway. Includes the `--remote <url>` TUI mode (dogfoods the session
+  API).
 - **Exit**: usable chat + research view from any browser.
 
 ### Phase 6 — Mobile (Flutter)
@@ -359,6 +395,14 @@ HTTP/SSE API, then manages everything around it:
   is no official embeddable Rust SDK. Evaluated and rejected: the
   `cloudflared` crate on crates.io (KABBOUCHI, v0.0.3, last pushed
   Feb 2024, 0 stars) — abandoned and unproven.
-- **Control plane = official `cloudflare-rs` crate** (cloudflare/cloudflare-rs,
-  Rust library for the Cloudflare v4 API) — used by `nexus host --setup` to
-  provision the named tunnel + DNS record + credentials non-interactively.
+- **Control plane = direct Cloudflare v4 API calls** (revised with Phase 4:
+  `cloudflare-rs` is dropped — it wraps four REST calls in a second,
+  blocking reqwest tree; the workspace's existing async reqwest covers
+  create-tunnel / DNS-record / tunnel-token / delete directly). Used by
+  `nexus host --setup` to provision the named tunnel + DNS record +
+  credentials non-interactively.
+- **Provider gateway in `nexus host`** (decided with Phase 4): `POST
+  /v1/chat/completions` reverse-proxies to OpenCode/OpenAI/OpenRouter by
+  model with byte-passthrough streaming — one host token, upstream keys
+  stay on the hub, stock OpenAI SDKs work everywhere. `GET /v1/models` and
+  `GET /v1/backends` expose the routing table and catalog.
