@@ -46,8 +46,10 @@ mod watches;
 pub use backends::{Backends, composite_id};
 pub use chat::{code_blocks, human_size, pick_greeting};
 pub use commands::{AppCommand, COMMANDS, Command, Match, command_score, fuzzy_score};
+pub use files::OcrUpdate;
+pub use research::{PlanQuestion, ResearchUpdate};
 pub use sessions::session_score;
-pub use swarm::parse_persona_editor;
+pub use swarm::{SwarmUpdate, parse_persona_editor};
 
 #[cfg(test)]
 use chat::split_inline_reasoning;
@@ -78,7 +80,7 @@ pub fn fuzzy_filter_sorted<T>(items: &[T], score_fn: impl Fn(&T) -> Option<i32>)
 }
 
 /// Which tab in the `/files` popup is active.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum FilesTab {
     Files,
     Images,

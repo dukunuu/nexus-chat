@@ -151,3 +151,77 @@ impl App {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Phase 5 clients (web/mobile/`--remote`) parse `CoreSnapshot` `JSON`
+    /// — this golden string locks the wire shape so a field rename or
+    /// reorder can never silently break a client. Update it deliberately
+    /// when the shape changes.
+    #[test]
+    fn golden_json_locks_wire_shape() {
+        let snap = CoreSnapshot {
+            sessions: vec![SessionSnapshot {
+                id: "s1".into(),
+                title: "hello".into(),
+                slug: Some("hello".into()),
+                model: "openrouter:anthropic/claude-sonnet-4".into(),
+                kind: "chat".into(),
+                web_mode: false,
+                created_at: "2025-01-01T00:00:00Z".into(),
+            }],
+            models: vec![ModelSnapshot {
+                id: "openrouter:anthropic/claude-sonnet-4".into(),
+                name: "Claude Sonnet 4".into(),
+                context_length: Some(200_000),
+                favorite: true,
+            }],
+            settings: SettingsSnapshot {
+                model: Some("openrouter:anthropic/claude-sonnet-4".into()),
+                verbosity: "high".into(),
+                web_mode: false,
+                incognito: false,
+                searxng_url: String::new(),
+                langsearch_key: String::new(),
+                search_provider: "searxng".into(),
+                temperature: Some(0.7),
+                top_p: None,
+                max_tokens: None,
+                compact_threshold: 60,
+                memory_model: String::new(),
+                transcriber_model: String::new(),
+                ocr_model: String::new(),
+                ocr_engine: "router".into(),
+                embedding_model: String::new(),
+                image_gen_model: String::new(),
+                video_gen_model: String::new(),
+                blocked_domains: Vec::new(),
+            },
+            tasks: vec![TaskSnapshot {
+                id: 1,
+                session_id: "s1".into(),
+                session_title: "hello".into(),
+                model: "openrouter:anthropic/claude-sonnet-4".into(),
+                backend: "OpenRouter".into(),
+                status: "streaming".into(),
+                buffer_chars: 12,
+            }],
+        };
+        let json = serde_json::to_string(&snap).expect("snapshot serializes");
+        assert_eq!(
+            json,
+            r#"{"sessions":[{"id":"s1","title":"hello","slug":"hello","model":"openrouter:anthropic/claude-sonnet-4","kind":"chat","web_mode":false,"created_at":"2025-01-01T00:00:00Z"}],"models":[{"id":"openrouter:anthropic/claude-sonnet-4","name":"Claude Sonnet 4","context_length":200000,"favorite":true}],"settings":{"model":"openrouter:anthropic/claude-sonnet-4","verbosity":"high","web_mode":false,"incognito":false,"searxng_url":"","langsearch_key":"","search_provider":"searxng","temperature":0.7,"top_p":null,"max_tokens":null,"compact_threshold":60,"memory_model":"","transcriber_model":"","ocr_model":"","ocr_engine":"router","embedding_model":"","image_gen_model":"","video_gen_model":"","blocked_domains":[]},"tasks":[{"id":1,"session_id":"s1","session_title":"hello","model":"openrouter:anthropic/claude-sonnet-4","backend":"OpenRouter","status":"streaming","buffer_chars":12}]}"#
+        );
+        // The golden string must also parse back into the same shape.
+        let back: CoreSnapshot = serde_json::from_str(&json).expect("golden parses");
+        assert_eq!(back.sessions[0].title, "hello");
+        assert_eq!(back.sessions[0].slug.as_deref(), Some("hello"));
+        assert_eq!(back.models[0].context_length, Some(200_000));
+        assert_eq!(back.settings.temperature, Some(0.7));
+        assert_eq!(back.settings.blocked_domains, Vec::<String>::new());
+        assert_eq!(back.tasks[0].status, "streaming");
+        assert_eq!(back.tasks[0].buffer_chars, 12);
+    }
+}

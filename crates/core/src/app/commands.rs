@@ -205,7 +205,11 @@ pub fn command_score(c: &Command, needle: &str) -> Option<i32> {
 /// One user intent, in the seam's own words. Parsed from the `/`-command
 /// line (`App::parse_command`) or synthesized by the TUI keys, the CLI, or
 /// the Phase 4 host; `App::execute` is the only mutation path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serde: `POST /v1/command` ships this enum directly — every payload is
+/// plain (strings, bools, optionals, [`FilesTab`](super::FilesTab)), so the
+/// seam itself is the wire type; no mirror needed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AppCommand {
     /// `/quit` — exit the app.
     Quit,
