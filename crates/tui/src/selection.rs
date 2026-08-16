@@ -138,6 +138,12 @@ impl HistorySel {
     /// snaps to word/line boundaries instead of a plain char range, so
     /// dragging after a double-click selects whole words at a time.
     pub fn on_drag(&mut self, pos: Pos) {
+        // Some terminals emit a drag sample immediately after the button goes
+        // down, even when the pointer has not moved.  Treating that sample as
+        // motion cancels the long-press timer before it can fire.
+        if !self.moved && pos == self.down_pos {
+            return;
+        }
         self.moved = true;
         let Some(a) = self.anchor else { return };
         self.sel = Some(match self.click_count {
@@ -153,6 +159,9 @@ impl HistorySel {
         self.down_at = None;
         if self.long_pressed {
             self.long_pressed = false;
+            self.anchor = None;
+            self.moved = false;
+            self.last_click = None;
             return None; // already handled + copied by the timer
         }
         let pos = pos.unwrap_or(self.down_pos);
@@ -198,23 +207,35 @@ impl HistorySel {
     /// a message, that message's index — `App` resolves this to the message's
     /// exact original text rather than a wrap-reconstructed approximation.
     pub fn check_long_press(&mut self) -> Option<LongPress> {
-        match self.down_at {
-            Some(t) if !self.moved && !self.long_pressed && t.elapsed() >= LONG_PRESS => {
-                self.long_pressed = true;
-                let line = self.down_pos.0;
-                if let Some(url) = self.url_at(self.down_pos) {
-                    return Some(LongPress::Url(url));
-                }
-                if let Some(&Some(id)) = self.code.get(line) {
-                    self.select_code_block(id);
-                    return self.code_raw.get(id).cloned().map(LongPress::Code);
-                }
-                let msg = (*self.owner.get(line)?)?;
-                self.select_message(self.down_pos);
-                Some(LongPress::Message(msg))
-            }
-            _ => None,
+        let t = self.down_at?;
+        if self.moved || self.long_pressed || t.elapsed() < LONG_PRESS {
+            return None;
         }
+
+        // Mark the gesture as handled before looking up its content.  This is
+        // important for separator/blank lines with no owner: a missed lookup
+        // must not leave an already-expired deadline spinning the event loop.
+        self.long_pressed = true;
+        let line = self.down_pos.0;
+        if let Some(url) = self.url_at(self.down_pos) {
+            return Some(LongPress::Url(url));
+        }
+        if let Some(&Some(id)) = self.code.get(line) {
+            self.select_code_block(id);
+            return self.code_raw.get(id).cloned().map(LongPress::Code);
+        }
+        let Some(&Some(msg)) = self.owner.get(line) else {
+            return None;
+        };
+        self.select_message(self.down_pos);
+        Some(LongPress::Message(msg))
+    }
+
+    /// Whether the current press has already crossed the long-press threshold.
+    /// The event loop uses this on release to avoid treating a handled long
+    /// press as a plain click (notably on an image line).
+    pub const fn is_long_pressed(&self) -> bool {
+        self.long_pressed
     }
 
     /// Select every line belonging to code block `id`.
@@ -230,6 +251,11 @@ impl HistorySel {
     pub const fn clear(&mut self) {
         self.sel = None;
         self.anchor = None;
+        self.down_at = None;
+        self.moved = false;
+        self.long_pressed = false;
+        self.last_click = None;
+        self.click_count = 0;
     }
 
     /// The word-boundary range (start, end) around `pos`, on its own line.
@@ -504,6 +530,27 @@ mod tests {
         s.on_down((0, 0));
         s.on_drag((0, 5));
         assert_eq!(s.selected_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn stationary_drag_sample_does_not_cancel_long_press() {
+        let mut s = sel_with(&["hello world"]);
+        s.on_down((0, 2));
+        s.on_drag((0, 2));
+        assert!(s.deadline().is_some());
+        assert!(!s.is_long_pressed());
+    }
+
+    #[test]
+    fn release_check_handles_long_press_when_timer_was_not_woken() {
+        let mut s = sel_with(&["hello world"]);
+        s.on_down((0, 2));
+        // Simulate the event loop reaching release without its timer branch
+        // having been scheduled.  The release path calls the same check.
+        s.down_at = Some(Instant::now() - LONG_PRESS);
+        assert!(matches!(s.check_long_press(), Some(LongPress::Message(0))));
+        assert!(s.is_long_pressed());
+        assert!(s.on_up(Some((0, 2))).is_none());
     }
 
     fn copy_of(a: Option<Action>) -> Option<String> {

@@ -541,14 +541,29 @@ fn handle_input_mouse(app: &mut AppView, m: MouseEvent) {
             match app.mouse_target {
                 MouseTarget::History => {
                     let p = app.sel.pos_at(m.column, m.row);
-                    let was_image = p.is_some_and(|p| app.open_image_at_line(p.0));
+                    // The timer normally handles a long press while the
+                    // button is held.  Also check on release: some terminal
+                    // event streams do not wake the timer reliably while a
+                    // mouse button is down, and may only deliver the next
+                    // event when the button is released.
+                    let long_press = app.sel.check_long_press();
+                    let long_press_handled = long_press.is_some() || app.sel.is_long_pressed();
+                    if let Some(long_press) = long_press {
+                        match long_press {
+                            crate::selection::LongPress::Code(text)
+                            | crate::selection::LongPress::Url(text) => app.copy_text(&text),
+                            crate::selection::LongPress::Message(idx) => app.copy_message(idx),
+                        }
+                    }
                     match app.sel.on_up(p) {
                         Some(crate::selection::Action::Copy(text)) => app.copy_text(&text),
                         Some(crate::selection::Action::OpenUrl(url)) => {
                             let _ = open::that_detached(&url);
                             app.push_status(format!("opened {url}"));
                         }
-                        None if !was_image && p.is_some() => {
+                        None if !long_press_handled
+                            && p.is_some_and(|p| app.open_image_at_line(p.0)) => {}
+                        None if !long_press_handled && p.is_some() => {
                             // Click without drag on a non-image line: open URLs or start selection.
                         }
                         None => {}
