@@ -48,7 +48,7 @@ const MAX_CONNECTIONS: usize = 128;
 /// `Access-Control-Allow-Methods` is required: without it a browser rejects
 /// the preflight for `POST /v1/command` and `POST /v1/chat/completions`
 /// (JSON bodies are never "simple" requests).
-const CORS_HEADERS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Nexus-Backend\r\nAccess-Control-Max-Age: 600\r\n";
+const CORS_HEADERS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Nexus-Backend, X-Nexus-Blob-Hash, X-Content-SHA256\r\nAccess-Control-Max-Age: 600\r\n";
 
 /// Configuration for a local host listener.
 #[derive(Debug, Clone)]
@@ -586,7 +586,10 @@ async fn handle_api_route(
     path: &str,
     state: &HostState,
 ) -> io::Result<()> {
-    if path == "/v1/sync/blob" || path.starts_with("/v1/sync/blob/") {
+    if path == "/v1/sync/blob"
+        || path.starts_with("/v1/sync/blob/")
+        || path.starts_with("/v1/sync/blobs/")
+    {
         return handle_sync_blob(stream, request, path, state).await;
     }
     match (request.method.as_str(), path) {
@@ -785,6 +788,7 @@ async fn handle_sync_blob(
     let query = split_target(&request.target).1;
     let path_parts = path
         .strip_prefix("/v1/sync/blob/")
+        .or_else(|| path.strip_prefix("/v1/sync/blobs/"))
         .and_then(|rest| rest.split_once('/'));
     let space_id = query_param(query, "space_id")
         .or_else(|| path_parts.map(|(space, _)| percent_decode(space)));
@@ -801,7 +805,10 @@ async fn handle_sync_blob(
             if request.body.len() > MAX_BLOB_BYTES {
                 return respond_text(stream, 413, "blob too large").await;
             }
-            let Some(hash) = query_param(split_target(&request.target).1, "hash") else {
+            let hash = query_param(query, "hash")
+                .or_else(|| request.headers.get("x-nexus-blob-hash").cloned())
+                .or_else(|| request.headers.get("x-content-sha256").cloned());
+            let Some(hash) = hash else {
                 return respond_error(stream, 400, "sync blob is missing hash").await;
             };
             let result = ask_actor(&state.requests, |reply| HostRequest::PutBlob {

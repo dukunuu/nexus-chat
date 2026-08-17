@@ -525,7 +525,6 @@ async fn esc_stop_keeps_partial_response() {
 }
 
 #[test]
-#[test]
 fn effort_accepted_follows_the_models_own_list() {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("k"), test_space());

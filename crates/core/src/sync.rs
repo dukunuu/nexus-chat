@@ -2351,7 +2351,6 @@ mod tests {
     fn file_blobs_transfer_keep_and_report_missing() {
         let pair = Pair::new();
         let a = &pair.a;
-        let b = &pair.b;
         let sid = space(a, "default");
         write_blob(&pair.space_a(), "default", "notes.txt", b"hello sync");
         let hash = sha256_hex(b"hello sync");
@@ -2504,7 +2503,6 @@ mod tests {
     fn space_rename_moves_the_dir() {
         let pair = Pair::new();
         let a = &pair.a;
-        let b = &pair.b;
         let sp = a.create_space("work").unwrap();
         pair.space_a().ensure_space_dir("work").unwrap();
         pair.space_b().ensure_space_dir("work").unwrap();
