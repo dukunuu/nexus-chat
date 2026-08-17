@@ -26,6 +26,8 @@ struct Provider {
     #[serde(default)]
     opencode_key: String,
     #[serde(default)]
+    host_token: Option<String>,
+    #[serde(default)]
     openai_codex: Option<CodexCredentials>,
 }
 
@@ -45,6 +47,9 @@ pub struct SavedCreds {
     pub openai_key: Option<String>,
     pub opencode_key: Option<String>,
     pub codex: Option<CodexCredentials>,
+    /// Bearer token protecting the local host API, persisted under
+    /// `[provider].host_token` and never synced with space data.
+    pub host_token: Option<String>,
 }
 
 /// XDG dirs for the app: `~/.config/nexus-chat` and `~/.local/share/nexus-chat`.
@@ -93,6 +98,7 @@ pub fn load_system_prompt() -> Result<String> {
 pub fn load_creds_offline() -> SavedCreds {
     let (mut openrouter_key, mut openai_key, mut opencode_key, codex) =
         load_config_all().unwrap_or_default();
+    let host_token = load_host_token().ok().flatten();
     if openrouter_key.is_empty()
         && let Ok(v) = std::env::var(OPENROUTER_ENV_KEY)
         && !v.trim().is_empty()
@@ -116,6 +122,7 @@ pub fn load_creds_offline() -> SavedCreds {
         openai_key: (!openai_key.is_empty()).then_some(openai_key),
         opencode_key: (!opencode_key.is_empty()).then_some(opencode_key),
         codex,
+        host_token,
     }
 }
 
@@ -263,6 +270,66 @@ fn load_config_all() -> Result<(String, String, String, Option<CodexCredentials>
     ))
 }
 
+/// Read the optional host bearer token without exposing it in provider
+/// selection or diagnostics.
+pub fn load_host_token() -> Result<Option<String>> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let cfg: Config =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(cfg
+        .provider
+        .host_token
+        .filter(|token| !token.trim().is_empty()))
+}
+
+/// Persist the host bearer token in the existing provider table while keeping
+/// all provider credentials and Codex fields intact.
+pub fn save_host_token(token: &str) -> Result<()> {
+    let path = config_path()?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let mut value = if path.exists() {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        toml::from_str::<toml::Value>(&text)
+            .with_context(|| format!("parsing {}", path.display()))?
+    } else {
+        toml::Value::Table(toml::map::Map::new())
+    };
+    let table = value
+        .as_table_mut()
+        .context("config root is not a TOML table")?;
+    let provider = table
+        .entry("provider".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let provider = provider
+        .as_table_mut()
+        .context("config provider is not a TOML table")?;
+    provider.insert(
+        "host_token".to_string(),
+        toml::Value::String(token.to_string()),
+    );
+    let body = toml::to_string_pretty(&value).context("serializing config")?;
+    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// Return the persisted token or create a random one on the first host run.
+pub fn ensure_host_token() -> Result<String> {
+    if let Some(token) = load_host_token()? {
+        return Ok(token);
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    save_host_token(&token)?;
+    Ok(token)
+}
+
 // Long by design (device-flow state machine).
 #[allow(clippy::too_many_lines)]
 pub async fn login_openai_codex_device(
@@ -406,6 +473,9 @@ fn write_provider_config(
         escape(openai_key),
         escape(opencode_key),
     );
+    if let Ok(Some(token)) = load_host_token() {
+        let _ = writeln!(body, "host_token = \"{}\"", escape(&token));
+    }
     if let Some(c) = codex {
         body.push_str("\n[provider.openai_codex]\n");
         let _ = writeln!(body, "access = \"{}\"", escape(&c.access));
@@ -454,6 +524,7 @@ mod tests {
             openai_key: Some("sk-proj-abc".into()),
             opencode_key: Some("oc-token".into()),
             codex: Some(codex_creds("codex-token")),
+            ..Default::default()
         };
         assert_eq!(
             first_configured(&saved),
@@ -468,6 +539,7 @@ mod tests {
             openai_key: None,
             opencode_key: Some("oc-token".into()),
             codex: Some(codex_creds("codex-token")),
+            ..Default::default()
         };
         assert_eq!(
             first_configured(&saved),

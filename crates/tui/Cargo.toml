@@ -28,6 +28,7 @@ crossterm = { workspace = true }
 futures-util = { workspace = true }
 image = { workspace = true }
 open = { workspace = true }
+qrcode = { workspace = true }
 ratatui = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

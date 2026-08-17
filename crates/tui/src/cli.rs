@@ -20,6 +20,7 @@ use clap::{Parser, Subcommand};
 use nexus_core::app;
 use nexus_core::config;
 use nexus_core::db;
+use nexus_core::host::{HostConfig, HostServer};
 use nexus_core::provider::Model;
 use nexus_core::provider::openrouter::OpenRouter;
 use nexus_core::space;
@@ -220,6 +221,21 @@ pub enum Command {
         /// A shared sync directory, or `ssh://user@host`.
         target: Option<PathBuf>,
     },
+    /// Run the local HTTP/SSE daemon and provider gateway.
+    Host {
+        /// Loopback port for the host API.
+        #[arg(long, default_value_t = 8643)]
+        port: u16,
+        /// Start a quick `cloudflared` tunnel and print its public URL.
+        #[arg(long)]
+        tunnel: bool,
+        /// Do not hold the machine awake while hosting.
+        #[arg(long)]
+        no_sleep_guard: bool,
+        /// Provision a named Cloudflare tunnel using `CF_API_TOKEN`.
+        #[arg(long)]
+        setup: bool,
+    },
     /// Show data/config paths and which providers are configured.
     Status,
     /// Deeper diagnostics: db integrity, config, optional tools,
@@ -362,6 +378,12 @@ pub async fn run(cmd: Command) -> Result<()> {
         Command::Skills { cmd } => skills(cmd).await,
         Command::Open { session } => open(&session),
         Command::Sync { cmd, target } => sync_cmd(cmd, target.as_deref()),
+        Command::Host {
+            port,
+            tunnel,
+            no_sleep_guard,
+            setup,
+        } => host(port, tunnel, no_sleep_guard, setup).await,
         Command::Update => update().await,
         Command::Status => status(),
         Command::Doctor { network } => doctor(network).await,
@@ -1287,6 +1309,191 @@ async fn skills_install(spec: &str) -> Result<()> {
     Ok(())
 }
 
+// --- host daemon (Phase 4) ---
+
+/// Run the headless app actor, HTTP/SSE API, optional tunnel, and sleep guard.
+#[allow(clippy::too_many_lines)]
+async fn host(port: u16, quick_tunnel: bool, no_sleep_guard: bool, setup: bool) -> Result<()> {
+    let named = if setup {
+        Some(setup_named_tunnel(port).await?)
+    } else {
+        None
+    };
+    let token = config::ensure_host_token()?;
+    let saved = config::load_all_providers().await?;
+    let mut app = nexus_core::boot(saved).await?;
+    app.init();
+    let mut server = HostServer::bind(app, HostConfig::new(port, token.clone())).await?;
+    let local_url = format!("http://{}", server.local_addr());
+
+    let mut tunnel = if let Some(named) = &named {
+        Some(nexus_core::host::process::Tunnel::named(
+            &named.config_path,
+            &named.tunnel_id,
+        )?)
+    } else if quick_tunnel {
+        nexus_core::host::process::require_cloudflared()?;
+        Some(nexus_core::host::process::Tunnel::quick(server.local_addr().port()).await?)
+    } else {
+        // No sidecar: the server remains reachable on loopback and all
+        // shutdown cleanup is still centralized below.
+        None
+    };
+    let public_host = named
+        .as_ref()
+        .map(|result| format!("https://{}", result.hostname))
+        .or_else(|| {
+            tunnel
+                .as_ref()
+                .and_then(|sidecar| sidecar.public_url().map(str::to_string))
+        });
+    if let Some(base) = &public_host {
+        // Browser navigations cannot send Authorization. App links therefore
+        // carry the same token as a query parameter; `/v1/*` remains header-only.
+        server
+            .set_public_base(Some(format!("{base}?token={token}")))
+            .await?;
+        out(format!("public host: {base}"));
+        let healthy = nexus_core::host::process::health_check(base).await;
+        out(if healthy {
+            "public host health check: reachable"
+        } else {
+            "warning: public host health check failed; tunnel may still be starting"
+        });
+    } else if quick_tunnel || setup {
+        out("tunnel started, but no public URL was discovered");
+    }
+    let enrollment_host = public_host.as_deref().unwrap_or(&local_url);
+    let enrollment = format!("nexus://host={enrollment_host}&token={token}");
+    out(format!("host listening at {local_url}"));
+    out(format!("enrollment: {enrollment}"));
+    match qrcode::QrCode::new(enrollment.as_bytes()) {
+        Ok(code) => {
+            let qr = code
+                .render::<qrcode::render::unicode::Dense1x2>()
+                .quiet_zone(true)
+                .build();
+            out(qr);
+        }
+        Err(error) => out(format!("could not render enrollment QR: {error}")),
+    }
+
+    let mut sleep_guard = if no_sleep_guard {
+        None
+    } else {
+        match nexus_core::host::process::sleep_guard() {
+            Ok(guard) => guard,
+            Err(error) => {
+                out(format!("sleep guard unavailable: {error:#}"));
+                None
+            }
+        }
+    };
+    if nexus_core::host::process::on_battery() == Some(true) {
+        out("warning: hosting while on battery power");
+    }
+    tokio::signal::ctrl_c()
+        .await
+        .context("waiting for shutdown")?;
+    out("shutting down host…");
+    let _ = server.set_public_base(None).await;
+    if let Some(sidecar) = tunnel.as_mut() {
+        sidecar.stop().await;
+    }
+    if let Some(guard) = sleep_guard.as_mut() {
+        guard.stop().await;
+    }
+    server.shutdown().await;
+    Ok(())
+}
+
+/// Provision a named tunnel interactively when account/zone IDs were not
+/// supplied through `CF_ACCOUNT_ID`/`CF_ZONE_ID`.
+async fn setup_named_tunnel(port: u16) -> Result<nexus_core::host::cloudflare::SetupResult> {
+    use nexus_core::host::cloudflare::{
+        SetupOptions, list_accounts, list_zones, provision_named_tunnel,
+    };
+    let accounts = list_accounts().await?;
+    if accounts.is_empty() {
+        bail!("Cloudflare API returned no accounts");
+    }
+    let account_id = if let Ok(id) = std::env::var("CF_ACCOUNT_ID") {
+        id
+    } else {
+        out("Cloudflare accounts:");
+        for (index, account) in accounts.iter().enumerate() {
+            out(format!(
+                "  {}. {} ({})",
+                index + 1,
+                account.name,
+                account.id
+            ));
+        }
+        accounts[choose_index("account number", accounts.len())? - 1]
+            .id
+            .clone()
+    };
+    let zones = list_zones().await?;
+    if zones.is_empty() {
+        bail!("Cloudflare API returned no DNS zones");
+    }
+    let zone_id = if let Ok(id) = std::env::var("CF_ZONE_ID") {
+        id
+    } else {
+        out("Cloudflare zones:");
+        for (index, zone) in zones.iter().enumerate() {
+            out(format!("  {}. {} ({})", index + 1, zone.name, zone.id));
+        }
+        zones[choose_index("zone number", zones.len())? - 1]
+            .id
+            .clone()
+    };
+    let zone_name = zones
+        .iter()
+        .find(|zone| zone.id == zone_id)
+        .map_or("example.com", |zone| zone.name.as_str());
+    let hostname = std::env::var("CF_HOSTNAME")
+        .unwrap_or_else(|_| prompt("hostname", &format!("nexus.{zone_name}")));
+    let tunnel_name =
+        std::env::var("CF_TUNNEL_NAME").unwrap_or_else(|_| prompt("tunnel name", "nexus"));
+    out(format!("creating Cloudflare tunnel {tunnel_name:?}…"));
+    provision_named_tunnel(&SetupOptions {
+        account_id,
+        zone_id,
+        hostname,
+        tunnel_name,
+        port,
+    })
+    .await
+}
+
+fn choose_index(label: &str, count: usize) -> Result<usize> {
+    let value = prompt(label, "1");
+    let index = value
+        .trim()
+        .parse::<usize>()
+        .with_context(|| format!("{label} must be a number"))?;
+    if !(1..=count).contains(&index) {
+        bail!("{label} must be between 1 and {count}");
+    }
+    Ok(index)
+}
+
+fn prompt(label: &str, default: &str) -> String {
+    print!("{label} [{default}]: ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return default.to_string();
+    }
+    let line = line.trim();
+    if line.is_empty() {
+        default.to_string()
+    } else {
+        line.to_string()
+    }
+}
+
 // --- sync commands (Phase 3 merge engine) ---
 
 /// `nexus sync` dispatch: the export/import subcommands, or the positional
@@ -1639,7 +1846,14 @@ async fn doctor(network: bool) -> Result<()> {
     );
 
     // Optional external tools.
-    for tool in ["ffmpeg", "tesseract", "ollama", "node", "npm"] {
+    for tool in [
+        "ffmpeg",
+        "tesseract",
+        "ollama",
+        "node",
+        "npm",
+        "cloudflared",
+    ] {
         let present = std::process::Command::new(tool)
             .arg("--version")
             .output()
