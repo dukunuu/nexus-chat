@@ -49,6 +49,7 @@ pub use commands::{AppCommand, COMMANDS, Command, Match, command_score, fuzzy_sc
 pub use files::OcrUpdate;
 pub use research::{PlanQuestion, ResearchUpdate};
 pub use sessions::session_score;
+pub use snapshot::{CoreSnapshot, ModelSnapshot, SessionSnapshot, SettingsSnapshot, TaskSnapshot};
 pub use swarm::{SwarmUpdate, parse_persona_editor};
 
 #[cfg(test)]
@@ -509,6 +510,7 @@ const SPINNER_COLORS: [SpinnerColor; 3] = [
 type ModelsResult = std::result::Result<Vec<Model>, String>;
 
 /// One memory-extraction op, as emitted by the memory model.
+#[derive(Clone)]
 pub enum MemoryOp {
     Add(String),
     Update(usize, String),
@@ -537,6 +539,7 @@ pub const MAX_CHAT_TASKS: usize = 10;
 pub type ChatTaskId = u64;
 
 /// Identity of a parked survey/plan gate, as surfaced on the event stream.
+#[derive(Clone)]
 pub struct GateState {
     /// The session the reply must come from.
     pub session_id: String,
@@ -626,6 +629,7 @@ pub enum SurveyPhase {
     Approve { rework: bool },
 }
 
+#[derive(Clone)]
 pub enum LoginMsg {
     Status(String),
     Done(Result<crate::config::CodexCredentials, String>),
@@ -649,6 +653,7 @@ impl Drop for AbortOnDrop {
     }
 }
 
+#[derive(Clone)]
 pub enum AppEvent {
     /// A one-line status update from a domain path (the 2e step converts the
     /// `status` field writes into these; the field still exists until then).
@@ -886,7 +891,7 @@ pub struct App {
 
     pub sessions_cache: Vec<Session>,
     /// Background topic-generation result channel.
-    title_rx: Option<mpsc::UnboundedReceiver<(String, String, String)>>,
+    pub(crate) title_rx: Option<mpsc::UnboundedReceiver<(String, String, String)>>,
 }
 
 impl App {
@@ -1191,6 +1196,7 @@ impl App {
                 .map(|s| crate::tools::AppsCtx {
                     dir: self.space.apps_dir(&self.active_space.name),
                     server_port: s.port(),
+                    public_base: s.public_base().map(str::to_string),
                     registry: s.registry().clone(),
                     space_name: self.active_space.name.clone(),
                     space_id: self.active_space.id.clone(),

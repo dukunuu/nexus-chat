@@ -20,6 +20,7 @@ use std::fmt::Write as _;
 /// A background research pipeline update: a phase label (+ progress detail),
 /// the survey's clarifying questions awaiting a chat reply, the Planner's
 /// sub-questions awaiting approval, or the final report/error.
+#[derive(Clone)]
 pub enum ResearchUpdate {
     /// Successive updates within one stage share a `label` so the UI/db
     /// replace one row in place instead of appending per tick.

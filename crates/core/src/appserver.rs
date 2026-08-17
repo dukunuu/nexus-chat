@@ -160,6 +160,7 @@ impl AppRegistry {
 pub struct AppServer {
     port: u16,
     registry: AppRegistry,
+    public_base: Option<String>,
 }
 
 impl AppServer {
@@ -175,6 +176,7 @@ impl AppServer {
         let srv = Self {
             port,
             registry: registry.clone(),
+            public_base: None,
         };
         tokio::spawn(async move {
             loop {
@@ -195,8 +197,25 @@ impl AppServer {
         self.port
     }
 
+    /// Set the externally reachable base URL used in generated app links.
+    /// `None` restores the local URL. The value is trimmed of trailing `/`.
+    pub fn set_public_base(&mut self, base: Option<String>) {
+        self.public_base = base.map(|value| value.trim_end_matches('/').to_string());
+    }
+
+    /// The app URL for a registry UUID. A host/tunnel base uses the
+    /// authenticated `/apps/<uuid>/` route; local links keep the historical
+    /// direct app-server shape.
     pub fn app_url(&self, uuid: &str) -> String {
-        format!("http://127.0.0.1:{}/{}/", self.port(), uuid)
+        self.public_base.as_ref().map_or_else(
+            || format!("http://127.0.0.1:{}/{}/", self.port(), uuid),
+            |base| public_app_url(base, uuid),
+        )
+    }
+
+    /// The public base currently used in generated links, if any.
+    pub fn public_base(&self) -> Option<&str> {
+        self.public_base.as_deref()
     }
 
     pub const fn registry(&self) -> &AppRegistry {
@@ -396,6 +415,15 @@ async fn respond(
         stream.write_all(body).await?;
     }
     stream.shutdown().await
+}
+
+fn public_app_url(base: &str, uuid: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if let Some((path, query)) = base.split_once('?') {
+        format!("{path}/apps/{uuid}/?{query}")
+    } else {
+        format!("{base}/apps/{uuid}/")
+    }
 }
 
 fn parse_header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
@@ -842,9 +870,21 @@ mod tests {
         let reg = AppRegistry::load(&PathBuf::from("/tmp"));
         let s = AppServer {
             port: 9999,
-            registry: reg,
+            registry: reg.clone(),
+            public_base: None,
         };
         assert_eq!(s.app_url("some-uuid"), "http://127.0.0.1:9999/some-uuid/");
+
+        let mut public = AppServer {
+            port: 9999,
+            registry: reg,
+            public_base: None,
+        };
+        public.set_public_base(Some("https://hub.example.test?token=abc".into()));
+        assert_eq!(
+            public.app_url("some-uuid"),
+            "https://hub.example.test/apps/some-uuid/?token=abc"
+        );
     }
 
     #[tokio::test]

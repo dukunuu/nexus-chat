@@ -326,7 +326,7 @@ pub fn seed_tool_result_dedup(
     seen
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StreamEvent {
     /// A chunk of the visible answer.
     Token(String),

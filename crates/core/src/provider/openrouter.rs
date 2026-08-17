@@ -40,6 +40,26 @@ const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
 /// the API; only used to pick which of the two bases above to hit.
 const OPENCODE_GO_PREFIX: &str = "go:";
 
+/// The OpenAI-wire base URL used by a backend gateway route.
+pub fn base_url(tag: crate::provider::BackendTag) -> &'static str {
+    match tag {
+        crate::provider::BackendTag::OpenRouter => OPENROUTER_BASE,
+        crate::provider::BackendTag::OpenAi => OPENAI_BASE,
+        crate::provider::BackendTag::OpencodeGo => OPENCODE_ZEN_BASE,
+        crate::provider::BackendTag::Codex => CODEX_BASE,
+    }
+}
+
+/// Select the base URL and raw model id for a gateway request.
+pub fn gateway_route(tag: crate::provider::BackendTag, model: &str) -> (&'static str, String) {
+    if tag == crate::provider::BackendTag::OpencodeGo
+        && let Some(raw) = model.strip_prefix(OPENCODE_GO_PREFIX)
+    {
+        return (OPENCODE_GO_BASE, raw.to_string());
+    }
+    (base_url(tag), model.to_string())
+}
+
 /// Context windows for `OpenCode` Zen's general catalog (`/zen/v1/models`),
 /// keyed by raw model id. The Zen `/models` endpoint returns no context
 /// metadata (only `id/created/owned_by`), so without this table every `OpenCode`

@@ -91,6 +91,8 @@ pub struct FilesCtx {
 pub struct AppsCtx {
     pub dir: PathBuf,
     pub server_port: u16,
+    /// Public host base, when the daemon is exposed through a tunnel.
+    pub public_base: Option<String>,
     pub registry: crate::appserver::AppRegistry,
     pub space_name: String,
     pub space_id: String,
@@ -988,7 +990,17 @@ impl ToolBox {
     /// The live URL for an app (accepts a UUID).
     fn app_link(&self, uuid: &str) -> String {
         match &self.apps {
-            Some(ctx) => format!("live at http://127.0.0.1:{}/{}/", ctx.server_port, uuid),
+            Some(ctx) => ctx.public_base.as_ref().map_or_else(
+                || format!("live at http://127.0.0.1:{}/{}/", ctx.server_port, uuid),
+                |base| {
+                    let base = base.trim_end_matches('/');
+                    if let Some((path, query)) = base.split_once('?') {
+                        format!("live at {path}/apps/{uuid}/?{query}")
+                    } else {
+                        format!("live at {base}/apps/{uuid}/")
+                    }
+                },
+            ),
             None => String::new(),
         }
     }
@@ -6434,6 +6446,7 @@ mod tests {
             Some(AppsCtx {
                 dir: dir.clone(),
                 server_port: 9999,
+                public_base: None,
                 registry,
                 space_name: "default".to_string(),
                 space_id: "default".to_string(),

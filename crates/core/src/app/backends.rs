@@ -23,6 +23,11 @@ impl Backends {
             || self.codex.is_some()
     }
 
+    /// Whether a credential-backed provider exists for `tag`.
+    pub const fn configured(&self, tag: BackendTag) -> bool {
+        self.get(tag).is_some()
+    }
+
     pub const fn get(&self, tag: BackendTag) -> Option<&OpenRouter> {
         match tag {
             BackendTag::OpenRouter => self.openrouter.as_ref(),

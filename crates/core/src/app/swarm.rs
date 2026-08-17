@@ -34,6 +34,7 @@ const MAX_PERSONAS: usize = 6;
 /// time an update lands).
 pub type SwarmMsg = (String, SwarmUpdate);
 
+#[derive(Clone)]
 pub enum SwarmUpdate {
     /// The roster was empty, so one was suggested — persist it before the
     /// conversation's first turn.

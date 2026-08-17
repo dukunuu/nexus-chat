@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use super::App;
 
 /// A message from the background OCR batch about one file.
+#[derive(Clone)]
 pub enum OcrUpdate {
     /// A human-readable phase ("rendering pages…") shown while nothing is
     /// countable yet.
