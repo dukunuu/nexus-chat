@@ -108,6 +108,12 @@ impl Tunnel {
         self.public_url.as_deref()
     }
 
+    /// Wait until the sidecar exits, returning its success status.
+    pub async fn wait(&mut self) -> Option<bool> {
+        let child = self.child.as_mut()?;
+        Some(child.wait().await.is_ok_and(|status| status.success()))
+    }
+
     /// Kill the sidecar and wait for it to exit.
     pub async fn stop(&mut self) {
         if let Some(child) = self.child.as_mut() {

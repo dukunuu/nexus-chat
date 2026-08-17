@@ -1311,6 +1311,32 @@ async fn skills_install(spec: &str) -> Result<()> {
 
 // --- host daemon (Phase 4) ---
 
+enum HostTunnel {
+    Quick {
+        port: u16,
+    },
+    Named {
+        config_path: PathBuf,
+        tunnel_id: String,
+    },
+}
+
+async fn start_host_tunnel(spec: &HostTunnel) -> Result<nexus_core::host::process::Tunnel> {
+    match spec {
+        HostTunnel::Quick { port } => nexus_core::host::process::Tunnel::quick(*port).await,
+        HostTunnel::Named {
+            config_path,
+            tunnel_id,
+        } => nexus_core::host::process::Tunnel::named(config_path, tunnel_id),
+    }
+}
+
+async fn wait_host_tunnel(tunnel: &mut Option<nexus_core::host::process::Tunnel>) {
+    if let Some(tunnel) = tunnel.as_mut() {
+        let _ = tunnel.wait().await;
+    }
+}
+
 /// Run the headless app actor, HTTP/SSE API, optional tunnel, and sleep guard.
 #[allow(clippy::too_many_lines)]
 async fn host(port: u16, quick_tunnel: bool, no_sleep_guard: bool, setup: bool) -> Result<()> {
@@ -1326,18 +1352,24 @@ async fn host(port: u16, quick_tunnel: bool, no_sleep_guard: bool, setup: bool) 
     let mut server = HostServer::bind(app, HostConfig::new(port, token.clone())).await?;
     let local_url = format!("http://{}", server.local_addr());
 
-    let mut tunnel = if let Some(named) = &named {
-        Some(nexus_core::host::process::Tunnel::named(
-            &named.config_path,
-            &named.tunnel_id,
-        )?)
+    let tunnel_spec = if let Some(named) = &named {
+        Some(HostTunnel::Named {
+            config_path: named.config_path.clone(),
+            tunnel_id: named.tunnel_id.clone(),
+        })
     } else if quick_tunnel {
         nexus_core::host::process::require_cloudflared()?;
-        Some(nexus_core::host::process::Tunnel::quick(server.local_addr().port()).await?)
+        Some(HostTunnel::Quick {
+            port: server.local_addr().port(),
+        })
     } else {
         // No sidecar: the server remains reachable on loopback and all
         // shutdown cleanup is still centralized below.
         None
+    };
+    let mut tunnel = match tunnel_spec.as_ref() {
+        Some(spec) => Some(start_host_tunnel(spec).await?),
+        None => None,
     };
     let public_host = named
         .as_ref()
@@ -1392,9 +1424,45 @@ async fn host(port: u16, quick_tunnel: bool, no_sleep_guard: bool, setup: bool) 
     if nexus_core::host::process::on_battery() == Some(true) {
         out("warning: hosting while on battery power");
     }
-    tokio::signal::ctrl_c()
-        .await
-        .context("waiting for shutdown")?;
+    let mut restart_delay = 1u64;
+    loop {
+        let exited = if tunnel.is_some() {
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => { let _ = result; false },
+                () = wait_host_tunnel(&mut tunnel) => true,
+            }
+        } else {
+            tokio::signal::ctrl_c()
+                .await
+                .context("waiting for shutdown")?;
+            false
+        };
+        if !exited {
+            break;
+        }
+        out("tunnel exited; restarting with backoff…");
+        tunnel = None;
+        let Some(spec) = tunnel_spec.as_ref() else {
+            break;
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(restart_delay)).await;
+        match start_host_tunnel(spec).await {
+            Ok(next) => {
+                if let Some(base) = next.public_url().map(str::to_string) {
+                    let _ = server
+                        .set_public_base(Some(format!("{base}?token={token}")))
+                        .await;
+                    out(format!("new public host: {base}"));
+                }
+                tunnel = Some(next);
+                restart_delay = 1;
+            }
+            Err(error) => {
+                out(format!("tunnel restart failed: {error:#}"));
+                restart_delay = (restart_delay * 2).min(30);
+            }
+        }
+    }
     out("shutting down host…");
     let _ = server.set_public_base(None).await;
     if let Some(sidecar) = tunnel.as_mut() {
