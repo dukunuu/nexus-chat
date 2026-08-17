@@ -200,11 +200,17 @@ impl AppServer {
     /// Set the externally reachable base URL used in generated app links.
     /// `None` restores the local URL. The value is trimmed of trailing `/`.
     pub fn set_public_base(&mut self, base: Option<String>) {
-        self.public_base = base.map(|value| value.trim_end_matches('/').to_string());
+        self.public_base = base.map(|value| {
+            value
+                .split_once(['?', '#'])
+                .map_or(value.as_str(), |(prefix, _)| prefix)
+                .trim_end_matches('/')
+                .to_string()
+        });
     }
 
-    /// The app URL for a registry UUID. A host/tunnel base uses the
-    /// authenticated `/apps/<uuid>/` route; local links keep the historical
+    /// The app URL for a registry UUID. A host/tunnel base uses the public
+    /// capability `/apps/<uuid>/` route; local links keep the historical
     /// direct app-server shape.
     pub fn app_url(&self, uuid: &str) -> String {
         self.public_base.as_ref().map_or_else(
@@ -417,13 +423,15 @@ async fn respond(
     stream.shutdown().await
 }
 
-fn public_app_url(base: &str, uuid: &str) -> String {
-    let base = base.trim_end_matches('/');
-    if let Some((path, query)) = base.split_once('?') {
-        format!("{path}/apps/{uuid}/?{query}")
-    } else {
-        format!("{base}/apps/{uuid}/")
-    }
+/// The public host route for an app UUID under a base. Query and fragment
+/// components are intentionally discarded: host bearer credentials never
+/// belong in generated app URLs.
+pub(crate) fn public_app_url(base: &str, uuid: &str) -> String {
+    let base = base
+        .split_once(['?', '#'])
+        .map_or(base, |(prefix, _)| prefix)
+        .trim_end_matches('/');
+    format!("{base}/apps/{uuid}/")
 }
 
 fn parse_header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
@@ -883,7 +891,7 @@ mod tests {
         public.set_public_base(Some("https://hub.example.test?token=abc".into()));
         assert_eq!(
             public.app_url("some-uuid"),
-            "https://hub.example.test/apps/some-uuid/?token=abc"
+            "https://hub.example.test/apps/some-uuid/"
         );
     }
 

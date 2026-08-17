@@ -294,11 +294,13 @@ HTTP/SSE API, then manages everything around it. Two API surfaces:
   through the existing `Backends`/models mapping (the TUI's dispatch
   logic), with an optional `x-nexus-backend` override header; inject the
   upstream key from `config.toml`/env; **byte-passthrough** the SSE
-  response (`[DONE]` included). No parse/re-emit — all backends are
-  OpenAI-wire already, so tool-call deltas, reasoning, and usage pass
-  through risk-free. Non-streaming JSON passes through too.
-- `GET /v1/models` — aggregated catalog from the core registry (OpenAI SDK
-  model pickers see what is routable).
+  response (`[DONE]` included). OpenRouter, OpenAI, and OpenCode are
+  OpenAI-wire and pass through unchanged. Codex is explicitly omitted until
+  a Responses→Chat Completions request/event adapter exists. Non-streaming
+  JSON passes through too.
+- `GET /v1/models` — standard OpenAI `object=list`/`data` catalog with
+  `object=model`, `owned_by`, and backend-qualified ids; only routable
+  backends are advertised.
 - `GET /v1/backends` — backend list: tag, configured (key present),
   default, model count — the model→backend routing table made visible.
 - Auth layering: one host token in (the same `Authorization: Bearer`
@@ -312,18 +314,24 @@ existing seam:
 - `GET /v1/snapshot` → serde `CoreSnapshot`; `POST /v1/command` →
   `AppCommand`; `GET /v1/events` → SSE of `AppEvent` + `ChatEvent`/
   `StreamEvent` frames; `POST /v1/sync` → `Changeset` in, reply `Changeset`
-  out (the sync engine's HTTP transport); `/apps/*` with a `public_base`
-  override so tunneled app URLs point at the tunnel host, not 127.0.0.1.
+  out, with `PUT`/`GET /v1/sync/blob` hash-checked file transfer; `/apps/*`
+  with a `public_base` override so tunneled app URLs point at the tunnel
+  host, not 127.0.0.1. Registered app UUIDs are public capabilities; the
+  host bearer token is never embedded in their URLs.
 - Worker: `GET /v1/tools` capability advertisement + `POST /v1/tools/run`
   JSON-RPC — the remote `ToolExecutor` impl from Phase 2d.
 
 **Process management**:
 
 - **Auth**: bearer token generated on first run, stored in `config.toml`
-  (machine-local, never syncs); gates every route including `/apps/*`.
+  (machine-local, never syncs); gates every `/v1/*` route. Registered
+  `/apps/<uuid>/` paths are public capabilities so browser navigations do
+  not require a bearer secret in the URL.
 - **Tunnel management**: spawns the official `cloudflared` binary as a
-  sidecar (config written by the daemon), health-checks the URL, restarts
-  it on failure; quick-tunnel fallback when no named tunnel. Not embedded —
+  sidecar (named config and credentials are persisted and reused),
+  health-checks the URL, restarts it on failure with backoff; quick-tunnel
+  fallback when no named tunnel. Request/body limits, upstream timeouts, and
+  a bounded connection semaphore protect the listener. Not embedded —
   updates come from brew/apt independently.
 - **`nexus host --setup`**: non-interactive provisioning via direct
   Cloudflare v4 API calls with the existing reqwest client (revision: the

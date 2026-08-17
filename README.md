@@ -63,7 +63,7 @@ nexus update                                           # update to the latest re
 nexus status                                           # paths, providers configured, db stats
 nexus doctor [--network]                               # db integrity, config, tools
 nexus host [--port 8643]                               # local HTTP/SSE daemon + gateway
-nexus host --tunnel                                     # quick Cloudflare tunnel + QR enrollment
+nexus host --tunnel                                     # reuse named tunnel, or quick tunnel + QR
 nexus host --setup                                      # provision a named tunnel with CF_API_TOKEN
 ```
 
@@ -80,8 +80,10 @@ commands (`usage`, `sessions`, `spaces`, `export`, `status`, `doctor`,
 
 `nexus host` runs the same core on a loopback HTTP/SSE daemon. It exposes
 `/v1/snapshot`, `/v1/models`, `/v1/backends`, `/v1/events`, `/v1/command`,
-`/v1/sync`, `/v1/tools`, and an OpenAI-compatible `/v1/chat/completions`
-gateway. The host token is generated once and stored in
+`/v1/sync`, hash-checked `GET`/`PUT /v1/sync/blob`, `/v1/tools`, and an
+OpenAI-compatible `/v1/chat/completions` gateway. Sync clients POST metadata
+first, then upload/download each manifest blob by `space_id`, `name`, and
+`hash`. The host token is generated once and stored in
 `~/.config/nexus-chat/config.toml` as `[provider].host_token`; provider API
 keys remain on the machine and are never sent to clients.
 
@@ -89,14 +91,20 @@ keys remain on the machine and are never sent to clients.
 nexus host --port 8643
 curl -H "Authorization: Bearer <host-token>" http://127.0.0.1:8643/v1/snapshot
 nexus host --tunnel                         # requires cloudflared
-CF_API_TOKEN=… nexus host --setup           # creates a named tunnel + DNS CNAME
+CF_API_TOKEN=… nexus host --setup           # creates/reuses named tunnel + DNS CNAME
 # non-interactive setup can also set CF_ACCOUNT_ID, CF_ZONE_ID,
 # CF_HOSTNAME, and CF_TUNNEL_NAME
 ```
 
-The command prints an enrollment URI and an ASCII QR code. Browser app links
-use `/apps/<uuid>/?token=…` because navigations cannot set an Authorization
-header. `--no-sleep-guard` disables `caffeinate`/`systemd-inhibit` if desired.
+The command prints an enrollment URI and an ASCII QR code. Public app links
+use `/apps/<uuid>/`; the registry UUID is the app capability and the host
+bearer token is never embedded in the URL or an app cookie. `/v1/models`
+returns an OpenAI-compatible `data` list with backend-qualified ids such as
+`openrouter:anthropic/…`. Codex's native Responses API is intentionally
+excluded from this chat-completions gateway until a response-stream adapter is
+available. Named tunnel setup is persisted and reused by later
+`nexus host --tunnel` runs when its local cloudflared files still exist.
+`--no-sleep-guard` disables `caffeinate`/`systemd-inhibit` if desired.
 
 ### Requirements
 

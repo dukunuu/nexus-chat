@@ -56,6 +56,17 @@ impl BackendTag {
         }
     }
 
+    /// Prefix used for model ids crossing an OpenAI-wire API boundary.
+    /// Unlike `key_prefix`, this qualifies `OpenRouter` too.
+    pub const fn wire_prefix(self) -> &'static str {
+        match self {
+            Self::OpenRouter => "openrouter:",
+            Self::OpenAi => "openai:",
+            Self::OpencodeGo => "opencode:",
+            Self::Codex => "codex:",
+        }
+    }
+
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::OpenRouter => "OpenRouter",

@@ -12,12 +12,15 @@ pub const OPENCODE_ENV_KEY: &str = "OPENCODE_API_KEY";
 
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../assets/system-prompt-base.md");
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct Config {
+    #[serde(default)]
     provider: Provider,
+    #[serde(default)]
+    host: Option<HostSettings>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct Provider {
     #[serde(default)]
     openrouter_key: String,
@@ -37,6 +40,21 @@ pub struct CodexCredentials {
     pub refresh: String,
     pub expires: i64,
     pub account_id: String,
+}
+
+/// Persisted, non-secret configuration for a named Cloudflare tunnel.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct NamedTunnelConfig {
+    pub tunnel_id: String,
+    pub hostname: String,
+    pub credentials_path: PathBuf,
+    pub config_path: PathBuf,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct HostSettings {
+    #[serde(default)]
+    named_tunnel: Option<NamedTunnelConfig>,
 }
 
 /// Every credential the app knows about at once — every configured backend
@@ -330,6 +348,51 @@ pub fn ensure_host_token() -> Result<String> {
     Ok(token)
 }
 
+/// Load a previously provisioned named tunnel without contacting Cloudflare.
+pub fn load_named_tunnel() -> Result<Option<NamedTunnelConfig>> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let cfg: Config =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(cfg.host.and_then(|host| host.named_tunnel))
+}
+
+/// Persist named-tunnel identifiers and local config paths. Credentials stay
+/// in cloudflared's private file; this table contains no bearer/API secret.
+pub fn save_named_tunnel(tunnel: &NamedTunnelConfig) -> Result<()> {
+    let path = config_path()?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let mut value = if path.exists() {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        toml::from_str::<toml::Value>(&text)
+            .with_context(|| format!("parsing {}", path.display()))?
+    } else {
+        toml::Value::Table(toml::map::Map::new())
+    };
+    let root = value
+        .as_table_mut()
+        .context("config root is not a TOML table")?;
+    let host = root
+        .entry("host".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+        .as_table_mut()
+        .context("config host is not a TOML table")?;
+    host.insert(
+        "named_tunnel".to_string(),
+        toml::Value::try_from(tunnel).context("serializing named tunnel config")?,
+    );
+    let body = toml::to_string_pretty(&value).context("serializing config")?;
+    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
 // Long by design (device-flow state machine).
 #[allow(clippy::too_many_lines)]
 pub async fn login_openai_codex_device(
@@ -482,6 +545,21 @@ fn write_provider_config(
         let _ = writeln!(body, "refresh = \"{}\"", escape(&c.refresh));
         let _ = writeln!(body, "expires = {}", c.expires);
         let _ = writeln!(body, "account_id = \"{}\"", escape(&c.account_id));
+    }
+    if let Ok(Some(tunnel)) = load_named_tunnel() {
+        body.push_str("\n[host.named_tunnel]\n");
+        let _ = writeln!(body, "tunnel_id = \"{}\"", escape(&tunnel.tunnel_id));
+        let _ = writeln!(body, "hostname = \"{}\"", escape(&tunnel.hostname));
+        let _ = writeln!(
+            body,
+            "credentials_path = \"{}\"",
+            escape(&tunnel.credentials_path.display().to_string())
+        );
+        let _ = writeln!(
+            body,
+            "config_path = \"{}\"",
+            escape(&tunnel.config_path.display().to_string())
+        );
     }
     std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
     Ok(())

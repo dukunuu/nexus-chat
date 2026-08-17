@@ -1340,13 +1340,24 @@ async fn wait_host_tunnel(tunnel: &mut Option<nexus_core::host::process::Tunnel>
 /// Run the headless app actor, HTTP/SSE API, optional tunnel, and sleep guard.
 #[allow(clippy::too_many_lines)]
 async fn host(port: u16, quick_tunnel: bool, no_sleep_guard: bool, setup: bool) -> Result<()> {
+    let saved_named = config::load_named_tunnel()?;
     let named = if setup {
         Some(setup_named_tunnel(port).await?)
+    } else if quick_tunnel {
+        saved_named
+            .as_ref()
+            .filter(|tunnel| tunnel.credentials_path.is_file() && tunnel.config_path.is_file())
+            .map(|tunnel| reuse_named_tunnel(tunnel, port))
+            .transpose()?
     } else {
         None
     };
-    let token = config::ensure_host_token()?;
+    // Providers first: `load_all_providers` only scaffolds the commented
+    // credential template when no config exists yet, and `ensure_host_token`
+    // creates the file. Minting the token first would leave a first-ever
+    // `nexus host` run with a config holding nothing but `host_token`.
     let saved = config::load_all_providers().await?;
+    let token = config::ensure_host_token()?;
     let mut app = nexus_core::boot(saved).await?;
     app.init();
     let mut server = HostServer::bind(app, HostConfig::new(port, token.clone())).await?;
@@ -1382,9 +1393,7 @@ async fn host(port: u16, quick_tunnel: bool, no_sleep_guard: bool, setup: bool) 
     if let Some(base) = &public_host {
         // Browser navigations cannot send Authorization. App links therefore
         // carry the same token as a query parameter; `/v1/*` remains header-only.
-        server
-            .set_public_base(Some(format!("{base}?token={token}")))
-            .await?;
+        server.set_public_base(Some(base.clone())).await?;
         out(format!("public host: {base}"));
         let healthy = nexus_core::host::process::health_check(base).await;
         out(if healthy {
@@ -1449,13 +1458,24 @@ async fn host(port: u16, quick_tunnel: bool, no_sleep_guard: bool, setup: bool) 
         match start_host_tunnel(spec).await {
             Ok(next) => {
                 if let Some(base) = next.public_url().map(str::to_string) {
-                    let _ = server
-                        .set_public_base(Some(format!("{base}?token={token}")))
-                        .await;
+                    let _ = server.set_public_base(Some(base.clone())).await;
                     out(format!("new public host: {base}"));
+                    restart_delay = 1;
+                } else if matches!(spec, HostTunnel::Quick { .. }) {
+                    // A replacement quick tunnel gets a *new* hostname, so a
+                    // restart with no discovered URL means the advertised one
+                    // is dead with nothing to replace it: stop handing it out.
+                    // Keep backing off too — spawning succeeds even when
+                    // cloudflared exits immediately, and resetting the delay
+                    // here would respawn it once a second forever.
+                    let _ = server.set_public_base(None).await;
+                    out("tunnel restarted without a public URL; app links fall back to loopback");
+                    restart_delay = (restart_delay * 2).min(30);
+                } else {
+                    // Named tunnels keep the hostname chosen during setup.
+                    restart_delay = 1;
                 }
                 tunnel = Some(next);
-                restart_delay = 1;
             }
             Err(error) => {
                 out(format!("tunnel restart failed: {error:#}"));
@@ -1475,19 +1495,53 @@ async fn host(port: u16, quick_tunnel: bool, no_sleep_guard: bool, setup: bool) 
     Ok(())
 }
 
+fn reuse_named_tunnel(
+    saved: &config::NamedTunnelConfig,
+    port: u16,
+) -> Result<nexus_core::host::cloudflare::SetupResult> {
+    nexus_core::host::cloudflare::write_named_config(
+        &saved.config_path,
+        &saved.credentials_path,
+        &saved.tunnel_id,
+        &saved.hostname,
+        port,
+    )?;
+    Ok(nexus_core::host::cloudflare::SetupResult {
+        tunnel_id: saved.tunnel_id.clone(),
+        hostname: saved.hostname.clone(),
+        credentials_path: saved.credentials_path.clone(),
+        config_path: saved.config_path.clone(),
+    })
+}
+
 /// Provision a named tunnel interactively when account/zone IDs were not
-/// supplied through `CF_ACCOUNT_ID`/`CF_ZONE_ID`.
+/// supplied through `CF_ACCOUNT_ID`/`CF_ZONE_ID`. Existing local tunnel
+/// configuration is reused without contacting Cloudflare.
 async fn setup_named_tunnel(port: u16) -> Result<nexus_core::host::cloudflare::SetupResult> {
     use nexus_core::host::cloudflare::{
         SetupOptions, list_accounts, list_zones, provision_named_tunnel,
     };
-    let accounts = list_accounts().await?;
-    if accounts.is_empty() {
-        bail!("Cloudflare API returned no accounts");
+    if let Some(saved) = config::load_named_tunnel()?
+        && saved.credentials_path.is_file()
+        && saved.config_path.is_file()
+    {
+        return reuse_named_tunnel(&saved, port);
     }
-    let account_id = if let Ok(id) = std::env::var("CF_ACCOUNT_ID") {
+    // An env override skips both the prompt *and* its listing call — an
+    // empty value is treated as unset rather than sent to the API as an id.
+    let env_id = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let account_id = if let Some(id) = env_id("CF_ACCOUNT_ID") {
         id
     } else {
+        let accounts = list_accounts().await?;
+        if accounts.is_empty() {
+            bail!("Cloudflare API returned no accounts");
+        }
         out("Cloudflare accounts:");
         for (index, account) in accounts.iter().enumerate() {
             out(format!(
@@ -1501,38 +1555,41 @@ async fn setup_named_tunnel(port: u16) -> Result<nexus_core::host::cloudflare::S
             .id
             .clone()
     };
-    let zones = list_zones().await?;
-    if zones.is_empty() {
-        bail!("Cloudflare API returned no DNS zones");
-    }
-    let zone_id = if let Ok(id) = std::env::var("CF_ZONE_ID") {
-        id
+    let (zone_id, zone_name) = if let Some(id) = env_id("CF_ZONE_ID") {
+        (id, None)
     } else {
+        let zones = list_zones().await?;
+        if zones.is_empty() {
+            bail!("Cloudflare API returned no DNS zones");
+        }
         out("Cloudflare zones:");
         for (index, zone) in zones.iter().enumerate() {
             out(format!("  {}. {} ({})", index + 1, zone.name, zone.id));
         }
-        zones[choose_index("zone number", zones.len())? - 1]
-            .id
-            .clone()
+        let zone = &zones[choose_index("zone number", zones.len())? - 1];
+        (zone.id.clone(), Some(zone.name.clone()))
     };
-    let zone_name = zones
-        .iter()
-        .find(|zone| zone.id == zone_id)
-        .map_or("example.com", |zone| zone.name.as_str());
-    let hostname = std::env::var("CF_HOSTNAME")
-        .unwrap_or_else(|_| prompt("hostname", &format!("nexus.{zone_name}")));
-    let tunnel_name =
-        std::env::var("CF_TUNNEL_NAME").unwrap_or_else(|_| prompt("tunnel name", "nexus"));
+    let hostname = env_id("CF_HOSTNAME").unwrap_or_else(|| {
+        let suffix = zone_name.as_deref().unwrap_or("example.com");
+        prompt("hostname", &format!("nexus.{suffix}"))
+    });
+    let tunnel_name = env_id("CF_TUNNEL_NAME").unwrap_or_else(|| prompt("tunnel name", "nexus"));
     out(format!("creating Cloudflare tunnel {tunnel_name:?}…"));
-    provision_named_tunnel(&SetupOptions {
+    let result = provision_named_tunnel(&SetupOptions {
         account_id,
         zone_id,
         hostname,
         tunnel_name,
         port,
     })
-    .await
+    .await?;
+    config::save_named_tunnel(&config::NamedTunnelConfig {
+        tunnel_id: result.tunnel_id.clone(),
+        hostname: result.hostname.clone(),
+        credentials_path: result.credentials_path.clone(),
+        config_path: result.config_path.clone(),
+    })?;
+    Ok(result)
 }
 
 fn choose_index(label: &str, count: usize) -> Result<usize> {

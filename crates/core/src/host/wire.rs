@@ -19,7 +19,6 @@ use crate::app::{
     AppEvent, GateState, LoginMsg, MemoryOp, OcrUpdate, PlanQuestion, ResearchUpdate, SurveyPhase,
     SwarmUpdate,
 };
-use crate::config::CodexCredentials;
 use crate::db::Persona;
 use crate::provider::{BackendTag, Model, ModelPricing, ReasoningEffort, StreamEvent, Usage};
 
@@ -207,16 +206,9 @@ pub struct WirePlanQuestion {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WireLoginMsg {
     Status(String),
-    Done(Result<WireCodexCredentials, String>),
-}
-
-/// The wire mirror of [`CodexCredentials`] — a finished Codex login.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WireCodexCredentials {
-    pub access: String,
-    pub refresh: String,
-    pub expires: i64,
-    pub account_id: String,
+    /// Login succeeded or failed. Credentials are consumed by the local app
+    /// and are deliberately never serialized onto the host event stream.
+    Done(Result<(), String>),
 }
 
 /// A `/swarm` turn update.
@@ -253,8 +245,8 @@ pub struct WirePersona {
 /// merged per-backend catalog.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WireModel {
-    /// Composite id (backend prefix + wire id) — what `current_model`,
-    /// favorites, and last-used store.
+    /// Backend-qualified public id (`openrouter:…`, `openai:…`, etc.).
+    /// Internal favorites/current-model storage may retain legacy bare ids.
     pub id: String,
     pub name: String,
     /// The reasoning-effort values this model accepts, in cycle order.
@@ -472,19 +464,13 @@ impl From<PlanQuestion> for WirePlanQuestion {
 impl From<LoginMsg> for WireLoginMsg {
     fn from(m: LoginMsg) -> Self {
         match m {
-            LoginMsg::Status(s) => Self::Status(s),
-            LoginMsg::Done(d) => Self::Done(d.map(WireCodexCredentials::from)),
-        }
-    }
-}
-
-impl From<CodexCredentials> for WireCodexCredentials {
-    fn from(c: CodexCredentials) -> Self {
-        Self {
-            access: c.access,
-            refresh: c.refresh,
-            expires: c.expires,
-            account_id: c.account_id,
+            // Device codes and prefilled URLs are short-lived credentials;
+            // the local UI receives them directly, never the host wire.
+            LoginMsg::Status(_) => Self::Status("codex login in progress".into()),
+            LoginMsg::Done(d) => Self::Done(match d {
+                Ok(_) => Ok(()),
+                Err(_) => Err("codex login failed".into()),
+            }),
         }
     }
 }
@@ -522,10 +508,22 @@ impl From<Persona> for WirePersona {
     }
 }
 
+/// The model id exposed to OpenAI-wire clients. Internal model preferences
+/// retain `OpenRouter`'s historical bare ids; the public API must distinguish
+/// identical raw ids from different backends.
+pub(crate) fn public_model_id(model: &Model) -> String {
+    let prefix = model.backend.wire_prefix();
+    if model.id.starts_with(prefix) {
+        model.id.clone()
+    } else {
+        format!("{prefix}{}", model.id)
+    }
+}
+
 impl From<Model> for WireModel {
     fn from(m: Model) -> Self {
         Self {
-            id: m.id,
+            id: public_model_id(&m),
             name: m.name,
             reasoning_efforts: m
                 .reasoning_efforts
@@ -670,12 +668,7 @@ mod tests {
             ))),
             WireEvent::ResearchTopic(Some(Ok("topic".into()))),
             WireEvent::UpdateCheck(Some("0.2.0".into())),
-            WireEvent::Login(Some(WireLoginMsg::Done(Ok(WireCodexCredentials {
-                access: "a".into(),
-                refresh: "r".into(),
-                expires: 123,
-                account_id: "acc".into(),
-            })))),
+            WireEvent::Login(Some(WireLoginMsg::Done(Ok(())))),
             WireEvent::Swarm(Some((
                 "s1".into(),
                 WireSwarmUpdate::RosterSuggested(vec![WirePersona {
@@ -996,8 +989,8 @@ mod tests {
         }
     }
 
-    /// Swarm and login payloads map their nested types (roster personas,
-    /// Codex credentials) through.
+    /// Swarm and login payloads map their nested types (roster personas),
+    /// while login credentials are reduced to a success marker.
     #[test]
     fn from_app_event_maps_swarm_and_login() {
         let app = AppEvent::Swarm(Some((
@@ -1020,20 +1013,16 @@ mod tests {
             )))
         );
 
-        let app = AppEvent::Login(Some(LoginMsg::Done(Ok(CodexCredentials {
-            access: "a".into(),
-            refresh: "r".into(),
+        let app = AppEvent::Login(Some(LoginMsg::Done(Ok(crate::config::CodexCredentials {
+            access: "access-secret".into(),
+            refresh: "refresh-secret".into(),
             expires: 123,
             account_id: "acc".into(),
         }))));
-        assert_eq!(
-            WireEvent::from(app),
-            WireEvent::Login(Some(WireLoginMsg::Done(Ok(WireCodexCredentials {
-                access: "a".into(),
-                refresh: "r".into(),
-                expires: 123,
-                account_id: "acc".into(),
-            }))))
-        );
+        let wire = WireEvent::from(app);
+        let json = serde_json::to_string(&wire).expect("login event serializes");
+        assert!(!json.contains("access-secret"));
+        assert!(!json.contains("refresh-secret"));
+        assert_eq!(wire, WireEvent::Login(Some(WireLoginMsg::Done(Ok(())))));
     }
 }

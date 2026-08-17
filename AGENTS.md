@@ -90,10 +90,12 @@ The README has the full tree; the parts agents touch most:
 > caches (system-prompt inputs), and the research steer/stage state.
 >
 > Phase 4 host support lives in `crates/core/src/host/`: the app-actor
-> HTTP/SSE API, bearer auth, `/v1` routes, OpenAI-wire gateway, authenticated
-> app proxy, and opt-in `cloudflared`/sleep-guard lifecycle. Keep tunnel and
-> Cloudflare setup paths opt-in; tests must remain network-free and must not
-> launch sidecars.
+> HTTP/SSE API, bearer auth, `/v1` routes, hash-checked sync blob transfer,
+> OpenAI-wire gateway (Codex Responses support is explicitly deferred), and
+> opt-in `cloudflared`/sleep-guard lifecycle. Registered app UUIDs are public
+> capabilities; host/provider secrets must never enter snapshots, events, or
+> app URLs. Keep tunnel and Cloudflare setup paths opt-in; tests must remain
+> network-free and must not launch sidecars.
 
 ## Things to know before changing code
 

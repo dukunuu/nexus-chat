@@ -44,8 +44,12 @@ pub struct SettingsSnapshot {
     pub verbosity: String,
     pub web_mode: bool,
     pub incognito: bool,
+    /// Sanitized `SearXNG` endpoint (credentials/query strings are removed).
     pub searxng_url: String,
-    pub langsearch_key: String,
+    /// Whether the local `LangSearch` credential is configured. The key never
+    /// crosses the host API boundary.
+    #[serde(default)]
+    pub langsearch_configured: bool,
     pub search_provider: String,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -72,6 +76,21 @@ pub struct TaskSnapshot {
     /// the map while their loop is active, so there is no idle state.
     pub status: String,
     pub buffer_chars: usize,
+}
+
+/// Remove URL userinfo, query, and fragment components before an endpoint is
+/// exposed in a remote snapshot. Search endpoints are local configuration, not
+/// credentials storage, but URLs commonly grow accidental `?token=` values.
+fn sanitized_endpoint(value: &str) -> String {
+    let value = value.trim();
+    let value = value.split_once('#').map_or(value, |(prefix, _)| prefix);
+    let value = value.split_once('?').map_or(value, |(prefix, _)| prefix);
+    if let Some((scheme, authority)) = value.split_once("://")
+        && let Some((_, host)) = authority.rsplit_once('@')
+    {
+        return format!("{scheme}://{host}");
+    }
+    value.to_string()
 }
 
 impl App {
@@ -115,8 +134,8 @@ impl App {
                 verbosity: self.verbosity.clone(),
                 web_mode: self.web_mode,
                 incognito: self.incognito,
-                searxng_url: self.searxng_url.clone(),
-                langsearch_key: self.langsearch_key.clone(),
+                searxng_url: sanitized_endpoint(&self.searxng_url),
+                langsearch_configured: !self.langsearch_key.trim().is_empty(),
                 search_provider: self.search_provider.clone(),
                 temperature: self.settings.temperature,
                 top_p: self.settings.top_p,
@@ -184,7 +203,7 @@ mod tests {
                 web_mode: false,
                 incognito: false,
                 searxng_url: String::new(),
-                langsearch_key: String::new(),
+                langsearch_configured: false,
                 search_provider: "searxng".into(),
                 temperature: Some(0.7),
                 top_p: None,
@@ -212,7 +231,7 @@ mod tests {
         let json = serde_json::to_string(&snap).expect("snapshot serializes");
         assert_eq!(
             json,
-            r#"{"sessions":[{"id":"s1","title":"hello","slug":"hello","model":"openrouter:anthropic/claude-sonnet-4","kind":"chat","web_mode":false,"created_at":"2025-01-01T00:00:00Z"}],"models":[{"id":"openrouter:anthropic/claude-sonnet-4","name":"Claude Sonnet 4","context_length":200000,"favorite":true}],"settings":{"model":"openrouter:anthropic/claude-sonnet-4","verbosity":"high","web_mode":false,"incognito":false,"searxng_url":"","langsearch_key":"","search_provider":"searxng","temperature":0.7,"top_p":null,"max_tokens":null,"compact_threshold":60,"memory_model":"","transcriber_model":"","ocr_model":"","ocr_engine":"router","embedding_model":"","image_gen_model":"","video_gen_model":"","blocked_domains":[]},"tasks":[{"id":1,"session_id":"s1","session_title":"hello","model":"openrouter:anthropic/claude-sonnet-4","backend":"OpenRouter","status":"streaming","buffer_chars":12}]}"#
+            r#"{"sessions":[{"id":"s1","title":"hello","slug":"hello","model":"openrouter:anthropic/claude-sonnet-4","kind":"chat","web_mode":false,"created_at":"2025-01-01T00:00:00Z"}],"models":[{"id":"openrouter:anthropic/claude-sonnet-4","name":"Claude Sonnet 4","context_length":200000,"favorite":true}],"settings":{"model":"openrouter:anthropic/claude-sonnet-4","verbosity":"high","web_mode":false,"incognito":false,"searxng_url":"","langsearch_configured":false,"search_provider":"searxng","temperature":0.7,"top_p":null,"max_tokens":null,"compact_threshold":60,"memory_model":"","transcriber_model":"","ocr_model":"","ocr_engine":"router","embedding_model":"","image_gen_model":"","video_gen_model":"","blocked_domains":[]},"tasks":[{"id":1,"session_id":"s1","session_title":"hello","model":"openrouter:anthropic/claude-sonnet-4","backend":"OpenRouter","status":"streaming","buffer_chars":12}]}"#
         );
         // The golden string must also parse back into the same shape.
         let back: CoreSnapshot = serde_json::from_str(&json).expect("golden parses");
@@ -220,8 +239,21 @@ mod tests {
         assert_eq!(back.sessions[0].slug.as_deref(), Some("hello"));
         assert_eq!(back.models[0].context_length, Some(200_000));
         assert_eq!(back.settings.temperature, Some(0.7));
+        assert!(!back.settings.langsearch_configured);
         assert_eq!(back.settings.blocked_domains, Vec::<String>::new());
         assert_eq!(back.tasks[0].status, "streaming");
         assert_eq!(back.tasks[0].buffer_chars, 12);
+    }
+
+    #[test]
+    fn sanitized_endpoint_drops_credentials_and_query() {
+        assert_eq!(
+            sanitized_endpoint("https://user:pass@example.test/search?token=secret#frag"),
+            "https://example.test/search"
+        );
+        assert_eq!(
+            sanitized_endpoint("http://localhost:8080"),
+            "http://localhost:8080"
+        );
     }
 }

@@ -6,6 +6,7 @@
 //! included in returned errors or written to disk.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
@@ -134,14 +135,13 @@ pub async fn provision_named_tunnel(options: &SetupOptions) -> Result<SetupResul
     });
     write_private(&credentials_path, &serde_json::to_vec_pretty(&credentials)?)?;
     let config_path = dir.join(format!("nexus-{}.yml", tunnel.id));
-    let config = format!(
-        "tunnel: {}\ncredentials-file: {}\ningress:\n  - hostname: {}\n    service: http://127.0.0.1:{}\n  - service: http_status:404\n",
-        tunnel.id,
-        yaml_quote(&credentials_path.display().to_string()),
-        options.hostname,
+    write_named_config(
+        &config_path,
+        &credentials_path,
+        &tunnel.id,
+        &options.hostname,
         options.port,
-    );
-    write_private(&config_path, config.as_bytes())?;
+    )?;
     Ok(SetupResult {
         tunnel_id: tunnel.id,
         hostname: options.hostname.clone(),
@@ -153,6 +153,24 @@ pub async fn provision_named_tunnel(options: &SetupOptions) -> Result<SetupResul
 #[derive(Debug, Deserialize)]
 struct TunnelResult {
     id: String,
+}
+
+/// Rewrite a named tunnel's local ingress for the current host port. The
+/// tunnel identity and credential path are reused; no Cloudflare API call is
+/// needed when the saved configuration is still present.
+pub fn write_named_config(
+    config_path: &std::path::Path,
+    credentials_path: &std::path::Path,
+    tunnel_id: &str,
+    hostname: &str,
+    port: u16,
+) -> Result<()> {
+    let config = format!(
+        "tunnel: {tunnel_id}\ncredentials-file: {}\ningress:\n  - hostname: {}\n    service: http://127.0.0.1:{port}\n  - service: http_status:404\n",
+        yaml_quote(&credentials_path.display().to_string()),
+        hostname,
+    );
+    write_private(config_path, config.as_bytes())
 }
 
 fn client() -> Result<reqwest::Client> {
@@ -167,6 +185,8 @@ fn client() -> Result<reqwest::Client> {
     );
     reqwest::Client::builder()
         .default_headers(headers)
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
         .user_agent("nexus-chat host setup")
         .build()
         .context("building Cloudflare API client")

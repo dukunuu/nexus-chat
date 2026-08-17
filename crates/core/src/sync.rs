@@ -1377,6 +1377,80 @@ fn sha256_hex(bytes: &[u8]) -> String {
     })
 }
 
+/// Store one HTTP/transport blob after checking that its manifest row exists,
+/// the declared size matches, and the content hash is exact. Metadata always
+/// wins first; an upload can never create a new file row or escape its space.
+pub fn put_blob(
+    db: &Db,
+    space: &Space,
+    space_id: &str,
+    name: &str,
+    hash: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    if !valid_component(space_id) || !valid_component(name) {
+        bail!("unsafe blob path");
+    }
+    let Some(space_name) = space_name_for(db, space_id)? else {
+        bail!("unknown space");
+    };
+    let row = db
+        .list_files(space_id)?
+        .into_iter()
+        .find(|file| file.name == name)
+        .ok_or_else(|| anyhow!("unknown file manifest"))?;
+    if row.hash != hash {
+        bail!("blob hash does not match the current file manifest");
+    }
+    if row.size < 0 || row.size as usize != bytes.len() {
+        bail!("blob size does not match the current file manifest");
+    }
+    if sha256_hex(bytes) != hash {
+        bail!("blob content hash mismatch");
+    }
+    let target = space.files_dir(&space_name).join(name);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let temporary = target.with_extension(format!("nexus-upload-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&temporary, bytes)
+        .with_context(|| format!("writing blob {}", temporary.display()))?;
+    if let Err(error) = std::fs::rename(&temporary, &target) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("installing blob {}", target.display()));
+    }
+    Ok(())
+}
+
+/// Read a manifest-backed blob for an HTTP download. A missing or stale local
+/// file is `None`, never an unverified byte stream.
+pub fn read_blob(db: &Db, space: &Space, space_id: &str, name: &str) -> Result<Option<Vec<u8>>> {
+    if !valid_component(space_id) || !valid_component(name) {
+        return Ok(None);
+    }
+    let Some(space_name) = space_name_for(db, space_id)? else {
+        return Ok(None);
+    };
+    let Some(row) = db
+        .list_files(space_id)?
+        .into_iter()
+        .find(|file| file.name == name)
+    else {
+        return Ok(None);
+    };
+    let path = space.files_dir(&space_name).join(name);
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(
+        (row.size >= 0 && row.size as usize == bytes.len() && sha256_hex(&bytes) == row.hash)
+            .then_some(bytes),
+    )
+}
+
 /// Whether the file at `path` exists and its sha256 matches `hash`.
 fn file_matches(path: &Path, hash: &str) -> bool {
     let Ok(bytes) = std::fs::read(path) else {

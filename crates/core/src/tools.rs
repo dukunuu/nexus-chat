@@ -992,14 +992,7 @@ impl ToolBox {
         match &self.apps {
             Some(ctx) => ctx.public_base.as_ref().map_or_else(
                 || format!("live at http://127.0.0.1:{}/{}/", ctx.server_port, uuid),
-                |base| {
-                    let base = base.trim_end_matches('/');
-                    if let Some((path, query)) = base.split_once('?') {
-                        format!("live at {path}/apps/{uuid}/?{query}")
-                    } else {
-                        format!("live at {base}/apps/{uuid}/")
-                    }
-                },
+                |base| format!("live at {}", crate::appserver::public_app_url(base, uuid)),
             ),
             None => String::new(),
         }

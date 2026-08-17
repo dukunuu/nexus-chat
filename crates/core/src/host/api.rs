@@ -20,17 +20,35 @@ use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::app::{App, AppCommand, AppEvent, CoreSnapshot};
+use crate::appserver::AppRegistry;
 use crate::provider::BackendTag;
 use crate::provider::openrouter;
 use crate::sync::Changeset;
 use crate::tools::ToolExecutor;
 
-use super::wire::{WireBackendTag, WireEvent, WireModel};
+use super::wire::{WireBackendTag, WireEvent, WireModel, public_model_id};
 
 const MAX_HEADER_BYTES: usize = 32 * 1024;
 const MAX_API_BODY_BYTES: usize = 10 * 1024 * 1024;
 const MAX_GATEWAY_BODY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_BLOB_BYTES: usize = 64 * 1024 * 1024;
+/// How much of a request body is read (and reserved) at a time.
+const BODY_CHUNK_BYTES: usize = 64 * 1024;
+/// Ceiling on the bytes held back while looking for a provider usage frame.
+const MAX_USAGE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const SSE_HEARTBEAT: Duration = Duration::from_secs(15);
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(15);
+const ACTOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const UPSTREAM_HEADERS_TIMEOUT: Duration = Duration::from_secs(20);
+const UPSTREAM_CHUNK_TIMEOUT: Duration = Duration::from_mins(2);
+const MAX_APP_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CONNECTIONS: usize = 128;
+/// CORS block shared by every response, including the `OPTIONS` preflight.
+/// `Access-Control-Allow-Methods` is required: without it a browser rejects
+/// the preflight for `POST /v1/command` and `POST /v1/chat/completions`
+/// (JSON bodies are never "simple" requests).
+const CORS_HEADERS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Nexus-Backend\r\nAccess-Control-Max-Age: 600\r\n";
 
 /// Configuration for a local host listener.
 #[derive(Debug, Clone)]
@@ -38,7 +56,8 @@ pub struct HostConfig {
     /// TCP port on loopback. `0` asks the OS for an ephemeral port (useful in
     /// tests); the CLI defaults this to `8643`.
     pub port: u16,
-    /// Bearer token required by `/v1/*` and the `/apps/*` proxy.
+    /// Bearer token required by `/v1/*`; registered public app UUID routes do
+    /// not embed or issue this token.
     pub token: String,
     /// Optional upstream override used by hermetic gateway tests. Production
     /// callers leave this `None`, selecting the provider's canonical base.
@@ -83,23 +102,50 @@ struct GatewayUsage {
     cache_read_tokens: u64,
     cache_creation_tokens: u64,
     cost: Option<f64>,
+    /// Bytes not yet forming a complete `SSE` line (or the whole body of a
+    /// non-streaming response). Chunk boundaries fall wherever the socket
+    /// puts them, so parsing each chunk in isolation would drop the usage
+    /// frame whenever it straddles two of them.
+    buffer: Vec<u8>,
 }
 
 impl GatewayUsage {
     fn observe(&mut self, bytes: &[u8], streaming: bool) {
+        if self.buffer.len() + bytes.len() > MAX_USAGE_BUFFER_BYTES {
+            return;
+        }
+        self.buffer.extend_from_slice(bytes);
+        if !streaming {
+            // One JSON document; it can only be parsed once it is complete.
+            return;
+        }
+        while let Some(position) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.buffer.drain(..=position).collect();
+            self.observe_line(&String::from_utf8_lossy(&line));
+        }
+    }
+
+    /// Parse whatever is left once the upstream body ends.
+    fn finish(&mut self, streaming: bool) {
+        let rest = std::mem::take(&mut self.buffer);
+        if rest.is_empty() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&rest).into_owned();
         if streaming {
-            let text = String::from_utf8_lossy(bytes);
-            for line in text.lines() {
-                let Some(data) = line.strip_prefix("data:") else {
-                    continue;
-                };
-                let data = data.trim();
-                if data != "[DONE]" {
-                    self.observe_json(data);
-                }
-            }
-        } else if let Ok(text) = std::str::from_utf8(bytes) {
-            self.observe_json(text);
+            self.observe_line(&text);
+        } else {
+            self.observe_json(text.trim());
+        }
+    }
+
+    fn observe_line(&mut self, line: &str) {
+        let Some(data) = line.trim_end().strip_prefix("data:") else {
+            return;
+        };
+        let data = data.trim();
+        if data != "[DONE]" {
+            self.observe_json(data);
         }
     }
 
@@ -163,7 +209,9 @@ struct HostState {
     events: broadcast::Sender<WireEvent>,
     token: Arc<String>,
     app_server_port: Option<u16>,
+    app_registry: Option<AppRegistry>,
     client: reqwest::Client,
+    connections: Arc<tokio::sync::Semaphore>,
     gateway_base: Option<String>,
 }
 
@@ -183,21 +231,33 @@ impl HostServer {
             .app_server
             .as_ref()
             .map(crate::appserver::AppServer::port);
+        let app_registry = app
+            .app_server
+            .as_ref()
+            .map(|server| server.registry().clone());
         let (request_tx, request_rx) = mpsc::channel(64);
         let (events, _) = broadcast::channel(256);
         let shutdown = Arc::new(Notify::new());
+        let host_token = Arc::new(config.token);
         let state = Arc::new(HostState {
             requests: request_tx,
             events: events.clone(),
-            token: Arc::new(config.token),
+            token: host_token.clone(),
             app_server_port,
-            client: reqwest::Client::new(),
+            app_registry,
+            client: reqwest::Client::builder()
+                .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
+                .pool_max_idle_per_host(8)
+                .pool_idle_timeout(Duration::from_secs(30))
+                .build()
+                .context("building host upstream client")?,
+            connections: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
             gateway_base: config.gateway_base,
         });
         let actor_events = events;
         let actor_shutdown = shutdown.clone();
         let actor_task = tokio::spawn(async move {
-            app_actor(app, request_rx, actor_events, actor_shutdown).await;
+            app_actor(app, request_rx, actor_events, actor_shutdown, host_token).await;
         });
         let accept_state = state.clone();
         let accept_shutdown = shutdown.clone();
@@ -270,8 +330,14 @@ async fn accept_loop(listener: TcpListener, state: Arc<HostState>, shutdown: Arc
             () = shutdown.notified() => break,
             accepted = listener.accept() => {
                 let Ok((stream, _peer)) = accepted else { continue; };
+                let Ok(permit) = state.connections.clone().try_acquire_owned() else {
+                    let mut stream = stream;
+                    let _ = respond_text(&mut stream, 503, "host connection limit reached").await;
+                    continue;
+                };
                 let state = state.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let _ = handle_connection(stream, state).await;
                 });
             }
@@ -300,16 +366,21 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, ReadError> {
         if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
             break position;
         }
-        if buffer.len() >= MAX_HEADER_BYTES {
+        let remaining = MAX_HEADER_BYTES.saturating_sub(buffer.len());
+        if remaining == 0 {
             return Err(ReadError {
                 status: 431,
                 message: "request headers too large",
             });
         }
-        let n = stream.read(&mut chunk).await.map_err(|_| ReadError {
-            status: 400,
-            message: "could not read request",
-        })?;
+        let read_len = remaining.min(chunk.len());
+        let n = stream
+            .read(&mut chunk[..read_len])
+            .await
+            .map_err(|_| ReadError {
+                status: 400,
+                message: "could not read request",
+            })?;
         if n == 0 {
             return Err(ReadError {
                 status: 400,
@@ -373,17 +444,8 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, ReadError> {
     }
     let body_start = header_end + 4;
     let already = buffer.len().saturating_sub(body_start).min(content_length);
-    let mut body = buffer[body_start..body_start + already].to_vec();
-    if already < content_length {
-        body.resize(content_length, 0);
-        stream
-            .read_exact(&mut body[already..])
-            .await
-            .map_err(|_| ReadError {
-                status: 400,
-                message: "incomplete request body",
-            })?;
-    }
+    let prefix = &buffer[body_start..body_start + already];
+    let body = read_body(stream, prefix, content_length).await?;
     Ok(Request {
         method,
         target,
@@ -392,10 +454,47 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, ReadError> {
     })
 }
 
+/// Read `content_length` body bytes, `prefix` already having arrived with the
+/// headers. The buffer grows with the bytes that actually turn up rather than
+/// reserving the declared length up front: authentication happens after this
+/// read, so one unauthenticated request announcing 64 MB must not be able to
+/// allocate 64 MB without sending it.
+async fn read_body(
+    stream: &mut TcpStream,
+    prefix: &[u8],
+    content_length: usize,
+) -> Result<Vec<u8>, ReadError> {
+    let incomplete = ReadError {
+        status: 400,
+        message: "incomplete request body",
+    };
+    let mut body = Vec::with_capacity(content_length.min(BODY_CHUNK_BYTES).max(prefix.len()));
+    body.extend_from_slice(prefix);
+    while body.len() < content_length {
+        let start = body.len();
+        let want = (content_length - start).min(BODY_CHUNK_BYTES);
+        body.resize(start + want, 0);
+        let n = stream
+            .read(&mut body[start..])
+            .await
+            .map_err(|_| ReadError {
+                status: incomplete.status,
+                message: incomplete.message,
+            })?;
+        body.truncate(start + n);
+        if n == 0 {
+            return Err(incomplete);
+        }
+    }
+    Ok(body)
+}
+
 async fn handle_connection(mut stream: TcpStream, state: Arc<HostState>) -> io::Result<()> {
-    let request = match read_request(&mut stream).await {
-        Ok(request) => request,
-        Err(error) => return respond_text(&mut stream, error.status, error.message).await,
+    let request = match tokio::time::timeout(REQUEST_READ_TIMEOUT, read_request(&mut stream)).await
+    {
+        Ok(Ok(request)) => request,
+        Ok(Err(error)) => return respond_text(&mut stream, error.status, error.message).await,
+        Err(_) => return respond_text(&mut stream, 408, "request timed out").await,
     };
     let (path, query) = split_target(&request.target);
     if request.method.eq_ignore_ascii_case("OPTIONS") {
@@ -403,7 +502,15 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<HostState>) -> io::
     }
     let is_apps = path == "/apps" || path.starts_with("/apps/");
     let is_v1 = path == "/v1" || path.starts_with("/v1/");
-    if (is_apps || is_v1) && !authorized(&request, query, &state.token, is_apps) {
+    if (is_apps || is_v1)
+        && !authorized(
+            &request,
+            &state.token,
+            is_apps,
+            state.app_registry.as_ref(),
+            path,
+        )
+    {
         return respond_json(
             &mut stream,
             401,
@@ -421,12 +528,21 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<HostState>) -> io::
         return handle_gateway(&mut stream, &request, &state).await;
     }
     if is_apps {
+        // Public app URLs are capabilities in their own right: the registry
+        // UUID is high entropy, while the host bearer token never appears in
+        // the URL, cookie jar, referrer, or proxy logs.
         return proxy_app(&mut stream, &request, path, query, &state).await;
     }
     handle_api_route(&mut stream, &request, path, &state).await
 }
 
-fn authorized(request: &Request, query: &str, token: &str, apps: bool) -> bool {
+fn authorized(
+    request: &Request,
+    token: &str,
+    apps: bool,
+    registry: Option<&AppRegistry>,
+    path: &str,
+) -> bool {
     if let Some(value) = request.headers.get("authorization")
         && let Some((scheme, supplied)) = value.split_once(char::is_whitespace)
         && scheme.eq_ignore_ascii_case("bearer")
@@ -434,8 +550,20 @@ fn authorized(request: &Request, query: &str, token: &str, apps: bool) -> bool {
     {
         return true;
     }
-    apps && query_param(query, "token")
-        .is_some_and(|supplied| constant_time_eq(supplied.as_bytes(), token.as_bytes()))
+    apps && known_app_path(registry, path)
+}
+
+fn known_app_path(registry: Option<&AppRegistry>, path: &str) -> bool {
+    let Some(registry) = registry else {
+        return false;
+    };
+    let Some(rest) = path.strip_prefix("/apps/") else {
+        return false;
+    };
+    let Some(uuid) = rest.split('/').next() else {
+        return false;
+    };
+    !uuid.is_empty() && registry.lookup(uuid).is_some()
 }
 
 /// Constant-time equality for the host token. The length difference is folded
@@ -458,6 +586,9 @@ async fn handle_api_route(
     path: &str,
     state: &HostState,
 ) -> io::Result<()> {
+    if path == "/v1/sync/blob" || path.starts_with("/v1/sync/blob/") {
+        return handle_sync_blob(stream, request, path, state).await;
+    }
     match (request.method.as_str(), path) {
         ("GET", "/v1/snapshot") => {
             let snapshot =
@@ -473,8 +604,7 @@ async fn handle_api_route(
                 Ok(models) => {
                     let response = ModelsResponse {
                         object: "list",
-                        data: models.clone(),
-                        models,
+                        data: models.into_iter().map(OpenAiModel::from).collect(),
                     };
                     respond_json(stream, 200, &response).await
                 }
@@ -568,8 +698,50 @@ async fn handle_api_route(
 #[derive(Debug, Serialize)]
 struct ModelsResponse {
     object: &'static str,
-    data: Vec<WireModel>,
-    models: Vec<WireModel>,
+    data: Vec<OpenAiModel>,
+}
+
+/// `OpenAI` `/v1/models` fields, with Nexus routing metadata retained as
+/// additive fields for clients that want backend-aware pickers.
+#[derive(Debug, Serialize)]
+struct OpenAiModel {
+    id: String,
+    object: &'static str,
+    created: u64,
+    owned_by: String,
+    backend: WireBackendTag,
+    name: String,
+    reasoning_efforts: Vec<super::wire::WireReasoningEffort>,
+    context_length: Option<u64>,
+    supports_images: bool,
+    supports_image_generation: bool,
+    supports_video_generation: bool,
+    pricing: Option<super::wire::WireModelPricing>,
+}
+
+impl From<WireModel> for OpenAiModel {
+    fn from(model: WireModel) -> Self {
+        let owned_by = match model.backend {
+            WireBackendTag::OpenRouter => "openrouter",
+            WireBackendTag::OpenAi => "openai",
+            WireBackendTag::OpencodeGo => "opencode-go",
+            WireBackendTag::Codex => "codex",
+        };
+        Self {
+            id: model.id,
+            object: "model",
+            created: 0,
+            owned_by: owned_by.to_string(),
+            backend: model.backend,
+            name: model.name,
+            reasoning_efforts: model.reasoning_efforts,
+            context_length: model.context_length,
+            supports_images: model.supports_images,
+            supports_image_generation: model.supports_image_generation,
+            supports_video_generation: model.supports_video_generation,
+            pricing: model.pricing,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -582,6 +754,11 @@ struct BackendInfo {
     tag: WireBackendTag,
     name: &'static str,
     configured: bool,
+    /// Whether `/v1/chat/completions` can route this backend.
+    gateway_supported: bool,
+    /// Stable explanation when a configured backend is intentionally omitted
+    /// from the gateway model picker.
+    gateway_error: Option<&'static str>,
     default_model: String,
     model_count: usize,
 }
@@ -599,6 +776,81 @@ struct ToolRunResponse {
     label: String,
 }
 
+async fn handle_sync_blob(
+    stream: &mut TcpStream,
+    request: &Request,
+    path: &str,
+    state: &HostState,
+) -> io::Result<()> {
+    let query = split_target(&request.target).1;
+    let path_parts = path
+        .strip_prefix("/v1/sync/blob/")
+        .and_then(|rest| rest.split_once('/'));
+    let space_id = query_param(query, "space_id")
+        .or_else(|| path_parts.map(|(space, _)| percent_decode(space)));
+    let Some(space_id) = space_id else {
+        return respond_error(stream, 400, "sync blob is missing space_id").await;
+    };
+    let name =
+        query_param(query, "name").or_else(|| path_parts.map(|(_, name)| percent_decode(name)));
+    let Some(name) = name else {
+        return respond_error(stream, 400, "sync blob is missing name").await;
+    };
+    match request.method.as_str() {
+        "PUT" => {
+            if request.body.len() > MAX_BLOB_BYTES {
+                return respond_text(stream, 413, "blob too large").await;
+            }
+            let Some(hash) = query_param(split_target(&request.target).1, "hash") else {
+                return respond_error(stream, 400, "sync blob is missing hash").await;
+            };
+            let result = ask_actor(&state.requests, |reply| HostRequest::PutBlob {
+                space_id,
+                name,
+                hash,
+                bytes: request.body.clone(),
+                reply,
+            })
+            .await;
+            match result {
+                Ok(()) => {
+                    respond_json(
+                        stream,
+                        201,
+                        &serde_json::json!({ "ok": true, "bytes": request.body.len() }),
+                    )
+                    .await
+                }
+                Err(error) => respond_error(stream, 409, &error).await,
+            }
+        }
+        "GET" | "HEAD" => {
+            let result = ask_actor(&state.requests, |reply| HostRequest::GetBlob {
+                space_id,
+                name,
+                reply,
+            })
+            .await;
+            match result {
+                Ok(Some(bytes)) => {
+                    respond_full(
+                        stream,
+                        200,
+                        "application/octet-stream",
+                        "",
+                        &bytes,
+                        request.method == "HEAD",
+                    )
+                    .await
+                }
+                Ok(None) => respond_text(stream, 404, "sync blob not found").await,
+                Err(error) => respond_error(stream, 500, &error).await,
+            }
+        }
+        _ => respond_text(stream, 405, "method not allowed").await,
+    }
+}
+
 async fn handle_sse(
     stream: &mut TcpStream,
     request: &Request,
@@ -610,7 +862,10 @@ async fn handle_sse(
     let mut receiver = state.events.subscribe();
     stream
         .write_all(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\n\r\n",
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n{CORS_HEADERS}\r\n"
+            )
+            .as_bytes(),
         )
         .await?;
     stream.flush().await?;
@@ -708,9 +963,19 @@ async fn handle_gateway(
             .await;
         }
     };
-    let (default_base, _raw_model) = openrouter::gateway_route(route.tag, &route.model);
+    let (default_base, raw_model) = openrouter::gateway_route(route.tag, &route.model);
     let base = state.gateway_base.as_deref().unwrap_or(default_base);
     let url = format!("{base}/chat/completions");
+    // `/v1/models` publishes composite ids (`openai:`/`codex:`/`opencode:`
+    // prefixes, plus the `go:` tag `list_models` adds), which no upstream
+    // recognizes. Forward the raw id the route resolved to, not the client's.
+    let payload = {
+        let mut forwarded = body.clone();
+        if let Some(object) = forwarded.as_object_mut() {
+            object.insert("model".to_string(), serde_json::Value::String(raw_model));
+        }
+        serde_json::to_vec(&forwarded).unwrap_or_else(|_| request.body.clone())
+    };
     let mut builder = state
         .client
         .post(url)
@@ -718,13 +983,9 @@ async fn handle_gateway(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", route.key),
         )
-        .body(request.body.clone());
+        .body(payload);
     for (name, value) in &request.headers {
-        if matches!(
-            name.as_str(),
-            "host" | "authorization" | "content-length" | "transfer-encoding"
-        ) || name.starts_with("x-nexus-")
-        {
+        if is_hop_by_hop(name) || name.starts_with("x-nexus-") {
             continue;
         }
         let Ok(header_name) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) else {
@@ -735,6 +996,8 @@ async fn handle_gateway(
         };
         builder = builder.header(header_name, header_value);
     }
+    // Unreachable while `gateway_unsupported` rejects Codex; kept so the
+    // headers are already correct when the gateway learns to translate.
     if route.tag == BackendTag::Codex {
         if let Some(account_id) = &route.account_id {
             builder = builder.header("chatgpt-account-id", account_id);
@@ -743,11 +1006,12 @@ async fn handle_gateway(
             .header("originator", "nexus-host")
             .header("OpenAI-Beta", "responses=experimental");
     }
-    let response = match builder.send().await {
-        Ok(response) => response,
-        Err(error) => {
+    let response = match tokio::time::timeout(UPSTREAM_HEADERS_TIMEOUT, builder.send()).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
             return respond_error(stream, 502, &format!("upstream request failed: {error}")).await;
         }
+        Err(_) => return respond_error(stream, 504, "upstream request timed out").await,
     };
     let status = response.status().as_u16();
     let content_type = response
@@ -769,13 +1033,19 @@ async fn handle_gateway(
     stream
         .write_all(
             format!(
-                "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\n\r\n"
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nConnection: close\r\n{CORS_HEADERS}\r\n"
             )
             .as_bytes(),
         )
         .await?;
     stream.flush().await?;
-    while let Some(chunk) = upstream.next().await {
+    loop {
+        let Ok(next) = tokio::time::timeout(UPSTREAM_CHUNK_TIMEOUT, upstream.next()).await else {
+            break;
+        };
+        let Some(chunk) = next else {
+            break;
+        };
         let Ok(chunk) = chunk else {
             break;
         };
@@ -787,6 +1057,7 @@ async fn handle_gateway(
             return Ok(());
         }
     }
+    usage.finish(streaming);
     let (reply, result) = oneshot::channel();
     let _ = state
         .requests
@@ -831,11 +1102,7 @@ async fn proxy_app(
         .request(method, target)
         .body(request.body.clone());
     for (name, value) in &request.headers {
-        if matches!(
-            name.as_str(),
-            "host" | "authorization" | "content-length" | "transfer-encoding"
-        ) || name == "x-nexus-token"
-        {
+        if is_hop_by_hop(name) || name == "cookie" || name == "x-nexus-token" {
             continue;
         }
         let Ok(header_name) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) else {
@@ -846,11 +1113,12 @@ async fn proxy_app(
         };
         builder = builder.header(header_name, header_value);
     }
-    let response = match builder.send().await {
-        Ok(response) => response,
-        Err(error) => {
+    let response = match tokio::time::timeout(UPSTREAM_HEADERS_TIMEOUT, builder.send()).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
             return respond_error(stream, 502, &format!("app proxy failed: {error}")).await;
         }
+        Err(_) => return respond_error(stream, 504, "app proxy timed out").await,
     };
     let status = response.status().as_u16();
     let content_type = response
@@ -859,20 +1127,59 @@ async fn proxy_app(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-    let body = match response.bytes().await {
-        Ok(body) => body,
-        Err(error) => {
-            return respond_error(stream, 502, &format!("app response failed: {error}")).await;
+    let mut body = Vec::new();
+    let mut upstream = response.bytes_stream();
+    loop {
+        let Ok(next) = tokio::time::timeout(UPSTREAM_CHUNK_TIMEOUT, upstream.next()).await else {
+            return respond_error(stream, 504, "app response timed out").await;
+        };
+        let Some(chunk) = next else {
+            break;
+        };
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                return respond_error(stream, 502, &format!("app response failed: {error}")).await;
+            }
+        };
+        if body.len().saturating_add(chunk.len()) > MAX_APP_RESPONSE_BYTES {
+            return respond_text(stream, 502, "app response too large").await;
         }
-    };
-    respond_with_content_type(
+        body.extend_from_slice(&chunk);
+    }
+    respond_full(
         stream,
         status,
         &content_type,
+        "",
         &body,
         request.method == "HEAD",
     )
     .await
+}
+
+/// Headers that must not be relayed to an upstream. `accept-encoding` is in
+/// the list because both proxies forward the upstream body verbatim while
+/// only relaying `Content-Type` — a compressed upstream response would
+/// otherwise reach the client without its `Content-Encoding` (and defeat the
+/// gateway's usage parsing).
+fn is_hop_by_hop(name: &str) -> bool {
+    matches!(
+        name,
+        "host"
+            | "authorization"
+            | "content-length"
+            | "transfer-encoding"
+            | "accept-encoding"
+            | "connection"
+            | "keep-alive"
+            | "expect"
+            | "te"
+            | "trailer"
+            | "upgrade"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+    )
 }
 
 fn query_without_token(query: &str) -> String {
@@ -887,11 +1194,59 @@ fn query_without_token(query: &str) -> String {
         .join("&")
 }
 
+fn redact_wire_event(event: WireEvent, app: &App, host_token: &str) -> WireEvent {
+    let mut secrets = vec![
+        host_token,
+        app.saved.host_token.as_deref().unwrap_or_default(),
+        app.saved.openrouter_key.as_deref().unwrap_or_default(),
+        app.saved.openai_key.as_deref().unwrap_or_default(),
+        app.saved.opencode_key.as_deref().unwrap_or_default(),
+        app.saved
+            .codex
+            .as_ref()
+            .map_or("", |credentials| credentials.access.as_str()),
+        app.saved
+            .codex
+            .as_ref()
+            .map_or("", |credentials| credentials.refresh.as_str()),
+        app.langsearch_key.as_str(),
+        app.searxng_url.as_str(),
+    ];
+    secrets.retain(|secret| !secret.is_empty());
+    let Ok(mut value) = serde_json::to_value(event.clone()) else {
+        return event;
+    };
+    redact_json_secrets(&mut value, &secrets);
+    serde_json::from_value(value).unwrap_or(event)
+}
+
+fn redact_json_secrets(value: &mut serde_json::Value, secrets: &[&str]) {
+    match value {
+        serde_json::Value::String(text) => {
+            for secret in secrets {
+                *text = text.replace(secret, "[redacted]");
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_json_secrets(value, secrets);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                redact_json_secrets(value, secrets);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
 async fn app_actor(
     mut app: App,
     mut requests: mpsc::Receiver<HostRequest>,
     events: broadcast::Sender<WireEvent>,
     shutdown: Arc<Notify>,
+    host_token: Arc<String>,
 ) {
     loop {
         tokio::select! {
@@ -901,12 +1256,12 @@ async fn app_actor(
                 handle_actor_request(&mut app, request);
             }
             event = app.next_event() => {
-                let wire = WireEvent::from(event.clone());
-                apply_domain_event(&mut app, &event);
+                let wire = redact_wire_event(WireEvent::from(event.clone()), &app, host_token.as_str());
                 // The handler may clear a one-shot receiver itself; this
                 // backstop also prevents a closed source from returning
                 // `None` forever when a remote client is the only consumer.
                 clear_closed_source(&mut app, &event);
+                apply_domain_event(&mut app, event);
                 let _ = events.send(wire);
             }
         }
@@ -920,7 +1275,15 @@ fn handle_actor_request(app: &mut App, request: HostRequest) {
             let _ = reply.send(app.snapshot().map_err(|error| error.to_string()));
         }
         HostRequest::Models { reply } => {
-            let models = app.models.iter().cloned().map(WireModel::from).collect();
+            // Gateway-unreachable backends are withheld: this list is what an
+            // OpenAI-wire client picks from, and every pick must be routable.
+            let models = app
+                .models
+                .iter()
+                .filter(|entry| gateway_unsupported(entry.backend).is_none())
+                .cloned()
+                .map(WireModel::from)
+                .collect();
             let _ = reply.send(Ok(models));
         }
         HostRequest::Backends { reply } => {
@@ -938,9 +1301,11 @@ fn handle_actor_request(app: &mut App, request: HostRequest) {
                         tag: tag.into(),
                         name: tag.display_name(),
                         configured: app.backends.configured(tag),
-                        default_model: provider
-                            .map(|provider| provider.default_utility_model().to_string())
-                            .unwrap_or_default(),
+                        gateway_supported: gateway_unsupported(tag).is_none(),
+                        gateway_error: gateway_unsupported(tag),
+                        default_model: provider.map_or_else(String::new, |provider| {
+                            public_model_id_for_backend(tag, provider.default_utility_model())
+                        }),
                         model_count: app
                             .models
                             .iter()
@@ -961,13 +1326,37 @@ fn handle_actor_request(app: &mut App, request: HostRequest) {
         HostRequest::Toolbox { reply } => {
             let _ = reply.send(Ok(app.toolbox.clone()));
         }
+        HostRequest::PutBlob {
+            space_id,
+            name,
+            hash,
+            bytes,
+            reply,
+        } => {
+            let result =
+                crate::sync::put_blob(&app.db, &app.space, &space_id, &name, &hash, &bytes)
+                    .map_err(|error| error.to_string());
+            if result.is_ok() {
+                app.files_cache = app.db.list_files(&app.active_space.id).unwrap_or_default();
+            }
+            let _ = reply.send(result);
+        }
+        HostRequest::GetBlob {
+            space_id,
+            name,
+            reply,
+        } => {
+            let result = crate::sync::read_blob(&app.db, &app.space, &space_id, &name)
+                .map_err(|error| error.to_string());
+            let _ = reply.send(result);
+        }
         HostRequest::Sync { changeset, reply } => {
             let result = (|| -> Result<Changeset, String> {
                 let (_summary, cursors) =
                     crate::sync::apply_changeset(&app.db, &app.space, &changeset, None)
                         .map_err(|error| error.to_string())?;
                 app.sessions_cache.clear();
-                app.rescan_files();
+                app.files_cache = app.db.list_files(&app.active_space.id).unwrap_or_default();
                 let mut reply_changeset = crate::sync::build_changeset(
                     &app.db,
                     Some(&changeset.device_id),
@@ -1023,8 +1412,8 @@ fn handle_actor_request(app: &mut App, request: HostRequest) {
     }
 }
 
-fn apply_domain_event(app: &mut App, event: &AppEvent) {
-    match event.clone() {
+fn apply_domain_event(app: &mut App, event: AppEvent) {
+    match event {
         AppEvent::Stream(Some((task_id, event))) => {
             if let Err(error) = app.on_chat_event(task_id, event) {
                 app.push_status(error.to_string());
@@ -1073,25 +1462,81 @@ fn clear_closed_source(app: &mut App, event: &AppEvent) {
     }
 }
 
+/// Why a backend cannot be reached through the OpenAI-wire gateway, if it
+/// cannot be.
+///
+/// Only Codex qualifies today. [`openrouter::base_url`] points it at
+/// `https://chatgpt.com/backend-api`, which serves `/codex/responses` taking a
+/// Responses-API body — but [`handle_gateway`] speaks `/chat/completions` and
+/// pipes the upstream bytes straight back. A Codex route would therefore 404
+/// upstream on every request, so it is rejected here and withheld from
+/// `/v1/models` and `/v1/backends` rather than advertised as usable.
+///
+/// The request half of the translation already exists as
+/// `openrouter::chat_body_to_codex_body`; the missing half is re-emitting the
+/// Responses event stream as `chat.completion.chunk` frames. Delete this
+/// function once the gateway can do that.
+const fn gateway_unsupported(tag: BackendTag) -> Option<&'static str> {
+    match tag {
+        BackendTag::Codex => Some(
+            "backend Codex is not reachable through the gateway: it speaks the Responses API, \
+             which the gateway cannot translate yet",
+        ),
+        _ => None,
+    }
+}
+
+fn public_model_id_for_backend(tag: BackendTag, model: &str) -> String {
+    format!("{}{}", tag.wire_prefix(), raw_model_for_backend(tag, model))
+}
+
+fn raw_model_for_backend(tag: BackendTag, model: &str) -> String {
+    model
+        .strip_prefix(tag.wire_prefix())
+        .or_else(|| {
+            let prefix = tag.key_prefix();
+            (!prefix.is_empty())
+                .then(|| model.strip_prefix(prefix))
+                .flatten()
+        })
+        .unwrap_or(model)
+        .to_string()
+}
+
 fn gateway_route(
     app: &App,
     model: &str,
     override_tag: Option<BackendTag>,
 ) -> Result<GatewayRoute, String> {
+    // Checked before `configured`, so an explicit `x-nexus-backend: codex`
+    // gets the real reason instead of advice to configure a backend that
+    // still would not work.
+    if let Some(tag) = override_tag
+        && let Some(reason) = gateway_unsupported(tag)
+    {
+        return Err(reason.to_string());
+    }
     let selected = if let Some(tag) = override_tag {
         if !app.backends.configured(tag) {
             return Err(format!("backend {} is not configured", tag.display_name()));
         }
-        Some((tag, model.to_string()))
+        Some((tag, raw_model_for_backend(tag, model)))
     } else {
         app.models.iter().find_map(|entry| {
             let composite = crate::app::composite_id(entry);
-            (entry.id == model || composite == model).then_some((entry.backend, entry.id.clone()))
+            let public_id = public_model_id(entry);
+            (entry.id == model || composite == model || public_id == model)
+                .then_some((entry.backend, entry.id.clone()))
         })
     };
     let Some((tag, raw_model)) = selected else {
         return Err(format!("unknown model {model:?}"));
     };
+    // A Codex model is still resolvable by raw id even though `/v1/models`
+    // no longer lists it.
+    if let Some(reason) = gateway_unsupported(tag) {
+        return Err(reason.to_string());
+    }
     let key = match tag {
         BackendTag::OpenRouter => app.saved.openrouter_key.clone(),
         BackendTag::OpenAi => app.saved.openai_key.clone(),
@@ -1140,6 +1585,18 @@ enum HostRequest {
         changeset: Changeset,
         reply: oneshot::Sender<Result<Changeset, String>>,
     },
+    PutBlob {
+        space_id: String,
+        name: String,
+        hash: String,
+        bytes: Vec<u8>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    GetBlob {
+        space_id: String,
+        name: String,
+        reply: oneshot::Sender<Result<Option<Vec<u8>>, String>>,
+    },
     SetPublicBase {
         base: Option<String>,
         reply: oneshot::Sender<Result<(), String>>,
@@ -1165,8 +1622,9 @@ where
         .send(make(reply))
         .await
         .map_err(|_| "host actor stopped".to_string())?;
-    receiver
+    tokio::time::timeout(ACTOR_REQUEST_TIMEOUT, receiver)
         .await
+        .map_err(|_| "host actor request timed out".to_string())?
         .map_err(|_| "host actor stopped".to_string())?
 }
 
@@ -1275,8 +1733,20 @@ async fn respond_with_content_type(
     body: &[u8],
     head: bool,
 ) -> io::Result<()> {
+    respond_full(stream, status, content_type, "", body, head).await
+}
+
+/// `extra` is a pre-rendered block of additional `Name: value\r\n` lines.
+async fn respond_full(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    extra: &str,
+    body: &[u8],
+    head: bool,
+) -> io::Result<()> {
     let header = format!(
-        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\n\r\n",
+        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n{CORS_HEADERS}{extra}\r\n",
         reason(status),
         body.len(),
     );
@@ -1290,6 +1760,7 @@ async fn respond_with_content_type(
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        201 => "Created",
         202 => "Accepted",
         204 => "No Content",
         400 => "Bad Request",
@@ -1301,7 +1772,10 @@ fn reason(status: u16) -> &'static str {
         500 => "Internal Server Error",
         501 => "Not Implemented",
         502 => "Bad Gateway",
+        408 => "Request Timeout",
+        409 => "Conflict",
         503 => "Service Unavailable",
+        504 => "Gateway Timeout",
         _ => "Error",
     }
 }
@@ -1309,6 +1783,7 @@ fn reason(status: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest as _;
 
     #[test]
     fn constant_time_compare_checks_length_and_bytes() {
@@ -1336,9 +1811,285 @@ mod tests {
             br#"{"usage":{"prompt_tokens":10,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":3},"cost":"0.01"}}"#,
             false,
         );
+        usage.finish(false);
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 4);
         assert_eq!(usage.cache_read_tokens, 3);
         assert_eq!(usage.cost, Some(0.01));
+    }
+
+    #[test]
+    fn usage_survives_a_chunk_boundary_inside_the_sse_frame() {
+        let frame = br#"data: {"usage":{"prompt_tokens":10,"completion_tokens":4}}"#;
+        let (head, tail) = frame.split_at(20);
+        let mut usage = GatewayUsage::default();
+        usage.observe(head, true);
+        usage.observe(tail, true);
+        usage.finish(true);
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 4);
+    }
+
+    #[test]
+    fn wire_event_redacts_provider_and_host_credentials() {
+        let mut app = test_app();
+        app.saved.openai_key = Some("provider-secret".into());
+        let event = redact_wire_event(
+            WireEvent::Status("provider-secret host-secret".into()),
+            &app,
+            "host-secret",
+        );
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("provider-secret"));
+        assert!(!json.contains("host-secret"));
+        assert!(json.contains("[redacted]"));
+    }
+
+    #[test]
+    fn codex_is_the_only_gateway_unreachable_backend() {
+        assert!(gateway_unsupported(BackendTag::Codex).is_some());
+        for tag in [
+            BackendTag::OpenRouter,
+            BackendTag::OpenAi,
+            BackendTag::OpencodeGo,
+        ] {
+            assert!(gateway_unsupported(tag).is_none(), "{tag:?} should route");
+        }
+    }
+
+    fn test_app() -> App {
+        let root = std::env::temp_dir().join(format!("nexus-host-test-{}", uuid::Uuid::new_v4()));
+        App::new(
+            crate::db::Db::open_in_memory().expect("in-memory db"),
+            Some("sk-host-test"),
+            crate::space::Space { root },
+        )
+    }
+
+    fn request(method: &str, target: &str, token: Option<&str>, body: &[u8]) -> Vec<u8> {
+        let mut request = format!("{method} {target} HTTP/1.1\r\nHost: localhost\r\n").into_bytes();
+        if let Some(token) = token {
+            request.extend_from_slice(format!("Authorization: Bearer {token}\r\n").as_bytes());
+        }
+        request.extend_from_slice(
+            format!(
+                "Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        request.extend_from_slice(body);
+        request
+    }
+
+    async fn raw_request(addr: SocketAddr, request: Vec<u8>) -> Vec<u8> {
+        let mut stream = TcpStream::connect(addr).await.expect("connect host");
+        stream.write_all(&request).await.expect("write request");
+        stream.shutdown().await.expect("shutdown request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        response
+    }
+
+    fn response_body(response: &[u8]) -> &[u8] {
+        response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map_or(&[], |position| &response[position + 4..])
+    }
+
+    #[tokio::test]
+    async fn host_http_auth_models_command_and_snapshot_are_hermetic() {
+        let mut app = test_app();
+        app.models = vec![crate::provider::Model {
+            id: "gpt-test".into(),
+            name: "Test model".into(),
+            reasoning_efforts: Vec::new(),
+            context_length: Some(8_192),
+            supports_images: false,
+            supports_image_generation: false,
+            supports_video_generation: false,
+            backend: BackendTag::OpenAi,
+            pricing: None,
+        }];
+        let mut server = HostServer::bind(app, HostConfig::new(0, "host-secret"))
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+
+        let unauthorized = raw_request(addr, request("GET", "/v1/snapshot", None, &[])).await;
+        assert!(String::from_utf8_lossy(&unauthorized).starts_with("HTTP/1.1 401"));
+
+        let models =
+            raw_request(addr, request("GET", "/v1/models", Some("host-secret"), &[])).await;
+        assert!(String::from_utf8_lossy(&models).starts_with("HTTP/1.1 200"));
+        let models: serde_json::Value = serde_json::from_slice(response_body(&models)).unwrap();
+        assert_eq!(models["object"], "list");
+        assert_eq!(models["data"][0]["object"], "model");
+        assert_eq!(models["data"][0]["id"], "openai:gpt-test");
+        assert_eq!(models["data"][0]["owned_by"], "openai");
+
+        let command = serde_json::to_vec(&AppCommand::SetSetting {
+            key: "langsearch_key".into(),
+            value: "do-not-leak".into(),
+        })
+        .unwrap();
+        let command_response = raw_request(
+            addr,
+            request("POST", "/v1/command", Some("host-secret"), &command),
+        )
+        .await;
+        assert!(String::from_utf8_lossy(&command_response).starts_with("HTTP/1.1 202"));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let snapshot = raw_request(
+            addr,
+            request("GET", "/v1/snapshot", Some("host-secret"), &[]),
+        )
+        .await;
+        let snapshot_text = String::from_utf8_lossy(response_body(&snapshot));
+        assert!(!snapshot_text.contains("do-not-leak"));
+        assert!(snapshot_text.contains("langsearch_configured"));
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn host_gateway_preserves_mocked_stream_bytes() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let mock_addr = listener.local_addr().unwrap();
+        let expected = br#"data: {"choices":[{"delta":{"content":"hi"}}]}
+
+data: [DONE]
+
+"#;
+        let expected_for_task = expected.to_vec();
+        let mock = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0u8; 1024];
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.starts_with("POST /chat/completions HTTP/1.1"));
+            assert!(request_text.contains("authorization: Bearer sk-host-test"));
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+                expected_for_task.len()
+            );
+            stream.write_all(header.as_bytes()).await.unwrap();
+            stream.write_all(&expected_for_task).await.unwrap();
+        });
+
+        let mut app = test_app();
+        app.models = vec![crate::provider::Model {
+            id: "gpt-test".into(),
+            name: "Test model".into(),
+            reasoning_efforts: Vec::new(),
+            context_length: None,
+            supports_images: false,
+            supports_image_generation: false,
+            supports_video_generation: false,
+            backend: BackendTag::OpenAi,
+            pricing: None,
+        }];
+        let mut server = HostServer::bind(
+            app,
+            HostConfig::new(0, "host-secret").with_gateway_base(format!("http://{mock_addr}")),
+        )
+        .await
+        .unwrap();
+        let body = br#"{"model":"openai:gpt-test","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        let response = raw_request(
+            server.local_addr(),
+            request("POST", "/v1/chat/completions", Some("host-secret"), body),
+        )
+        .await;
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"));
+        assert!(response.ends_with(expected));
+        mock.await.unwrap();
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn host_sse_and_http_blob_transfer_are_hermetic() {
+        let app = test_app();
+        let space_id = app.active_space.id.clone();
+        let name = "remote.txt";
+        let bytes = b"blob over http";
+        let digest = sha2::Sha256::digest(bytes);
+        let hash = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        app.db
+            .upsert_file(&space_id, name, &hash, bytes.len() as i64, "ok")
+            .unwrap();
+        let mut server = HostServer::bind(app, HostConfig::new(0, "host-secret"))
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+
+        let mut events = TcpStream::connect(addr).await.unwrap();
+        events
+            .write_all(&request("GET", "/v1/events", Some("host-secret"), &[]))
+            .await
+            .unwrap();
+        let mut initial = Vec::new();
+        while !initial.windows(4).any(|window| window == b"\r\n\r\n") {
+            let mut chunk = [0u8; 1024];
+            let n = tokio::time::timeout(Duration::from_secs(2), events.read(&mut chunk))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(n > 0);
+            initial.extend_from_slice(&chunk[..n]);
+        }
+
+        let setting = serde_json::to_vec(&AppCommand::Send {
+            text: "event-secret".into(),
+        })
+        .unwrap();
+        let _ = raw_request(
+            addr,
+            request("POST", "/v1/command", Some("host-secret"), &setting),
+        )
+        .await;
+        let mut frame_bytes = initial;
+        while !String::from_utf8_lossy(&frame_bytes).contains("composer_set") {
+            let mut chunk = [0u8; 1024];
+            let n = tokio::time::timeout(Duration::from_secs(2), events.read(&mut chunk))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(n > 0);
+            frame_bytes.extend_from_slice(&chunk[..n]);
+        }
+        assert!(!String::from_utf8_lossy(&frame_bytes).contains("host-secret"));
+        events.shutdown().await.unwrap();
+
+        let target = format!("/v1/sync/blob?space_id={space_id}&name={name}&hash={hash}");
+        let uploaded = raw_request(addr, request("PUT", &target, Some("host-secret"), bytes)).await;
+        assert!(String::from_utf8_lossy(&uploaded).starts_with("HTTP/1.1 201"));
+        let downloaded = raw_request(
+            addr,
+            request(
+                "GET",
+                &format!("/v1/sync/blob?space_id={space_id}&name={name}"),
+                Some("host-secret"),
+                &[],
+            ),
+        )
+        .await;
+        assert_eq!(response_body(&downloaded), bytes);
+        server.shutdown().await;
     }
 }

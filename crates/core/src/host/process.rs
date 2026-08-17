@@ -48,6 +48,7 @@ impl Tunnel {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .context("starting cloudflared quick tunnel")?;
         let stderr = child
@@ -90,6 +91,7 @@ impl Tunnel {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .stdin(Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .context("starting cloudflared named tunnel")?;
         // Named tunnels use the hostname selected during setup, so there is
@@ -135,6 +137,7 @@ pub fn sleep_guard() -> Result<Option<ChildGuard>> {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .context("starting macOS caffeinate")?;
         return Ok(Some(ChildGuard { child: Some(child) }));
@@ -152,6 +155,7 @@ pub fn sleep_guard() -> Result<Option<ChildGuard>> {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .context("starting systemd-inhibit")?;
         return Ok(Some(ChildGuard { child: Some(child) }));
