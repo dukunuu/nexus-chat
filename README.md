@@ -62,6 +62,9 @@ nexus open <id|slug>                                   # launch the TUI inside t
 nexus update                                           # update to the latest release (cargo install)
 nexus status                                           # paths, providers configured, db stats
 nexus doctor [--network]                               # db integrity, config, tools
+nexus host [--port 8643]                               # local HTTP/SSE daemon + gateway
+nexus host --tunnel                                     # quick Cloudflare tunnel + QR enrollment
+nexus host --setup                                      # provision a named tunnel with CF_API_TOKEN
 ```
 
 `nexus ask`/`chat`/`research` use your most recently used model (or
@@ -72,6 +75,28 @@ survey/plan checkpoints: interactive when stdin is a terminal, an error
 otherwise (`--approve` runs unattended, like `/research!`). The read-only
 commands (`usage`, `sessions`, `spaces`, `export`, `status`, `doctor`,
 `backup`, `memory`, …) never touch the network.
+
+### Hosting
+
+`nexus host` runs the same core on a loopback HTTP/SSE daemon. It exposes
+`/v1/snapshot`, `/v1/models`, `/v1/backends`, `/v1/events`, `/v1/command`,
+`/v1/sync`, `/v1/tools`, and an OpenAI-compatible `/v1/chat/completions`
+gateway. The host token is generated once and stored in
+`~/.config/nexus-chat/config.toml` as `[provider].host_token`; provider API
+keys remain on the machine and are never sent to clients.
+
+```sh
+nexus host --port 8643
+curl -H "Authorization: Bearer <host-token>" http://127.0.0.1:8643/v1/snapshot
+nexus host --tunnel                         # requires cloudflared
+CF_API_TOKEN=… nexus host --setup           # creates a named tunnel + DNS CNAME
+# non-interactive setup can also set CF_ACCOUNT_ID, CF_ZONE_ID,
+# CF_HOSTNAME, and CF_TUNNEL_NAME
+```
+
+The command prints an enrollment URI and an ASCII QR code. Browser app links
+use `/apps/<uuid>/?token=…` because navigations cannot set an Authorization
+header. `--no-sleep-guard` disables `caffeinate`/`systemd-inhibit` if desired.
 
 ### Requirements
 
@@ -196,6 +221,8 @@ crates/core/        nexus-chat-core (lib crate `nexus_core`) — domain only, ze
 ├── src/skills.rs, extract.rs, citations.rs   tool support
 ├── src/db.rs       SQLite: sessions, messages, usage, citations, model prefs
 ├── src/appserver.rs  localhost static server for model-created apps (8642)
+├── src/host/         HTTP/SSE daemon, provider gateway, sync/worker routes,
+│                     Cloudflare setup, tunnel and sleep-guard lifecycle
 ├── src/markdown.rs pure to_plain copy path + the shared GFM table splitter
 └── src/config.rs, space.rs   credentials, spaces
 crates/tui/         nexus-chat — the `nexus` binary

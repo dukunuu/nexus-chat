@@ -71,6 +71,7 @@ The README has the full tree; the parts agents touch most:
 | `crates/core/src/db.rs` | SQLite (rusqlite bundled): sessions, messages, usage, citations, model prefs |
 | `crates/core/src/sync.rs` | Phase 3 merge engine: changeset types, per-table registry (cursor + apply rules), build/apply/ack, file blobs + zip bundles |
 | `crates/core/src/appserver.rs` | localhost static server for model-created apps (port 8642) |
+| `crates/core/src/host/` | `nexus host` HTTP/SSE API, OpenAI-wire gateway, sync/worker routes, Cloudflare setup, tunnel and sleep guard |
 | `crates/tui/src/app_view.rs` | `AppView`: wraps `App` (Deref) with all view state — composer, popup chrome/caches, render state, theme, status line |
 | `crates/tui/src/flows/` | popup flow methods moved out of core by 2e (`open_*_popup`, `move_*_selection`, `confirm_*`) |
 | `crates/tui/src/composer.rs` | TextArea ops: editing, clipboard, slash/`@` autocomplete (catalog stays core) |
@@ -87,6 +88,12 @@ The README has the full tree; the parts agents touch most:
 > fields (documented in `app/mod.rs`): `context_total`/`last_cache_rate`
 > (auto-compaction), `unread`, `notifications`, the files/scripts/sessions
 > caches (system-prompt inputs), and the research steer/stage state.
+>
+> Phase 4 host support lives in `crates/core/src/host/`: the app-actor
+> HTTP/SSE API, bearer auth, `/v1` routes, OpenAI-wire gateway, authenticated
+> app proxy, and opt-in `cloudflared`/sleep-guard lifecycle. Keep tunnel and
+> Cloudflare setup paths opt-in; tests must remain network-free and must not
+> launch sidecars.
 
 ## Things to know before changing code
 
