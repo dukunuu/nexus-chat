@@ -367,6 +367,7 @@ impl App {
     /// single bad file gets an "error: …" status instead of failing the scan.
     /// ponytail: runs synchronously on the UI task — extraction of a huge PDF
     /// blocks a beat; move to a blocking task if that ever hurts.
+    #[allow(clippy::too_many_lines)]
     pub fn rescan_files(&mut self) {
         let dir = self.space.files_dir(&self.active_space.name);
         let known = self
@@ -402,11 +403,17 @@ impl App {
                 && mtime != 0
             {
                 // Stale "ocr…"/"ocr N/M" (app quit mid-OCR) re-queues once no
-                // batch is in flight.
-                if f.status.starts_with("ocr") && self.ocr_rx.is_none() {
-                    ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
+                // batch is in flight.  Do not let the stat fast path hide a
+                // file imported by an older build that has no chunks yet.
+                if f.status.starts_with("ocr") {
+                    if self.ocr_rx.is_none() {
+                        ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
+                    }
+                    continue;
                 }
-                continue;
+                if self.db.file_has_chunks(&f.id).unwrap_or(false) {
+                    continue;
+                }
             }
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
@@ -419,6 +426,7 @@ impl App {
                 });
             if let Some(f) = existing.filter(|f| f.hash == hash)
                 && self.db.file_indexed(&f.id).unwrap_or(false)
+                && self.db.file_has_chunks(&f.id).unwrap_or(false)
             {
                 // Content unchanged (touched, or indexed before mtimes were
                 // tracked): just record the stat for next time.
@@ -443,11 +451,27 @@ impl App {
                         ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
                         ("ocr…".to_string(), Vec::new())
                     } else {
-                        ("no text (scanned?)".to_string(), Vec::new())
+                        (
+                            "no text (scanned?)".to_string(),
+                            crate::extract::metadata_chunks(&name),
+                        )
                     }
                 }
-                Ok(text) => ("ok".to_string(), crate::extract::chunk_lines(&text)),
-                Err(e) => (format!("error: {e}"), Vec::new()),
+                Ok(text) => {
+                    let chunks = crate::extract::chunk_lines(&text);
+                    if chunks.is_empty() {
+                        (
+                            "no text (scanned?)".to_string(),
+                            crate::extract::metadata_chunks(&name),
+                        )
+                    } else {
+                        ("ok".to_string(), chunks)
+                    }
+                }
+                Err(e) => (
+                    format!("error: {e}"),
+                    crate::extract::metadata_chunks(&name),
+                ),
             };
             if let Ok(id) = self
                 .db
@@ -682,9 +706,11 @@ impl App {
         self.push_status(format!("ocr queued: {}", f.name));
     }
 
-    /// Embed the next file whose chunks lack vectors, one file per job (the
-    /// done-handler chains the next). No-op without a provider, without an
-    /// embedding model, or while a job is already in flight.
+    /// Embed the next imported file whose chunks lack vectors, one file per
+    /// job (the done-handler chains the next). Files with no extractable text
+    /// receive a small filename metadata chunk so they are still searchable.
+    /// No-op without a provider, without an embedding model, or while a job is
+    /// already in flight.
     pub fn start_embedding(&mut self) {
         if self.embed_rx.is_some() {
             return;
@@ -700,31 +726,75 @@ impl App {
         let Ok(missing) = self.db.files_missing_embeddings(&space_id) else {
             return;
         };
-        let Some(file_id) = missing.first().cloned() else {
+        let Some(file) = self.db.list_files(&space_id).ok().and_then(|files| {
+            files.into_iter().find(|file| {
+                missing.iter().any(|id| id == &file.id) && !file.status.starts_with("ocr")
+            })
+        }) else {
             return;
         };
-        let chunks = self.db.file_chunk_texts(&file_id).unwrap_or_default();
-        if chunks.is_empty() {
+        // OCR owns files in this state.  They remain in the database work
+        // queue, but must not receive a placeholder chunk while OCR is still
+        // running.  The ready-file filter above prevents an OCR row from
+        // blocking all other files.
+        let file_id = file.id.clone();
+        let Ok(mut chunks) = self.db.file_chunk_texts(&file_id) else {
             return;
+        };
+        if chunks.is_empty() {
+            if self
+                .db
+                .set_file_chunks(&file_id, &crate::extract::metadata_chunks(&file.name))
+                .is_err()
+            {
+                return;
+            }
+            chunks = match self.db.file_chunk_texts(&file_id) {
+                Ok(chunks) => chunks,
+                Err(_) => return,
+            };
         }
         // Embedding is best-effort background work; outside a runtime (sync
         // unit tests) there's nowhere to run it, so just skip.
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let _ = self.db.set_file_status(&file_id, "embedding…");
+        // Keep extraction/OCR status text for metadata-only and failed files;
+        // the transient embedding marker is only safe to replace with "ok"
+        // when the original index status was already "ok".
+        let show_embedding_status = matches!(file.status.as_str(), "ok" | "embedding…");
+        if show_embedding_status {
+            let _ = self.db.set_file_status(&file_id, "embedding…");
+        }
         if space_id == self.active_space.id {
             self.files_cache = self.db.list_files(&space_id).unwrap_or_default();
         }
+        let file_name = file.name;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.embed_rx = Some(rx);
         handle.spawn(async move {
             let mut out: Vec<(i64, Vec<f32>)> = Vec::with_capacity(chunks.len());
             let mut err = None;
             for batch in chunks.chunks(64) {
-                let inputs: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
+                let inputs: Vec<String> = batch
+                    .iter()
+                    .map(|(_, text)| format!("file: {file_name}\n{text}"))
+                    .collect();
                 match provider.embed(&raw_model, inputs).await {
-                    Ok(vecs) => out.extend(batch.iter().zip(vecs).map(|((seq, _), v)| (*seq, v))),
+                    Ok(vecs) if vecs.len() == batch.len() => out.extend(
+                        batch
+                            .iter()
+                            .zip(vecs)
+                            .map(|((seq, _), vector)| (*seq, vector)),
+                    ),
+                    Ok(vecs) => {
+                        err = Some(format!(
+                            "embedding returned {} vectors for {} chunks",
+                            vecs.len(),
+                            batch.len()
+                        ));
+                        break;
+                    }
                     Err(e) => {
                         err = Some(e.to_string());
                         break;
@@ -741,22 +811,32 @@ impl App {
 
     /// One embedding job finished: store vectors and chain the next file, or
     /// surface the error and stop (a dead endpoint shouldn't be hammered —
-    /// the next rescan retries). Either way the file's status returns to "ok";
-    /// search falls back to keywords while vectors are missing.
+    /// the next rescan retries). Search falls back to keywords while vectors
+    /// are missing.
     pub fn on_embed_done(&mut self, r: Option<crate::app::EmbedMsg>) {
         let Some((space_id, file_id, result)) = r else {
             self.embed_rx = None;
             return;
         };
         self.embed_rx = None;
+        let restore_status = self
+            .db
+            .list_files(&space_id)
+            .ok()
+            .and_then(|files| files.into_iter().find(|file| file.id == file_id))
+            .is_some_and(|file| file.status == "embedding…");
         match result {
             Ok(vecs) => {
                 let _ = self.db.set_chunk_embeddings(&file_id, &vecs);
-                let _ = self.db.set_file_status(&file_id, "ok");
+                if restore_status {
+                    let _ = self.db.set_file_status(&file_id, "ok");
+                }
                 self.start_embedding();
             }
             Err(e) => {
-                let _ = self.db.set_file_status(&file_id, "ok");
+                if restore_status {
+                    let _ = self.db.set_file_status(&file_id, "ok");
+                }
                 self.push_status(format!("embedding failed: {e}"));
             }
         }
@@ -767,6 +847,7 @@ impl App {
 
     /// A finished OCR job: persist chunks/status, refresh the cache only if the
     /// file's space is still active. `None` = batch done (channel closed).
+    #[allow(clippy::too_many_lines)]
     pub fn on_ocr_done(&mut self, r: Option<(String, String, OcrUpdate)>) {
         let Some((space_id, name, update)) = r else {
             self.ocr_rx = None;
@@ -785,6 +866,7 @@ impl App {
         if !f.status.starts_with("ocr") {
             return; // re-imported mid-OCR — this result is for stale content
         }
+        let completed = matches!(update, OcrUpdate::Done(_));
         match update {
             OcrUpdate::Stage(s) => {
                 // Keep the "ocr" prefix — the stale-check above depends on it.
@@ -807,6 +889,11 @@ impl App {
                 }
             }
             OcrUpdate::Done(Ok((text, errors))) if text.trim().is_empty() => {
+                // Nothing usable came back; keep a filename metadata chunk so
+                // even an image/scanned document remains searchable.
+                let _ = self
+                    .db
+                    .set_file_chunks(&f.id, &crate::extract::metadata_chunks(&name));
                 // Nothing usable came back; say exactly why if we know.
                 let status = match errors.first() {
                     Some((i, e)) => {
@@ -820,9 +907,13 @@ impl App {
                 }
             }
             OcrUpdate::Done(Ok((text, errors))) => {
-                let _ = self
-                    .db
-                    .set_file_chunks(&f.id, &crate::extract::chunk_lines(&text));
+                let chunks = crate::extract::chunk_lines(&text);
+                let chunks = if chunks.is_empty() {
+                    crate::extract::metadata_chunks(&name)
+                } else {
+                    chunks
+                };
+                let _ = self.db.set_file_chunks(&f.id, &chunks);
                 let status = match errors.first() {
                     None => "ok".to_string(),
                     Some((i, e)) => format!(
@@ -857,11 +948,27 @@ impl App {
                 }
             }
             OcrUpdate::Done(Err(msg)) => {
+                // A failed first OCR pass has no chunks to embed. Preserve old
+                // extracted text when re-OCRing an already indexed file, but
+                // create metadata for a file that has never been indexed.
+                if self
+                    .db
+                    .file_chunk_texts(&f.id)
+                    .unwrap_or_default()
+                    .is_empty()
+                {
+                    let _ = self
+                        .db
+                        .set_file_chunks(&f.id, &crate::extract::metadata_chunks(&name));
+                }
                 let _ = self.db.set_file_status(&f.id, &msg);
                 if space_id == self.active_space.id {
                     self.push_status(format!("ocr {name}: {msg}"));
                 }
             }
+        }
+        if completed && space_id == self.active_space.id {
+            self.start_embedding();
         }
         if space_id == self.active_space.id {
             self.files_cache = self.db.list_files(&space_id).unwrap_or_default();
@@ -1042,6 +1149,36 @@ mod tests {
         let hits = crate::db::search_chunks(a.db.conn_for_test(), &a.active_space.id, "revenue", 8)
             .unwrap();
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn generic_code_and_binary_files_get_index_chunks() {
+        let mut a = test_app();
+        let dir = a.space.files_dir(&a.active_space.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("page.html"), "<main>searchable markup</main>").unwrap();
+        std::fs::write(dir.join("job.py"), "def searchable_code():\n    return 42").unwrap();
+        // A binary file cannot provide content to a text embedding model, but
+        // its metadata still makes the upload searchable by name.
+        std::fs::write(dir.join("asset.bin"), [0u8, 1, 2, 3]).unwrap();
+
+        a.rescan_files();
+        for name in ["page.html", "job.py", "asset.bin"] {
+            let file = a.files_cache.iter().find(|file| file.name == name).unwrap();
+            assert!(a.db.file_has_chunks(&file.id).unwrap(), "{name}");
+        }
+        let hits =
+            crate::db::search_chunks(a.db.conn_for_test(), &a.active_space.id, "searchable", 8)
+                .unwrap();
+        assert_eq!(hits.len(), 2, "code files should be FTS indexed");
+        let binary_hits =
+            crate::db::search_chunks(a.db.conn_for_test(), &a.active_space.id, "asset.bin", 8)
+                .unwrap();
+        assert_eq!(
+            binary_hits.len(),
+            1,
+            "binary upload should be name-searchable"
+        );
     }
 
     #[test]

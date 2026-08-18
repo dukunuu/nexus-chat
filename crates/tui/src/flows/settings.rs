@@ -253,7 +253,12 @@ impl AppView {
         self.core
             .db
             .set_setting("ocr_engine", &self.core.ocr_engine)?;
-        self.core.embedding_model = self.settings_inputs[6].trim().to_string();
+        let embedding_model = self.settings_inputs[6].trim().to_string();
+        if self.core.embedding_model != embedding_model {
+            self.core.embed_rx = None;
+            self.core.db.clear_chunk_embeddings()?;
+        }
+        self.core.embedding_model = embedding_model;
         self.core
             .db
             .set_setting("embedding_model", &self.core.embedding_model)?;
@@ -270,6 +275,7 @@ impl AppView {
             self.settings_inputs[7].trim(),
         );
         self.core.refresh_toolbox();
+        self.core.start_embedding();
         self.popup = Popup::None;
         self.push_status("settings saved".to_string());
         Ok(())

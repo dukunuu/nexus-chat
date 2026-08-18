@@ -1596,6 +1596,17 @@ impl Db {
         )?)
     }
 
+    /// Whether a file has extracted/indexable chunks on this device.  This is
+    /// separate from `file_indexed`: older cache versions could have a status
+    /// row without ever writing chunks.
+    pub fn file_has_chunks(&self, file_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cache.file_chunks WHERE file_id = ?1)",
+            [file_id],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn delete_file(&self, file_id: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM cache.file_chunks WHERE file_id = ?1",
@@ -1768,6 +1779,15 @@ impl Db {
                 (file_id, seq, vec_to_blob(v)),
             )?;
         }
+        Ok(())
+    }
+
+    /// Drop all device-local vectors.  Embeddings are model-specific; this is
+    /// used when the configured embedding model changes so semantic search does
+    /// not silently rank chunks with vectors from the old model.
+    pub fn clear_chunk_embeddings(&self) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM cache.chunk_embeddings", [])?;
         Ok(())
     }
 
@@ -2014,15 +2034,33 @@ pub fn cache_put(
     Ok(())
 }
 
-/// Ids of files (in one space) that have chunks but not a vector per chunk —
-/// the embedder's work queue, which doubles as the pre-upgrade backfill.
-/// Cross-db: `files` is durable, the chunk tables are device-local.
+/// Ids of files (in one space) that have no vector for at least one indexed
+/// chunk.  A file with no chunks is included too; the background embedder adds
+/// a filename metadata chunk for it.  OCR-in-progress files remain in this
+/// database-level queue; the app-level worker skips them until OCR supplies
+/// their real text (or a terminal OCR result supplies metadata). Cross-db:
+/// `files` is durable, the chunk tables are device-local.
 pub fn files_missing_embeddings(conn: &Connection, space_id: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT files.id FROM files
+        "SELECT files.id
+         FROM files
          WHERE files.space_id = ?1
-           AND (SELECT COUNT(*) FROM cache.file_chunks WHERE cache.file_chunks.file_id = files.id) >
-               (SELECT COUNT(*) FROM cache.chunk_embeddings WHERE cache.chunk_embeddings.file_id = files.id)",
+           AND (
+               NOT EXISTS (
+                   SELECT 1 FROM cache.file_chunks
+                   WHERE cache.file_chunks.file_id = files.id
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM cache.file_chunks
+                   LEFT JOIN cache.chunk_embeddings
+                       ON cache.chunk_embeddings.file_id = cache.file_chunks.file_id
+                      AND cache.chunk_embeddings.seq = CAST(cache.file_chunks.seq AS INTEGER)
+                   WHERE cache.file_chunks.file_id = files.id
+                     AND cache.chunk_embeddings.file_id IS NULL
+               )
+           )
+         ORDER BY files.name",
     )?;
     let rows = stmt.query_map([space_id], |r| r.get(0))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2910,6 +2948,7 @@ pub fn file_text(conn: &Connection, space_id: &str, name: &str) -> Result<Option
         "SELECT cache.file_chunks.text
          FROM cache.file_chunks JOIN files ON files.id = cache.file_chunks.file_id
          WHERE files.space_id = ?1 AND files.name = ?2
+           AND cache.file_chunks.location != 'file metadata'
          ORDER BY CAST(cache.file_chunks.seq AS INTEGER) ASC",
     )?;
     let rows = stmt.query_map((space_id, name), |r| r.get::<_, String>(0))?;
@@ -3722,6 +3761,36 @@ mod tests {
         assert_eq!(
             files_missing_embeddings(&db.conn, &space).unwrap(),
             vec![id.clone()]
+        );
+
+        // A vector for the wrong sequence must not make the file look complete.
+        db.set_chunk_embeddings(&id, &[(99, vec![1.0, 0.0])])
+            .unwrap();
+        assert_eq!(
+            files_missing_embeddings(&db.conn, &space).unwrap(),
+            vec![id.clone()]
+        );
+    }
+
+    #[test]
+    fn files_without_chunks_are_embedding_queue_entries() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let id = db
+            .upsert_file(&space, "empty.py", "h", 0, "no text (scanned?)")
+            .unwrap();
+        assert_eq!(
+            files_missing_embeddings(&db.conn, &space).unwrap(),
+            vec![id]
+        );
+
+        // OCR rows stay in the queue until they report a terminal result;
+        // the app-level worker skips them while they are active.
+        let ocr = db.upsert_file(&space, "scan.pdf", "p", 0, "ocr…").unwrap();
+        assert!(
+            files_missing_embeddings(&db.conn, &space)
+                .unwrap()
+                .contains(&ocr)
         );
     }
 

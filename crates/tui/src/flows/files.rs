@@ -242,7 +242,7 @@ impl AppView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nexus_core::app::{App, AppCommand};
+    use nexus_core::app::App;
     use nexus_core::db::Db;
     use nexus_core::space::Space;
 

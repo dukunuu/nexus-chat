@@ -126,17 +126,62 @@ pub fn extract_text(path: &Path) -> Result<String> {
         "xlsx" => office_text(path, &OfficeKind::Xlsx),
         // Images: return empty text so the OCR pipeline picks them up.
         _ if is_image_ext(&ext) => Ok(String::new()),
-        // Everything else: treat as text if it looks like text.
+        // Everything else: treat it as a text/code file unless it is clearly
+        // binary.  There is deliberately no extension allow-list here: source
+        // files (`html`, `py`, `rs`, shell scripts, and files without an
+        // extension) are all valid searchable files.  UTF-16 is common for
+        // files saved by desktop editors, so decode it before the NUL-byte
+        // binary check.
         _ => {
             let bytes =
                 std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let head = &bytes[..bytes.len().min(8192)];
-            if head.contains(&0) {
+            if let Some(text) = decode_utf16(&bytes) {
+                return Ok(text.trim().to_string());
+            }
+            if bytes.contains(&0) {
                 anyhow::bail!("unsupported binary file");
             }
-            Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+            Ok(String::from_utf8_lossy(&bytes)
+                .trim_start_matches('\u{feff}')
+                .trim()
+                .to_string())
         }
     }
+}
+
+/// Decode a BOM-marked UTF-16 text file.  A BOM is required so arbitrary
+/// binary files are not accidentally interpreted as source code.
+fn decode_utf16(bytes: &[u8]) -> Option<String> {
+    let (little_endian, payload) = if bytes.starts_with(&[0xFF, 0xFE]) {
+        (true, &bytes[2..])
+    } else if bytes.starts_with(&[0xFE, 0xFF]) {
+        (false, &bytes[2..])
+    } else {
+        return None;
+    };
+    let units: Vec<u16> = payload
+        .chunks_exact(2)
+        .map(|pair| {
+            if little_endian {
+                u16::from_le_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_be_bytes([pair[0], pair[1]])
+            }
+        })
+        .collect();
+    String::from_utf16(&units).ok()
+}
+
+/// A searchable fallback for a file whose contents are empty, binary, or
+/// otherwise not extractable.  Keeping this in the FTS/embedding input means
+/// every imported file still has an index entry and can be found by name.
+pub fn metadata_chunks(name: &str) -> Vec<(String, String)> {
+    vec![(
+        "file metadata".to_string(),
+        format!(
+            "uploaded file: {name}\nNo text could be extracted from this file; search by its file name."
+        ),
+    )]
 }
 
 enum OfficeKind {
@@ -583,6 +628,36 @@ mod tests {
         let p = dir.join("blob.bin");
         std::fs::write(&p, [0u8, 159, 146, 150]).unwrap();
         assert!(extract_text(&p).is_err());
+    }
+
+    #[test]
+    fn generic_code_files_are_plain_text() {
+        let dir = std::env::temp_dir().join(format!("nexus-extract-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, expected) in [("page.html", "<main>hello</main>"), ("job.py", "print(42)")] {
+            let path = dir.join(name);
+            std::fs::write(&path, expected).unwrap();
+            assert_eq!(extract_text(&path).unwrap(), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn utf16_code_files_are_decoded_before_binary_detection() {
+        let dir = std::env::temp_dir().join(format!("nexus-extract-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("script.py");
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend("print(42)".encode_utf16().flat_map(u16::to_le_bytes));
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(extract_text(&path).unwrap(), "print(42)");
+    }
+
+    #[test]
+    fn metadata_chunk_makes_empty_files_searchable_by_name() {
+        let chunks = metadata_chunks("archive.zip");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].0, "file metadata");
+        assert!(chunks[0].1.contains("archive.zip"));
     }
 
     #[test]

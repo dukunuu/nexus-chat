@@ -45,7 +45,18 @@ impl App {
         if !valid_setting_value(key, value) {
             bail!("invalid value for {key}: {value:?}");
         }
+        let embedding_changed =
+            key == "embedding_model" && self.embedding_model.trim() != value.trim();
         self.apply_setting(key, value);
+        if embedding_changed {
+            // Vectors have no model id of their own, so retaining them after a
+            // model change can make semantic search silently skip or mis-rank
+            // every file. Rebuild them with the new model instead. Dropping
+            // the receiver also prevents an old in-flight result from being
+            // written back after the clear.
+            self.embed_rx = None;
+            self.db.clear_chunk_embeddings()?;
+        }
         if key == "blocked_domains" {
             // Per-space (not a db setting): lives next to the space's other
             // config files so it travels with the space.
@@ -57,6 +68,9 @@ impl App {
             self.db.set_setting(key, value)?;
         }
         self.refresh_toolbox();
+        if key == "embedding_model" {
+            self.start_embedding();
+        }
         self.push_status(format!("{key} set"));
         Ok(())
     }

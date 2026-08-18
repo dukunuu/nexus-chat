@@ -1344,7 +1344,22 @@ fn handle_actor_request(app: &mut App, request: HostRequest) {
                 crate::sync::put_blob(&app.db, &app.space, &space_id, &name, &hash, &bytes)
                     .map_err(|error| error.to_string());
             if result.is_ok() {
-                app.files_cache = app.db.list_files(&app.active_space.id).unwrap_or_default();
+                // Invalidate the stat shortcut too: a replacement upload can
+                // have the same size and land in the same mtime second.
+                if let Some(file) = app
+                    .db
+                    .list_files(&space_id)
+                    .ok()
+                    .and_then(|files| files.into_iter().find(|file| file.name == name))
+                {
+                    let _ = app.db.set_file_mtime(&file.id, 0);
+                }
+                if space_id == app.active_space.id {
+                    // The blob route is also an upload path for the long-lived
+                    // host actor; without a rescan it would exist on disk but
+                    // never receive extracted chunks or background embeddings.
+                    app.rescan_files();
+                }
             }
             let _ = reply.send(result);
         }
@@ -2053,7 +2068,10 @@ data: [DONE]
 
     #[tokio::test]
     async fn host_sse_and_http_blob_transfer_are_hermetic() {
-        let app = test_app();
+        let mut app = test_app();
+        // The upload path rescans and starts semantic backfill; keep this
+        // transport-only test independent of the fake provider key.
+        app.embedding_model.clear();
         let space_id = app.active_space.id.clone();
         let name = "remote.txt";
         let bytes = b"blob over http";
