@@ -219,6 +219,9 @@ async fn background_tool_call_persists_to_origin_session_only() {
 
     a.new_session();
     a.on_stream_event(crate::provider::StreamEvent::ToolCall {
+        id: "call_0".into(),
+        reasoning: None,
+        assistant_content: None,
         name: "web_search".into(),
         arguments: "{}".into(),
         result: "ok".into(),
@@ -1221,6 +1224,9 @@ fn tool_call_events_persist_and_replay_into_history() {
     let s = a.db.create_session("t", "a/one", &space, "chat").unwrap();
     a.session = Some(s.clone());
     a.on_stream_event(crate::provider::StreamEvent::ToolCall {
+        id: "call_search".into(),
+        reasoning: None,
+        assistant_content: None,
         name: "search_files".into(),
         arguments: r#"{"query":"q3 revenue"}"#.into(),
         result: "report.pdf (page 3): revenue grew".into(),
@@ -1250,6 +1256,50 @@ fn tool_call_events_persist_and_replay_into_history() {
         .find(|m| m.role == "tool" && m.tool_call_id == Some(call.id.clone()))
         .expect("matching tool result message");
     assert!(tool_msg.content.contains("revenue grew"));
+}
+
+#[test]
+fn parallel_tool_call_rows_replay_as_one_lossless_assistant_batch() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    let space = a.active_space.id.clone();
+    let s = a.db.create_session("t", "a/one", &space, "chat").unwrap();
+    a.session = Some(s);
+
+    for (id, name, result, reasoning) in [
+        ("call_a", "search", "first result", Some("think once")),
+        ("call_b", "read_file", "second result", None),
+    ] {
+        a.on_stream_event(crate::provider::StreamEvent::ToolCall {
+            id: id.into(),
+            reasoning: reasoning.map(str::to_string),
+            assistant_content: (id == "call_a").then(|| "visible fragment".to_string()),
+            name: name.into(),
+            arguments: "{}".into(),
+            result: result.into(),
+        })
+        .unwrap();
+    }
+
+    let history = a.build_history();
+    let assistant = history
+        .iter()
+        .find(|m| m.role == "assistant" && m.tool_calls.is_some())
+        .expect("parallel assistant batch");
+    let calls = assistant.tool_calls.as_ref().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].id, "call_a");
+    assert_eq!(calls[1].id, "call_b");
+    assert_eq!(assistant.reasoning_content.as_deref(), Some("think once"));
+    assert_eq!(assistant.content, "visible fragment");
+    assert_eq!(
+        history
+            .iter()
+            .filter(|m| m.role == "tool")
+            .map(|m| m.tool_call_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("call_a"), Some("call_b")]
+    );
 }
 
 #[test]

@@ -1688,6 +1688,9 @@ mod tests {
         a.on_chat_event(
             1,
             nexus_core::provider::StreamEvent::ToolCall {
+                id: "call_0".into(),
+                reasoning: None,
+                assistant_content: None,
                 name: "web_search".into(),
                 arguments: r#"{"query":"some search query text"}"#.into(),
                 result: "result line one\nresult line two\nresult line three".into(),

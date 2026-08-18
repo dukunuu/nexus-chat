@@ -372,6 +372,7 @@ impl From<StreamEvent> for WireStreamEvent {
                 name,
                 arguments,
                 result,
+                ..
             } => Self::ToolCall {
                 name,
                 arguments,
@@ -825,6 +826,9 @@ mod tests {
             ),
             (
                 StreamEvent::ToolCall {
+                    id: "call_0".into(),
+                    reasoning: None,
+                    assistant_content: None,
                     name: "python".into(),
                     arguments: "print(1)".into(),
                     result: "1".into(),

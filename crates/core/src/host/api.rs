@@ -1853,6 +1853,31 @@ mod tests {
     }
 
     #[test]
+    fn fresh_codex_login_never_reaches_host_redaction_with_credentials() {
+        // The event is converted before the actor applies it to `App`, so the
+        // newly-issued credentials are not present in `app.saved` yet. The
+        // wire conversion must therefore remove them structurally rather than
+        // relying on the later string-redaction backstop.
+        let app = test_app();
+        let event = AppEvent::Login(Some(crate::app::LoginMsg::Done(Ok(
+            crate::config::CodexCredentials {
+                access: "fresh-access-secret".into(),
+                refresh: "fresh-refresh-secret".into(),
+                expires: 123,
+                account_id: "account".into(),
+            },
+        ))));
+        let wire = redact_wire_event(WireEvent::from(event), &app, "host-secret");
+        let json = serde_json::to_string(&wire).expect("serializes login event");
+        assert!(!json.contains("fresh-access-secret"));
+        assert!(!json.contains("fresh-refresh-secret"));
+        assert_eq!(
+            wire,
+            WireEvent::Login(Some(crate::host::wire::WireLoginMsg::Done(Ok(()))))
+        );
+    }
+
+    #[test]
     fn codex_is_the_only_gateway_unreachable_backend() {
         assert!(gateway_unsupported(BackendTag::Codex).is_some());
         for tag in [

@@ -185,6 +185,9 @@ pub struct ChatParams {
     /// `xhigh`, `max`, or explicit `none`), as stored per model. Rust `None`
     /// means do not send the parameter at all.
     pub reasoning_effort: Option<String>,
+    /// Stable per-session key used by compatible OpenAI-wire backends to
+    /// keep prompt-cache entries on one cache lane.
+    pub prompt_cache_key: Option<String>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub max_tokens: Option<u32>,
@@ -200,6 +203,9 @@ pub struct ChatParams {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// Provider reasoning text that must be passed back with assistant tool
+    /// calls when the backend requires it for replayable context.
+    pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<ToolCall>>,
     pub tool_call_id: Option<String>,
     pub images: Vec<String>,
@@ -245,6 +251,9 @@ impl Serialize for ChatMessage {
                 parts.push(serde_json::json!({ "type": "image_url", "image_url": { "url": url } }));
             }
             map.serialize_entry("content", &parts)?;
+        }
+        if let Some(reasoning) = &self.reasoning_content {
+            map.serialize_entry("reasoning_content", reasoning)?;
         }
         if let Some(calls) = &self.tool_calls {
             let wire: Vec<Wire> = calls
@@ -300,6 +309,15 @@ impl Usage {
     }
 }
 
+/// The text and usage returned by a one-shot completion.
+#[derive(Debug, Clone)]
+pub struct Completion {
+    /// Assistant-visible text returned by the provider.
+    pub text: String,
+    /// Exact request usage, when the provider included it.
+    pub usage: Option<Usage>,
+}
+
 /// Rebuild the tool-result dedup state — `(tool, arguments) → latest full
 /// result` — from a wire history produced by `build_history`. Both that
 /// replay and the live tool loop apply the same rule ("keep the first full
@@ -350,6 +368,14 @@ pub enum StreamEvent {
     Status(String),
     /// A tool finished: shown (and persisted) as its own transcript block.
     ToolCall {
+        /// The provider's stable call id, retained for exact replay. It is
+        /// intentionally omitted by the remote host wire mirror.
+        id: String,
+        /// Reasoning content that accompanied the assistant tool-call batch,
+        /// when the provider requires it on the next request.
+        reasoning: Option<String>,
+        /// Any visible assistant content sent alongside the tool-call batch.
+        assistant_content: Option<String>,
         name: String,
         arguments: String,
         result: String,
@@ -371,6 +397,7 @@ mod tests {
                 ChatMessage {
                     role: "assistant".into(),
                     content: String::new(),
+                    reasoning_content: None,
                     tool_calls: Some(vec![ToolCall {
                         id: id.into(),
                         name: name.into(),
@@ -382,6 +409,7 @@ mod tests {
                 ChatMessage {
                     role: "tool".into(),
                     content: content.into(),
+                    reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: Some(id.into()),
                     images: Vec::new(),
@@ -418,6 +446,7 @@ mod tests {
             ChatMessage {
                 role: "assistant".into(),
                 content: String::new(),
+                reasoning_content: None,
                 tool_calls: Some(vec![ToolCall {
                     id: "a".into(),
                     name: "search".into(),
@@ -429,6 +458,7 @@ mod tests {
             ChatMessage {
                 role: "tool".into(),
                 content: "hits-a".into(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: Some("a".into()),
                 images: Vec::new(),
@@ -450,6 +480,14 @@ mod tests {
     }
 
     #[test]
+    fn chat_message_serializes_reasoning_content_when_present() {
+        let mut m = ChatMessage::text("assistant", "");
+        m.reasoning_content = Some("check the tool result".into());
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["reasoning_content"], "check the tool result");
+    }
+
+    #[test]
     fn chat_message_serializes_parts_when_images_present() {
         let mut m = ChatMessage::text("user", "what is this?");
         m.images = vec!["data:image/png;base64,AAAA".into()];
@@ -468,6 +506,7 @@ mod tests {
         let m = ChatMessage {
             role: "assistant".into(),
             content: String::new(),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "c1".into(),
                 name: "web_search".into(),

@@ -159,6 +159,15 @@ const PLAN_APPROVAL_PROMPT: &str = "You are the approval stage of a research pip
 
 pub const SEARCHER_PROMPT: &str = "You are a research searcher agent. You will be given one focused sub-question. Use search(mode=web) and fetch_url to investigate it thoroughly: search, then fetch and read the most promising pages, and search again with new terms you learn from them if needed. When you have enough to answer well, write a concise findings summary (a few paragraphs, prose, no headers) that directly answers the sub-question, citing sources inline as [n]. End your answer with a line starting exactly with 'Sources:' followed by the numbered list of URLs you used, one per line, matching your [n] citations. Prefer sources from domains you have not already cited — diverse sources make a stronger report.";
 
+/// Fixed protocol text placed before every research-stage instruction. Keeping
+/// this prefix byte-identical gives independent stages and agent branches a
+/// common provider-cache anchor; stage-specific instructions follow it.
+const RESEARCH_CACHE_PREFIX: &str = "You are operating inside Nexus's deterministic research workflow. Treat this request as one step in a structured pipeline: obey the stage instruction that follows, use only evidence supplied by the current messages or tools, preserve exact URLs and citation meaning, and never invent a source or claim. Earlier messages may be workflow context; do not repeat them unless the current stage asks for it. Keep output within the requested format because the next pipeline stage parses it mechanically. This protocol is fixed across research stages so the reusable input prefix remains stable.";
+
+fn research_stage_prompt(stage: &str) -> String {
+    format!("{RESEARCH_CACHE_PREFIX}\n\n{stage}")
+}
+
 const SYNTHESIZER_PROMPT: &str = "You are the synthesis stage of a research pipeline. You'll be given the original topic and findings from several searcher agents, each already citing their own sources. Combine them into a single coherent draft report on the topic: organize by theme (not by sub-question), resolve obvious overlaps, keep every citation but you may renumber them consistently as you merge. Do not invent facts not present in the findings. Output the draft report in markdown, no preamble.";
 
 const CRITIC_PROMPT: &str = "You are the critic stage of a research pipeline. Given the original topic and a draft report, decide if it's ready. Respond in exactly one of these forms:\n- the single word SATISFIED, if the draft thoroughly covers the topic with no notable gaps or contradictions.\n- GAPS: followed by a newline-separated bullet list (each line starting with '- ') of specific missing sub-topics or unanswered angles, each phrased as a searchable question.\n- CONTRADICTION: followed by one line describing a specific factual contradiction between sources in the draft that isn't resolved.\nUse CONTRADICTION only for an actual conflict between sources, not a missing angle — missing angles are always GAPS. Respond with nothing else.";
@@ -434,7 +443,7 @@ fn planner_messages_with_context(
         );
     }
     vec![
-        ChatMessage::text("system", PLANNER_PROMPT),
+        ChatMessage::text("system", research_stage_prompt(PLANNER_PROMPT)),
         ChatMessage::text("user", user),
     ]
 }
@@ -456,7 +465,7 @@ fn survey_messages(topic: &str, rounds: &[(String, String)]) -> Vec<ChatMessage>
         }
     }
     vec![
-        ChatMessage::text("system", SURVEY_AGENT_PROMPT),
+        ChatMessage::text("system", research_stage_prompt(SURVEY_AGENT_PROMPT)),
         ChatMessage::text("user", user),
     ]
 }
@@ -470,7 +479,7 @@ fn plan_approval_messages(
     user_reply: &str,
 ) -> Vec<ChatMessage> {
     vec![
-        ChatMessage::text("system", PLAN_APPROVAL_PROMPT),
+        ChatMessage::text("system", research_stage_prompt(PLAN_APPROVAL_PROMPT)),
         ChatMessage::text(
             "user",
             format!(
@@ -498,14 +507,14 @@ fn synthesizer_messages(topic: &str, findings: &[String], pinned: &[String]) -> 
     }
     user.push_str(&body);
     vec![
-        ChatMessage::text("system", SYNTHESIZER_PROMPT),
+        ChatMessage::text("system", research_stage_prompt(SYNTHESIZER_PROMPT)),
         ChatMessage::text("user", user),
     ]
 }
 
 fn critic_messages(topic: &str, draft: &str) -> Vec<ChatMessage> {
     vec![
-        ChatMessage::text("system", CRITIC_PROMPT),
+        ChatMessage::text("system", research_stage_prompt(CRITIC_PROMPT)),
         ChatMessage::text("user", format!("Topic: {topic}\n\nDraft:\n{draft}")),
     ]
 }
@@ -518,7 +527,7 @@ fn resolver_messages(
 ) -> Vec<ChatMessage> {
     let body = findings.join("\n\n");
     vec![
-        ChatMessage::text("system", RESOLVER_PROMPT),
+        ChatMessage::text("system", research_stage_prompt(RESOLVER_PROMPT)),
         ChatMessage::text(
             "user",
             format!(
@@ -531,7 +540,7 @@ fn resolver_messages(
 fn verifier_messages(topic: &str, draft: &str, findings: &[String]) -> Vec<ChatMessage> {
     let body = findings.join("\n\n");
     vec![
-        ChatMessage::text("system", VERIFIER_PROMPT),
+        ChatMessage::text("system", research_stage_prompt(VERIFIER_PROMPT)),
         ChatMessage::text(
             "user",
             format!("Topic: {topic}\n\nSource findings:\n{body}\n\nDraft:\n{draft}"),
@@ -550,7 +559,7 @@ fn writer_messages(topic: &str, verified_draft: &str, pinned: &[String]) -> Vec<
     }
     let _ = write!(user, "Verified draft:\n{verified_draft}");
     vec![
-        ChatMessage::text("system", WRITER_PROMPT),
+        ChatMessage::text("system", research_stage_prompt(WRITER_PROMPT)),
         ChatMessage::text("user", user),
     ]
 }
@@ -559,12 +568,67 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::db::Db;
 use crate::provider::openrouter::OpenRouter;
-use crate::provider::{ChatParams, StreamEvent};
+use crate::provider::{ChatParams, StreamEvent, Usage};
 use crate::tools::{ToolBox, ToolExecutor};
 
 use super::ResearchMsg;
 use super::{SurveyGate, SurveyPhase};
+
+/// Content-free usage sink for background research requests. Each stage uses
+/// the same provider accounting as interactive chat without putting prompt
+/// text into the database.
+#[derive(Clone)]
+struct ResearchUsage {
+    db_path: std::path::PathBuf,
+    session_id: String,
+    space_id: String,
+    backend: &'static str,
+}
+
+impl ResearchUsage {
+    fn chat_params(&self) -> ChatParams {
+        ChatParams {
+            prompt_cache_key: Some(self.session_id.clone()),
+            ..ChatParams::default()
+        }
+    }
+
+    fn record(&self, model: &str, usage: Usage) {
+        // Cost-only trailing events are merged by the interactive task;
+        // background streams have no request boundary for that event, so do
+        // not create a zero-token duplicate row here.
+        if usage.prompt_tokens == 0 && usage.completion_tokens == 0 {
+            return;
+        }
+        let Ok(db) = Db::open(&self.db_path) else {
+            return;
+        };
+        let cost_is_provider = usage.cost.is_some();
+        let cost = usage.cost.or_else(|| {
+            db.request_cost(
+                model,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+            )
+        });
+        let _ = db.log_usage(
+            self.backend,
+            model,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            usage.cache_read_tokens,
+            usage.cache_creation_tokens,
+            cost,
+            cost_is_provider,
+            Some(&self.session_id),
+            Some(&self.space_id),
+        );
+    }
+}
 
 /// Send the `(session_id, space_id, space_name)` triple's stage update.
 fn send_stage(
@@ -599,11 +663,18 @@ async fn complete_text(
     provider: &OpenRouter,
     model: &str,
     messages: Vec<ChatMessage>,
+    usage: &ResearchUsage,
 ) -> Result<String, String> {
+    let params = usage.chat_params();
     provider
-        .complete(model, messages)
+        .complete_with_params(model, messages, &params)
         .await
-        .map(|s| s.trim().to_string())
+        .map(|completion| {
+            if let Some(reported) = completion.usage {
+                usage.record(model, reported);
+            }
+            completion.text.trim().to_string()
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -613,11 +684,12 @@ async fn complete_agent(
     provider: &OpenRouter,
     model: &str,
     messages: Vec<ChatMessage>,
+    usage: &ResearchUsage,
     tx: &mpsc::UnboundedSender<ResearchMsg>,
     ids: &(String, String, String),
     label: &str,
 ) -> Result<String, String> {
-    match complete_text(provider, model, messages).await {
+    match complete_text(provider, model, messages, usage).await {
         Ok(text) => Ok(text),
         Err(e) => {
             send_stage(tx, ids, label, format!("error — {e}"));
@@ -632,11 +704,13 @@ async fn plan(
     topic: &str,
     answers: &[(String, String)],
     known: &[String],
+    usage: &ResearchUsage,
 ) -> Result<Vec<PlanQuestion>, String> {
     let text = complete_text(
         provider,
         model,
         planner_messages_with_context(topic, answers, known),
+        usage,
     )
     .await?;
     let qs = parse_plan_blocks(&text);
@@ -668,6 +742,7 @@ async fn plan(
 /// job's session/space identity.
 pub struct SearcherCtx<'a> {
     pub toolbox: Arc<dyn ToolExecutor>,
+    usage: Arc<ResearchUsage>,
     pub tx: &'a mpsc::UnboundedSender<ResearchMsg>,
     pub ids: &'a (String, String, String),
 }
@@ -698,14 +773,17 @@ async fn run_searcher(
         format!("working — investigating \"{display}\""),
     );
     let messages = vec![
-        ChatMessage::text("system", SEARCHER_PROMPT),
+        ChatMessage::text("system", research_stage_prompt(SEARCHER_PROMPT)),
         ChatMessage::text("user", prompt),
     ];
     let tools = ctx.toolbox.defs();
     let (mut rx, abort) = provider.stream_chat(
         model.to_string(),
         messages,
-        ChatParams::default(),
+        ChatParams {
+            prompt_cache_key: Some(ctx.ids.0.clone()),
+            ..ChatParams::default()
+        },
         tools,
         ctx.toolbox,
         RESEARCH_SEARCHER_MAX_ITERS,
@@ -722,6 +800,7 @@ async fn run_searcher(
                 name,
                 arguments,
                 result,
+                ..
             } => {
                 let summary = crate::app::tool_call_summary(&name, &arguments, &result);
                 send_stage(ctx.tx, ctx.ids, &label, format!("working — {summary}"));
@@ -730,8 +809,9 @@ async fn run_searcher(
                 send_stage(ctx.tx, ctx.ids, &label, format!("error — {e}"));
                 return format!("[search agent error on \"{display}\": {e}]");
             }
+            StreamEvent::Usage(reported) => ctx.usage.record(model, reported),
             StreamEvent::Done => break,
-            _ => {}
+            StreamEvent::Reasoning(_) => {}
         }
     }
     let text = buf.trim();
@@ -761,6 +841,7 @@ async fn verify_with_quote_check(
     model: &str,
     messages: Vec<ChatMessage>,
     cache_only_toolbox: Arc<dyn ToolExecutor>,
+    usage: &ResearchUsage,
     tx: &mpsc::UnboundedSender<ResearchMsg>,
     ids: &(String, String, String),
 ) -> String {
@@ -768,7 +849,10 @@ async fn verify_with_quote_check(
     let (mut rx, abort) = provider.stream_chat(
         model.to_string(),
         messages,
-        ChatParams::default(),
+        ChatParams {
+            prompt_cache_key: Some(ids.0.clone()),
+            ..ChatParams::default()
+        },
         tools,
         cache_only_toolbox,
         RESEARCH_SEARCHER_MAX_ITERS,
@@ -784,6 +868,7 @@ async fn verify_with_quote_check(
                 name,
                 arguments,
                 result,
+                ..
             } => {
                 let summary = crate::app::tool_call_summary(&name, &arguments, &result);
                 send_stage(tx, ids, "verifier", format!("working — {summary}"));
@@ -793,8 +878,9 @@ async fn verify_with_quote_check(
                 send_stage(tx, ids, "verifier", format!("error — {e}"));
                 break;
             }
+            StreamEvent::Usage(reported) => usage.record(model, reported),
             StreamEvent::Done => break,
-            _ => {}
+            StreamEvent::Reasoning(_) => {}
         }
     }
     if !failed {
@@ -812,21 +898,33 @@ async fn verify_with_quote_check(
     buf
 }
 
+/// The shared plumbing for one searcher fan-out batch.
+struct SearcherBatch<'a> {
+    provider: &'a OpenRouter,
+    model: &'a str,
+    toolbox: &'a Arc<dyn ToolExecutor>,
+    usage: &'a Arc<ResearchUsage>,
+    tx: &'a mpsc::UnboundedSender<ResearchMsg>,
+    ids: &'a (String, String, String),
+    batch: &'a str,
+}
+
 /// Fan out one Searcher per question in parallel, sending a running
 /// `{done}/{total}` stage update as each finishes (in addition to each
 /// searcher's own live per-tool-call feed). Order of the returned findings
 /// doesn't matter (synthesis treats them as an unordered set). Each item is
 /// `(prompt, display)`: the full prompt goes to the agent, the short display
 /// label goes into the activity rows.
-async fn run_searchers(
-    provider: &OpenRouter,
-    model: &str,
-    toolbox: &Arc<dyn ToolExecutor>,
-    items: &[(String, String)],
-    tx: &mpsc::UnboundedSender<ResearchMsg>,
-    ids: &(String, String, String),
-    batch: &str,
-) -> Vec<String> {
+async fn run_searchers(batch_ctx: SearcherBatch<'_>, items: &[(String, String)]) -> Vec<String> {
+    let SearcherBatch {
+        provider,
+        model,
+        toolbox,
+        usage,
+        tx,
+        ids,
+        batch,
+    } = batch_ctx;
     let total = items.len();
     send_stage(
         tx,
@@ -839,12 +937,14 @@ async fn run_searchers(
         let provider = provider.clone();
         let model = model.to_string();
         let toolbox = toolbox.clone();
+        let usage = usage.clone();
         let tx = tx.clone();
         let ids = ids.clone();
         let batch = batch.to_string();
         set.spawn(async move {
             let ctx = SearcherCtx {
                 toolbox,
+                usage,
                 tx: &tx,
                 ids: &ids,
             };
@@ -978,11 +1078,14 @@ async fn run_user_survey(
     reply_rx: &mut mpsc::UnboundedReceiver<String>,
     tx: &mpsc::UnboundedSender<ResearchMsg>,
     ids: &(String, String, String),
+    usage: &ResearchUsage,
 ) -> Result<Vec<(String, String)>, String> {
     let mut rounds: Vec<(String, String)> = Vec::new();
-    let initial = complete_text(provider, model, survey_messages(topic, &[]))
+    let mut history = survey_messages(topic, &[]);
+    let initial = complete_text(provider, model, history.clone(), usage)
         .await
         .map_err(|e| format!("survey agent failed: {e}"))?;
+    history.push(ChatMessage::text("assistant", initial.clone()));
     let mut questions = parse_survey_reply(&initial);
     let mut raw = initial;
     let mut round: u8 = 1;
@@ -1007,18 +1110,38 @@ async fn run_user_survey(
                 if reply.is_empty() {
                     return Ok(rounds); // Empty Enter = skip the rest.
                 }
-                rounds.push((qs.join("\n"), reply));
+                let asked = qs.join("\n");
+                rounds.push((asked.clone(), reply.clone()));
                 round += 1;
                 if round > MAX_SURVEY_ROUNDS {
                     return Ok(rounds);
                 }
-                raw = complete_text(provider, model, survey_messages(topic, &rounds))
+                // Preserve the exact prior request and append only the
+                // user's answer. Rebuilding one growing user string changes
+                // the serialized history and forfeits the provider's cached
+                // prefix on every survey round.
+                history.push(ChatMessage::text(
+                    "user",
+                    format!("Questions asked:\n{asked}\nUser answer: {reply}"),
+                ));
+                raw = complete_text(provider, model, history.clone(), usage)
                     .await
                     .map_err(|e| format!("survey follow-up failed: {e}"))?;
+                history.push(ChatMessage::text("assistant", raw.clone()));
                 questions = parse_survey_reply(&raw);
             }
         }
     }
+}
+
+/// The shared plumbing for the plan-approval agent.
+struct PlanApprovalContext<'a> {
+    provider: &'a OpenRouter,
+    model: &'a str,
+    topic: &'a str,
+    usage: &'a ResearchUsage,
+    tx: &'a mpsc::UnboundedSender<ResearchMsg>,
+    ids: &'a (String, String, String),
 }
 
 /// The plan-approval phase: present the plan, park for a chat reply, and fold
@@ -1029,14 +1152,18 @@ async fn run_user_survey(
 /// racing the parked gate) fails visibly (`Err`) — searchers never run on a
 /// plan the user hasn't approved, and approval never fails open.
 async fn await_plan_approval(
-    provider: &OpenRouter,
-    model: &str,
-    topic: &str,
+    ctx: PlanApprovalContext<'_>,
     questions: &mut Vec<PlanQuestion>,
     reply_rx: &mut mpsc::UnboundedReceiver<String>,
-    tx: &mpsc::UnboundedSender<ResearchMsg>,
-    ids: &(String, String, String),
 ) -> Result<(), String> {
+    let PlanApprovalContext {
+        provider,
+        model,
+        topic,
+        usage,
+        tx,
+        ids,
+    } = ctx;
     let mut rework = false;
     loop {
         let _ = tx.send((
@@ -1064,6 +1191,7 @@ async fn await_plan_approval(
             provider,
             model,
             plan_approval_messages(topic, questions, &reply),
+            usage,
         )
         .await
         .map_err(|e| format!("plan approval agent failed: {e}"))?;
@@ -1114,6 +1242,12 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         ..
     } = &mut *opts;
     let db_path = db_path.as_path();
+    let usage = Arc::new(ResearchUsage {
+        db_path: db_path.to_path_buf(),
+        session_id: ids.0.clone(),
+        space_id: ids.1.clone(),
+        backend: research_provider.backend_tag().name(),
+    });
     // Gather the planning context (local chunks + a web landscape survey)
     // concurrently with the conversational survey — the user answers while
     // the ground truth arrives, so the plan targets real gaps. The two
@@ -1127,6 +1261,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         let research_provider = research_provider.clone();
         let research_model = research_model.clone();
         let toolbox = toolbox.clone();
+        let usage = usage.clone();
         let tx = tx.clone();
         let ids = ids.clone();
         tokio::spawn(async move {
@@ -1146,6 +1281,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
                 );
                 let ctx = SearcherCtx {
                     toolbox,
+                    usage,
                     tx: &tx,
                     ids: &ids,
                 };
@@ -1180,12 +1316,20 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
     // Failures propagate visibly — the survey is a promised phase, and a
     // silent skip would report success without the user's scoping input.
     let answers: Vec<(String, String)> = if let Some(rx) = reply_rx.as_mut() {
-        run_user_survey(research_provider, research_model, topic, rx, tx, ids)
-            .await
-            .map_err(|e| {
-                send_stage(tx, ids, "survey", format!("error — {e}"));
-                e
-            })?
+        run_user_survey(
+            research_provider,
+            research_model,
+            topic,
+            rx,
+            tx,
+            ids,
+            &usage,
+        )
+        .await
+        .map_err(|e| {
+            send_stage(tx, ids, "survey", format!("error — {e}"));
+            e
+        })?
     } else {
         Vec::new()
     };
@@ -1230,6 +1374,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         topic,
         &answers,
         &planning_context,
+        &usage,
     )
     .await
     {
@@ -1253,13 +1398,16 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
     // than running searchers on an unapproved plan.
     if let Some(rx) = reply_rx.as_mut() {
         await_plan_approval(
-            research_provider,
-            research_model,
-            topic,
+            PlanApprovalContext {
+                provider: research_provider,
+                model: research_model,
+                topic,
+                usage: &usage,
+                tx,
+                ids,
+            },
             &mut questions,
             rx,
-            tx,
-            ids,
         )
         .await?;
     }
@@ -1285,13 +1433,16 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         .collect();
     findings.extend(
         run_searchers(
-            research_provider,
-            research_model,
-            toolbox,
+            SearcherBatch {
+                provider: research_provider,
+                model: research_model,
+                toolbox,
+                usage: &usage,
+                tx,
+                ids,
+                batch: "round 1",
+            },
             &searcher_items,
-            tx,
-            ids,
-            "round 1",
         )
         .await,
     );
@@ -1314,13 +1465,16 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
             send_stage(tx, ids, format!("steer #{steer_seq}"), s.clone());
         }
         let steered = run_searchers(
-            research_provider,
-            research_model,
-            toolbox,
+            SearcherBatch {
+                provider: research_provider,
+                model: research_model,
+                toolbox,
+                usage: &usage,
+                tx,
+                ids,
+                batch: "round 1 steer",
+            },
             &steer_items,
-            tx,
-            ids,
-            "round 1 steer",
         )
         .await;
         persist_session_sources(db_path, &ids.0, &steered);
@@ -1333,10 +1487,13 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         "synthesizer",
         format!("working — combining {} agent findings", findings.len()),
     );
+    let mut synthesizer_history =
+        synthesizer_messages(topic, &crate::tools::dedup_source_lines(&findings), &pinned);
     let mut draft = complete_agent(
         research_provider,
         research_model,
-        synthesizer_messages(topic, &crate::tools::dedup_source_lines(&findings), &pinned),
+        synthesizer_history.clone(),
+        &usage,
         tx,
         ids,
         "synthesizer",
@@ -1355,6 +1512,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
             research_provider,
             research_model,
             critic_messages(topic, &draft),
+            &usage,
             tx,
             ids,
             "critic",
@@ -1380,20 +1538,23 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
 
     if let Critique::Gaps(gaps) = &critique {
         let more = run_searchers(
-            research_provider,
-            research_model,
-            toolbox,
+            SearcherBatch {
+                provider: research_provider,
+                model: research_model,
+                toolbox,
+                usage: &usage,
+                tx,
+                ids,
+                batch: "round 2",
+            },
             &gaps
                 .iter()
                 .map(|g| (g.clone(), g.clone()))
                 .collect::<Vec<_>>(),
-            tx,
-            ids,
-            "round 2",
         )
         .await;
         persist_session_sources(db_path, &ids.0, &more);
-        findings.extend(more);
+        let mut follow_up_findings = more;
 
         let steers = drain_steers(steer_rx);
         if !steers.is_empty() {
@@ -1404,18 +1565,22 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
                 send_stage(tx, ids, format!("steer #{steer_seq}"), s.clone());
             }
             let steered = run_searchers(
-                research_provider,
-                research_model,
-                toolbox,
+                SearcherBatch {
+                    provider: research_provider,
+                    model: research_model,
+                    toolbox,
+                    usage: &usage,
+                    tx,
+                    ids,
+                    batch: "round 2 steer",
+                },
                 &steer_items,
-                tx,
-                ids,
-                "round 2 steer",
             )
             .await;
             persist_session_sources(db_path, &ids.0, &steered);
-            findings.extend(steered);
+            follow_up_findings.extend(steered);
         }
+        findings.extend(follow_up_findings.clone());
 
         send_stage(
             tx,
@@ -1423,10 +1588,22 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
             "synthesizer r2",
             "working — merging follow-up findings",
         );
+        // Continue the original synthesis conversation instead of
+        // rebuilding one giant user message. The old request remains an
+        // exact prefix and only the new findings are appended.
+        synthesizer_history.push(ChatMessage::text("assistant", draft.clone()));
+        synthesizer_history.push(ChatMessage::text(
+            "user",
+            format!(
+                "Additional searcher findings to incorporate:\n{}",
+                crate::tools::dedup_source_lines(&follow_up_findings).join("\n\n")
+            ),
+        ));
         draft = complete_agent(
             research_provider,
             research_model,
-            synthesizer_messages(topic, &crate::tools::dedup_source_lines(&findings), &pinned),
+            synthesizer_history.clone(),
+            &usage,
             tx,
             ids,
             "synthesizer r2",
@@ -1444,6 +1621,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
                 research_provider,
                 research_model,
                 critic_messages(topic, &draft),
+                &usage,
                 tx,
                 ids,
                 "critic r2",
@@ -1478,6 +1656,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
             research_provider,
             research_model,
             resolver_messages(topic, &draft, &findings, desc),
+            &usage,
             tx,
             ids,
             "resolver",
@@ -1509,6 +1688,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         research_model,
         verifier_messages(topic, &draft, &findings),
         verify_toolbox,
+        &usage,
         tx,
         ids,
     )
@@ -1529,6 +1709,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         research_provider,
         research_model,
         writer_messages(topic, &verified, &pinned),
+        &usage,
     )
     .await
     {
@@ -2760,6 +2941,15 @@ mod tests {
     }
 
     #[test]
+    fn research_stage_prompts_share_a_stable_cache_prefix() {
+        let planner = research_stage_prompt(PLANNER_PROMPT);
+        let writer = research_stage_prompt(WRITER_PROMPT);
+        assert!(planner.starts_with(RESEARCH_CACHE_PREFIX));
+        assert!(writer.starts_with(RESEARCH_CACHE_PREFIX));
+        assert_ne!(planner, writer);
+    }
+
+    #[test]
     fn survey_messages_include_topic_and_rounds() {
         let msgs = survey_messages("t", &[]);
         assert_eq!(msgs[0].role, "system");
@@ -2982,14 +3172,23 @@ mod tests {
         let ids = ("s".to_string(), "sp".to_string(), "sn".to_string());
         let mut questions = vec![PlanQuestion::bare("q1".to_string())];
         let provider = OpenRouter::openrouter_flavor("test-key".to_string());
+        let usage = ResearchUsage {
+            db_path: std::env::temp_dir().join("nexus-research-test.db"),
+            session_id: ids.0.clone(),
+            space_id: ids.1.clone(),
+            backend: provider.backend_tag().name(),
+        };
         let result = await_plan_approval(
-            &provider,
-            "a/b",
-            "topic",
+            PlanApprovalContext {
+                provider: &provider,
+                model: "a/b",
+                topic: "topic",
+                usage: &usage,
+                tx: &tx,
+                ids: &ids,
+            },
             &mut questions,
             &mut reply_rx,
-            &tx,
-            &ids,
         )
         .await;
         let err = result.expect_err("closed channel must fail closed, not approve");

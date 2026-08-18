@@ -396,6 +396,12 @@ fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
 
     if !show_bar {
         let mut line = badge(&format!("{space_tag}{incog_tag}{web_tag}{model}"));
+        if let Some(rate) = app.last_cache_rate {
+            line.spans.push(Span::styled(
+                format!(" · {:.0}% cached  |  ", rate * 100.0),
+                Style::default().fg(app.theme.fg_dim),
+            ));
+        }
         line.spans.push(Span::styled(
             app.status.clone(),
             Style::default().fg(app.theme.fg_dim),

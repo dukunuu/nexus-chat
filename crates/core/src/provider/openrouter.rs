@@ -8,7 +8,6 @@
     clippy::cast_sign_loss
 )]
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -19,8 +18,8 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use super::{
-    ChatMessage, ChatParams, Model, ModelPricing, ReasoningEffort, StreamEvent, ToolCall, ToolDef,
-    Usage,
+    ChatMessage, ChatParams, Completion, Model, ModelPricing, ReasoningEffort, StreamEvent,
+    ToolCall, ToolDef, Usage,
 };
 use crate::tools::ToolExecutor;
 
@@ -163,7 +162,7 @@ const OPENCODE_GO_CONTEXT: &[(&str, u64)] = &[
 /// Hard cap on tool round-trips per response, so a model that keeps calling
 /// tools can't loop forever. The default for interactive chat; background
 /// jobs (e.g. deep-research searcher agents) pass their own smaller budget.
-pub const MAX_TOOL_ITERS: usize = 50;
+pub const MAX_TOOL_ITERS: usize = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderFlavor {
@@ -320,6 +319,14 @@ impl ProviderFlavor {
                 );
             }
             Self::OpenAiCodex => {}
+        }
+    }
+
+    /// Add the `OpenCode` cache-lane key without sending this optional field to
+    /// providers that do not advertise the same OpenAI-compatible behavior.
+    fn add_prompt_cache_key(self, obj: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
+        if self == Self::OpencodeGo {
+            obj.insert("prompt_cache_key".into(), serde_json::json!(key));
         }
     }
 
@@ -1045,6 +1052,30 @@ impl OpenRouter {
     /// One-shot, non-streaming completion. Used for short utility calls like
     /// generating a session topic/slug. Returns the assistant's message text.
     pub async fn complete(&self, model: &str, messages: Vec<ChatMessage>) -> Result<String> {
+        self.complete_with_usage(model, messages)
+            .await
+            .map(|completion| completion.text)
+    }
+
+    /// One-shot completion with the provider's usage object when available.
+    /// Keeping usage attached to the text lets background workflow stages use
+    /// the same cache accounting as the interactive stream.
+    pub async fn complete_with_usage(
+        &self,
+        model: &str,
+        messages: Vec<ChatMessage>,
+    ) -> Result<Completion> {
+        self.complete_with_params(model, messages, &ChatParams::default())
+            .await
+    }
+
+    /// One-shot completion with request parameters and usage accounting.
+    pub async fn complete_with_params(
+        &self,
+        model: &str,
+        messages: Vec<ChatMessage>,
+        params: &ChatParams,
+    ) -> Result<Completion> {
         // ChatGPT's Codex endpoint is stream-oriented: non-streaming requests
         // are rejected or can return no usable output. Utility jobs (titles,
         // memory, compaction, research metadata) still need a one-shot string,
@@ -1052,37 +1083,51 @@ impl OpenRouter {
         if self.flavor == ProviderFlavor::OpenAiCodex {
             let (tx, mut rx) = mpsc::unbounded_channel();
             let finish = self
-                .run_codex_stream(model, &messages, &ChatParams::default(), &[], &tx)
+                .run_codex_stream(model, &messages, params, &[], false, &tx)
                 .await?;
             drop(tx);
 
             let mut text = String::new();
             let mut error = None;
+            let mut usage = None;
             while let Ok(event) = rx.try_recv() {
                 match event {
                     StreamEvent::Token(token) => text.push_str(&token),
                     StreamEvent::Error(message) => error = Some(message),
+                    StreamEvent::Usage(next) => merge_usage(&mut usage, next),
                     _ => {}
                 }
             }
             if matches!(finish, Finish::Errored) {
                 anyhow::bail!(error.unwrap_or_else(|| "Codex completion failed".to_string()));
             }
-            return Ok(text);
+            return Ok(Completion { text, usage });
         }
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
             "stream": false,
         });
-        self.post_completion(body).await
+        if let Some(key) = &params.prompt_cache_key
+            && let Some(obj) = body.as_object_mut()
+        {
+            self.flavor.add_prompt_cache_key(obj, key);
+        }
+        self.post_completion_with_usage(body).await
     }
 
     /// POST a completions body and pull the first choice's message text.
     async fn post_completion(&self, body: serde_json::Value) -> Result<String> {
+        self.post_completion_with_usage(body)
+            .await
+            .map(|completion| completion.text)
+    }
+
+    /// POST a non-streaming completions body while retaining usage accounting.
+    async fn post_completion_with_usage(&self, body: serde_json::Value) -> Result<Completion> {
         if let Some(delegate) = self.openrouter_delegate_for_body(&body) {
-            return Box::pin(delegate.post_completion(body)).await;
+            return Box::pin(delegate.post_completion_with_usage(body)).await;
         }
         if self.flavor == ProviderFlavor::OpenAiCodex {
             let body = chat_body_to_codex_body(&body, false, &[]);
@@ -1099,7 +1144,10 @@ impl OpenRouter {
                 .json::<serde_json::Value>()
                 .await
                 .context("parsing Codex completion")?;
-            return Ok(codex_response_text(&v));
+            return Ok(Completion {
+                text: codex_response_text(&v),
+                usage: v.get("usage").and_then(parse_usage_value),
+            });
         }
         let mut body = body;
         let base = if let Some(model) = body.get("model").and_then(|m| m.as_str()) {
@@ -1124,12 +1172,16 @@ impl OpenRouter {
             .json::<serde_json::Value>()
             .await
             .context("parsing completion")?;
-        Ok(v.get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
-            .and_then(|m| m.get("content"))
-            .and_then(wire_text)
-            .unwrap_or_default())
+        Ok(Completion {
+            text: v
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(wire_text)
+                .unwrap_or_default(),
+            usage: v.get("usage").and_then(parse_usage_value),
+        })
     }
 
     /// One-shot, non-streaming vision call: describe `image_data_url` with `model`.
@@ -1360,18 +1412,19 @@ impl OpenRouter {
         // rebuild (prompt-cache continuity).
         let mut seen_results = super::seed_tool_result_dedup(&messages);
         for iter in 0..=max_tool_iters {
-            // On the final allowed iteration, omit tools and tell the model
-            // why — otherwise it writes the tool call as plain text.
-            let send_tools: &[ToolDef] = if iter < max_tool_iters { &tools } else { &[] };
-            if iter == max_tool_iters {
-                messages.push(ChatMessage::text(
-                    "system",
-                    "Tool budget exhausted for this turn. Do not attempt further tool calls; \
-                     answer now with the information you already have.",
-                ));
-            }
+            // Keep the tool schema stable while the loop grows. On the final
+            // request, disable selection without removing the schemas or
+            // appending a transient budget prompt; the next turn can still
+            // reconstruct the same message prefix.
             match self
-                .run_stream(&model, &messages, &params, send_tools, tx)
+                .run_stream(
+                    &model,
+                    &messages,
+                    &params,
+                    &tools,
+                    iter == max_tool_iters,
+                    tx,
+                )
                 .await?
             {
                 Finish::Errored => return Ok(()),
@@ -1379,10 +1432,11 @@ impl OpenRouter {
                     let _ = tx.send(StreamEvent::Done);
                     return Ok(());
                 }
-                Finish::ToolCalls(calls, content) => {
+                Finish::ToolCalls(calls, content, reasoning) => {
                     messages.push(ChatMessage {
                         role: "assistant".to_string(),
-                        content,
+                        content: content.clone(),
+                        reasoning_content: reasoning.clone(),
                         tool_calls: Some(calls.clone()),
                         tool_call_id: None,
                         images: Vec::new(),
@@ -1410,10 +1464,14 @@ impl OpenRouter {
                         }
                         results
                     };
-                    for (call, (result, status)) in calls.iter().zip(results) {
+                    for (index, (call, (result, status))) in calls.iter().zip(results).enumerate() {
                         let _ = tx.send(StreamEvent::Status("Running tool…".to_string()));
                         let _ = tx.send(StreamEvent::Status(status));
                         let _ = tx.send(StreamEvent::ToolCall {
+                            id: call.id.clone(),
+                            reasoning: (index == 0).then(|| reasoning.clone()).flatten(),
+                            assistant_content: (index == 0 && !content.is_empty())
+                                .then(|| content.clone()),
                             name: call.name.clone(),
                             arguments: call.arguments.clone(),
                             result: result.clone(),
@@ -1441,6 +1499,7 @@ impl OpenRouter {
                         messages.push(ChatMessage {
                             role: "tool".to_string(),
                             content,
+                            reasoning_content: None,
                             tool_calls: None,
                             tool_call_id: Some(call.id.clone()),
                             images: Vec::new(),
@@ -1456,18 +1515,12 @@ impl OpenRouter {
                             messages.push(ChatMessage {
                                 role: "user".to_string(),
                                 content: imgs.description,
+                                reasoning_content: None,
                                 tool_calls: None,
                                 tool_call_id: None,
                                 images: imgs.urls,
                             });
                         }
-                    }
-                    let remaining = max_tool_iters - (iter + 1);
-                    if let Some(m) = messages.last_mut() {
-                        let _ = write!(
-                            m.content,
-                            "\n\n[{remaining} tool round-trips left this turn — plan accordingly]"
-                        );
                     }
                 }
             }
@@ -1486,14 +1539,23 @@ impl OpenRouter {
         messages: &[ChatMessage],
         params: &ChatParams,
         tools: &[ToolDef],
+        disable_tool_choice: bool,
         tx: &mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<Finish> {
         if let Some(delegate) = self.openrouter_delegate_for_model(model) {
-            return Box::pin(delegate.run_stream(model, messages, params, tools, tx)).await;
+            return Box::pin(delegate.run_stream(
+                model,
+                messages,
+                params,
+                tools,
+                disable_tool_choice,
+                tx,
+            ))
+            .await;
         }
         if self.flavor == ProviderFlavor::OpenAiCodex {
             return self
-                .run_codex_stream(model, messages, params, tools, tx)
+                .run_codex_stream(model, messages, params, tools, disable_tool_choice, tx)
                 .await;
         }
         let (base, model) = self.opencode_route(model);
@@ -1504,6 +1566,9 @@ impl OpenRouter {
         });
         let obj = body.as_object_mut().expect("body is a json object");
         self.flavor.add_stream_usage(obj);
+        if let Some(key) = &params.prompt_cache_key {
+            self.flavor.add_prompt_cache_key(obj, key);
+        }
         if let Some(effort) = &params.reasoning_effort {
             self.flavor.add_reasoning_effort(obj, effort);
         }
@@ -1527,6 +1592,9 @@ impl OpenRouter {
                 })
                 .collect();
             obj.insert("tools".into(), serde_json::json!(wire));
+            if disable_tool_choice {
+                obj.insert("tool_choice".into(), serde_json::json!("none"));
+            }
         }
         let request = self
             .client
@@ -1537,6 +1605,7 @@ impl OpenRouter {
         let mut es = EventSource::new(request).context("opening SSE stream")?;
         let mut tool_calls: BTreeMap<usize, ToolCall> = BTreeMap::new();
         let mut content_acc = String::new();
+        let mut reasoning_acc = String::new();
         let mut done = false;
         while let Some(event) = es.next().await {
             match event {
@@ -1550,6 +1619,7 @@ impl OpenRouter {
                     if let Some(r) = reasoning
                         && !r.is_empty()
                     {
+                        reasoning_acc.push_str(&r);
                         let _ = tx.send(StreamEvent::Reasoning(r));
                     }
                     if let Some(token) = content
@@ -1637,6 +1707,7 @@ impl OpenRouter {
             Ok(Finish::ToolCalls(
                 tool_calls.into_values().collect(),
                 content_acc,
+                (!reasoning_acc.is_empty()).then_some(reasoning_acc),
             ))
         }
     }
@@ -1691,6 +1762,7 @@ impl OpenRouter {
         messages: &[ChatMessage],
         params: &ChatParams,
         tools: &[ToolDef],
+        disable_tool_choice: bool,
         tx: &mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<Finish> {
         let mut body = serde_json::json!({
@@ -1701,7 +1773,7 @@ impl OpenRouter {
             "input": codex_input(messages),
             "text": { "verbosity": "low" },
             "include": ["reasoning.encrypted_content"],
-            "tool_choice": "auto",
+            "tool_choice": if disable_tool_choice { "none" } else { "auto" },
             "parallel_tool_calls": true,
         });
         let obj = body.as_object_mut().unwrap();
@@ -1784,6 +1856,7 @@ impl OpenRouter {
             Ok(Finish::ToolCalls(
                 tool_calls.into_values().collect(),
                 content_acc,
+                None,
             ))
         }
     }
@@ -1791,7 +1864,7 @@ impl OpenRouter {
 
 enum Finish {
     Done,
-    ToolCalls(Vec<ToolCall>, String),
+    ToolCalls(Vec<ToolCall>, String, Option<String>),
     Errored,
 }
 
@@ -1824,7 +1897,10 @@ fn parse_delta(data: &str) -> (Option<String>, Option<String>) {
         return (None, None);
     };
     let field = |name: &str| delta.get(name).and_then(|x| x.as_str()).map(str::to_string);
-    (field("content"), field("reasoning"))
+    (
+        field("content"),
+        field("reasoning_content").or_else(|| field("reasoning")),
+    )
 }
 
 /// Merge one SSE chunk's `delta.tool_calls` fragments into the running
@@ -1876,12 +1952,17 @@ fn accumulate_tool_calls(acc: &mut BTreeMap<usize, ToolCall>, data: &str) {
 /// log garbage rows and clobber the last cache hit rate).
 fn parse_usage(data: &str) -> Option<Usage> {
     let v: serde_json::Value = serde_json::from_str(data).ok()?;
-    let u = v.get("usage").and_then(serde_json::Value::as_object)?;
-    let get = |k: &str| u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    v.get("usage").and_then(parse_usage_value)
+}
+
+/// Parse a provider usage object shared by streaming and non-streaming calls.
+fn parse_usage_value(value: &serde_json::Value) -> Option<Usage> {
+    let u = value.as_object()?;
+    let get = |k: &str| u.get(k).and_then(json_u64).unwrap_or(0);
     let detail = |group: &str, field: &str| {
         u.get(group)
             .and_then(|d| d.get(field))
-            .and_then(serde_json::Value::as_u64)
+            .and_then(json_u64)
             .unwrap_or(0)
     };
     // OpenAI/OpenRouter report cache accounting in prompt_tokens_details
@@ -1893,6 +1974,8 @@ fn parse_usage(data: &str) -> Option<Usage> {
         detail("input_tokens_details", "cached_tokens"),
         get("cache_read_input_tokens"),
         get("prompt_cache_hit_tokens"),
+        get("prompt_cache_read_tokens"),
+        get("cache_read_tokens"),
     ]
     .into_iter()
     .max()
@@ -1916,6 +1999,30 @@ fn parse_usage(data: &str) -> Option<Usage> {
     };
     (usage.prompt_tokens > 0 || usage.completion_tokens > 0 || usage.cost.is_some())
         .then_some(usage)
+}
+
+/// Merge a usage-only event with an earlier accounting event from the same
+/// request. `OpenCode` may send a cost-only event after token usage.
+fn merge_usage(slot: &mut Option<Usage>, next: Usage) {
+    *slot = Some(match slot.take() {
+        Some(previous) if next.prompt_tokens + next.completion_tokens == 0 => Usage {
+            cost: next.cost.or(previous.cost),
+            ..previous
+        },
+        Some(previous) => Usage {
+            cost: next.cost.or(previous.cost),
+            ..next
+        },
+        None => next,
+    });
+}
+
+/// Parse an unsigned usage count from either JSON's numeric representation or
+/// a provider's stringly-typed equivalent.
+fn json_u64(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str()?.parse::<u64>().ok())
 }
 
 /// Parse either JSON's numeric representation or a provider's stringly-typed
@@ -2503,7 +2610,10 @@ fn check_video_params(
 /// files from `files_dir`, resize large images to avoid hitting API size
 /// limits, and return data URLs for the synthetic user message.
 /// Returns `None` when no references found.
-fn extract_tool_images(result: &str, files_dir: &std::path::Path) -> Option<ImagesForTool> {
+pub(crate) fn extract_tool_images(
+    result: &str,
+    files_dir: &std::path::Path,
+) -> Option<ImagesForTool> {
     use base64::Engine;
     let mut urls: Vec<String> = Vec::new();
     let mut descs: Vec<String> = Vec::new();
@@ -2578,9 +2688,9 @@ fn resize_for_api(bytes: &[u8], _files_dir: &std::path::Path) -> Vec<u8> {
     bytes.to_vec()
 }
 
-struct ImagesForTool {
-    urls: Vec<String>,
-    description: String,
+pub(crate) struct ImagesForTool {
+    pub(crate) urls: Vec<String>,
+    pub(crate) description: String,
 }
 
 #[cfg(test)]
@@ -2962,6 +3072,20 @@ mod tests {
     }
 
     #[test]
+    fn opencode_cache_key_is_scoped_to_its_wire_flavor() {
+        let mut opencode = serde_json::Map::new();
+        ProviderFlavor::OpencodeGo.add_prompt_cache_key(&mut opencode, "session-1");
+        assert_eq!(
+            opencode.get("prompt_cache_key"),
+            Some(&serde_json::json!("session-1"))
+        );
+
+        let mut openai = serde_json::Map::new();
+        ProviderFlavor::OpenAi.add_prompt_cache_key(&mut openai, "session-1");
+        assert!(openai.is_empty());
+    }
+
+    #[test]
     fn extracts_content_delta() {
         let data = r#"{"choices":[{"delta":{"content":"Hel"}}]}"#;
         let (content, reasoning) = parse_delta(data);
@@ -2975,6 +3099,14 @@ mod tests {
         let (content, reasoning) = parse_delta(data);
         assert_eq!(content, None);
         assert_eq!(reasoning.as_deref(), Some("Let me think"));
+    }
+
+    #[test]
+    fn extracts_reasoning_content_delta() {
+        let data = r#"{"choices":[{"delta":{"reasoning_content":"Keep this on replay"}}]}"#;
+        let (content, reasoning) = parse_delta(data);
+        assert_eq!(content, None);
+        assert_eq!(reasoning.as_deref(), Some("Keep this on replay"));
     }
 
     #[test]

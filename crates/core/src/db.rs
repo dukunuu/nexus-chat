@@ -1179,8 +1179,11 @@ impl Db {
         )
     }
 
-    /// Insert a tool-call transcript block: `content` is JSON
-    /// `{"name","arguments","result"}`. Never sent back to the model.
+    /// Insert a tool-call transcript block: `content` is JSON containing the
+    /// provider call id, optional reasoning/content, name, arguments, and
+    /// result. It
+    /// is never sent back to the model verbatim; `App::build_history` rebuilds
+    /// the assistant/tool wire messages.
     pub fn add_tool_call_message(&self, session_id: &str, content: &str) -> Result<String> {
         self.insert_message(
             session_id,

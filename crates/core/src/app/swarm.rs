@@ -459,7 +459,10 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
             let (mut rx, abort) = persona_provider.stream_chat(
                 raw_persona_model,
                 messages,
-                ChatParams::default(),
+                ChatParams {
+                    prompt_cache_key: Some(session_id.clone()),
+                    ..ChatParams::default()
+                },
                 tools,
                 persona_toolbox,
                 SWARM_PERSONA_MAX_TOOL_ITERS,
@@ -478,6 +481,7 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
                             name,
                             arguments,
                             result,
+                            ..
                         } => {
                             let summary = crate::app::tool_call_summary(&name, &arguments, &result);
                             send(SwarmUpdate::Progress(format!(

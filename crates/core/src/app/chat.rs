@@ -154,7 +154,15 @@ impl App {
         // this history), keeping the prompt-cache prefix continuous.
         let mut seen_results: std::collections::HashMap<(String, String), String> =
             std::collections::HashMap::new();
-        for m in self.effective_messages() {
+        let effective = self.effective_messages();
+        let tool_images_dir = self
+            .toolbox
+            .supports_images()
+            .then(|| self.toolbox.space_files_dir())
+            .flatten();
+        let mut index = 0;
+        while index < effective.len() {
+            let m = &effective[index];
             // Replay past tool calls as real assistant/tool message pairs so
             // the model remembers what it already tried (and got back) in
             // prior turns — dropping these caused it to repeat the same
@@ -166,35 +174,17 @@ impl App {
             // survey/plan sections are excluded, so a bare "the second
             // option" or "drop Q2" must not reach the model without context).
             if Self::excluded_from_model_history(m) {
+                index += 1;
                 continue;
             }
             if m.role == "tool_call" {
-                if let Some((call, result)) = parse_tool_call_row(&m.content) {
-                    history.push(ChatMessage {
-                        role: "assistant".to_string(),
-                        content: String::new(),
-                        tool_calls: Some(vec![call.clone()]),
-                        tool_call_id: None,
-                        images: Vec::new(),
-                    });
-                    let key = (call.name.clone(), call.arguments.clone());
-                    let content = match seen_results.get(&key) {
-                        Some(prev) if *prev == result => {
-                            crate::tools::tool_result_unchanged_note(&call.name, &call.arguments)
-                        }
-                        _ => {
-                            seen_results.insert(key, result.clone());
-                            result
-                        }
-                    };
-                    history.push(ChatMessage {
-                        role: "tool".to_string(),
-                        content,
-                        tool_calls: None,
-                        tool_call_id: Some(call.id),
-                        images: Vec::new(),
-                    });
-                }
+                append_tool_call_history(
+                    &mut history,
+                    effective,
+                    &mut index,
+                    &mut seen_results,
+                    tool_images_dir.as_deref(),
+                );
                 continue;
             }
             let mut cm = ChatMessage::text(m.role.clone(), m.content.clone());
@@ -219,6 +209,7 @@ impl App {
                 cm.images = images;
             }
             history.push(cm);
+            index += 1;
         }
         history
     }
@@ -253,6 +244,7 @@ impl App {
         };
         let params = ChatParams {
             reasoning_effort,
+            prompt_cache_key: self.session.as_ref().map(|session| session.id.clone()),
             temperature: self.settings.temperature,
             top_p: self.settings.top_p,
             max_tokens: self.settings.max_tokens,
@@ -330,12 +322,18 @@ impl App {
             return self.on_chat_event(task_id, ev);
         }
         if let StreamEvent::ToolCall {
+            id,
+            reasoning,
+            assistant_content,
             name,
             arguments,
             result,
         } = ev
         {
             let content = serde_json::json!({
+                "id": id,
+                "reasoning_content": reasoning,
+                "assistant_content": assistant_content,
                 "name": name,
                 "arguments": arguments,
                 "result": result,
@@ -468,6 +466,9 @@ impl App {
                 }
             }
             StreamEvent::ToolCall {
+                id,
+                reasoning,
+                assistant_content,
                 name,
                 arguments,
                 result,
@@ -486,9 +487,15 @@ impl App {
                 let Some(task) = self.chat_tasks.get(&task_id) else {
                     return Ok(());
                 };
-                let content =
-                    serde_json::json!({ "name": name, "arguments": arguments, "result": result })
-                        .to_string();
+                let content = serde_json::json!({
+                    "id": id,
+                    "reasoning_content": reasoning,
+                    "assistant_content": assistant_content,
+                    "name": name,
+                    "arguments": arguments,
+                    "result": result,
+                })
+                .to_string();
                 let target = task.session_id.clone();
                 let incognito = task.incognito;
                 let in_active_space = task.space_id == self.active_space.id;
@@ -1168,6 +1175,7 @@ impl App {
         Some(ChatMessage {
             role: "system".to_string(),
             content: text,
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             images: urls,
@@ -1261,23 +1269,111 @@ pub fn title_from(text: &str) -> String {
     }
 }
 
-/// Recover a `(ToolCall, result)` pair from a stored `tool_call` row's JSON
-/// content (`{"name","arguments","result"}`), for replaying past tool use
-/// back into the request history. `id` is synthesized — it only needs to
-/// match between the assistant/tool pair built at the same call site.
-fn parse_tool_call_row(content: &str) -> Option<(ToolCall, String)> {
+/// Append one persisted assistant tool-call batch and its tool results to a
+/// reconstructed request history.
+fn append_tool_call_history(
+    history: &mut Vec<ChatMessage>,
+    effective: &[Message],
+    index: &mut usize,
+    seen_results: &mut std::collections::HashMap<(String, String), String>,
+    tool_images_dir: Option<&std::path::Path>,
+) {
+    let start = *index;
+    let mut rows = Vec::new();
+    while *index < effective.len() && effective[*index].role == "tool_call" {
+        if let Some(row) = parse_tool_call_row(&effective[*index].content) {
+            rows.push(row);
+        }
+        *index += 1;
+    }
+    if rows.is_empty() {
+        // Keep malformed legacy rows out of the model, as before.
+        debug_assert!(*index > start);
+        return;
+    }
+    let calls = rows.iter().map(|row| row.call.clone()).collect::<Vec<_>>();
+    let reasoning_content = rows.iter().find_map(|row| row.reasoning_content.clone());
+    let assistant_content = rows.iter().find_map(|row| row.assistant_content.clone());
+    history.push(ChatMessage {
+        role: "assistant".to_string(),
+        content: assistant_content.unwrap_or_default(),
+        reasoning_content,
+        tool_calls: Some(calls),
+        tool_call_id: None,
+        images: Vec::new(),
+    });
+    for row in rows {
+        let call = row.call;
+        let images = tool_images_dir
+            .and_then(|dir| crate::provider::openrouter::extract_tool_images(&row.result, dir));
+        let key = (call.name.clone(), call.arguments.clone());
+        let content = match seen_results.get(&key) {
+            Some(prev) if *prev == row.result => {
+                crate::tools::tool_result_unchanged_note(&call.name, &call.arguments)
+            }
+            _ => {
+                seen_results.insert(key, row.result.clone());
+                row.result
+            }
+        };
+        history.push(ChatMessage {
+            role: "tool".to_string(),
+            content,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: Some(call.id),
+            images: Vec::new(),
+        });
+        if let Some(images) = images {
+            history.push(ChatMessage {
+                role: "user".to_string(),
+                content: images.description,
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                images: images.urls,
+            });
+        }
+    }
+}
+
+/// One persisted tool-call transcript row, including the provider call id,
+/// assistant content, and optional reasoning needed to reconstruct the batch.
+struct StoredToolCall {
+    call: ToolCall,
+    result: String,
+    reasoning_content: Option<String>,
+    assistant_content: Option<String>,
+}
+
+/// Recover a stored tool-call row from its JSON content. Older rows did not
+/// persist an id, so they retain the legacy synthetic id as a fallback.
+fn parse_tool_call_row(content: &str) -> Option<StoredToolCall> {
     let v: serde_json::Value = serde_json::from_str(content).ok()?;
     let name = v.get("name")?.as_str()?.to_string();
     let arguments = v.get("arguments")?.as_str()?.to_string();
     let result = v.get("result")?.as_str()?.to_string();
-    Some((
-        ToolCall {
-            id: "call_0".to_string(),
+    Some(StoredToolCall {
+        call: ToolCall {
+            id: v
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .unwrap_or("call_0")
+                .to_string(),
             name,
             arguments,
         },
         result,
-    ))
+        reasoning_content: v
+            .get("reasoning_content")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        assistant_content: v
+            .get("assistant_content")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 /// Compact byte counts: 940 B, 1.2 KB, 3.4 MB.
