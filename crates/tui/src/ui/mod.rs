@@ -103,10 +103,11 @@ fn render_input(f: &mut Frame, app: &mut AppView, area: Rect) {
             app.chat_task_count(),
             if app.chat_task_count() == 1 { "" } else { "s" }
         )
-    } else if app.compact_rx.is_some() {
+    } else if app.is_compacting_current_session() {
         // Compaction is a background job on this session — keep its state on
         // the input bar for as long as it runs, not in a status message that
-        // the next event overwrites.
+        // the next event overwrites. The history pane also shows a transient
+        // block so the work is visible away from the composer.
         " ⟳ compacting… ".to_string()
     } else if let Some((_, topic)) = app
         .research_running
@@ -124,7 +125,7 @@ fn render_input(f: &mut Frame, app: &mut AppView, area: Rect) {
         Some(s) => s.title.clone(),
         None => "nexus-chat".to_string(),
     };
-    let border_color = if app.is_streaming() || app.compact_rx.is_some() {
+    let border_color = if app.is_streaming() || app.is_compacting_current_session() {
         to_color(app.spinner_color())
     } else {
         app.theme.border_dim

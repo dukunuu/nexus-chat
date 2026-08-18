@@ -1132,7 +1132,7 @@ impl Db {
     pub fn load_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
             "SELECT role, content, model, reasoning, tokens, secs, cost, phrase, persona, created_at
-             FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
+             FROM messages WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC",
         )?;
         let messages = stmt
             .query_map([session_id], |r| {
@@ -1418,7 +1418,7 @@ impl Db {
     pub fn message_created_at(&self, session_id: &str, index: usize) -> Result<Option<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT created_at FROM messages WHERE session_id = ?1
-             ORDER BY created_at ASC LIMIT 1 OFFSET ?2",
+             ORDER BY created_at ASC, rowid ASC LIMIT 1 OFFSET ?2",
         )?;
         Ok(stmt
             .query_row((session_id, index as i64), |r| r.get(0))

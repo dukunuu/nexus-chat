@@ -60,8 +60,11 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
     let mut tail_blocks: Vec<String> = Vec::new();
     if app.viewing_stream() {
         push_assistant_streaming(&mut tail, app, width, &mut tail_code, &mut tail_blocks);
-        tail_code.resize(tail.len(), None);
     }
+    if app.is_compacting_current_session() {
+        push_compaction_pending(&mut tail, width, &app.theme);
+    }
+    tail_code.resize(tail.len(), None);
 
     let cache = &app.history_cache;
     let cached_lines = cache.lines.len();
@@ -812,6 +815,32 @@ fn push_compaction(
     out.push(Line::from(""));
 }
 
+/// A transient block shown in the transcript while a compaction request is
+/// running. It is deliberately not a `Message`: failed or cancelled jobs must
+/// disappear without leaving a fake conversation turn in the database.
+fn push_compaction_pending(
+    out: &mut Vec<Line<'static>>,
+    width: usize,
+    theme: &crate::theme::Theme,
+) {
+    out.push(Line::from(vec![
+        Span::styled("⟳ ", Style::default().fg(theme.accent2)),
+        Span::styled(
+            "compacting earlier messages…",
+            Style::default()
+                .fg(theme.accent2)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    for line in wrap_plain(
+        "building a conversation digest — please wait",
+        width.saturating_sub(2),
+    ) {
+        out.push(Line::from(dim(format!("  {line}"), theme)));
+    }
+    out.push(Line::from(""));
+}
+
 /// A background-research progress line: a dim one-liner with a 🔎 marker,
 /// no expand/collapse (unlike `tool_call` — there's no arguments/result pair,
 /// just a phase label).
@@ -1503,6 +1532,33 @@ mod tests {
                 .any(|l| l.contains("digest line one")),
             "{text}"
         );
+    }
+
+    #[test]
+    fn running_compaction_is_visible_in_the_history_pane() {
+        let mut a = test_app();
+        let session =
+            a.db.create_session("compacting", "a/one", &a.active_space.id, "chat")
+                .unwrap();
+        a.session = Some(session.clone());
+        a.messages.push(msg("user", "old conversation"));
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        a.compact_rx = Some(rx);
+        a.compacting_session_id = Some(session.id);
+
+        let backend = ratatui::backend::TestBackend::new(100, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_history(f, &mut a, f.area()))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect::<String>();
+        assert!(text.contains("compacting earlier messages"), "{text}");
     }
 
     /// A conversation tall enough to overflow the history pane, with one

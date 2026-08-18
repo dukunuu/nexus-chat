@@ -56,6 +56,10 @@ impl App {
         // view resets them on `ViewportReset`.
         self.push_viewport_reset();
         self.cleanup_incognito_images();
+        // Opening an old session should be enough to trigger auto-compaction
+        // once its catalog/context window is available. `on_models_result`
+        // repeats this check when the model fetch races the session switch.
+        self.maybe_compact();
         Ok(())
     }
 }

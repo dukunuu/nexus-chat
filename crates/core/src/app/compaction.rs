@@ -45,15 +45,31 @@ impl App {
         let through = self
             .session
             .as_ref()
-            .map_or(0, |s| s.compact_through as usize)
+            .and_then(|s| usize::try_from(s.compact_through).ok())
+            .unwrap_or(0)
             .min(self.messages.len());
         &self.messages[through..]
+    }
+
+    /// Whether `id` is the session whose background compaction is still running.
+    #[must_use]
+    pub fn is_compacting_session(&self, id: &str) -> bool {
+        self.compact_rx.is_some() && self.compacting_session_id.as_deref() == Some(id)
+    }
+
+    /// Whether the session currently on screen is being compacted.
+    #[must_use]
+    pub fn is_compacting_current_session(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|s| self.is_compacting_session(&s.id))
     }
 
     /// After a reply, auto-compact once context usage crosses the configured
     /// threshold (0 disables it).
     pub fn maybe_compact(&mut self) {
-        if self.settings.compact_threshold == 0 || self.compact_rx.is_some() {
+        if self.settings.compact_threshold == 0 || self.compact_rx.is_some() || self.is_streaming()
+        {
             return;
         }
         let Some(limit) = self.context_limit() else {
@@ -85,7 +101,10 @@ impl App {
             self.push_status("no active session to compact".to_string());
             return;
         };
-        if session.compact_through as usize >= self.messages.len() {
+        let through = usize::try_from(session.compact_through)
+            .unwrap_or(0)
+            .min(self.messages.len());
+        if compaction_tail(&self.messages, through).trim().is_empty() {
             self.push_status("nothing new to compact".to_string());
             return;
         }
@@ -102,38 +121,46 @@ impl App {
     /// back to the session model), same pattern as memory extraction.
     /// `before_pct` is only used to report the before/after status on completion.
     fn start_compaction(&mut self, before_pct: u64) {
-        let model = if self.memory_model.trim().is_empty() {
-            if let Some(m) = self.current_model.clone() {
-                m
-            } else {
+        let (session_id, through, prior_summary) = {
+            let Some(session) = self.session.as_ref() else {
+                return;
+            };
+            let through = usize::try_from(session.compact_through)
+                .unwrap_or(0)
+                .min(self.messages.len());
+            (session.id.clone(), through, session.compact_summary.clone())
+        };
+        let tail = compaction_tail(&self.messages, through);
+        if tail.trim().is_empty() {
+            return; // only the existing digest or excluded UI rows remain
+        }
+
+        // A saved utility-model id may belong to a backend that is no longer
+        // configured (especially for sessions created before the backend
+        // prefixes were introduced). Resolve it like every other background
+        // utility job, falling back to the active session backend/model.
+        let requested_model = if self.memory_model.trim().is_empty() {
+            let Some(model) = self.current_model.clone() else {
                 self.push_status("pick a model first with /model".to_string());
                 return;
-            }
+            };
+            model
         } else {
-            self.memory_model.clone()
+            self.memory_model.trim().to_string()
         };
-        let Some((provider, raw_model)) = self.resolve_model_backend(&model) else {
+        let Some((provider, raw_model)) = self.resolve_utility_model_backend(&requested_model)
+        else {
             self.push_status(format!(
-                "model backend unavailable: {model} — pick another with /model"
+                "model backend unavailable: {requested_model} — pick another with /model"
             ));
             return;
         };
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
-        let through = session.compact_through as usize;
-        if through >= self.messages.len() {
-            return; // nothing new since the last compaction to fold in
-        }
-        let prior_summary = session.compact_summary.clone();
-        let tail = compaction_tail(&self.messages, through);
-        let session_id = session.id.clone();
         let new_through = self.messages.len() as i64;
         let (tx, rx) = mpsc::unbounded_channel();
         self.compact_rx = Some(rx);
-        // No status write here: the input bar's "⟳ compacting…" hint (driven
-        // by `compact_rx`) is the progress indicator — a status message would
-        // be overwritten by the next event and never seen again.
+        self.compacting_session_id = Some(session_id.clone());
+        // The history pane gets a transient "compacting" block immediately;
+        // the input bar also keeps its compact status while the request runs.
         tokio::spawn(async move {
             let mut prompt = String::new();
             if let Some(s) = &prior_summary {
@@ -171,7 +198,9 @@ impl App {
     /// reports fresh usage.
     pub fn on_compact_result(&mut self, result: Option<(String, String, i64, u64)>) {
         self.compact_rx = None;
+        self.compacting_session_id = None;
         let Some((id, summary, through, before_pct)) = result else {
+            self.push_status("compaction failed — no digest returned".to_string());
             return;
         };
         let _ = self.db.set_compaction(&id, &summary, through);
@@ -184,11 +213,16 @@ impl App {
         // one at the boundary — after the last message it covers, before
         // anything the user says next. The db row is anchored to that last
         // message's timestamp so reloads keep the same position.
-        if self.session.as_ref().is_some_and(|s| s.id == id) {
+        let in_view = self.session.as_ref().is_some_and(|s| s.id == id);
+        let mut history_invalidated = false;
+        if in_view {
             if let Some(row) = self.messages.iter_mut().find(|m| m.role == "compaction") {
                 row.content.clone_from(&summary);
+                history_invalidated = true;
             } else {
-                let through = (through as usize).min(self.messages.len());
+                let through = usize::try_from(through)
+                    .unwrap_or(0)
+                    .min(self.messages.len());
                 let anchor = self
                     .messages
                     .get(through.saturating_sub(1))
@@ -208,8 +242,11 @@ impl App {
                         created_at: anchor,
                     },
                 );
-                self.push_history_invalidated();
+                history_invalidated = true;
             }
+        }
+        if history_invalidated {
+            self.push_history_invalidated();
         }
         if self
             .db
@@ -219,14 +256,20 @@ impl App {
             // Anchor: the in-memory row we just placed (viewing the session),
             // else the boundary message's timestamp straight from the db
             // (job finished after the user switched away), else now.
-            let anchor = self
-                .messages
-                .iter()
-                .find(|m| m.role == "compaction")
-                .and_then(|m| m.created_at.clone())
+            let anchor = in_view
+                .then(|| {
+                    self.messages
+                        .iter()
+                        .find(|m| m.role == "compaction")
+                        .and_then(|m| m.created_at.clone())
+                })
+                .flatten()
                 .or_else(|| {
                     self.db
-                        .message_created_at(&id, (through as usize).saturating_sub(1))
+                        .message_created_at(
+                            &id,
+                            usize::try_from(through).unwrap_or(0).saturating_sub(1),
+                        )
                         .ok()
                         .flatten()
                 })
@@ -260,7 +303,9 @@ impl App {
         if self.messages.iter().any(|m| m.role == "compaction") {
             return;
         }
-        let through = (s.compact_through as usize).min(self.messages.len());
+        let through = usize::try_from(s.compact_through)
+            .unwrap_or(0)
+            .min(self.messages.len());
         let anchor = self
             .messages
             .get(through.saturating_sub(1))
@@ -365,6 +410,10 @@ impl App {
         let id = session.id.clone();
         let through = session.compact_through;
         self.db.set_compaction(&id, &text, through)?;
+        if let Some(row) = self.messages.iter_mut().find(|m| m.role == "compaction") {
+            row.content.clone_from(&text);
+            self.push_history_invalidated();
+        }
         if let Some(s) = self.session.as_mut() {
             s.compact_summary = Some(text);
         }
@@ -379,7 +428,7 @@ impl App {
 /// carry contextless gate replies ("drop Q2") into later history even
 /// though `build_history` skips them.
 fn compaction_tail(messages: &[Message], through: usize) -> String {
-    messages[through..]
+    messages[through.min(messages.len())..]
         .iter()
         .filter(|m| m.role != "tool_call" && !App::excluded_from_model_history(m))
         .map(|m| format!("{}: {}", m.role, m.content))
@@ -510,6 +559,38 @@ mod tests {
         a.backfill_compaction_row();
         assert_eq!(a.messages.len(), 3);
         assert_eq!(a.db.load_messages(&sid).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn force_compact_ignores_a_backfilled_digest_row() {
+        let (mut a, sid) = app_with_session(1);
+        a.db.set_compaction(&sid, "legacy digest", 2).unwrap();
+        a.session = a.db.get_session(&sid).unwrap();
+        a.backfill_compaction_row();
+
+        // The visible legacy digest is not new conversation content. It must
+        // not cause a second compaction request every time the session opens.
+        a.force_compact();
+        assert!(a.compact_rx.is_none());
+        assert!(a.last_status().contains("nothing new"));
+    }
+
+    #[test]
+    fn compaction_failure_clears_the_running_marker() {
+        let mut a = test_app();
+        let session =
+            a.db.create_session("t", "m", &a.active_space.id, "chat")
+                .unwrap();
+        a.session = Some(session.clone());
+        a.compacting_session_id = Some(session.id.clone());
+        let (_tx, rx) = mpsc::unbounded_channel();
+        a.compact_rx = Some(rx);
+
+        a.on_compact_result(None);
+
+        assert!(a.compact_rx.is_none());
+        assert!(a.compacting_session_id.is_none());
+        assert!(a.last_status().contains("compaction failed"));
     }
 
     #[test]

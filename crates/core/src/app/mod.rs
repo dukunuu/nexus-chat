@@ -759,6 +759,9 @@ pub struct App {
     pub memory_rx: Option<mpsc::UnboundedReceiver<(String, Vec<MemoryOp>)>>,
     /// Background compaction result: (session id, digest, messages-covered, pre-compaction %).
     pub compact_rx: Option<mpsc::UnboundedReceiver<(String, String, i64, u64)>>,
+    /// Session currently being compacted. Kept separately from `compact_rx` so
+    /// the TUI can mark the right row while the job is still in flight.
+    pub compacting_session_id: Option<String>,
 
     /// Installed skills (name/description only — bodies are read from disk on
     /// invocation, so this list is cheap and reloaded whenever it changes).
@@ -1047,6 +1050,7 @@ impl App {
             verbosity: "concise".to_string(),
             memory_rx: None,
             compact_rx: None,
+            compacting_session_id: None,
             models: Vec::new(),
             current_model: None,
             models_rx: None,
@@ -1580,6 +1584,10 @@ impl App {
                 let _ = self.db.backfill_usage_costs();
                 self.models = models;
                 self.push_status(format!("loaded {n} models"));
+                // A session may have been opened before the catalog arrived.
+                // Re-check it now so old, already-large conversations are
+                // compacted without requiring another user turn.
+                self.maybe_compact();
                 // The 2e view layer opens the model picker here: it owns the
                 // `popup` state, and checks `models`/`current_model` after
                 // this handler runs.

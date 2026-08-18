@@ -45,8 +45,9 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
                 .clone()
                 .unwrap_or_else(|| format!("{}…", &s.id[..8.min(s.id.len())]));
             let when = crate::ui::fmt_created(&s.created_at);
-            // ⟳ = a response is streaming here; 🔎 = a research job is running
-            // here; ● = finished while unviewed.
+            // ⟳ = a response or compaction is running here; 🔎 = a research
+            // job is running here; ● = finished while unviewed.
+            let compacting_here = app.is_compacting_session(&s.id);
             let streaming_here = app.chat_task_for_session(&s.id).is_some();
             let researching_here = app
                 .research_running
@@ -54,7 +55,9 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
                 .is_some_and(|(id, _)| *id == s.id);
             let is_research = s.kind == "research";
             let is_linked_research = s.research_parent_id.is_some();
-            let marker = if streaming_here {
+            let marker = if compacting_here {
+                Some(Span::styled("⟳ ", Style::default().fg(app.theme.accent2)))
+            } else if streaming_here {
                 Some(Span::styled("⟳ ", Style::default().fg(app.theme.accent)))
             } else if researching_here {
                 Some(Span::styled("🔎 ", Style::default().fg(app.theme.accent2)))
@@ -80,12 +83,19 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
                 Span::styled(when, dim),
             ]);
             let top = Line::from(top_spans);
-            // title (truncated) with the model dimmed after it.
+            // title (truncated) with the model dimmed after it. A running
+            // compaction replaces the model suffix with an explicit label so
+            // the history picker doesn't make the user guess what ⟳ means.
+            let detail = if compacting_here {
+                "  ⟳ compacting…".to_string()
+            } else {
+                format!("  {}", s.model)
+            };
             let title =
-                chrome::truncate(&s.title, width.saturating_sub(s.model.chars().count() + 5));
+                chrome::truncate(&s.title, width.saturating_sub(detail.chars().count() + 1));
             let body = Line::from(vec![
                 Span::styled(title, Style::default().fg(app.theme.fg)),
-                Span::styled(format!("  {}", s.model), dim),
+                Span::styled(detail, dim),
             ]);
             ListItem::new(vec![top, body, Line::from("")])
         })
