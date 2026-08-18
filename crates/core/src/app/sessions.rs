@@ -20,6 +20,7 @@ impl App {
     pub fn new_session(&mut self) {
         self.session = None;
         self.messages.clear();
+        self.refresh_memory_snapshot();
         // A selection points into the old session's wrapped lines — a stale
         // one would mis-highlight the new chat and resolve links against the
         // wrong messages; the view clears it on `ViewportReset`.
@@ -48,6 +49,7 @@ impl App {
         self.current_model = Some(s.model.clone());
         self.web_mode = s.web_mode;
         self.session = Some(s);
+        self.refresh_memory_snapshot();
         self.backfill_compaction_row();
         self.restore_survey_gate_prompt();
         self.refresh_toolbox();

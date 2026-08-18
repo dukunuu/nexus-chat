@@ -1621,6 +1621,31 @@ fn prompt(label: &str, default: &str) -> String {
 
 // --- sync commands (Phase 3 merge engine) ---
 
+/// Temporary workspace for bundle extraction and SSH replies. Cleanup runs
+/// on every return path, including malformed bundles and failed SSH calls.
+struct SyncTempDir {
+    path: PathBuf,
+}
+
+impl SyncTempDir {
+    fn new(prefix: &str) -> Result<Self> {
+        let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("creating temporary sync directory {}", path.display()))?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for SyncTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 /// `nexus sync` dispatch: the export/import subcommands, or the positional
 /// target — a shared dir (mailbox sync) or `ssh://user@host`.
 fn sync_cmd(cmd: Option<SyncCmd>, target: Option<&Path>) -> Result<()> {
@@ -1684,12 +1709,11 @@ fn sync_import(path: Option<&Path>, bundle_reply: bool) -> Result<()> {
         std::io::stdin().read_to_end(&mut buf)?;
         buf
     };
-    let tmp = std::env::temp_dir().join(format!("nexus-import-{}", uuid::Uuid::new_v4()));
+    let tmp = SyncTempDir::new("nexus-import")?;
     let (cs, blob_source) = if bytes.starts_with(b"PK") {
-        let bundle = tmp.join("in.bundle");
-        std::fs::create_dir_all(&tmp)?;
+        let bundle = tmp.path().join("in.bundle");
         std::fs::write(&bundle, &bytes)?;
-        let unpacked = tmp.join("unpacked");
+        let unpacked = tmp.path().join("unpacked");
         let cs = nexus_core::sync::unpack_bundle(&bundle, &unpacked)?;
         (cs, Some(unpacked))
     } else {
@@ -1710,7 +1734,7 @@ fn sync_import(path: Option<&Path>, bundle_reply: bool) -> Result<()> {
     if bundle_reply {
         // Zip writers need a seekable sink — write the reply bundle to a
         // temp file, then stream it out.
-        let reply_path = tmp.join("reply.bundle");
+        let reply_path = tmp.path().join("reply.bundle");
         nexus_core::sync::write_bundle(&db, &space, &reply, std::fs::File::create(&reply_path)?)?;
         std::io::copy(
             &mut std::fs::File::open(&reply_path)?,
@@ -1719,7 +1743,6 @@ fn sync_import(path: Option<&Path>, bundle_reply: bool) -> Result<()> {
     } else {
         out(serde_json::to_string(&reply)?);
     }
-    let _ = std::fs::remove_dir_all(&tmp);
     Ok(())
 }
 
@@ -1742,6 +1765,26 @@ fn print_sync_summary(cs: &nexus_core::sync::Changeset, summary: &nexus_core::sy
     }
 }
 
+/// Write a mailbox file through a temporary sibling and rename it into place.
+/// Readers either see the previous complete changeset or the new complete
+/// one, never a half-written JSON document.
+fn write_sync_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("changeset.json");
+    let temporary = path.with_file_name(format!(".{name}.nexus-write-{}", uuid::Uuid::new_v4()));
+    if let Err(error) = std::fs::write(&temporary, bytes) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("writing {}", temporary.display()));
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("installing {}", path.display()));
+    }
+    Ok(())
+}
+
 /// Bidirectional mailbox sync over a shared directory: consume every
 /// foreign `*.changeset.json` (rows, tombstones, embedded acks, blobs),
 /// then leave this device's own changeset + blobs + ack behind for the
@@ -1751,7 +1794,26 @@ fn sync_dir(dir: &Path) -> Result<()> {
     let db = db::Db::open(&space.db_path())?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let my_id = db.device_id()?;
-    let mut reply_cursors: Vec<nexus_core::sync::PeerCursor> = Vec::new();
+    let own_path = dir.join(format!("{my_id}.changeset.json"));
+    // Our previous reply is still an outbound message until a peer imports
+    // it. Preserve its ack when this device is run again before that peer;
+    // dropping the file would silently lose the only copy of the ack.
+    let pending_ack = if own_path.is_file() {
+        let bytes = std::fs::read(&own_path)
+            .with_context(|| format!("reading pending {}", own_path.display()))?;
+        let pending: nexus_core::sync::Changeset = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing pending {}", own_path.display()))?;
+        if pending.device_id != my_id {
+            bail!(
+                "mailbox file {} belongs to another device",
+                own_path.display()
+            );
+        }
+        pending.ack
+    } else {
+        None
+    };
+    let mut reply_cursors = pending_ack.unwrap_or_default();
     let mut senders: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -1764,8 +1826,8 @@ fn sync_dir(dir: &Path) -> Result<()> {
         let cs: nexus_core::sync::Changeset = serde_json::from_slice(&std::fs::read(entry.path())?)
             .with_context(|| format!("parsing {}", entry.path().display()))?;
         if cs.device_id == my_id {
-            // Our own stale mail — consume it unread.
-            let _ = std::fs::remove_file(entry.path());
+            // Keep our outbound file until a peer consumes it. It is read
+            // above only to preserve its ack; it is replaced atomically below.
             continue;
         }
         let (summary, cursors) = nexus_core::sync::apply_changeset(&db, &space, &cs, Some(dir))?;
@@ -1774,10 +1836,10 @@ fn sync_dir(dir: &Path) -> Result<()> {
         if !senders.contains(&cs.device_id) {
             senders.push(cs.device_id);
         }
-        // Consume the mail: the changeset and its blobs.
-        for fc in &cs.files {
-            let _ = std::fs::remove_file(dir.join("blobs").join(&fc.space_id).join(&fc.name));
-        }
+        // Consume the changeset. Blob files are retained as a bounded
+        // per-name mailbox cache: deleting them here races with another
+        // device's outbound export when peers share one directory, while
+        // hash verification makes stale payloads harmless.
         std::fs::remove_file(entry.path())?;
     }
     // Our reply: an export for whoever we just imported from (a full
@@ -1786,20 +1848,30 @@ fn sync_dir(dir: &Path) -> Result<()> {
     // round the cursors are empty but the push cursors were just advanced.
     // With no mail at all (a solo re-run), fall back to the peer we most
     // recently synced with so we don't blast a full export.
-    let peer: Option<String> = senders.first().cloned().or_else(|| {
-        db.load_sync_state()
-            .ok()?
+    // A single changeset can carry an ack for many senders, but its row
+    // export can only be delta-filtered for one peer. When several peers
+    // posted mail in the same pass, use a full export so none of them gets
+    // its push cursor acknowledged without receiving this device's rows.
+    let peer: Option<String> = match senders.as_slice() {
+        [peer] if reply_cursors.is_empty() => Some(peer.clone()),
+        [] if reply_cursors.is_empty() => db
+            .load_sync_state()?
             .iter()
             .filter(|s| s.push_cursor.is_some())
             .max_by(|a, b| a.last_synced_at.cmp(&b.last_synced_at))
-            .map(|s| s.peer_id.clone())
-    });
+            .map(|s| s.peer_id.clone()),
+        // A pending ack means another outbound exchange is still in flight;
+        // use a full export so replacing the mailbox file cannot drop rows
+        // associated with that pending message.
+        _ => None,
+    };
     let mut cs =
         nexus_core::sync::build_changeset(&db, peer.as_deref(), &nexus_core::sync::device_name())?;
     cs.ack = Some(reply_cursors);
     let path = dir.join(format!("{my_id}.changeset.json"));
-    std::fs::write(&path, serde_json::to_vec(&cs)?)?;
+    let encoded = serde_json::to_vec(&cs)?;
     let blobs = nexus_core::sync::export_blobs(&db, &space, &cs, dir)?;
+    write_sync_file(&path, &encoded)?;
     eprintln!(
         "exported {} rows, {} tombstones, {blobs} blob(s) → {}",
         cs.rows.len(),
@@ -1832,9 +1904,8 @@ fn sync_ssh(host: &str) -> Result<()> {
     if let Some(peer) = &remote_peer {
         cs.ack = Some(nexus_core::sync::build_ack(&db, peer)?);
     }
-    let tmp = std::env::temp_dir().join(format!("nexus-ssh-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&tmp)?;
-    let bundle = tmp.join("out.bundle");
+    let tmp = SyncTempDir::new("nexus-ssh")?;
+    let bundle = tmp.path().join("out.bundle");
     let n = nexus_core::sync::write_bundle(&db, &space, &cs, std::fs::File::create(&bundle)?)?;
     eprintln!(
         "exported {} rows, {} tombstones, {n} blob(s)",
@@ -1855,14 +1926,13 @@ fn sync_ssh(host: &str) -> Result<()> {
             output.status
         );
     }
-    let reply_path = tmp.join("reply.bundle");
+    let reply_path = tmp.path().join("reply.bundle");
     std::fs::write(&reply_path, &output.stdout)?;
-    let unpacked = tmp.join("unpacked");
+    let unpacked = tmp.path().join("unpacked");
     let reply = nexus_core::sync::unpack_bundle(&reply_path, &unpacked)?;
     let (summary, _) = nexus_core::sync::apply_changeset(&db, &space, &reply, Some(&unpacked))?;
     print_sync_summary(&reply, &summary);
     db.set_setting("sync_ssh_peer", &reply.device_id)?;
-    let _ = std::fs::remove_dir_all(&tmp);
     Ok(())
 }
 

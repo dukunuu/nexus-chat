@@ -1107,9 +1107,9 @@ impl Db {
         Ok(())
     }
 
-    /// Delete a session and all its messages. Every removed row is
-    /// tombstoned — messages are append-only union rows, so a peer must
-    /// learn each one is gone, not just the session.
+    /// Delete a session and all its messages and swarm personas. Every
+    /// removed row is tombstoned — append-only children and roster slots
+    /// must not survive as orphaned durable state on this device.
     pub fn delete_session(&self, id: &str) -> Result<()> {
         let ids: Vec<String> = {
             let mut stmt = self
@@ -1118,11 +1118,23 @@ impl Db {
             let rows = stmt.query_map([id], |r| r.get(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
+        let persona_ids: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT ord FROM swarm_personas WHERE session_id = ?1")?;
+            let rows = stmt.query_map([id], |r| Ok(format!("{id}:{}", r.get::<_, i64>(0)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
         for mid in &ids {
             self.tombstone("messages", mid)?;
         }
+        for persona_id in &persona_ids {
+            self.tombstone("swarm_personas", persona_id)?;
+        }
         self.conn
             .execute("DELETE FROM messages WHERE session_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM swarm_personas WHERE session_id = ?1", [id])?;
         self.conn
             .execute("DELETE FROM sessions WHERE id = ?1", [id])?;
         self.tombstone("sessions", id)?;
@@ -4166,11 +4178,21 @@ mod tests {
         let sid2 = db.create_session("t2", "a/b", &space, "chat").unwrap().id;
         let m1 = db.add_user_message(&sid2, "one").unwrap();
         let m2 = db.add_user_message(&sid2, "two").unwrap();
+        db.save_swarm_personas(
+            &sid2,
+            &[Persona {
+                name: "p".into(),
+                model: "m".into(),
+                blurb: "b".into(),
+            }],
+        )
+        .unwrap();
         db.delete_session(&sid2).unwrap();
         let mut expected = vec![mid, m1, m2];
         expected.sort();
         assert_eq!(tombstones("messages"), expected);
-        assert_eq!(tombstones("sessions"), vec![sid2]);
+        assert_eq!(tombstones("sessions"), vec![sid2.clone()]);
+        assert_eq!(tombstones("swarm_personas"), vec![format!("{sid2}:0")]);
 
         // File delete.
         let fid = db.upsert_file(&space, "f.txt", "h", 1, "ok").unwrap();
@@ -4196,10 +4218,10 @@ mod tests {
         db.save_swarm_personas(&sid, &[persona("a"), persona("b")])
             .unwrap();
         db.save_swarm_personas(&sid, &[persona("b")]).unwrap();
-        assert_eq!(
-            tombstones("swarm_personas"),
-            vec![format!("{sid}:0"), format!("{sid}:1")]
-        );
+        let mut expected_persona_tombstones =
+            vec![format!("{sid2}:0"), format!("{sid}:0"), format!("{sid}:1")];
+        expected_persona_tombstones.sort();
+        assert_eq!(tombstones("swarm_personas"), expected_persona_tombstones);
     }
 
     /// A v1 db (Phase 1 layout: random uuid for the default space) gets

@@ -583,6 +583,7 @@ use super::{SurveyGate, SurveyPhase};
 struct ResearchUsage {
     db_path: std::path::PathBuf,
     session_id: String,
+    prompt_cache_key: String,
     space_id: String,
     backend: &'static str,
 }
@@ -590,7 +591,7 @@ struct ResearchUsage {
 impl ResearchUsage {
     fn chat_params(&self) -> ChatParams {
         ChatParams {
-            prompt_cache_key: Some(self.session_id.clone()),
+            prompt_cache_key: Some(self.prompt_cache_key.clone()),
             ..ChatParams::default()
         }
     }
@@ -780,10 +781,7 @@ async fn run_searcher(
     let (mut rx, abort) = provider.stream_chat(
         model.to_string(),
         messages,
-        ChatParams {
-            prompt_cache_key: Some(ctx.ids.0.clone()),
-            ..ChatParams::default()
-        },
+        ctx.usage.chat_params(),
         tools,
         ctx.toolbox,
         RESEARCH_SEARCHER_MAX_ITERS,
@@ -849,10 +847,7 @@ async fn verify_with_quote_check(
     let (mut rx, abort) = provider.stream_chat(
         model.to_string(),
         messages,
-        ChatParams {
-            prompt_cache_key: Some(ids.0.clone()),
-            ..ChatParams::default()
-        },
+        usage.chat_params(),
         tools,
         cache_only_toolbox,
         RESEARCH_SEARCHER_MAX_ITERS,
@@ -989,6 +984,7 @@ pub struct ResearchOptions {
     pub toolbox: Arc<dyn ToolExecutor>,
     pub tx: mpsc::UnboundedSender<ResearchMsg>,
     pub session_id: String,
+    pub prompt_cache_key: String,
     pub space_id: String,
     pub space_name: String,
 }
@@ -1228,6 +1224,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         opts.space_id.clone(),
         opts.space_name.clone(),
     );
+    let prompt_cache_key = opts.prompt_cache_key.clone();
     let ResearchOptions {
         research_provider,
         research_model,
@@ -1245,6 +1242,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
     let usage = Arc::new(ResearchUsage {
         db_path: db_path.to_path_buf(),
         session_id: ids.0.clone(),
+        prompt_cache_key,
         space_id: ids.1.clone(),
         backend: research_provider.backend_tag().name(),
     });
@@ -2037,6 +2035,8 @@ impl super::App {
         let space_id = self.active_space.id.clone();
         let space_name = self.active_space.name.clone();
         self.session = Some(session.clone());
+        self.refresh_memory_snapshot();
+        let prompt_cache_key = format!("research:{}", self.prompt_cache_key_for(&session.id));
         self.context_total = None;
         // Selection + scroll point into the previous session's lines; the
         // view resets them on `ViewportReset`.
@@ -2060,6 +2060,7 @@ impl super::App {
             toolbox,
             tx,
             session_id: session.id,
+            prompt_cache_key,
             space_id,
             space_name,
         }));
@@ -3175,6 +3176,7 @@ mod tests {
         let usage = ResearchUsage {
             db_path: std::env::temp_dir().join("nexus-research-test.db"),
             session_id: ids.0.clone(),
+            prompt_cache_key: "s:0".to_string(),
             space_id: ids.1.clone(),
             backend: provider.backend_tag().name(),
         };

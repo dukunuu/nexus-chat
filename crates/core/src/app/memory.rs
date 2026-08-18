@@ -9,7 +9,7 @@
 )]
 use super::{App, MemoryOp};
 use crate::db::Message;
-use crate::provider::ChatMessage;
+use crate::provider::{ChatMessage, ChatParams};
 use std::fmt::Write as _;
 use tokio::sync::mpsc;
 
@@ -23,6 +23,32 @@ impl App {
         let text = std::fs::read_to_string(self.space.memory_path(&self.active_space.name))
             .unwrap_or_default();
         text.chars().take(120_000).collect()
+    }
+
+    /// Reload the active session's memory snapshot and begin a new prompt-cache
+    /// epoch. New inferred facts normally do not call this while a session is
+    /// active; switching sessions or an explicit refresh does.
+    pub fn refresh_memory_snapshot(&mut self) {
+        self.memory_snapshot = self.read_memory();
+        self.bump_cache_epoch();
+    }
+
+    /// Return the memory text that is stable for the active cache epoch.
+    #[must_use]
+    pub fn memory_snapshot(&self) -> &str {
+        &self.memory_snapshot
+    }
+
+    /// Advance the app-local prompt-cache epoch after a serialized-prefix
+    /// boundary such as a memory or prompt refresh.
+    pub(crate) fn bump_cache_epoch(&mut self) {
+        self.cache_epoch = self.cache_epoch.wrapping_add(1);
+    }
+
+    /// Build a non-sensitive cache-lane key for one session and epoch.
+    #[must_use]
+    pub(crate) fn prompt_cache_key_for(&self, session_id: &str) -> String {
+        format!("{session_id}:{}", self.cache_epoch)
     }
 
     /// After an assistant reply, ask the memory model for ADD/UPDATE/DELETE ops
@@ -41,6 +67,10 @@ impl App {
         };
         let facts = self.read_memory();
         let space = self.active_space.name.clone();
+        let prompt_cache_key = self
+            .session
+            .as_ref()
+            .map(|session| format!("memory:{}", self.prompt_cache_key_for(&session.id)));
         let (tx, rx) = mpsc::unbounded_channel();
         self.memory_rx = Some(rx);
         tokio::spawn(async move {
@@ -61,8 +91,15 @@ impl App {
                 truncate(&assistant_msg.content),
             );
             let msgs = vec![ChatMessage::text("user", prompt)];
-            if let Ok(text) = provider.complete(&raw_model, msgs).await {
-                let ops = parse_memory_ops(&text);
+            let params = ChatParams {
+                prompt_cache_key,
+                ..ChatParams::default()
+            };
+            if let Ok(completion) = provider
+                .complete_with_params(&raw_model, msgs, &params)
+                .await
+            {
+                let ops = parse_memory_ops(&completion.text);
                 let _ = tx.send((space, ops));
             }
         });
@@ -113,6 +150,12 @@ impl App {
             });
         let _ = self.space.ensure_space_dir(&self.active_space.name);
         let _ = std::fs::write(self.space.memory_path(&self.active_space.name), body);
+        // A blank/new chat has no active run to protect, so make a completed
+        // background write visible to the next request. Active sessions keep
+        // their frozen snapshot until the user switches/restarts them.
+        if self.session.is_none() {
+            self.refresh_memory_snapshot();
+        }
     }
 }
 

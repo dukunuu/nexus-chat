@@ -25,6 +25,7 @@ impl App {
         self.active_space = row;
         self.session = None;
         self.messages.clear();
+        self.refresh_memory_snapshot();
         self.context_total = None;
         self.push_viewport_reset();
         self.cleanup_incognito_images();

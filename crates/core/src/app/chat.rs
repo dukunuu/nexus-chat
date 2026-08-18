@@ -51,8 +51,10 @@ impl App {
             return Ok(());
         };
 
-        // Auto-create a session on the first message.
+        // Auto-create a session on the first message. Refresh here as well as
+        // in `/new` so edits made while no session was open are picked up.
         if self.session.is_none() {
+            self.refresh_memory_snapshot();
             let title = title_from(&text);
             let s = if self.incognito {
                 crate::db::Session {
@@ -244,7 +246,10 @@ impl App {
         };
         let params = ChatParams {
             reasoning_effort,
-            prompt_cache_key: self.session.as_ref().map(|session| session.id.clone()),
+            prompt_cache_key: self
+                .session
+                .as_ref()
+                .map(|session| self.prompt_cache_key_for(&session.id)),
             temperature: self.settings.temperature,
             top_p: self.settings.top_p,
             max_tokens: self.settings.max_tokens,
@@ -827,12 +832,12 @@ impl App {
         }
     }
 
-    /// Instructions + memory for the active space, combined into one system
-    /// message. `None` if the space has neither (today's no-system-prompt path).
-    /// The full system prompt: the app's own base prompt (identity/formatting
-    /// rules, `$EDITOR`-editable) first, then space instructions, skills, and
-    /// memory layered on top. Unlike those three, the base prompt is never
-    /// empty — it's the app speaking, not per-space configuration.
+    /// Instructions + the active session's memory snapshot, combined into one
+    /// system message. The full system prompt puts the app's own base prompt
+    /// (identity/formatting rules, `$EDITOR`-editable) first, then space
+    /// instructions, skills, and the frozen memory snapshot layered on top.
+    /// Unlike those three, the base prompt is never empty — it's the app
+    /// speaking, not per-space configuration.
     pub fn system_prompt(&self) -> String {
         let mut parts: Vec<String> = vec![self.resolved_base_system_prompt()];
         if !self.incognito {
@@ -853,7 +858,7 @@ impl App {
             if let Some(scripts) = self.scripts_section() {
                 parts.push(scripts);
             }
-            let memory = self.read_memory();
+            let memory = self.memory_snapshot();
             if !memory.trim().is_empty() {
                 parts.push(format!("## Memory\n{memory}"));
             }
@@ -961,6 +966,7 @@ impl App {
     /// applied to the session created by the next message.
     pub fn toggle_web_mode(&mut self) {
         self.web_mode = !self.web_mode;
+        self.bump_cache_epoch();
         if let Some(session) = self.session.as_mut() {
             session.web_mode = self.web_mode;
             let _ = self.db.set_session_web_mode(&session.id, self.web_mode);
@@ -978,6 +984,7 @@ impl App {
         }
         self.session = None;
         self.messages.clear();
+        self.refresh_memory_snapshot();
         self.context_total = None;
         self.push_composer_clear();
         self.push_viewport_reset();
@@ -1003,7 +1010,10 @@ impl App {
     /// Re-read `system_prompt.md` after a Ctrl+E hand-edit.
     pub fn reload_base_system_prompt(&mut self) {
         if let Ok(text) = crate::config::load_system_prompt() {
-            self.base_system_prompt = text;
+            if text != self.base_system_prompt {
+                self.base_system_prompt = text;
+                self.bump_cache_epoch();
+            }
             self.push_status("system prompt reloaded".to_string());
         }
     }

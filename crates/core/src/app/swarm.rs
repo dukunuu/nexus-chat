@@ -116,6 +116,7 @@ impl App {
             base_history,
             toolbox: self.toolbox.clone(),
             user_message,
+            prompt_cache_key: format!("swarm:{}", self.prompt_cache_key_for(&session.id)),
             session_id: session.id,
             tx,
         }));
@@ -341,6 +342,7 @@ pub struct SwarmTurnOptions {
     pub base_history: Vec<ChatMessage>,
     pub toolbox: Arc<dyn ToolExecutor>,
     pub user_message: String,
+    pub prompt_cache_key: String,
     pub session_id: String,
     pub tx: mpsc::UnboundedSender<SwarmMsg>,
 }
@@ -359,6 +361,7 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
         base_history,
         toolbox,
         user_message,
+        prompt_cache_key,
         session_id,
         tx,
     } = opts;
@@ -372,6 +375,7 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
             &raw_meta_model,
             &user_message,
             &default_model,
+            &prompt_cache_key,
         )
         .await
         {
@@ -460,7 +464,7 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
                 raw_persona_model,
                 messages,
                 ChatParams {
-                    prompt_cache_key: Some(session_id.clone()),
+                    prompt_cache_key: Some(prompt_cache_key.clone()),
                     ..ChatParams::default()
                 },
                 tools,
@@ -543,7 +547,15 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
         send(SwarmUpdate::Progress(format!(
             "round {round} complete — moderator checking for a conclusion…"
         )));
-        match moderator_check(&meta_provider, &raw_meta_model, &user_message, &discussion).await {
+        match moderator_check(
+            &meta_provider,
+            &raw_meta_model,
+            &user_message,
+            &discussion,
+            &prompt_cache_key,
+        )
+        .await
+        {
             Ok(ModeratorVerdict::Converged) | Err(_) => break 'convo,
             Ok(ModeratorVerdict::Continue) => {}
             Ok(ModeratorVerdict::AddPersona { name, blurb }) => {
@@ -564,7 +576,15 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
     }
 
     send(SwarmUpdate::Progress("writing synthesis…".to_string()));
-    match synthesize(&meta_provider, &raw_meta_model, &user_message, &discussion).await {
+    match synthesize(
+        &meta_provider,
+        &raw_meta_model,
+        &user_message,
+        &discussion,
+        &prompt_cache_key,
+    )
+    .await
+    {
         Ok(content) => send(SwarmUpdate::Synthesis(content)),
         Err(e) => send(SwarmUpdate::Error(format!("synthesis failed: {e}"))),
     }
@@ -598,6 +618,7 @@ async fn suggest_personas(
     meta_model: &str,
     topic: &str,
     default_model: &str,
+    prompt_cache_key: &str,
 ) -> Result<Vec<Persona>, String> {
     let prompt = format!(
         "Suggest exactly 3 distinct personas to discuss the following message from different \
@@ -605,13 +626,18 @@ async fn suggest_personas(
          like: [{{\"name\": \"short persona name\", \"blurb\": \"one-sentence personality and \
          perspective\"}}, ...]\n\nMessage: {topic}"
     );
+    let params = ChatParams {
+        prompt_cache_key: Some(prompt_cache_key.to_string()),
+        ..ChatParams::default()
+    };
     let raw = timeout(
         Duration::from_mins(1),
-        provider.complete(meta_model, vec![ChatMessage::text("user", prompt)]),
+        provider.complete_with_params(meta_model, vec![ChatMessage::text("user", prompt)], &params),
     )
     .await
     .map_err(|_| "timed out after 60s".to_string())?
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    .text;
     parse_suggested_personas(&raw, default_model)
 }
 
@@ -650,6 +676,7 @@ async fn moderator_check(
     meta_model: &str,
     topic: &str,
     discussion: &[(String, String)],
+    prompt_cache_key: &str,
 ) -> Result<ModeratorVerdict, String> {
     let transcript = render_discussion(discussion).unwrap_or_default();
     let prompt = format!(
@@ -663,13 +690,18 @@ async fn moderator_check(
          perspective>\n\
          - Otherwise, reply exactly: CONTINUE"
     );
+    let params = ChatParams {
+        prompt_cache_key: Some(prompt_cache_key.to_string()),
+        ..ChatParams::default()
+    };
     let raw = timeout(
         Duration::from_secs(30),
-        provider.complete(meta_model, vec![ChatMessage::text("user", prompt)]),
+        provider.complete_with_params(meta_model, vec![ChatMessage::text("user", prompt)], &params),
     )
     .await
     .map_err(|_| "timed out after 30s".to_string())?
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    .text;
     Ok(parse_moderator_verdict(&raw))
 }
 
@@ -697,6 +729,7 @@ async fn synthesize(
     meta_model: &str,
     topic: &str,
     discussion: &[(String, String)],
+    prompt_cache_key: &str,
 ) -> Result<String> {
     let transcript = render_discussion(discussion).unwrap_or_default();
     let prompt = format!(
@@ -707,12 +740,17 @@ async fn synthesize(
          to the end, say so and give the best-supported call. Markdown allowed. Don't mention \
          that this came from a panel — just answer well, informed by the conversation."
     );
+    let params = ChatParams {
+        prompt_cache_key: Some(prompt_cache_key.to_string()),
+        ..ChatParams::default()
+    };
     timeout(
         Duration::from_secs(90),
-        provider.complete(meta_model, vec![ChatMessage::text("user", prompt)]),
+        provider.complete_with_params(meta_model, vec![ChatMessage::text("user", prompt)], &params),
     )
     .await
     .map_err(|_| anyhow::anyhow!("timed out after 90s"))?
+    .map(|completion| completion.text)
 }
 
 #[cfg(test)]

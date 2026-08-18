@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use super::{App, ContextBreakdown};
 use crate::db::Message;
-use crate::provider::ChatMessage;
+use crate::provider::{ChatMessage, ChatParams};
 
 impl App {
     // --- auto-compaction ---
@@ -156,6 +156,7 @@ impl App {
             return;
         };
         let new_through = self.messages.len() as i64;
+        let prompt_cache_key = format!("compaction:{}", self.prompt_cache_key_for(&session_id));
         let (tx, rx) = mpsc::unbounded_channel();
         self.compact_rx = Some(rx);
         self.compacting_session_id = Some(session_id.clone());
@@ -178,8 +179,15 @@ impl App {
                  meta-commentary about summarizing. Reply with ONLY the digest.",
             );
             let msgs = vec![ChatMessage::text("user", prompt)];
-            if let Ok(summary) = provider.complete(&raw_model, msgs).await {
-                let summary = summary.trim().to_string();
+            let params = ChatParams {
+                prompt_cache_key: Some(prompt_cache_key),
+                ..ChatParams::default()
+            };
+            if let Ok(completion) = provider
+                .complete_with_params(&raw_model, msgs, &params)
+                .await
+            {
+                let summary = completion.text.trim().to_string();
                 if !summary.is_empty() {
                     let _ = tx.send((session_id, summary, new_through, before_pct));
                 }
@@ -214,6 +222,9 @@ impl App {
         // anything the user says next. The db row is anchored to that last
         // message's timestamp so reloads keep the same position.
         let in_view = self.session.as_ref().is_some_and(|s| s.id == id);
+        if in_view {
+            self.bump_cache_epoch();
+        }
         let mut history_invalidated = false;
         if in_view {
             if let Some(row) = self.messages.iter_mut().find(|m| m.role == "compaction") {
@@ -339,7 +350,7 @@ impl App {
         instructions_chars +=
             std::fs::read_to_string(self.space.instructions_path(&self.active_space.name))
                 .map_or(0, |s| s.trim().chars().count());
-        let memory_chars = self.read_memory().chars().count();
+        let memory_chars = self.memory_snapshot().chars().count();
         let mut skills_chars: usize = self
             .skills
             .iter()
@@ -410,6 +421,7 @@ impl App {
         let id = session.id.clone();
         let through = session.compact_through;
         self.db.set_compaction(&id, &text, through)?;
+        self.bump_cache_epoch();
         if let Some(row) = self.messages.iter_mut().find(|m| m.role == "compaction") {
             row.content.clone_from(&text);
             self.push_history_invalidated();

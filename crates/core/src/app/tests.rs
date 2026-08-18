@@ -849,6 +849,26 @@ fn system_prompt_lists_files_but_not_their_content() {
 }
 
 #[test]
+fn memory_snapshot_stays_stable_until_refresh() {
+    let mut a = app_with_key();
+    let path = a.space.memory_path(&a.active_space.name);
+    std::fs::write(&path, "1. first fact\n").unwrap();
+    a.refresh_memory_snapshot();
+    let first_epoch = a.cache_epoch;
+    assert!(a.system_prompt().contains("first fact"));
+
+    std::fs::write(&path, "1. newer fact\n").unwrap();
+    assert!(a.system_prompt().contains("first fact"));
+    assert!(!a.system_prompt().contains("newer fact"));
+    assert_eq!(a.cache_epoch, first_epoch);
+
+    a.refresh_memory_snapshot();
+    assert!(!a.system_prompt().contains("first fact"));
+    assert!(a.system_prompt().contains("newer fact"));
+    assert!(a.cache_epoch > first_epoch);
+}
+
+#[test]
 fn clear_memory_model_disables_extraction() {
     let mut a = app_with_key();
     a.memory_model = "some/model".into();

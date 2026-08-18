@@ -728,6 +728,13 @@ pub struct App {
     pub active_space: SpaceRow,
     /// Model used for background memory extraction (empty = disabled).
     pub memory_model: String,
+    /// Memory contents captured when the active session/cache epoch began.
+    /// Background extraction may update the space file without changing this
+    /// snapshot during the active run.
+    pub(crate) memory_snapshot: String,
+    /// App-local prompt-cache epoch. Changes that alter the serialized prefix
+    /// advance it so a provider gets a fresh cache lane.
+    pub(crate) cache_epoch: u64,
     /// Model used for image transcription (empty = disabled).
     pub transcriber_model: String,
     /// Vision model for scanned-PDF OCR (empty = tesseract only).
@@ -1039,6 +1046,8 @@ impl App {
             usage_range: crate::db::UsageRange::default(),
             active_space,
             memory_model: utility_model.clone(),
+            memory_snapshot: String::new(),
+            cache_epoch: 0,
             transcriber_model: utility_model.clone(),
             ocr_model: utility_model,
             ocr_engine: "auto".to_string(),
@@ -1076,6 +1085,9 @@ impl App {
             sessions_cache: Vec::new(),
             title_rx: None,
         };
+        // Capture the first session snapshot before any request can be built.
+        // Subsequent session switches/new chats refresh it explicitly.
+        app.memory_snapshot = app.read_memory();
         app.pending_events.push_back(AppEvent::Status(status));
         app.load_prefs();
         app.load_settings();
@@ -1157,7 +1169,12 @@ impl App {
                 }
             }
             "searxng_url" => self.searxng_url = v.to_string(),
-            "verbosity" if VERBOSITY_LEVELS.contains(&v) => self.verbosity = v.to_string(),
+            "verbosity" if VERBOSITY_LEVELS.contains(&v) => {
+                if self.verbosity != v {
+                    self.verbosity = v.to_string();
+                    self.bump_cache_epoch();
+                }
+            }
             "langsearch_key" => self.langsearch_key = v.to_string(),
             "search_provider" if SEARCH_PROVIDERS.contains(&v) => {
                 self.search_provider = v.to_string();

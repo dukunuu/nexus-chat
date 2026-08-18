@@ -184,7 +184,7 @@ push/pull cursors need one.
 
 | Table | Cursor | Apply |
 |---|---|---|
-| sessions, model_prefs, spaces, files, watches, app_settings(scope='sync') | `updated_at` | LWW upsert: incoming wins iff `(updated_at, pk…) > (local updated_at, pk…)` — deterministic and convergent across devices; no origin columns |
+| sessions, model_prefs, spaces, files, watches, app_settings(scope='sync') | `(updated_at, primary-key…)` cursor | LWW upsert: incoming wins iff `(updated_at, pk…) > (local updated_at, pk…)` — deterministic and convergent across devices; no origin columns |
 | messages | `(created_at, id)` tuple | INSERT OR IGNORE by uuid id |
 | usage_log, citations | `(created_at, sync_id)` tuple / AUTOINCREMENT id | INSERT OR IGNORE by `sync_id` (UNIQUE indexes from Phase 1 dedupe across devices) |
 | session_sources | `updated_at` | LWW upsert (composite-PK tiebreak) |
@@ -213,8 +213,12 @@ winning.
 
 **Files**: metadata syncs as LWW rows; content syncs by hash — the
 receiver keeps the local blob when `files/<name>` matches, else pulls it
-via the transport's blob channel (`blobs/<space_id>/<name>` under a sync
-dir, or inside a zip bundle over ssh). Never re-sends identical content.
+via the transport's blob channel (`blobs/<space_id>/<name>` plus the
+content-addressed `blobs/by-hash/<hash>` fallback under a sync dir, or
+inside a zip bundle over ssh). The content-addressed copy prevents two
+senders sharing one mailbox from overwriting each other's payload. Missing
+metadata blobs can be retried by re-importing the same changeset; never
+re-sends identical content.
 A file row whose blob never arrives is dropped by the local rescan (the
 files table mirrors the disk) — so the supported flows (dir/ssh) always
 deliver blobs.
@@ -278,10 +282,11 @@ mixed usage; `scripts/check.sh` green; all tests hermetic.
   Phase 4's host.
 
 Known edges (documented, accepted): same-nanosecond LWW ties keep local;
-delete-vs-offline-write revives via LWW; duplicate space *names* across
-devices resolve by deterministically renaming the LWW loser
-(`<name>-<first8(id)>`, computed identically on both sides); a blob that
-never arrives is dropped by the rescan (warning printed).
+mutable export cursors include the primary-key tiebreak so equal-timestamp
+rows cannot be skipped; delete-vs-offline-write revives via LWW; duplicate
+space *names* across devices resolve by deterministically renaming the LWW
+loser (`<name>-<first8(id)>`, computed identically on both sides); a blob
+that never arrives is dropped by the rescan (warning printed).
 
 ### Phase 4 — `nexus host` (the daemon, in one subcommand)
 

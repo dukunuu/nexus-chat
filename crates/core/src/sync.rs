@@ -70,8 +70,8 @@ pub struct Changeset {
     /// Deletes that actually happened on the sender.
     pub tombstones: Vec<Tombstone>,
     /// File metadata — the blobs themselves follow via the transport's
-    /// blob channel (`blobs/<space_id>/<name>` under a sync dir, or inside
-    /// a zip bundle).
+    /// blob channel (`blobs/<space_id>/<name>` plus the content-addressed
+    /// `blobs/by-hash/<hash>` path under a sync dir or inside a zip bundle).
     pub files: Vec<FileChange>,
     pub generated_at: String,
 }
@@ -128,10 +128,11 @@ pub struct ApplySummary {
 /// How a table's rows are ordered and resumed across changesets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cursor {
-    /// Mutable rows: the cursor is the `updated_at` column (nullable — a
-    /// NULL version sorts as `''`, i.e. the epoch; rows that never got a
-    /// version are legacy and simply never export). Incoming row wins iff
-    /// `(updated_at, pk…) > (local updated_at, pk…)`.
+    /// Mutable rows: the cursor is an opaque JSON tuple containing
+    /// `(updated_at, pk…)`. Legacy bare `updated_at` cursors remain readable;
+    /// rows that never got a version are never exported. Including the
+    /// primary key prevents a row created with the same timestamp as the
+    /// last acknowledged row from being skipped forever.
     UpdatedAt,
     /// Append-only rows: cursor is a `(col1, col2)` row-value tuple
     /// (e.g. messages `(created_at, id)`), encoded as `"a|b"`.
@@ -367,16 +368,93 @@ fn known_table(table: &str) -> bool {
     table == SYNC_TOMBSTONES || spec_for(table).is_some()
 }
 
+/// Encode the cursor for a mutable row. The JSON representation is opaque to
+/// transports and avoids delimiter collisions in keys such as URLs.
+fn encode_updated_cursor(updated_at: &str, keys: &[String]) -> String {
+    serde_json::Value::Array(vec![
+        serde_json::Value::String(updated_at.to_string()),
+        serde_json::Value::Array(
+            keys.iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    ])
+    .to_string()
+}
+
+/// Decode a mutable-row cursor. Cursors written before the primary-key
+/// tiebreak was added were bare timestamps; treating those as an empty key
+/// tuple is backwards-compatible and may produce one safe duplicate export.
+fn decode_updated_cursor(cursor: &str, key_count: usize) -> (String, Vec<String>) {
+    if let Ok(serde_json::Value::Array(parts)) = serde_json::from_str(cursor)
+        && let (Some(serde_json::Value::String(updated_at)), Some(serde_json::Value::Array(keys))) =
+            (parts.first(), parts.get(1))
+    {
+        let mut keys = keys
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .take(key_count)
+            .collect::<Vec<_>>();
+        keys.resize(key_count, String::new());
+        return (updated_at.clone(), keys);
+    }
+    (cursor.to_string(), vec![String::new(); key_count])
+}
+
 /// Cursor comparisons are table-aware: the AUTOINCREMENT tables compare
-/// numerically (string comparison would order "9" > "10"), everything else
-/// lexically (RFC3339 sorts correctly, and the tuple cursors are
-/// `timestamp|id` whose leading timestamp dominates).
+/// numerically (string comparison would order "9" > "10"), mutable rows
+/// compare `(updated_at, pk…)`, and everything else compares lexically.
 fn position_gt(table: &str, a: &str, b: &str) -> bool {
     if table == "citations" || table == SYNC_TOMBSTONES {
         let n = |s: &str| s.parse::<i64>().unwrap_or(0);
         n(a) > n(b)
+    } else if let Some(spec) = spec_for(table)
+        && let Cursor::UpdatedAt = spec.cursor
+    {
+        let left = decode_updated_cursor(a, spec.pk.len());
+        let right = decode_updated_cursor(b, spec.pk.len());
+        left > right
     } else {
         a > b
+    }
+}
+
+/// Validate a cursor received from another device before persisting it. A
+/// malformed ack must not poison future exports with an impossible SQL
+/// comparison or a cursor that can never be advanced.
+fn valid_cursor(table: &str, cursor: &str) -> bool {
+    if table == "citations" || table == SYNC_TOMBSTONES {
+        return cursor.parse::<i64>().is_ok_and(|value| value >= 0);
+    }
+    let Some(spec) = spec_for(table) else {
+        return false;
+    };
+    match spec.cursor {
+        Cursor::UpdatedAt => {
+            if let Ok(serde_json::Value::Array(parts)) = serde_json::from_str(cursor) {
+                let Some(serde_json::Value::String(updated_at)) = parts.first() else {
+                    return false;
+                };
+                let Some(serde_json::Value::Array(keys)) = parts.get(1) else {
+                    return false;
+                };
+                !updated_at.is_empty()
+                    && keys.len() == spec.pk.len()
+                    && keys.iter().all(serde_json::Value::is_string)
+            } else {
+                // Cursors written by older versions were bare timestamps.
+                !cursor.trim().is_empty()
+            }
+        }
+        Cursor::Tuple(_) => {
+            let Some((left, right)) = cursor.split_once('|') else {
+                return false;
+            };
+            !left.is_empty() && !right.is_empty()
+        }
+        Cursor::AutoId | Cursor::None => false,
     }
 }
 
@@ -384,11 +462,23 @@ fn position_gt(table: &str, a: &str, b: &str) -> bool {
 /// among received rows, win or lose (a losing row was still imported).
 fn row_position(spec: &TableSpec, row: &serde_json::Value) -> String {
     match spec.cursor {
-        Cursor::UpdatedAt => row
-            .get("updated_at")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        Cursor::UpdatedAt => {
+            let updated_at = row
+                .get("updated_at")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let keys = spec
+                .pk
+                .iter()
+                .map(|key| {
+                    row.get(*key)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            encode_updated_cursor(updated_at, &keys)
+        }
         Cursor::Tuple(cols) => cols
             .iter()
             .map(|c| {
@@ -525,11 +615,14 @@ pub fn build_ack(db: &Db, peer_id: &str) -> Result<Vec<PeerCursor>> {
         .iter()
         .filter(|s| s.peer_id == peer_id)
         .filter_map(|s| {
-            s.pull_cursor.clone().map(|cursor| PeerCursor {
-                peer_id: peer_id.to_string(),
-                table_name: s.table_name.clone(),
-                cursor,
-            })
+            s.pull_cursor
+                .as_deref()
+                .filter(|cursor| valid_cursor(&s.table_name, cursor))
+                .map(|cursor| PeerCursor {
+                    peer_id: peer_id.to_string(),
+                    table_name: s.table_name.clone(),
+                    cursor: cursor.to_string(),
+                })
         })
         .collect())
 }
@@ -541,22 +634,36 @@ fn select_rows(db: &Db, spec: &TableSpec, cursor: Option<&str>) -> Result<Vec<se
     let cols = spec.columns.join(", ");
     let (sql, params): (String, Vec<rusqlite::types::Value>) = match spec.cursor {
         Cursor::UpdatedAt => {
-            // Device-local settings are structurally invisible to sync.
+            // Device-local settings are structurally invisible to sync. The
+            // cursor is `(updated_at, pk…)`, not only a timestamp: two rows
+            // can legitimately share an RFC3339 timestamp when a device is
+            // busy or a clock has coarse precision.
+            let (updated_at, keys) = decode_updated_cursor(cursor.unwrap_or(""), spec.pk.len());
+            let ordered_columns = std::iter::once("COALESCE(updated_at, '')")
+                .chain(spec.pk.iter().copied())
+                .collect::<Vec<_>>();
+            let placeholders = (1..=ordered_columns.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
             let scope_filter = if spec.name == "app_settings" {
                 " AND scope = 'sync'"
             } else {
                 ""
             };
+            let mut values = vec![rusqlite::types::Value::Text(updated_at)];
+            values.extend(keys.into_iter().map(rusqlite::types::Value::Text));
             (
                 format!(
-                    "SELECT {cols} FROM {} WHERE COALESCE(updated_at, '') > ?1{scope_filter} \
+                    "SELECT {cols} FROM {} WHERE COALESCE(updated_at, '') <> '' \
+                     AND ({}) > ({}){scope_filter} \
                      ORDER BY COALESCE(updated_at, ''), {}",
                     spec.name,
+                    ordered_columns.join(", "),
+                    placeholders,
                     spec.pk.join(", ")
                 ),
-                vec![rusqlite::types::Value::Text(
-                    cursor.unwrap_or("").to_string(),
-                )],
+                values,
             )
         }
         Cursor::Tuple(tuple_cols) => {
@@ -684,7 +791,8 @@ fn lww_wins_against(id: &str, updated: &str, local_id: &str, local_updated: &str
 /// Apply one changeset: rows (per the registry), tombstones, file blobs,
 /// and the embedded ack. Returns the summary plus the reply cursors — the
 /// receiver's new pull cursors per table, to be acked back to the sender.
-/// `blob_source`, when given, is a directory whose `blobs/<space_id>/<name>`
+/// `blob_source`, when given, is a directory whose legacy
+/// `blobs/<space_id>/<name>` or content-addressed `blobs/by-hash/<hash>` path
 /// holds the sender's payloads; missing blobs are reported instead.
 // Long by design: one step per sync rule, in registry order.
 #[allow(clippy::too_many_lines)]
@@ -709,10 +817,11 @@ pub fn apply_changeset(
     }
 
     // Rows, in registry order. `max_pos` tracks the highest position
-    // received per table — the reply cursor. Positions advance even for
-    // rows that lost LWW or failed: a single bad row must not block the
-    // table forever (the warning names it).
+    // received per table — the reply cursor. Losing LWW rows are safe to
+    // acknowledge because their data is already present locally; warned
+    // rows remove the table cursor below so they are retried.
     let mut max_pos: HashMap<&'static str, String> = HashMap::new();
+    let mut failed_tables: HashSet<&'static str> = HashSet::new();
     let mut won_sessions: HashSet<String> = HashSet::new();
     let mut won_files: HashSet<(String, String)> = HashSet::new();
     for spec in TABLES {
@@ -757,9 +866,17 @@ pub fn apply_changeset(
                 LwwOutcome::Warned(w) => {
                     summary.rows_skipped += 1;
                     summary.warnings.push(w);
+                    // Do not acknowledge a table past a row that was not
+                    // applied. The sender will retry it; advancing here
+                    // would turn a transient/local validation problem into
+                    // silent permanent data loss.
+                    failed_tables.insert(spec.name);
                 }
             }
         }
+    }
+    for table in failed_tables {
+        max_pos.remove(table);
     }
 
     // swarm_personas: applied only for sessions that won in this changeset,
@@ -803,7 +920,7 @@ pub fn apply_changeset(
     let mut tombstone_max = 0i64;
     for t in &cs.tombstones {
         tombstone_max = tombstone_max.max(t.origin_id);
-        if apply_tombstone(db, space, t, &mut summary) {
+        if apply_tombstone(db, space, t, &mut summary)? {
             summary.tombstones_applied += 1;
         }
     }
@@ -812,9 +929,12 @@ pub fn apply_changeset(
     }
 
     // File blobs: for every file row that won, keep the local blob when it
-    // matches, else pull it from the transport's blob channel.
+    // matches, else pull it from the transport's blob channel. A manifest
+    // may have landed during an earlier metadata-only import, so retry a
+    // missing blob even when the row itself is an idempotent LWW skip.
     for fc in &cs.files {
-        if !won_files.contains(&(fc.space_id.clone(), fc.name.clone())) {
+        let manifest_matches = local_file_matches_manifest(db, fc)?;
+        if !won_files.contains(&(fc.space_id.clone(), fc.name.clone())) && !manifest_matches {
             continue;
         }
         if !valid_component(&fc.name) || !valid_component(&fc.space_id) {
@@ -867,6 +987,13 @@ pub fn apply_changeset(
                 summary
                     .warnings
                     .push(format!("ack for unknown table {:?}", a.table_name));
+                continue;
+            }
+            if !valid_cursor(&a.table_name, &a.cursor) {
+                summary.warnings.push(format!(
+                    "ack for {} has an invalid cursor and was ignored",
+                    a.table_name
+                ));
                 continue;
             }
             let existing = states
@@ -1239,43 +1366,132 @@ fn insert_file_row(conn: &Connection, row: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-/// Apply one tombstone; returns whether it hit anything. The incoming
-/// tombstone is also recorded locally (deduped by `(table_name, row_id)`)
-/// — that is what makes a delete transitive across a mesh of devices
-/// without every pair syncing directly. The ack prevents resends.
+/// Read the version that competes with a tombstone. Mutable rows use
+/// `updated_at`; append-only rows use `created_at`. A newer offline write must
+/// be allowed to revive a row after an older delete reaches the device.
+fn row_version_for_tombstone(db: &Db, table: &str, row_id: &str) -> Result<Option<String>> {
+    let conn = db.conn();
+    let (table, id_column, version_column, id) = match table {
+        "sessions" | "model_prefs" | "spaces" | "files" | "watches" => {
+            (table, "id", "updated_at", row_id)
+        }
+        "app_settings" => (table, "key", "updated_at", row_id),
+        "messages" => (table, "id", "created_at", row_id),
+        "usage_log" | "citations" => (table, "sync_id", "created_at", row_id),
+        // Persona rows are versioned by their owning session. Their own
+        // tombstones are retained for transitive propagation, but the row is
+        // only removed by a winning session roster replacement.
+        "swarm_personas" => {
+            let Some((session_id, _)) = row_id.split_once(':') else {
+                return Ok(None);
+            };
+            ("sessions", "id", "updated_at", session_id)
+        }
+        _ => return Ok(None),
+    };
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT COALESCE({version_column}, '') FROM {table} \
+                 WHERE {id_column} = ?1"
+            ),
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// Record an incoming tombstone and return the newest delete time known for
+/// this `(table_name, row_id)`. Tombstones can cross several peers, so an
+/// older copy must never replace a newer delete that was already recorded.
+fn remember_tombstone(db: &Db, tombstone: &Tombstone) -> Result<String> {
+    let conn = db.conn();
+    let existing: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, deleted_at FROM sync_tombstones
+             WHERE table_name = ?1 AND row_id = ?2
+             ORDER BY id DESC LIMIT 1",
+            (&tombstone.table_name, &tombstone.row_id),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, deleted_at)) = existing else {
+        conn.execute(
+            "INSERT INTO sync_tombstones (table_name, row_id, deleted_at)
+             VALUES (?1, ?2, ?3)",
+            (
+                &tombstone.table_name,
+                &tombstone.row_id,
+                &tombstone.deleted_at,
+            ),
+        )?;
+        return Ok(tombstone.deleted_at.clone());
+    };
+    if tombstone.deleted_at > deleted_at {
+        conn.execute(
+            "UPDATE sync_tombstones SET deleted_at = ?1 WHERE id = ?2",
+            (&tombstone.deleted_at, id),
+        )?;
+        Ok(tombstone.deleted_at.clone())
+    } else {
+        Ok(deleted_at)
+    }
+}
+
+/// Apply one tombstone; returns whether it performed the destructive delete.
+/// The incoming tombstone is recorded locally for transitive propagation,
+/// even when a newer row makes the delete stale.
 // Long by design: one arm per tombstonable table.
 #[allow(clippy::too_many_lines)]
-fn apply_tombstone(db: &Db, space: &Space, t: &Tombstone, summary: &mut ApplySummary) -> bool {
+fn apply_tombstone(
+    db: &Db,
+    space: &Space,
+    t: &Tombstone,
+    summary: &mut ApplySummary,
+) -> Result<bool> {
+    if !matches!(
+        t.table_name.as_str(),
+        "spaces"
+            | "sessions"
+            | "messages"
+            | "files"
+            | "watches"
+            | "usage_log"
+            | "citations"
+            | "swarm_personas"
+            | "app_settings"
+    ) {
+        summary
+            .warnings
+            .push(format!("tombstone for unknown table {:?}", t.table_name));
+        return Ok(false);
+    }
+    let deleted_at = remember_tombstone(db, t)?;
+    if t.table_name == "spaces" && t.row_id == DEFAULT_SPACE {
+        summary
+            .warnings
+            .push("tombstone for the default space ignored".to_string());
+        return Ok(false);
+    }
+    if let Some(version) = row_version_for_tombstone(db, &t.table_name, &t.row_id)?
+        && version >= deleted_at
+    {
+        summary.warnings.push(format!(
+            "stale tombstone for {} {:?} ignored; row version is newer",
+            t.table_name, t.row_id
+        ));
+        return Ok(false);
+    }
+
     let conn = db.conn();
-    // Dedupe: the first tombstone for a (table, row) wins; later copies
-    // are the same delete.
-    let _ = conn.execute(
-        "INSERT INTO sync_tombstones (table_name, row_id, deleted_at)
-         SELECT ?1, ?2, ?3 WHERE NOT EXISTS (
-             SELECT 1 FROM sync_tombstones WHERE table_name = ?1 AND row_id = ?2)",
-        (&t.table_name, &t.row_id, &t.deleted_at),
-    );
     match t.table_name.as_str() {
         "spaces" => {
-            if t.row_id == DEFAULT_SPACE {
-                summary
-                    .warnings
-                    .push("tombstone for the default space ignored".to_string());
-                return false;
-            }
             let name: Option<String> = conn
                 .query_row("SELECT name FROM spaces WHERE id = ?1", [&t.row_id], |r| {
                     r.get(0)
                 })
-                .optional()
-                .ok()
-                .flatten();
-            if conn
-                .execute("DELETE FROM spaces WHERE id = ?1", [&t.row_id])
-                .is_err()
-            {
-                return false;
-            }
+                .optional()?;
+            conn.execute("DELETE FROM spaces WHERE id = ?1", [&t.row_id])?;
             if let Some(name) = name
                 && let Err(e) = space.remove_space_dir(&name)
             {
@@ -1283,20 +1499,25 @@ fn apply_tombstone(db: &Db, space: &Space, t: &Tombstone, summary: &mut ApplySum
                     .warnings
                     .push(format!("removing space dir {name}: {e}"));
             }
-            true
+            Ok(true)
         }
         "sessions" => {
-            let cascade = conn.execute("DELETE FROM messages WHERE session_id = ?1", [&t.row_id]);
-            let sources = conn.execute(
+            conn.execute("DELETE FROM messages WHERE session_id = ?1", [&t.row_id])?;
+            conn.execute(
                 "DELETE FROM session_sources WHERE session_id = ?1",
                 [&t.row_id],
-            );
-            let row = conn.execute("DELETE FROM sessions WHERE id = ?1", [&t.row_id]);
-            cascade.is_ok() && sources.is_ok() && row.is_ok()
+            )?;
+            conn.execute(
+                "DELETE FROM swarm_personas WHERE session_id = ?1",
+                [&t.row_id],
+            )?;
+            conn.execute("DELETE FROM sessions WHERE id = ?1", [&t.row_id])?;
+            Ok(true)
         }
-        "messages" => conn
-            .execute("DELETE FROM messages WHERE id = ?1", [&t.row_id])
-            .is_ok(),
+        "messages" => {
+            conn.execute("DELETE FROM messages WHERE id = ?1", [&t.row_id])?;
+            Ok(true)
+        }
         "files" => {
             let row: Option<(String, String)> = conn
                 .query_row(
@@ -1304,56 +1525,84 @@ fn apply_tombstone(db: &Db, space: &Space, t: &Tombstone, summary: &mut ApplySum
                     [&t.row_id],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
-                .optional()
-                .ok()
-                .flatten();
-            let _ = conn.execute(
+                .optional()?;
+            conn.execute(
                 "DELETE FROM cache.file_chunks WHERE file_id = ?1",
                 [&t.row_id],
-            );
-            let _ = conn.execute(
+            )?;
+            conn.execute(
                 "DELETE FROM cache.chunk_embeddings WHERE file_id = ?1",
                 [&t.row_id],
-            );
-            let _ = conn.execute(
+            )?;
+            conn.execute(
                 "DELETE FROM cache.file_index_state WHERE file_id = ?1",
                 [&t.row_id],
-            );
-            if conn
-                .execute("DELETE FROM files WHERE id = ?1", [&t.row_id])
-                .is_err()
-            {
-                return false;
-            }
+            )?;
+            conn.execute("DELETE FROM files WHERE id = ?1", [&t.row_id])?;
             if let Some((space_id, name)) = row
-                && let Ok(Some(space_name)) = space_name_for(db, &space_id)
+                && let Some(space_name) = space_name_for(db, &space_id)?
                 && valid_component(&name)
             {
                 let blob = space.files_dir(&space_name).join(&name);
                 let _ = std::fs::remove_file(blob);
             }
-            true
+            Ok(true)
         }
-        "watches" => conn
-            .execute("DELETE FROM watches WHERE id = ?1", [&t.row_id])
-            .is_ok(),
-        "usage_log" => conn
-            .execute("DELETE FROM usage_log WHERE sync_id = ?1", [&t.row_id])
-            .is_ok(),
-        "citations" => conn
-            .execute("DELETE FROM citations WHERE sync_id = ?1", [&t.row_id])
-            .is_ok(),
+        "watches" => {
+            conn.execute("DELETE FROM watches WHERE id = ?1", [&t.row_id])?;
+            Ok(true)
+        }
+        "usage_log" => {
+            conn.execute("DELETE FROM usage_log WHERE sync_id = ?1", [&t.row_id])?;
+            Ok(true)
+        }
+        "citations" => {
+            conn.execute("DELETE FROM citations WHERE sync_id = ?1", [&t.row_id])?;
+            Ok(true)
+        }
+        "app_settings" => {
+            // Local-scope settings are never exported, but reject a forged
+            // tombstone rather than allowing a peer to delete device state.
+            let scope: Option<String> = conn
+                .query_row(
+                    "SELECT scope FROM app_settings WHERE key = ?1",
+                    [&t.row_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if scope.as_deref() == Some("local") {
+                summary
+                    .warnings
+                    .push(format!("local setting {:?} tombstone ignored", t.row_id));
+                return Ok(false);
+            }
+            conn.execute("DELETE FROM app_settings WHERE key = ?1", [&t.row_id])?;
+            Ok(true)
+        }
         // Persona tombstones are subsumed by the roster replace that
         // accompanies a winning session row — applying them alone could
         // delete slots of a roster the session's LWW winner restored.
-        "swarm_personas" => false,
-        other => {
-            summary
-                .warnings
-                .push(format!("tombstone for unknown table {other:?}"));
-            false
-        }
+        "swarm_personas" => Ok(false),
+        _ => unreachable!("validated tombstone table"),
     }
+}
+
+/// Whether the local durable manifest still describes the incoming file.
+/// This enables a later blob-only retry after a metadata changeset was
+/// imported without its transport channel.
+fn local_file_matches_manifest(db: &Db, file: &FileChange) -> Result<bool> {
+    if !valid_component(&file.space_id) || !valid_component(&file.name) {
+        return Ok(false);
+    }
+    Ok(db
+        .conn()
+        .query_row(
+            "SELECT hash, size FROM files WHERE space_id = ?1 AND name = ?2",
+            (&file.space_id, &file.name),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+        .is_some_and(|(hash, size)| hash == file.hash && size == file.size))
 }
 
 /// A space row's name for a space id, when the space still exists.
@@ -1469,7 +1718,47 @@ fn blob_source_path(db: &Db, space: &Space, fc: &FileChange) -> Result<Option<Pa
         return Ok(None);
     };
     let path = space.files_dir(&space_name).join(&fc.name);
-    Ok(path.exists().then_some(path))
+    // Never publish a disk payload that does not match the durable manifest.
+    // Sending it only guarantees a failed import and can overwrite a valid
+    // mailbox blob from another export.
+    Ok((path.is_file() && file_matches(&path, &fc.hash)).then_some(path))
+}
+
+/// Install a copied file with a rename so a reader never observes a partial
+/// blob. The final rename is also what makes a mailbox changeset safe to read
+/// immediately after its blobs are exported.
+fn copy_atomic(source: &Path, target: &Path) -> Result<()> {
+    let name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("blob");
+    let temporary = target.with_file_name(format!(".{name}.nexus-copy-{}", uuid::Uuid::new_v4()));
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    if let Err(error) = std::fs::copy(source, &temporary) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).with_context(|| {
+            format!(
+                "copying blob {} to {}",
+                source.display(),
+                temporary.display()
+            )
+        });
+    }
+    let result = match std::fs::rename(&temporary, target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(target).and_then(|()| std::fs::rename(&temporary, target))
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("installing blob {}", target.display()));
+    }
+    Ok(())
 }
 
 /// Copy the local blobs of a changeset's manifest into `dest/blobs/` —
@@ -1482,12 +1771,15 @@ pub fn export_blobs(db: &Db, space: &Space, cs: &Changeset, dest: &Path) -> Resu
             continue;
         };
         let target = dest.join("blobs").join(&fc.space_id).join(&fc.name);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+        copy_atomic(&src, &target).with_context(|| format!("exporting blob {}", src.display()))?;
+        // The legacy name-based path remains for older peers. The
+        // content-addressed copy is what prevents two simultaneous senders
+        // from overwriting each other's payload when they use one mailbox.
+        if valid_component(&fc.hash) {
+            let by_hash = dest.join("blobs").join("by-hash").join(&fc.hash);
+            copy_atomic(&src, &by_hash)
+                .with_context(|| format!("exporting content-addressed blob {}", src.display()))?;
         }
-        std::fs::copy(&src, &target)
-            .with_context(|| format!("copying blob {} to {}", src.display(), target.display()))?;
         n += 1;
     }
     Ok(n)
@@ -1497,23 +1789,24 @@ pub fn export_blobs(db: &Db, space: &Space, cs: &Changeset, dest: &Path) -> Resu
 /// verifying the source's content hash matches the manifest (a stale or
 /// mismatched payload is never applied).
 fn pull_blob(src: &Path, space_id: &str, name: &str, hash: &str, target: &Path) -> Result<bool> {
-    let candidate = src.join("blobs").join(space_id).join(name);
-    if !file_matches(&candidate, hash) {
+    let content_addressed =
+        valid_component(hash).then(|| src.join("blobs").join("by-hash").join(hash));
+    let legacy = src.join("blobs").join(space_id).join(name);
+    let candidate = content_addressed
+        .filter(|path| file_matches(path, hash))
+        .or_else(|| file_matches(&legacy, hash).then_some(legacy));
+    let Some(candidate) = candidate else {
         return Ok(false);
-    }
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    std::fs::copy(&candidate, target)
-        .with_context(|| format!("copying blob to {}", target.display()))?;
+    };
+    copy_atomic(&candidate, target)?;
     Ok(true)
 }
 
 // ── zip bundles (the ssh transport's blob channel) ──
 
-/// Write a changeset plus its blobs as a zip: `changeset.json` +
-/// `blobs/<space_id>/<name>`. Returns how many blobs were included.
+/// Write a changeset plus its blobs as a zip: `changeset.json`, legacy
+/// `blobs/<space_id>/<name>` entries, and content-addressed
+/// `blobs/by-hash/<hash>` entries. Returns how many blobs were included.
 pub fn write_bundle(
     db: &Db,
     space: &Space,
@@ -1526,6 +1819,7 @@ pub fn write_bundle(
     zip.start_file("changeset.json", opts)?;
     serde_json::to_writer(&mut zip, cs)?;
     let mut n = 0usize;
+    let mut content_hashes = HashSet::new();
     for fc in &cs.files {
         let Some(src) = blob_source_path(db, space, fc)? else {
             continue;
@@ -1533,6 +1827,11 @@ pub fn write_bundle(
         zip.start_file(format!("blobs/{}/{}", fc.space_id, fc.name), opts)?;
         let mut f = std::fs::File::open(&src)?;
         std::io::copy(&mut f, &mut zip)?;
+        if valid_component(&fc.hash) && content_hashes.insert(fc.hash.clone()) {
+            zip.start_file(format!("blobs/by-hash/{}", fc.hash), opts)?;
+            let mut content = std::fs::File::open(&src)?;
+            std::io::copy(&mut content, &mut zip)?;
+        }
         n += 1;
     }
     zip.finish()?;
@@ -1821,6 +2120,35 @@ mod tests {
         assert!(!valid_component("a\0b"));
     }
 
+    #[test]
+    fn warned_rows_do_not_advance_their_table_cursor() {
+        let pair = Pair::new();
+        let changeset = Changeset {
+            device_id: "peer".to_string(),
+            device_name: "peer".to_string(),
+            ack: None,
+            rows: vec![RowChange {
+                table: "files".to_string(),
+                row: serde_json::json!({
+                    "id": "file-1",
+                    "space_id": "default",
+                    "name": "../escape.txt",
+                    "hash": "hash",
+                    "size": 4,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z"
+                }),
+            }],
+            tombstones: Vec::new(),
+            files: Vec::new(),
+            generated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let (summary, cursors) =
+            apply_changeset(&pair.b, &pair.space_b(), &changeset, None).unwrap();
+        assert!(!summary.warnings.is_empty());
+        assert!(!cursors.iter().any(|cursor| cursor.table_name == "files"));
+    }
+
     // ── export / cursor rules ──
 
     #[test]
@@ -1920,7 +2248,7 @@ mod tests {
             .rows
             .iter()
             .find(|r| r.table == "sessions" && r.row["id"] == s1)
-            .map(|r| r.row["updated_at"].as_str().unwrap().to_string())
+            .map(|r| row_position(spec_for("sessions").unwrap(), &r.row))
             .unwrap();
         a.set_sync_state("peer-x", "sessions", None, Some(&sess_pos))
             .unwrap();
@@ -1935,6 +2263,42 @@ mod tests {
                 .any(|r| r.table == "sessions" && r.row["title"] == "two")
         );
         let _ = s1;
+    }
+
+    #[test]
+    fn updated_cursor_keeps_rows_sharing_a_timestamp() {
+        let pair = Pair::new();
+        let a = &pair.a;
+        let first = session(a, "first");
+        let second = session(a, "second");
+        let timestamp = "2026-02-01T00:00:00Z";
+        set_session_updated(a, &first, timestamp);
+        set_session_updated(a, &second, timestamp);
+
+        let full = build_changeset(a, None, "a").unwrap();
+        let sessions: Vec<&RowChange> = full
+            .rows
+            .iter()
+            .filter(|row| row.table == "sessions")
+            .collect();
+        assert!(sessions.iter().any(|row| row.row["id"] == first));
+        assert!(sessions.iter().any(|row| row.row["id"] == second));
+
+        // Ack only the first ordered row. A timestamp-only cursor would skip
+        // the second row; the composite cursor must resume at its primary key.
+        let first_row = sessions.first().expect("session export is non-empty");
+        let cursor = row_position(spec_for("sessions").unwrap(), &first_row.row);
+        a.set_sync_state("peer-x", "sessions", None, Some(&cursor))
+            .unwrap();
+        let resumed = build_changeset(a, Some("peer-x"), "a").unwrap();
+        let resumed_ids: Vec<&str> = resumed
+            .rows
+            .iter()
+            .filter(|row| row.table == "sessions")
+            .map(|row| row.row["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(resumed_ids.len(), 1);
+        assert_ne!(resumed_ids[0], first_row.row["id"].as_str().unwrap());
     }
 
     // ── LWW ──
@@ -2269,6 +2633,39 @@ mod tests {
     }
 
     #[test]
+    fn newer_offline_write_survives_an_older_tombstone() {
+        let pair = Pair::new();
+        let a = &pair.a;
+        let b = &pair.b;
+        let session_id = session(a, "before delete");
+        pair.exchange_ab();
+
+        a.delete_session(&session_id).unwrap();
+        b.conn()
+            .execute(
+                "UPDATE sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
+                ("offline revival", "2099-01-01T00:00:00Z", &session_id),
+            )
+            .unwrap();
+
+        // A's delete arrives first. B must retain its newer write and send
+        // the row back, allowing A to converge on the revived session.
+        let delete = build_changeset(a, None, "a").unwrap();
+        let (_, cursors) = apply_changeset(b, &pair.space_b(), &delete, None).unwrap();
+        assert_eq!(
+            b.get_session(&session_id).unwrap().unwrap().title,
+            "offline revival"
+        );
+        let mut reply = build_changeset(b, Some(&delete.device_id), "b").unwrap();
+        reply.ack = Some(cursors);
+        apply_changeset(a, &pair.space_a(), &reply, None).unwrap();
+        assert_eq!(
+            a.get_session(&session_id).unwrap().unwrap().title,
+            "offline revival"
+        );
+    }
+
+    #[test]
     fn tombstone_cursor_advances_and_no_resends() {
         let pair = Pair::new();
         let a = &pair.a;
@@ -2370,19 +2767,16 @@ mod tests {
                 .exists()
         );
 
-        // The same changeset re-imported with a channel: the row loses LWW
-        // (idempotent), so nothing is pulled or reported.
+        // The same changeset re-imported with a channel retries the missing
+        // blob even though the metadata row is now an idempotent LWW skip.
         export_blobs(a, &pair.space_a(), &cs, &pair.dir).unwrap();
         let (summary2, _) =
             apply_changeset(&pair.b, &pair.space_b(), &cs, Some(&pair.dir)).unwrap();
-        assert_eq!(summary2.files_pulled, 0);
+        assert_eq!(summary2.files_pulled, 1);
         assert!(summary2.files_missing.is_empty());
-        assert!(
-            !pair
-                .space_b()
-                .files_dir("default")
-                .join("notes.txt")
-                .exists()
+        assert_eq!(
+            std::fs::read(pair.space_b().files_dir("default").join("notes.txt")).unwrap(),
+            b"hello sync"
         );
 
         // A newer version of the file re-wins the row and pulls its blob,
@@ -2419,6 +2813,48 @@ mod tests {
         assert_eq!(summary.files_pulled, 0);
         assert_eq!(summary.files_missing.len(), 1);
         assert!(!pair.space_b().files_dir("default").join("f.txt").exists());
+    }
+
+    #[test]
+    fn content_addressed_blob_survives_mailbox_name_collision() {
+        let pair = Pair::new();
+        let a = &pair.a;
+        let b = &pair.b;
+        let sid = space(a, "default");
+        write_blob(&pair.space_a(), "default", "same.txt", b"from-a");
+        write_blob(&pair.space_b(), "default", "same.txt", b"from-b");
+        let hash_a = sha256_hex(b"from-a");
+        let hash_b = sha256_hex(b"from-b");
+        a.upsert_file(&sid, "same.txt", &hash_a, 6, "ok").unwrap();
+        b.upsert_file(&sid, "same.txt", &hash_b, 6, "ok").unwrap();
+        set_updated(
+            a,
+            "files",
+            &a.list_files(&sid).unwrap()[0].id,
+            "2099-01-01T00:00:00Z",
+        );
+        set_updated(
+            b,
+            "files",
+            &b.list_files(&sid).unwrap()[0].id,
+            "2020-01-01T00:00:00Z",
+        );
+
+        let changeset_a = build_changeset(a, None, "a").unwrap();
+        let changeset_b = build_changeset(b, None, "b").unwrap();
+        // Both senders use the same legacy name path; the second export wins
+        // there, but each content hash gets its own immutable mailbox path.
+        export_blobs(a, &pair.space_a(), &changeset_a, &pair.dir).unwrap();
+        export_blobs(b, &pair.space_b(), &changeset_b, &pair.dir).unwrap();
+        let (summary, _) =
+            apply_changeset(b, &pair.space_b(), &changeset_a, Some(&pair.dir)).unwrap();
+        assert_eq!(summary.files_pulled, 1);
+        assert_eq!(
+            std::fs::read(pair.space_b().files_dir("default").join("same.txt")).unwrap(),
+            b"from-a"
+        );
+        assert_eq!(hash_a.len(), 64);
+        assert_ne!(hash_a, hash_b);
     }
 
     #[test]
@@ -2638,6 +3074,37 @@ mod tests {
         };
         let (summary, _) = apply_changeset(a, &pair.space_a(), &forged, None).unwrap();
         assert_eq!(summary.acks_applied, 0);
+    }
+
+    #[test]
+    fn malformed_ack_does_not_poison_peer_cursor() {
+        let pair = Pair::new();
+        let a = &pair.a;
+        let b = &pair.b;
+        let forged = Changeset {
+            device_id: b.device_id().unwrap(),
+            device_name: "b".to_string(),
+            ack: Some(vec![PeerCursor {
+                peer_id: a.device_id().unwrap(),
+                table_name: "sessions".to_string(),
+                cursor: "[\"missing-key-tuple\"]".to_string(),
+            }]),
+            rows: Vec::new(),
+            tombstones: Vec::new(),
+            files: Vec::new(),
+            generated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let (summary, _) = apply_changeset(a, &pair.space_a(), &forged, None).unwrap();
+        assert_eq!(summary.acks_applied, 0);
+        assert!(
+            summary
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("invalid cursor"))
+        );
+        assert!(!db_state(a).iter().any(|state| {
+            state.peer_id == b.device_id().unwrap() && state.push_cursor.is_some()
+        }));
     }
 
     #[test]

@@ -218,6 +218,9 @@ impl App {
     pub fn pick_model(&mut self, id: &str) -> Result<()> {
         match self.model_pick_target {
             ModelPickTarget::Session => {
+                if self.current_model.as_deref() != Some(id) {
+                    self.bump_cache_epoch();
+                }
                 self.current_model = Some(id.to_string());
                 if let Some(session) = &self.session {
                     self.db.set_session_model(&session.id, id)?;
