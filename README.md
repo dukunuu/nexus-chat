@@ -59,6 +59,7 @@ nexus login openrouter sk-... [--check]                # save a provider key
 nexus skills list                                      # installed skills
 nexus skills install owner/repo[/path]                 # install a skill from GitHub
 nexus open <id|slug>                                   # launch the TUI inside that session
+nexus --continue                                       # launch the TUI inside the latest session
 nexus update                                           # update to the latest release (cargo install)
 nexus status                                           # paths, providers configured, db stats
 nexus doctor [--network]                               # db integrity, config, tools

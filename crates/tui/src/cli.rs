@@ -29,6 +29,9 @@ use nexus_core::space;
 #[derive(Parser)]
 #[command(name = "nexus", version, about, max_term_width = 100)]
 pub struct Cli {
+    /// Open the most recently updated session instead of starting a blank chat.
+    #[arg(long = "continue")]
+    pub continue_session: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -319,11 +322,12 @@ pub enum SyncCmd {
     },
 }
 
-/// Parse argv and return the requested subcommand. `None` means no
-/// subcommand — the caller launches the TUI. Help/version/parse errors are
-/// handled by clap (it exits the process).
-pub fn parse() -> Option<Command> {
-    Cli::parse().command
+/// Parse argv and return the launch flag plus requested subcommand. `None`
+/// means no subcommand — the caller launches the TUI. Help/version/parse
+/// errors are handled by clap (it exits the process).
+pub fn parse() -> (bool, Option<Command>) {
+    let cli = Cli::parse();
+    (cli.continue_session, cli.command)
 }
 
 /// Run a parsed subcommand.
@@ -2236,6 +2240,17 @@ fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continue_flag_parses_without_a_subcommand() {
+        let cli = Cli::try_parse_from(["nexus", "--continue"]).unwrap();
+        assert!(cli.continue_session);
+        assert!(cli.command.is_none());
+
+        let cli = Cli::try_parse_from(["nexus", "status"]).unwrap();
+        assert!(!cli.continue_session);
+        assert!(matches!(cli.command, Some(Command::Status)));
+    }
 
     #[test]
     fn resolve_session_by_id_slug_and_prefix() {

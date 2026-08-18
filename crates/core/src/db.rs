@@ -1002,6 +1002,40 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Return the most recently updated session across all spaces, together
+    /// with its owning space id. Used by the `nexus --continue` launcher.
+    pub fn latest_session(&self) -> Result<Option<(String, Session)>> {
+        self.conn
+            .query_row(
+                "SELECT space_id, id, title, model, slug, created_at, compact_summary,
+                        compact_through, web_mode, swarm_mode, kind, research_parent_id
+                 FROM sessions
+                 ORDER BY updated_at DESC, rowid DESC
+                 LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        Session {
+                            id: r.get(1)?,
+                            title: r.get(2)?,
+                            model: r.get(3)?,
+                            slug: r.get(4)?,
+                            created_at: r.get(5)?,
+                            compact_summary: r.get(6)?,
+                            compact_through: r.get(7)?,
+                            web_mode: r.get::<_, i64>(8)? != 0,
+                            swarm_mode: r.get::<_, i64>(9)? != 0,
+                            kind: r.get(10)?,
+                            research_parent_id: r.get(11)?,
+                        },
+                    ))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Store an auto-compaction result: the digest plus how many raw messages
     /// it now covers.
     pub fn set_compaction(&self, session_id: &str, summary: &str, through: i64) -> Result<()> {
@@ -3509,6 +3543,44 @@ mod tests {
         let sessions = db.list_sessions(&space).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, s.id);
+    }
+
+    #[test]
+    fn latest_session_returns_the_newest_session_across_spaces() {
+        let db = Db::open_in_memory().unwrap();
+        let default_id = db.default_space_id().unwrap();
+        let other = db.create_space("other").unwrap();
+        let older = db
+            .create_session("older", "a/one", &default_id, "chat")
+            .unwrap();
+        let newer = db
+            .create_session("newer", "b/two", &other.id, "chat")
+            .unwrap();
+
+        // Use explicit timestamps so the assertion is independent of clock
+        // resolution on the test runner.
+        db.raw()
+            .execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                ("2026-01-01T00:00:00Z", &older.id),
+            )
+            .unwrap();
+        db.raw()
+            .execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                ("2026-01-02T00:00:00Z", &newer.id),
+            )
+            .unwrap();
+
+        let (space_id, session) = db.latest_session().unwrap().unwrap();
+        assert_eq!(space_id, other.id);
+        assert_eq!(session.id, newer.id);
+    }
+
+    #[test]
+    fn latest_session_is_empty_without_sessions() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.latest_session().unwrap().is_none());
     }
 
     #[test]
