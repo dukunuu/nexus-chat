@@ -7,12 +7,76 @@
 
 use std::path::PathBuf;
 
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
 use serde::Deserialize;
+
+/// How the TUI paints its general background.
+///
+/// Terminal cells do not support alpha blending. `Transparent` uses
+/// [`Color::Reset`] so the terminal's own window opacity remains visible;
+/// `Opaque` paints the active theme's background color into the cells.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BackgroundMode {
+    #[default]
+    Opaque,
+    Transparent,
+}
+
+impl BackgroundMode {
+    /// Database key used for this per-device UI preference.
+    pub const SETTING_KEY: &str = "ui_background";
+
+    /// Stable value persisted in the settings database.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Opaque => "opaque",
+            Self::Transparent => "transparent",
+        }
+    }
+
+    /// Human-readable value used in the status line.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        self.key()
+    }
+
+    /// Cycle between the two background modes.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Opaque => Self::Transparent,
+            Self::Transparent => Self::Opaque,
+        }
+    }
+
+    /// Parse a `/theme` background argument.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("opaque")
+            || value.eq_ignore_ascii_case("solid")
+            || value.eq_ignore_ascii_case("on")
+        {
+            Some(Self::Opaque)
+        } else if value.eq_ignore_ascii_case("transparent")
+            || value.eq_ignore_ascii_case("terminal")
+            || value.eq_ignore_ascii_case("reset")
+            || value.eq_ignore_ascii_case("off")
+        {
+            Some(Self::Transparent)
+        } else {
+            None
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub bg: Color,
+    /// Background painted into the TUI surface; derived from `bg` and the
+    /// user's [`BackgroundMode`].
+    pub surface: Color,
     pub fg: Color,
     pub fg_dim: Color,
     pub accent: Color,
@@ -32,6 +96,7 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             bg: Color::Black,
+            surface: Color::Black,
             fg: Color::White,
             fg_dim: Color::DarkGray,
             accent: Color::Cyan,
@@ -93,8 +158,10 @@ impl Theme {
         let fallback = Self::default();
         let n = &a.colors.normal;
         let b = &a.colors.bright;
+        let bg = hex_to_color(&a.colors.primary.background).unwrap_or(fallback.bg);
         Self {
-            bg: hex_to_color(&a.colors.primary.background).unwrap_or(fallback.bg),
+            bg,
+            surface: bg,
             fg: hex_to_color(&a.colors.primary.foreground).unwrap_or(fallback.fg),
             fg_dim: hex_to_color(&b.black).unwrap_or(fallback.fg_dim),
             accent: hex_to_color(&n.cyan).unwrap_or(fallback.accent),
@@ -110,6 +177,20 @@ impl Theme {
             tool_msg: hex_to_color(&n.yellow).unwrap_or(fallback.tool_msg),
             research_msg: hex_to_color(&n.magenta).unwrap_or(fallback.research_msg),
         }
+    }
+
+    /// Apply a UI background mode without changing the palette colors.
+    pub fn set_background_mode(&mut self, mode: BackgroundMode) {
+        self.surface = match mode {
+            BackgroundMode::Opaque => self.bg,
+            BackgroundMode::Transparent => Color::Reset,
+        };
+    }
+
+    /// Style used to paint the TUI's general surface.
+    #[must_use]
+    pub fn background_style(&self) -> Style {
+        Style::default().bg(self.surface)
     }
 }
 
@@ -169,6 +250,26 @@ white = "#ddf7ff"
         let theme = Theme::from_alacritty(&a);
         assert_eq!(theme.accent, Color::Rgb(0x7c, 0xf8, 0xf7));
         assert_eq!(theme.fg, Color::Rgb(0xdd, 0xf7, 0xff));
+    }
+
+    #[test]
+    fn background_mode_parses_and_cycles() {
+        assert_eq!(BackgroundMode::parse("solid"), Some(BackgroundMode::Opaque));
+        assert_eq!(
+            BackgroundMode::parse("terminal"),
+            Some(BackgroundMode::Transparent)
+        );
+        assert_eq!(BackgroundMode::Opaque.next(), BackgroundMode::Transparent);
+        assert_eq!(BackgroundMode::Transparent.next(), BackgroundMode::Opaque);
+    }
+
+    #[test]
+    fn background_mode_updates_surface_color() {
+        let mut theme = Theme::default();
+        theme.set_background_mode(BackgroundMode::Transparent);
+        assert_eq!(theme.surface, Color::Reset);
+        theme.set_background_mode(BackgroundMode::Opaque);
+        assert_eq!(theme.surface, theme.bg);
     }
 
     #[test]

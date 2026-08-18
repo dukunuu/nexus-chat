@@ -816,6 +816,7 @@ impl Db {
                 | "local_ocr_model"
                 // Per-device ui/timing state.
                 | "usage_range"
+                | "ui_background"
                 | "last_update_check"
                 // Which remote device the ssh transport last synced with —
                 // per-peer export cursors are device-local bookkeeping.
@@ -4303,6 +4304,7 @@ mod tests {
             "ocr_model",
             "local_ocr_model",
             "usage_range",
+            "ui_background",
             "last_update_check",
         ] {
             assert!(Db::setting_is_local(local), "{local} should be local");

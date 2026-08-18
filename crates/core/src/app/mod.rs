@@ -1454,7 +1454,7 @@ impl App {
     }
 
     /// Test helper: every queued `ComposerSet` payload, in order, draining
-    /// the queue (asserts composer-restore paths without a TextArea).
+    /// the queue (asserts composer-restore paths without a `TextArea`).
     #[cfg(feature = "test-helpers")]
     pub fn drain_composer_sets(&mut self) -> Vec<String> {
         self.drain_ui_events().0

@@ -224,7 +224,9 @@ async fn run_loop(app: &mut AppView, terminal: &mut DefaultTerminal) -> Result<(
             _ = theme_poll.tick() => {
                 let target = crate::theme::current_link_target();
                 if target != app.theme_link {
+                    let mode = app.background_mode;
                     app.theme = crate::theme::load();
+                    app.theme.set_background_mode(mode);
                     app.theme_link = target;
                     app.theme_gen = app.theme_gen.wrapping_add(1);
                 }

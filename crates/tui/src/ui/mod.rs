@@ -24,6 +24,13 @@ pub mod popups;
 use history::render_history;
 
 pub fn render(f: &mut Frame, app: &mut AppView) {
+    // Paint the base first so widgets that only set foreground colors inherit
+    // the configured opaque or terminal-transparent surface.
+    f.render_widget(
+        Block::default().style(app.theme.background_style()),
+        f.area(),
+    );
+
     // Grow the input box with its wrapped content (1–20 rows) plus 2 for the
     // border. `measure` wants the width the widget renders at, i.e. inside the
     // border (full width - 2).
@@ -186,7 +193,7 @@ fn render_command_popup(f: &mut Frame, app: &AppView, input_area: Rect) {
         })
         .collect();
 
-    let mut block = Block::default();
+    let mut block = Block::default().style(app.theme.background_style());
     if hints {
         block = block.title(Line::from(Span::styled(
             "commands (Tab fill · Enter run)",
@@ -251,10 +258,12 @@ fn render_at_popup(f: &mut Frame, app: &AppView, input_area: Rect) {
         })
         .collect();
 
-    let block = Block::default().title(Line::from(Span::styled(
-        "files (Tab insert · Esc cancel)",
-        Style::default().fg(app.theme.fg_dim),
-    )));
+    let block = Block::default()
+        .style(app.theme.background_style())
+        .title(Line::from(Span::styled(
+            "files (Tab insert · Esc cancel)",
+            Style::default().fg(app.theme.fg_dim),
+        )));
     let mut state = ListState::default();
     state.select(Some(selected.min(items.len().saturating_sub(1))));
     let list = List::new(items)
@@ -455,7 +464,8 @@ fn render_notifications(f: &mut Frame, app: &mut AppView, area: Rect) {
             Paragraph::new(Line::from(Span::styled(
                 label,
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ))),
+            )))
+            .style(app.theme.background_style()),
             rect,
         );
         app.notification_areas.push((rect, index));

@@ -663,9 +663,9 @@ fn strip_markdown_images(content: &str) -> String {
 }
 
 /// A user message card: a right-aligned bubble capped at ~60% of the pane.
-/// Its padding explicitly resets to the terminal's default background so a
-/// terminal-level transparent background remains visible. The `❯ you` header
-/// and time sit inside the bubble; images render inside at the bubble's width.
+/// Its padding follows the configured UI surface background. The `❯ you`
+/// header and time sit inside the bubble; images render inside at the bubble's
+/// width.
 #[allow(clippy::too_many_arguments)]
 fn push_user_card(
     out: &mut Vec<Line<'static>>,
@@ -681,10 +681,7 @@ fn push_user_card(
         .clamp(24, 64)
         .min(width.saturating_sub(6).max(24));
     let inner = card_w.saturating_sub(4);
-    // Terminal colors have no alpha channel. Resetting the background lets
-    // the terminal itself decide whether its default background is opaque or
-    // transparent instead of baking an opaque RGB tint into every card cell.
-    let bg_style = Style::default().bg(Color::Reset);
+    let bg_style = theme.background_style();
 
     let mut card: Vec<Line<'static>> = Vec::new();
     let mut card_img: Vec<Option<String>> = Vec::new();
@@ -2013,7 +2010,7 @@ mod card_background_tests {
     use nexus_core::space::Space;
 
     #[test]
-    fn user_card_keeps_terminal_bg_and_stays_right_aligned() {
+    fn user_card_uses_configured_bg_and_stays_right_aligned() {
         let db = Db::open_in_memory().unwrap();
         let space = Space {
             root: std::env::temp_dir().join(format!("nexus-tint-{}", uuid::Uuid::new_v4())),
@@ -2036,7 +2033,7 @@ mod card_background_tests {
         terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let buf = terminal.backend().buffer();
         // The card occupies the right side: find the first "a" of
-        // "a short note" and verify that it uses the terminal background.
+        // "a short note" and verify that it uses the configured surface.
         let mut body_start = None;
         for y in 0..buf.area.height {
             for x in 0..buf.area.width {
@@ -2052,9 +2049,8 @@ mod card_background_tests {
         }
         let (body_start, body_bg) = body_start.expect("user message should be rendered");
         assert_eq!(
-            body_bg,
-            Color::Reset,
-            "card should not paint an opaque RGB bg"
+            body_bg, app.theme.surface,
+            "card should use the configured UI background"
         );
         // Right-aligned: the body starts well past the pane's midpoint.
         assert!(

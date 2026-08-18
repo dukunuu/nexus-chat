@@ -90,6 +90,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["settings", "stats", "nerd", "params"],
     },
     Command {
+        name: "theme",
+        desc: "set UI background",
+        aliases: &["appearance", "colors"],
+    },
+    Command {
         name: "skills",
         desc: "manage skills",
         aliases: &["addskill"],
@@ -237,6 +242,8 @@ pub enum AppCommand {
     OpenSwarm,
     /// `/config` — the nerd-config popup.
     OpenSettings,
+    /// `/theme [opaque|transparent]` — configure the TUI background.
+    SetTheme { mode: String },
     /// `/copy` — the copy menu.
     OpenCopyMenu,
     /// `/skills` — the skills popup.
@@ -301,6 +308,9 @@ impl App {
             "login" => Ok(AppCommand::OpenLogin),
             "swarm" => Ok(AppCommand::OpenSwarm),
             "config" => Ok(AppCommand::OpenSettings),
+            "theme" => Ok(AppCommand::SetTheme {
+                mode: rest(cmd, token),
+            }),
             "copy" => Ok(AppCommand::OpenCopyMenu),
             "skills" => Ok(AppCommand::OpenSkills),
             "files" => Ok(AppCommand::OpenFiles {
@@ -360,6 +370,7 @@ impl App {
             | AppCommand::OpenLogin
             | AppCommand::OpenSwarm
             | AppCommand::OpenSettings
+            | AppCommand::SetTheme { .. }
             | AppCommand::OpenCopyMenu
             | AppCommand::OpenSkills
             | AppCommand::OpenFiles { .. }

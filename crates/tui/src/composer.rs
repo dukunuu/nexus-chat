@@ -523,6 +523,7 @@ impl AppView {
             AppCommand::OpenLogin => self.open_login_popup(),
             AppCommand::OpenSwarm => self.open_swarm_popup(),
             AppCommand::OpenSettings => self.open_settings(),
+            AppCommand::SetTheme { mode } => self.set_background_mode(&mode)?,
             AppCommand::OpenCopyMenu => self.open_copy_menu(),
             AppCommand::OpenSkills => self.open_skills_popup(),
             AppCommand::OpenFiles { tab } => {
@@ -730,6 +731,14 @@ mod tests {
         let mut a = test_app();
         a.run_command("model").unwrap();
         assert_eq!(a.popup, Popup::Model);
+        a.run_command("theme opaque").unwrap();
+        assert_eq!(a.background_mode, crate::theme::BackgroundMode::Opaque);
+        assert!(
+            a.db.load_settings()
+                .unwrap()
+                .iter()
+                .any(|(key, value)| key == "ui_background" && value == "opaque")
+        );
         a.run_command("quit").unwrap();
         assert!(a.should_quit);
         // Unknown commands surface as a status line, not an error.

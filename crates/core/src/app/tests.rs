@@ -1522,6 +1522,12 @@ fn parse_command_maps_the_slash_catalog_into_the_seam() {
     assert_eq!(a.parse_command("new").unwrap(), AppCommand::NewSession);
     assert_eq!(a.parse_command("web").unwrap(), AppCommand::ToggleWeb);
     assert_eq!(
+        a.parse_command("theme opaque").unwrap(),
+        AppCommand::SetTheme {
+            mode: "opaque".into()
+        }
+    );
+    assert_eq!(
         a.parse_command("research! rust async").unwrap(),
         AppCommand::RunResearch {
             topic: "rust async".into(),

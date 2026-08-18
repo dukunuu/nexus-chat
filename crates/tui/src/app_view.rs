@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 
+use anyhow::{Result, bail};
 use ratatui::layout::Rect;
 use tui_textarea::TextArea;
 
@@ -27,7 +28,7 @@ use crate::filter_input::FilterInput;
 use crate::flows::files::PickerEntry;
 use crate::history_cache::HistoryCache;
 use crate::selection::HistorySel;
-use crate::theme::Theme;
+use crate::theme::{BackgroundMode, Theme};
 
 /// Built-in start-screen banner (override with `~/.config/nexus-chat/banner.txt`).
 const BANNER: &str = r"
@@ -180,6 +181,9 @@ pub struct AppView {
     /// built-in default. `theme_link` is the last-seen omarchy symlink
     /// target, polled by the event loop to detect a theme switch.
     pub theme: Theme,
+    /// How the TUI surface background is painted; persisted per device and
+    /// changed with `/theme opaque` or `/theme transparent`.
+    pub background_mode: BackgroundMode,
     pub theme_link: Option<PathBuf>,
     /// Bumped every time `theme` changes, so the history render cache (which
     /// bakes colors into cached `Line`s) knows to re-wrap on a theme switch.
@@ -208,6 +212,19 @@ impl DerefMut for AppView {
     }
 }
 
+fn load_background_mode(core: &App) -> BackgroundMode {
+    core.db
+        .load_settings()
+        .ok()
+        .and_then(|settings| {
+            settings
+                .into_iter()
+                .find(|(key, _)| key == BackgroundMode::SETTING_KEY)
+        })
+        .and_then(|(_, value)| BackgroundMode::parse(&value))
+        .unwrap_or_default()
+}
+
 impl AppView {
     /// Wrap a freshly-booted domain `App` with a fresh view layer.
     pub fn new(mut core: App) -> Self {
@@ -220,6 +237,9 @@ impl AppView {
                 _ => String::new(),
             })
             .unwrap_or_default();
+        let background_mode = load_background_mode(&core);
+        let mut theme = crate::theme::load();
+        theme.set_background_mode(background_mode);
         Self {
             core,
             input: crate::composer::new_textarea(),
@@ -295,7 +315,8 @@ impl AppView {
             banner: nexus_core::config::load_banner()
                 .unwrap_or_else(|| BANNER.trim_matches('\n').to_string()),
             greeting: nexus_core::app::pick_greeting(),
-            theme: crate::theme::load(),
+            theme,
+            background_mode,
             theme_link: crate::theme::current_link_target(),
             theme_gen: 0,
             status,
@@ -324,6 +345,32 @@ impl AppView {
             AppEvent::OpenLoginPopup => self.open_login_popup(),
             _ => {}
         }
+    }
+
+    /// Change and persist the TUI background mode. With no argument, cycles
+    /// between opaque and transparent; explicit values are useful for scripts
+    /// and command history.
+    pub fn set_background_mode(&mut self, requested: &str) -> Result<()> {
+        let requested = requested.trim();
+        let mode = if requested.is_empty() {
+            self.background_mode.next()
+        } else {
+            let Some(mode) = BackgroundMode::parse(requested) else {
+                bail!(
+                    "unknown theme background {requested:?} — use /theme opaque or /theme transparent"
+                );
+            };
+            mode
+        };
+        self.core
+            .db
+            .set_setting(BackgroundMode::SETTING_KEY, mode.key())?;
+        self.background_mode = mode;
+        self.theme.set_background_mode(mode);
+        self.theme_gen = self.theme_gen.wrapping_add(1);
+        self.invalidate_history_cache();
+        self.push_status(format!("theme background: {}", mode.label()));
+        Ok(())
     }
 
     /// Force a full history cache rebuild on the next frame. Used when

@@ -38,8 +38,8 @@ pub enum Tone {
 }
 
 /// The rounded border + title style shared by every popup. The interior uses
-/// the terminal's default background instead of painting an RGB surface. This
-/// preserves terminal-level transparency (ratatui colors do not carry alpha).
+/// the configured UI surface, which can be either the active theme's opaque
+/// background or the terminal's default background.
 pub fn popup_block_focused<'a>(
     title: impl Into<Line<'a>>,
     theme: &Theme,
@@ -55,7 +55,7 @@ pub fn popup_block_focused<'a>(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border))
-        .style(Style::default().bg(Color::Reset))
+        .style(theme.background_style())
         .title(title)
 }
 
@@ -125,7 +125,7 @@ pub fn render_hinted<'a>(
 }
 
 /// Standard popup list selection: accent `▸ ` marker + bold selection
-/// without an opaque row fill, so the terminal's background remains visible.
+/// without an extra row fill, so the configured surface stays consistent.
 pub fn standard_list<'a>(items: Vec<ListItem<'a>>, theme: &Theme) -> List<'a> {
     List::new(items)
         .highlight_symbol(Span::styled("▸ ", Style::default().fg(theme.accent)))
