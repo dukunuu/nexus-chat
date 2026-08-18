@@ -117,30 +117,6 @@ fn omarchy_current_dir() -> Option<PathBuf> {
     Some(std::env::home_dir()?.join(".config/omarchy/current"))
 }
 
-/// Linear blend between two colors at `t` in 0.0..=1.0 (used for tinted
-/// message cards — terminals have no alpha, so the tint is pre-mixed into
-/// the theme background). Falls back to `a` for non-RGB colors.
-pub fn blend(a: Color, b: Color, t: f32) -> Color {
-    let mix = |x: u8, y: u8| {
-        let (xf, yf) = (f32::from(x), f32::from(y));
-        // t is caller-clamped to 0.0..=1.0; the result is always in 0..=255.
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_possible_wrap,
-            clippy::cast_sign_loss
-        )]
-        {
-            (xf + (yf - xf) * t).round() as u8
-        }
-    };
-    match (a, b) {
-        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
-            Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
-        }
-        _ => a,
-    }
-}
-
 /// The omarchy theme symlink's current target (e.g. `.../themes/retropc`), or
 /// `None` off-omarchy. Compared across polls to detect a theme switch.
 pub fn current_link_target() -> Option<PathBuf> {

@@ -662,10 +662,10 @@ fn strip_markdown_images(content: &str) -> String {
     out
 }
 
-/// A user message card: a right-aligned bubble capped at ~60% of the pane,
-/// tinted with the user color blended into the theme background (terminals
-/// have no alpha, so the tint is pre-mixed). The `❯ you` header and time sit
-/// inside the bubble; images render inside at the bubble's width.
+/// A user message card: a right-aligned bubble capped at ~60% of the pane.
+/// Its padding explicitly resets to the terminal's default background so a
+/// terminal-level transparent background remains visible. The `❯ you` header
+/// and time sit inside the bubble; images render inside at the bubble's width.
 #[allow(clippy::too_many_arguments)]
 fn push_user_card(
     out: &mut Vec<Line<'static>>,
@@ -681,8 +681,10 @@ fn push_user_card(
         .clamp(24, 64)
         .min(width.saturating_sub(6).max(24));
     let inner = card_w.saturating_sub(4);
-    let bg = crate::theme::blend(theme.bg, theme.user_msg, 0.08);
-    let bg_style = Style::default().bg(bg);
+    // Terminal colors have no alpha channel. Resetting the background lets
+    // the terminal itself decide whether its default background is opaque or
+    // transparent instead of baking an opaque RGB tint into every card cell.
+    let bg_style = Style::default().bg(Color::Reset);
 
     let mut card: Vec<Line<'static>> = Vec::new();
     let mut card_img: Vec<Option<String>> = Vec::new();
@@ -2004,14 +2006,14 @@ mod tests {
 }
 
 #[cfg(test)]
-mod card_tint_tests {
+mod card_background_tests {
     use super::*;
     use nexus_core::app::App;
     use nexus_core::db::{Db, Message};
     use nexus_core::space::Space;
 
     #[test]
-    fn user_card_paints_tinted_bg_and_stays_right_aligned() {
+    fn user_card_keeps_terminal_bg_and_stays_right_aligned() {
         let db = Db::open_in_memory().unwrap();
         let space = Space {
             root: std::env::temp_dir().join(format!("nexus-tint-{}", uuid::Uuid::new_v4())),
@@ -2033,27 +2035,31 @@ mod card_tint_tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 10)).unwrap();
         terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let buf = terminal.backend().buffer();
-        // The card occupies the right side: find a "a" of "a short note".
-        let expected_bg = crate::theme::blend(app.theme.bg, app.theme.user_msg, 0.08);
-        let mut painted = 0;
-        let mut rightmost = 0;
+        // The card occupies the right side: find the first "a" of
+        // "a short note" and verify that it uses the terminal background.
+        let mut body_start = None;
         for y in 0..buf.area.height {
             for x in 0..buf.area.width {
                 let cell = &buf[(x, y)];
-                if cell.bg == expected_bg {
-                    painted += 1;
-                    rightmost = rightmost.max(x);
+                if cell.symbol() == "a" {
+                    body_start = Some((x, cell.bg));
+                    break;
                 }
             }
+            if body_start.is_some() {
+                break;
+            }
         }
-        assert!(
-            painted > 10,
-            "card bg should cover many cells, got {painted}"
+        let (body_start, body_bg) = body_start.expect("user message should be rendered");
+        assert_eq!(
+            body_bg,
+            Color::Reset,
+            "card should not paint an opaque RGB bg"
         );
-        // Right-aligned: the card's tint must reach near the scrollbar gutter.
+        // Right-aligned: the body starts well past the pane's midpoint.
         assert!(
-            rightmost >= 76,
-            "card should reach the right edge, got {rightmost}"
+            body_start >= 30,
+            "card should be right-aligned, got body start at {body_start}"
         );
     }
 }

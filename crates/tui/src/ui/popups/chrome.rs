@@ -19,7 +19,7 @@ use ratatui::widgets::{
 };
 
 use crate::app_view::AppView;
-use crate::theme::{Theme, blend};
+use crate::theme::Theme;
 
 /// Canonical popup sizes — every popup picks one so the whole family reads
 /// as the same design: small prompts, standard lists, tall lists, wide
@@ -37,10 +37,9 @@ pub enum Tone {
     Danger,
 }
 
-/// The rounded border + title style shared by every popup. The block also
-/// carries a subtle surface tint (theme bg blended toward the border color)
-/// so popups read as cards floating above the conversation, matching the
-/// user-message bubbles.
+/// The rounded border + title style shared by every popup. The interior uses
+/// the terminal's default background instead of painting an RGB surface. This
+/// preserves terminal-level transparency (ratatui colors do not carry alpha).
 pub fn popup_block_focused<'a>(
     title: impl Into<Line<'a>>,
     theme: &Theme,
@@ -56,7 +55,7 @@ pub fn popup_block_focused<'a>(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border))
-        .style(Style::default().bg(blend(theme.bg, theme.border, 0.05)))
+        .style(Style::default().bg(Color::Reset))
         .title(title)
 }
 
@@ -125,16 +124,12 @@ pub fn render_hinted<'a>(
     inner
 }
 
-/// Standard popup list selection: accent `▸ ` marker + bold selection on a
-/// subtle accent-tinted row — the same surface language as the chat cards.
+/// Standard popup list selection: accent `▸ ` marker + bold selection
+/// without an opaque row fill, so the terminal's background remains visible.
 pub fn standard_list<'a>(items: Vec<ListItem<'a>>, theme: &Theme) -> List<'a> {
     List::new(items)
         .highlight_symbol(Span::styled("▸ ", Style::default().fg(theme.accent)))
-        .highlight_style(
-            Style::default()
-                .bg(blend(theme.bg, theme.accent, 0.08))
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
 }
 
 /// Truncate `s` to `max` chars, appending `…` when it overflows — the same
