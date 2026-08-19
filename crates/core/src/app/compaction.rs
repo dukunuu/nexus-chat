@@ -435,14 +435,13 @@ impl App {
 }
 
 /// The message tail handed to the compaction model: everything since the
-/// last digest except rows that must never reach a model — tool-call blocks
-/// and `App::excluded_from_model_history`. Without this, a digest could
-/// carry contextless gate replies ("drop Q2") into later history even
-/// though `build_history` skips them.
+/// last digest except rows that must never reach a model via
+/// `App::excluded_from_model_history`. Tool-call rows are retained so a
+/// compaction cannot silently erase the model's tool findings.
 fn compaction_tail(messages: &[Message], through: usize) -> String {
     messages[through.min(messages.len())..]
         .iter()
-        .filter(|m| m.role != "tool_call" && !App::excluded_from_model_history(m))
+        .filter(|m| !App::excluded_from_model_history(m))
         .map(|m| format!("{}: {}", m.role, m.content))
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -617,7 +616,10 @@ mod tests {
             msg("session_link", "sess-1\n↩ from: x"),
             msg("compaction", "folded-away digest"),
             msg("user", "the final question"),
-            msg("tool_call", r#"{"name":"search"}"#),
+            msg(
+                "tool_call",
+                r#"{"name":"search","result":"important finding"}"#,
+            ),
         ];
         let mut persona = msg("assistant", "round reply");
         persona.persona = Some("Optimist".into());
@@ -639,13 +641,16 @@ mod tests {
             "sess-1",
             "folded-away digest",
             "round reply",
-            "tool_call",
         ] {
             assert!(
                 !tail.contains(banned),
                 "digest must not contain {banned:?}: {tail}"
             );
         }
+        assert!(
+            tail.contains("important finding"),
+            "tool findings must survive: {tail}"
+        );
         // The compaction boundary still applies.
         let partial = compaction_tail(&msgs, 1);
         assert!(!partial.contains("what should we research?"), "{partial}");

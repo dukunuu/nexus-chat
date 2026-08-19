@@ -570,8 +570,8 @@ pub struct ChatTask {
     pub thinking: String,
     pub tool_status: Option<String>,
     pub usage: Option<Usage>,
-    /// Row id of this task's `usage_log` row (one per request); the trailing
-    /// `OpenCode` Zen cost event updates it rather than inserting a duplicate.
+    /// Most recent `usage_log` row for this task; a trailing `OpenCode` Zen
+    /// cost event updates it rather than inserting a duplicate.
     pub usage_row_id: Option<i64>,
     pub started: std::time::Instant,
     pub thinking_idx: usize,
@@ -735,6 +735,10 @@ pub struct App {
     /// App-local prompt-cache epoch. Changes that alter the serialized prefix
     /// advance it so a provider gets a fresh cache lane.
     pub(crate) cache_epoch: u64,
+    /// Timestamp captured for the current prompt-cache epoch. Keeping the
+    /// `{{datetime}}` expansion stable prevents a clock tick from invalidating
+    /// the entire serialized prefix on every request.
+    pub(crate) prompt_datetime: String,
     /// Model used for image transcription (empty = disabled).
     pub transcriber_model: String,
     /// Vision model for scanned-PDF OCR (empty = tesseract only).
@@ -1048,6 +1052,7 @@ impl App {
             memory_model: utility_model.clone(),
             memory_snapshot: String::new(),
             cache_epoch: 0,
+            prompt_datetime: Utc::now().format("%Y-%m-%d %H:%M UTC, %A").to_string(),
             transcriber_model: utility_model.clone(),
             ocr_model: utility_model,
             ocr_engine: "auto".to_string(),

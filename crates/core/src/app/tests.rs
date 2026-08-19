@@ -382,6 +382,38 @@ async fn opencode_split_usage_merges_cost_into_one_row() {
 }
 
 #[tokio::test]
+async fn each_real_api_usage_event_gets_its_own_row() {
+    let mut a = app_with_key();
+    a.current_model = Some("go:deepseek-v4-pro".into());
+    a.execute(AppCommand::Send {
+        text: "hi".to_string(),
+    })
+    .unwrap();
+    let session = a.session.as_ref().unwrap().id.clone();
+    let task = a.chat_task_for_session(&session).map(|t| t.id).unwrap();
+
+    for prompt_tokens in [100, 140] {
+        a.on_chat_event(
+            task,
+            StreamEvent::Usage(crate::provider::Usage {
+                prompt_tokens,
+                completion_tokens: 20,
+                total_tokens: prompt_tokens + 20,
+                cache_read_tokens: prompt_tokens.saturating_sub(20),
+                cache_creation_tokens: 0,
+                cost: None,
+            }),
+        )
+        .unwrap();
+    }
+
+    let rows = a.db.usage_recent(10, None).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].prompt_tokens, 140);
+    assert_eq!(rows[1].prompt_tokens, 100);
+}
+
+#[tokio::test]
 async fn cost_only_usage_event_is_logged_with_zero_tokens() {
     // OpenCode Zen free models never report usage — the trailing cost chunk
     // is the only accounting. It must still land in the log (provider cost
@@ -657,6 +689,41 @@ fn context_used_and_limit() {
         created_at: None,
     });
     assert_eq!(a.context_used(), 10);
+}
+
+#[tokio::test]
+async fn streaming_context_estimate_does_not_shrink_below_last_exact_total() {
+    let mut a = app_with_key();
+    a.base_system_prompt.clear();
+    a.skills.clear();
+    a.context_total = Some(10_000);
+    let task = tokio::spawn(async {});
+    let abort = task.abort_handle();
+    let _ = task.await;
+    a.chat_tasks.insert(
+        1,
+        ChatTask {
+            id: 1,
+            session_id: String::new(),
+            session_title: String::new(),
+            space_id: String::new(),
+            model: "a/one".into(),
+            model_id: "a/one".into(),
+            backend: BackendTag::OpenRouter,
+            incognito: false,
+            buffer: String::new(),
+            thinking: String::new(),
+            tool_status: None,
+            usage: None,
+            usage_row_id: None,
+            started: std::time::Instant::now(),
+            thinking_idx: 0,
+            spinner_color: SpinnerColor::Green,
+            abort,
+        },
+    );
+
+    assert_eq!(a.context_used(), 10_000);
 }
 
 #[test]
@@ -1039,6 +1106,197 @@ fn build_history_compresses_duplicate_tool_results_and_keeps_changed_ones() {
     );
     assert!(tools[1].contains("read_file a.txt"), "{}", tools[1]);
     assert_eq!(tools[2], "v2", "changed re-read stays full");
+}
+
+#[test]
+fn history_prefix_survives_repeated_new_requests() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    let session =
+        a.db.create_session("history", "a/one", &a.active_space.id, "chat")
+            .unwrap();
+    for i in 0..100 {
+        a.db.add_user_message(&session.id, &format!("user turn {i}"))
+            .unwrap();
+        a.db.add_assistant_message(
+            &session.id,
+            &format!("assistant turn {i}"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    }
+    a.session = Some(session.clone());
+    a.messages = a.db.load_messages(&session.id).unwrap();
+
+    let first = a.build_history();
+    assert_eq!(
+        first
+            .iter()
+            .filter(|message| message.role == "user")
+            .count(),
+        100
+    );
+    assert_eq!(
+        first
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .count(),
+        100
+    );
+
+    a.db.add_user_message(&session.id, "user turn 100").unwrap();
+    a.messages = a.db.load_messages(&session.id).unwrap();
+    let second = a.build_history();
+    assert!(
+        second
+            .iter()
+            .any(|message| message.content == "user turn 100")
+    );
+    assert_eq!(
+        serde_json::to_value(&first).unwrap(),
+        serde_json::to_value(&second[..first.len()]).unwrap()
+    );
+}
+
+#[test]
+fn hundred_turns_preserve_messages_tool_inputs_results_and_wire_prefixes() {
+    let mut a = app_with_key();
+    a.base_system_prompt.clear();
+    a.skills.clear();
+    a.current_model = Some("a/one".into());
+    let session =
+        a.db.create_session("many turns", "a/one", &a.active_space.id, "chat")
+            .unwrap();
+    a.session = Some(session.clone());
+
+    let mut previous_wire: Option<Vec<serde_json::Value>> = None;
+    for turn in 0..100 {
+        let user = format!("user turn {turn}: preserve this input");
+        a.db.add_user_message(&session.id, &user).unwrap();
+        a.messages.push(Message {
+            role: "user".into(),
+            content: user,
+            model: None,
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            cost: None,
+            phrase: None,
+            persona: None,
+            created_at: None,
+        });
+
+        for call_index in 0..2 {
+            let id = format!("call-{turn}-{call_index}");
+            let name = format!("tool-{call_index}");
+            let arguments = format!(r#"{{"turn":{turn},"input":"value-{call_index}"}}"#);
+            let result = format!("result for turn {turn}, call {call_index}");
+            a.on_stream_event(StreamEvent::ToolCall {
+                id,
+                reasoning: (call_index == 0).then(|| format!("reasoning for turn {turn}")),
+                assistant_content: (call_index == 0).then(|| format!("tool batch for turn {turn}")),
+                name,
+                arguments,
+                result,
+            })
+            .unwrap();
+        }
+
+        let answer = format!("assistant answer for turn {turn}");
+        a.db.add_assistant_message(&session.id, &answer, None, None, None, None, None, None)
+            .unwrap();
+        a.messages.push(Message {
+            role: "assistant".into(),
+            content: answer,
+            model: None,
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            cost: None,
+            phrase: None,
+            persona: None,
+            created_at: None,
+        });
+
+        let history = a.build_history();
+        let wire: Vec<serde_json::Value> = history
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<_>>()
+            .unwrap();
+        if let Some(previous) = &previous_wire {
+            assert_eq!(
+                &wire[..previous.len()],
+                previous.as_slice(),
+                "wire prefix changed after turn {turn}"
+            );
+        }
+        previous_wire = Some(wire);
+    }
+
+    let history = a.build_history();
+    let mut cursor = 1; // the stable system message
+    for turn in 0..100 {
+        assert_eq!(history[cursor].role, "user");
+        assert_eq!(
+            history[cursor].content,
+            format!("user turn {turn}: preserve this input")
+        );
+        cursor += 1;
+
+        let batch = &history[cursor];
+        assert_eq!(batch.role, "assistant");
+        assert_eq!(batch.content, format!("tool batch for turn {turn}"));
+        let calls = batch.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 2);
+        for (call_index, call) in calls.iter().enumerate() {
+            assert_eq!(call.id, format!("call-{turn}-{call_index}"));
+            assert_eq!(call.name, format!("tool-{call_index}"));
+            assert_eq!(
+                call.arguments,
+                format!(r#"{{"turn":{turn},"input":"value-{call_index}"}}"#)
+            );
+        }
+        cursor += 1;
+
+        for call_index in 0..2 {
+            let tool = &history[cursor];
+            assert_eq!(tool.role, "tool");
+            assert_eq!(
+                tool.tool_call_id.as_deref(),
+                Some(format!("call-{turn}-{call_index}").as_str())
+            );
+            assert_eq!(
+                tool.content,
+                format!("result for turn {turn}, call {call_index}")
+            );
+            cursor += 1;
+        }
+        assert_eq!(history[cursor].role, "assistant");
+        assert_eq!(
+            history[cursor].content,
+            format!("assistant answer for turn {turn}")
+        );
+        cursor += 1;
+    }
+    assert_eq!(cursor, history.len());
+
+    // Reload exactly what was persisted and require the same wire history.
+    let persisted = a.db.load_messages(&session.id).unwrap();
+    assert_eq!(persisted.len(), 100 * 4);
+    a.messages = persisted;
+    let reloaded_wire: Vec<serde_json::Value> = a
+        .build_history()
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<serde_json::Result<_>>()
+        .unwrap();
+    assert_eq!(reloaded_wire, previous_wire.unwrap());
 }
 
 fn install_test_skill(a: &mut App, name: &str, desc: &str, body: &str) {

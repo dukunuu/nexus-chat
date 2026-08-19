@@ -160,6 +160,7 @@ impl App {
         {
             return total;
         }
+        let streaming = self.is_streaming();
         let mut chars = self.system_prompt().chars().count();
         if let Some(s) = self
             .session
@@ -185,7 +186,19 @@ impl App {
         if let Some(buf) = self.active_streaming_text() {
             chars += buf.chars().count();
         }
-        (chars / 4) as u64
+        let estimate = (chars / 4) as u64;
+        // The character estimate is intentionally conservative about wire
+        // overhead and provider tokenization. Do not let it make the status
+        // bar visibly shrink at the start of a new request: the previous
+        // completed request is a better lower bound until this one reports
+        // exact usage. Compaction/model/session boundaries clear
+        // `context_total` before a genuinely smaller context is shown.
+        if streaming {
+            self.context_total
+                .map_or(estimate, |total| total.max(estimate))
+        } else {
+            estimate
+        }
     }
 
     /// Whether the active model accepts image input (unknown model → false).

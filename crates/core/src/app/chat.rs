@@ -379,34 +379,31 @@ impl App {
                 }
             }
             StreamEvent::Usage(u) => {
-                // One API request finished: surface its cache hit rate next
-                // to the context window and log the request (tokens, cache,
-                // cost) for the /usage panel. Incognito streams are never
-                // persisted, matching the message-storage convention.
+                // The provider emits one Usage event per underlying API
+                // request, including each tool-loop round. Keep every real
+                // accounting event as its own row; overwriting one row for
+                // the whole top-level chat turn made a long tool loop look as
+                // if prompt tokens had gone down or vanished.
                 //
-                // OpenCode Zen splits accounting across two events: the
-                // finish chunk may carry real usage, and a trailing chunk
-                // carries only the provider-reported `cost`. Merge instead
-                // of logging two rows.
-                if u.prompt_tokens + u.completion_tokens > 0 {
+                // OpenCode Zen may follow a real usage event with a
+                // cost-only event. That event belongs to the most recent row
+                // and is merged in place rather than logged separately.
+                let has_tokens = u.prompt_tokens + u.completion_tokens > 0;
+                if has_tokens {
                     self.last_cache_rate = u.cache_hit_rate();
                 }
                 let Some(task) = self.chat_tasks.get_mut(&task_id) else {
                     return Ok(());
                 };
-                let merged = match task.usage {
-                    Some(prev) if u.prompt_tokens + u.completion_tokens > 0 => {
-                        // Real accounting (arrives after a cost-only chunk).
-                        Usage {
-                            cost: u.cost.or(prev.cost),
-                            ..u
-                        }
-                    }
-                    Some(prev) => Usage {
+                let merged = if has_tokens {
+                    // A real event starts a new API-request record. Do not
+                    // carry a previous request's provider cost into it.
+                    u
+                } else {
+                    task.usage.map_or(u, |prev| Usage {
                         cost: u.cost.or(prev.cost),
                         ..prev
-                    },
-                    None => u,
+                    })
                 };
                 task.usage = Some(merged);
                 let session_id = task.session_id.clone();
@@ -434,17 +431,7 @@ impl App {
                             merged.cache_creation_tokens,
                         )
                     });
-                    if let Some(id) = row_id {
-                        let _ = self.db.update_usage(
-                            id,
-                            merged.prompt_tokens,
-                            merged.completion_tokens,
-                            merged.cache_read_tokens,
-                            merged.cache_creation_tokens,
-                            cost,
-                            cost_is_provider,
-                        );
-                    } else {
+                    if has_tokens || row_id.is_none() {
                         let id = self.db.log_usage(
                             backend.name(),
                             &model_id,
@@ -462,6 +449,16 @@ impl App {
                         {
                             task.usage_row_id = Some(id);
                         }
+                    } else if let Some(row_id) = row_id {
+                        let _ = self.db.update_usage(
+                            row_id,
+                            merged.prompt_tokens,
+                            merged.completion_tokens,
+                            merged.cache_read_tokens,
+                            merged.cache_creation_tokens,
+                            cost,
+                            cost_is_provider,
+                        );
                     }
                 }
             }
@@ -867,8 +864,12 @@ impl App {
             parts.push(skills);
         }
         if self.web_mode {
-            let today = Utc::now().format("%Y-%m-%d").to_string();
-            parts.push(web_mode_clause(&today));
+            let today = self
+                .prompt_datetime
+                .split_whitespace()
+                .next()
+                .unwrap_or_default();
+            parts.push(web_mode_clause(today));
         }
         if self.is_research_session() {
             parts.push(
@@ -1001,10 +1002,9 @@ impl App {
     /// `base_system_prompt` (raw, as read from `system_prompt.md`) with the
     /// `{{verbosity}}` placeholder swapped for the level the user picked.
     pub fn resolved_base_system_prompt(&self) -> String {
-        let now = Utc::now().format("%Y-%m-%d %H:%M UTC, %A").to_string();
         self.base_system_prompt
             .replace("{{verbosity}}", verbosity_clause(&self.verbosity))
-            .replace("{{datetime}}", &now)
+            .replace("{{datetime}}", &self.prompt_datetime)
     }
 
     /// Re-read `system_prompt.md` after a Ctrl+E hand-edit.

@@ -1606,6 +1606,7 @@ impl OpenRouter {
         let mut tool_calls: BTreeMap<usize, ToolCall> = BTreeMap::new();
         let mut content_acc = String::new();
         let mut reasoning_acc = String::new();
+        let mut usage = None;
         let mut done = false;
         while let Some(event) = es.next().await {
             match event {
@@ -1629,20 +1630,23 @@ impl OpenRouter {
                         let _ = tx.send(StreamEvent::Token(token));
                     }
                     accumulate_tool_calls(&mut tool_calls, &msg.data);
-                    if let Some(usage) = parse_usage(&msg.data) {
-                        let _ = tx.send(StreamEvent::Usage(usage));
+                    if let Some(next) = parse_usage(&msg.data) {
+                        merge_usage(&mut usage, next);
                     } else if let Some(cost) = parse_stream_cost(&msg.data) {
                         // OpenCode Zen: models on the general route never
                         // report usage (every chunk carries `usage:null`);
                         // the trailing cost chunk is the only accounting.
-                        let _ = tx.send(StreamEvent::Usage(Usage {
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            total_tokens: 0,
-                            cache_read_tokens: 0,
-                            cache_creation_tokens: 0,
-                            cost: Some(cost),
-                        }));
+                        merge_usage(
+                            &mut usage,
+                            Usage {
+                                prompt_tokens: 0,
+                                completion_tokens: 0,
+                                total_tokens: 0,
+                                cache_read_tokens: 0,
+                                cache_creation_tokens: 0,
+                                cost: Some(cost),
+                            },
+                        );
                     }
                 }
                 Err(reqwest_eventsource::Error::StreamEnded) => break,
@@ -1682,14 +1686,17 @@ impl OpenRouter {
                 match next {
                     Ok(Some(Ok(Event::Message(msg)))) if msg.data != "[DONE]" => {
                         if let Some(cost) = parse_stream_cost(&msg.data) {
-                            let _ = tx.send(StreamEvent::Usage(Usage {
-                                prompt_tokens: 0,
-                                completion_tokens: 0,
-                                total_tokens: 0,
-                                cache_read_tokens: 0,
-                                cache_creation_tokens: 0,
-                                cost: Some(cost),
-                            }));
+                            merge_usage(
+                                &mut usage,
+                                Usage {
+                                    prompt_tokens: 0,
+                                    completion_tokens: 0,
+                                    total_tokens: 0,
+                                    cache_read_tokens: 0,
+                                    cache_creation_tokens: 0,
+                                    cost: Some(cost),
+                                },
+                            );
                         }
                     }
                     // StreamEnded, transport error, a second [DONE], or the
@@ -1697,6 +1704,12 @@ impl OpenRouter {
                     _ => break,
                 }
             }
+        }
+        // Surface exactly one accounting event for this provider request.
+        // Keeping it at the request boundary prevents the app from treating
+        // several partial/cost chunks as separate requests.
+        if let Some(usage) = usage {
+            let _ = tx.send(StreamEvent::Usage(usage));
         }
         // Trust accumulated tool calls, not finish_reason: some providers
         // stream tool_calls but finish with "stop" (or no finish chunk at
@@ -1777,6 +1790,13 @@ impl OpenRouter {
             "parallel_tool_calls": true,
         });
         let obj = body.as_object_mut().unwrap();
+        if let Some(key) = &params.prompt_cache_key {
+            // The Codex Responses route uses the public Responses API cache
+            // key field when it is available. Without it, GPT-5.6+ can route
+            // identical prefixes to different cache workers and report no
+            // reuse even though the full input is stable.
+            obj.insert("prompt_cache_key".into(), serde_json::json!(key));
+        }
         if let Some(t) = params.temperature {
             obj.insert("temperature".into(), serde_json::json!(t));
         }
@@ -1815,6 +1835,7 @@ impl OpenRouter {
 
         let mut tool_calls: BTreeMap<usize, ToolCall> = BTreeMap::new();
         let mut content_acc = String::new();
+        let mut usage = None;
         let mut buf = String::new();
         let mut stream = response.bytes_stream();
         'stream: while let Some(chunk) = stream.next().await {
@@ -1845,10 +1866,13 @@ impl OpenRouter {
                     let _ = tx.send(StreamEvent::Reasoning(r));
                 }
                 accumulate_codex_tool_calls(&mut tool_calls, &data);
-                if let Some(usage) = codex_usage(&data) {
-                    let _ = tx.send(StreamEvent::Usage(usage));
+                if let Some(next) = codex_usage(&data) {
+                    merge_usage(&mut usage, next);
                 }
             }
+        }
+        if let Some(usage) = usage {
+            let _ = tx.send(StreamEvent::Usage(usage));
         }
         if tool_calls.is_empty() {
             Ok(Finish::Done)
@@ -2001,8 +2025,9 @@ fn parse_usage_value(value: &serde_json::Value) -> Option<Usage> {
         .then_some(usage)
 }
 
-/// Merge a usage-only event with an earlier accounting event from the same
-/// request. `OpenCode` may send a cost-only event after token usage.
+/// Merge a usage-only event with earlier accounting from the same request.
+/// `OpenCode` may send cost-only or partial/cumulative objects after token
+/// usage; counts must never move backwards within one API request.
 fn merge_usage(slot: &mut Option<Usage>, next: Usage) {
     *slot = Some(match slot.take() {
         Some(previous) if next.prompt_tokens + next.completion_tokens == 0 => Usage {
@@ -2010,8 +2035,19 @@ fn merge_usage(slot: &mut Option<Usage>, next: Usage) {
             ..previous
         },
         Some(previous) => Usage {
+            // Streaming providers may expose cumulative accounting more than
+            // once, and a trailing compatibility object can be partial. Keep
+            // the largest count seen for this one API request instead of
+            // allowing a later smaller object to make prompt history appear
+            // to shrink.
+            prompt_tokens: previous.prompt_tokens.max(next.prompt_tokens),
+            completion_tokens: previous.completion_tokens.max(next.completion_tokens),
+            total_tokens: previous.total_tokens.max(next.total_tokens),
+            cache_read_tokens: previous.cache_read_tokens.max(next.cache_read_tokens),
+            cache_creation_tokens: previous
+                .cache_creation_tokens
+                .max(next.cache_creation_tokens),
             cost: next.cost.or(previous.cost),
-            ..next
         },
         None => next,
     });
@@ -2066,17 +2102,29 @@ fn codex_input(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
             // function_call_output must have a matching function_call item;
             // emitting only calls[0] makes Codex reject the other outputs.
             "assistant" => match m.tool_calls.as_ref().filter(|calls| !calls.is_empty()) {
-                Some(calls) => calls
-                    .iter()
-                    .map(|call| {
+                Some(calls) => {
+                    let mut items = Vec::with_capacity(calls.len() + usize::from(!m.content.is_empty()));
+                    if !m.content.is_empty() {
+                        // Chat Completions permits visible assistant text next
+                        // to tool calls. Keep it when translating the same
+                        // history to Responses input; dropping it would make
+                        // a later Codex request differ from the conversation
+                        // the user saw.
+                        items.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": [{ "type": "output_text", "text": m.content, "annotations": [] }],
+                        }));
+                    }
+                    items.extend(calls.iter().map(|call| {
                         serde_json::json!({
                             "type": "function_call",
                             "call_id": call.id,
                             "name": call.name,
                             "arguments": call.arguments,
                         })
-                    })
-                    .collect::<Vec<_>>(),
+                    }));
+                    items
+                }
                 None => vec![serde_json::json!({
                     "role": "assistant",
                     "content": [{ "type": "output_text", "text": m.content, "annotations": [] }],
@@ -2361,9 +2409,13 @@ fn codex_usage(data: &str) -> Option<Usage> {
         cache_read_tokens: u
             .get("input_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
-            .and_then(serde_json::Value::as_u64)
+            .and_then(json_u64)
             .unwrap_or(0),
-        cache_creation_tokens: 0,
+        cache_creation_tokens: u
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cache_write_tokens"))
+            .and_then(json_u64)
+            .unwrap_or(0),
         cost: None,
     })
 }
@@ -3133,6 +3185,36 @@ mod tests {
     }
 
     #[test]
+    fn merging_usage_never_reduces_counts_within_a_request() {
+        let mut slot = Some(Usage {
+            prompt_tokens: 120,
+            completion_tokens: 40,
+            total_tokens: 160,
+            cache_read_tokens: 100,
+            cache_creation_tokens: 5,
+            cost: None,
+        });
+        merge_usage(
+            &mut slot,
+            Usage {
+                prompt_tokens: 80,
+                completion_tokens: 20,
+                total_tokens: 100,
+                cache_read_tokens: 60,
+                cache_creation_tokens: 2,
+                cost: Some(0.01),
+            },
+        );
+        let u = slot.unwrap();
+        assert_eq!(u.prompt_tokens, 120);
+        assert_eq!(u.completion_tokens, 40);
+        assert_eq!(u.total_tokens, 160);
+        assert_eq!(u.cache_read_tokens, 100);
+        assert_eq!(u.cache_creation_tokens, 5);
+        assert_eq!(u.cost, Some(0.01));
+    }
+
+    #[test]
     fn parses_usage_cache_tokens_both_styles() {
         // OpenRouter/OpenAI style: cache reads and writes nested under
         // prompt_tokens_details, alongside the provider's exact request cost.
@@ -3188,11 +3270,12 @@ mod tests {
     }
 
     #[test]
-    fn codex_usage_reads_cached_input() {
-        let data = r#"{"response":{"usage":{"input_tokens":50,"output_tokens":5,"input_tokens_details":{"cached_tokens":30}}}}"#;
+    fn codex_usage_reads_cached_input_and_cache_writes() {
+        let data = r#"{"response":{"usage":{"input_tokens":50,"output_tokens":5,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":12}}}}"#;
         let u = codex_usage(data).unwrap();
         assert_eq!(u.prompt_tokens, 50);
         assert_eq!(u.cache_read_tokens, 30);
+        assert_eq!(u.cache_creation_tokens, 12);
         assert_eq!(u.cache_hit_rate(), Some(0.6));
     }
 
@@ -3233,10 +3316,11 @@ mod tests {
     }
 
     #[test]
-    fn codex_input_emits_every_parallel_function_call_before_outputs() {
+    fn codex_input_preserves_assistant_content_with_parallel_function_calls() {
         let messages = vec![
             ChatMessage {
                 role: "assistant".into(),
+                content: "I will check both sources.".into(),
                 tool_calls: Some(vec![
                     ToolCall {
                         id: "call_a".into(),
@@ -3266,15 +3350,17 @@ mod tests {
         ];
 
         let input = codex_input(&messages);
-        assert_eq!(input.len(), 4);
-        assert_eq!(input[0]["type"], "function_call");
-        assert_eq!(input[0]["call_id"], "call_a");
+        assert_eq!(input.len(), 5);
+        assert_eq!(input[0]["role"], "assistant");
+        assert_eq!(input[0]["content"][0]["text"], "I will check both sources.");
         assert_eq!(input[1]["type"], "function_call");
-        assert_eq!(input[1]["call_id"], "call_b");
-        assert_eq!(input[2]["type"], "function_call_output");
-        assert_eq!(input[2]["call_id"], "call_a");
+        assert_eq!(input[1]["call_id"], "call_a");
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["call_id"], "call_b");
         assert_eq!(input[3]["type"], "function_call_output");
-        assert_eq!(input[3]["call_id"], "call_b");
+        assert_eq!(input[3]["call_id"], "call_a");
+        assert_eq!(input[4]["type"], "function_call_output");
+        assert_eq!(input[4]["call_id"], "call_b");
     }
 
     #[test]

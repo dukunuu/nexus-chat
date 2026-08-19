@@ -790,7 +790,7 @@ impl ToolBox {
                     "content": { "type": "string", "description": "complete script content for write" },
                     "offset": { "type": "integer" },
                     "limit": { "type": "integer", "description": "maximum 200 lines" },
-                    "edits": { "type": "array", "items": { "type": "object", "properties": { "hash": { "type": "string" }, "new": { "type": ["string", "null"] } }, "required": ["hash"] } },
+                    "edits": { "type": "array", "items": { "type": "object", "properties": { "hash": { "type": "string", "description": "hash from the latest read" }, "line": { "type": "integer", "description": "optional 1-based line number to disambiguate repeated lines" }, "new": { "type": ["string", "null"] } }, "required": ["hash"] } },
                     "code": { "type": "string", "description": "Python source for python" },
                     "name": { "type": "string", "description": "confined .py filename for python" },
                     "temporary": { "type": "boolean", "description": "delete the script after python runs (default false)" },
@@ -877,7 +877,7 @@ impl ToolBox {
         if self.apps.is_some() {
             defs.push(tool_def(
                 "app",
-                "Build and manage locally served web apps. action=read returns hash-lines for safe editing and action=search greps non-ignored files; action=write replaces complete content, action=patch applies hash-line edits with stale-hash rejection, and action=diff previews a complete candidate without writing; action=list shows conversation/space images and action=copy_file/copy_images bring user data into an app (images go to _images/, text files to the app KV store); action=init scaffolds a React starter (framework astro = Astro + React islands, vite-react = Vite SPA; default astro) and action=build compiles the app — it installs missing deps from package.json, runs the framework's static build with --base=/<app-uuid>/ (so asset links resolve under the app's URL), and serves the result from dist/ (build errors come back here for you to fix; requires node/npm on this machine).",
+                "Build and manage locally served web apps. action=read returns stable hash-lines for safe editing and action=search greps non-ignored files; action=write replaces complete content, action=patch applies hash-line edits (include the line number when identical lines repeat), and action=diff previews a complete candidate without writing; action=list shows conversation/space images and action=copy_file/copy_images bring user data into an app (images go to _images/, text files to the app KV store); action=init scaffolds a React starter (framework astro = Astro + React islands, vite-react = Vite SPA; default astro) and action=build compiles the app — it installs missing deps from package.json, runs the framework's static build with --base=/<app-uuid>/ (so asset links resolve under the app's URL), and serves the result from dist/ (build errors come back here for you to fix; requires node/npm on this machine).",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -886,7 +886,7 @@ impl ToolBox {
                         "path": { "type": "string", "description": "file path within the app" },
                         "pattern": { "type": "string", "description": "case-insensitive search text for search" },
                         "content": { "type": "string", "description": "complete content for write or diff" },
-                        "edits": { "type": "array", "description": "hash-line edits for patch", "items": { "type": "object", "properties": { "hash": { "type": "string" }, "new": { "type": ["string", "null"] } }, "required": ["hash"] } },
+                        "edits": { "type": "array", "description": "hash-line edits from the latest read; hashes remain valid when earlier lines move, and include line when identical lines repeat", "items": { "type": "object", "properties": { "hash": { "type": "string", "description": "hash from the latest read" }, "line": { "type": "integer", "description": "optional 1-based line number to disambiguate repeated lines" }, "new": { "type": ["string", "null"] } }, "required": ["hash"] } },
                         "file_name": { "type": "string", "description": "imported file name for copy_file" },
                         "image_ids": { "type": "array", "items": { "type": "string" }, "description": "image IDs for copy_images" },
                         "framework": { "type": "string", "enum": ["astro", "vite-react"], "description": "starter template for init (default astro)" },
@@ -2232,15 +2232,19 @@ must land in dist/ for the app server to serve it"
                         .to_string()
                 };
                 let (app, path) = (field("app"), field("path"));
-                let edits: Vec<(String, Option<String>)> = v
+                let edits: Vec<(String, Option<usize>, Option<String>)> = v
                     .get("edits")
                     .and_then(|e| e.as_array())
                     .map(|arr| {
                         arr.iter()
                             .filter_map(|e| {
                                 let hash = e.get("hash")?.as_str()?.to_string();
+                                let line = e
+                                    .get("line")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .and_then(|n| usize::try_from(n).ok());
                                 let new = e.get("new").and_then(|n| n.as_str()).map(str::to_string);
-                                Some((hash, new))
+                                Some((hash, line, new))
                             })
                             .collect()
                     })
@@ -3208,15 +3212,19 @@ must land in dist/ for the app server to serve it"
                     .and_then(|x| x.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let edits: Vec<(String, Option<String>)> = v
+                let edits: Vec<(String, Option<usize>, Option<String>)> = v
                     .get("edits")
                     .and_then(|e| e.as_array())
                     .map(|arr| {
                         arr.iter()
                             .filter_map(|e| {
                                 let hash = e.get("hash")?.as_str()?.to_string();
+                                let line = e
+                                    .get("line")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .and_then(|n| usize::try_from(n).ok());
                                 let new = e.get("new").and_then(|n| n.as_str()).map(str::to_string);
-                                Some((hash, new))
+                                Some((hash, line, new))
                             })
                             .collect()
                     })
@@ -3507,11 +3515,26 @@ fn number_lines(slice: &[&str], start: usize) -> String {
         .join("\n")
 }
 
-/// sha256("{1-based line number}:{content}") truncated to 8 hex chars —
-/// stable for a given (position, content) pair, so a hash `edit_file` gets
-/// back always resolves to the same line it was read from, and a line that
-/// moved or changed since then simply won't match anything.
-fn line_hash(line_no: usize, content: &str) -> String {
+/// sha256(content) truncated to 8 hex chars. Unlike a line-number hash,
+/// this remains valid when an earlier edit inserts or removes lines. Repeated
+/// identical lines are rejected as ambiguous unless the optional line hint is
+/// supplied with the edit.
+fn line_hash(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    hasher
+        .finalize()
+        .iter()
+        .take(4)
+        .fold(String::new(), |mut h, b| {
+            let _ = write!(h, "{b:02x}");
+            h
+        })
+}
+
+/// Hash format used by older reads. Keep accepting it for a running session
+/// after the stable content-hash format is deployed.
+fn legacy_line_hash(line_no: usize, content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(format!("{line_no}:{content}"));
     hasher
@@ -3532,23 +3555,23 @@ fn number_lines_with_hash(slice: &[&str], start: usize) -> String {
         .enumerate()
         .map(|(i, l)| {
             let n = start + i + 1;
-            format!("{:>5}:{}\t{l}", n, line_hash(n, l))
+            format!("{:>5}:{}\t{l}", n, line_hash(l))
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Apply hashline edits to `text`: each `(hash, new)` targets the line whose
-/// current (1-based position, content) hashes to it (see `line_hash`) —
-/// `new: None` deletes that line, `Some(t)` replaces it with `t`'s lines
-/// (0, 1, or many — this is also how you insert: include the original
-/// line's content in `t` alongside what's being added). Hashes are resolved
-/// against `text` as given, so a stale hash fails loudly instead of
-/// silently landing on the wrong line. Returns the new file content plus a
-/// git-diff-style summary of what changed, in the order edits were given.
+/// Apply hashline edits to `text`: each `(hash, line_hint, new)` targets the
+/// matching line content (see `line_hash`). `new: None` deletes that line;
+/// `Some(t)` replaces it with `t`'s lines (0, 1, or many — this is also how
+/// you insert: include the original line's content in `t`). The optional
+/// line hint disambiguates repeated identical lines. Hashes are resolved
+/// against the current file and never silently land on a different line.
+/// Returns the new file content plus a git-diff-style summary of what changed,
+/// in the order edits were given.
 fn apply_hashline_edits(
     text: &str,
-    edits: &[(String, Option<String>)],
+    edits: &[(String, Option<usize>, Option<String>)],
 ) -> Result<(String, String), String> {
     if edits.is_empty() {
         return Err("edits must not be empty".to_string());
@@ -3556,14 +3579,29 @@ fn apply_hashline_edits(
     let lines: Vec<&str> = text.lines().collect();
     let mut resolved: Vec<(usize, Option<String>)> = Vec::new();
     let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for (hash, new) in edits {
-        let idx = lines
+    for (hash, line_hint, new) in edits {
+        let matches: Vec<usize> = lines
             .iter()
             .enumerate()
-            .position(|(i, l)| line_hash(i + 1, l) == *hash)
-            .ok_or_else(|| {
-                format!("hash {hash} not found — read the file again, it may have changed")
-            })?;
+            .filter(|(i, l)| line_hash(l) == *hash || legacy_line_hash(i + 1, l) == *hash)
+            .map(|(i, _)| i)
+            .collect();
+        let idx = match matches.as_slice() {
+            [] => {
+                return Err(format!(
+                    "hash {hash} not found — read the file again, it may have changed"
+                ));
+            }
+            [idx] => *idx,
+            _ => line_hint
+                .and_then(|line| line.checked_sub(1))
+                .filter(|idx| matches.contains(idx))
+                .ok_or_else(|| {
+                    format!(
+                        "hash {hash} matches multiple lines — include the 1-based line from the latest read"
+                    )
+                })?,
+        };
         if !seen.insert(idx) {
             return Err(format!(
                 "hash {hash} targets a line already edited by another entry in this call"
@@ -5721,7 +5759,7 @@ mod tests {
             )
             .await;
         assert!(result.contains("echo hi"), "{result}");
-        let hash = line_hash(1, "echo hi");
+        let hash = line_hash("echo hi");
         let (result, _) = tb
             .run(
                 "script_files",
@@ -5899,8 +5937,8 @@ mod tests {
         let (result, _) = tb
             .run("read_app_file", r#"{"app":"d","path":"i.html"}"#)
             .await;
-        let h1 = line_hash(1, "alpha");
-        let h2 = line_hash(2, "beta");
+        let h1 = line_hash("alpha");
+        let h2 = line_hash("beta");
         assert!(result.contains(&format!("    1:{h1}\talpha")), "{result}");
         assert!(result.contains(&format!("    2:{h2}\tbeta")), "{result}");
         let (result, _) = tb
@@ -5913,6 +5951,19 @@ mod tests {
             .await;
         assert!(result.contains("- beta"), "{result}");
         assert!(result.contains("+ gamma"), "{result}");
+    }
+
+    #[test]
+    fn hashline_edits_survive_line_shifts_and_support_duplicate_hints() {
+        let hash = line_hash("needle");
+        let edits = vec![(hash, None, Some("changed".to_string()))];
+        let (out, _) = apply_hashline_edits("inserted\nneedle", &edits).unwrap();
+        assert_eq!(out, "inserted\nchanged");
+
+        let hash = line_hash("same");
+        let edits = vec![(hash, Some(3), Some("third".to_string()))];
+        let (out, _) = apply_hashline_edits("same\nother\nsame", &edits).unwrap();
+        assert_eq!(out, "same\nother\nthird");
     }
 
     #[tokio::test]
@@ -6671,7 +6722,7 @@ mod tests {
             .await;
         assert!(result.contains("wrote deck/js/a.js"), "{result}");
 
-        let h = line_hash(1, "<h1>Hello</h1>");
+        let h = line_hash("<h1>Hello</h1>");
         let (result, _) = tb
             .run(
                 "edit_file",
@@ -6711,7 +6762,7 @@ mod tests {
             )
             .await;
         assert!(result.contains("<h1>Hello</h1>"), "{result}");
-        let hash = line_hash(1, "<h1>Hello</h1>");
+        let hash = line_hash("<h1>Hello</h1>");
         let (result, _) = tb
             .run(
                 "app",
@@ -6802,7 +6853,7 @@ mod tests {
         assert!(result.contains("not found"), "{result}");
 
         // Two edits resolving to the same line in one call.
-        let h = line_hash(1, "x y x");
+        let h = line_hash("x y x");
         let args = format!(
             r#"{{"app":"a","path":"f.txt","edits":[{{"hash":"{h}","new":"a"}},{{"hash":"{h}","new":"b"}}]}}"#
         );
@@ -6819,11 +6870,11 @@ mod tests {
                 r#"{"app":"a","path":"f.txt","content":"one\ntwo\nthree"}"#,
             )
             .await;
-        let h = line_hash(2, "two");
+        let h = line_hash("two");
         // Delete "two" and insert an extra line after "one" in the same call.
         let args = format!(
             r#"{{"app":"a","path":"f.txt","edits":[{{"hash":"{}","new":"one\ninserted"}},{{"hash":"{h}"}}]}}"#,
-            line_hash(1, "one"),
+            line_hash("one"),
         );
         let (result, _) = tb.run("edit_file", &args).await;
         assert!(result.contains("edited a/f.txt"), "{result}");
