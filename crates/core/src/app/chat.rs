@@ -927,7 +927,7 @@ impl App {
         owner: Option<usize>,
     ) {
         let Some(selected) = selected else {
-            self.push_status("select a [n] citation, then press x".to_string());
+            self.push_status("select a [n] citation first".to_string());
             return;
         };
         let Some(n) = crate::citations::citation_number_in(&selected) else {

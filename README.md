@@ -197,11 +197,12 @@ Type `/` in the composer for autocomplete. Aliases in parentheses.
 | `Ctrl+R` | expand/collapse reasoning traces |
 | `Ctrl+T` | expand/collapse tool-call detail blocks |
 | `Ctrl+G` | context breakdown (system/memory/skills/conversation) |
-| `Ctrl+N` | toggle incognito |
+| `Ctrl+N` | start a new regular session |
+| `Ctrl+Shift+N` | start a new incognito session |
 | `Ctrl+O` | open a session-link message under the selection |
 | `Ctrl+↑` | live research activity view (Ctrl+X there stops the job) |
 | `PageUp` / `PageDown` | scroll |
-| mouse drag | select + copy; `p` / `x` pin / discard the cited source under the selection |
+| mouse drag | select + copy |
 
 While a research survey or plan approval is pending, Enter in that session
 answers the gate; a reply with edits is folded in once by the approval agent.

@@ -320,6 +320,16 @@ fn edit_in_external_editor(terminal: &mut DefaultTerminal, path: &std::path::Pat
     }
 }
 
+fn open_new_session(app: &mut AppView, incognito: bool) -> Result<()> {
+    app.clear_input();
+    app.sel.clear();
+    if app.incognito != incognito {
+        app.toggle_incognito()?;
+    }
+    app.new_session();
+    Ok(())
+}
+
 // Long by design (key dispatch).
 #[allow(clippy::too_many_lines)]
 fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
@@ -406,27 +416,13 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
             app.show_tool_detail = !app.show_tool_detail;
             app.pin_viewport_top = true;
         }
-        // Ctrl+N toggles incognito mode (no persistence, no apps).
-        KeyCode::Char('n') if ctrl => app.toggle_incognito()?,
+        // Ctrl+N starts a regular session; Ctrl+Shift+N starts an incognito
+        // session. Both shortcuts also switch modes when needed.
+        KeyCode::Char('n' | 'N') if ctrl && shift => open_new_session(app, true)?,
+        KeyCode::Char('n' | 'N') if ctrl => open_new_session(app, false)?,
         // Ctrl+O navigates a session link message under the current selection.
         KeyCode::Char('o') if ctrl && app.sel.selected_text().is_some() => {
             app.open_session_link();
-        }
-        // 'p' pins, 'x' discards the [n] source under the current selection.
-        // Both are plain letters guarded by an active mouse selection, so
-        // composer typing is untouched (the guard fires only while a
-        // selection exists).
-        KeyCode::Char('p') if !ctrl && !shift && app.sel.selected_text().is_some() => {
-            let selected = app.sel.selected_text();
-            let owner = app.sel.owner_at_selection_start();
-            app.core
-                .flag_source_under_selection(Some("pinned"), selected, owner);
-        }
-        KeyCode::Char('x') if !ctrl && !shift && app.sel.selected_text().is_some() => {
-            let selected = app.sel.selected_text();
-            let owner = app.sel.owner_at_selection_start();
-            app.core
-                .flag_source_under_selection(Some("discarded"), selected, owner);
         }
         // Ctrl+↑ opens the live research-activity view (per-searcher
         // reasoning/tool calls) — only while a research job is running.
