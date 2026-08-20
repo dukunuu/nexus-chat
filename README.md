@@ -142,8 +142,9 @@ key is enough; models are fetched from the catalogs.
 - **Watches** (`/watch`): standing research jobs that re-run daily
 - **Spaces**: per-project context (instructions, memory, imported files,
   scripts, apps) with embeddings-backed semantic file search
-- **Skills**: reusable instruction packs (SKILL.md) with sandboxed Python
-  virtualenvs, installable from chat
+- **Skills**: Agent Skills-compatible instruction packs (`SKILL.md`) with
+  progressive disclosure, project/user/global discovery, bundled resources,
+  sandboxed Python virtualenvs, and chat installation
 - **Tools for the model**: nine consolidated tools — `search` (web/academic/
   discussion), `fetch_url` (with PDF/YouTube extraction), `batch` (multi-op
   calls), `research_lookup`, `files`, `app` (build & edit web apps served on
@@ -173,7 +174,7 @@ Type `/` in the composer for autocomplete. Aliases in parentheses.
 | `/swarm` (`panel`) | multi-persona roundtable |
 | `/files` (`images`, `scripts`, …) | browse space files / images / scripts |
 | `/apps` (`webapps`) | view model-created web apps |
-| `/skills` | manage skills |
+| `/skills` | manage skills (app + project/user/global Agent Skills) |
 | `/usage` (`analytics`, `costs`) | token/cache/cost analytics by backend & model (←/→ for 24h/7d/30d/all windows) |
 | `/compact` (`summarize`) | summarize old messages into a digest |
 | `/config` (`settings`, `stats`) | settings, footer toggles, sampling params |
@@ -244,7 +245,12 @@ crates/tui/         nexus-chat — the `nexus` binary
 ```
 
 Data lives under the XDG data dir: `spaces/<space>/` holds the per-space
-SQLite db, files, scripts, apps, and generated media.
+SQLite db, files, scripts, apps, and generated media. Skills are discovered
+from the app-managed `skills/` directory plus project `.agents/skills` (and
+Claude/Codex/pi/OpenCode adapter roots), then user roots such as
+`~/.agents/skills`, `~/.codex/skills`, and `~/.pi/agent/skills`. Earlier,
+more-specific roots win duplicate names; only metadata is loaded until a
+skill is explicitly activated.
 
 ## Development
 

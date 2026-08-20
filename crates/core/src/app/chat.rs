@@ -1024,8 +1024,10 @@ impl App {
         if self.skills.is_empty() {
             return None;
         }
-        let mut s = "## Skills\nYou have skills available. To use one, call the `skills` tool \
-                     with action=load and its name; the full instructions will be returned.\n"
+        let mut s = "## Skills\nYou have skills available. Their descriptions are metadata only: when a skill \
+                     matches the user's task, call the `skills` tool with action=load and its name before \
+                     acting; the full instructions will be returned. Load bundled resources by their relative \
+                     path only, and do not load every skill spec up front.\n"
             .to_string();
         for skill in &self.skills {
             let _ = writeln!(s, "- {}: {}", skill.name, skill.description);

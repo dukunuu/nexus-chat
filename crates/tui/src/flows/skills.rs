@@ -33,8 +33,17 @@ impl AppView {
     }
 
     pub fn start_skill_remove(&mut self) {
-        if self.core.skills.get(self.skills_selected).is_some() {
+        let Some(skill) = self.core.skills.get(self.skills_selected) else {
+            return;
+        };
+        let name = skill.name.clone();
+        let managed = self.core.skill_is_app_managed(skill);
+        if managed {
             self.skills_mode = SkillsMode::ConfirmRemove;
+        } else {
+            self.push_status(format!(
+                "cannot remove global skill '{name}' here — edit it with Ctrl+E"
+            ));
         }
     }
 
@@ -47,11 +56,21 @@ impl AppView {
     }
 
     pub fn confirm_skill_remove(&mut self) {
-        if let Some(skill) = self.core.skills.get(self.skills_selected) {
-            let name = skill.name.clone();
-            let _ = std::fs::remove_dir_all(&skill.dir);
-            self.reload_skills();
-            self.push_status(format!("removed skill: {name}"));
+        let selected = self.core.skills.get(self.skills_selected).map(|skill| {
+            (
+                skill.name.clone(),
+                skill.dir.clone(),
+                self.core.skill_is_app_managed(skill),
+            )
+        });
+        if let Some((name, dir, managed)) = selected {
+            if managed {
+                let _ = std::fs::remove_dir_all(dir);
+                self.reload_skills();
+                self.push_status(format!("removed skill: {name}"));
+            } else {
+                self.push_status(format!("cannot remove global skill: {name}"));
+            }
         }
         self.skills_mode = SkillsMode::Browse;
     }

@@ -1,28 +1,39 @@
 ---
 name: find-skills
-description: Find and install new skills from GitHub when the user asks for a capability you don't have.
+description: Find and install Agent Skills when a task needs a specialized capability that is not already available.
 ---
-Skills are directories on GitHub containing a `SKILL.md` (frontmatter with
-`name` and `description`, then instructions). You can search for them and
-install them yourself.
+# Find Skills
 
-1. Search with the `search` tool using `mode=web`. Good queries: `github SKILL.md <topic>`
-   or `github "claude skill" <topic>`. Known collections worth checking first:
-   `anthropics/skills` (one skill per top-level directory, e.g.
-   `anthropics/skills/pdf`).
-2. Turn a result URL like `https://github.com/<owner>/<repo>/tree/<branch>/<path>`
-   into the install source `<owner>/<repo>/<path>` (drop `tree/<branch>`; a
-   skill at the repo root is just `<owner>/<repo>`).
-3. Tell the user which skill you found and what it does, then call
-   `skills` with `action=install` and that source.
-4. On success the skill is immediately usable: load it with the `skills`
-   tool using `action=load` and its name.
+Skills follow the Agent Skills convention: each skill is a directory containing
+`SKILL.md` with YAML frontmatter (`name`, `description`) and an instruction
+body. Nexus discovers app, project, and user/global skill roots and loads only
+metadata at startup. Do not assume a skill is usable until its `SKILL.md` has
+been loaded successfully.
 
-Installed skills may ship scripts — run them with the `scripts` tool using
-`action=run` (`skill=<name>`, `path=<script>`).
-Python scripts get the skill's own virtualenv (its `requirements.txt` installs
-automatically); add extra packages with `scripts(action=install, skill, packages)`.
+When the user's request needs a specialized capability that is not already
+covered by an available skill:
 
-If the user names a repo or source directly, skip the search and install it.
-If installation fails with "no SKILL.md", the path doesn't point at a skill
-directory — check the repo layout and try the correct subdirectory.
+1. Search with the `search` tool using `mode=web`. Useful queries include
+   `github SKILL.md <topic>` and `github "agent skills" <topic>`. Check
+   established collections such as `anthropics/skills` first.
+2. Convert a result URL like
+   `https://github.com/<owner>/<repo>/tree/<branch>/<path>` to the install
+   source `<owner>/<repo>/<path>` (drop `tree/<branch>`). A root skill uses
+   `<owner>/<repo>`.
+3. Tell the user which skill you found and what it does, then call `skills`
+   with `action=install` and that source.
+4. After a successful install, call `skills` with `action=load` and the skill
+   name before using it.
+
+If the user names a repository or source directly, skip the search and install
+it. If installation fails with `no SKILL.md`, the source points at a repository
+or parent directory rather than a skill directory; inspect the repository
+layout and retry with the exact skill path.
+
+Skills can include resource files and scripts. Load a specific resource with
+`skills(action=load, name=<skill>, file=<relative-path>)`; run a bundled script
+only with `scripts(action=run, skill=<skill>, path=<relative-path>)`. Python
+scripts use the skill's own virtual environment, and packages belong in that
+skill environment via `scripts(action=install, skill=<skill>, packages=[...])`.
+Keep all paths relative to the skill directory and never invent missing
+resources.

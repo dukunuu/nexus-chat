@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::provider::ToolDef;
 use crate::provider::openrouter::{OpenRouter, normalize_video_params};
-use crate::skills::{load_skills, skill_body};
+use crate::skills::{load_skills_from_dirs, resolve_skill_dir, resolve_skill_file, skill_body};
 
 const MAX_TOOL_RESULT_CHARS: usize = 8_000;
 /// Maximum sub-operations in one `batch` call — bounds execution time and
@@ -25,7 +25,11 @@ const MAX_BATCH_CALLS: usize = 8;
 const MAX_BATCH_RESULT_CHARS: usize = MAX_TOOL_RESULT_CHARS * 4;
 
 pub struct ToolBox {
+    /// App-managed destination for newly created or downloaded skills.
     pub skills_dir: PathBuf,
+    /// Skill roots in precedence order. These include the app-managed root and
+    /// read-only project/user Agent Skills roots discovered at startup.
+    skill_dirs: Vec<PathBuf>,
     /// Base URL of a `SearXNG` instance (e.g. `http://localhost:8080`), no
     /// trailing slash. Free and self-hosted — no API key needed.
     pub searxng_url: Option<String>,
@@ -527,6 +531,7 @@ impl ToolBox {
         apps: Option<AppsCtx>,
     ) -> Self {
         Self {
+            skill_dirs: vec![skills_dir.clone()],
             skills_dir,
             searxng_url,
             langsearch_key,
@@ -547,6 +552,14 @@ impl ToolBox {
             session_id: String::new(),
             video_gen_backend: None,
         }
+    }
+
+    /// Replace the skill roots used for reads while retaining `skills_dir` as
+    /// the app-managed install/create destination.
+    #[must_use]
+    pub fn with_skill_dirs(mut self, skill_dirs: Vec<PathBuf>) -> Self {
+        self.skill_dirs = skill_dirs;
+        self
     }
 
     /// A toolbox restricted to `search`/`fetch_url` — for deep-research
@@ -757,14 +770,14 @@ impl ToolBox {
                 "required": ["calls"]
             }),
         ));
-        let has_skills = !load_skills(&self.skills_dir).is_empty();
+        let has_skills = !load_skills_from_dirs(&self.skill_dirs).is_empty();
         let mut skills_actions = vec!["create", "install"];
         if has_skills {
             skills_actions.insert(0, "load");
         }
         defs.push(tool_def(
             "skills",
-            "Manage reusable skills. action=load returns a skill's full instructions (SKILL.md by default, or a specific file within it); action=create makes a new skill from name/description/body; action=install fetches one from GitHub.",
+            "Manage Agent Skills discovered from app, project, and user/global roots. action=load returns a skill's full instructions (SKILL.md by default, or a specific relative file); action=create and action=install write only to the app-managed root.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1053,7 +1066,7 @@ impl ToolBox {
                     .filter(|f| !f.is_empty())
                     .unwrap_or("SKILL.md");
                 let status = format!("Reading {skill_name}/{file}…");
-                let result = match resolve_confined(&self.skills_dir, &skill_name, file) {
+                let result = match resolve_skill_file(&self.skill_dirs, &skill_name, file) {
                     Err(e) => e,
                     Ok(path) if !path.is_file() => format!("no such file: {skill_name}/{file}"),
                     Ok(path) => {
@@ -1118,12 +1131,13 @@ impl ToolBox {
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 let status = format!("Creating skill {name}…");
-                let result = if name.is_empty() {
-                    "name must not be empty".to_string()
-                } else if name.contains('/') || name.contains('\\') || name.contains("..") {
-                    "name must not contain /, \\, or ..".to_string()
-                } else if description.is_empty() {
-                    "description must not be empty".to_string()
+                let result = if !crate::skills::valid_skill_name(&name) {
+                    "name must be 1-64 lowercase letters, digits, and single hyphens".to_string()
+                } else if description.is_empty()
+                    || description.chars().count() > 1_024
+                    || description.contains(['\n', '\r'])
+                {
+                    "description must be 1-1024 characters on one line".to_string()
                 } else {
                     let dir = self.skills_dir.join(&name);
                     let existed = dir.exists();
@@ -1248,13 +1262,15 @@ impl ToolBox {
                         }
                     }
                 } else {
-                    match resolve_confined(&self.skills_dir, &skill, &script) {
-                        Err(e) => e,
-                        Ok(file) if !file.is_file() => {
+                    match (
+                        resolve_skill_dir(&self.skill_dirs, &skill),
+                        resolve_skill_file(&self.skill_dirs, &skill, &script),
+                    ) {
+                        (Err(e), _) | (_, Err(e)) => e,
+                        (Ok(_dir), Ok(file)) if !file.is_file() => {
                             format!("no such script: {skill}/{script}")
                         }
-                        Ok(file) => {
-                            let dir = self.skills_dir.join(&skill);
+                        (Ok(dir), Ok(file)) => {
                             let ext = file
                                 .extension()
                                 .and_then(|e| e.to_str())
@@ -1317,11 +1333,12 @@ impl ToolBox {
                         "pass either skill or app, not both".to_string()
                     }
                     Ok(()) if !skill.is_empty() => {
-                        match resolve_confined(&self.skills_dir, &skill, "SKILL.md") {
-                            Err(e) => e,
-                            Ok(md) if !md.is_file() => format!("unknown skill: {skill}"),
-                            Ok(_) => {
-                                let dir = self.skills_dir.join(&skill);
+                        match resolve_skill_dir(&self.skill_dirs, &skill) {
+                            Err(_) => format!("unknown skill: {skill}"),
+                            Ok(dir) if !dir.join("SKILL.md").is_file() => {
+                                format!("unknown skill: {skill}")
+                            }
+                            Ok(dir) => {
                                 let run = async {
                                     let py = ensure_venv(&dir).await?;
                                     let mut cmd: Vec<std::ffi::OsString> =
@@ -3797,28 +3814,6 @@ fn grep_dir(
             }
         }
     }
-}
-
-/// Resolve `<root>/<top>/<rel>`, rejecting anything that could escape `root`
-/// (absolute paths, `..`/`.` segments, backslashes). Shared by the app and
-/// skill-script tools.
-fn resolve_confined(root: &std::path::Path, top: &str, rel: &str) -> Result<PathBuf, String> {
-    if top.is_empty() || top.contains(['/', '\\']) || top == "." || top == ".." {
-        return Err(format!("invalid name: {top:?}"));
-    }
-    if rel.is_empty() || rel.starts_with('/') {
-        return Err(format!("path must be relative and non-empty: {rel:?}"));
-    }
-    for seg in rel.split('/') {
-        if seg.is_empty() || seg == "." || seg == ".." || seg.contains('\\') {
-            return Err(format!("invalid path segment in {rel:?}"));
-        }
-    }
-    let mut p = root.join(top);
-    for seg in rel.split('/') {
-        p.push(seg);
-    }
-    Ok(p)
 }
 
 /// Run a command with a timeout, kill-on-drop, and no shell. Returns the

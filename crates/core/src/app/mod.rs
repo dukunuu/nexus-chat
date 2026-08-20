@@ -774,7 +774,7 @@ pub struct App {
     /// the TUI can mark the right row while the job is still in flight.
     pub compacting_session_id: Option<String>,
 
-    /// Installed skills (name/description only — bodies are read from disk on
+    /// Discovered skills (name/description only — bodies are read from disk on
     /// invocation, so this list is cheap and reloaded whenever it changes).
     pub skills: Vec<crate::skills::Skill>,
     /// A skill armed by `/<skill-name>`, injected into the next message only.
@@ -983,28 +983,32 @@ impl App {
         let video_gen_model =
             default_model_id(OpenRouter::default_video_gen_model, "google/veo-3.1");
         let skills_dir = crate::skills::skills_dir(&space.root);
-        let skills = crate::skills::load_skills(&skills_dir);
+        let skill_dirs = crate::skills::app_skill_roots(&space.root);
+        let skills = crate::skills::load_skills_from_dirs(&skill_dirs);
         let (chat_event_tx, chat_event_rx) = mpsc::unbounded_channel();
         // Built with search disabled; `load_settings()` below reads the
         // persisted config (if any) and rebuilds this via `refresh_toolbox`.
-        let toolbox = std::sync::Arc::new(crate::tools::ToolBox::new(
-            skills_dir,
-            None,
-            None,
-            "auto".to_string(),
-            Vec::new(),
-            Some(space.db_path()),
-            Some(crate::tools::FilesCtx {
-                db_path: space.db_path(),
-                space_id: active_space.id.clone(),
-                embedder: (!embedding_model.is_empty())
-                    .then(|| backends.resolve(&embedding_model))
-                    .flatten(),
-            }),
-            // No apps ctx yet — the app server starts after construction;
-            // main() calls refresh_toolbox() once it's up.
-            None,
-        ));
+        let toolbox = std::sync::Arc::new(
+            crate::tools::ToolBox::new(
+                skills_dir,
+                None,
+                None,
+                "auto".to_string(),
+                Vec::new(),
+                Some(space.db_path()),
+                Some(crate::tools::FilesCtx {
+                    db_path: space.db_path(),
+                    space_id: active_space.id.clone(),
+                    embedder: (!embedding_model.is_empty())
+                        .then(|| backends.resolve(&embedding_model))
+                        .flatten(),
+                }),
+                // No apps ctx yet — the app server starts after construction;
+                // main() calls refresh_toolbox() once it's up.
+                None,
+            )
+            .with_skill_dirs(skill_dirs),
+        );
         let mut app = Self {
             db,
             space,
@@ -1196,10 +1200,11 @@ impl App {
             (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
         let key = (!self.langsearch_key.trim().is_empty())
             .then(|| self.langsearch_key.trim().to_string());
-        // The toolbox sits behind the `ToolExecutor` seam now, so the skills
-        // dir comes from the space layout instead of off the old toolbox.
+        // The toolbox sits behind the `ToolExecutor` seam now. It writes only
+        // to the app-managed root but reads the full Agent Skills search path.
         let skills_dir = crate::skills::skills_dir(&self.space.root);
         crate::skills::install_builtin(&skills_dir);
+        let skill_dirs = crate::skills::app_skill_roots(&self.space.root);
         let mut toolbox = crate::tools::ToolBox::new(
             skills_dir.clone(),
             url,
@@ -1234,7 +1239,8 @@ impl App {
                         .map(|s| s.id.clone())
                         .unwrap_or_default(),
                 }),
-        );
+        )
+        .with_skill_dirs(skill_dirs);
         if self.is_research_session()
             && let Some(session_id) = self.session.as_ref().map(|s| s.id.clone())
         {

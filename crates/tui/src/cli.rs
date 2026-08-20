@@ -1280,7 +1280,11 @@ async fn skills(cmd: SkillsCmd) -> Result<()> {
 
 fn skills_list() -> Result<()> {
     let space = space::Space::open()?;
-    let skills = nexus_core::skills::load_skills(&nexus_core::skills::skills_dir(&space.root));
+    let local = nexus_core::skills::skills_dir(&space.root);
+    nexus_core::skills::install_builtin(&local);
+    let skills = nexus_core::skills::load_skills_from_dirs(&nexus_core::skills::app_skill_roots(
+        &space.root,
+    ));
     if skills.is_empty() {
         out("no skills installed — `nexus skills install <owner/repo[/path]>`");
         return Ok(());
