@@ -35,6 +35,8 @@ nexus ask --model deepseek/deepseek-v3 --web "..."    # pick a model, search-gro
 cat brief.md | nexus ask "summarize this"             # prompt from stdin
 nexus ask --space new:research "..."                  # create-and-use a space
 nexus ask --json --quiet "..."                        # structured output for scripting
+nexus clip                                             # explain text currently in the OS clipboard
+nexus clip --web --copy "Explain this and list surprising facts" # browser-text shortcut
 nexus chat                                             # bare REPL, one session
 nexus research "impact of EU AI Act on startups"       # deep research (survey + plan gates)
 nexus research --approve "..."                        # skip the gates, run unattended
@@ -68,10 +70,16 @@ nexus host --tunnel                                     # reuse named tunnel, or
 nexus host --setup                                      # provision a named tunnel with CF_API_TOKEN
 ```
 
-`nexus ask`/`chat`/`research` use your most recently used model (or
+`nexus ask`/`clip`/`chat`/`research` use your most recently used model (or
 `--model`), run the same search/tool pipelines as the TUI, and save
 conversations as normal sessions — tool status and token usage go to
-stderr, answers to stdout. `research` without `--approve` parks at the
+stderr, answers to stdout. `clip` reads text through the OS clipboard
+(Wayland or X11), applies its optional instruction, and uses a built-in
+plain-language/facts prompt when no instruction is supplied. `--copy` puts
+the answer back on the clipboard. Bind a Linux global shortcut to a
+terminal command such as `foot -e nexus clip --web --copy "Explain this in
+plain language and list interesting facts"`; use the equivalent `-e` option
+for your terminal emulator. `research` without `--approve` parks at the
 survey/plan checkpoints: interactive when stdin is a terminal, an error
 otherwise (`--approve` runs unattended, like `/research!`). The read-only
 commands (`usage`, `sessions`, `spaces`, `export`, `status`, `doctor`,
