@@ -29,9 +29,8 @@ pub fn skills_dir(data_dir: &Path) -> PathBuf {
 /// The order is precedence order: an earlier root wins a duplicate name.
 pub fn app_skill_roots(data_dir: &Path) -> Vec<PathBuf> {
     let local = skills_dir(data_dir);
-    let is_default_data_dir = crate::config::project_dirs()
-        .ok()
-        .is_some_and(|dirs| dirs.data_dir() == data_dir);
+    let is_default_data_dir =
+        crate::config::project_dirs().is_ok_and(|dirs| dirs.data_dir() == data_dir);
     if is_default_data_dir {
         skill_search_paths(data_dir)
     } else {
