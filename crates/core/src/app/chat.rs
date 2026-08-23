@@ -45,6 +45,9 @@ impl App {
             self.push_composer_set(&text);
             return Ok(());
         }
+        // A new turn starts a fresh tally: the rate beside the context window
+        // describes this answer, not the previous one.
+        self.turn_cache = super::CacheTally::default();
         let Some(model) = self.current_model.clone() else {
             self.push_status("pick a model first with /model".to_string());
             self.push_composer_set(&text);
@@ -213,7 +216,54 @@ impl App {
             history.push(cm);
             index += 1;
         }
+        self.mark_cache_breakpoints(&mut history);
         history
+    }
+
+    /// Mark where the cacheable prefix ends, for models that cache only when
+    /// asked. No-op for backends that cache automatically.
+    ///
+    /// Two breakpoints, on the boundaries [`App::bump_cache_epoch`] already
+    /// keeps byte-identical for the life of a cache epoch:
+    ///
+    /// 1. the end of the leading system block (base prompt, space
+    ///    instructions, file/app/script sections, memory snapshot, skills);
+    /// 2. the last message before the live tail, so a tool loop replays over
+    ///    a cached prefix instead of resending the whole conversation.
+    ///
+    /// Placing them anywhere later would invalidate the cache on every turn,
+    /// which is the failure this exists to avoid.
+    fn mark_cache_breakpoints(&self, history: &mut [ChatMessage]) {
+        if !self.wants_explicit_cache_breakpoints() {
+            return;
+        }
+        let last_system = history
+            .iter()
+            .position(|message| message.role != "system")
+            .unwrap_or(history.len())
+            .saturating_sub(1);
+        if let Some(message) = history.get_mut(last_system) {
+            message.cache_breakpoint = true;
+        }
+        // The tail message is the live one; the prefix worth caching ends
+        // just before it. With fewer than two messages after the system
+        // block there is no separate prefix to mark.
+        if history.len() >= last_system + 3
+            && let Some(message) = history.get_mut(history.len() - 2)
+        {
+            message.cache_breakpoint = true;
+        }
+    }
+
+    /// Whether the active model caches only when the request marks a
+    /// breakpoint. `OpenAI`, Gemini and `DeepSeek`-family models cache
+    /// automatically and reject or ignore the marker; Anthropic-family models
+    /// cache nothing without it.
+    #[must_use]
+    pub fn wants_explicit_cache_breakpoints(&self) -> bool {
+        self.current_model
+            .as_deref()
+            .is_some_and(super::model_needs_cache_breakpoints)
     }
 
     /// Build history and fire one independently-routed streaming request.
@@ -391,6 +441,7 @@ impl App {
                 let has_tokens = u.prompt_tokens + u.completion_tokens > 0;
                 if has_tokens {
                     self.last_cache_rate = u.cache_hit_rate();
+                    self.turn_cache.observe(&u);
                 }
                 let Some(task) = self.chat_tasks.get_mut(&task_id) else {
                     return Ok(());
@@ -439,6 +490,7 @@ impl App {
                             merged.completion_tokens,
                             merged.cache_read_tokens,
                             merged.cache_creation_tokens,
+                            merged.prompt_convention,
                             cost,
                             cost_is_provider,
                             Some(&session_id),
@@ -1191,6 +1243,7 @@ impl App {
             tool_calls: None,
             tool_call_id: None,
             images: urls,
+            cache_breakpoint: false,
         })
     }
 
@@ -1313,6 +1366,7 @@ fn append_tool_call_history(
         tool_calls: Some(calls),
         tool_call_id: None,
         images: Vec::new(),
+        cache_breakpoint: false,
     });
     for row in rows {
         let call = row.call;
@@ -1335,6 +1389,7 @@ fn append_tool_call_history(
             tool_calls: None,
             tool_call_id: Some(call.id),
             images: Vec::new(),
+            cache_breakpoint: false,
         });
         if let Some(images) = images {
             history.push(ChatMessage {
@@ -1344,6 +1399,7 @@ fn append_tool_call_history(
                 tool_calls: None,
                 tool_call_id: None,
                 images: images.urls,
+                cache_breakpoint: false,
             });
         }
     }

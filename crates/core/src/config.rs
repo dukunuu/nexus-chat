@@ -70,6 +70,27 @@ pub struct SavedCreds {
     pub host_token: Option<String>,
 }
 
+/// Write a file that holds credentials, restricting it to the owner.
+///
+/// `config.toml` carries provider API keys, Codex OAuth tokens, and the host
+/// bearer token. `std::fs::write` would leave it at the process umask
+/// (commonly world-readable), so the mode is tightened the same way
+/// `host/cloudflare.rs` protects tunnel credentials.
+fn write_secret_file(path: &std::path::Path, body: &str) -> Result<()> {
+    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
+    restrict_to_owner(path);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_to_owner(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn restrict_to_owner(_path: &std::path::Path) {}
+
 /// XDG dirs for the app: `~/.config/nexus-chat` and `~/.local/share/nexus-chat`.
 pub fn project_dirs() -> Result<ProjectDirs> {
     ProjectDirs::from("", "", "nexus-chat").context("could not resolve home directory")
@@ -334,8 +355,7 @@ pub fn save_host_token(token: &str) -> Result<()> {
         toml::Value::String(token.to_string()),
     );
     let body = toml::to_string_pretty(&value).context("serializing config")?;
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    write_secret_file(&path, &body)
 }
 
 /// Return the persisted token or create a random one on the first host run.
@@ -389,8 +409,7 @@ pub fn save_named_tunnel(tunnel: &NamedTunnelConfig) -> Result<()> {
         toml::Value::try_from(tunnel).context("serializing named tunnel config")?,
     );
     let body = toml::to_string_pretty(&value).context("serializing config")?;
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    write_secret_file(&path, &body)
 }
 
 // Long by design (device-flow state machine).
@@ -561,8 +580,7 @@ fn write_provider_config(
             escape(&tunnel.config_path.display().to_string())
         );
     }
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    write_secret_file(&path, &body)
 }
 
 #[cfg(test)]

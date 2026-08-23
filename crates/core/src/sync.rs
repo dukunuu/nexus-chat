@@ -2164,6 +2164,7 @@ mod tests {
             2,
             0,
             0,
+            Default::default(),
             Some(0.1),
             true,
             Some(&s),
@@ -2437,12 +2438,36 @@ mod tests {
         let a = &pair.a;
         let b = &pair.b;
         let s = session(a, "shared");
-        a.log_usage("openrouter", "m", 1, 2, 0, 0, None, false, Some(&s), None)
-            .unwrap();
+        a.log_usage(
+            "openrouter",
+            "m",
+            1,
+            2,
+            0,
+            0,
+            Default::default(),
+            None,
+            false,
+            Some(&s),
+            None,
+        )
+        .unwrap();
         let cs = build_changeset(a, None, "a").unwrap();
         let _ = apply_changeset(b, &pair.space_b(), &cs, None).unwrap();
-        b.log_usage("openrouter", "m", 3, 4, 0, 0, None, false, Some(&s), None)
-            .unwrap();
+        b.log_usage(
+            "openrouter",
+            "m",
+            3,
+            4,
+            0,
+            0,
+            Default::default(),
+            None,
+            false,
+            Some(&s),
+            None,
+        )
+        .unwrap();
         a.add_citations(&space(a, "default"), "r.md", &[("https://a".into(), None)])
             .unwrap();
         let cs2 = build_changeset(a, None, "a").unwrap();
@@ -2491,8 +2516,20 @@ mod tests {
         a.add_user_message(&sa, "from a").unwrap();
         a.set_setting("theme", "dark").unwrap();
         a.set_reasoning("m1", Some("high")).unwrap();
-        a.log_usage("openrouter", "m1", 1, 2, 0, 0, None, false, Some(&sa), None)
-            .unwrap();
+        a.log_usage(
+            "openrouter",
+            "m1",
+            1,
+            2,
+            0,
+            0,
+            Default::default(),
+            None,
+            false,
+            Some(&sa),
+            None,
+        )
+        .unwrap();
         let sb = session(b, "b's chat");
         b.add_user_message(&sb, "from b").unwrap();
         b.add_user_message(&sb, "and another").unwrap();
@@ -2516,8 +2553,20 @@ mod tests {
         let b = &pair.b;
         let s = session(a, "hello");
         a.add_user_message(&s, "hi").unwrap();
-        a.log_usage("openrouter", "m", 1, 2, 0, 0, None, false, Some(&s), None)
-            .unwrap();
+        a.log_usage(
+            "openrouter",
+            "m",
+            1,
+            2,
+            0,
+            0,
+            Default::default(),
+            None,
+            false,
+            Some(&s),
+            None,
+        )
+        .unwrap();
         let cs = build_changeset(a, None, "a").unwrap();
         let (first, _) = apply_changeset(b, &pair.space_b(), &cs, None).unwrap();
         assert!(first.rows_applied > 0);

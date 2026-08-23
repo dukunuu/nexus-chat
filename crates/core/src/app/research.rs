@@ -623,6 +623,7 @@ impl ResearchUsage {
             usage.completion_tokens,
             usage.cache_read_tokens,
             usage.cache_creation_tokens,
+            usage.prompt_convention,
             cost,
             cost_is_provider,
             Some(&self.session_id),
@@ -1410,7 +1411,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         .await?;
     }
 
-    let pinned = rusqlite::Connection::open(db_path)
+    let pinned = crate::db::open_conn(db_path)
         .ok()
         .and_then(|conn| crate::db::pinned_urls(&conn, &ids.0).ok())
         .unwrap_or_default();
@@ -1730,7 +1731,7 @@ fn persist_session_sources(db_path: &std::path::Path, session_id: &str, findings
     if url_norms.is_empty() {
         return;
     }
-    if let Ok(conn) = rusqlite::Connection::open(db_path) {
+    if let Ok(conn) = crate::db::open_conn(db_path) {
         let _ = crate::db::add_session_sources(&conn, session_id, &url_norms);
     }
 }

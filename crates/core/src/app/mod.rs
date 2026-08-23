@@ -233,6 +233,69 @@ pub enum ModelPanel {
     Available,
 }
 
+/// Whether a model id belongs to a family that caches only when the request
+/// marks an explicit breakpoint.
+///
+/// Matched on the id rather than the backend: every backend here routes to
+/// several vendors, and it is the vendor behind the id that decides. Ids
+/// arrive bare (`anthropic/claude-…`) or wire-prefixed
+/// (`openrouter:anthropic/claude-…`), so the vendor segment is matched
+/// wherever it sits.
+#[must_use]
+pub fn model_needs_cache_breakpoints(model: &str) -> bool {
+    let id = model
+        .rsplit(':')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    // Anthropic is the family in every current catalog that requires this.
+    id.starts_with("anthropic/") || id.contains("/claude-") || id.starts_with("claude-")
+}
+
+/// Cache accounting summed over one user turn.
+///
+/// A turn is one user message plus every API request the tool loop makes to
+/// answer it. Later requests in a loop carry a longer cached prefix than the
+/// first, so the last request's rate is not the turn's rate — reporting one as
+/// the other is what made this number look erratic.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CacheTally {
+    /// Prompt tokens across requests whose accounting is trustworthy.
+    pub prompt_tokens: u64,
+    /// Cache reads across those same requests.
+    pub cache_read_tokens: u64,
+    /// Requests in this turn whose provider reported no cache accounting at
+    /// all. Non-zero means the rate covers only part of the turn.
+    pub unrated_requests: u64,
+}
+
+impl CacheTally {
+    /// Fold in one request's accounting. Requests with an unidentifiable
+    /// convention are counted, not guessed at.
+    pub fn observe(&mut self, usage: &crate::provider::Usage) {
+        if usage.prompt_convention.ratio_is_meaningful() {
+            self.prompt_tokens += usage.prompt_tokens;
+            self.cache_read_tokens += usage.cache_read_tokens;
+        } else {
+            self.unrated_requests += 1;
+        }
+    }
+
+    /// The turn's hit rate, or `None` when nothing rateable was recorded.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // a ratio of token counts loses nothing meaningful
+    pub fn rate(&self) -> Option<f64> {
+        (self.prompt_tokens > 0).then(|| self.cache_read_tokens as f64 / self.prompt_tokens as f64)
+    }
+
+    /// Whether some request in the turn went unaccounted, so the UI can mark
+    /// the rate as partial rather than presenting it as the whole story.
+    #[must_use]
+    pub const fn is_partial(&self) -> bool {
+        self.unrated_requests > 0
+    }
+}
+
 /// What a confirmed model picker selection is for: the active session's model,
 /// or the background memory-extraction model.
 #[derive(PartialEq, Eq, Clone, Copy, Default)]
@@ -889,9 +952,12 @@ pub struct App {
     pub unread: std::collections::HashSet<String>,
     /// Exact conversation token total from the last completed response.
     pub context_total: Option<u64>,
-    /// Cache hit rate of the most recent completed request (0..=1), shown
-    /// next to the context window. Transient — not persisted here; the
-    /// per-request numbers live in `usage_log`.
+    /// Cache accounting for the turn in progress, summed across every API
+    /// request it makes (a tool loop is many). Shown next to the context
+    /// window. Transient — the per-request numbers live in `usage_log`.
+    pub turn_cache: CacheTally,
+    /// Cache hit rate of the single most recent completed request (0..=1) —
+    /// the per-request view, shown in the context breakdown popup.
     pub last_cache_rate: Option<f64>,
 
     pub settings: Settings,
@@ -1085,6 +1151,7 @@ impl App {
             pending_events: VecDeque::new(),
             unread: std::collections::HashSet::new(),
             context_total: None,
+            turn_cache: CacheTally::default(),
             last_cache_rate: None,
             settings: Settings::default(),
             model_pick_target: ModelPickTarget::Session,

@@ -494,7 +494,7 @@ async fn handle_kv(
 }
 
 fn kv_op(db_path: &Path, method: &str, segs: &[&str], body: &[u8]) -> (u16, &'static str, Vec<u8>) {
-    let conn = match rusqlite::Connection::open(db_path) {
+    let conn = match crate::db::open_conn(db_path) {
         Ok(c) => {
             let _ =
                 c.execute_batch("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)");
@@ -577,26 +577,19 @@ async fn handle_upload(
         return respond(stream, 400, "text/plain", b"empty boundary", false).await;
     }
 
-    let Ok(body_str) = std::str::from_utf8(body) else {
-        return respond(
-            stream,
-            400,
-            "text/plain",
-            b"upload body is not valid UTF-8",
-            false,
-        )
-        .await;
-    };
+    // Scanned as bytes, not as a string: the part payload is arbitrary binary
+    // (images, PDFs, zips), so decoding the whole body as UTF-8 first would
+    // reject every non-text upload. Only the part headers are decoded, and
+    // those are ASCII by the multipart grammar.
+    let part_header = format!("--{boundary}\r\n").into_bytes();
+    let part_end = format!("\r\n--{boundary}").into_bytes();
 
-    let part_header = format!("--{boundary}\r\n");
-    let part_end = format!("\r\n--{boundary}");
-
-    let Some(header_start) = body_str.find(&part_header) else {
+    let Some(header_start) = find_bytes(body, &part_header) else {
         return respond(stream, 400, "text/plain", b"no multipart part found", false).await;
     };
     let after_header_marker = header_start + part_header.len();
 
-    let Some(hdr_body_sep) = body_str[after_header_marker..].find("\r\n\r\n") else {
+    let Some(hdr_body_sep) = find_bytes(&body[after_header_marker..], b"\r\n\r\n") else {
         return respond(
             stream,
             400,
@@ -607,7 +600,7 @@ async fn handle_upload(
         .await;
     };
     let hdr_end = after_header_marker + hdr_body_sep;
-    let part_headers = &body_str[after_header_marker..hdr_end];
+    let part_headers = String::from_utf8_lossy(&body[after_header_marker..hdr_end]);
 
     let filename = part_headers
         .split(';')
@@ -618,9 +611,8 @@ async fn handle_upload(
         );
 
     let content_start = hdr_end + 4;
-    let content_end = body_str[content_start..]
-        .find(&part_end)
-        .map_or(body_str.len(), |d| content_start + d);
+    let content_end = find_bytes(&body[content_start..], &part_end)
+        .map_or(body.len(), |offset| content_start + offset);
 
     let mut file_body = &body[content_start..content_end];
     if file_body.ends_with(b"\r\n") {
@@ -663,6 +655,16 @@ async fn handle_upload(
     let json = serde_json::json!({"name": filename, "url": url});
     let body_out = serde_json::to_string(&json).unwrap_or_default();
     respond(stream, 200, "application/json", body_out.as_bytes(), false).await
+}
+
+/// First index of `needle` in `haystack` (byte-exact, no UTF-8 assumptions).
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn mime_for(path: &Path) -> &'static str {
@@ -1050,5 +1052,44 @@ mod tests {
         let r = c.get(format!("{base}{url}")).send().await.unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(r.text().await.unwrap(), "Hello World!");
+    }
+
+    #[tokio::test]
+    async fn binary_upload_round_trips_unmodified() {
+        let srv = AppServer::start(setup()).await.unwrap();
+        let uuid = srv.registry().assign("default", "deck");
+        let c = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{}", srv.port());
+
+        // A PNG header plus bytes that are not valid UTF-8 — the shape of
+        // every real upload an app would make.
+        let file: Vec<u8> = vec![
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28,
+        ];
+        let boundary = "----BinaryBoundary42";
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"pic.png\"\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(&file);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let r = c
+            .post(format!("{base}/{uuid}/_api/upload"))
+            .header(
+                "Content-Type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let resp: serde_json::Value = r.json().await.unwrap();
+        let url = resp["url"].as_str().unwrap().to_string();
+
+        let served = c.get(format!("{base}{url}")).send().await.unwrap();
+        assert_eq!(served.status(), 200);
+        assert_eq!(served.bytes().await.unwrap().as_ref(), file.as_slice());
     }
 }

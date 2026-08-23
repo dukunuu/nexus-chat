@@ -7,7 +7,8 @@ making changes — it covers the gates, conventions, and the shape of the code.
 
 `nexus-chat` is a local-first terminal chat app (Rust, [ratatui]) for deep
 research and multi-agent work. All state lives on the user's machine: a
-SQLite database per *space*, files/scripts/apps in space directories, and
+SQLite database (rows scoped by *space*), files/scripts/apps in space
+directories, and
 model-created web apps served from `localhost:8642`. It talks to any
 OpenAI-wire backend (OpenRouter, OpenAI, OpenCode Zen/Go, Codex) through one
 client. The binary is named `nexus` (package name `nexus-chat`).
@@ -91,8 +92,9 @@ The README has the full tree; the parts agents touch most:
 >
 > Phase 4 host support lives in `crates/core/src/host/`: the app-actor
 > HTTP/SSE API, bearer auth, `/v1` routes, hash-checked sync blob transfer,
-> OpenAI-wire gateway (Codex Responses support is explicitly deferred), and
-> opt-in `cloudflared`/sleep-guard lifecycle. Registered app UUIDs are public
+> the OpenAI-wire gateway (every backend routes, Codex via the
+> chat↔Responses translation in `provider/openrouter.rs`), and opt-in
+> `cloudflared`/sleep-guard lifecycle. Registered app UUIDs are public
 > capabilities; host/provider secrets must never enter snapshots, events, or
 > app URLs. Keep tunnel and Cloudflare setup paths opt-in; tests must remain
 > network-free and must not launch sidecars.

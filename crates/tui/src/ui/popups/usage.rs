@@ -74,7 +74,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
         Span::styled(format!("{:>9}", "cost"), dim),
     ])];
     for b in &data.by_backend {
-        let cached = rate(b.cache_read_tokens, b.prompt_tokens);
+        let cached = rate(b.rated_cache_read_tokens, b.rated_prompt_tokens);
         let name = chrome::truncate(&b.backend, 14);
         let mut row = vec![
             Span::styled("● ", Style::default().fg(backend_color(theme, &b.backend))),
@@ -108,7 +108,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
         Span::styled(format!("{:>9}", "cost"), dim),
     ])];
     for (i, m) in data.by_model.iter().enumerate() {
-        let cached = rate(m.cache_read_tokens, m.prompt_tokens);
+        let cached = rate(m.rated_cache_read_tokens, m.rated_prompt_tokens);
         let rank_style = if i == 0 {
             Style::default()
                 .fg(theme.warning)
@@ -145,7 +145,12 @@ pub fn render(f: &mut Frame, app: &AppView) {
         .min(data.recent.len().saturating_sub(visible));
     let mut recent_lines: Vec<Line> = Vec::with_capacity(visible);
     for r in data.recent.iter().skip(top).take(visible) {
-        let cached = rate(r.cache_read_tokens, r.prompt_tokens);
+        // Per row: a rate only where the provider's convention is known.
+        let cached = r
+            .prompt_convention
+            .ratio_is_meaningful()
+            .then(|| rate(r.cache_read_tokens, r.prompt_tokens))
+            .flatten();
         let time = r
             .created_at
             .parse::<chrono::DateTime<chrono::Utc>>()
@@ -166,15 +171,15 @@ pub fn render(f: &mut Frame, app: &AppView) {
             // the overflow amount — which varied row to row.
             Span::styled(format!("{tokens:>13} "), dim),
             Span::styled(
-                "█".repeat((cached * 8.0).round() as usize),
+                "█".repeat(cached.map_or(0, |c| (c * 8.0).round() as usize)),
                 Style::default().fg(cache_color(theme, cached)),
             ),
             Span::styled(
-                "░".repeat(8 - (cached * 8.0).round() as usize),
+                "░".repeat(8 - cached.map_or(0, |c| (c * 8.0).round() as usize)),
                 Style::default().fg(theme.border_dim),
             ),
             Span::styled(
-                format!(" {:>4}%", (cached * 100.0).round()),
+                format!(" {:>5}", fmt_rate(cached)),
                 Style::default()
                     .fg(cache_color(theme, cached))
                     .add_modifier(Modifier::BOLD),
@@ -186,6 +191,15 @@ pub fn render(f: &mut Frame, app: &AppView) {
         ]));
     }
     f.render_widget(Paragraph::new(recent_lines), recent_area);
+}
+
+/// One line explaining what an absent rate means, so `—` never reads as a
+/// rendering glitch or as a zero.
+fn cache_legend(theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        "  — = provider reported no cache accounting (or row predates normalization); excluded from rates",
+        Style::default().fg(theme.fg_dim),
+    ))
 }
 
 /// Hero summary: colored headline numbers plus a cache bar over all prompt
@@ -214,24 +228,38 @@ fn render_summary(f: &mut Frame, app: &AppView, area: Rect) {
             cost_style(theme, t.cost),
         ),
     ]);
-    let cached = rate(t.cache_read_tokens, t.prompt_tokens);
-    let bar_line = if t.prompt_tokens > 0 {
+    let cached = rate(t.rated_cache_read_tokens, t.rated_prompt_tokens);
+    let bar_line = if let Some(cached_rate) = cached {
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
-        spans.extend(cache_bar(cached, 24, theme));
+        spans.extend(cache_bar(cached_rate, 24, theme));
         spans.push(Span::styled(
-            format!(" {:.0}% of prompt served from cache", cached * 100.0),
+            format!(" {:.0}% of prompt served from cache", cached_rate * 100.0),
             Style::default()
                 .fg(cache_color(theme, cached))
                 .add_modifier(Modifier::BOLD),
         ));
+        // Requests the providers did not account for are excluded from the
+        // rate rather than silently averaged into it.
+        let unrated = t.prompt_tokens.saturating_sub(t.rated_prompt_tokens);
+        if unrated > 0 {
+            spans.push(Span::styled(
+                format!(
+                    " (excludes {} unaccounted prompt tokens)",
+                    humanize(unrated)
+                ),
+                dim,
+            ));
+        }
         Line::from(spans)
     } else {
         Line::from(Span::styled("  no cache data reported", dim))
     };
-    f.render_widget(
-        Paragraph::new(vec![headline, Line::from(""), bar_line]),
-        area,
-    );
+    // The legend only earns its line when something was actually excluded.
+    let mut lines = vec![headline, Line::from(""), bar_line];
+    if t.prompt_tokens > t.rated_prompt_tokens {
+        lines.push(cache_legend(theme));
+    }
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// The shared `req prompt out cached% cost` cells for a backend/model row.
@@ -243,7 +271,7 @@ fn numeric_cells(
     requests: u64,
     prompt: u64,
     completion: u64,
-    cached: f64,
+    cached: Option<f64>,
     cost: f64,
 ) -> Vec<Span<'static>> {
     let dim = Style::default().fg(theme.fg_dim);
@@ -258,7 +286,7 @@ fn numeric_cells(
             dim,
         ),
         Span::styled(
-            format!("{:>6}% ", (cached * 100.0).round()),
+            format!("{:>7} ", fmt_rate(cached)),
             Style::default().fg(cache_color(theme, cached)),
         ),
         Span::styled(
@@ -283,17 +311,26 @@ fn section_header(theme: &Theme, title: &str, width: u16) -> Line<'static> {
     ])
 }
 
-/// Cache hit fraction 0..=1 from raw token counts (0 when nothing to divide).
-fn rate(cache_read: u64, prompt: u64) -> f64 {
-    if prompt == 0 {
-        0.0
-    } else {
-        (cache_read as f64 / prompt as f64).clamp(0.0, 1.0)
-    }
+/// Cache hit fraction 0..=1 over the rows whose accounting can be trusted.
+///
+/// `None` when nothing in the window is rateable — a provider that reports no
+/// cache accounting, or rows logged before the prompt-token convention was
+/// normalized. Rendered as `—`, never as a confident `0%`.
+fn rate(rated_cache_read: u64, rated_prompt: u64) -> Option<f64> {
+    (rated_prompt > 0).then(|| rated_cache_read as f64 / rated_prompt as f64)
+}
+
+/// `82%`, or `—` when no rate can be claimed.
+fn fmt_rate(rate: Option<f64>) -> String {
+    rate.map_or_else(|| "—".to_string(), |r| format!("{:.0}%", r * 100.0))
 }
 
 /// Threshold color for a cache rate: green ≥70%, yellow ≥40%, red below.
-fn cache_color(theme: &Theme, rate: f64) -> Color {
+/// An absent rate is dim — it is not a bad rate, it is no rate.
+fn cache_color(theme: &Theme, rate: Option<f64>) -> Color {
+    let Some(rate) = rate else {
+        return theme.fg_dim;
+    };
     if rate >= 0.7 {
         theme.success
     } else if rate >= 0.4 {
@@ -319,7 +356,7 @@ fn cache_bar(rate: f64, width: usize, theme: &Theme) -> Vec<Span<'static>> {
     vec![
         Span::styled(
             "█".repeat(filled),
-            Style::default().fg(cache_color(theme, rate)),
+            Style::default().fg(cache_color(theme, Some(rate))),
         ),
         Span::styled(
             "░".repeat(width - filled),

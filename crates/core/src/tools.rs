@@ -593,7 +593,7 @@ impl ToolBox {
     #[must_use]
     pub fn with_research_session(mut self, session_id: String) -> Self {
         if let Some(db_path) = &self.db_path
-            && let Ok(conn) = rusqlite::Connection::open(db_path)
+            && let Ok(conn) = crate::db::open_conn(db_path)
             && let Ok(hosts) = crate::db::discarded_domains(&conn, &session_id)
         {
             self.blocked_domains.extend(hosts);
@@ -613,7 +613,7 @@ impl ToolBox {
 
     fn files_count(&self) -> u64 {
         let Some(ctx) = &self.files else { return 0 };
-        rusqlite::Connection::open(&ctx.db_path)
+        crate::db::open_conn(&ctx.db_path)
             .ok()
             .and_then(|conn| crate::db::count_files(&conn, &ctx.space_id).ok())
             .unwrap_or(0)
@@ -621,7 +621,7 @@ impl ToolBox {
 
     fn citation_count(&self) -> u64 {
         let Some(ctx) = &self.files else { return 0 };
-        rusqlite::Connection::open(&ctx.db_path)
+        crate::db::open_conn(&ctx.db_path)
             .ok()
             .and_then(|conn| {
                 conn.query_row(

@@ -51,6 +51,7 @@ impl App {
         // pinning the context bar to an unrelated boundary.
         self.context_total = None;
         self.last_cache_rate = None;
+        self.turn_cache = super::CacheTally::default();
     }
 
     /// Build a non-sensitive cache-lane key for one session and epoch.

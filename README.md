@@ -5,7 +5,7 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A local-first terminal chat app for deep research and multi-agent work. Rust +
-[ratatui], all state on your machine — SQLite per space, files and artifacts in
+[ratatui], all state on your machine — one SQLite db scoped by space, files and artifacts in
 space directories, model-created web apps served from localhost.
 
 ## Install
@@ -90,9 +90,11 @@ commands (`usage`, `sessions`, `spaces`, `export`, `status`, `doctor`,
 `nexus host` runs the same core on a loopback HTTP/SSE daemon. It exposes
 `/v1/snapshot`, `/v1/models`, `/v1/backends`, `/v1/events`, `/v1/command`,
 `/v1/sync`, hash-checked `GET`/`PUT /v1/sync/blob`, `/v1/tools`, and an
-OpenAI-compatible `/v1/chat/completions` gateway. Sync clients POST metadata
-first, then upload/download each manifest blob by `space_id`, `name`, and
-`hash`. The host token is generated once and stored in
+OpenAI-compatible `/v1/chat/completions` gateway. `/v1/tools/run` uses a
+JSON-RPC 2.0 envelope, for example
+`{"jsonrpc":"2.0","id":1,"method":"tools/run","params":{"name":"read_file","arguments":{...}}}`.
+Sync clients POST metadata first, then upload/download each manifest blob by
+`space_id`, `name`, and `hash`. The host token is generated once and stored in
 `~/.config/nexus-chat/config.toml` as `[provider].host_token`; provider API
 keys remain on the machine and are never sent to clients.
 
@@ -109,11 +111,15 @@ The command prints an enrollment URI and an ASCII QR code. Public app links
 use `/apps/<uuid>/`; the registry UUID is the app capability and the host
 bearer token is never embedded in the URL or an app cookie. `/v1/models`
 returns an OpenAI-compatible `data` list with backend-qualified ids such as
-`openrouter:anthropic/…`. Codex's native Responses API is intentionally
-excluded from this chat-completions gateway until a response-stream adapter is
-available. Named tunnel setup is persisted and reused by later
+`openrouter:anthropic/…`. Codex is routed too: the gateway translates the
+chat-completions request into a native Responses call and re-emits the
+Responses event stream as `chat.completion.chunk` frames, so every listed
+backend is reachable through one OpenAI-wire endpoint. Named tunnel setup is persisted and reused by later
 `nexus host --tunnel` runs when its local cloudflared files still exist.
 `--no-sleep-guard` disables `caffeinate`/`systemd-inhibit` if desired.
+For optional per-user startup, use `nexus host --install-service` (or
+`--uninstall-service`); it writes a systemd user unit on Linux or a launchd
+agent on macOS and prints the activation command.
 
 ### Requirements
 

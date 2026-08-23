@@ -1,7 +1,7 @@
 # Roadmap: multi-device nexus
 
 Local-first chat that works across desktop, web, and mobile — with a sync
-mesh instead of a 24/7 backend. Single user, one DB per space, sync by
+mesh instead of a 24/7 backend. Single user, one DB scoped by space, sync by
 design (append-only union + last-write-wins on a small mutable surface).
 No CRDTs, no conflicts to resolve.
 
@@ -324,14 +324,17 @@ existing seam:
   host, not 127.0.0.1. Registered app UUIDs are public capabilities; the
   host bearer token is never embedded in their URLs.
 - Worker: `GET /v1/tools` capability advertisement + `POST /v1/tools/run`
-  JSON-RPC — the remote `ToolExecutor` impl from Phase 2d.
+  JSON-RPC 2.0 (`method: tools/run`, `params.name`, and
+  `params.arguments`) — the remote `ToolExecutor` impl from Phase 2d.
 
 **Process management**:
 
 - **Auth**: bearer token generated on first run, stored in `config.toml`
-  (machine-local, never syncs); gates every `/v1/*` route. Registered
-  `/apps/<uuid>/` paths are public capabilities so browser navigations do
-  not require a bearer secret in the URL.
+  (machine-local, never syncs); gates every `/v1/*` route. The listener parses
+  only bounded headers, authenticates, and rejects unauthorized requests before
+  reading their potentially large bodies. Registered `/apps/<uuid>/` paths
+  are public capabilities so browser navigations do not require a bearer
+  secret in the URL.
 - **Tunnel management**: spawns the official `cloudflared` binary as a
   sidecar (named config and credentials are persisted and reused),
   health-checks the URL, restarts it on failure with backoff; quick-tunnel
@@ -347,7 +350,10 @@ existing seam:
   while hosting, released on exit; warns on battery.
 - **QR enrollment**: ASCII QR encoding `nexus://host=<url>&token=…` — the
   mobile app scans once, done.
-- Laptop service setup: launchd/systemd wrapper; charge cap note.
+- Laptop service setup: `nexus host --install-service` writes a per-user
+  launchd/systemd wrapper with optional `--tunnel`; activation remains an
+  explicit printed command, and the host service always disables its sleep
+  inhibitor. Charge cap note remains user/platform-specific.
 - `--remote <url>` TUI mode moves to Phase 5 with the web UI — both are
   new frontends on this API and share the snapshot/event-driven render
   work.

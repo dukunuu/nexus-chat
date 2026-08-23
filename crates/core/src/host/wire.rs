@@ -20,7 +20,9 @@ use crate::app::{
     SwarmUpdate,
 };
 use crate::db::Persona;
-use crate::provider::{BackendTag, Model, ModelPricing, ReasoningEffort, StreamEvent, Usage};
+use crate::provider::{
+    BackendTag, Model, ModelPricing, PromptConvention, ReasoningEffort, StreamEvent, Usage,
+};
 
 /// One event on the host's `/v1/events` `SSE` feed — the wire mirror of
 /// [`AppEvent`], with every variant mapping 1:1 onto the domain event.
@@ -125,6 +127,11 @@ pub struct WireUsage {
     pub cache_read_tokens: u64,
     /// Prompt tokens written into the cache on this request (cache writes).
     pub cache_creation_tokens: u64,
+    /// Which prompt-token convention the provider used, so a remote client
+    /// can tell a real 0% from "the provider reported nothing" exactly as the
+    /// local UI does. Defaulted on the wire for older clients.
+    #[serde(default)]
+    pub prompt_convention: PromptConvention,
     /// Provider-reported request cost in `USD`; `None` when the provider
     /// omits cost.
     pub cost: Option<f64>,
@@ -392,6 +399,7 @@ impl From<Usage> for WireUsage {
             total_tokens: u.total_tokens,
             cache_read_tokens: u.cache_read_tokens,
             cache_creation_tokens: u.cache_creation_tokens,
+            prompt_convention: u.prompt_convention,
             cost: u.cost,
         }
     }
@@ -809,6 +817,7 @@ mod tests {
                     total_tokens: 15,
                     cache_read_tokens: 2,
                     cache_creation_tokens: 1,
+                    prompt_convention: Default::default(),
                     cost: Some(0.0012),
                 }),
                 WireStreamEvent::Usage(WireUsage {
@@ -817,6 +826,7 @@ mod tests {
                     total_tokens: 15,
                     cache_read_tokens: 2,
                     cache_creation_tokens: 1,
+                    prompt_convention: Default::default(),
                     cost: Some(0.0012),
                 }),
             ),

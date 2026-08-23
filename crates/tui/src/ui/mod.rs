@@ -335,9 +335,15 @@ fn context_label(app: &AppView) -> Option<String> {
         0.0
     };
     let mut label = format!("{pct:.0}% {}/{}", humanize(used), humanize(limit));
-    if let Some(rate) = app.last_cache_rate {
-        let _ =
-            std::fmt::Write::write_fmt(&mut label, format_args!(" · {:.0}% cached", rate * 100.0));
+    // The whole turn, not its last request: a tool loop's final request sits
+    // on the longest cached prefix, so reporting it alone always flattered
+    // the number. A `~` marks a turn some provider did not fully account for.
+    if let Some(rate) = app.turn_cache.rate() {
+        let partial = if app.turn_cache.is_partial() { "~" } else { "" };
+        let _ = std::fmt::Write::write_fmt(
+            &mut label,
+            format_args!(" · {partial}{:.0}% cached", rate * 100.0),
+        );
     }
     Some(label)
 }
@@ -397,9 +403,10 @@ fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
 
     if !show_bar {
         let mut line = badge(&format!("{space_tag}{incog_tag}{web_tag}{model}"));
-        if let Some(rate) = app.last_cache_rate {
+        if let Some(rate) = app.turn_cache.rate() {
+            let partial = if app.turn_cache.is_partial() { "~" } else { "" };
             line.spans.push(Span::styled(
-                format!(" · {:.0}% cached  |  ", rate * 100.0),
+                format!(" · {partial}{:.0}% cached  |  ", rate * 100.0),
                 Style::default().fg(app.theme.fg_dim),
             ));
         }

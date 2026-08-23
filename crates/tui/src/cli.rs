@@ -273,6 +273,12 @@ pub enum Command {
         /// Provision a named Cloudflare tunnel using `CF_API_TOKEN`.
         #[arg(long)]
         setup: bool,
+        /// Install a per-user systemd/launchd service and exit.
+        #[arg(long, conflicts_with = "uninstall_service")]
+        install_service: bool,
+        /// Remove the per-user systemd/launchd service and exit.
+        #[arg(long, conflicts_with = "install_service")]
+        uninstall_service: bool,
     },
     /// Show data/config paths and which providers are configured.
     Status,
@@ -439,7 +445,24 @@ pub async fn run(cmd: Command) -> Result<()> {
             tunnel,
             no_sleep_guard,
             setup,
-        } => host(port, tunnel, no_sleep_guard, setup).await,
+            install_service,
+            uninstall_service,
+        } => {
+            host(HostOptions {
+                port,
+                tunnel,
+                no_sleep_guard,
+                setup,
+                service_action: if install_service {
+                    Some(HostServiceAction::Install)
+                } else if uninstall_service {
+                    Some(HostServiceAction::Uninstall)
+                } else {
+                    None
+                },
+            })
+            .await
+        }
         Command::Update => update().await,
         Command::Status => status(),
         Command::Doctor { network } => doctor(network).await,
@@ -759,15 +782,7 @@ fn usage(range_key: &str, json: bool, top: u64, by_day: bool) -> Result<()> {
         out(range.empty_message());
         return Ok(());
     }
-    out(format!("requests: {}", fmt_req(totals.requests)));
-    out(format!(
-        "prompt: {}   completion: {}   cached reads: {}   cached writes: {}",
-        fmt_tokens(totals.prompt_tokens),
-        fmt_tokens(totals.completion_tokens),
-        fmt_tokens(totals.cache_read_tokens),
-        fmt_tokens(totals.cache_creation_tokens),
-    ));
-    out(format!("cost: ${:.4}", totals.cost));
+    print_usage_totals(&totals);
 
     let by_backend = db.usage_by_backend(since.as_deref())?;
     if !by_backend.is_empty() {
@@ -775,11 +790,12 @@ fn usage(range_key: &str, json: bool, top: u64, by_day: bool) -> Result<()> {
         out("by backend");
         for b in by_backend {
             out(format!(
-                "  {:<24} {:>8} req   prompt {:<8} cached {:<8} ${:.4}",
+                "  {:<24} {:>8} req   prompt {:<8} cached {:<8} {:>5} ${:.4}",
                 truncate(&b.backend, 24),
                 fmt_req(b.requests),
                 fmt_tokens(b.prompt_tokens),
                 fmt_tokens(b.cache_read_tokens),
+                fmt_cache_rate(b.rated_cache_read_tokens, b.rated_prompt_tokens),
                 b.cost,
             ));
         }
@@ -790,11 +806,13 @@ fn usage(range_key: &str, json: bool, top: u64, by_day: bool) -> Result<()> {
         out(format!("by model (top {top})"));
         for m in by_model {
             out(format!(
-                "  {:<32} {:>8} req   prompt {:<8} cached {:<8} ${:.4}",
+                "  {:<32} {:>8} req   prompt {:<8} cached {:<8} {:>5} {:<8} ${:.4}",
                 truncate(&m.model, 32),
                 fmt_req(m.requests),
                 fmt_tokens(m.prompt_tokens),
                 fmt_tokens(m.cache_read_tokens),
+                fmt_cache_rate(m.rated_cache_read_tokens, m.rated_prompt_tokens),
+                caching_mode(&m.model),
                 m.cost,
             ));
         }
@@ -837,6 +855,57 @@ fn usage(range_key: &str, json: bool, top: u64, by_day: bool) -> Result<()> {
 }
 
 /// The `--json` variant of `usage` — the same aggregates, machine-readable.
+/// The headline block: counts, cost, and the hit rate over the rows that can
+/// actually support one.
+fn print_usage_totals(totals: &nexus_core::db::UsageTotals) {
+    out(format!("requests: {}", fmt_req(totals.requests)));
+    out(format!(
+        "prompt: {}   completion: {}   cached reads: {}   cached writes: {}",
+        fmt_tokens(totals.prompt_tokens),
+        fmt_tokens(totals.completion_tokens),
+        fmt_tokens(totals.cache_read_tokens),
+        fmt_tokens(totals.cache_creation_tokens),
+    ));
+    out(format!("cost: ${:.4}", totals.cost));
+    out(format!(
+        "cache hit rate: {}",
+        fmt_cache_rate(totals.rated_cache_read_tokens, totals.rated_prompt_tokens)
+    ));
+    let unrated = totals
+        .prompt_tokens
+        .saturating_sub(totals.rated_prompt_tokens);
+    if unrated > 0 {
+        out(format!(
+            "  ({} prompt tokens excluded: provider reported no cache accounting, \
+             or the row predates convention normalization)",
+            fmt_tokens(unrated)
+        ));
+    }
+}
+
+/// `82%`, or `—` when nothing in the window can be rated. Never a confident
+/// `0%` for "the provider told us nothing".
+fn fmt_cache_rate(rated_cache_read: u64, rated_prompt: u64) -> String {
+    if rated_prompt == 0 {
+        return "—".to_string();
+    }
+    #[allow(clippy::cast_precision_loss)] // a ratio of token counts is exact enough
+    let rate = rated_cache_read as f64 / rated_prompt as f64;
+    format!("{:.0}%", rate * 100.0)
+}
+
+/// How a model's prompt cache is engaged: `explicit` when the request has to
+/// mark a breakpoint, `auto` when the provider caches on its own. A model
+/// showing 0% under `auto` really did miss; under `explicit` check that
+/// breakpoints are reaching it.
+fn caching_mode(model: &str) -> &'static str {
+    if nexus_core::app::model_needs_cache_breakpoints(model) {
+        "explicit"
+    } else {
+        "auto"
+    }
+}
+
 fn usage_json(
     db: &db::Db,
     range: db::UsageRange,
@@ -856,22 +925,34 @@ fn usage_json(
             "completion_tokens": totals.completion_tokens,
             "cache_read_tokens": totals.cache_read_tokens,
             "cache_creation_tokens": totals.cache_creation_tokens,
+            // The rate's numerator and denominator, restricted to rows whose
+            // prompt-token convention is known. Divide these, not the raw
+            // totals: the raw pair can mix conventions.
+            "rated_prompt_tokens": totals.rated_prompt_tokens,
+            "rated_cache_read_tokens": totals.rated_cache_read_tokens,
             "cost": totals.cost,
         },
         "by_backend": by_backend.iter().map(|b| serde_json::json!({
             "backend": b.backend, "requests": b.requests,
             "prompt_tokens": b.prompt_tokens, "completion_tokens": b.completion_tokens,
-            "cache_read_tokens": b.cache_read_tokens, "cost": b.cost,
+            "cache_read_tokens": b.cache_read_tokens,
+            "rated_prompt_tokens": b.rated_prompt_tokens,
+            "rated_cache_read_tokens": b.rated_cache_read_tokens, "cost": b.cost,
         })).collect::<Vec<_>>(),
         "by_model": by_model.iter().map(|m| serde_json::json!({
             "model": m.model, "requests": m.requests,
             "prompt_tokens": m.prompt_tokens, "completion_tokens": m.completion_tokens,
-            "cache_read_tokens": m.cache_read_tokens, "cost": m.cost,
+            "cache_read_tokens": m.cache_read_tokens,
+            "rated_prompt_tokens": m.rated_prompt_tokens,
+            "rated_cache_read_tokens": m.rated_cache_read_tokens,
+            "caching_mode": caching_mode(&m.model), "cost": m.cost,
         })).collect::<Vec<_>>(),
         "recent": recent.iter().map(|r| serde_json::json!({
             "created_at": r.created_at, "backend": r.backend, "model": r.model,
             "prompt_tokens": r.prompt_tokens, "completion_tokens": r.completion_tokens,
-            "cache_read_tokens": r.cache_read_tokens, "cost": r.cost,
+            "cache_read_tokens": r.cache_read_tokens,
+            "cache_creation_tokens": r.cache_creation_tokens,
+            "prompt_convention": r.prompt_convention.as_str(), "cost": r.cost,
         })).collect::<Vec<_>>(),
     });
     if by_day {
@@ -881,7 +962,9 @@ fn usage_json(
                 .map(|d| serde_json::json!({
                     "day": d.day, "requests": d.requests,
                     "prompt_tokens": d.prompt_tokens, "completion_tokens": d.completion_tokens,
-                    "cache_read_tokens": d.cache_read_tokens, "cost": d.cost,
+                    "cache_read_tokens": d.cache_read_tokens,
+                    "rated_prompt_tokens": d.rated_prompt_tokens,
+                    "rated_cache_read_tokens": d.rated_cache_read_tokens, "cost": d.cost,
                 }))
                 .collect::<Vec<_>>()
         );
@@ -1214,6 +1297,9 @@ fn backup(output: Option<&Path>) -> Result<()> {
         chrono::Utc::now().format("%Y-%m-%d")
     ));
     let path = output.unwrap_or(&default);
+    // In WAL mode recent commits can still live in `nexus.db-wal`. Fold them
+    // into the db file first so the archive is complete on its own.
+    checkpoint_wal(&space.db_path());
     zip_dir(&space.root, path)?;
     out(format!("backed up to {}", path.display()));
     Ok(())
@@ -1239,10 +1325,31 @@ fn restore(file: &Path, yes: bool) -> Result<()> {
     // recreates it empty and re-indexes on demand.
     let cache_path = space.root.join("cache.db");
     let _ = std::fs::remove_file(&cache_path);
+    // The current db's WAL sidecars describe the file being replaced; left in
+    // place SQLite would replay them over the restored db. Removed only here,
+    // before extraction — sidecars that arrive *in* the archive belong to the
+    // db that arrives with them.
+    for suffix in [
+        "nexus.db-wal",
+        "nexus.db-shm",
+        "cache.db-wal",
+        "cache.db-shm",
+    ] {
+        let _ = std::fs::remove_file(space.root.join(suffix));
+    }
     unzip_into(file, &space.root)?;
     let _ = std::fs::remove_file(&cache_path);
     out("restored");
     Ok(())
+}
+
+/// Fold the write-ahead log back into the db file. Best-effort: a missing db
+/// or a concurrent writer just means the `-wal` sidecar is archived alongside
+/// it, which restores the same way.
+fn checkpoint_wal(db_path: &Path) {
+    if let Ok(conn) = nexus_core::db::open_conn(db_path) {
+        let _ = conn.pragma_update(None, "wal_checkpoint", "TRUNCATE");
+    }
 }
 
 /// Zip a directory tree into `dst` (relative paths, deflated).
@@ -1456,6 +1563,20 @@ async fn skills_install(spec: &str) -> Result<()> {
 
 // --- host daemon (Phase 4) ---
 
+struct HostOptions {
+    port: u16,
+    tunnel: bool,
+    no_sleep_guard: bool,
+    setup: bool,
+    service_action: Option<HostServiceAction>,
+}
+
+#[derive(Clone, Copy)]
+enum HostServiceAction {
+    Install,
+    Uninstall,
+}
+
 enum HostTunnel {
     Quick {
         port: u16,
@@ -1484,7 +1605,30 @@ async fn wait_host_tunnel(tunnel: &mut Option<nexus_core::host::process::Tunnel>
 
 /// Run the headless app actor, HTTP/SSE API, optional tunnel, and sleep guard.
 #[allow(clippy::too_many_lines)]
-async fn host(port: u16, quick_tunnel: bool, no_sleep_guard: bool, setup: bool) -> Result<()> {
+async fn host(options: HostOptions) -> Result<()> {
+    let HostOptions {
+        port,
+        tunnel: quick_tunnel,
+        no_sleep_guard,
+        setup,
+        service_action,
+    } = options;
+    if matches!(service_action, Some(HostServiceAction::Install)) {
+        let path = nexus_core::host::process::install_service(port, quick_tunnel)?;
+        out(format!("installed host service: {}", path.display()));
+        print_service_activation_hint();
+        return Ok(());
+    }
+    if matches!(service_action, Some(HostServiceAction::Uninstall)) {
+        let removed = nexus_core::host::process::uninstall_service()?;
+        out(if removed {
+            "removed host service"
+        } else {
+            "host service was not installed"
+        });
+        print_service_deactivation_hint();
+        return Ok(());
+    }
     let saved_named = config::load_named_tunnel()?;
     let named = if setup {
         Some(setup_named_tunnel(port).await?)
@@ -1638,6 +1782,34 @@ async fn host(port: u16, quick_tunnel: bool, no_sleep_guard: bool, setup: bool) 
     }
     server.shutdown().await;
     Ok(())
+}
+
+fn print_service_activation_hint() {
+    match nexus_core::host::process::service_manager() {
+        Some(nexus_core::host::process::ServiceManager::Systemd) => {
+            out(
+                "activate with: systemctl --user daemon-reload && systemctl --user enable --now nexus-host.service",
+            );
+        }
+        Some(nexus_core::host::process::ServiceManager::Launchd) => {
+            out(
+                "activate with: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/chat.nexus.host.plist",
+            );
+        }
+        None => {}
+    }
+}
+
+fn print_service_deactivation_hint() {
+    match nexus_core::host::process::service_manager() {
+        Some(nexus_core::host::process::ServiceManager::Systemd) => {
+            out("if running, stop with: systemctl --user disable --now nexus-host.service");
+        }
+        Some(nexus_core::host::process::ServiceManager::Launchd) => {
+            out("if running, stop with: launchctl bootout gui/$(id -u)/chat.nexus.host");
+        }
+        None => {}
+    }
 }
 
 fn reuse_named_tunnel(

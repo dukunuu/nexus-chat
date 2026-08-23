@@ -58,6 +58,38 @@ pub fn render(f: &mut Frame, app: &AppView) {
         ),
     ]));
 
+    // Cache detail lives here, where the two figures can be labelled apart:
+    // the status line shows the turn, this shows the request behind it.
+    let turn = app.turn_cache;
+    if turn.rate().is_some() || app.last_cache_rate.is_some() {
+        lines.push(Line::from(""));
+        let pct = |rate: Option<f64>| {
+            rate.map_or_else(|| "—".to_string(), |r| format!("{:.0}%", r * 100.0))
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Cache        ",
+                Style::default()
+                    .fg(app.theme.fg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} this turn", pct(turn.rate())),
+                Style::default().fg(app.theme.success),
+            ),
+            Span::styled(format!(" · {} last request", pct(app.last_cache_rate)), dim),
+        ]));
+        if turn.is_partial() {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  ⤷ {} request(s) this turn reported no cache accounting — excluded",
+                    turn.unrated_requests
+                ),
+                dim,
+            )));
+        }
+    }
+
     let hint = if b.compacted {
         "v digest · Esc close"
     } else {

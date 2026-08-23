@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
@@ -21,8 +21,8 @@ use tokio::task::JoinHandle;
 
 use crate::app::{App, AppCommand, AppEvent, CoreSnapshot};
 use crate::appserver::AppRegistry;
-use crate::provider::BackendTag;
 use crate::provider::openrouter;
+use crate::provider::{BackendTag, Usage};
 use crate::sync::Changeset;
 use crate::tools::ToolExecutor;
 
@@ -94,14 +94,15 @@ struct GatewayRoute {
     account_id: Option<String>,
 }
 
-/// A usage fragment observed while forwarding one provider response.
+/// Usage observed while forwarding one provider response.
+///
+/// This owns only the gateway's own problem — reassembling `SSE` frames from
+/// arbitrary socket chunks — and hands the JSON to the same parser the
+/// in-process client uses, so a gateway request and a direct request account
+/// for the identical response identically.
 #[derive(Debug, Default)]
 struct GatewayUsage {
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    cache_read_tokens: u64,
-    cache_creation_tokens: u64,
-    cost: Option<f64>,
+    usage: Option<Usage>,
     /// Bytes not yet forming a complete `SSE` line (or the whole body of a
     /// non-streaming response). Chunk boundaries fall wherever the socket
     /// puts them, so parsing each chunk in isolation would drop the usage
@@ -153,43 +154,19 @@ impl GatewayUsage {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
             return;
         };
-        let Some(usage) = value.get("usage").and_then(serde_json::Value::as_object) else {
+        let Some(usage) = value.get("usage") else {
             return;
         };
-        let number = |key: &str| {
-            usage
-                .get(key)
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-        };
-        let nested = |group: &str, key: &str| {
-            usage
-                .get(group)
-                .and_then(|value| value.get(key))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-        };
-        self.prompt_tokens = self.prompt_tokens.max(number("prompt_tokens"));
-        self.completion_tokens = self.completion_tokens.max(number("completion_tokens"));
-        self.cache_read_tokens = self.cache_read_tokens.max(
-            nested("prompt_tokens_details", "cached_tokens")
-                .max(nested("input_tokens_details", "cached_tokens"))
-                .max(number("cache_read_input_tokens")),
-        );
-        self.cache_creation_tokens = self.cache_creation_tokens.max(
-            nested("prompt_tokens_details", "cache_write_tokens")
-                .max(nested("input_tokens_details", "cache_write_tokens"))
-                .max(number("cache_creation_input_tokens")),
-        );
-        self.cost = usage.get("cost").and_then(json_f64).or(self.cost);
+        if let Some(next) = openrouter::parse_usage_value(usage) {
+            openrouter::merge_usage(&mut self.usage, next);
+        }
     }
-}
 
-fn json_f64(value: &serde_json::Value) -> Option<f64> {
-    value
-        .as_f64()
-        .or_else(|| value.as_str()?.parse::<f64>().ok())
-        .filter(|number| number.is_finite())
+    /// The accounting to log, or an all-zero record when the upstream never
+    /// reported any.
+    fn into_usage(self) -> Usage {
+        self.usage.unwrap_or_default()
+    }
 }
 
 /// A running host server. It owns the listener and app actor; dropping it
@@ -346,6 +323,17 @@ async fn accept_loop(listener: TcpListener, state: Arc<HostState>, shutdown: Arc
 }
 
 #[derive(Debug)]
+struct RequestHead {
+    method: String,
+    target: String,
+    headers: HashMap<String, String>,
+    content_length: usize,
+    /// Body bytes read together with the headers. Keeping this prefix avoids
+    /// losing pipelined data when authentication rejects the request.
+    prefix: Vec<u8>,
+}
+
+#[derive(Debug)]
 struct Request {
     method: String,
     target: String,
@@ -359,7 +347,7 @@ struct ReadError {
     message: &'static str,
 }
 
-async fn read_request(stream: &mut TcpStream) -> Result<Request, ReadError> {
+async fn read_request_head(stream: &mut TcpStream) -> Result<RequestHead, ReadError> {
     let mut buffer = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
     let header_end = loop {
@@ -427,12 +415,6 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, ReadError> {
         })
         .transpose()?
         .unwrap_or(0);
-    if content_length > MAX_GATEWAY_BODY_BYTES {
-        return Err(ReadError {
-            status: 413,
-            message: "request entity too large",
-        });
-    }
     if headers
         .get("transfer-encoding")
         .is_some_and(|value| !value.eq_ignore_ascii_case("identity"))
@@ -444,21 +426,20 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, ReadError> {
     }
     let body_start = header_end + 4;
     let already = buffer.len().saturating_sub(body_start).min(content_length);
-    let prefix = &buffer[body_start..body_start + already];
-    let body = read_body(stream, prefix, content_length).await?;
-    Ok(Request {
+    let prefix = buffer[body_start..body_start + already].to_vec();
+    Ok(RequestHead {
         method,
         target,
         headers,
-        body,
+        content_length,
+        prefix,
     })
 }
 
 /// Read `content_length` body bytes, `prefix` already having arrived with the
 /// headers. The buffer grows with the bytes that actually turn up rather than
-/// reserving the declared length up front: authentication happens after this
-/// read, so one unauthenticated request announcing 64 MB must not be able to
-/// allocate 64 MB without sending it.
+/// reserving the declared length up front. Callers authenticate before
+/// invoking this for protected routes.
 async fn read_body(
     stream: &mut TcpStream,
     prefix: &[u8],
@@ -490,25 +471,27 @@ async fn read_body(
 }
 
 async fn handle_connection(mut stream: TcpStream, state: Arc<HostState>) -> io::Result<()> {
-    let request = match tokio::time::timeout(REQUEST_READ_TIMEOUT, read_request(&mut stream)).await
-    {
-        Ok(Ok(request)) => request,
-        Ok(Err(error)) => return respond_text(&mut stream, error.status, error.message).await,
-        Err(_) => return respond_text(&mut stream, 408, "request timed out").await,
-    };
-    let (path, query) = split_target(&request.target);
-    if request.method.eq_ignore_ascii_case("OPTIONS") {
+    let head =
+        match tokio::time::timeout(REQUEST_READ_TIMEOUT, read_request_head(&mut stream)).await {
+            Ok(Ok(head)) => head,
+            Ok(Err(error)) => return respond_text(&mut stream, error.status, error.message).await,
+            Err(_) => return respond_text(&mut stream, 408, "request timed out").await,
+        };
+    let (path, query) = split_target(&head.target);
+    let path = path.to_string();
+    let query = query.to_string();
+    if head.method.eq_ignore_ascii_case("OPTIONS") {
         return respond_empty(&mut stream, 204).await;
     }
     let is_apps = path == "/apps" || path.starts_with("/apps/");
     let is_v1 = path == "/v1" || path.starts_with("/v1/");
     if (is_apps || is_v1)
         && !authorized(
-            &request,
+            &head,
             &state.token,
             is_apps,
             state.app_registry.as_ref(),
-            path,
+            &path,
         )
     {
         return respond_json(
@@ -520,6 +503,25 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<HostState>) -> io::
         )
         .await;
     }
+    if head.content_length > MAX_GATEWAY_BODY_BYTES {
+        return respond_text(&mut stream, 413, "request entity too large").await;
+    }
+    let body = match tokio::time::timeout(
+        REQUEST_READ_TIMEOUT,
+        read_body(&mut stream, &head.prefix, head.content_length),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Ok(Err(error)) => return respond_text(&mut stream, error.status, error.message).await,
+        Err(_) => return respond_text(&mut stream, 408, "request timed out").await,
+    };
+    let request = Request {
+        method: head.method,
+        target: head.target,
+        headers: head.headers,
+        body,
+    };
 
     if path == "/v1/events" {
         return handle_sse(&mut stream, &request, &state).await;
@@ -531,13 +533,13 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<HostState>) -> io::
         // Public app URLs are capabilities in their own right: the registry
         // UUID is high entropy, while the host bearer token never appears in
         // the URL, cookie jar, referrer, or proxy logs.
-        return proxy_app(&mut stream, &request, path, query, &state).await;
+        return proxy_app(&mut stream, &request, &path, &query, &state).await;
     }
-    handle_api_route(&mut stream, &request, path, &state).await
+    handle_api_route(&mut stream, &request, &path, &state).await
 }
 
 fn authorized(
-    request: &Request,
+    request: &RequestHead,
     token: &str,
     apps: bool,
     registry: Option<&AppRegistry>,
@@ -674,24 +676,33 @@ async fn handle_api_route(
             if request.body.len() > MAX_API_BODY_BYTES {
                 return respond_text(stream, 413, "request entity too large").await;
             }
-            let input = match serde_json::from_slice::<ToolRunRequest>(&request.body) {
+            let input = match parse_tool_rpc_request(&request.body) {
                 Ok(input) => input,
                 Err(error) => {
-                    return respond_error(stream, 400, &format!("invalid tool request: {error}"))
-                        .await;
+                    let response = ToolRpcResponse::error(error.id, error.error);
+                    return respond_json(stream, 400, &response).await;
                 }
             };
-            let toolbox =
-                match ask_actor(&state.requests, |reply| HostRequest::Toolbox { reply }).await {
-                    Ok(toolbox) => toolbox,
-                    Err(error) => return respond_error(stream, 500, &error).await,
-                };
+            let toolbox = match ask_actor(&state.requests, |reply| HostRequest::Toolbox { reply })
+                .await
+            {
+                Ok(toolbox) => toolbox,
+                Err(error) => {
+                    let response = ToolRpcResponse::error(input.id, ToolRpcError::internal(error));
+                    return respond_json(stream, 200, &response).await;
+                }
+            };
             let args = match input.args {
                 serde_json::Value::String(args) => args,
                 value => value.to_string(),
             };
             let (result, label) = toolbox.run(&input.name, &args).await;
-            respond_json(stream, 200, &ToolRunResponse { result, label }).await
+            respond_json(
+                stream,
+                200,
+                &ToolRpcResponse::success(input.id, ToolRunResult { result, label }),
+            )
+            .await
         }
         ("GET", "/") => respond_text(stream, 200, "nexus host\n").await,
         _ => respond_text(stream, 404, "not found").await,
@@ -757,26 +768,159 @@ struct BackendInfo {
     tag: WireBackendTag,
     name: &'static str,
     configured: bool,
-    /// Whether `/v1/chat/completions` can route this backend.
+    /// Whether `/v1/chat/completions` can route this backend. Always true
+    /// now that Codex is translated too; kept in the wire shape so existing
+    /// clients keep parsing `/v1/backends`.
     gateway_supported: bool,
-    /// Stable explanation when a configured backend is intentionally omitted
-    /// from the gateway model picker.
+    /// Stable explanation when a backend cannot be routed. Always `None`
+    /// today — retained alongside `gateway_supported` for the same reason.
     gateway_error: Option<&'static str>,
     default_model: String,
     model_count: usize,
 }
 
-#[derive(Debug, Deserialize)]
-struct ToolRunRequest {
+#[derive(Debug)]
+struct ToolRpcRequest {
+    id: serde_json::Value,
     name: String,
-    #[serde(default)]
     args: serde_json::Value,
 }
 
+#[derive(Debug)]
+struct ToolRpcRequestError {
+    id: serde_json::Value,
+    error: ToolRpcError,
+}
+
+impl ToolRpcRequestError {
+    fn new(id: serde_json::Value, error: ToolRpcError) -> Self {
+        Self { id, error }
+    }
+}
+
 #[derive(Debug, Serialize)]
-struct ToolRunResponse {
+struct ToolRunResult {
     result: String,
     label: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolRpcError {
+    code: i32,
+    message: String,
+}
+
+impl ToolRpcError {
+    fn invalid_request(message: impl Into<String>) -> Self {
+        Self {
+            code: -32600,
+            message: message.into(),
+        }
+    }
+
+    fn method_not_found(method: &str) -> Self {
+        Self {
+            code: -32601,
+            message: format!("method not found: {method}"),
+        }
+    }
+
+    fn invalid_params(message: impl Into<String>) -> Self {
+        Self {
+            code: -32602,
+            message: message.into(),
+        }
+    }
+
+    fn parse_error() -> Self {
+        Self {
+            code: -32700,
+            message: "invalid JSON".to_string(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            code: -32603,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ToolRpcResponse {
+    jsonrpc: &'static str,
+    id: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<ToolRunResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ToolRpcError>,
+}
+
+impl ToolRpcResponse {
+    fn success(id: serde_json::Value, result: ToolRunResult) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    fn error(id: serde_json::Value, error: ToolRpcError) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: None,
+            error: Some(error),
+        }
+    }
+}
+
+fn parse_tool_rpc_request(body: &[u8]) -> Result<ToolRpcRequest, ToolRpcRequestError> {
+    let value = serde_json::from_slice::<serde_json::Value>(body).map_err(|_| {
+        ToolRpcRequestError::new(serde_json::Value::Null, ToolRpcError::parse_error())
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        ToolRpcRequestError::new(
+            serde_json::Value::Null,
+            ToolRpcError::invalid_request("request must be a JSON object"),
+        )
+    })?;
+    let id = object.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let fail = |error| ToolRpcRequestError::new(id.clone(), error);
+    if object.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0") {
+        return Err(fail(ToolRpcError::invalid_request(
+            "jsonrpc must be the string \"2.0\"",
+        )));
+    }
+    let method = object
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| fail(ToolRpcError::invalid_request("method must be a string")))?;
+    if method != "tools/run" {
+        return Err(fail(ToolRpcError::method_not_found(method)));
+    }
+    let params = object
+        .get("params")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| fail(ToolRpcError::invalid_params("params must be an object")))?;
+    let name = params
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| {
+            fail(ToolRpcError::invalid_params(
+                "params.name must be a non-empty string",
+            ))
+        })?
+        .to_string();
+    let args = params
+        .get("arguments")
+        .or_else(|| params.get("args"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    Ok(ToolRpcRequest { id, name, args })
 }
 
 async fn handle_sync_blob(
@@ -972,14 +1116,33 @@ async fn handle_gateway(
     };
     let (default_base, raw_model) = openrouter::gateway_route(route.tag, &route.model);
     let base = state.gateway_base.as_deref().unwrap_or(default_base);
-    let url = format!("{base}/chat/completions");
+    let codex = route.tag == BackendTag::Codex;
+    let streaming_requested = body
+        .get("stream")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let url = if codex {
+        format!("{base}/codex/responses")
+    } else {
+        format!("{base}/chat/completions")
+    };
     // `/v1/models` publishes composite ids (`openai:`/`codex:`/`opencode:`
     // prefixes, plus the `go:` tag `list_models` adds), which no upstream
     // recognizes. Forward the raw id the route resolved to, not the client's.
-    let payload = {
+    let payload = if codex {
+        serde_json::to_vec(&openrouter::chat_body_to_codex_body(
+            &body,
+            streaming_requested,
+            &[],
+        ))
+        .unwrap_or_else(|_| request.body.clone())
+    } else {
         let mut forwarded = body.clone();
         if let Some(object) = forwarded.as_object_mut() {
-            object.insert("model".to_string(), serde_json::Value::String(raw_model));
+            object.insert(
+                "model".to_string(),
+                serde_json::Value::String(raw_model.clone()),
+            );
         }
         serde_json::to_vec(&forwarded).unwrap_or_else(|_| request.body.clone())
     };
@@ -1003,15 +1166,17 @@ async fn handle_gateway(
         };
         builder = builder.header(header_name, header_value);
     }
-    // Unreachable while `gateway_unsupported` rejects Codex; kept so the
-    // headers are already correct when the gateway learns to translate.
-    if route.tag == BackendTag::Codex {
+    if codex {
         if let Some(account_id) = &route.account_id {
             builder = builder.header("chatgpt-account-id", account_id);
         }
         builder = builder
             .header("originator", "nexus-host")
-            .header("OpenAI-Beta", "responses=experimental");
+            .header("OpenAI-Beta", "responses=experimental")
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+        if streaming_requested {
+            builder = builder.header(reqwest::header::ACCEPT, "text/event-stream");
+        }
     }
     let response = match tokio::time::timeout(UPSTREAM_HEADERS_TIMEOUT, builder.send()).await {
         Ok(Ok(response)) => response,
@@ -1020,6 +1185,17 @@ async fn handle_gateway(
         }
         Err(_) => return respond_error(stream, 504, "upstream request timed out").await,
     };
+    if codex && response.status().is_success() {
+        return handle_codex_gateway_response(
+            stream,
+            response,
+            state,
+            route,
+            &raw_model,
+            streaming_requested,
+        )
+        .await;
+    }
     let status = response.status().as_u16();
     let content_type = response
         .headers()
@@ -1065,6 +1241,110 @@ async fn handle_gateway(
         }
     }
     usage.finish(streaming);
+    log_gateway_usage(state, route, usage).await;
+    stream.shutdown().await
+}
+
+async fn handle_codex_gateway_response(
+    stream: &mut TcpStream,
+    response: reqwest::Response,
+    state: &HostState,
+    route: GatewayRoute,
+    model: &str,
+    streaming: bool,
+) -> io::Result<()> {
+    if !streaming {
+        let status = response.status().as_u16();
+        let body = match response.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                return respond_error(
+                    stream,
+                    502,
+                    &format!("reading Codex response failed: {error}"),
+                )
+                .await;
+            }
+        };
+        let response_json: serde_json::Value = match serde_json::from_slice(&body) {
+            Ok(value) => value,
+            Err(error) => {
+                return respond_error(stream, 502, &format!("invalid Codex response: {error}"))
+                    .await;
+            }
+        };
+        let translated = openrouter::codex_response_to_chat(&response_json);
+        let payload = match serde_json::to_vec(&translated) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return respond_error(
+                    stream,
+                    502,
+                    &format!("encoding Codex response failed: {error}"),
+                )
+                .await;
+            }
+        };
+        let mut usage = GatewayUsage::default();
+        usage.observe(&payload, false);
+        usage.finish(false);
+        log_gateway_usage(state, route, usage).await;
+        return respond_full(stream, status, "application/json", "", &payload, false).await;
+    }
+
+    let mut adapter = openrouter::CodexChatStreamAdapter::new(model.to_string());
+    let mut usage = GatewayUsage::default();
+    stream
+        .write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n{CORS_HEADERS}\r\n"
+            )
+            .as_bytes(),
+        )
+        .await?;
+    stream.flush().await?;
+    let mut upstream = response.bytes_stream();
+    loop {
+        // A stream that stops early must not be reported as a clean stop: the
+        // adapter's terminal chunk would otherwise tell the client the answer
+        // finished normally when it was cut off mid-response.
+        let Ok(next) = tokio::time::timeout(UPSTREAM_CHUNK_TIMEOUT, upstream.next()).await else {
+            adapter.fail("Codex stream stalled");
+            break;
+        };
+        let Some(chunk) = next else { break };
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                adapter.fail(format!("Codex stream failed: {error}"));
+                break;
+            }
+        };
+        for frame in adapter.push_bytes(&chunk) {
+            usage.observe(&frame, true);
+            if stream.write_all(&frame).await.is_err() {
+                return Ok(());
+            }
+            if stream.flush().await.is_err() {
+                return Ok(());
+            }
+        }
+    }
+    for frame in adapter.finish() {
+        usage.observe(&frame, true);
+        if stream.write_all(&frame).await.is_err() {
+            return Ok(());
+        }
+        if stream.flush().await.is_err() {
+            return Ok(());
+        }
+    }
+    usage.finish(true);
+    log_gateway_usage(state, route, usage).await;
+    stream.shutdown().await
+}
+
+async fn log_gateway_usage(state: &HostState, route: GatewayRoute, usage: GatewayUsage) {
     let (reply, result) = oneshot::channel();
     let _ = state
         .requests
@@ -1075,7 +1355,6 @@ async fn handle_gateway(
         })
         .await;
     let _ = result.await;
-    stream.shutdown().await
 }
 
 async fn proxy_app(
@@ -1282,15 +1561,8 @@ fn handle_actor_request(app: &mut App, request: HostRequest) {
             let _ = reply.send(app.snapshot().map_err(|error| error.to_string()));
         }
         HostRequest::Models { reply } => {
-            // Gateway-unreachable backends are withheld: this list is what an
-            // OpenAI-wire client picks from, and every pick must be routable.
-            let models = app
-                .models
-                .iter()
-                .filter(|entry| gateway_unsupported(entry.backend).is_none())
-                .cloned()
-                .map(WireModel::from)
-                .collect();
+            // Every configured backend has an OpenAI-wire gateway route.
+            let models = app.models.iter().cloned().map(WireModel::from).collect();
             let _ = reply.send(Ok(models));
         }
         HostRequest::Backends { reply } => {
@@ -1308,8 +1580,8 @@ fn handle_actor_request(app: &mut App, request: HostRequest) {
                         tag: tag.into(),
                         name: tag.display_name(),
                         configured: app.backends.configured(tag),
-                        gateway_supported: gateway_unsupported(tag).is_none(),
-                        gateway_error: gateway_unsupported(tag),
+                        gateway_supported: true,
+                        gateway_error: None,
                         default_model: provider.map_or_else(String::new, |provider| {
                             public_model_id_for_backend(tag, provider.default_utility_model())
                         }),
@@ -1413,6 +1685,7 @@ fn handle_actor_request(app: &mut App, request: HostRequest) {
             usage,
             reply,
         } => {
+            let usage = usage.into_usage();
             let result = app
                 .db
                 .log_usage(
@@ -1422,6 +1695,7 @@ fn handle_actor_request(app: &mut App, request: HostRequest) {
                     usage.completion_tokens,
                     usage.cache_read_tokens,
                     usage.cache_creation_tokens,
+                    usage.prompt_convention,
                     usage.cost,
                     usage.cost.is_some(),
                     None,
@@ -1484,30 +1758,6 @@ fn clear_closed_source(app: &mut App, event: &AppEvent) {
     }
 }
 
-/// Why a backend cannot be reached through the OpenAI-wire gateway, if it
-/// cannot be.
-///
-/// Only Codex qualifies today. [`openrouter::base_url`] points it at
-/// `https://chatgpt.com/backend-api`, which serves `/codex/responses` taking a
-/// Responses-API body — but [`handle_gateway`] speaks `/chat/completions` and
-/// pipes the upstream bytes straight back. A Codex route would therefore 404
-/// upstream on every request, so it is rejected here and withheld from
-/// `/v1/models` and `/v1/backends` rather than advertised as usable.
-///
-/// The request half of the translation already exists as
-/// `openrouter::chat_body_to_codex_body`; the missing half is re-emitting the
-/// Responses event stream as `chat.completion.chunk` frames. Delete this
-/// function once the gateway can do that.
-const fn gateway_unsupported(tag: BackendTag) -> Option<&'static str> {
-    match tag {
-        BackendTag::Codex => Some(
-            "backend Codex is not reachable through the gateway: it speaks the Responses API, \
-             which the gateway cannot translate yet",
-        ),
-        _ => None,
-    }
-}
-
 fn public_model_id_for_backend(tag: BackendTag, model: &str) -> String {
     format!("{}{}", tag.wire_prefix(), raw_model_for_backend(tag, model))
 }
@@ -1530,14 +1780,6 @@ fn gateway_route(
     model: &str,
     override_tag: Option<BackendTag>,
 ) -> Result<GatewayRoute, String> {
-    // Checked before `configured`, so an explicit `x-nexus-backend: codex`
-    // gets the real reason instead of advice to configure a backend that
-    // still would not work.
-    if let Some(tag) = override_tag
-        && let Some(reason) = gateway_unsupported(tag)
-    {
-        return Err(reason.to_string());
-    }
     let selected = if let Some(tag) = override_tag {
         if !app.backends.configured(tag) {
             return Err(format!("backend {} is not configured", tag.display_name()));
@@ -1554,11 +1796,6 @@ fn gateway_route(
     let Some((tag, raw_model)) = selected else {
         return Err(format!("unknown model {model:?}"));
     };
-    // A Codex model is still resolvable by raw id even though `/v1/models`
-    // no longer lists it.
-    if let Some(reason) = gateway_unsupported(tag) {
-        return Err(reason.to_string());
-    }
     let key = match tag {
         BackendTag::OpenRouter => app.saved.openrouter_key.clone(),
         BackendTag::OpenAi => app.saved.openai_key.clone(),
@@ -1827,6 +2064,49 @@ mod tests {
     }
 
     #[test]
+    fn tool_rpc_uses_standard_request_and_response_envelopes() {
+        let request = parse_tool_rpc_request(
+            br#"{"jsonrpc":"2.0","id":7,"method":"tools/run","params":{"name":"read_file","arguments":{"path":"notes.md"}}}"#,
+        )
+        .expect("valid tool JSON-RPC request");
+        assert_eq!(request.id, serde_json::json!(7));
+        assert_eq!(request.name, "read_file");
+        assert_eq!(request.args, serde_json::json!({"path": "notes.md"}));
+
+        let response = serde_json::to_value(ToolRpcResponse::success(
+            request.id,
+            ToolRunResult {
+                result: "ok".into(),
+                label: "read_file".into(),
+            },
+        ))
+        .expect("serializes tool JSON-RPC response");
+        assert_eq!(
+            response,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "result": {"result": "ok", "label": "read_file"}
+            })
+        );
+    }
+
+    #[test]
+    fn tool_rpc_errors_keep_request_ids() {
+        let error = parse_tool_rpc_request(
+            br#"{"jsonrpc":"2.0","id":"abc","method":"unknown","params":{}}"#,
+        )
+        .expect_err("unknown method must fail");
+        assert_eq!(error.id, serde_json::json!("abc"));
+        assert_eq!(error.error.code, -32601);
+        let response = serde_json::to_value(ToolRpcResponse::error(error.id, error.error))
+            .expect("serializes tool JSON-RPC error");
+        assert_eq!(response["id"], "abc");
+        assert_eq!(response["error"]["code"], -32601);
+        assert!(response.get("result").is_none());
+    }
+
+    #[test]
     fn usage_observer_reads_openai_and_cache_fields() {
         let mut usage = GatewayUsage::default();
         usage.observe(
@@ -1834,10 +2114,12 @@ mod tests {
             false,
         );
         usage.finish(false);
+        let usage = usage.into_usage();
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 4);
         assert_eq!(usage.cache_read_tokens, 3);
         assert_eq!(usage.cost, Some(0.01));
+        assert_eq!(usage.cache_hit_rate(), Some(0.3));
     }
 
     #[test]
@@ -1848,6 +2130,7 @@ mod tests {
         usage.observe(head, true);
         usage.observe(tail, true);
         usage.finish(true);
+        let usage = usage.into_usage();
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 4);
     }
@@ -1893,14 +2176,46 @@ mod tests {
     }
 
     #[test]
-    fn codex_is_the_only_gateway_unreachable_backend() {
-        assert!(gateway_unsupported(BackendTag::Codex).is_some());
-        for tag in [
-            BackendTag::OpenRouter,
-            BackendTag::OpenAi,
-            BackendTag::OpencodeGo,
-        ] {
-            assert!(gateway_unsupported(tag).is_none(), "{tag:?} should route");
+    fn codex_routes_through_the_gateway_like_every_other_backend() {
+        let mut app = test_app();
+        app.saved.codex = Some(crate::config::CodexCredentials {
+            access: "codex-access".into(),
+            refresh: "codex-refresh".into(),
+            expires: 0,
+            account_id: "codex-account".into(),
+        });
+        app.backends.set(
+            BackendTag::Codex,
+            openrouter::OpenRouter::openai_codex("codex-access".into()),
+        );
+        app.models = vec![test_model("gpt-5-codex", BackendTag::Codex)];
+
+        // Resolvable by raw id, by composite id, and by the public
+        // `codex:`-prefixed id `/v1/models` now advertises.
+        for model in ["gpt-5-codex", "codex:gpt-5-codex"] {
+            let route = gateway_route(&app, model, None).expect("codex model routes");
+            assert_eq!(route.tag, BackendTag::Codex);
+            assert_eq!(route.model, "gpt-5-codex");
+            assert_eq!(route.account_id.as_deref(), Some("codex-account"));
+        }
+
+        // An explicit `x-nexus-backend: codex` override routes too.
+        let route =
+            gateway_route(&app, "codex:gpt-5-codex", Some(BackendTag::Codex)).expect("override");
+        assert_eq!(route.model, "gpt-5-codex");
+    }
+
+    fn test_model(id: &str, backend: BackendTag) -> crate::provider::Model {
+        crate::provider::Model {
+            id: id.to_string(),
+            name: id.to_string(),
+            reasoning_efforts: Vec::new(),
+            context_length: None,
+            supports_images: false,
+            supports_image_generation: false,
+            supports_video_generation: false,
+            backend,
+            pricing: None,
         }
     }
 
@@ -1970,9 +2285,39 @@ mod tests {
         let unauthorized = raw_request(addr, request("GET", "/v1/snapshot", None, &[])).await;
         assert!(String::from_utf8_lossy(&unauthorized).starts_with("HTTP/1.1 401"));
 
+        // Authentication must happen before waiting for or allocating a
+        // declared large body. An attacker that does not know the token gets
+        // 401 immediately instead of tying up the request-read timeout.
+        let oversized_unauthorized = raw_request(
+            addr,
+            format!(
+                "POST /v1/command HTTP/1.1\r\nHost: localhost\r\nContent-Length: {MAX_GATEWAY_BODY_BYTES}\r\nConnection: close\r\n\r\n"
+            )
+            .into_bytes(),
+        )
+        .await;
+        assert!(String::from_utf8_lossy(&oversized_unauthorized).starts_with("HTTP/1.1 401"));
+
         let models =
             raw_request(addr, request("GET", "/v1/models", Some("host-secret"), &[])).await;
         assert!(String::from_utf8_lossy(&models).starts_with("HTTP/1.1 200"));
+
+        let tool_rpc = br#"{"jsonrpc":"2.0","id":"tool-1","method":"tools/run","params":{"name":"not_a_real_tool","arguments":{}}}"#;
+        let tool_response = raw_request(
+            addr,
+            request("POST", "/v1/tools/run", Some("host-secret"), tool_rpc),
+        )
+        .await;
+        assert!(String::from_utf8_lossy(&tool_response).starts_with("HTTP/1.1 200"));
+        let tool_response: serde_json::Value =
+            serde_json::from_slice(response_body(&tool_response)).unwrap();
+        assert_eq!(tool_response["jsonrpc"], "2.0");
+        assert_eq!(tool_response["id"], "tool-1");
+        assert!(
+            tool_response["result"]["result"]
+                .as_str()
+                .is_some_and(|result| result.contains("unknown tool"))
+        );
         let models: serde_json::Value = serde_json::from_slice(response_body(&models)).unwrap();
         assert_eq!(models["object"], "list");
         assert_eq!(models["data"][0]["object"], "model");

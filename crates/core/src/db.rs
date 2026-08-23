@@ -279,6 +279,14 @@ const LEGACY_COLUMN_ADDS: &[(&str, &str, &str)] = &[
         "updated_at",
         "ALTER TABLE watches ADD COLUMN updated_at TEXT",
     ),
+    // NULL on pre-normalization rows: they were logged when the prompt-token
+    // convention was ambiguous, so their cache ratio cannot be reconstructed.
+    // Token and cost totals stay usable; only the ratio is withheld.
+    (
+        "usage_log",
+        "prompt_convention",
+        "ALTER TABLE usage_log ADD COLUMN prompt_convention TEXT",
+    ),
 ];
 
 /// The device-local cache db living next to the durable db: `cache.db` in
@@ -302,14 +310,41 @@ pub fn cache_path_for(db_path: &std::path::Path) -> std::path::PathBuf {
 /// cache-only connection (the schema fallback resolves them). Tool
 /// connections use this directly; `Db::open` wraps it in migrations.
 pub fn open_attached(db_path: &std::path::Path) -> Result<Connection> {
-    let conn =
-        Connection::open(db_path).with_context(|| format!("opening db {}", db_path.display()))?;
+    let conn = open_conn(db_path)?;
     let cache = cache_path_for(db_path);
     let escaped = cache.display().to_string().replace('\'', "''");
     conn.execute_batch(&format!("ATTACH DATABASE '{escaped}' AS cache"))
         .with_context(|| format!("attaching cache db {}", cache.display()))?;
+    // Journal mode is per-database, so the freshly attached cache needs its
+    // own switch: tool connections write embeddings and fetched pages there
+    // while other connections read.
+    let _ = conn.pragma_update(Some("cache"), "journal_mode", "WAL");
     migrate_cache(&conn, "cache")?;
     Ok(conn)
+}
+
+/// Open one connection with the pragmas every nexus connection needs.
+///
+/// The same db is opened by several readers at once — the TUI, a `nexus host`
+/// daemon, the per-call connections in `tools.rs`/`research.rs`, and the CLI
+/// subcommands — so WAL keeps a writer from blocking them, and the busy
+/// timeout makes a concurrent writer wait instead of failing the call outright
+/// with `SQLITE_BUSY`. WAL is a persistent property of the file; the timeout is
+/// per-connection, which is why every open goes through here.
+pub fn open_conn(db_path: &std::path::Path) -> Result<Connection> {
+    let conn =
+        Connection::open(db_path).with_context(|| format!("opening db {}", db_path.display()))?;
+    apply_pragmas(&conn);
+    Ok(conn)
+}
+
+/// Best-effort connection pragmas. A read-only or exotic filesystem can
+/// refuse the journal-mode switch; that is a slower db, not a broken one, so
+/// failures here never block opening.
+fn apply_pragmas(conn: &Connection) {
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    let _ = conn.pragma_update(None, "synchronous", "NORMAL");
 }
 
 /// Create the device-local cache schema on `conn` under the given schema
@@ -387,6 +422,7 @@ impl Db {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        apply_pragmas(&conn);
         conn.execute_batch("ATTACH DATABASE ':memory:' AS cache")?;
         migrate_cache(&conn, "cache")?;
         let mut db = Db { conn };
@@ -526,6 +562,7 @@ impl Db {
                 completion_tokens INTEGER NOT NULL,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                prompt_convention TEXT,
                 cost REAL,
                 cost_is_provider INTEGER,
                 updated_at TEXT
@@ -2257,8 +2294,13 @@ fn catalog_price<'a>(
         .map(|(_, price)| price)
 }
 
-/// Price a token breakdown. Prompt totals include cache reads/writes, so each
-/// cached bucket replaces (rather than adds to) the ordinary prompt rate.
+/// Price a token breakdown. `prompt_tokens` is the normalized total (see
+/// `provider::PromptConvention`), so each cached bucket replaces — rather than
+/// adds to — the ordinary prompt rate.
+///
+/// The buckets are subsets of the total by construction. `saturating_sub`
+/// here is for rows logged before that was enforced, not a live correction:
+/// the assertion is what a mis-normalized provider shape should trip.
 fn catalog_request_cost(
     price: ModelPricing,
     prompt_tokens: u64,
@@ -2266,9 +2308,14 @@ fn catalog_request_cost(
     cache_read_tokens: u64,
     cache_creation_tokens: u64,
 ) -> f64 {
+    debug_assert!(
+        cache_read_tokens + cache_creation_tokens <= prompt_tokens,
+        "cache buckets exceed the prompt total: {cache_read_tokens} + \
+         {cache_creation_tokens} > {prompt_tokens}"
+    );
     let reads = cache_read_tokens.min(prompt_tokens);
-    let writes = cache_creation_tokens.min(prompt_tokens - reads);
-    let ordinary = prompt_tokens - reads - writes;
+    let writes = cache_creation_tokens.min(prompt_tokens.saturating_sub(reads));
+    let ordinary = prompt_tokens.saturating_sub(reads).saturating_sub(writes);
     let read_price = price.cache_read.unwrap_or(price.prompt);
     let write_price = price.cache_write.unwrap_or(price.prompt);
     (ordinary as f64 * price.prompt
@@ -2299,6 +2346,14 @@ pub struct UsageTotals {
     pub completion_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
+    /// Prompt tokens from rows whose cache accounting is trustworthy — the
+    /// only honest denominator for a cache hit rate. Rows logged before the
+    /// prompt-token convention was normalized are excluded, so a window that
+    /// straddles the change reports a rate over the part it can vouch for
+    /// instead of blending two conventions.
+    pub rated_prompt_tokens: u64,
+    /// Cache reads from those same rows — the matching numerator.
+    pub rated_cache_read_tokens: u64,
     /// Total USD (0 when no model had a known price).
     pub cost: f64,
 }
@@ -2312,6 +2367,14 @@ pub struct UsageDay {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Prompt tokens from rows whose cache accounting is trustworthy — the
+    /// only honest denominator for a cache hit rate. Rows logged before the
+    /// prompt-token convention was normalized are excluded, so a window that
+    /// straddles the change reports a rate over the part it can vouch for
+    /// instead of blending two conventions.
+    pub rated_prompt_tokens: u64,
+    /// Cache reads from those same rows — the matching numerator.
+    pub rated_cache_read_tokens: u64,
     pub cost: f64,
 }
 
@@ -2323,6 +2386,14 @@ pub struct UsageByBackend {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Prompt tokens from rows whose cache accounting is trustworthy — the
+    /// only honest denominator for a cache hit rate. Rows logged before the
+    /// prompt-token convention was normalized are excluded, so a window that
+    /// straddles the change reports a rate over the part it can vouch for
+    /// instead of blending two conventions.
+    pub rated_prompt_tokens: u64,
+    /// Cache reads from those same rows — the matching numerator.
+    pub rated_cache_read_tokens: u64,
     pub cost: f64,
 }
 
@@ -2334,6 +2405,14 @@ pub struct UsageByModel {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Prompt tokens from rows whose cache accounting is trustworthy — the
+    /// only honest denominator for a cache hit rate. Rows logged before the
+    /// prompt-token convention was normalized are excluded, so a window that
+    /// straddles the change reports a rate over the part it can vouch for
+    /// instead of blending two conventions.
+    pub rated_prompt_tokens: u64,
+    /// Cache reads from those same rows — the matching numerator.
+    pub rated_cache_read_tokens: u64,
     pub cost: f64,
 }
 
@@ -2346,6 +2425,11 @@ pub struct UsageRow {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    /// How this row's prompt count was reported. `Unknown` covers both
+    /// providers that report no cache accounting and rows logged before the
+    /// convention was normalized — either way, no rate is claimed for it.
+    pub prompt_convention: crate::provider::PromptConvention,
     pub cost: Option<f64>,
 }
 
@@ -2361,6 +2445,7 @@ impl Db {
         completion_tokens: u64,
         cache_read_tokens: u64,
         cache_creation_tokens: u64,
+        prompt_convention: crate::provider::PromptConvention,
         cost: Option<f64>,
         cost_is_provider: bool,
         session_id: Option<&str>,
@@ -2369,8 +2454,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO usage_log (sync_id, created_at, session_id, space_id, backend, model,
                 prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens,
-                cost, cost_is_provider, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                prompt_convention, cost, cost_is_provider, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             (
                 Uuid::new_v4().to_string(),
                 Utc::now().to_rfc3339(),
@@ -2382,6 +2467,7 @@ impl Db {
                 completion_tokens as i64,
                 cache_read_tokens as i64,
                 cache_creation_tokens as i64,
+                prompt_convention.as_str(),
                 cost,
                 i64::from(cost_is_provider),
                 Utc::now().to_rfc3339(),
@@ -2660,6 +2746,10 @@ impl Db {
                     COALESCE(SUM(completion_tokens), 0),
                     COALESCE(SUM(cache_read_tokens), 0),
                     COALESCE(SUM(cache_creation_tokens), 0),
+                    COALESCE(SUM(CASE WHEN prompt_convention IN ('inclusive','normalized_from_exclusive')
+                                      THEN prompt_tokens ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN prompt_convention IN ('inclusive','normalized_from_exclusive')
+                                      THEN cache_read_tokens ELSE 0 END), 0),
                     COALESCE(SUM(cost), 0)
              FROM usage_log",
         );
@@ -2673,7 +2763,9 @@ impl Db {
                 completion_tokens: r.get::<_, i64>(2)? as u64,
                 cache_read_tokens: r.get::<_, i64>(3)? as u64,
                 cache_creation_tokens: r.get::<_, i64>(4)? as u64,
-                cost: r.get::<_, f64>(5)?,
+                rated_prompt_tokens: r.get::<_, i64>(5)? as u64,
+                rated_cache_read_tokens: r.get::<_, i64>(6)? as u64,
+                cost: r.get::<_, f64>(7)?,
             })
         };
         let totals = match since {
@@ -2691,6 +2783,10 @@ impl Db {
                     COALESCE(SUM(prompt_tokens), 0),
                     COALESCE(SUM(completion_tokens), 0),
                     COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(CASE WHEN prompt_convention IN ('inclusive','normalized_from_exclusive')
+                                      THEN prompt_tokens ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN prompt_convention IN ('inclusive','normalized_from_exclusive')
+                                      THEN cache_read_tokens ELSE 0 END), 0),
                     COALESCE(SUM(cost), 0)
              FROM usage_log",
         );
@@ -2705,7 +2801,9 @@ impl Db {
                 prompt_tokens: r.get::<_, i64>(2)? as u64,
                 completion_tokens: r.get::<_, i64>(3)? as u64,
                 cache_read_tokens: r.get::<_, i64>(4)? as u64,
-                cost: r.get::<_, f64>(5)?,
+                rated_prompt_tokens: r.get::<_, i64>(5)? as u64,
+                rated_cache_read_tokens: r.get::<_, i64>(6)? as u64,
+                cost: r.get::<_, f64>(7)?,
             })
         };
         let mut stmt = self.conn.prepare(&sql)?;
@@ -2724,6 +2822,10 @@ impl Db {
                     COALESCE(SUM(prompt_tokens), 0),
                     COALESCE(SUM(completion_tokens), 0),
                     COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(CASE WHEN prompt_convention IN ('inclusive','normalized_from_exclusive')
+                                      THEN prompt_tokens ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN prompt_convention IN ('inclusive','normalized_from_exclusive')
+                                      THEN cache_read_tokens ELSE 0 END), 0),
                     COALESCE(SUM(cost), 0)
              FROM usage_log",
         );
@@ -2740,7 +2842,9 @@ impl Db {
                 prompt_tokens: r.get::<_, i64>(2)? as u64,
                 completion_tokens: r.get::<_, i64>(3)? as u64,
                 cache_read_tokens: r.get::<_, i64>(4)? as u64,
-                cost: r.get::<_, f64>(5)?,
+                rated_prompt_tokens: r.get::<_, i64>(5)? as u64,
+                rated_cache_read_tokens: r.get::<_, i64>(6)? as u64,
+                cost: r.get::<_, f64>(7)?,
             })
         };
         let mut stmt = self.conn.prepare(&sql)?;
@@ -2756,7 +2860,7 @@ impl Db {
     pub fn usage_recent(&self, limit: u64, since: Option<&str>) -> Result<Vec<UsageRow>> {
         let mut sql = String::from(
             "SELECT created_at, backend, model, prompt_tokens, completion_tokens,
-                    cache_read_tokens, cost
+                    cache_read_tokens, cache_creation_tokens, prompt_convention, cost
              FROM usage_log",
         );
         if since.is_some() {
@@ -2773,7 +2877,14 @@ impl Db {
                 prompt_tokens: r.get::<_, i64>(3)? as u64,
                 completion_tokens: r.get::<_, i64>(4)? as u64,
                 cache_read_tokens: r.get::<_, i64>(5)? as u64,
-                cost: r.get(6)?,
+                cache_creation_tokens: r.get::<_, i64>(6)? as u64,
+                prompt_convention: r
+                    .get::<_, Option<String>>(7)?
+                    .as_deref()
+                    .map_or(crate::provider::PromptConvention::Unknown, |value| {
+                        crate::provider::PromptConvention::from_str_or_unknown(value)
+                    }),
+                cost: r.get(8)?,
             })
         };
         let mut stmt = self.conn.prepare(&sql)?;
@@ -2792,6 +2903,10 @@ impl Db {
                     COALESCE(SUM(prompt_tokens), 0),
                     COALESCE(SUM(completion_tokens), 0),
                     COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(CASE WHEN prompt_convention IN ('inclusive','normalized_from_exclusive')
+                                      THEN prompt_tokens ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN prompt_convention IN ('inclusive','normalized_from_exclusive')
+                                      THEN cache_read_tokens ELSE 0 END), 0),
                     COALESCE(SUM(cost), 0)
              FROM usage_log",
         );
@@ -2808,7 +2923,9 @@ impl Db {
                 prompt_tokens: r.get::<_, i64>(2)? as u64,
                 completion_tokens: r.get::<_, i64>(3)? as u64,
                 cache_read_tokens: r.get::<_, i64>(4)? as u64,
-                cost: r.get(5)?,
+                rated_prompt_tokens: r.get::<_, i64>(5)? as u64,
+                rated_cache_read_tokens: r.get::<_, i64>(6)? as u64,
+                cost: r.get(7)?,
             })
         };
         let mut stmt = self.conn.prepare(&sql)?;
@@ -2825,9 +2942,7 @@ impl Db {
 /// One peer's sync cursor for one table. Cursors are opaque strings; for
 /// append-only tables they are `(created_at, id)` tuples (so equal
 /// timestamps don't collide), never naked timestamps.
-/// Phase 3's merge engine reads/writes these; kept live from day one so
-/// the schema and identity can't drift.
-#[allow(dead_code)]
+/// The merge engine in `sync.rs` reads and writes these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncState {
     pub peer_id: String,
@@ -2837,8 +2952,7 @@ pub struct SyncState {
     pub last_synced_at: Option<String>,
 }
 
-/// Sync identity + cursor bookkeeping for the Phase 3 merge engine.
-#[allow(dead_code)]
+/// Sync identity + cursor bookkeeping for the merge engine in `sync.rs`.
 impl Db {
     /// This device's stable id, created on first use. Sync identity for
     /// everything this device writes (tombstones, LWW tie-breaks on
@@ -3036,6 +3150,7 @@ mod tests {
             10,
             70,
             20,
+            Default::default(),
             Some(0.00056),
             true,
             Some("s1"),
@@ -3049,6 +3164,7 @@ mod tests {
             5,
             0,
             0,
+            Default::default(),
             None,
             false,
             None,
@@ -3147,6 +3263,7 @@ mod tests {
             10,
             70,
             20,
+            Default::default(),
             None,
             false,
             None,
@@ -3160,6 +3277,7 @@ mod tests {
             5,
             0,
             0,
+            Default::default(),
             None,
             false,
             None,
@@ -3198,6 +3316,7 @@ mod tests {
             10,
             70,
             20,
+            Default::default(),
             Some(0.000_321),
             true,
             None,
@@ -3229,6 +3348,7 @@ mod tests {
             672,
             118_784,
             0,
+            Default::default(),
             Some(9.89864e-09), // the old, 1e6×-too-small value
             false,
             None,
@@ -3343,6 +3463,7 @@ mod tests {
             10,
             0,
             0,
+            Default::default(),
             None,
             false,
             None,
@@ -4270,7 +4391,19 @@ mod tests {
 
         // usage_log: in-place updates bump; the backfill does too.
         let row = db
-            .log_usage("OpenRouter", "a/model", 1, 2, 3, 4, None, false, None, None)
+            .log_usage(
+                "OpenRouter",
+                "a/model",
+                100,
+                2,
+                3,
+                4,
+                Default::default(),
+                None,
+                false,
+                None,
+                None,
+            )
             .unwrap();
         let read_usage = |db: &Db, row: i64| -> String {
             std::thread::sleep(std::time::Duration::from_millis(2));
@@ -4283,7 +4416,8 @@ mod tests {
                 .unwrap()
         };
         let before = read_usage(&db, row);
-        db.update_usage(row, 5, 6, 7, 8, Some(0.1), false).unwrap();
+        db.update_usage(row, 200, 6, 7, 8, Some(0.1), false)
+            .unwrap();
         assert!(read_usage(&db, row) > before);
         db.upsert_model_prices(&[(
             "a/model".to_string(),
@@ -4517,10 +4651,34 @@ mod tests {
             ],
         )
         .unwrap();
-        db.log_usage("OpenRouter", "m", 1, 2, 0, 0, None, false, None, None)
-            .unwrap();
-        db.log_usage("OpenRouter", "m", 1, 2, 0, 0, None, false, None, None)
-            .unwrap();
+        db.log_usage(
+            "OpenRouter",
+            "m",
+            1,
+            2,
+            0,
+            0,
+            Default::default(),
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        db.log_usage(
+            "OpenRouter",
+            "m",
+            1,
+            2,
+            0,
+            0,
+            Default::default(),
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
         let distinct: i64 = db
             .raw()
             .query_row(

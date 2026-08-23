@@ -355,6 +355,7 @@ async fn opencode_split_usage_merges_cost_into_one_row() {
             total_tokens: 120,
             cache_read_tokens: 60,
             cache_creation_tokens: 0,
+            prompt_convention: Default::default(),
             cost: None,
         }),
     )
@@ -367,6 +368,7 @@ async fn opencode_split_usage_merges_cost_into_one_row() {
             total_tokens: 0,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            prompt_convention: Default::default(),
             cost: Some(0.0042),
         }),
     )
@@ -401,6 +403,7 @@ async fn each_real_api_usage_event_gets_its_own_row() {
                 total_tokens: prompt_tokens + 20,
                 cache_read_tokens: prompt_tokens.saturating_sub(20),
                 cache_creation_tokens: 0,
+                prompt_convention: Default::default(),
                 cost: None,
             }),
         )
@@ -436,6 +439,7 @@ async fn cost_only_usage_event_is_logged_with_zero_tokens() {
             total_tokens: 0,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            prompt_convention: Default::default(),
             cost: Some(0.0),
         }),
     )
@@ -2007,4 +2011,109 @@ fn snapshot_serializes_sessions_models_settings_and_tasks() {
     assert!(json.contains("\"settings\""));
     assert!(json.contains("\"tasks\""));
     assert!(json.contains("\"model\":\"a/one\""));
+}
+
+#[test]
+fn cache_breakpoints_only_go_to_models_that_need_them() {
+    assert!(crate::app::model_needs_cache_breakpoints(
+        "anthropic/claude-sonnet-4"
+    ));
+    assert!(crate::app::model_needs_cache_breakpoints(
+        "openrouter:anthropic/claude-opus-4.1"
+    ));
+    assert!(crate::app::model_needs_cache_breakpoints(
+        "claude-3-5-haiku"
+    ));
+    // Auto-caching families must not be sent a marker they ignore or reject.
+    for model in [
+        "openai/gpt-5",
+        "openai:gpt-5-mini",
+        "deepseek/deepseek-v3",
+        "google/gemini-2.5-pro",
+    ] {
+        assert!(
+            !crate::app::model_needs_cache_breakpoints(model),
+            "{model} caches automatically"
+        );
+    }
+}
+
+#[test]
+fn explicit_cache_breakpoints_mark_the_stable_prefix() {
+    let mut a = app_with_key();
+    a.current_model = Some("anthropic/claude-sonnet-4".to_string());
+    let message = |role: &str, content: &str| Message {
+        role: role.into(),
+        content: content.into(),
+        model: None,
+        reasoning: None,
+        tokens: None,
+        secs: None,
+        cost: None,
+        phrase: None,
+        persona: None,
+        created_at: None,
+    };
+    a.messages = vec![
+        message("user", "first"),
+        message("assistant", "answer"),
+        message("user", "second"),
+    ];
+    let history = a.build_history();
+    let marked: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.cache_breakpoint)
+        .map(|(i, _)| i)
+        .collect();
+    // End of the system block, and the message before the live tail.
+    assert_eq!(marked, vec![0, history.len() - 2], "history: {history:?}");
+    let wire = serde_json::to_value(&history[0]).expect("serializes");
+    assert_eq!(
+        wire["content"][0]["cache_control"],
+        serde_json::json!({"type": "ephemeral"})
+    );
+
+    // The same conversation on an auto-caching model carries no markers, and
+    // its content stays a plain string.
+    a.current_model = Some("openai/gpt-5".to_string());
+    let history = a.build_history();
+    assert!(history.iter().all(|m| !m.cache_breakpoint));
+    let wire = serde_json::to_value(&history[0]).expect("serializes");
+    assert!(wire["content"].is_string(), "wire: {wire}");
+}
+
+#[test]
+fn turn_cache_reports_the_turn_not_its_last_request() {
+    use crate::app::CacheTally;
+    use crate::provider::{PromptConvention, Usage};
+    let mut tally = CacheTally::default();
+    // A tool loop: the first request caches nothing, later ones ride a
+    // growing prefix. The last request alone would claim 90%.
+    for (prompt, read) in [(1000u64, 0u64), (1200, 900), (1400, 1260)] {
+        tally.observe(&Usage {
+            prompt_tokens: prompt,
+            cache_read_tokens: read,
+            prompt_convention: PromptConvention::Inclusive,
+            ..Default::default()
+        });
+    }
+    let rate = tally.rate().expect("rateable turn");
+    assert!((rate - 2160.0 / 3600.0).abs() < 1e-9, "rate: {rate}");
+    assert!(!tally.is_partial());
+
+    // A request the provider did not account for is excluded and flagged,
+    // never averaged in as a zero.
+    tally.observe(&Usage {
+        prompt_tokens: 5000,
+        prompt_convention: PromptConvention::Unknown,
+        ..Default::default()
+    });
+    assert!(tally.is_partial());
+    assert_eq!(tally.unrated_requests, 1);
+    let after = tally.rate().expect("still rateable");
+    assert!(
+        (after - 2160.0 / 3600.0).abs() < 1e-9,
+        "rate moved: {after}"
+    );
 }

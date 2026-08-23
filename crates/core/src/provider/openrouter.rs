@@ -18,8 +18,8 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use super::{
-    ChatMessage, ChatParams, Completion, Model, ModelPricing, ReasoningEffort, StreamEvent,
-    ToolCall, ToolDef, Usage,
+    ChatMessage, ChatParams, Completion, Model, ModelPricing, PromptConvention, ReasoningEffort,
+    StreamEvent, ToolCall, ToolDef, Usage,
 };
 use crate::tools::ToolExecutor;
 
@@ -322,10 +322,15 @@ impl ProviderFlavor {
         }
     }
 
-    /// Add the `OpenCode` cache-lane key without sending this optional field to
-    /// providers that do not advertise the same OpenAI-compatible behavior.
+    /// Add the cache-lane key for backends that route on it.
+    ///
+    /// `OpenAI` and `OpenCode` Zen/Go both accept `prompt_cache_key` and use
+    /// it to keep one conversation's requests on a single cache lane — which
+    /// raises the hit rate on shared infrastructure. `OpenRouter` normalizes
+    /// away unknown top-level fields per upstream provider, and the Codex
+    /// Responses body has no equivalent, so neither is sent one.
     fn add_prompt_cache_key(self, obj: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
-        if self == Self::OpencodeGo {
+        if matches!(self, Self::OpencodeGo | Self::OpenAi) {
             obj.insert("prompt_cache_key".into(), serde_json::json!(key));
         }
     }
@@ -1438,8 +1443,7 @@ impl OpenRouter {
                         content: content.clone(),
                         reasoning_content: reasoning.clone(),
                         tool_calls: Some(calls.clone()),
-                        tool_call_id: None,
-                        images: Vec::new(),
+                        ..Default::default()
                     });
                     // Parallel calls the model issued in one response run
                     // concurrently when they're all read-only (searches,
@@ -1499,10 +1503,8 @@ impl OpenRouter {
                         messages.push(ChatMessage {
                             role: "tool".to_string(),
                             content,
-                            reasoning_content: None,
-                            tool_calls: None,
                             tool_call_id: Some(call.id.clone()),
-                            images: Vec::new(),
+                            ..Default::default()
                         });
                         // If the model supports images, load image references
                         // from the tool result and inject them as a user
@@ -1515,10 +1517,8 @@ impl OpenRouter {
                             messages.push(ChatMessage {
                                 role: "user".to_string(),
                                 content: imgs.description,
-                                reasoning_content: None,
-                                tool_calls: None,
-                                tool_call_id: None,
                                 images: imgs.urls,
+                                ..Default::default()
                             });
                         }
                     }
@@ -1639,12 +1639,9 @@ impl OpenRouter {
                         merge_usage(
                             &mut usage,
                             Usage {
-                                prompt_tokens: 0,
-                                completion_tokens: 0,
-                                total_tokens: 0,
-                                cache_read_tokens: 0,
-                                cache_creation_tokens: 0,
                                 cost: Some(cost),
+                                prompt_convention: PromptConvention::Unknown,
+                                ..Default::default()
                             },
                         );
                     }
@@ -1689,12 +1686,9 @@ impl OpenRouter {
                             merge_usage(
                                 &mut usage,
                                 Usage {
-                                    prompt_tokens: 0,
-                                    completion_tokens: 0,
-                                    total_tokens: 0,
-                                    cache_read_tokens: 0,
-                                    cache_creation_tokens: 0,
                                     cost: Some(cost),
+                                    prompt_convention: PromptConvention::Unknown,
+                                    ..Default::default()
                                 },
                             );
                         }
@@ -1886,6 +1880,380 @@ impl OpenRouter {
     }
 }
 
+/// Convert a native Codex Responses JSON object into a Chat Completions
+/// response for gateway clients.
+pub fn codex_response_to_chat(response: &serde_json::Value) -> serde_json::Value {
+    let id = response
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("chatcmpl-nexus-codex");
+    let model = response
+        .get("model")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let text = codex_response_text(response);
+    let mut tool_calls = Vec::new();
+    if let Some(output) = response.get("output").and_then(|value| value.as_array()) {
+        for item in output {
+            if item.get("type").and_then(|value| value.as_str()) != Some("function_call") {
+                continue;
+            }
+            tool_calls.push(serde_json::json!({
+                "id": item.get("call_id").and_then(|value| value.as_str()).unwrap_or_default(),
+                "type": "function",
+                "function": {
+                    "name": item.get("name").and_then(|value| value.as_str()).unwrap_or_default(),
+                    "arguments": item.get("arguments").and_then(|value| value.as_str()).unwrap_or_default(),
+                },
+            }));
+        }
+    }
+    let finish_reason = if tool_calls.is_empty() {
+        "stop"
+    } else {
+        "tool_calls"
+    };
+    // A tool-call response carries `content: null`, matching what an
+    // OpenAI-wire client expects to branch on.
+    let mut message = if tool_calls.is_empty() {
+        serde_json::json!({ "role": "assistant", "content": text })
+    } else {
+        serde_json::json!({ "role": "assistant", "content": serde_json::Value::Null })
+    };
+    if !tool_calls.is_empty() {
+        message
+            .as_object_mut()
+            .expect("message is a JSON object")
+            .insert("tool_calls".into(), serde_json::Value::Array(tool_calls));
+    }
+    let mut out = serde_json::json!({
+        "id": id,
+        "object": "chat.completion",
+        "created": response.get("created_at").and_then(json_u64).unwrap_or(0),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": finish_reason,
+        }],
+    });
+    if let Some(usage) = response.get("usage").map(response_usage_to_chat) {
+        out.as_object_mut()
+            .expect("response is a JSON object")
+            .insert("usage".into(), usage);
+    }
+    out
+}
+
+fn response_usage_to_chat(usage: &serde_json::Value) -> serde_json::Value {
+    let input = usage.get("input_tokens").and_then(json_u64).unwrap_or(0);
+    let output = usage.get("output_tokens").and_then(json_u64).unwrap_or(0);
+    let total = usage
+        .get("total_tokens")
+        .and_then(json_u64)
+        .unwrap_or(input + output);
+    serde_json::json!({
+        "prompt_tokens": input,
+        "completion_tokens": output,
+        "total_tokens": total,
+        "prompt_tokens_details": {
+            "cached_tokens": usage.get("input_tokens_details").and_then(|value| value.get("cached_tokens")).and_then(json_u64).unwrap_or(0)
+        }
+    })
+}
+
+/// Translate a native Codex Responses SSE stream into Chat Completions SSE
+/// frames. The adapter intentionally emits only `data:` frames, allowing the
+/// host to preserve the normal `OpenAI` streaming contract for SDK clients.
+pub struct CodexChatStreamAdapter {
+    buffer: Vec<u8>,
+    id: String,
+    model: String,
+    created: u64,
+    started: bool,
+    finished: bool,
+    tool_calls: BTreeMap<usize, ToolCall>,
+    usage: Option<Usage>,
+    failed: Option<String>,
+}
+
+impl CodexChatStreamAdapter {
+    /// Create an adapter for one gateway request.
+    #[must_use]
+    pub fn new(model: impl Into<String>) -> Self {
+        Self {
+            buffer: Vec::new(),
+            id: "chatcmpl-nexus-codex".to_string(),
+            model: model.into(),
+            created: 0,
+            started: false,
+            finished: false,
+            tool_calls: BTreeMap::new(),
+            usage: None,
+            failed: None,
+        }
+    }
+
+    /// Feed raw upstream bytes and return complete translated SSE frames.
+    ///
+    /// Bytes are buffered, not decoded on arrival: a chunk boundary can fall
+    /// inside a multi-byte character, and decoding each chunk on its own would
+    /// turn that character into replacement bytes in both halves. Only whole
+    /// SSE blocks — which end at an ASCII separator — are decoded.
+    pub fn push_bytes(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        self.buffer.extend_from_slice(bytes);
+        let mut frames = Vec::new();
+        while let Some((end, separator_len)) = sse_block_end(&self.buffer) {
+            let block: Vec<u8> = self.buffer.drain(..end + separator_len).collect();
+            let data = sse_event_data(&String::from_utf8_lossy(&block));
+            if !data.is_empty() {
+                frames.extend(self.push_data(&data));
+            }
+        }
+        frames
+    }
+
+    /// Record that the upstream stream ended early (timeout, transport error).
+    /// Without this the terminal chunk would claim a normal `stop`, turning a
+    /// truncated answer into an apparently complete one.
+    pub fn fail(&mut self, message: impl Into<String>) {
+        if self.failed.is_none() {
+            self.failed = Some(message.into());
+        }
+    }
+
+    /// Finish the upstream stream and emit the terminal chunk plus `[DONE]`.
+    pub fn finish(&mut self) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        if !self.buffer.is_empty() {
+            let block = std::mem::take(&mut self.buffer);
+            let data = sse_event_data(&String::from_utf8_lossy(&block));
+            if !data.is_empty() {
+                frames.extend(self.push_data(&data));
+            }
+        }
+        if self.finished {
+            return frames;
+        }
+        self.finished = true;
+        if let Some(message) = self.failed.take() {
+            frames.push(chat_sse_frame(&serde_json::json!({
+                "error": { "message": message, "type": "server_error" }
+            })));
+        } else {
+            let finish_reason = if self.tool_calls.is_empty() {
+                "stop"
+            } else {
+                "tool_calls"
+            };
+            frames.push(self.chunk(&serde_json::json!({}), Some(finish_reason)));
+            if let Some(usage) = self.usage {
+                frames.push(self.usage_chunk(usage));
+            }
+        }
+        frames.push(b"data: [DONE]\n\n".to_vec());
+        frames
+    }
+
+    #[allow(clippy::too_many_lines)] // one match arm per Responses event type
+    fn push_data(&mut self, data: &str) -> Vec<Vec<u8>> {
+        if data == "[DONE]" {
+            return Vec::new();
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+            return Vec::new();
+        };
+        match value.get("type").and_then(|value| value.as_str()) {
+            Some("response.created") => {
+                if let Some(response) = value.get("response") {
+                    if let Some(id) = response.get("id").and_then(|value| value.as_str()) {
+                        self.id = id.to_string();
+                    }
+                    if let Some(model) = response.get("model").and_then(|value| value.as_str()) {
+                        self.model = model.to_string();
+                    }
+                    self.created = response
+                        .get("created_at")
+                        .and_then(json_u64)
+                        .unwrap_or(self.created);
+                }
+                Vec::new()
+            }
+            Some("response.output_text.delta" | "response.refusal.delta") => value
+                .get("delta")
+                .and_then(|value| value.as_str())
+                .filter(|delta| !delta.is_empty())
+                .map(|delta| {
+                    let mut object = serde_json::Map::new();
+                    if !self.started {
+                        object.insert("role".into(), serde_json::json!("assistant"));
+                        self.started = true;
+                    }
+                    object.insert("content".into(), serde_json::json!(delta));
+                    vec![self.chunk(&serde_json::Value::Object(object), None)]
+                })
+                .unwrap_or_default(),
+            Some("response.reasoning_summary_text.delta" | "response.reasoning_text.delta") => {
+                value
+                    .get("delta")
+                    .and_then(|value| value.as_str())
+                    .filter(|delta| !delta.is_empty())
+                    .map(|delta| {
+                        let mut object = serde_json::Map::new();
+                        if !self.started {
+                            object.insert("role".into(), serde_json::json!("assistant"));
+                            self.started = true;
+                        }
+                        object.insert("reasoning_content".into(), serde_json::json!(delta));
+                        vec![self.chunk(&serde_json::Value::Object(object), None)]
+                    })
+                    .unwrap_or_default()
+            }
+            Some("response.output_item.added") => {
+                let Some(item) = value.get("item") else {
+                    return Vec::new();
+                };
+                if item.get("type").and_then(|value| value.as_str()) != Some("function_call") {
+                    return Vec::new();
+                }
+                let index = output_index(&value);
+                let call = self.tool_calls.entry(index).or_default();
+                call.id = item
+                    .get("call_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                call.name = item
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let mut function = serde_json::Map::new();
+                function.insert("name".into(), serde_json::json!(call.name));
+                function.insert("arguments".into(), serde_json::json!(""));
+                let delta = serde_json::json!({
+                    "role": "assistant",
+                    "tool_calls": [{ "index": index, "id": call.id, "type": "function", "function": function }]
+                });
+                self.started = true;
+                vec![self.chunk(&delta, None)]
+            }
+            Some("response.function_call_arguments.delta") => {
+                let index = output_index(&value);
+                let delta = value
+                    .get("delta")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                self.tool_calls
+                    .entry(index)
+                    .or_default()
+                    .arguments
+                    .push_str(delta);
+                if delta.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![self.chunk(
+                        &serde_json::json!({ "tool_calls": [{ "index": index, "function": { "arguments": delta } }] }),
+                        None,
+                    )]
+                }
+            }
+            Some("response.function_call_arguments.done" | "response.output_item.done") => {
+                if value.get("type").and_then(|value| value.as_str())
+                    == Some("response.function_call_arguments.done")
+                {
+                    let index = output_index(&value);
+                    if let Some(arguments) = value.get("arguments").and_then(|value| value.as_str())
+                    {
+                        self.tool_calls.entry(index).or_default().arguments = arguments.to_string();
+                    }
+                }
+                Vec::new()
+            }
+            Some("response.completed") => {
+                self.usage = value
+                    .get("response")
+                    .and_then(|response| response.get("usage"))
+                    .and_then(parse_usage_value);
+                Vec::new()
+            }
+            Some("response.failed") => {
+                self.failed = Some(
+                    value
+                        .get("response")
+                        .and_then(|response| response.get("error"))
+                        .and_then(|error| error.get("message"))
+                        .and_then(|message| message.as_str())
+                        .unwrap_or("Codex response failed")
+                        .to_string(),
+                );
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn chunk(&self, delta: &serde_json::Value, finish_reason: Option<&str>) -> Vec<u8> {
+        chat_sse_frame(&serde_json::json!({
+            "id": self.id,
+            "object": "chat.completion.chunk",
+            "created": self.created,
+            "model": self.model,
+            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish_reason }],
+        }))
+    }
+
+    fn usage_chunk(&self, usage: Usage) -> Vec<u8> {
+        chat_sse_frame(&serde_json::json!({
+            "id": self.id,
+            "object": "chat.completion.chunk",
+            "created": self.created,
+            "model": self.model,
+            "choices": [],
+            "usage": {
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.total_tokens,
+                "prompt_tokens_details": { "cached_tokens": usage.cache_read_tokens },
+            },
+        }))
+    }
+}
+
+fn output_index(value: &serde_json::Value) -> usize {
+    value
+        .get("output_index")
+        .and_then(json_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+/// End of the first complete SSE block in `buffer`, as `(offset, separator
+/// length)`. Both `\n\n` and `\r\n\r\n` terminate a block; whichever starts
+/// first wins.
+fn sse_block_end(buffer: &[u8]) -> Option<(usize, usize)> {
+    let lf = find_bytes(buffer, b"\n\n").map(|index| (index, 2));
+    let crlf = find_bytes(buffer, b"\r\n\r\n").map(|index| (index, 4));
+    match (lf, crlf) {
+        (Some(left), Some(right)) => Some(if left.0 < right.0 { left } else { right }),
+        (Some(found), None) | (None, Some(found)) => Some(found),
+        (None, None) => None,
+    }
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn chat_sse_frame(value: &serde_json::Value) -> Vec<u8> {
+    format!("data: {value}\n\n").into_bytes()
+}
+
 enum Finish {
     Done,
     ToolCalls(Vec<ToolCall>, String, Option<String>),
@@ -1979,24 +2347,33 @@ fn parse_usage(data: &str) -> Option<Usage> {
     v.get("usage").and_then(parse_usage_value)
 }
 
-/// Parse a provider usage object shared by streaming and non-streaming calls.
-fn parse_usage_value(value: &serde_json::Value) -> Option<Usage> {
+/// Parse a provider usage object — the one place raw usage JSON becomes a
+/// [`Usage`], for every backend and both streaming and non-streaming calls.
+///
+/// Providers disagree about what their prompt count means. This normalizes all
+/// of them to one invariant: `prompt_tokens` is the **total** prompt, of which
+/// the cache buckets are subsets. See [`PromptConvention`].
+pub(crate) fn parse_usage_value(value: &serde_json::Value) -> Option<Usage> {
     let u = value.as_object()?;
     let get = |k: &str| u.get(k).and_then(json_u64).unwrap_or(0);
+    let has = |k: &str| u.contains_key(k);
     let detail = |group: &str, field: &str| {
         u.get(group)
             .and_then(|d| d.get(field))
             .and_then(json_u64)
             .unwrap_or(0)
     };
-    // OpenAI/OpenRouter report cache accounting in prompt_tokens_details
-    // (Responses-style payloads call it input_tokens_details). Anthropic and
-    // DeepSeek-compatible backends may expose flat fields instead. Take the
-    // largest reported value so duplicated compatibility fields count once.
-    let cached = [
+    let detail_present = |group: &str, field: &str| {
+        u.get(group)
+            .is_some_and(|d| d.get(field).is_some_and(|v| json_u64(v).is_some()))
+    };
+
+    // Cache fields whose provider reports a prompt total that already covers
+    // them (OpenAI, Codex Responses, DeepSeek-compatible). Take the largest so
+    // duplicated compatibility spellings count once, not twice.
+    let inclusive_read = [
         detail("prompt_tokens_details", "cached_tokens"),
         detail("input_tokens_details", "cached_tokens"),
-        get("cache_read_input_tokens"),
         get("prompt_cache_hit_tokens"),
         get("prompt_cache_read_tokens"),
         get("cache_read_tokens"),
@@ -2004,22 +2381,80 @@ fn parse_usage_value(value: &serde_json::Value) -> Option<Usage> {
     .into_iter()
     .max()
     .unwrap_or(0);
-    let cache_creation = [
+    let inclusive_write = [
         detail("prompt_tokens_details", "cache_write_tokens"),
         detail("input_tokens_details", "cache_write_tokens"),
-        get("cache_creation_input_tokens"),
     ]
     .into_iter()
     .max()
     .unwrap_or(0);
-    let cost = u.get("cost").and_then(json_f64);
+    let inclusive_present = detail_present("prompt_tokens_details", "cached_tokens")
+        || detail_present("input_tokens_details", "cached_tokens")
+        || detail_present("prompt_tokens_details", "cache_write_tokens")
+        || detail_present("input_tokens_details", "cache_write_tokens")
+        || has("prompt_cache_hit_tokens")
+        || has("prompt_cache_read_tokens")
+        || has("cache_read_tokens");
+
+    // Anthropic-shaped accounting: `input_tokens` counts only the fresh
+    // prompt, with reads and writes reported beside it.
+    let exclusive_read = get("cache_read_input_tokens");
+    let exclusive_write = get("cache_creation_input_tokens");
+    let exclusive_present = has("cache_read_input_tokens") || has("cache_creation_input_tokens");
+
+    let names_prompt_tokens = has("prompt_tokens");
+    let reported_prompt = if names_prompt_tokens {
+        get("prompt_tokens")
+    } else {
+        get("input_tokens")
+    };
+    let completion = if has("completion_tokens") {
+        get("completion_tokens")
+    } else {
+        get("output_tokens")
+    };
+
+    let (prompt_tokens, cache_read, cache_write, convention) =
+        if exclusive_present && !names_prompt_tokens {
+            // The unambiguous Anthropic shape: no `prompt_tokens` key at all,
+            // and the exclusive cache fields present. The total is the sum.
+            (
+                reported_prompt + exclusive_read + exclusive_write,
+                exclusive_read,
+                exclusive_write,
+                PromptConvention::NormalizedFromExclusive,
+            )
+        } else {
+            let read = inclusive_read.max(exclusive_read);
+            let write = inclusive_write.max(exclusive_write);
+            if read + write > reported_prompt {
+                // Backstop for a shape not recognized above: buckets larger
+                // than the total prove the count excluded them. This case used
+                // to be clamped into a plausible-looking 100% hit rate.
+                (
+                    reported_prompt + read + write,
+                    read,
+                    write,
+                    PromptConvention::NormalizedFromExclusive,
+                )
+            } else if inclusive_present || exclusive_present {
+                (reported_prompt, read, write, PromptConvention::Inclusive)
+            } else {
+                // No cache accounting at all. Zero reads is not the same claim
+                // as "this provider reported zero reads", so no ratio is
+                // offered rather than reporting a confident 0%.
+                (reported_prompt, 0, 0, PromptConvention::Unknown)
+            }
+        };
+
     let usage = Usage {
-        prompt_tokens: get("prompt_tokens"),
-        completion_tokens: get("completion_tokens"),
-        total_tokens: get("total_tokens"),
-        cache_read_tokens: cached,
-        cache_creation_tokens: cache_creation,
-        cost,
+        prompt_tokens,
+        completion_tokens: completion,
+        total_tokens: get("total_tokens").max(prompt_tokens + completion),
+        cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_write,
+        prompt_convention: convention,
+        cost: u.get("cost").and_then(json_f64),
     };
     (usage.prompt_tokens > 0 || usage.completion_tokens > 0 || usage.cost.is_some())
         .then_some(usage)
@@ -2028,27 +2463,26 @@ fn parse_usage_value(value: &serde_json::Value) -> Option<Usage> {
 /// Merge a usage-only event with earlier accounting from the same request.
 /// `OpenCode` may send cost-only or partial/cumulative objects after token
 /// usage; counts must never move backwards within one API request.
-fn merge_usage(slot: &mut Option<Usage>, next: Usage) {
+pub(crate) fn merge_usage(slot: &mut Option<Usage>, next: Usage) {
     *slot = Some(match slot.take() {
+        // A cost-only trailing object annotates the request it follows.
         Some(previous) if next.prompt_tokens + next.completion_tokens == 0 => Usage {
             cost: next.cost.or(previous.cost),
             ..previous
         },
-        Some(previous) => Usage {
-            // Streaming providers may expose cumulative accounting more than
-            // once, and a trailing compatibility object can be partial. Keep
-            // the largest count seen for this one API request instead of
-            // allowing a later smaller object to make prompt history appear
-            // to shrink.
-            prompt_tokens: previous.prompt_tokens.max(next.prompt_tokens),
-            completion_tokens: previous.completion_tokens.max(next.completion_tokens),
-            total_tokens: previous.total_tokens.max(next.total_tokens),
-            cache_read_tokens: previous.cache_read_tokens.max(next.cache_read_tokens),
-            cache_creation_tokens: previous
-                .cache_creation_tokens
-                .max(next.cache_creation_tokens),
-            cost: next.cost.or(previous.cost),
-        },
+        // Otherwise take whichever object accounts for more of the request,
+        // whole. Merging field-by-field (what this did before) could pair a
+        // cache count from one frame with a prompt total from another and
+        // produce a ratio no single response ever reported.
+        Some(previous) => {
+            let keep_next = next.prompt_tokens + next.completion_tokens
+                >= previous.prompt_tokens + previous.completion_tokens;
+            let winner = if keep_next { next } else { previous };
+            Usage {
+                cost: next.cost.or(previous.cost),
+                ..winner
+            }
+        }
         None => next,
     });
 }
@@ -2164,7 +2598,11 @@ fn codex_tools(tools: &[ToolDef]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn chat_body_to_codex_body(
+/// Convert an `OpenAI` Chat Completions request into the native Codex
+/// Responses request shape. `tools` is used by the in-process client; the
+/// host gateway reads the same definitions directly from the JSON body.
+#[allow(clippy::too_many_lines)] // one flat pass over the chat-body fields
+pub fn chat_body_to_codex_body(
     body: &serde_json::Value,
     stream: bool,
     tools: &[ToolDef],
@@ -2180,38 +2618,79 @@ fn chat_body_to_codex_body(
         .unwrap_or_default();
     let instructions = messages
         .iter()
-        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+        .filter(|m| {
+            matches!(
+                m.get("role").and_then(|r| r.as_str()),
+                Some("system" | "developer")
+            )
+        })
         .filter_map(|m| wire_text(m.get("content")?))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let input = messages
-        .iter()
-        .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
-        .map(|m| {
-            let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("user");
-            if role == "assistant" {
-                return serde_json::json!({
+    let mut input = Vec::new();
+    for message in &messages {
+        let role = message
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("user");
+        if matches!(role, "system" | "developer") {
+            continue;
+        }
+        if role == "tool" {
+            input.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": message.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or_default(),
+                "output": wire_text(message.get("content").unwrap_or(&serde_json::Value::Null)).unwrap_or_default(),
+            }));
+            continue;
+        }
+        if role == "assistant"
+            && let Some(calls) = message.get("tool_calls").and_then(|v| v.as_array())
+        {
+            let text = wire_text(message.get("content").unwrap_or(&serde_json::Value::Null))
+                .unwrap_or_default();
+            if !text.is_empty() {
+                input.push(serde_json::json!({
                     "role": "assistant",
-                    "content": [{ "type": "output_text", "text": wire_text(m.get("content").unwrap_or(&serde_json::Value::Null)).unwrap_or_default(), "annotations": [] }],
-                });
+                    "content": [{ "type": "output_text", "text": text, "annotations": [] }],
+                }));
             }
-            let mut content = Vec::new();
-            match m.get("content") {
-                Some(serde_json::Value::String(s)) => content.push(serde_json::json!({ "type": "input_text", "text": s })),
-                Some(serde_json::Value::Array(parts)) => {
-                    for p in parts {
-                        match p.get("type").and_then(|t| t.as_str()) {
-                            Some("text") => content.push(serde_json::json!({ "type": "input_text", "text": p.get("text").and_then(|t| t.as_str()).unwrap_or_default() })),
-                            Some("image_url") => content.push(serde_json::json!({ "type": "input_image", "detail": "auto", "image_url": p.get("image_url").and_then(|i| i.get("url")).and_then(|u| u.as_str()).unwrap_or_default() })),
-                            _ => {}
-                        }
+            for call in calls {
+                let function = call.get("function").unwrap_or(call);
+                input.push(serde_json::json!({
+                    "type": "function_call",
+                    "call_id": call.get("id").and_then(|v| v.as_str()).unwrap_or_default(),
+                    "name": function.get("name").and_then(|v| v.as_str()).unwrap_or_default(),
+                    "arguments": function.get("arguments").and_then(|v| v.as_str()).unwrap_or_default(),
+                }));
+            }
+            continue;
+        }
+        let mut content = Vec::new();
+        match message.get("content") {
+            Some(serde_json::Value::String(s)) => {
+                content.push(serde_json::json!({ "type": "input_text", "text": s }));
+            }
+            Some(serde_json::Value::Array(parts)) => {
+                for part in parts {
+                    match part.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => content.push(serde_json::json!({
+                            "type": "input_text",
+                            "text": part.get("text").and_then(|t| t.as_str()).unwrap_or_default()
+                        })),
+                        Some("image_url") => content.push(serde_json::json!({
+                            "type": "input_image",
+                            "detail": "auto",
+                            "image_url": part.get("image_url").and_then(|i| i.get("url")).and_then(|u| u.as_str()).unwrap_or_default()
+                        })),
+                        _ => {}
                     }
                 }
-                _ => {}
             }
-            serde_json::json!({ "role": "user", "content": content })
-        })
-        .collect::<Vec<_>>();
+            _ => {}
+        }
+        input.push(serde_json::json!({ "role": role, "content": content }));
+    }
     let mut out = serde_json::json!({
         "model": model,
         "store": false,
@@ -2220,12 +2699,50 @@ fn chat_body_to_codex_body(
         "input": input,
         "text": { "verbosity": "low" },
     });
-    if !tools.is_empty() {
-        out.as_object_mut()
-            .unwrap()
-            .insert("tools".into(), serde_json::json!(codex_tools(tools)));
+    let object = out.as_object_mut().expect("body is a JSON object");
+    if tools.is_empty() {
+        if let Some(chat_tools) = body.get("tools").and_then(|v| v.as_array()) {
+            let response_tools = chat_tools
+                .iter()
+                .filter_map(chat_tool_to_codex_tool)
+                .collect::<Vec<_>>();
+            if !response_tools.is_empty() {
+                object.insert("tools".into(), serde_json::Value::Array(response_tools));
+            }
+        }
+    } else {
+        object.insert("tools".into(), serde_json::json!(codex_tools(tools)));
+    }
+    for key in ["tool_choice", "parallel_tool_calls"] {
+        if let Some(value) = body.get(key) {
+            object.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(effort) = body
+        .get("reasoning_effort")
+        .and_then(|value| value.as_str())
+    {
+        object.insert(
+            "reasoning".into(),
+            serde_json::json!({ "effort": effort, "summary": "auto" }),
+        );
+    }
+    if let Some(max_tokens) = body.get("max_tokens") {
+        object.insert("max_output_tokens".into(), max_tokens.clone());
     }
     out
+}
+
+fn chat_tool_to_codex_tool(tool: &serde_json::Value) -> Option<serde_json::Value> {
+    let function = tool.get("function").unwrap_or(tool);
+    let name = function.get("name")?.as_str()?;
+    Some(serde_json::json!({
+        "type": "function",
+        "name": name,
+        "description": function.get("description").and_then(|v| v.as_str()).unwrap_or_default(),
+        "parameters": function.get("parameters").cloned().unwrap_or(serde_json::json!({})),
+        "strict": false,
+    }))
 }
 
 fn wire_text(v: &serde_json::Value) -> Option<String> {
@@ -2387,37 +2904,12 @@ fn accumulate_codex_tool_calls(acc: &mut BTreeMap<usize, ToolCall>, data: &str) 
     }
 }
 
+/// Pull usage out of a Codex Responses `response.completed` event. Everything
+/// beneath `response.usage` is handled by the shared parser, so the Responses
+/// shape gets the same normalization and field coverage as every other backend.
 fn codex_usage(data: &str) -> Option<Usage> {
     let v: serde_json::Value = serde_json::from_str(data).ok()?;
-    let response = v.get("response")?;
-    let u = response.get("usage")?;
-    let prompt_tokens = u
-        .get("input_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let completion_tokens = u
-        .get("output_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    Some(Usage {
-        prompt_tokens,
-        completion_tokens,
-        total_tokens: u
-            .get("total_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(prompt_tokens + completion_tokens),
-        cache_read_tokens: u
-            .get("input_tokens_details")
-            .and_then(|d| d.get("cached_tokens"))
-            .and_then(json_u64)
-            .unwrap_or(0),
-        cache_creation_tokens: u
-            .get("input_tokens_details")
-            .and_then(|d| d.get("cache_write_tokens"))
-            .and_then(json_u64)
-            .unwrap_or(0),
-        cost: None,
-    })
+    v.get("response")?.get("usage").and_then(parse_usage_value)
 }
 
 /// Request body for a one-shot image-understanding call: a text part with the
@@ -2748,6 +3240,74 @@ pub(crate) struct ImagesForTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_adapter_survives_multibyte_split_across_chunks() {
+        let mut adapter = CodexChatStreamAdapter::new("gpt-5-codex");
+        let event = concat!(
+            r#"data: {"type":"response.output_text.delta","delta":"héllo — 世界"}"#,
+            "\n\n"
+        )
+        .as_bytes()
+        .to_vec();
+        // Split inside the three-byte 世, the worst case for per-chunk decoding.
+        let split = event
+            .iter()
+            .position(|byte| *byte == 0xe4)
+            .expect("multi-byte character present")
+            + 1;
+        let mut frames = adapter.push_bytes(&event[..split]);
+        frames.extend(adapter.push_bytes(&event[split..]));
+        let text: String = frames
+            .iter()
+            .map(|frame| String::from_utf8_lossy(frame).into_owned())
+            .collect();
+        assert!(text.contains("héllo — 世界"), "corrupted delta: {text}");
+        assert!(!text.contains('\u{fffd}'), "replacement char in: {text}");
+    }
+
+    #[test]
+    fn codex_adapter_reports_a_truncated_stream_as_an_error() {
+        let mut adapter = CodexChatStreamAdapter::new("gpt-5-codex");
+        adapter.push_bytes(
+            concat!(
+                r#"data: {"type":"response.output_text.delta","delta":"half an ans"}"#,
+                "\n\n"
+            )
+            .as_bytes(),
+        );
+        adapter.fail("Codex stream stalled");
+        let frames = adapter.finish();
+        let text: String = frames
+            .iter()
+            .map(|frame| String::from_utf8_lossy(frame).into_owned())
+            .collect();
+        assert!(text.contains("Codex stream stalled"), "frames: {text}");
+        assert!(
+            !text.contains(r#""finish_reason":"stop""#),
+            "a cut-off stream must not claim a normal stop: {text}"
+        );
+        assert!(text.contains("[DONE]"));
+    }
+
+    #[test]
+    fn codex_tool_call_response_reports_null_content() {
+        let response = serde_json::json!({
+            "id": "resp_1",
+            "model": "gpt-5-codex",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "read_file",
+                "arguments": "{\"path\":\"a.md\"}",
+            }],
+        });
+        let chat = codex_response_to_chat(&response);
+        let message = &chat["choices"][0]["message"];
+        assert!(message["content"].is_null(), "message: {message}");
+        assert_eq!(message["tool_calls"][0]["function"]["name"], "read_file");
+        assert_eq!(chat["choices"][0]["finish_reason"], "tool_calls");
+    }
 
     #[tokio::test]
     async fn codex_catalog_matches_current_chatgpt_models() {
@@ -3123,18 +3683,177 @@ mod tests {
         assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
     }
 
+    /// One golden usage payload per provider family, each asserting the same
+    /// normalized invariant. This is the regression net for the convention:
+    /// adding a backend whose shape is not covered here should fail loudly
+    /// rather than silently reporting a clamped rate.
     #[test]
-    fn opencode_cache_key_is_scoped_to_its_wire_flavor() {
-        let mut opencode = serde_json::Map::new();
-        ProviderFlavor::OpencodeGo.add_prompt_cache_key(&mut opencode, "session-1");
-        assert_eq!(
-            opencode.get("prompt_cache_key"),
-            Some(&serde_json::json!("session-1"))
-        );
+    fn every_provider_family_normalizes_to_one_prompt_convention() {
+        struct Case {
+            name: &'static str,
+            payload: &'static str,
+            prompt: u64,
+            read: u64,
+            write: u64,
+            convention: PromptConvention,
+            rate: Option<f64>,
+        }
+        let cases = [
+            Case {
+                name: "OpenAI / OpenRouter (prompt_tokens includes cached)",
+                payload: r#"{"prompt_tokens":1000,"completion_tokens":50,
+                    "prompt_tokens_details":{"cached_tokens":800}}"#,
+                prompt: 1000,
+                read: 800,
+                write: 0,
+                convention: PromptConvention::Inclusive,
+                rate: Some(0.8),
+            },
+            Case {
+                name: "Codex Responses (input_tokens includes cached)",
+                payload: r#"{"input_tokens":1000,"output_tokens":50,
+                    "input_tokens_details":{"cached_tokens":250}}"#,
+                prompt: 1000,
+                read: 250,
+                write: 0,
+                convention: PromptConvention::Inclusive,
+                rate: Some(0.25),
+            },
+            Case {
+                name: "DeepSeek (prompt_tokens = hit + miss)",
+                payload: r#"{"prompt_tokens":400,"completion_tokens":10,
+                    "prompt_cache_hit_tokens":300,"prompt_cache_miss_tokens":100}"#,
+                prompt: 400,
+                read: 300,
+                write: 0,
+                convention: PromptConvention::Inclusive,
+                rate: Some(0.75),
+            },
+            Case {
+                name: "Anthropic-shaped (input_tokens excludes both buckets)",
+                payload: r#"{"input_tokens":100,"output_tokens":20,
+                    "cache_read_input_tokens":700,"cache_creation_input_tokens":200}"#,
+                // The provider's 100 is the fresh remainder; the real prompt
+                // is 100 + 700 + 200. Before normalization this produced
+                // 700/100 = 700%, clamped to a convincing 100%.
+                prompt: 1000,
+                read: 700,
+                write: 200,
+                convention: PromptConvention::NormalizedFromExclusive,
+                rate: Some(0.7),
+            },
+            Case {
+                name: "no cache accounting at all",
+                payload: r#"{"prompt_tokens":500,"completion_tokens":25}"#,
+                prompt: 500,
+                read: 0,
+                write: 0,
+                convention: PromptConvention::Unknown,
+                rate: None,
+            },
+        ];
+        for case in cases {
+            let value: serde_json::Value =
+                serde_json::from_str(case.payload).expect("valid golden payload");
+            let usage = parse_usage_value(&value).expect("payload reports usage");
+            assert_eq!(usage.prompt_tokens, case.prompt, "prompt: {}", case.name);
+            assert_eq!(usage.cache_read_tokens, case.read, "read: {}", case.name);
+            assert_eq!(
+                usage.cache_creation_tokens, case.write,
+                "write: {}",
+                case.name
+            );
+            assert_eq!(
+                usage.prompt_convention, case.convention,
+                "convention: {}",
+                case.name
+            );
+            assert_eq!(usage.cache_hit_rate(), case.rate, "rate: {}", case.name);
+            // The invariant every consumer relies on.
+            assert!(
+                usage.cache_read_tokens + usage.cache_creation_tokens <= usage.prompt_tokens,
+                "cache buckets must be subsets of the prompt total: {}",
+                case.name
+            );
+        }
+    }
 
-        let mut openai = serde_json::Map::new();
-        ProviderFlavor::OpenAi.add_prompt_cache_key(&mut openai, "session-1");
-        assert!(openai.is_empty());
+    #[test]
+    fn an_unrecognized_exclusive_shape_is_normalized_not_clamped() {
+        // A hypothetical backend using inclusive-looking field names with an
+        // exclusive count. The arithmetic contradiction is the giveaway.
+        let value = serde_json::json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "cache_read_tokens": 990,
+        });
+        let usage = parse_usage_value(&value).expect("reports usage");
+        assert_eq!(usage.prompt_tokens, 1000);
+        assert_eq!(usage.cache_read_tokens, 990);
+        assert_eq!(
+            usage.prompt_convention,
+            PromptConvention::NormalizedFromExclusive
+        );
+        assert_eq!(usage.cache_hit_rate(), Some(0.99));
+    }
+
+    #[test]
+    fn merged_usage_keeps_fields_from_one_response() {
+        // A later, less complete frame must not donate one field into an
+        // earlier frame's numbers and invent a ratio out of the pair.
+        let mut slot = None;
+        merge_usage(
+            &mut slot,
+            parse_usage_value(&serde_json::json!({
+                "prompt_tokens": 1000,
+                "completion_tokens": 40,
+                "prompt_tokens_details": {"cached_tokens": 900},
+            }))
+            .unwrap(),
+        );
+        merge_usage(
+            &mut slot,
+            parse_usage_value(&serde_json::json!({
+                "prompt_tokens": 200,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            }))
+            .unwrap(),
+        );
+        let merged = slot.expect("merged usage");
+        assert_eq!(merged.prompt_tokens, 1000);
+        assert_eq!(merged.cache_read_tokens, 900);
+        assert_eq!(merged.cache_hit_rate(), Some(0.9));
+
+        // A trailing cost-only frame annotates the winner without disturbing
+        // its counts.
+        merge_usage(
+            &mut slot,
+            parse_usage_value(&serde_json::json!({"cost": "0.02"})).unwrap(),
+        );
+        let merged = slot.expect("merged usage");
+        assert_eq!(merged.prompt_tokens, 1000);
+        assert_eq!(merged.cost, Some(0.02));
+    }
+
+    #[test]
+    fn cache_key_goes_to_the_flavors_that_route_on_it() {
+        for flavor in [ProviderFlavor::OpencodeGo, ProviderFlavor::OpenAi] {
+            let mut body = serde_json::Map::new();
+            flavor.add_prompt_cache_key(&mut body, "session-1");
+            assert_eq!(
+                body.get("prompt_cache_key"),
+                Some(&serde_json::json!("session-1")),
+                "{flavor:?} should carry the cache lane key"
+            );
+        }
+        // OpenRouter normalizes unknown top-level fields per upstream
+        // provider; the Codex Responses body has no equivalent field.
+        for flavor in [ProviderFlavor::OpenRouter, ProviderFlavor::OpenAiCodex] {
+            let mut body = serde_json::Map::new();
+            flavor.add_prompt_cache_key(&mut body, "session-1");
+            assert!(body.is_empty(), "{flavor:?} should not carry it");
+        }
     }
 
     #[test]
@@ -3192,6 +3911,7 @@ mod tests {
             total_tokens: 160,
             cache_read_tokens: 100,
             cache_creation_tokens: 5,
+            prompt_convention: Default::default(),
             cost: None,
         });
         merge_usage(
@@ -3202,6 +3922,7 @@ mod tests {
                 total_tokens: 100,
                 cache_read_tokens: 60,
                 cache_creation_tokens: 2,
+                prompt_convention: Default::default(),
                 cost: Some(0.01),
             },
         );

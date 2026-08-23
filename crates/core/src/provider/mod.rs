@@ -209,6 +209,14 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
     pub tool_call_id: Option<String>,
     pub images: Vec<String>,
+    /// Mark this message as the end of a cacheable prefix.
+    ///
+    /// Providers split into two camps here too. Most cache automatically;
+    /// Anthropic-family models cache nothing unless the request marks where
+    /// the stable prefix ends, which is why those models sat at a flat 0% hit
+    /// rate. Set only for backends that need it — see
+    /// `App::wants_explicit_cache_breakpoints`.
+    pub cache_breakpoint: bool,
 }
 
 impl ChatMessage {
@@ -239,7 +247,7 @@ impl Serialize for ChatMessage {
         use serde::ser::SerializeMap;
         let mut map = s.serialize_map(None)?;
         map.serialize_entry("role", &self.role)?;
-        if self.images.is_empty() {
+        if self.images.is_empty() && !self.cache_breakpoint {
             map.serialize_entry("content", &self.content)?;
         } else {
             // OpenAI vision shape: text part (if any) + one image_url part per image.
@@ -249,6 +257,17 @@ impl Serialize for ChatMessage {
             }
             for url in &self.images {
                 parts.push(serde_json::json!({ "type": "image_url", "image_url": { "url": url } }));
+            }
+            // The breakpoint rides the final part: everything up to and
+            // including it is what the provider is asked to cache.
+            if self.cache_breakpoint
+                && let Some(last) = parts.last_mut()
+                && let Some(object) = last.as_object_mut()
+            {
+                object.insert(
+                    "cache_control".to_string(),
+                    serde_json::json!({ "type": "ephemeral" }),
+                );
             }
             map.serialize_entry("content", &parts)?;
         }
@@ -279,10 +298,66 @@ impl Serialize for ChatMessage {
 /// Events emitted while a completion streams. Delivered over an mpsc channel so
 /// the UI event loop can interleave them with keypresses.
 /// Exact token accounting reported by the provider at end of stream.
-#[derive(Debug, Clone, Copy)]
+/// Which convention the provider used for its prompt-token count, recorded at
+/// the parse boundary so nothing downstream has to guess.
+///
+/// Providers split into two camps. Most (`OpenAI`, Codex Responses,
+/// `DeepSeek`-compatible) report a prompt total that *includes* the cached
+/// tokens. Anthropic-shaped payloads report `input_tokens` alongside
+/// `cache_read_input_tokens`/`cache_creation_input_tokens`, where the input
+/// count *excludes* both. A ratio computed without knowing which is which is
+/// meaningless — and, before this was tracked, was clamped into looking fine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptConvention {
+    /// The provider's prompt count already covers cache reads and writes.
+    #[default]
+    Inclusive,
+    /// The provider reported them separately; `prompt_tokens` here is the sum
+    /// this crate computed, not the number the provider sent.
+    NormalizedFromExclusive,
+    /// No recognized cache fields were present, so no claim is made. Cache
+    /// ratios are withheld rather than reported as zero. Also the landing
+    /// place for a spelling this build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+impl PromptConvention {
+    /// Wire/db spelling. Stable — persisted in `usage_log`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inclusive => "inclusive",
+            Self::NormalizedFromExclusive => "normalized_from_exclusive",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Parse the persisted spelling; anything unrecognized reads as `Unknown`.
+    #[must_use]
+    pub fn from_str_or_unknown(value: &str) -> Self {
+        match value {
+            "inclusive" => Self::Inclusive,
+            "normalized_from_exclusive" => Self::NormalizedFromExclusive,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Whether a cache ratio derived from this row means anything.
+    #[must_use]
+    pub const fn ratio_is_meaningful(self) -> bool {
+        matches!(self, Self::Inclusive | Self::NormalizedFromExclusive)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 // _tokens postfix is the unit — removing it would make the fields ambiguous.
 #[allow(clippy::struct_field_names)]
 pub struct Usage {
+    /// The **total** prompt for this request. `cache_read_tokens` and
+    /// `cache_creation_tokens` are subsets of it, never addends — normalized
+    /// at the parse boundary, see [`PromptConvention`].
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
@@ -290,6 +365,8 @@ pub struct Usage {
     pub cache_read_tokens: u64,
     /// Prompt tokens written into the cache on this request (cache writes).
     pub cache_creation_tokens: u64,
+    /// Which convention the provider's prompt count arrived in.
+    pub prompt_convention: PromptConvention,
     /// Provider-reported request cost in USD. `OpenRouter` includes it in the
     /// final usage object; `OpenCode` Zen/Go reports it in a trailing streamed
     /// chunk (`"cost":"0.0012"`). `None` when the provider omits cost.
@@ -298,14 +375,22 @@ pub struct Usage {
 
 impl Usage {
     /// Fraction of this request's prompt served from cache, 0.0..=1.0.
-    /// `None` when the provider reported no usage or a zero prompt.
+    ///
+    /// `None` when there is nothing honest to report: no prompt tokens, or a
+    /// payload whose convention could not be identified. Deliberately *not*
+    /// clamped — a ratio above 1.0 means the normalization missed a provider
+    /// shape, and clamping it to a plausible 100% is exactly how that stayed
+    /// invisible before.
     #[allow(clippy::cast_precision_loss)] // token counts are too large for u32; a ratio loses nothing meaningful
     pub fn cache_hit_rate(&self) -> Option<f64> {
-        if self.prompt_tokens == 0 {
-            None
-        } else {
-            Some((self.cache_read_tokens as f64 / self.prompt_tokens as f64).clamp(0.0, 1.0))
+        if self.prompt_tokens == 0 || !self.prompt_convention.ratio_is_meaningful() {
+            return None;
         }
+        debug_assert!(
+            self.cache_read_tokens + self.cache_creation_tokens <= self.prompt_tokens,
+            "cache buckets exceed the prompt total — a provider shape is not normalized: {self:?}"
+        );
+        Some(self.cache_read_tokens as f64 / self.prompt_tokens as f64)
     }
 }
 
@@ -405,6 +490,7 @@ mod tests {
                     }]),
                     tool_call_id: None,
                     images: Vec::new(),
+                    cache_breakpoint: false,
                 },
                 ChatMessage {
                     role: "tool".into(),
@@ -413,6 +499,7 @@ mod tests {
                     tool_calls: None,
                     tool_call_id: Some(id.into()),
                     images: Vec::new(),
+                    cache_breakpoint: false,
                 },
             ]
         };
@@ -454,6 +541,7 @@ mod tests {
                 }]),
                 tool_call_id: None,
                 images: Vec::new(),
+                cache_breakpoint: false,
             },
             ChatMessage {
                 role: "tool".into(),
@@ -462,6 +550,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: Some("a".into()),
                 images: Vec::new(),
+                cache_breakpoint: false,
             },
         ];
         let seen = seed_tool_result_dedup(&msgs);
@@ -514,6 +603,7 @@ mod tests {
             }]),
             tool_call_id: None,
             images: Vec::new(),
+            cache_breakpoint: false,
         };
         let v = serde_json::to_value(&m).unwrap();
         assert_eq!(v["tool_calls"][0]["function"]["name"], "web_search");
