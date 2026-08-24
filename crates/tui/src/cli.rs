@@ -36,6 +36,9 @@ pub struct Cli {
     /// otherwise behave like `--continue`.
     #[arg(long = "selection-chat")]
     pub selection_chat: bool,
+    /// Send a selection request to an already-running TUI and exit.
+    #[arg(long = "selection-chat-send-only", hide = true)]
+    pub selection_chat_send_only: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -370,9 +373,14 @@ pub enum SyncCmd {
 /// Parse argv and return the launch flags plus requested subcommand. `None`
 /// means no subcommand — the caller launches the TUI. Help/version/parse
 /// errors are handled by clap (it exits the process).
-pub fn parse() -> (bool, bool, Option<Command>) {
+pub fn parse() -> (bool, bool, bool, Option<Command>) {
     let cli = Cli::parse();
-    (cli.continue_session, cli.selection_chat, cli.command)
+    (
+        cli.continue_session,
+        cli.selection_chat,
+        cli.selection_chat_send_only,
+        cli.command,
+    )
 }
 
 /// Run a parsed subcommand.
@@ -679,6 +687,140 @@ pub(crate) fn clear_primary_selection() {
     not(any(target_os = "macos", target_os = "android", target_os = "emscripten")),
 )))]
 pub(crate) const fn clear_primary_selection() {}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten")),
+))]
+fn selection_socket_path() -> Option<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR").map(|dir| PathBuf::from(dir).join("nexus-chat.sock"))
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten")),
+))]
+/// Send a selection prompt to the running TUI, returning whether one accepted it.
+pub(crate) fn send_selection_request(prompt: Option<&str>) -> bool {
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+
+    let Some(path) = selection_socket_path() else {
+        return false;
+    };
+    let Ok(mut stream) = UnixStream::connect(&path) else {
+        let _ = std::fs::remove_file(path);
+        return false;
+    };
+    if let Some(prompt) = prompt.filter(|text| !text.trim().is_empty())
+        && stream.write_all(prompt.as_bytes()).is_err()
+    {
+        return false;
+    }
+    let _ = stream.shutdown(Shutdown::Write);
+    if prompt.is_some() {
+        clear_primary_selection();
+    }
+    true
+}
+
+#[cfg(not(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten")),
+)))]
+pub(crate) const fn send_selection_request(_prompt: Option<&str>) -> bool {
+    false
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten")),
+))]
+pub(crate) struct SelectionServer {
+    path: PathBuf,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten")),
+))]
+impl Drop for SelectionServer {
+    fn drop(&mut self) {
+        self.task.abort();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten")),
+))]
+async fn accept_selection_requests(
+    listener: tokio::net::UnixListener,
+    sender: tokio::sync::mpsc::UnboundedSender<String>,
+) {
+    use tokio::io::AsyncReadExt as _;
+
+    loop {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            break;
+        };
+        let sender = sender.clone();
+        tokio::spawn(async move {
+            let mut request = Vec::new();
+            if stream.read_to_end(&mut request).await.is_ok()
+                && let Ok(prompt) = String::from_utf8(request)
+                && !prompt.trim().is_empty()
+            {
+                let _ = sender.send(prompt);
+            }
+        });
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten")),
+))]
+pub(crate) fn start_selection_server() -> Result<(
+    Option<SelectionServer>,
+    Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+)> {
+    let Some(path) = selection_socket_path() else {
+        return Ok((None, None));
+    };
+    if path.exists() {
+        use std::os::unix::net::UnixStream;
+
+        if UnixStream::connect(&path).is_ok() {
+            bail!("another Nexus TUI instance is already running");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    let listener = tokio::net::UnixListener::bind(&path)
+        .with_context(|| format!("binding Nexus instance socket {}", path.display()))?;
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(accept_selection_requests(listener, sender));
+    Ok((Some(SelectionServer { path, task }), Some(receiver)))
+}
+
+#[cfg(not(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten")),
+)))]
+pub(crate) struct SelectionServer;
+
+#[cfg(not(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten")),
+)))]
+pub(crate) const fn start_selection_server() -> Result<(
+    Option<SelectionServer>,
+    Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+)> {
+    Ok((None, None))
+}
 
 fn read_clipboard_text() -> Result<String> {
     let mut clipboard = arboard::Clipboard::new().context(
@@ -2621,15 +2763,22 @@ mod tests {
         let cli = Cli::try_parse_from(["nexus", "--continue"]).unwrap();
         assert!(cli.continue_session);
         assert!(!cli.selection_chat);
+        assert!(!cli.selection_chat_send_only);
         assert!(cli.command.is_none());
 
         let cli = Cli::try_parse_from(["nexus", "--selection-chat"]).unwrap();
         assert!(cli.selection_chat);
+        assert!(!cli.selection_chat_send_only);
+        assert!(cli.command.is_none());
+
+        let cli = Cli::try_parse_from(["nexus", "--selection-chat-send-only"]).unwrap();
+        assert!(cli.selection_chat_send_only);
         assert!(cli.command.is_none());
 
         let cli = Cli::try_parse_from(["nexus", "status"]).unwrap();
         assert!(!cli.continue_session);
         assert!(!cli.selection_chat);
+        assert!(!cli.selection_chat_send_only);
         assert!(matches!(cli.command, Some(Command::Status)));
     }
 

@@ -16,20 +16,30 @@ use app_view::AppView;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let (continue_session, selection_chat, command) = cli::parse();
+    let (continue_session, selection_chat, send_only, command) = cli::parse();
     // A subcommand (ask/usage/sessions/…) runs headless; no subcommand boots
     // the TUI. Launch flags only make sense when launching the TUI.
     if let Some(cmd) = command {
-        if continue_session || selection_chat {
+        if continue_session || selection_chat || send_only {
             anyhow::bail!("launch flags can only be used when launching the TUI");
         }
         return cli::run(cmd).await;
     }
 
-    let selection_prompt = selection_chat.then(cli::primary_selection_prompt).flatten();
+    let selection_prompt = (selection_chat || send_only)
+        .then(cli::primary_selection_prompt)
+        .flatten();
+    if (selection_chat || send_only) && cli::send_selection_request(selection_prompt.as_deref()) {
+        return Ok(());
+    }
+    if send_only {
+        anyhow::bail!("no running Nexus TUI instance");
+    }
+
     let saved = config::load_all_providers().await?;
     let app = nexus_core::boot(saved).await?;
     let mut app = AppView::new(app);
+    let (selection_server, selection_requests) = cli::start_selection_server()?;
 
     let mut terminal = ratatui::init();
     // Capture mouse so the model picker is clickable and the terminal doesn't do
@@ -90,7 +100,8 @@ async fn main() -> Result<()> {
     }
     app.spawn_update_check(); // once a day: is a newer release out? — auto-installs it in the background
     app.run_due_watches(); // re-run any standing research watches that are due
-    let result = events::run(app, &mut terminal).await;
+    let result = events::run(app, &mut terminal, selection_requests).await;
+    drop(selection_server);
     if enhanced {
         let _ = crossterm::execute!(
             std::io::stdout(),

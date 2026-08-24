@@ -53,15 +53,32 @@ fn system_prompt_edit_target(app: &AppView, key: &KeyEvent) -> Option<std::path:
     nexus_core::config::system_prompt_path().ok()
 }
 
-pub async fn run(mut app: AppView, terminal: &mut DefaultTerminal) -> Result<()> {
-    let result = run_loop(&mut app, terminal).await;
+pub async fn run(
+    mut app: AppView,
+    terminal: &mut DefaultTerminal,
+    selection_requests: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+) -> Result<()> {
+    let result = run_loop(&mut app, terminal, selection_requests).await;
     app.cancel_chat_tasks();
     result
 }
 
+async fn next_selection_request(
+    receiver: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+) -> Option<String> {
+    match receiver {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 // Long by design (event loop).
 #[allow(clippy::too_many_lines)]
-async fn run_loop(app: &mut AppView, terminal: &mut DefaultTerminal) -> Result<()> {
+async fn run_loop(
+    app: &mut AppView,
+    terminal: &mut DefaultTerminal,
+    mut selection_requests: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+) -> Result<()> {
     let mut reader = EventStream::new();
     // Cheap poll for an omarchy theme switch (symlink target change) so a
     // `omarchy theme set` while nexus-chat is running takes effect live.
@@ -141,6 +158,16 @@ async fn run_loop(app: &mut AppView, terminal: &mut DefaultTerminal) -> Result<(
                 Some(Err(e)) => return Err(e.into()),
                 None => break,
             },
+            request = next_selection_request(&mut selection_requests) => {
+                if let Some(prompt) = request {
+                    if !app.web_mode {
+                        app.execute(nexus_core::app::AppCommand::ToggleWeb)?;
+                    }
+                    app.execute(nexus_core::app::AppCommand::Send { text: prompt })?;
+                } else {
+                    selection_requests = None;
+                }
+            }
             event = app.next_event() => {
                 // View-side events (status line, composer restore, viewport
                 // reset) apply to the view layer; domain events go to their

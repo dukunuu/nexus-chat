@@ -80,9 +80,11 @@ plain-language/facts prompt when no instruction is supplied. `--copy` puts
 the answer back on the clipboard. `--selection-chat` is the interactive
 Linux shortcut mode: it reads the primary selection without changing either
 clipboard, submits a protected web-mode turn into the TUI, and behaves like
-`--continue` when the selection is empty. Bind it with a terminal command
-such as `foot -e nexus --selection-chat`; use the equivalent `-e` option for
-your terminal emulator. `research` without `--approve` parks at the
+`--continue` when the selection is empty. A running TUI accepts later
+selection requests over its per-user runtime socket, so the shortcut reuses
+one instance. Bind it with a terminal command such as
+`foot -e nexus --selection-chat`; use the equivalent `-e` option for your
+terminal emulator. `research` without `--approve` parks at the
 survey/plan checkpoints: interactive when stdin is a terminal, an error
 otherwise (`--approve` runs unattended, like `/research!`). The read-only
 commands (`usage`, `sessions`, `spaces`, `export`, `status`, `doctor`,
