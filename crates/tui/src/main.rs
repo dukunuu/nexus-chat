@@ -16,16 +16,17 @@ use app_view::AppView;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let (continue_session, command) = cli::parse();
+    let (continue_session, selection_chat, command) = cli::parse();
     // A subcommand (ask/usage/sessions/…) runs headless; no subcommand boots
-    // the TUI. `--continue` only makes sense for the interactive launcher.
+    // the TUI. Launch flags only make sense when launching the TUI.
     if let Some(cmd) = command {
-        if continue_session {
-            anyhow::bail!("--continue can only be used when launching the TUI");
+        if continue_session || selection_chat {
+            anyhow::bail!("launch flags can only be used when launching the TUI");
         }
         return cli::run(cmd).await;
     }
 
+    let selection_prompt = selection_chat.then(cli::primary_selection_prompt).flatten();
     let saved = config::load_all_providers().await?;
     let app = nexus_core::boot(saved).await?;
     let mut app = AppView::new(app);
@@ -50,8 +51,15 @@ async fn main() -> Result<()> {
         );
     }
     app.init(); // fetch models if a key is already present
-    if continue_session {
-        // Explicit `--continue` wins over a stale `nexus open` handoff file.
+    if let Some(prompt) = selection_prompt {
+        // Selection mode is a real TUI launch: submit the protected prompt to
+        // the same event loop so the answer streams into the open chat.
+        app.execute(nexus_core::app::AppCommand::ToggleWeb)?;
+        app.execute(nexus_core::app::AppCommand::Send { text: prompt })?;
+        cli::clear_primary_selection();
+    } else if continue_session || selection_chat {
+        // Explicit `--continue` (and selection mode with no selection) wins
+        // over a stale `nexus open` handoff file.
         let _ = std::fs::remove_file(app.space.root.join("pending-open"));
         if let Some((space_id, session)) = app.db.latest_session()? {
             if app.active_space.id != space_id

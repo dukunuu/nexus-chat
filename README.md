@@ -62,6 +62,7 @@ nexus skills list                                      # installed skills
 nexus skills install owner/repo[/path]                 # install a skill from GitHub
 nexus open <id|slug>                                   # launch the TUI inside that session
 nexus --continue                                       # launch the TUI inside the latest session
+nexus --selection-chat                                 # analyze Linux primary selection, or continue
 nexus update                                           # update to the latest release (cargo install)
 nexus status                                           # paths, providers configured, db stats
 nexus doctor [--network]                               # db integrity, config, tools
@@ -76,10 +77,12 @@ conversations as normal sessions — tool status and token usage go to
 stderr, answers to stdout. `clip` reads text through the OS clipboard
 (Wayland or X11), applies its optional instruction, and uses a built-in
 plain-language/facts prompt when no instruction is supplied. `--copy` puts
-the answer back on the clipboard. Bind a Linux global shortcut to a
-terminal command such as `foot -e nexus clip --web --copy "Explain this in
-plain language and list interesting facts"`; use the equivalent `-e` option
-for your terminal emulator. `research` without `--approve` parks at the
+the answer back on the clipboard. `--selection-chat` is the interactive
+Linux shortcut mode: it reads the primary selection without changing either
+clipboard, submits a protected web-mode turn into the TUI, and behaves like
+`--continue` when the selection is empty. Bind it with a terminal command
+such as `foot -e nexus --selection-chat`; use the equivalent `-e` option for
+your terminal emulator. `research` without `--approve` parks at the
 survey/plan checkpoints: interactive when stdin is a terminal, an error
 otherwise (`--approve` runs unattended, like `/research!`). The read-only
 commands (`usage`, `sessions`, `spaces`, `export`, `status`, `doctor`,
