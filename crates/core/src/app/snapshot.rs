@@ -11,6 +11,11 @@ use super::App;
 /// One snapshot of the app's domain state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreSnapshot {
+    /// The session currently selected by the host actor. `None` means the
+    /// next message will lazily create a new session.
+    pub active_session_id: Option<String>,
+    pub active_space_id: String,
+    pub active_space_name: String,
     pub sessions: Vec<SessionSnapshot>,
     pub models: Vec<ModelSnapshot>,
     pub settings: SettingsSnapshot,
@@ -28,6 +33,22 @@ pub struct SessionSnapshot {
     pub created_at: String,
 }
 
+/// A persisted transcript row exposed to thin clients. Provider credentials
+/// and internal database identifiers are intentionally not part of this view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageSnapshot {
+    pub role: String,
+    pub content: String,
+    pub model: Option<String>,
+    pub reasoning: Option<String>,
+    pub tokens: Option<i64>,
+    pub secs: Option<f64>,
+    pub cost: Option<f64>,
+    pub phrase: Option<String>,
+    pub persona: Option<String>,
+    pub created_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelSnapshot {
     /// Composite id (backend prefix + wire id) — what `current_model`,
@@ -39,7 +60,14 @@ pub struct ModelSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // Independent user preferences in the wire format.
 pub struct SettingsSnapshot {
+    #[serde(default)]
+    pub show_stats: bool,
+    #[serde(default)]
+    pub show_reasoning: bool,
+    #[serde(default)]
+    pub hide_hints: bool,
     pub model: Option<String>,
     pub verbosity: String,
     pub web_mode: bool,
@@ -76,6 +104,10 @@ pub struct TaskSnapshot {
     /// the map while their loop is active, so there is no idle state.
     pub status: String,
     pub buffer_chars: usize,
+    /// Partial answer buffer, allowing thin clients to recover after an SSE
+    /// reconnect. It contains model output only, never credentials.
+    #[serde(default)]
+    pub buffer: String,
 }
 
 /// Remove URL userinfo, query, and fragment components before an endpoint is
@@ -94,6 +126,30 @@ fn sanitized_endpoint(value: &str) -> String {
 }
 
 impl App {
+    /// Load one session's transcript for thin clients such as the web UI.
+    pub fn session_messages(&self, session_id: &str) -> Result<Vec<MessageSnapshot>> {
+        self.db
+            .load_messages(session_id)
+            .context("reading session messages")
+            .map(|messages| {
+                messages
+                    .into_iter()
+                    .map(|message| MessageSnapshot {
+                        role: message.role,
+                        content: message.content,
+                        model: message.model,
+                        reasoning: message.reasoning,
+                        tokens: message.tokens,
+                        secs: message.secs,
+                        cost: message.cost,
+                        phrase: message.phrase,
+                        persona: message.persona,
+                        created_at: message.created_at,
+                    })
+                    .collect()
+            })
+    }
+
     /// Serde-shaped state for API consumers (the Phase 4 host). Sessions
     /// come from the picker cache when loaded, else a fresh db read — a
     /// failed read is an error, never a silently-empty session list.
@@ -107,6 +163,9 @@ impl App {
         };
         let favorite_ids = &self.favorites;
         Ok(CoreSnapshot {
+            active_session_id: self.session.as_ref().map(|session| session.id.clone()),
+            active_space_id: self.active_space.id.clone(),
+            active_space_name: self.active_space.name.clone(),
             sessions: sessions
                 .into_iter()
                 .map(|s| SessionSnapshot {
@@ -130,6 +189,9 @@ impl App {
                 })
                 .collect(),
             settings: SettingsSnapshot {
+                show_stats: self.settings.show_stats,
+                show_reasoning: self.settings.show_reasoning,
+                hide_hints: self.settings.hide_hints,
                 model: self.current_model.clone(),
                 verbosity: self.verbosity.clone(),
                 web_mode: self.web_mode,
@@ -165,6 +227,7 @@ impl App {
                         "streaming".to_string()
                     },
                     buffer_chars: t.buffer.chars().count(),
+                    buffer: t.buffer.clone(),
                 })
                 .collect(),
         })
@@ -182,6 +245,9 @@ mod tests {
     #[test]
     fn golden_json_locks_wire_shape() {
         let snap = CoreSnapshot {
+            active_session_id: Some("s1".into()),
+            active_space_id: "sp1".into(),
+            active_space_name: "Default".into(),
             sessions: vec![SessionSnapshot {
                 id: "s1".into(),
                 title: "hello".into(),
@@ -198,6 +264,9 @@ mod tests {
                 favorite: true,
             }],
             settings: SettingsSnapshot {
+                show_stats: false,
+                show_reasoning: false,
+                hide_hints: false,
                 model: Some("openrouter:anthropic/claude-sonnet-4".into()),
                 verbosity: "high".into(),
                 web_mode: false,
@@ -226,12 +295,13 @@ mod tests {
                 backend: "OpenRouter".into(),
                 status: "streaming".into(),
                 buffer_chars: 12,
+                buffer: "".into(),
             }],
         };
         let json = serde_json::to_string(&snap).expect("snapshot serializes");
         assert_eq!(
             json,
-            r#"{"sessions":[{"id":"s1","title":"hello","slug":"hello","model":"openrouter:anthropic/claude-sonnet-4","kind":"chat","web_mode":false,"created_at":"2025-01-01T00:00:00Z"}],"models":[{"id":"openrouter:anthropic/claude-sonnet-4","name":"Claude Sonnet 4","context_length":200000,"favorite":true}],"settings":{"model":"openrouter:anthropic/claude-sonnet-4","verbosity":"high","web_mode":false,"incognito":false,"searxng_url":"","langsearch_configured":false,"search_provider":"searxng","temperature":0.7,"top_p":null,"max_tokens":null,"compact_threshold":60,"memory_model":"","transcriber_model":"","ocr_model":"","ocr_engine":"router","embedding_model":"","image_gen_model":"","video_gen_model":"","blocked_domains":[]},"tasks":[{"id":1,"session_id":"s1","session_title":"hello","model":"openrouter:anthropic/claude-sonnet-4","backend":"OpenRouter","status":"streaming","buffer_chars":12}]}"#
+            r#"{"active_session_id":"s1","active_space_id":"sp1","active_space_name":"Default","sessions":[{"id":"s1","title":"hello","slug":"hello","model":"openrouter:anthropic/claude-sonnet-4","kind":"chat","web_mode":false,"created_at":"2025-01-01T00:00:00Z"}],"models":[{"id":"openrouter:anthropic/claude-sonnet-4","name":"Claude Sonnet 4","context_length":200000,"favorite":true}],"settings":{"show_stats":false,"show_reasoning":false,"hide_hints":false,"model":"openrouter:anthropic/claude-sonnet-4","verbosity":"high","web_mode":false,"incognito":false,"searxng_url":"","langsearch_configured":false,"search_provider":"searxng","temperature":0.7,"top_p":null,"max_tokens":null,"compact_threshold":60,"memory_model":"","transcriber_model":"","ocr_model":"","ocr_engine":"router","embedding_model":"","image_gen_model":"","video_gen_model":"","blocked_domains":[]},"tasks":[{"id":1,"session_id":"s1","session_title":"hello","model":"openrouter:anthropic/claude-sonnet-4","backend":"OpenRouter","status":"streaming","buffer_chars":12,"buffer":""}]}"#
         );
         // The golden string must also parse back into the same shape.
         let back: CoreSnapshot = serde_json::from_str(&json).expect("golden parses");

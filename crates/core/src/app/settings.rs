@@ -108,9 +108,20 @@ const SETTING_KEYS: [&str; 21] = [
 fn valid_setting_value(key: &str, value: &str) -> bool {
     match key {
         "show_stats" | "show_reasoning" | "hide_hints" => matches!(value, "0" | "1"),
-        "temperature" | "top_p" => value.parse::<f32>().is_ok(),
-        "max_tokens" => value.parse::<u32>().is_ok(),
-        "compact_threshold" => value.parse::<u8>().is_ok(),
+        "temperature" => {
+            value.is_empty()
+                || value
+                    .parse::<f32>()
+                    .is_ok_and(|value| value.is_finite() && (0.0..=2.0).contains(&value))
+        }
+        "top_p" => {
+            value.is_empty()
+                || value
+                    .parse::<f32>()
+                    .is_ok_and(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+        }
+        "max_tokens" => value.is_empty() || value.parse::<u32>().is_ok_and(|value| value > 0),
+        "compact_threshold" => value.parse::<u8>().is_ok_and(|value| value <= 100),
         "usage_range" => crate::db::UsageRange::CYCLE
             .iter()
             .any(|r| r.key() == value),

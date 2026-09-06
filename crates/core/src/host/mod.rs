@@ -7,9 +7,21 @@
 //! gateway live in `api.rs`, sidecar lifecycles in [`process`], and named
 //! tunnel provisioning in [`cloudflare`].
 
+mod admin;
 mod api;
+mod apps;
 pub mod cloudflare;
 pub mod process;
 pub mod wire;
 
 pub use api::{HostConfig, HostServer};
+
+mod management;
+
+mod media;
+
+mod research_view;
+
+mod browser_sync;
+mod jobs;
+mod sessions_view;

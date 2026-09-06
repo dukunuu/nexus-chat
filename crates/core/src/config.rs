@@ -412,10 +412,24 @@ pub fn save_named_tunnel(tunnel: &NamedTunnelConfig) -> Result<()> {
     write_secret_file(&path, &body)
 }
 
-// Long by design (device-flow state machine).
-#[allow(clippy::too_many_lines)]
 pub async fn login_openai_codex_device(
     status: tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<CodexCredentials> {
+    login_openai_codex_device_with_browser(status, true).await
+}
+
+/// Device login for a host client; does not launch a browser or touch the host clipboard.
+pub async fn login_openai_codex_remote(
+    status: tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<CodexCredentials> {
+    login_openai_codex_device_with_browser(status, false).await
+}
+
+// Long by design (device-flow state machine).
+#[allow(clippy::too_many_lines)]
+async fn login_openai_codex_device_with_browser(
+    status: tokio::sync::mpsc::UnboundedSender<String>,
+    local_browser: bool,
 ) -> Result<CodexCredentials> {
     let client = reqwest::Client::new();
     let device = client
@@ -446,13 +460,16 @@ pub async fn login_openai_codex_device(
         .max(1.0);
     let url = "https://auth.openai.com/codex/device";
     let prefilled_url = format!("{url}?user_code={user_code}");
-    // Put only the raw code first so it stays visible even on narrow status lines.
-    let _ =
-        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(user_code.clone()));
-    let _ = status.send(format!(
-        "{user_code}  ← copied to clipboard; enter at {url}"
-    ));
-    let _ = open::that(&prefilled_url);
+    if local_browser {
+        let _ = arboard::Clipboard::new()
+            .and_then(|mut clipboard| clipboard.set_text(user_code.clone()));
+        let _ = status.send(format!(
+            "{user_code}  ← copied to clipboard; enter at {url}"
+        ));
+        let _ = open::that(&prefilled_url);
+    } else {
+        let _ = status.send(format!("device-code:{user_code}"));
+    }
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_mins(15);
     let code = loop {

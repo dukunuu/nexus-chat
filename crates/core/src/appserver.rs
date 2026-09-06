@@ -120,6 +120,16 @@ impl AppRegistry {
             .map(|(u, _)| u.clone())
     }
 
+    /// Remove a single registered app capability after its directory is
+    /// deleted. Public URLs are opaque capabilities and must not outlive the
+    /// app they reference.
+    pub fn remove(&self, space: &str, name: &str) {
+        let mut map = self.inner.write().unwrap();
+        map.retain(|_, entry| !(entry.space == space && entry.name == name));
+        drop(map);
+        let _ = self.save();
+    }
+
     /// Record that an app's served files live under `subdir` (e.g. "dist")
     /// after a successful framework build.
     pub fn set_served_from(&self, uuid: &str, subdir: &str) {
@@ -667,7 +677,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn mime_for(path: &Path) -> &'static str {
+pub(crate) fn mime_for(path: &Path) -> &'static str {
     match path
         .extension()
         .and_then(|e| e.to_str())

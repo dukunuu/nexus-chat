@@ -1853,7 +1853,15 @@ async fn host(options: HostOptions) -> Result<()> {
     let token = config::ensure_host_token()?;
     let mut app = nexus_core::boot(saved).await?;
     app.init();
-    let mut server = HostServer::bind(app, HostConfig::new(port, token.clone())).await?;
+    let web_dir = std::env::var_os("NEXUS_WEB_DIR").map_or_else(
+        || std::path::PathBuf::from("web/dist"),
+        std::path::PathBuf::from,
+    );
+    let mut server = HostServer::bind(
+        app,
+        HostConfig::new(port, token.clone()).with_web_dir(web_dir),
+    )
+    .await?;
     let local_url = format!("http://{}", server.local_addr());
 
     let tunnel_spec = if let Some(named) = &named {

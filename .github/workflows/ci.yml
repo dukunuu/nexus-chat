@@ -27,5 +27,19 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build and test web client
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+          npx playwright install --with-deps chromium
+          npm test
+
       - name: Run check gate
         run: scripts/check.sh

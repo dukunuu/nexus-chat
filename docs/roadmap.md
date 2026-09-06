@@ -300,9 +300,9 @@ HTTP/SSE API, then manages everything around it. Two API surfaces:
   logic), with an optional `x-nexus-backend` override header; inject the
   upstream key from `config.toml`/env; **byte-passthrough** the SSE
   response (`[DONE]` included). OpenRouter, OpenAI, and OpenCode are
-  OpenAI-wire and pass through unchanged. Codex is explicitly omitted until
-  a Responses→Chat Completions request/event adapter exists. Non-streaming
-  JSON passes through too.
+  OpenAI-wire and pass through unchanged. Codex uses a native
+  Responses→Chat Completions request/event adapter. Non-streaming JSON is
+  translated too.
 - `GET /v1/models` — standard OpenAI `object=list`/`data` catalog with
   `object=model`, `owned_by`, and backend-qualified ids; only routable
   backends are advertised.
@@ -316,13 +316,14 @@ HTTP/SSE API, then manages everything around it. Two API surfaces:
 **Session API** (nexus state — what a web/mobile UI renders), all on the
 existing seam:
 
-- `GET /v1/snapshot` → serde `CoreSnapshot`; `POST /v1/command` →
-  `AppCommand`; `GET /v1/events` → SSE of `AppEvent` + `ChatEvent`/
-  `StreamEvent` frames; `POST /v1/sync` → `Changeset` in, reply `Changeset`
-  out, with `PUT`/`GET /v1/sync/blob` hash-checked file transfer; `/apps/*`
-  with a `public_base` override so tunneled app URLs point at the tunnel
-  host, not 127.0.0.1. Registered app UUIDs are public capabilities; the
-  host bearer token is never embedded in their URLs.
+- `GET /v1/snapshot` → serde `CoreSnapshot`; `GET
+  /v1/sessions/<id>/messages` → the sanitized transcript for a thin client;
+  `POST /v1/command` → `AppCommand`; `GET /v1/events` → SSE of `AppEvent` +
+  `ChatEvent`/`StreamEvent` frames; `POST /v1/sync` → `Changeset` in, reply
+  `Changeset` out, with `PUT`/`GET /v1/sync/blob` hash-checked file transfer;
+  `/apps/*` with a `public_base` override so tunneled app URLs point at the
+  tunnel host, not 127.0.0.1. Registered app UUIDs are public capabilities;
+  the host bearer token is never embedded in their URLs.
 - Worker: `GET /v1/tools` capability advertisement + `POST /v1/tools/run`
   JSON-RPC 2.0 (`method: tools/run`, `params.name`, and
   `params.arguments`) — the remote `ToolExecutor` impl from Phase 2d.
@@ -367,6 +368,11 @@ existing seam:
   rendering; raw chat widgets use stock OpenAI SDKs against the Phase 4
   gateway. Includes the `--remote <url>` TUI mode (dogfoods the session
   API).
+- **Started**: `web/` is a SolidJS + Vite static client with authenticated
+  snapshot/transcript loading, reconnecting fetch-based SSE, streaming
+  reasoning/tool output, research gates, model selection, web/incognito
+  toggles, mobile navigation, responsive chat layout, host discovery, and
+  opt-in reconnect to previously paired hosts.
 - **Exit**: usable chat + research view from any browser.
 
 ### Phase 6 — Mobile (Flutter)

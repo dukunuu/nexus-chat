@@ -49,7 +49,9 @@ pub use commands::{AppCommand, COMMANDS, Command, Match, command_score, fuzzy_sc
 pub use files::OcrUpdate;
 pub use research::{PlanQuestion, ResearchUpdate};
 pub use sessions::session_score;
-pub use snapshot::{CoreSnapshot, ModelSnapshot, SessionSnapshot, SettingsSnapshot, TaskSnapshot};
+pub use snapshot::{
+    CoreSnapshot, MessageSnapshot, ModelSnapshot, SessionSnapshot, SettingsSnapshot, TaskSnapshot,
+};
 pub use swarm::{SwarmUpdate, parse_persona_editor};
 
 #[cfg(test)]

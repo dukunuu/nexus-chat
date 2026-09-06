@@ -93,8 +93,9 @@ commands (`usage`, `sessions`, `spaces`, `export`, `status`, `doctor`,
 ### Hosting
 
 `nexus host` runs the same core on a loopback HTTP/SSE daemon. It exposes
-`/v1/snapshot`, `/v1/models`, `/v1/backends`, `/v1/events`, `/v1/command`,
-`/v1/sync`, hash-checked `GET`/`PUT /v1/sync/blob`, `/v1/tools`, and an
+`/v1/snapshot`, `/v1/models`, `/v1/backends`, `/v1/events`,
+`/v1/sessions/<id>/messages`, `/v1/command`, `/v1/sync`, hash-checked
+`GET`/`PUT /v1/sync/blob`, `/v1/tools`, and an
 OpenAI-compatible `/v1/chat/completions` gateway. `/v1/tools/run` uses a
 JSON-RPC 2.0 envelope, for example
 `{"jsonrpc":"2.0","id":1,"method":"tools/run","params":{"name":"read_file","arguments":{...}}}`.
@@ -276,7 +277,14 @@ skill is explicitly activated.
 ```sh
 scripts/check.sh          # fmt + clippy (-D warnings, pedantic) + cargo-audit + tests
 cargo test --workspace    # 500+ tests, no network needed
+npm --prefix web ci
+npm --prefix web run build  # production client served by nexus host
+npm --prefix web test       # Chromium desktop/mobile + mocked SSE tests
 ```
+
+Open `http://127.0.0.1:8643` after starting `nexus host` from the repository root.
+For installed hosts, set `NEXUS_WEB_DIR` to the absolute web build directory.
+See [web setup and API documentation](web/README.md) for development and browser setup.
 
 The pre-commit hook runs `scripts/check.sh` on every commit — a merge-ready
 change passes it. See [AGENTS.md](AGENTS.md) for conventions and a deeper

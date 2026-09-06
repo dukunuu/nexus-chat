@@ -5,7 +5,7 @@
 
 use super::App;
 
-use crate::db::{UsageByBackend, UsageByModel, UsageRow, UsageTotals};
+use crate::db::{UsageByBackend, UsageByModel, UsageRange, UsageRow, UsageTotals};
 
 /// Snapshot of the aggregates the popup renders, loaded on open (and on
 /// Ctrl+R refresh).
@@ -20,7 +20,13 @@ impl App {
     /// Load the aggregates for the currently selected range (the view owns
     /// the cursor; the range is a persisted core preference).
     pub fn load_usage(&self) -> UsageData {
-        let since = self.usage_range.since().map(|t| t.to_rfc3339());
+        self.load_usage_for_range(self.usage_range)
+    }
+
+    /// Load usage analytics for a requested window without changing the
+    /// persisted TUI preference. Thin clients use this for range tabs.
+    pub fn load_usage_for_range(&self, range: UsageRange) -> UsageData {
+        let since = range.since().map(|t| t.to_rfc3339());
         UsageData {
             totals: self.db.usage_totals(since.as_deref()).unwrap_or_default(),
             by_backend: self

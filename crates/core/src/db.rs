@@ -1890,6 +1890,15 @@ impl Db {
         Ok(())
     }
 
+    /// Change a watch cadence while preserving its current run timestamp.
+    pub fn set_watch_interval(&self, id: &str, interval_hours: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE watches SET interval_hours = ?2, updated_at = ?3 WHERE id = ?1",
+            (id, interval_hours, Utc::now().to_rfc3339()),
+        )?;
+        Ok(())
+    }
+
     /// Repoint a watch at the session its most recent re-run actually used,
     /// so the next due-check's diff-section lookup
     /// (`previous_citations_for_watch_session`) can match against it.

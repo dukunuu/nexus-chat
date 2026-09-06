@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures_util::StreamExt;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
@@ -21,6 +22,7 @@ use tokio::task::JoinHandle;
 
 use crate::app::{App, AppCommand, AppEvent, CoreSnapshot};
 use crate::appserver::AppRegistry;
+use crate::db::UsageRange;
 use crate::provider::openrouter;
 use crate::provider::{BackendTag, Usage};
 use crate::sync::Changeset;
@@ -48,7 +50,7 @@ const MAX_CONNECTIONS: usize = 128;
 /// `Access-Control-Allow-Methods` is required: without it a browser rejects
 /// the preflight for `POST /v1/command` and `POST /v1/chat/completions`
 /// (JSON bodies are never "simple" requests).
-const CORS_HEADERS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, HEAD, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Nexus-Backend, X-Nexus-Blob-Hash, X-Content-SHA256\r\nAccess-Control-Max-Age: 600\r\n";
+const CORS_HEADERS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Nexus-Backend, X-Nexus-Blob-Hash, X-Content-SHA256\r\nAccess-Control-Max-Age: 600\r\n";
 
 /// Configuration for a local host listener.
 #[derive(Debug, Clone)]
@@ -62,6 +64,7 @@ pub struct HostConfig {
     /// Optional upstream override used by hermetic gateway tests. Production
     /// callers leave this `None`, selecting the provider's canonical base.
     gateway_base: Option<String>,
+    web_dir: Option<std::path::PathBuf>,
 }
 
 impl HostConfig {
@@ -71,7 +74,15 @@ impl HostConfig {
             port,
             token: token.into(),
             gateway_base: None,
+            web_dir: None,
         }
+    }
+
+    /// Serve a built web client from this directory at the host origin.
+    #[must_use]
+    pub fn with_web_dir(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.web_dir = Some(path.into());
+        self
     }
 
     /// Route all gateway flavors to a local mock upstream. Intended for
@@ -190,6 +201,7 @@ struct HostState {
     client: reqwest::Client,
     connections: Arc<tokio::sync::Semaphore>,
     gateway_base: Option<String>,
+    web_dir: Option<std::path::PathBuf>,
 }
 
 impl HostServer {
@@ -230,6 +242,7 @@ impl HostServer {
                 .context("building host upstream client")?,
             connections: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
             gateway_base: config.gateway_base,
+            web_dir: config.web_dir,
         });
         let actor_events = events;
         let actor_shutdown = shutdown.clone();
@@ -535,7 +548,72 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<HostState>) -> io::
         // the URL, cookie jar, referrer, or proxy logs.
         return proxy_app(&mut stream, &request, &path, &query, &state).await;
     }
+    if !is_v1 && path != "/.well-known/nexus" {
+        return serve_web(&mut stream, &request, &path, state.web_dir.as_deref()).await;
+    }
     handle_api_route(&mut stream, &request, &path, &state).await
+}
+
+async fn serve_web(
+    stream: &mut TcpStream,
+    request: &Request,
+    path: &str,
+    root: Option<&std::path::Path>,
+) -> io::Result<()> {
+    if !matches!(request.method.as_str(), "GET" | "HEAD") {
+        return respond_text(stream, 405, "method not allowed").await;
+    }
+    let Some(root) = root else {
+        return respond_text(
+            stream,
+            404,
+            "Web client unavailable. Build web/ and set NEXUS_WEB_DIR to its dist directory.",
+        )
+        .await;
+    };
+    let decoded = percent_decode(path);
+    let relative = decoded.trim_start_matches('/');
+    if relative
+        .split('/')
+        .any(|part| part == ".." || part.starts_with('.'))
+        || relative.contains('\\')
+    {
+        return respond_text(stream, 404, "not found").await;
+    }
+    let Ok(root) = tokio::fs::canonicalize(root).await else {
+        return respond_text(stream, 404, "web build not found").await;
+    };
+    let target = root.join(if relative.is_empty() {
+        "index.html"
+    } else {
+        relative
+    });
+    let Ok(target) = tokio::fs::canonicalize(target).await else {
+        return respond_text(stream, 404, "not found").await;
+    };
+    if !target.starts_with(&root) {
+        return respond_text(stream, 404, "not found").await;
+    }
+    let Ok(metadata) = tokio::fs::metadata(&target).await else {
+        return respond_text(stream, 404, "not found").await;
+    };
+    if !metadata.is_file() || metadata.len() > MAX_APP_RESPONSE_BYTES as u64 {
+        return respond_text(stream, 404, "not found").await;
+    }
+    match tokio::fs::read(&target).await {
+        Ok(bytes) => {
+            respond_full(
+                stream,
+                200,
+                crate::appserver::mime_for(&target),
+                "X-Content-Type-Options: nosniff\r\n",
+                &bytes,
+                request.method == "HEAD",
+            )
+            .await
+        }
+        Err(_) => respond_text(stream, 404, "not found").await,
+    }
 }
 
 fn authorized(
@@ -588,18 +666,267 @@ async fn handle_api_route(
     path: &str,
     state: &HostState,
 ) -> io::Result<()> {
+    if path == "/v1/media/action" && request.method == "POST" {
+        let value = serde_json::from_slice::<serde_json::Value>(&request.body).unwrap_or_default();
+        if value["action"] == "run_script" {
+            let query = split_target(&request.target).1;
+            let space_id = query_param(query, "space_id").unwrap_or_default();
+            let name = value["name"].as_str().unwrap_or_default().to_string();
+            let Ok(args) = serde_json::from_value::<Vec<String>>(
+                value
+                    .get("args")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
+            ) else {
+                return respond_error(stream, 400, "invalid script arguments").await;
+            };
+            let job = ask_actor(&state.requests, |reply| HostRequest::ScriptJob {
+                space_id,
+                name,
+                args,
+                reply,
+            })
+            .await;
+            let result = match job {
+                Ok(job) => super::jobs::run(job)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error),
+            };
+            return match result {
+                Ok(value) => respond_json(stream, 200, &value).await,
+                Err(error) => respond_error(stream, 400, &error).await,
+            };
+        }
+    }
+    if path.starts_with("/v1/sessions/") && matches!(request.method.as_str(), "PATCH" | "DELETE") {
+        let id = percent_decode(path.trim_start_matches("/v1/sessions/"));
+        if id.is_empty() || id.contains('/') {
+            return respond_error(stream, 400, "invalid session id").await;
+        }
+        let body = serde_json::from_slice::<serde_json::Value>(&request.body).unwrap_or_default();
+        let space_id = body["space_id"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| query_param(split_target(&request.target).1, "space_id"))
+            .unwrap_or_default();
+        let title = (request.method == "PATCH")
+            .then(|| body["title"].as_str().unwrap_or_default().to_string());
+        let result = ask_actor(&state.requests, |reply| HostRequest::SessionEdit {
+            space_id,
+            id,
+            title,
+            reply,
+        })
+        .await;
+        return match result {
+            Ok(value) => respond_json(stream, 200, &value).await,
+            Err(error) => respond_error(stream, 400, &error).await,
+        };
+    }
+    if path == "/v1/sync/bundle" {
+        if !matches!(request.method.as_str(), "GET" | "POST") {
+            return respond_text(stream, 405, "method not allowed").await;
+        }
+        let input = (request.method == "POST").then(|| request.body.clone());
+        let result = ask_actor(&state.requests, |reply| HostRequest::Bundle {
+            input,
+            reply,
+        })
+        .await;
+        return match result {
+            Ok(bytes) => {
+                respond_full(
+                    stream,
+                    200,
+                    "application/zip",
+                    "Content-Disposition: attachment; filename=nexus-sync.zip\r\n",
+                    &bytes,
+                    false,
+                )
+                .await
+            }
+            Err(error) => respond_error(stream, 400, &error).await,
+        };
+    }
+    if path == "/v1/media/blob" {
+        if request.method != "GET" {
+            return respond_text(stream, 405, "method not allowed").await;
+        }
+        let query = split_target(&request.target).1.to_string();
+        let result = ask_actor(&state.requests, |reply| HostRequest::MediaBlob {
+            query,
+            reply,
+        })
+        .await;
+        return match result {
+            Ok(blob) => {
+                respond_full(
+                    stream,
+                    200,
+                    &blob.mime,
+                    "Content-Security-Policy: sandbox\r\nX-Content-Type-Options: nosniff\r\n",
+                    &blob.bytes,
+                    false,
+                )
+                .await
+            }
+            Err(error) => respond_error(stream, 404, &error).await,
+        };
+    }
+    if (request.method == "GET" && matches!(path, "/v1/sync" | "/v1/sync/state"))
+        || matches!(
+            path,
+            "/v1/settings"
+                | "/v1/settings/document"
+                | "/v1/login"
+                | "/v1/attachments"
+                | "/v1/models/refresh"
+                | "/v1/media"
+                | "/v1/media/action"
+        )
+        || ["/v1/swarm", "/v1/skills", "/v1/watches", "/v1/research"]
+            .iter()
+            .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+    {
+        if request.body.len() > MAX_API_BODY_BYTES
+            && !(path == "/v1/media" && request.method == "PUT")
+        {
+            return respond_text(stream, 413, "request entity too large").await;
+        }
+        let route = path.to_string();
+        let method = request.method.clone();
+        let query = split_target(&request.target).1.to_string();
+        let body = request.body.clone();
+        let result = ask_actor(&state.requests, |reply| HostRequest::Surface {
+            route,
+            method,
+            query,
+            body,
+            reply,
+        })
+        .await;
+        return match result {
+            Ok(value) => respond_json(stream, 200, &value).await,
+            Err(error) => respond_error(stream, 400, &error).await,
+        };
+    }
+    if matches!(path, "/v1/apps" | "/v1/apps/files" | "/v1/apps/source") {
+        if request.method != "GET"
+            && !(request.method == "PUT" && path == "/v1/apps/source")
+            && !(path == "/v1/apps" && matches!(request.method.as_str(), "POST" | "DELETE"))
+        {
+            return respond_text(stream, 405, "method not allowed").await;
+        }
+        let query = split_target(&request.target).1;
+        let space_id = query_param(query, "space_id");
+        let name = query_param(query, "name").unwrap_or_default();
+        let file = query_param(query, "path").unwrap_or_default();
+        let edit = if request.method == "PUT" {
+            match serde_json::from_slice::<super::apps::Edit>(&request.body) {
+                Ok(edit) => Some(edit),
+                Err(_) => return respond_error(stream, 400, "invalid source edit").await,
+            }
+        } else {
+            None
+        };
+        let route = path.to_string();
+        let method = request.method.clone();
+        let result = ask_actor(&state.requests, |reply| HostRequest::Apps {
+            route,
+            method,
+            space_id,
+            name,
+            file,
+            edit,
+            reply,
+        })
+        .await;
+        return match result {
+            Ok(value) => respond_json(stream, 200, &value).await,
+            Err(error) => respond_error(stream, 400, &error).await,
+        };
+    }
     if path == "/v1/sync/blob"
         || path.starts_with("/v1/sync/blob/")
         || path.starts_with("/v1/sync/blobs/")
     {
         return handle_sync_blob(stream, request, path, state).await;
     }
+    if let Some(session_id) = session_messages_path(path) {
+        if request.method != "GET" {
+            return respond_text(stream, 405, "method not allowed").await;
+        }
+        let messages = ask_actor(&state.requests, |reply| HostRequest::Messages {
+            session_id,
+            reply,
+        })
+        .await;
+        return match messages {
+            Ok(messages) => {
+                respond_json(stream, 200, &serde_json::json!({ "messages": messages })).await
+            }
+            Err(error) => respond_error(stream, 404, &error).await,
+        };
+    }
     match (request.method.as_str(), path) {
+        ("GET", "/.well-known/nexus") => {
+            let discovery = DiscoveryResponse {
+                host_id: host_discovery_id(&state.token),
+                product: "nexus-chat",
+                version: env!("CARGO_PKG_VERSION"),
+                api: "/v1",
+                authentication: "bearer",
+            };
+            respond_json(stream, 200, &discovery).await
+        }
+        ("POST", "/v1/spaces") | ("PUT", "/v1/files") => {
+            let query = split_target(&request.target).1;
+            let name = query_param(query, "name").unwrap_or_default();
+            let space_id = query_param(query, "space_id");
+            let bytes = (path == "/v1/files").then(|| request.body.clone());
+            let result = ask_actor(&state.requests, |reply| HostRequest::WorkspaceWrite {
+                name,
+                space_id,
+                bytes,
+                reply,
+            })
+            .await;
+            match result {
+                Ok(()) => respond_json(stream, 201, &serde_json::json!({ "ok": true })).await,
+                Err(error) => respond_error(stream, 400, &error).await,
+            }
+        }
+        ("GET", "/v1/spaces" | "/v1/files") => {
+            let files = path == "/v1/files";
+            let space_id = query_param(split_target(&request.target).1, "space_id");
+            let result = ask_actor(&state.requests, |reply| HostRequest::Workspace {
+                files,
+                space_id,
+                reply,
+            })
+            .await;
+            match result {
+                Ok(value) => respond_json(stream, 200, &value).await,
+                Err(error) => respond_error(stream, 400, &error).await,
+            }
+        }
         ("GET", "/v1/snapshot") => {
             let snapshot =
                 ask_actor(&state.requests, |reply| HostRequest::Snapshot { reply }).await;
             match snapshot {
                 Ok(snapshot) => respond_json(stream, 200, &snapshot).await,
+                Err(error) => respond_error(stream, 500, &error).await,
+            }
+        }
+        ("GET", "/v1/usage") => {
+            let range = query_param(split_target(&request.target).1, "range")
+                .map(|value| UsageRange::from_key(&value))
+                .unwrap_or_default();
+            let usage =
+                ask_actor(&state.requests, |reply| HostRequest::Usage { range, reply }).await;
+            match usage {
+                Ok(usage) => respond_json(stream, 200, &usage).await,
                 Err(error) => respond_error(stream, 500, &error).await,
             }
         }
@@ -683,8 +1010,12 @@ async fn handle_api_route(
                     return respond_json(stream, 400, &response).await;
                 }
             };
-            let toolbox = match ask_actor(&state.requests, |reply| HostRequest::Toolbox { reply })
-                .await
+            let space_id = query_param(split_target(&request.target).1, "space_id");
+            let toolbox = match ask_actor(&state.requests, |reply| HostRequest::Toolbox {
+                space_id,
+                reply,
+            })
+            .await
             {
                 Ok(toolbox) => toolbox,
                 Err(error) => {
@@ -707,6 +1038,15 @@ async fn handle_api_route(
         ("GET", "/") => respond_text(stream, 200, "nexus host\n").await,
         _ => respond_text(stream, 404, "not found").await,
     }
+}
+
+#[derive(Debug, Serialize)]
+struct DiscoveryResponse {
+    host_id: String,
+    product: &'static str,
+    version: &'static str,
+    api: &'static str,
+    authentication: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -1437,7 +1777,10 @@ async fn proxy_app(
         stream,
         status,
         &content_type,
-        "",
+        // Generated applications are untrusted documents on the host origin.
+        // An opaque sandbox origin prevents access to the web client's tokens
+        // in browser storage, including when an app is opened in a new tab.
+        "Content-Security-Policy: sandbox allow-scripts allow-forms allow-downloads allow-popups\r\nX-Content-Type-Options: nosniff\r\n",
         &body,
         request.method == "HEAD",
     )
@@ -1534,14 +1877,16 @@ async fn app_actor(
     shutdown: Arc<Notify>,
     host_token: Arc<String>,
 ) {
+    let mut admin = super::admin::State::default();
     loop {
         tokio::select! {
             () = shutdown.notified() => break,
             request = requests.recv() => {
                 let Some(request) = request else { break; };
-                handle_actor_request(&mut app, request);
+                handle_actor_request(&mut app, &mut admin, request);
             }
             event = app.next_event() => {
+                admin.observe(&event);
                 let wire = redact_wire_event(WireEvent::from(event.clone()), &app, host_token.as_str());
                 // The handler may clear a one-shot receiver itself; this
                 // backstop also prevents a closed source from returning
@@ -1554,9 +1899,177 @@ async fn app_actor(
     }
 }
 
+fn write_workspace(
+    app: &mut App,
+    name: &str,
+    space_id: Option<&str>,
+    bytes: Option<&[u8]>,
+) -> Result<()> {
+    if name.trim().is_empty()
+        || name.starts_with('.')
+        || name.contains(['/', '\\', '\0'])
+        || name.chars().any(char::is_control)
+    {
+        bail!("invalid name");
+    }
+    if let Some(bytes) = bytes {
+        let space = app
+            .db
+            .list_spaces()?
+            .into_iter()
+            .find(|space| Some(space.id.as_str()) == space_id)
+            .ok_or_else(|| anyhow!("unknown space"))?;
+        let dir = app.space.files_dir(&space.name);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(name);
+        // Never silently overwrite a user's existing file, including symlinks.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        if let Err(error) = std::io::Write::write_all(&mut file, bytes) {
+            let _ = std::fs::remove_file(&path);
+            return Err(error.into());
+        }
+        let hash = hex_string(&Sha256::digest(bytes));
+        app.db.upsert_file(
+            &space.id,
+            name,
+            &hash,
+            i64::try_from(bytes.len())?,
+            "not indexed",
+        )?;
+        if space.id == app.active_space.id {
+            app.rescan_files();
+        }
+    } else {
+        app.space.ensure_space_dir(name)?;
+        app.db.create_space(name)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
-fn handle_actor_request(app: &mut App, request: HostRequest) {
+fn handle_actor_request(app: &mut App, admin: &mut super::admin::State, request: HostRequest) {
     match request {
+        HostRequest::ScriptJob {
+            space_id,
+            name,
+            args,
+            reply,
+        } => {
+            let _ = reply.send(
+                super::media::prepare_script(app, &space_id, &name, &args)
+                    .map_err(|error| error.to_string()),
+            );
+        }
+        HostRequest::SessionEdit {
+            space_id,
+            id,
+            title,
+            reply,
+        } => {
+            let result = if let Some(title) = title {
+                super::sessions_view::rename(app, &space_id, &id, &title)
+                    .and_then(|value| Ok(serde_json::to_value(value)?))
+            } else {
+                super::sessions_view::delete(app, &space_id, &id)
+            };
+            let _ = reply.send(result.map_err(|error| error.to_string()));
+        }
+        HostRequest::Bundle { input, reply } => {
+            let _ = reply.send(
+                super::browser_sync::bundle(app, input.as_deref())
+                    .map_err(|error| error.to_string()),
+            );
+        }
+
+        HostRequest::MediaBlob { query, reply } => {
+            let _ = reply.send(super::media::blob(app, &query).map_err(|error| error.to_string()));
+        }
+
+        HostRequest::Surface {
+            route,
+            method,
+            query,
+            body,
+            reply,
+        } => {
+            let result = if route.starts_with("/v1/sync") {
+                super::browser_sync::dispatch(app, &method, &route, &query)
+            } else if route.starts_with("/v1/research/") {
+                super::research_view::dispatch(app, &method, &route, &query, &body)
+            } else if ["/v1/swarm", "/v1/skills", "/v1/watches"]
+                .iter()
+                .any(|prefix| route.starts_with(prefix))
+            {
+                super::management::dispatch(app, &method, &route, &query, &body)
+            } else if route.starts_with("/v1/media") {
+                super::media::dispatch(app, &method, &query, &body)
+            } else {
+                super::admin::dispatch(app, admin, &method, &route, &query, &body)
+            };
+            let _ = reply.send(result.map_err(|error| error.to_string()));
+        }
+
+        HostRequest::Apps {
+            route,
+            method,
+            space_id,
+            name,
+            file,
+            edit,
+            reply,
+        } => {
+            let result = match (method.as_str(), route.as_str()) {
+                ("DELETE", "/v1/apps") => super::apps::delete(app, space_id.as_deref(), &name),
+                ("POST", "/v1/apps") => super::apps::register(app, space_id.as_deref(), &name),
+                (_, "/v1/apps") => super::apps::catalog(app, space_id.as_deref()),
+                (_, "/v1/apps/files") => super::apps::files(app, space_id.as_deref(), &name),
+                _ => super::apps::source(app, space_id.as_deref(), &name, &file, edit),
+            };
+            let _ = reply.send(result.map_err(|error| error.to_string()));
+        }
+
+        HostRequest::WorkspaceWrite {
+            name,
+            space_id,
+            bytes,
+            reply,
+        } => {
+            let _ = reply.send(
+                write_workspace(app, &name, space_id.as_deref(), bytes.as_deref())
+                    .map_err(|error| error.to_string()),
+            );
+        }
+        HostRequest::Workspace {
+            files,
+            space_id,
+            reply,
+        } => {
+            let result = (|| -> Result<serde_json::Value> {
+                let spaces = app.db.list_spaces()?;
+                if files {
+                    let id = space_id.as_deref().unwrap_or(&app.active_space.id);
+                    if !spaces.iter().any(|space| space.id == id) {
+                        bail!("unknown space");
+                    }
+                    let files = app.db.list_files(id)?.into_iter().map(|file| serde_json::json!({
+                        "id": file.id, "name": file.name, "size": file.size, "hash": file.hash, "status": file.status
+                    })).collect::<Vec<_>>();
+                    Ok(serde_json::json!({ "space_id": id, "files": files }))
+                } else {
+                    let spaces = spaces
+                        .into_iter()
+                        .map(|space| serde_json::json!({ "id": space.id, "name": space.name }))
+                        .collect::<Vec<_>>();
+                    Ok(
+                        serde_json::json!({ "active_space_id": app.active_space.id, "spaces": spaces }),
+                    )
+                }
+            })();
+            let _ = reply.send(result.map_err(|error| error.to_string()));
+        }
         HostRequest::Snapshot { reply } => {
             let _ = reply.send(app.snapshot().map_err(|error| error.to_string()));
         }
@@ -1564,6 +2077,55 @@ fn handle_actor_request(app: &mut App, request: HostRequest) {
             // Every configured backend has an OpenAI-wire gateway route.
             let models = app.models.iter().cloned().map(WireModel::from).collect();
             let _ = reply.send(Ok(models));
+        }
+        HostRequest::Usage { range, reply } => {
+            app.backfill_usage_costs();
+            let data = app.load_usage_for_range(range);
+            let usage = serde_json::json!({
+                "range": range.key(),
+                "totals": {
+                    "requests": data.totals.requests,
+                    "prompt_tokens": data.totals.prompt_tokens,
+                    "completion_tokens": data.totals.completion_tokens,
+                    "cache_read_tokens": data.totals.cache_read_tokens,
+                    "cache_creation_tokens": data.totals.cache_creation_tokens,
+                    "rated_prompt_tokens": data.totals.rated_prompt_tokens,
+                    "rated_cache_read_tokens": data.totals.rated_cache_read_tokens,
+                    "cost": data.totals.cost,
+                },
+                "by_backend": data.by_backend.iter().map(|row| serde_json::json!({
+                    "backend": row.backend,
+                    "requests": row.requests,
+                    "prompt_tokens": row.prompt_tokens,
+                    "completion_tokens": row.completion_tokens,
+                    "cache_read_tokens": row.cache_read_tokens,
+                    "rated_prompt_tokens": row.rated_prompt_tokens,
+                    "rated_cache_read_tokens": row.rated_cache_read_tokens,
+                    "cost": row.cost,
+                })).collect::<Vec<_>>(),
+                "by_model": data.by_model.iter().map(|row| serde_json::json!({
+                    "model": row.model,
+                    "requests": row.requests,
+                    "prompt_tokens": row.prompt_tokens,
+                    "completion_tokens": row.completion_tokens,
+                    "cache_read_tokens": row.cache_read_tokens,
+                    "rated_prompt_tokens": row.rated_prompt_tokens,
+                    "rated_cache_read_tokens": row.rated_cache_read_tokens,
+                    "cost": row.cost,
+                })).collect::<Vec<_>>(),
+                "recent": data.recent.iter().map(|row| serde_json::json!({
+                    "created_at": row.created_at,
+                    "backend": row.backend,
+                    "model": row.model,
+                    "prompt_tokens": row.prompt_tokens,
+                    "completion_tokens": row.completion_tokens,
+                    "cache_read_tokens": row.cache_read_tokens,
+                    "cache_creation_tokens": row.cache_creation_tokens,
+                    "prompt_convention": row.prompt_convention.as_str(),
+                    "cost": row.cost,
+                })).collect::<Vec<_>>(),
+            });
+            let _ = reply.send(Ok(usage));
         }
         HostRequest::Backends { reply } => {
             let tags = [
@@ -1595,6 +2157,12 @@ fn handle_actor_request(app: &mut App, request: HostRequest) {
                 .collect();
             let _ = reply.send(Ok(backends));
         }
+        HostRequest::Messages { session_id, reply } => {
+            let _ = reply.send(
+                app.session_messages(&session_id)
+                    .map_err(|error| error.to_string()),
+            );
+        }
         HostRequest::Command { command, reply } => {
             let result = app.execute(command).map_err(|error| error.to_string());
             let _ = reply.send(result);
@@ -1602,8 +2170,13 @@ fn handle_actor_request(app: &mut App, request: HostRequest) {
         HostRequest::ToolDefs { reply } => {
             let _ = reply.send(Ok(app.toolbox.defs()));
         }
-        HostRequest::Toolbox { reply } => {
-            let _ = reply.send(Ok(app.toolbox.clone()));
+        HostRequest::Toolbox { space_id, reply } => {
+            let result = if space_id.is_some_and(|id| id != app.active_space.id) {
+                Err("active space changed; retry the operation".into())
+            } else {
+                Ok(app.toolbox.clone())
+            };
+            let _ = reply.send(result);
         }
         HostRequest::PutBlob {
             space_id,
@@ -1649,8 +2222,7 @@ fn handle_actor_request(app: &mut App, request: HostRequest) {
                 let (_summary, cursors) =
                     crate::sync::apply_changeset(&app.db, &app.space, &changeset, None)
                         .map_err(|error| error.to_string())?;
-                app.sessions_cache.clear();
-                app.files_cache = app.db.list_files(&app.active_space.id).unwrap_or_default();
+                super::browser_sync::refresh_after_merge(app).map_err(|error| error.to_string())?;
                 let mut reply_changeset = crate::sync::build_changeset(
                     &app.db,
                     Some(&changeset.device_id),
@@ -1821,14 +2393,69 @@ fn gateway_route(
 }
 
 enum HostRequest {
+    ScriptJob {
+        space_id: String,
+        name: String,
+        args: Vec<String>,
+        reply: oneshot::Sender<Result<super::media::ScriptJob, String>>,
+    },
+    SessionEdit {
+        space_id: String,
+        id: String,
+        title: Option<String>,
+        reply: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
+    Bundle {
+        input: Option<Vec<u8>>,
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    },
+    MediaBlob {
+        query: String,
+        reply: oneshot::Sender<Result<super::media::MediaBlob, String>>,
+    },
+    Surface {
+        route: String,
+        method: String,
+        query: String,
+        body: Vec<u8>,
+        reply: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
+    Apps {
+        route: String,
+        method: String,
+        space_id: Option<String>,
+        name: String,
+        file: String,
+        edit: Option<super::apps::Edit>,
+        reply: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
+    WorkspaceWrite {
+        name: String,
+        space_id: Option<String>,
+        bytes: Option<Vec<u8>>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    Workspace {
+        files: bool,
+        space_id: Option<String>,
+        reply: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
     Snapshot {
         reply: oneshot::Sender<Result<CoreSnapshot, String>>,
     },
     Models {
         reply: oneshot::Sender<Result<Vec<WireModel>, String>>,
     },
+    Usage {
+        range: UsageRange,
+        reply: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
     Backends {
         reply: oneshot::Sender<Result<Vec<BackendInfo>, String>>,
+    },
+    Messages {
+        session_id: String,
+        reply: oneshot::Sender<Result<Vec<crate::app::MessageSnapshot>, String>>,
     },
     Command {
         command: AppCommand,
@@ -1838,6 +2465,7 @@ enum HostRequest {
         reply: oneshot::Sender<Result<Vec<crate::provider::ToolDef>, String>>,
     },
     Toolbox {
+        space_id: Option<String>,
         reply: oneshot::Sender<Result<Arc<dyn ToolExecutor>, String>>,
     },
     Sync {
@@ -1887,6 +2515,23 @@ where
         .map_err(|_| "host actor stopped".to_string())?
 }
 
+pub(super) fn hex_string(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(
+        String::with_capacity(bytes.len() * 2),
+        |mut output, byte| {
+            let _ = write!(output, "{byte:02x}");
+            output
+        },
+    )
+}
+
+fn host_discovery_id(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    let suffix = hex_string(&digest[..8]);
+    format!("host-{suffix}")
+}
+
 fn parse_backend_tag(value: &str) -> Result<BackendTag, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "openrouter" | "router" => Ok(BackendTag::OpenRouter),
@@ -1903,14 +2548,20 @@ fn split_target(target: &str) -> (&str, &str) {
         .map_or((target, ""), |(path, query)| (path, query))
 }
 
-fn query_param(query: &str, wanted: &str) -> Option<String> {
+fn session_messages_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/v1/sessions/")?;
+    let session_id = rest.strip_suffix("/messages")?;
+    (!session_id.is_empty()).then(|| percent_decode(session_id))
+}
+
+pub(super) fn query_param(query: &str, wanted: &str) -> Option<String> {
     query.split('&').find_map(|pair| {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
         (percent_decode(name).eq_ignore_ascii_case(wanted)).then(|| percent_decode(value))
     })
 }
 
-fn percent_decode(value: &str) -> String {
+pub(super) fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -2042,7 +2693,6 @@ fn reason(status: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::Digest as _;
 
     #[test]
     fn constant_time_compare_checks_length_and_bytes() {
@@ -2282,6 +2932,20 @@ mod tests {
             .unwrap();
         let addr = server.local_addr();
 
+        let discovery = raw_request(addr, request("GET", "/.well-known/nexus", None, &[])).await;
+        assert!(String::from_utf8_lossy(&discovery).starts_with("HTTP/1.1 200"));
+        let discovery_body: serde_json::Value =
+            serde_json::from_slice(response_body(&discovery)).unwrap();
+        assert_eq!(discovery_body["product"], "nexus-chat");
+        assert_eq!(discovery_body["api"], "/v1");
+        assert_eq!(discovery_body["authentication"], "bearer");
+        assert!(
+            !discovery_body["host_id"]
+                .as_str()
+                .unwrap()
+                .contains("host-secret")
+        );
+
         let unauthorized = raw_request(addr, request("GET", "/v1/snapshot", None, &[])).await;
         assert!(String::from_utf8_lossy(&unauthorized).starts_with("HTTP/1.1 401"));
 
@@ -2346,6 +3010,261 @@ mod tests {
         assert!(snapshot_text.contains("langsearch_configured"));
 
         server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn generated_apps_are_sandboxed_from_host_browser_storage() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = upstream.local_addr().unwrap().port();
+        let mock = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let _ = read_request_head(&mut stream).await.unwrap();
+            respond_with_content_type(&mut stream, 200, "text/html", b"<h1>App</h1>", false)
+                .await
+                .unwrap();
+        });
+        let mut server = HostServer::bind(test_app(), HostConfig::new(0, "secret"))
+            .await
+            .unwrap();
+        let mut state = (*server.state).clone();
+        state.app_server_port = Some(port);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let proxy = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connection(stream, Arc::new(state)).await.unwrap();
+        });
+        let response = raw_request(addr, request("GET", "/apps/test/", Some("secret"), &[])).await;
+        let headers = String::from_utf8_lossy(&response);
+        assert!(headers.contains("Content-Security-Policy: sandbox allow-scripts allow-forms allow-downloads allow-popups\r\n"));
+        assert!(!headers.contains("allow-same-origin"));
+        assert_eq!(response_body(&response), b"<h1>App</h1>");
+        proxy.await.unwrap();
+        mock.await.unwrap();
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn web_build_and_workspace_routes_are_hermetic() {
+        let mut app = test_app();
+        app.embedding_model.clear();
+        let root = app.space.root.clone();
+        let web = root.join("web");
+        std::fs::create_dir_all(web.join("assets")).unwrap();
+        std::fs::write(web.join("index.html"), "<h1>Nexus</h1>").unwrap();
+        std::fs::write(web.join("assets/app.js"), "export {}").unwrap();
+        std::fs::write(root.join("secret.txt"), "private").unwrap();
+        let first_space = app.active_space.id.clone();
+        let second = app.db.create_space("other").unwrap();
+        let mut server = HostServer::bind(app, HostConfig::new(0, "secret").with_web_dir(&web))
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let index = raw_request(addr, request("GET", "/", None, &[])).await;
+        assert_eq!(response_body(&index), b"<h1>Nexus</h1>");
+        let asset = raw_request(addr, request("GET", "/assets/app.js", None, &[])).await;
+        assert!(String::from_utf8_lossy(&asset).contains("Content-Type: text/javascript"));
+        let head = raw_request(addr, request("HEAD", "/", None, &[])).await;
+        assert!(response_body(&head).is_empty());
+        for path in ["/%2e%2e/secret.txt", "/missing.js"] {
+            let result = raw_request(addr, request("GET", path, None, &[])).await;
+            assert!(String::from_utf8_lossy(&result).starts_with("HTTP/1.1 404"));
+        }
+        for path in ["/v1/spaces", "/v1/files"] {
+            let result = raw_request(addr, request("GET", path, None, &[])).await;
+            assert!(String::from_utf8_lossy(&result).starts_with("HTTP/1.1 401"));
+        }
+        let target = format!("/v1/files?space_id={first_space}&name=hello.txt");
+        let uploaded = raw_request(addr, request("PUT", &target, Some("secret"), b"hello")).await;
+        assert!(String::from_utf8_lossy(&uploaded).starts_with("HTTP/1.1 201"));
+        let duplicate =
+            raw_request(addr, request("PUT", &target, Some("secret"), b"overwrite")).await;
+        assert!(String::from_utf8_lossy(&duplicate).starts_with("HTTP/1.1 400"));
+        let downloaded = raw_request(
+            addr,
+            request(
+                "GET",
+                &format!("/v1/sync/blob?space_id={first_space}&name=hello.txt"),
+                Some("secret"),
+                &[],
+            ),
+        )
+        .await;
+        assert_eq!(response_body(&downloaded), b"hello");
+        let files = raw_request(
+            addr,
+            request(
+                "GET",
+                &format!("/v1/files?space_id={}", second.id),
+                Some("secret"),
+                &[],
+            ),
+        )
+        .await;
+        let value: serde_json::Value = serde_json::from_slice(response_body(&files)).unwrap();
+        assert_eq!(value["files"], serde_json::json!([]));
+        let unsafe_upload = raw_request(
+            addr,
+            request(
+                "PUT",
+                &format!("/v1/files?space_id={first_space}&name=..%2Fescape"),
+                Some("secret"),
+                b"bad",
+            ),
+        )
+        .await;
+        assert!(String::from_utf8_lossy(&unsafe_upload).starts_with("HTTP/1.1 400"));
+        let created = raw_request(
+            addr,
+            request("POST", "/v1/spaces?name=research", Some("secret"), &[]),
+        )
+        .await;
+        assert!(String::from_utf8_lossy(&created).starts_with("HTTP/1.1 201"));
+        let switched = serde_json::to_vec(&AppCommand::SwitchSpace {
+            name: "research".into(),
+        })
+        .unwrap();
+        raw_request(
+            addr,
+            request("POST", "/v1/command", Some("secret"), &switched),
+        )
+        .await;
+        let snapshot = raw_request(addr, request("GET", "/v1/snapshot", Some("secret"), &[])).await;
+        let value: serde_json::Value = serde_json::from_slice(response_body(&snapshot)).unwrap();
+        assert_eq!(value["active_space_name"], "research");
+        server.shutdown().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_session_messages_are_available_to_thin_clients() {
+        let app = test_app();
+        let session = app
+            .db
+            .create_session("web", "gpt-test", &app.active_space.id, "chat")
+            .unwrap();
+        app.db
+            .insert_message(
+                &session.id,
+                "user",
+                "hello from the browser",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let mut server = HostServer::bind(app, HostConfig::new(0, "host-secret"))
+            .await
+            .unwrap();
+        let response = raw_request(
+            server.local_addr(),
+            request(
+                "GET",
+                &format!("/v1/sessions/{}/messages", session.id),
+                Some("host-secret"),
+                &[],
+            ),
+        )
+        .await;
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"));
+        let body: serde_json::Value = serde_json::from_slice(response_body(&response)).unwrap();
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "hello from the browser");
+        server.shutdown().await;
+    }
+
+    #[test]
+    fn session_messages_path_decodes_ids_without_matching_partial_paths() {
+        assert_eq!(
+            session_messages_path("/v1/sessions/session%2Fid/messages"),
+            Some("session/id".into())
+        );
+        assert!(session_messages_path("/v1/sessions/session/messages/extra").is_none());
+    }
+
+    #[tokio::test]
+    async fn host_gateway_translates_codex_responses_stream() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let mock_addr = listener.local_addr().unwrap();
+        let upstream = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5-codex\",\"created_at\":123}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello from Codex\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":3,\"total_tokens\":13}}}\n\n",
+        );
+        let mock = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0u8; 1024];
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+                let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.starts_with("POST /codex/responses HTTP/1.1"));
+            assert!(request_text.contains("authorization: Bearer codex-access"));
+            assert!(request_text.contains("chatgpt-account-id: codex-account"));
+            assert!(request_text.contains("\"instructions\":\"be helpful\""));
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+                upstream.len()
+            );
+            stream.write_all(header.as_bytes()).await.unwrap();
+            stream.write_all(upstream.as_bytes()).await.unwrap();
+        });
+
+        let mut app = test_app();
+        app.saved.codex = Some(crate::config::CodexCredentials {
+            access: "codex-access".into(),
+            refresh: "codex-refresh".into(),
+            expires: 0,
+            account_id: "codex-account".into(),
+        });
+        app.backends.set(
+            BackendTag::Codex,
+            openrouter::OpenRouter::openai_codex("codex-access".into()),
+        );
+        app.models = vec![test_model("gpt-5-codex", BackendTag::Codex)];
+        let mut server = HostServer::bind(
+            app,
+            HostConfig::new(0, "host-secret").with_gateway_base(format!("http://{mock_addr}")),
+        )
+        .await
+        .unwrap();
+        let body = br#"{"model":"codex:gpt-5-codex","stream":true,"messages":[{"role":"system","content":"be helpful"},{"role":"user","content":"hi"}]}"#;
+        let response = raw_request(
+            server.local_addr(),
+            request("POST", "/v1/chat/completions", Some("host-secret"), body),
+        )
+        .await;
+        let text = String::from_utf8_lossy(response_body(&response));
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"));
+        assert!(text.contains("chat.completion.chunk"));
+        assert!(text.contains("hello from Codex"));
+        assert!(text.contains("\"prompt_tokens\":10"));
+        assert!(text.contains("data: [DONE]"));
+        assert!(!text.contains("response.output_text.delta"));
+        server.shutdown().await;
+        mock.await.unwrap();
     }
 
     #[tokio::test]
