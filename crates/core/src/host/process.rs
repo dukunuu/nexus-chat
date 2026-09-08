@@ -364,7 +364,7 @@ pub fn on_battery() -> Option<bool> {
             .output()
             .ok()?;
         let text = String::from_utf8_lossy(&output.stdout);
-        return Some(text.contains("Battery Power") && !text.contains("AC Power"));
+        Some(text.contains("Battery Power") && !text.contains("AC Power"))
     }
     #[cfg(not(target_os = "macos"))]
     {
