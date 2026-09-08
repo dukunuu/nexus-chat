@@ -121,6 +121,10 @@ pub struct AppView {
     pub key_target: KeyTarget,
     /// Highlighted row in the `/login` provider selector.
     pub login_selected: usize,
+    /// Cursor in the `/local` runtime selector, and whether it was reached
+    /// through `/login` — Esc goes back there, but closes for a bare `/local`.
+    pub local_selected: usize,
+    pub local_from_login: bool,
     pub settings_selected: usize,
     /// Text edit buffers for the numeric settings (temperature, `top_p`, `max_tokens`).
     pub settings_inputs: [String; 8],
@@ -289,6 +293,8 @@ impl AppView {
             key_input: String::new(),
             key_target: KeyTarget::OpenRouter,
             login_selected: 0,
+            local_selected: 0,
+            local_from_login: false,
             settings_selected: 0,
             settings_inputs: Default::default(),
             settings_collapsed: HashSet::new(),

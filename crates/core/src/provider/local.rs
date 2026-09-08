@@ -18,6 +18,37 @@ pub enum LocalRuntime {
     Lmstudio,
 }
 
+impl LocalRuntime {
+    /// Every runtime, in the order `/local` lists them.
+    pub const ALL: [Self; 3] = [Self::Ollama, Self::Mlx, Self::Lmstudio];
+
+    /// Human-readable runtime name, shown in model names and the picker.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Ollama => "Ollama",
+            Self::Mlx => "MLX",
+            Self::Lmstudio => "LM Studio",
+        }
+    }
+
+    /// Parse a `/local <runtime>` token, accepting the config spellings plus
+    /// the ways people write them by hand (`lm-studio`, `mlx_lm`).
+    #[must_use]
+    pub fn parse(token: &str) -> Option<Self> {
+        match token
+            .to_ascii_lowercase()
+            .replace(['-', '_', ' '], "")
+            .as_str()
+        {
+            "ollama" => Some(Self::Ollama),
+            "mlx" | "mlxlm" => Some(Self::Mlx),
+            "lmstudio" | "lms" => Some(Self::Lmstudio),
+            _ => None,
+        }
+    }
+}
+
 /// Trusted, machine-local settings. Commands are argv arrays, never shell strings.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -55,6 +86,50 @@ impl LocalConfig {
             );
         }
         Ok(())
+    }
+
+    /// Switch to `provider`, carrying over the settings that still apply: a
+    /// custom endpoint and discovery command are written for one runtime, so
+    /// they survive re-selecting it and are dropped when the runtime changes.
+    #[must_use]
+    pub fn for_runtime(provider: LocalRuntime, current: Option<&Self>) -> Self {
+        let carried = current.filter(|config| config.provider == provider);
+        Self {
+            provider,
+            endpoint: carried.and_then(|config| config.endpoint.clone()),
+            list_command: carried.and_then(|config| config.list_command.clone()),
+        }
+    }
+
+    /// Parse a `/local` argument: `off` disables local inference,
+    /// `<runtime> [endpoint]` selects one. An explicit endpoint replaces the
+    /// carried-over one; omitting it keeps whatever the runtime already had.
+    ///
+    /// # Errors
+    /// Rejects unknown runtimes, extra arguments and invalid endpoints.
+    pub fn from_spec(spec: &str, current: Option<&Self>) -> Result<Option<Self>> {
+        let mut words = spec.split_whitespace();
+        let runtime = words.next().context("expected a runtime, or `off`")?;
+        if matches!(
+            runtime.to_ascii_lowercase().as_str(),
+            "off" | "none" | "disable"
+        ) {
+            anyhow::ensure!(words.next().is_none(), "`/local off` takes no arguments");
+            return Ok(None);
+        }
+        let provider = LocalRuntime::parse(runtime).with_context(|| {
+            format!("unknown local runtime {runtime:?} — expected ollama, mlx, lmstudio or off")
+        })?;
+        let mut config = Self::for_runtime(provider, current);
+        if let Some(endpoint) = words.next() {
+            config.endpoint = Some(endpoint.to_string());
+        }
+        anyhow::ensure!(
+            words.next().is_none(),
+            "expected `/local <runtime> [endpoint]`"
+        );
+        config.validate()?;
+        Ok(Some(config))
     }
 
     fn command(&self) -> Vec<String> {
@@ -99,14 +174,7 @@ impl LocalConfig {
         Ok(ids
             .into_iter()
             .map(|id| Model {
-                name: format!(
-                    "{id} ({})",
-                    match self.provider {
-                        LocalRuntime::Ollama => "Ollama",
-                        LocalRuntime::Mlx => "MLX",
-                        LocalRuntime::Lmstudio => "LM Studio",
-                    }
-                ),
+                name: format!("{id} ({})", self.provider.label()),
                 id,
                 backend: BackendTag::Local,
                 context_length: None,
@@ -225,6 +293,43 @@ mod tests {
         config.validate().unwrap();
         let invalid: LocalConfig = toml::from_str("provider = 'mlx'\nlist_command = []").unwrap();
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn spec_parsing_selects_disables_and_carries_runtime_settings() {
+        let current = LocalConfig {
+            provider: LocalRuntime::Ollama,
+            endpoint: Some("http://127.0.0.1:9999/v1".into()),
+            list_command: Some(vec!["my-list".into()]),
+        };
+        // Re-selecting a runtime keeps the settings written for it; an
+        // explicit endpoint wins; switching runtimes drops both.
+        let same = LocalConfig::from_spec("ollama", Some(&current))
+            .unwrap()
+            .unwrap();
+        assert_eq!(same.endpoint(), "http://127.0.0.1:9999/v1");
+        assert_eq!(same.list_command, current.list_command);
+        let moved = LocalConfig::from_spec("lm-studio", Some(&current))
+            .unwrap()
+            .unwrap();
+        assert_eq!(moved.provider, LocalRuntime::Lmstudio);
+        assert_eq!(moved.endpoint(), "http://localhost:1234/v1");
+        assert_eq!(moved.list_command, None);
+        let retargeted = LocalConfig::from_spec("ollama http://localhost:1234/v1", Some(&current))
+            .unwrap()
+            .unwrap();
+        assert_eq!(retargeted.endpoint(), "http://localhost:1234/v1");
+        assert!(
+            LocalConfig::from_spec("off", Some(&current))
+                .unwrap()
+                .is_none()
+        );
+
+        assert!(LocalConfig::from_spec("", None).is_err());
+        assert!(LocalConfig::from_spec("olama", None).is_err());
+        assert!(LocalConfig::from_spec("off now", None).is_err());
+        assert!(LocalConfig::from_spec("ollama http://a/v1 extra", None).is_err());
+        assert!(LocalConfig::from_spec("ollama file:///models", None).is_err());
     }
 
     #[tokio::test]

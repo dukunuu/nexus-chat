@@ -109,8 +109,11 @@ pub enum Popup {
     Swarm,
     /// `/usage`: aggregated per-backend/per-model token, cache, and cost stats.
     Usage,
-    /// `/login`'s provider selector (`OpenRouter` / `OpenCode` Go / `OpenAI` / Codex).
+    /// `/login`'s provider selector (`OpenRouter` / `OpenCode` Go / `OpenAI` /
+    /// Codex / local runtime).
     Login,
+    /// `/local`'s runtime selector (Ollama / MLX / LM Studio / off).
+    Local,
 }
 
 /// Which backend a pasted key in `Popup::Key` is for — set by whichever

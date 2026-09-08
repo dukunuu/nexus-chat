@@ -1,4 +1,5 @@
-//! `/login`'s provider selector: `OpenRouter`, `OpenCode` Go, `OpenAI`, or Codex.
+//! `/login`'s provider selector: `OpenRouter`, `OpenCode` Go, `OpenAI`,
+//! Codex, or a local runtime (which takes no key and opens `/local`).
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -10,11 +11,12 @@ use crate::app_view::AppView;
 
 use super::chrome;
 
-const ROWS: [(&str, &str); 4] = [
+const ROWS: [(&str, &str); 5] = [
     ("OpenRouter", "paste a key, or reads $OPENROUTER_API_KEY"),
     ("OpenCode Go", "paste a key, or reads $OPENCODE_API_KEY"),
     ("OpenAI", "paste a key, or reads $OPENAI_API_KEY"),
     ("Codex", "ChatGPT subscription — device-code login"),
+    ("Local runtime", "Ollama / MLX / LM Studio — no key"),
 ];
 
 pub fn render(f: &mut Frame, app: &AppView) {
@@ -39,7 +41,8 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 0 => app.backends.openrouter.is_some(),
                 1 => app.backends.opencode.is_some(),
                 2 => app.backends.openai.is_some(),
-                _ => app.backends.codex.is_some(),
+                3 => app.backends.codex.is_some(),
+                _ => app.backends.local.is_some(),
             };
             let chip = if configured {
                 Span::styled("✓ configured", Style::default().fg(app.theme.success))

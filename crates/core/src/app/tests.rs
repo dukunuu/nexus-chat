@@ -37,6 +37,39 @@ async fn local_backend_discovers_models_and_uses_local_utility_fallback() {
 }
 
 #[test]
+fn bare_local_command_reports_the_current_runtime() {
+    // The status path is the headless half of `/local`; applying a spec
+    // writes the user's real config file, so it stays out of the suite.
+    let mut app = App::new(Db::open_in_memory().unwrap(), None, test_space());
+    let last_status = |app: &mut App| {
+        app.pending_events
+            .drain(..)
+            .filter_map(|event| match event {
+                AppEvent::Status(s) => Some(s),
+                _ => None,
+            })
+            .next_back()
+            .unwrap()
+    };
+    app.execute(AppCommand::ConfigureLocal {
+        spec: String::new(),
+    })
+    .unwrap();
+    assert!(last_status(&mut app).contains("local inference is off"));
+    app.saved.local = Some(crate::provider::local::LocalConfig {
+        provider: crate::provider::local::LocalRuntime::Lmstudio,
+        endpoint: None,
+        list_command: None,
+    });
+    app.configure_local("  ");
+    let status = last_status(&mut app);
+    assert!(
+        status.contains("LM Studio") && status.contains("http://localhost:1234/v1"),
+        "{status}"
+    );
+}
+
+#[test]
 fn parse_topic_extracts_and_slugifies() {
     let (t, s) = parse_topic(r#"{"topic": "Rust Async Runtimes", "id": "rust async!"}"#).unwrap();
     assert_eq!(t, "Rust Async Runtimes");
@@ -1931,6 +1964,23 @@ fn parse_command_maps_the_slash_catalog_into_the_seam() {
         a.parse_command("incognito").unwrap(),
         AppCommand::Incognito { on: true }
     );
+    // `/local` opens the picker; the runtime aliases resolve to `local` and
+    // carry themselves through as the spec.
+    for (line, spec) in [
+        ("local", ""),
+        ("local off", "off"),
+        ("ollama", "ollama"),
+        (
+            "mlx http://localhost:8080/v1",
+            "mlx http://localhost:8080/v1",
+        ),
+    ] {
+        assert_eq!(
+            a.parse_command(line).unwrap(),
+            AppCommand::ConfigureLocal { spec: spec.into() },
+            "{line}"
+        );
+    }
     assert!(a.parse_command("nosuchcommand").is_err());
     // Aliases resolve to the canonical command.
     assert_eq!(

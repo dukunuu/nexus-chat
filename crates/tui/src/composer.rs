@@ -521,6 +521,10 @@ impl AppView {
             }
             AppCommand::OpenModelPicker => self.open_model_picker(),
             AppCommand::OpenLogin => self.open_login_popup(),
+            // A bare `/local` picks interactively; a spec applies directly.
+            AppCommand::ConfigureLocal { spec } if spec.trim().is_empty() => {
+                self.open_local_popup();
+            }
             AppCommand::OpenSwarm => self.open_swarm_popup(),
             AppCommand::OpenSettings => self.open_settings(),
             AppCommand::SetTheme { mode } => self.set_background_mode(&mode)?,
@@ -731,6 +735,10 @@ mod tests {
         let mut a = test_app();
         a.run_command("model").unwrap();
         assert_eq!(a.popup, Popup::Model);
+        // A bare `/local` is view-only; a spec would reach the domain (and
+        // the user's config file), so the test stops at the popup.
+        a.run_command("local").unwrap();
+        assert_eq!(a.popup, Popup::Local);
         a.run_command("theme opaque").unwrap();
         assert_eq!(a.background_mode, crate::theme::BackgroundMode::Opaque);
         assert!(

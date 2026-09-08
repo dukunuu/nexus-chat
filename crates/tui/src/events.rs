@@ -303,6 +303,9 @@ fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
         Popup::Login => {
             ui::popups::login::handle_key(app, key);
         }
+        Popup::Local => {
+            ui::popups::local::handle_key(app, key);
+        }
 
         Popup::None => handle_normal(app, key)?,
     }

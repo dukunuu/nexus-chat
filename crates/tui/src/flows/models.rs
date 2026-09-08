@@ -11,6 +11,7 @@ use anyhow::Result;
 
 use nexus_core::app::{KeyTarget, ModelPanel, ModelPickTarget, Popup};
 use nexus_core::config;
+use nexus_core::provider::local::{LocalConfig, LocalRuntime};
 use nexus_core::provider::{BackendTag, Model, openrouter::OpenRouter};
 
 use crate::app_view::AppView;
@@ -120,12 +121,13 @@ impl AppView {
     }
 
     pub fn move_login_selection(&mut self, delta: i32) {
-        self.login_selected = nexus_core::app::clamp_cursor(self.login_selected, 4, delta);
+        self.login_selected = nexus_core::app::clamp_cursor(self.login_selected, 5, delta);
     }
 
     /// Enter on a `/login` row: OpenRouter/OpenCode Go/OpenAI activate
     /// immediately from their env var if set, else drop into the key-paste
-    /// popup; Codex has no key, so it starts the device-code login instead.
+    /// popup; Codex has no key, so it starts the device-code login instead,
+    /// and the local runtime has none either — it opens `/local`.
     pub fn confirm_login_selection(&mut self) {
         match self.login_selected {
             0 => self.start_key_login(
@@ -146,7 +148,48 @@ impl AppView {
                 "openai",
                 "OpenAI",
             ),
-            _ => self.core.start_codex_login(),
+            3 => self.core.start_codex_login(),
+            _ => {
+                self.open_local_popup();
+                self.local_from_login = true;
+            }
+        }
+    }
+
+    /// `/local`: open the runtime selector, parked on whatever is active.
+    pub fn open_local_popup(&mut self) {
+        self.local_from_login = false;
+        self.local_selected = self.core.saved.local.as_ref().map_or(
+            crate::ui::popups::local::ROW_COUNT - 1,
+            |config| {
+                LocalRuntime::ALL
+                    .iter()
+                    .position(|runtime| *runtime == config.provider)
+                    .unwrap_or(0)
+            },
+        );
+        self.popup = Popup::Local;
+    }
+
+    pub fn move_local_selection(&mut self, delta: i32) {
+        self.local_selected = nexus_core::app::clamp_cursor(
+            self.local_selected,
+            crate::ui::popups::local::ROW_COUNT,
+            delta,
+        );
+    }
+
+    /// Enter on a `/local` row: switch runtime (or disable), persisting to
+    /// the machine-local config and reloading the catalog. Failures stay on
+    /// the status line with the popup open, so the pick can be retried.
+    pub fn confirm_local_selection(&mut self) {
+        let current = self.core.saved.local.clone();
+        let config = LocalRuntime::ALL
+            .get(self.local_selected)
+            .map(|runtime| LocalConfig::for_runtime(*runtime, current.as_ref()));
+        match self.core.set_local_runtime(config) {
+            Ok(()) => self.popup = Popup::None,
+            Err(error) => self.push_status(format!("local inference: {error}")),
         }
     }
 

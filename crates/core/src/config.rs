@@ -572,11 +572,45 @@ async fn login_openai_codex_device_with_browser(
     Ok(creds)
 }
 
+/// Persist (or clear) the machine-local `[local]` block, leaving every
+/// credential in the file untouched.
+///
+/// # Errors
+/// Propagates read/serialize/write failures on the config file.
+pub fn save_local_config(local: Option<&crate::provider::local::LocalConfig>) -> Result<()> {
+    let (openrouter_key, openai_key, opencode_key, codex) = load_config_all().unwrap_or_default();
+    write_config(
+        &openrouter_key,
+        &openai_key,
+        &opencode_key,
+        codex.as_ref(),
+        local,
+    )
+}
+
 fn write_provider_config(
     openrouter_key: &str,
     openai_key: &str,
     opencode_key: &str,
     codex: Option<&CodexCredentials>,
+) -> Result<()> {
+    // Credential writers leave the local runtime block exactly as it is.
+    let local = load_local_config()?;
+    write_config(
+        openrouter_key,
+        openai_key,
+        opencode_key,
+        codex,
+        local.as_ref(),
+    )
+}
+
+fn write_config(
+    openrouter_key: &str,
+    openai_key: &str,
+    opencode_key: &str,
+    codex: Option<&CodexCredentials>,
+    local: Option<&crate::provider::local::LocalConfig>,
 ) -> Result<()> {
     let path = config_path()?;
     if let Some(dir) = path.parent() {
@@ -617,9 +651,9 @@ fn write_provider_config(
             escape(&tunnel.config_path.display().to_string())
         );
     }
-    if let Some(local) = load_local_config()? {
+    if let Some(local) = local {
         body.push_str("\n[local]\n");
-        body.push_str(&toml::to_string(&local).context("serializing local runtime configuration")?);
+        body.push_str(&toml::to_string(local).context("serializing local runtime configuration")?);
     }
     write_secret_file(&path, &body)
 }

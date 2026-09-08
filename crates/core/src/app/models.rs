@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 
 use crate::provider::BackendTag;
+use crate::provider::local::LocalConfig;
 use crate::provider::openrouter::OpenRouter;
 
 use super::{App, ModelPickTarget, Popup};
@@ -35,6 +36,70 @@ impl App {
         if self.backends.any() {
             self.push_status("loading models…  (/model to pick, /help for commands)".to_string());
         }
+    }
+
+    /// `/local` — apply a runtime spec, or report the current setting when
+    /// it's empty (the TUI opens its picker for that case instead). Parse
+    /// and persistence failures land on the status line: a typo'd runtime
+    /// must not take the app down.
+    pub fn configure_local(&mut self, spec: &str) {
+        if spec.trim().is_empty() {
+            let status = match &self.saved.local {
+                Some(config) => format!(
+                    "local inference: {} at {}",
+                    config.provider.label(),
+                    config.endpoint()
+                ),
+                None => "local inference is off — /local <ollama|mlx|lmstudio>".to_string(),
+            };
+            self.push_status(status);
+            return;
+        }
+        let applied = LocalConfig::from_spec(spec, self.saved.local.as_ref())
+            .and_then(|config| self.set_local_runtime(config));
+        if let Err(error) = applied {
+            self.push_status(format!("local inference: {error}"));
+        }
+    }
+
+    /// Persist and activate (or clear) the local runtime, then refresh the
+    /// model catalog. The `[local]` block is machine-local, so this only ever
+    /// touches this device's config file.
+    ///
+    /// # Errors
+    /// Invalid settings, or a config file that can't be written.
+    pub fn set_local_runtime(&mut self, config: Option<LocalConfig>) -> Result<()> {
+        if let Some(config) = &config {
+            config.validate()?;
+        }
+        crate::config::save_local_config(config.as_ref())?;
+        let status = match &config {
+            Some(config) => format!(
+                "local inference: {} at {} — loading models…",
+                config.provider.label(),
+                config.endpoint()
+            ),
+            None => "local inference disabled".to_string(),
+        };
+        self.saved.local = config;
+        if self.saved.local.is_none() {
+            // `fetch_models` can't clear these: with no provider left it
+            // returns early, and a stale `local:` selection would fail to
+            // route on the next send.
+            self.models
+                .retain(|model| model.backend != BackendTag::Local);
+            if self
+                .current_model
+                .as_deref()
+                .is_some_and(|id| id.starts_with(BackendTag::Local.key_prefix()))
+            {
+                self.current_model = None;
+            }
+        }
+        self.rebuild_all_backends();
+        self.fetch_models();
+        self.push_status(status);
+        Ok(())
     }
 
     pub fn resolve_model_backend(&self, id: &str) -> Option<(OpenRouter, String)> {

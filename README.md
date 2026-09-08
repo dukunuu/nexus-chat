@@ -151,13 +151,23 @@ key is enough; models are fetched from the catalogs.
 
 ## Local inference (experimental)
 
-Choose a runtime in `~/.config/nexus-chat/config.toml`, then launch `nexus`:
+Pick a runtime from inside the TUI with `/local` (also the last row of
+`/login`), or name one directly: `/ollama`, `/mlx`, `/lmstudio`,
+`/local mlx http://localhost:8080/v1`, `/local off`. Either way the choice is
+written to `~/.config/nexus-chat/config.toml` and the catalog reloads
+immediately — no restart.
+
+The same block can be written by hand:
 
 ```toml
 [local]
 provider = "ollama" # or "mlx", "lmstudio"
 # endpoint = "http://localhost:11434/v1" # optional inference URL override
 ```
+
+Switching runtimes from `/local` drops a custom `endpoint`/`list_command`,
+since those are written for one runtime; re-selecting the active runtime keeps
+them.
 
 Nexus runs the runtime's discovery command when loading/refreshing `/model`:
 

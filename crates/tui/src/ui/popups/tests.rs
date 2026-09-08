@@ -30,6 +30,55 @@ fn render_to_string(width: u16, height: u16, render: impl FnOnce(&mut ratatui::F
 }
 
 #[test]
+fn local_popup_lists_runtimes_with_discovery_and_endpoint() {
+    let mut app = test_app();
+    app.core.saved.local = Some(nexus_core::provider::local::LocalConfig {
+        provider: nexus_core::provider::local::LocalRuntime::Mlx,
+        endpoint: None,
+        list_command: None,
+    });
+    app.open_local_popup();
+    let screen = render_to_string(80, 24, |f| super::local::render(f, &app));
+
+    assert!(screen.contains("local runtime"), "{screen}");
+    assert!(screen.contains("ollama list"), "{screen}");
+    assert!(screen.contains("http://localhost:8080/v1"), "{screen}");
+    assert!(screen.contains("✓ active"), "{screen}");
+    // The picker opens on the configured runtime, not on row 0.
+    assert_eq!(app.local_selected, 1);
+
+    // Esc closes a bare `/local`, but steps back when `/login` opened it.
+    let esc = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Esc);
+    super::local::handle_key(&mut app, esc);
+    assert_eq!(app.popup, nexus_core::app::Popup::None);
+    app.open_login_popup();
+    for _ in 0..4 {
+        app.move_login_selection(1);
+    }
+    app.confirm_login_selection();
+    assert_eq!(app.popup, nexus_core::app::Popup::Local);
+    super::local::handle_key(&mut app, esc);
+    assert_eq!(app.popup, nexus_core::app::Popup::Login);
+}
+
+#[test]
+fn login_popup_offers_the_local_runtime_row() {
+    let mut app = test_app();
+    app.open_login_popup();
+    // The list scrolls; the local row is the last one, past Codex.
+    for _ in 0..4 {
+        app.move_login_selection(1);
+    }
+    assert_eq!(app.login_selected, 4);
+    app.move_login_selection(1);
+    assert_eq!(app.login_selected, 4, "selection must stay in range");
+
+    let screen = render_to_string(80, 30, |f| super::login::render(f, &app));
+    assert!(screen.contains("Local runtime"), "{screen}");
+    assert!(screen.contains("Ollama / MLX"), "{screen}");
+}
+
+#[test]
 fn copy_popup_uses_rounded_border_and_standard_marker() {
     let mut app = test_app();
     app.copy_options = vec![CopyOption {

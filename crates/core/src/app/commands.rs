@@ -80,6 +80,11 @@ pub const COMMANDS: &[Command] = &[
         ],
     },
     Command {
+        name: "local",
+        desc: "local inference runtime",
+        aliases: &["ollama", "mlx", "lmstudio", "offline", "runtime"],
+    },
+    Command {
         name: "swarm",
         desc: "multi-persona roundtable roster",
         aliases: &["swarms", "personas", "panel"],
@@ -238,6 +243,10 @@ pub enum AppCommand {
     OpenModelPicker,
     /// `/login` — the provider login popup.
     OpenLogin,
+    /// `/local [<runtime> [endpoint] | off]` — pick the local inference
+    /// runtime. An empty `spec` opens the picker (reports the current
+    /// setting headless); `/ollama`, `/mlx` and `/lmstudio` fill it in.
+    ConfigureLocal { spec: String },
     /// `/swarm` — the swarm roster popup.
     OpenSwarm,
     /// `/config` — the nerd-config popup.
@@ -306,6 +315,15 @@ impl App {
             "space" => Ok(AppCommand::OpenSpacePicker),
             "model" => Ok(AppCommand::OpenModelPicker),
             "login" => Ok(AppCommand::OpenLogin),
+            // `/local <spec>`, but also `/ollama` and friends: the runtime
+            // aliases resolve to `local`, so the token *is* the spec.
+            "local" => Ok(AppCommand::ConfigureLocal {
+                spec: match (token, rest(cmd, token)) {
+                    ("local", arg) => arg,
+                    (runtime, arg) if arg.is_empty() => runtime.to_string(),
+                    (runtime, arg) => format!("{runtime} {arg}"),
+                },
+            }),
             "swarm" => Ok(AppCommand::OpenSwarm),
             "config" => Ok(AppCommand::OpenSettings),
             "theme" => Ok(AppCommand::SetTheme {
@@ -377,6 +395,7 @@ impl App {
             | AppCommand::OpenApps
             | AppCommand::OpenUsage
             | AppCommand::Watch { .. } => {}
+            AppCommand::ConfigureLocal { spec } => self.configure_local(&spec),
             AppCommand::Send { text } => self.send_message(text)?,
             AppCommand::Cancel { task } => match task {
                 Some(id) => self.cancel_chat_task(id)?,
