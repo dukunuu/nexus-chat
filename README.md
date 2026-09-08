@@ -149,6 +149,56 @@ key is enough; models are fetched from the catalogs.
 | custom banner | `~/.config/nexus-chat/banner.txt` |
 | spaces (db, files, scripts, apps, media) | `~/.local/share/nexus-chat/spaces/<space>/` |
 
+## Local inference (experimental)
+
+Choose a runtime in `~/.config/nexus-chat/config.toml`, then launch `nexus`:
+
+```toml
+[local]
+provider = "ollama" # or "mlx", "lmstudio"
+# endpoint = "http://localhost:11434/v1" # optional inference URL override
+```
+
+Nexus runs the runtime's discovery command when loading/refreshing `/model`:
+
+| Runtime | Discovery | Default inference URL |
+| --- | --- | --- |
+| `ollama` | `ollama list` | `http://localhost:11434/v1` |
+| `lmstudio` | `lms ls --json` | `http://localhost:1234/v1` |
+| `mlx` | `python3` running a bundled, offline Hugging Face cache scanner | `http://localhost:8080/v1` |
+
+These are **installed models**, not an online download catalog. MLX has no
+`mlx list` command: the scanner lists cached repositories with `config.json`
+and safetensors weights, respecting `HF_HOME`/`HF_HUB_CACHE`. These are candidates,
+not a guarantee of MLX compatibility or a complete download.
+
+Local models have their own **Local** backend filter and `local:` IDs; names also
+show the runtime. OpenAI and other cloud backends remain independent. Only one
+local runtime is configured at a time. No cloud credentials are sent locally.
+
+For a custom installation, override discovery with an argv array. Its output
+must be one inference model ID per line (no header):
+
+```toml
+[local]
+provider = "mlx"
+list_command = ["/absolute/path/to/my-model-list", "--installed"]
+```
+
+Commands run without a shell, with a 15-second timeout and 1 MiB stdout cap.
+Only put trusted commands in this machine-local config; discovery executes them
+automatically. Configuring a different inference endpoint does not change where
+the discovery command looks—configure that command/runtime accordingly.
+
+**Inference still requires a running server.** Start Ollama, enable LM Studio's
+server and load the selected model, or run `mlx_lm.server --model <model-id>`.
+MLX servers usually serve one model: selecting another in Nexus does not restart
+the server. The API must accept the discovered model ID. Automatic server
+launch/switching, downloads, authenticated local servers, host gateway forwarding,
+and capability/context discovery are not implemented yet. Tool calling depends
+on the runtime/model. Local utility fallback uses the selected/installed model
+rather than a cloud model name.
+
 ## Features
 
 - **Chat** over any configured backend: OpenRouter, OpenAI, OpenCode Zen/Go,

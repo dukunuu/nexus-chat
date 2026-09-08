@@ -293,6 +293,7 @@ pub enum WireBackendTag {
     OpenAi,
     OpencodeGo,
     Codex,
+    Local,
 }
 
 /// `USD` per 1M tokens from the catalog.
@@ -570,6 +571,7 @@ impl From<BackendTag> for WireBackendTag {
             BackendTag::OpenAi => Self::OpenAi,
             BackendTag::OpencodeGo => Self::OpencodeGo,
             BackendTag::Codex => Self::Codex,
+            BackendTag::Local => Self::Local,
         }
     }
 }

@@ -7,6 +7,35 @@ fn test_space() -> Space {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn local_backend_discovers_models_and_uses_local_utility_fallback() {
+    let mut app = App::new(Db::open_in_memory().unwrap(), None, test_space());
+    app.saved.local = Some(crate::provider::local::LocalConfig {
+        provider: crate::provider::local::LocalRuntime::Mlx,
+        endpoint: None,
+        list_command: Some(vec![
+            "/usr/bin/printf".into(),
+            "mlx-community/test-model\\n".into(),
+        ]),
+    });
+    app.rebuild_all_backends();
+    assert!(app.backends.configured(BackendTag::Local));
+    assert!(!app.backends.configured(BackendTag::OpenAi));
+    app.fetch_models();
+    let result = app.models_rx.as_mut().unwrap().recv().await;
+    app.on_models_result(result);
+    assert_eq!(app.models.len(), 1);
+    assert_eq!(
+        composite_id(&app.models[0]),
+        "local:mlx-community/test-model"
+    );
+    app.current_model = Some(composite_id(&app.models[0]));
+    let (provider, model) = app.resolve_utility_model_backend("gpt-4.1-mini").unwrap();
+    assert_eq!(provider.backend_tag(), BackendTag::Local);
+    assert_eq!(model, "mlx-community/test-model");
+}
+
 #[test]
 fn parse_topic_extracts_and_slugifies() {
     let (t, s) = parse_topic(r#"{"topic": "Rust Async Runtimes", "id": "rust async!"}"#).unwrap();

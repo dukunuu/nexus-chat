@@ -1080,6 +1080,7 @@ impl From<WireModel> for OpenAiModel {
             WireBackendTag::OpenAi => "openai",
             WireBackendTag::OpencodeGo => "opencode-go",
             WireBackendTag::Codex => "codex",
+            WireBackendTag::Local => "local",
         };
         Self {
             id: model.id,
@@ -2133,6 +2134,7 @@ fn handle_actor_request(app: &mut App, admin: &mut super::admin::State, request:
                 BackendTag::OpenAi,
                 BackendTag::OpencodeGo,
                 BackendTag::Codex,
+                BackendTag::Local,
             ];
             let backends = tags
                 .into_iter()
@@ -2369,6 +2371,9 @@ fn gateway_route(
         return Err(format!("unknown model {model:?}"));
     };
     let key = match tag {
+        BackendTag::Local => {
+            return Err("local inference is not yet supported by the host gateway".into());
+        }
         BackendTag::OpenRouter => app.saved.openrouter_key.clone(),
         BackendTag::OpenAi => app.saved.openai_key.clone(),
         BackendTag::OpencodeGo => app.saved.opencode_key.clone(),
@@ -2538,6 +2543,7 @@ fn parse_backend_tag(value: &str) -> Result<BackendTag, String> {
         "openai" => Ok(BackendTag::OpenAi),
         "opencode" | "opencode-go" | "opencode_go" | "go" => Ok(BackendTag::OpencodeGo),
         "codex" => Ok(BackendTag::Codex),
+        "local" => Ok(BackendTag::Local),
         _ => Err(format!("unknown x-nexus-backend {value:?}")),
     }
 }

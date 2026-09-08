@@ -1,3 +1,4 @@
+pub mod local;
 pub mod openrouter;
 
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,7 @@ pub enum BackendTag {
     OpenAi,
     OpencodeGo,
     Codex,
+    Local,
 }
 
 impl BackendTag {
@@ -40,6 +42,7 @@ impl BackendTag {
             Self::OpenAi => "OpenAI",
             Self::OpencodeGo => "OpenCode Go",
             Self::Codex => "Codex",
+            Self::Local => "Local",
         }
     }
 
@@ -53,6 +56,7 @@ impl BackendTag {
             Self::OpenAi => "openai:",
             Self::OpencodeGo => "opencode:",
             Self::Codex => "codex:",
+            Self::Local => "local:",
         }
     }
 
@@ -64,6 +68,7 @@ impl BackendTag {
             Self::OpenAi => "openai:",
             Self::OpencodeGo => "opencode:",
             Self::Codex => "codex:",
+            Self::Local => "local:",
         }
     }
 
@@ -73,6 +78,7 @@ impl BackendTag {
             Self::OpenAi => "OpenAI",
             Self::OpencodeGo => "OpenCode Go",
             Self::Codex => "Codex",
+            Self::Local => "Local",
         }
     }
 }

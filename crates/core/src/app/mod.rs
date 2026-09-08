@@ -1001,7 +1001,7 @@ impl App {
                 }
                 // No full CodexCredentials from a bare key — fine for the
                 // bootstrap/test path, main.rs always has the real ones.
-                crate::provider::BackendTag::Codex => {}
+                crate::provider::BackendTag::Codex | crate::provider::BackendTag::Local => {}
             }
         }
         let status = if key.is_some() {

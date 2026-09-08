@@ -18,6 +18,8 @@ struct Config {
     provider: Provider,
     #[serde(default)]
     host: Option<HostSettings>,
+    #[serde(default)]
+    local: Option<crate::provider::local::LocalConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -61,6 +63,8 @@ struct HostSettings {
 /// is simultaneously usable (`/model` merges all of their catalogs).
 #[derive(Debug, Clone, Default)]
 pub struct SavedCreds {
+    /// Independent local runtime configuration, never synced between machines.
+    pub local: Option<crate::provider::local::LocalConfig>,
     pub openrouter_key: Option<String>,
     pub openai_key: Option<String>,
     pub opencode_key: Option<String>,
@@ -157,6 +161,7 @@ pub fn load_creds_offline() -> SavedCreds {
         opencode_key = v.trim().to_string();
     }
     SavedCreds {
+        local: load_local_config().ok().flatten(),
         openrouter_key: (!openrouter_key.is_empty()).then_some(openrouter_key),
         openai_key: (!openai_key.is_empty()).then_some(openai_key),
         opencode_key: (!opencode_key.is_empty()).then_some(opencode_key),
@@ -177,12 +182,27 @@ pub async fn load_all_providers() -> Result<SavedCreds> {
         write_provider_config("", "", "", None)?; // scaffold template
     }
     let mut saved = load_creds_offline();
+    saved.local = load_local_config()?;
+    if let Some(local) = &saved.local {
+        local.validate()?;
+    }
     if let Some(creds) = saved.codex.take() {
         let creds = refresh_codex_if_needed(creds).await?;
         save_codex_credentials(&creds)?;
         saved.codex = Some(creds);
     }
     Ok(saved)
+}
+
+fn load_local_config() -> Result<Option<crate::provider::local::LocalConfig>> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let config: Config = toml::from_str(&text).context("parsing local runtime configuration")?;
+    Ok(config.local)
 }
 
 /// The first configured credential in a fixed priority order (openrouter >
@@ -597,12 +617,32 @@ fn write_provider_config(
             escape(&tunnel.config_path.display().to_string())
         );
     }
+    if let Some(local) = load_local_config()? {
+        body.push_str("\n[local]\n");
+        body.push_str(&toml::to_string(&local).context("serializing local runtime configuration")?);
+    }
     write_secret_file(&path, &body)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_runtime_config_round_trips_alongside_cloud_credentials() {
+        let cfg: Config = toml::from_str(
+            "[provider]\nopenai_key = 'test-key'\n[local]\nprovider = 'mlx'\nlist_command = ['my-list', '--installed']\n",
+        ).unwrap();
+        assert_eq!(cfg.provider.openai_key, "test-key");
+        let local = cfg.local.unwrap();
+        local.validate().unwrap();
+        let encoded = toml::to_string(&local).unwrap();
+        let decoded: crate::provider::local::LocalConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.provider, local.provider);
+        assert_eq!(decoded.list_command, local.list_command);
+        assert_eq!(decoded.endpoint(), "http://localhost:8080/v1");
+        assert!(toml::from_str::<Config>("[local]\nprovider = 'unknown'").is_err());
+    }
 
     #[test]
     fn parses_keys() {

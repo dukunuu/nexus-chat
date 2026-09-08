@@ -13,6 +13,7 @@ pub struct Backends {
     pub openai: Option<OpenRouter>,
     pub opencode: Option<OpenRouter>,
     pub codex: Option<OpenRouter>,
+    pub local: Option<OpenRouter>,
 }
 
 impl Backends {
@@ -21,6 +22,7 @@ impl Backends {
             || self.openai.is_some()
             || self.opencode.is_some()
             || self.codex.is_some()
+            || self.local.is_some()
     }
 
     /// Whether a credential-backed provider exists for `tag`.
@@ -34,6 +36,7 @@ impl Backends {
             BackendTag::OpenAi => self.openai.as_ref(),
             BackendTag::OpencodeGo => self.opencode.as_ref(),
             BackendTag::Codex => self.codex.as_ref(),
+            BackendTag::Local => self.local.as_ref(),
         }
     }
 
@@ -43,6 +46,7 @@ impl Backends {
             BackendTag::OpenAi => self.openai = Some(provider),
             BackendTag::OpencodeGo => self.opencode = Some(provider),
             BackendTag::Codex => self.codex = Some(provider),
+            BackendTag::Local => self.local = Some(provider),
         }
     }
 
@@ -54,6 +58,7 @@ impl Backends {
             BackendTag::OpenAi,
             BackendTag::OpencodeGo,
             BackendTag::Codex,
+            BackendTag::Local,
         ]
         .into_iter()
         .filter(|t| self.get(*t).is_some())
@@ -69,6 +74,7 @@ impl Backends {
             BackendTag::OpenAi,
             BackendTag::OpencodeGo,
             BackendTag::Codex,
+            BackendTag::Local,
         ] {
             if let Some(raw) = composite_id.strip_prefix(tag.key_prefix()) {
                 return self.get(tag).cloned().map(|p| (p, raw.to_string()));
@@ -119,6 +125,33 @@ mod tests {
         let (provider, raw) = backends.resolve("codex:gpt-5.4-mini").unwrap();
         assert_eq!(provider.backend_tag(), BackendTag::Codex);
         assert_eq!(raw, "gpt-5.4-mini");
+    }
+
+    #[test]
+    fn local_and_openai_are_independent_backends() {
+        let mut backends = Backends::default();
+        backends.set(BackendTag::OpenAi, OpenRouter::openai("cloud-key".into()));
+        backends.set(
+            BackendTag::Local,
+            OpenRouter::local("http://localhost:11434/v1").unwrap(),
+        );
+        let (provider, raw) = backends.resolve("local:org/model:latest").unwrap();
+        assert_eq!(provider.backend_tag(), BackendTag::Local);
+        assert_eq!(raw, "org/model:latest");
+        assert_eq!(
+            backends
+                .resolve("openai:org/model:latest")
+                .unwrap()
+                .0
+                .backend_tag(),
+            BackendTag::OpenAi
+        );
+        assert_eq!(
+            backends.configured_tags(),
+            [BackendTag::OpenAi, BackendTag::Local]
+        );
+        backends.local = None;
+        assert!(backends.resolve("local:org/model:latest").is_none());
     }
 
     #[test]

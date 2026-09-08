@@ -15,6 +15,12 @@ impl App {
             self.backends
                 .set(BackendTag::OpenRouter, OpenRouter::openrouter_flavor(k));
         }
+        if let Some(config) = self.saved.local.clone() {
+            match OpenRouter::configured_local(config) {
+                Ok(provider) => self.backends.set(BackendTag::Local, provider),
+                Err(error) => self.push_status(format!("local inference: {error}")),
+            }
+        }
         if let Some(k) = self.saved.openai_key.clone() {
             self.backends.set(BackendTag::OpenAi, OpenRouter::openai(k));
         }
@@ -71,6 +77,23 @@ impl App {
                     .first()
                     .and_then(|tag| self.backends.get(*tag).cloned())
             })?;
+        if provider.backend_tag() == BackendTag::Local {
+            // Local runtimes do not have cloud default model names. Only use
+            // an installed model, preferring the current chat selection.
+            let raw = self
+                .current_model
+                .as_deref()
+                .and_then(|id| self.resolve_model_backend(id))
+                .filter(|(backend, _)| backend.backend_tag() == BackendTag::Local)
+                .map(|(_, raw)| raw)
+                .or_else(|| {
+                    self.models
+                        .iter()
+                        .find(|model| model.backend == BackendTag::Local)
+                        .map(|model| model.id.clone())
+                })?;
+            return Some((provider, raw));
+        }
         Some((provider.clone(), default(&provider).to_string()))
     }
 
@@ -88,7 +111,8 @@ impl App {
             // `google/gemini-*` being resolved against OpenAI/Codex/Go because
             // OpenRouter is not configured. Those backends' built-in defaults
             // do not contain `/`, so treat slashy bare ids as OpenRouter-only.
-            return backend == BackendTag::OpenRouter || !original_id.contains('/');
+            return backend != BackendTag::Local
+                && (backend == BackendTag::OpenRouter || !original_id.contains('/'));
         }
         self.models
             .iter()
@@ -106,6 +130,7 @@ impl App {
             self.backends.openai.clone(),
             self.backends.opencode.clone(),
             self.backends.codex.clone(),
+            self.backends.local.clone(),
         ]
         .into_iter()
         .flatten()

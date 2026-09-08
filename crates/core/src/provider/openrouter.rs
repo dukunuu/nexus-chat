@@ -46,6 +46,8 @@ pub fn base_url(tag: crate::provider::BackendTag) -> &'static str {
         crate::provider::BackendTag::OpenAi => OPENAI_BASE,
         crate::provider::BackendTag::OpencodeGo => OPENCODE_ZEN_BASE,
         crate::provider::BackendTag::Codex => CODEX_BASE,
+        // Local routing requires instance configuration; never fall back to a cloud URL.
+        crate::provider::BackendTag::Local => "http://localhost:11434/v1",
     }
 }
 
@@ -180,6 +182,8 @@ pub struct OpenRouter {
     client: reqwest::Client,
     key: String,
     flavor: ProviderFlavor,
+    endpoint: Option<String>,
+    local_config: Option<super::local::LocalConfig>,
 }
 
 /// Everything needed to generate a video: model, prompt, params, optional
@@ -519,6 +523,54 @@ fn merge_generation_models(models: &mut Vec<Model>, additions: Vec<Model>) {
     models.sort_by(|a, b| a.id.cmp(&b.id));
 }
 
+#[cfg(test)]
+mod local_tests {
+    use super::OpenRouter;
+
+    #[test]
+    fn local_routes_preserve_model_ids_and_omit_credentials() {
+        for endpoint in [
+            "http://localhost:11434/v1/",
+            "http://localhost:1234/v1",
+            "http://127.0.0.1:8080/v1",
+        ] {
+            let provider = OpenRouter::local(endpoint).expect("valid endpoint");
+            let (base, model) = provider.opencode_route("mlx-community/model:latest");
+            assert_eq!(base, endpoint.trim_end_matches('/'));
+            assert_eq!(model, "mlx-community/model:latest");
+            let request = provider
+                .authenticate(provider.client.get(format!("{base}/models")))
+                .build()
+                .expect("valid request");
+            assert!(!request.headers().contains_key("authorization"));
+        }
+    }
+
+    #[test]
+    fn local_rejects_unsafe_or_ambiguous_endpoints() {
+        for endpoint in [
+            "file:///tmp/model",
+            "not a URL",
+            "http://user:secret@localhost/v1",
+            "http://localhost/v1?key=secret",
+            "http://localhost/v1#fragment",
+        ] {
+            assert!(OpenRouter::local(endpoint).is_err(), "{endpoint}");
+        }
+    }
+
+    #[test]
+    fn cloud_authentication_is_unchanged() {
+        let provider = OpenRouter::openai("test-key".into());
+        let request = provider
+            .authenticate(provider.client.get(provider.api_base()))
+            .build()
+            .expect("valid request");
+        assert_eq!(request.headers()["authorization"], "Bearer test-key");
+        assert_eq!(provider.api_base(), super::OPENAI_BASE);
+    }
+}
+
 impl OpenRouter {
     pub fn from_key_auto(key: String) -> Self {
         if looks_like_openrouter_key(&key) {
@@ -535,6 +587,8 @@ impl OpenRouter {
             client: reqwest::Client::new(),
             key,
             flavor: ProviderFlavor::OpenRouter,
+            endpoint: None,
+            local_config: None,
         }
     }
 
@@ -543,6 +597,54 @@ impl OpenRouter {
             client: reqwest::Client::new(),
             key,
             flavor: ProviderFlavor::OpenAi,
+            endpoint: None,
+            local_config: None,
+        }
+    }
+
+    /// Connect to an explicitly configured OpenAI-compatible inference server.
+    /// Cloud credentials are never reused for this endpoint.
+    ///
+    /// # Errors
+    /// Returns an error for non-HTTP URLs, embedded credentials, queries or fragments.
+    pub fn local(endpoint: &str) -> Result<Self> {
+        let url = reqwest::Url::parse(endpoint).context("invalid local inference URL")?;
+        anyhow::ensure!(
+            matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "local inference URL must be HTTP(S) without credentials, query or fragment"
+        );
+        let mut provider = Self::openai(String::new());
+        provider.endpoint = Some(url.as_str().trim_end_matches('/').to_string());
+        Ok(provider)
+    }
+
+    /// Build a separate local backend with command-based model discovery.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime configuration is invalid.
+    pub fn configured_local(config: super::local::LocalConfig) -> Result<Self> {
+        config.validate()?;
+        let mut provider = Self::local(config.endpoint())?;
+        provider.local_config = Some(config);
+        Ok(provider)
+    }
+
+    fn api_base(&self) -> &str {
+        self.endpoint
+            .as_deref()
+            .unwrap_or_else(|| self.flavor.base())
+    }
+
+    fn authenticate(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if self.key.is_empty() {
+            request
+        } else {
+            request.bearer_auth(&self.key)
         }
     }
 
@@ -551,6 +653,8 @@ impl OpenRouter {
             client: reqwest::Client::new(),
             key,
             flavor: ProviderFlavor::OpencodeGo,
+            endpoint: None,
+            local_config: None,
         }
     }
 
@@ -559,10 +663,15 @@ impl OpenRouter {
             client: reqwest::Client::new(),
             key,
             flavor: ProviderFlavor::OpenAiCodex,
+            endpoint: None,
+            local_config: None,
         }
     }
 
     pub const fn backend_tag(&self) -> crate::provider::BackendTag {
+        if self.endpoint.is_some() {
+            return crate::provider::BackendTag::Local;
+        }
         match self.flavor {
             ProviderFlavor::OpenRouter => crate::provider::BackendTag::OpenRouter,
             ProviderFlavor::OpenAi => crate::provider::BackendTag::OpenAi,
@@ -788,6 +897,9 @@ impl OpenRouter {
     // Long by design (catalog merge).
     #[allow(clippy::too_many_lines)]
     pub async fn list_models(&self) -> Result<Vec<Model>> {
+        if let Some(config) = &self.local_config {
+            return config.list_models().await;
+        }
         if self.flavor == ProviderFlavor::OpenAiCodex {
             // Codex-only models — deliberately not merged with OpenRouter's
             // catalog (switch backends with Ctrl+P to see that instead): a few hundred OpenRouter entries used to bury these
@@ -902,7 +1014,7 @@ impl OpenRouter {
             models.sort_by(|a, b| a.id.cmp(&b.id));
             return Ok(models);
         }
-        let mut models = self.fetch_models_from(self.flavor.base()).await?;
+        let mut models = self.fetch_models_from(self.api_base()).await?;
         if self.flavor == ProviderFlavor::OpenRouter {
             // The general catalog is not authoritative for generation models.
             // Merge OpenRouter's dedicated catalogs into the existing picker.
@@ -989,9 +1101,7 @@ impl OpenRouter {
     /// this instance's flavor for reasoning/image-support inference.
     async fn fetch_models_from(&self, base: &str) -> Result<Vec<Model>> {
         let resp = self
-            .client
-            .get(format!("{base}/models"))
-            .bearer_auth(&self.key)
+            .authenticate(self.client.get(format!("{base}/models")))
             .send()
             .await
             .context("requesting model list")?
@@ -1162,12 +1272,10 @@ impl OpenRouter {
             }
             base
         } else {
-            self.flavor.base()
+            self.api_base()
         };
         let v = self
-            .client
-            .post(format!("{base}/chat/completions"))
-            .bearer_auth(&self.key)
+            .authenticate(self.client.post(format!("{base}/chat/completions")))
             .json(&body)
             .send()
             .await
@@ -1333,9 +1441,7 @@ impl OpenRouter {
         }
         let (base, model) = self.opencode_route(model);
         let v = self
-            .client
-            .post(format!("{base}/embeddings"))
-            .bearer_auth(&self.key)
+            .authenticate(self.client.post(format!("{base}/embeddings")))
             .json(&serde_json::json!({ "model": model, "input": inputs }))
             .send()
             .await
@@ -1597,9 +1703,7 @@ impl OpenRouter {
             }
         }
         let request = self
-            .client
-            .post(format!("{base}/chat/completions"))
-            .bearer_auth(&self.key)
+            .authenticate(self.client.post(format!("{base}/chat/completions")))
             .json(&body);
 
         let mut es = EventSource::new(request).context("opening SSE stream")?;
@@ -1723,13 +1827,13 @@ impl OpenRouter {
     /// stripping the `go:` tag `list_models` adds to flat-fee Go models. A
     /// no-op (returns the flavor's default base, id unchanged) for every
     /// other flavor and for untagged (general Zen) `OpenCode` ids.
-    fn opencode_route(&self, model: &str) -> (&'static str, String) {
+    fn opencode_route(&self, model: &str) -> (&str, String) {
         if self.flavor == ProviderFlavor::OpencodeGo
             && let Some(stripped) = model.strip_prefix(OPENCODE_GO_PREFIX)
         {
             return (OPENCODE_GO_BASE, stripped.to_string());
         }
-        (self.flavor.base(), model.to_string())
+        (self.api_base(), model.to_string())
     }
 
     fn openrouter_delegate_for_model(&self, model: &str) -> Option<Self> {
