@@ -135,6 +135,10 @@ impl ReasoningEffort {
     pub const WITH_XHIGH_AND_NONE: &'static [Self] =
         &[Self::Low, Self::Medium, Self::High, Self::XHigh, Self::None];
 
+    /// Models that expose `xhigh` and `max` but cannot be explicitly disabled.
+    pub const WITH_MAX_XHIGH: &'static [Self] =
+        &[Self::Low, Self::Medium, Self::High, Self::XHigh, Self::Max];
+
     /// Models that additionally expose a top-level `max` tier.
     pub const WITH_MAX_XHIGH_AND_NONE: &'static [Self] = &[
         Self::Low,

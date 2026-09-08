@@ -263,6 +263,8 @@ impl ProviderFlavor {
                     E::WITH_XHIGH_AND_NONE.to_vec()
                 } else if id.starts_with("gpt-5.6") {
                     E::WITH_MAX_XHIGH_AND_NONE.to_vec()
+                } else if id.starts_with("gpt-6") {
+                    E::WITH_MAX_XHIGH.to_vec()
                 } else if id
                     .strip_prefix('o')
                     .is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()))
@@ -854,7 +856,7 @@ impl OpenRouter {
         match self.flavor {
             ProviderFlavor::OpenRouter => "google/gemini-2.5-flash-lite",
             ProviderFlavor::OpenAi => "gpt-4.1-mini",
-            ProviderFlavor::OpenAiCodex => "gpt-5.4-mini",
+            ProviderFlavor::OpenAiCodex => "gpt-5.6-luna",
             ProviderFlavor::OpencodeGo => "deepseek-v4-flash",
         }
     }
@@ -902,8 +904,10 @@ impl OpenRouter {
         }
         if self.flavor == ProviderFlavor::OpenAiCodex {
             // Codex-only models — deliberately not merged with OpenRouter's
-            // catalog (switch backends with Ctrl+P to see that instead): a few hundred OpenRouter entries used to bury these
-            // 7 alphabetically, making it look like Codex had no models.
+            // catalog (switch backends with Ctrl+P to see that instead): a few
+            // hundred OpenRouter entries used to bury these alphabetically,
+            // making it look like Codex had no models. Mirrors the official
+            // ChatGPT sign-in catalog (gpt-5.4/-mini retired 2026-08-31).
             return Ok(vec![
                 Model {
                     id: "gpt-5.3-codex-spark".into(),
@@ -911,28 +915,6 @@ impl OpenRouter {
                     reasoning_efforts: ReasoningEffort::STANDARD.to_vec(),
                     context_length: Some(128_000),
                     supports_images: false,
-                    supports_image_generation: false,
-                    supports_video_generation: false,
-                    backend: crate::provider::BackendTag::Codex,
-                    pricing: None,
-                },
-                Model {
-                    id: "gpt-5.4".into(),
-                    name: "GPT-5.4".into(),
-                    reasoning_efforts: ReasoningEffort::WITH_XHIGH_AND_NONE.to_vec(),
-                    context_length: Some(272_000),
-                    supports_images: true,
-                    supports_image_generation: false,
-                    supports_video_generation: false,
-                    backend: crate::provider::BackendTag::Codex,
-                    pricing: None,
-                },
-                Model {
-                    id: "gpt-5.4-mini".into(),
-                    name: "GPT-5.4 mini".into(),
-                    reasoning_efforts: ReasoningEffort::WITH_XHIGH_AND_NONE.to_vec(),
-                    context_length: Some(272_000),
-                    supports_images: true,
                     supports_image_generation: false,
                     supports_video_generation: false,
                     backend: crate::provider::BackendTag::Codex,
@@ -976,6 +958,17 @@ impl OpenRouter {
                     name: "GPT-5.6 Luna".into(),
                     reasoning_efforts: ReasoningEffort::WITH_MAX_XHIGH_AND_NONE.to_vec(),
                     context_length: Some(1_000_000),
+                    supports_images: true,
+                    supports_image_generation: false,
+                    supports_video_generation: false,
+                    backend: crate::provider::BackendTag::Codex,
+                    pricing: None,
+                },
+                Model {
+                    id: "gpt-6-astra".into(),
+                    name: "GPT-6 Astra".into(),
+                    reasoning_efforts: ReasoningEffort::WITH_MAX_XHIGH.to_vec(),
+                    context_length: Some(1_050_000),
                     supports_images: true,
                     supports_image_generation: false,
                     supports_video_generation: false,
@@ -3425,12 +3418,11 @@ mod tests {
             ids,
             [
                 "gpt-5.3-codex-spark",
-                "gpt-5.4",
-                "gpt-5.4-mini",
                 "gpt-5.5",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
+                "gpt-6-astra",
             ]
         );
         assert!(models.iter().all(|model| {
