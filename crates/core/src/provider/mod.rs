@@ -1,3 +1,4 @@
+pub mod harmony;
 pub mod local;
 pub mod openrouter;
 

@@ -17,6 +17,7 @@ use reqwest_eventsource::{Event, EventSource};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
+use super::harmony::{self, Piece};
 use super::{
     ChatMessage, ChatParams, Completion, Model, ModelPricing, PromptConvention, ReasoningEffort,
     StreamEvent, ToolCall, ToolDef, Usage,
@@ -670,8 +671,15 @@ impl OpenRouter {
         }
     }
 
+    /// True when this client points at a user-configured local inference
+    /// server rather than a hosted backend. Local runtimes are the ones
+    /// that may leave Harmony framing in `content` (see `provider::harmony`).
+    const fn is_local(&self) -> bool {
+        self.endpoint.is_some()
+    }
+
     pub const fn backend_tag(&self) -> crate::provider::BackendTag {
-        if self.endpoint.is_some() {
+        if self.is_local() {
             return crate::provider::BackendTag::Local;
         }
         match self.flavor {
@@ -1212,6 +1220,13 @@ impl OpenRouter {
             return Ok(Completion { text, usage });
         }
 
+        // Same Harmony repair the streaming path does: utility jobs
+        // (titles, memory, compaction) replay recorded assistant turns too.
+        let messages = if self.is_local() {
+            harmony::sanitize_history(&messages).unwrap_or(messages)
+        } else {
+            messages
+        };
         let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
@@ -1278,14 +1293,21 @@ impl OpenRouter {
             .json::<serde_json::Value>()
             .await
             .context("parsing completion")?;
+        let text = v
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(wire_text)
+            .unwrap_or_default();
+        // A local runtime may hand back a whole Harmony turn here; the
+        // caller wants the answer, not the framing around it.
+        let text = match self.is_local().then(|| harmony::sanitize(&text)).flatten() {
+            Some(visible) => visible,
+            None => text,
+        };
         Ok(Completion {
-            text: v
-                .get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("message"))
-                .and_then(|m| m.get("content"))
-                .and_then(wire_text)
-                .unwrap_or_default(),
+            text,
             usage: v.get("usage").and_then(parse_usage_value),
         })
     }
@@ -1658,6 +1680,15 @@ impl OpenRouter {
                 .await;
         }
         let (base, model) = self.opencode_route(model);
+        // A local runtime that leaves Harmony framing in `content` also
+        // refuses to take it back ("you have passed a message containing
+        // <|channel|> tags"), which wedges every later turn of a session
+        // recorded before the demux existed. Repair the replay.
+        let repaired = self
+            .is_local()
+            .then(|| harmony::sanitize_history(messages))
+            .flatten();
+        let messages = repaired.as_deref().unwrap_or(messages);
         let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
@@ -1703,6 +1734,9 @@ impl OpenRouter {
         let mut tool_calls: BTreeMap<usize, ToolCall> = BTreeMap::new();
         let mut content_acc = String::new();
         let mut reasoning_acc = String::new();
+        // Only local endpoints get the splitter: a hosted model that writes
+        // `<|channel|>` is talking about Harmony, not speaking it.
+        let mut demux = self.is_local().then(harmony::Demux::default);
         let mut usage = None;
         let mut done = false;
         while let Some(event) = es.next().await {
@@ -1723,8 +1757,19 @@ impl OpenRouter {
                     if let Some(token) = content
                         && !token.is_empty()
                     {
-                        content_acc.push_str(&token);
-                        let _ = tx.send(StreamEvent::Token(token));
+                        if let Some(demux) = demux.as_mut() {
+                            let pieces = demux.push(&token);
+                            route_harmony(
+                                pieces,
+                                &mut content_acc,
+                                &mut reasoning_acc,
+                                &mut tool_calls,
+                                tx,
+                            );
+                        } else {
+                            content_acc.push_str(&token);
+                            let _ = tx.send(StreamEvent::Token(token));
+                        }
                     }
                     accumulate_tool_calls(&mut tool_calls, &msg.data);
                     if let Some(next) = parse_usage(&msg.data) {
@@ -1768,6 +1813,18 @@ impl OpenRouter {
                     return Ok(Finish::Errored);
                 }
             }
+        }
+        // Whatever the last delta held back (a control token split across
+        // chunks, or a truncated tool call) is resolved here.
+        if let Some(demux) = demux.as_mut() {
+            let pieces = demux.finish();
+            route_harmony(
+                pieces,
+                &mut content_acc,
+                &mut reasoning_acc,
+                &mut tool_calls,
+                tx,
+            );
         }
         // The stream isn't finished at [DONE]: OpenCode sends the trailing
         // cost chunk ({"choices":[],"cost":"…"}) AFTER it, and for
@@ -2374,6 +2431,36 @@ fn truncate_error_body(body: &str) -> String {
 
 /// Pull `(content, reasoning)` deltas out of one SSE data chunk. ``OpenRouter`` puts
 /// thinking tokens in `delta.reasoning`, separate from the visible `delta.content`.
+/// Dispatch demultiplexed Harmony spans the way the provider should have
+/// sent them: visible text as tokens, chain-of-thought as reasoning, and an
+/// unparsed `commentary` call as a real tool call. Calls are appended after
+/// any the runtime *did* parse, so a server that handles Harmony itself
+/// never sees a duplicate.
+fn route_harmony(
+    pieces: Vec<Piece>,
+    content_acc: &mut String,
+    reasoning_acc: &mut String,
+    tool_calls: &mut BTreeMap<usize, ToolCall>,
+    tx: &mpsc::UnboundedSender<StreamEvent>,
+) {
+    for piece in pieces {
+        match piece {
+            Piece::Content(text) => {
+                content_acc.push_str(&text);
+                let _ = tx.send(StreamEvent::Token(text));
+            }
+            Piece::Reasoning(text) => {
+                reasoning_acc.push_str(&text);
+                let _ = tx.send(StreamEvent::Reasoning(text));
+            }
+            Piece::ToolCall { name, arguments } => {
+                let index = tool_calls.keys().last().map_or(0, |last| last + 1);
+                tool_calls.insert(index, harmony::synthetic_call(index, name, arguments));
+            }
+        }
+    }
+}
+
 fn parse_delta(data: &str) -> (Option<String>, Option<String>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
         return (None, None);
@@ -4184,6 +4271,52 @@ mod tests {
     fn request_body_omits_tools_key_when_empty() {
         let body = serde_json::json!({ "model": "m", "messages": Vec::<ChatMessage>::new(), "stream": true });
         assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn harmony_spans_route_to_tokens_reasoning_and_tool_calls() {
+        // Only local endpoints demux; hosted ones stream content verbatim.
+        assert!(
+            OpenRouter::local("http://localhost:8080/v1")
+                .unwrap()
+                .is_local()
+        );
+        assert!(!OpenRouter::openai("k".into()).is_local());
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        // A call the runtime *did* parse: the synthetic one lands after it.
+        let mut calls = BTreeMap::from([(
+            0,
+            ToolCall {
+                id: "parsed".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+        )]);
+        route_harmony(
+            vec![
+                Piece::Reasoning("thinking".into()),
+                Piece::Content("Hello.".into()),
+                Piece::ToolCall {
+                    name: "grep".into(),
+                    arguments: r#"{"q":"x"}"#.into(),
+                },
+            ],
+            &mut content,
+            &mut reasoning,
+            &mut calls,
+            &tx,
+        );
+        assert_eq!(content, "Hello.");
+        assert_eq!(reasoning, "thinking");
+        let names: Vec<&str> = calls.values().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["read_file", "grep"]);
+        assert_eq!(calls[&1].id, "harmony-1");
+        assert!(matches!(rx.try_recv(), Ok(StreamEvent::Reasoning(t)) if t == "thinking"));
+        assert!(matches!(rx.try_recv(), Ok(StreamEvent::Token(t)) if t == "Hello."));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
