@@ -18,7 +18,10 @@
 //! [`Demux`] splits the channels apart as deltas arrive, so nothing framed
 //! ever reaches the transcript; [`sanitize_history`] repairs assistant turns
 //! recorded before that existed, which is what unwedges a session already
-//! carrying framed text. Both are wired in for local endpoints only
+//! carrying framed text. A recorded tool call wedges a session the same way
+//! — the server re-parses its arguments and fails the request with
+//! `404 … Unterminated string` — so unparsable arguments are repaired there
+//! too, and a truncated call never reaches the transcript at all. Both are wired in for local endpoints only
 //! (`OpenRouter::is_local`) — a hosted model quoting a `<|channel|>` tag is
 //! discussing Harmony, not speaking it.
 
@@ -115,8 +118,9 @@ impl Demux {
     }
 
     /// Flush whatever the last delta held back. A stream that ended
-    /// mid-token drops the partial framing; an unterminated tool call is
-    /// still reported, since its arguments are all the caller will get.
+    /// mid-token drops the partial framing; a tool call whose arguments
+    /// never finished is dropped too, rather than recorded as a call the
+    /// server will refuse to replay.
     pub fn finish(&mut self) -> Vec<Piece> {
         if self.mode == Mode::Undecided {
             self.mode = Mode::PassThrough;
@@ -196,7 +200,15 @@ impl Demux {
             "<|message|>" => self.open_message(),
             "<|end|>" | "<|return|>" | "<|call|>" => self.close_message(out),
             // `<|constrain|>` and anything unrecognized is framing, not text.
-            _ => {}
+            // Inside a header it still separates words: gpt-oss writes the
+            // recipient without a trailing space (`to=functions.batch`
+            // `<|constrain|>json`), and fusing those yields the tool name
+            // `batchjson`, which no catalog has.
+            _ => {
+                if self.sink == Sink::Header {
+                    self.header.push(' ');
+                }
+            }
         }
     }
 
@@ -225,14 +237,34 @@ impl Demux {
 
     fn close_message(&mut self, out: &mut Vec<Piece>) {
         if self.sink == Sink::Tool {
-            out.push(Piece::ToolCall {
-                name: std::mem::take(&mut self.name),
-                arguments: std::mem::take(&mut self.args),
-            });
+            let name = std::mem::take(&mut self.name);
+            let arguments = std::mem::take(&mut self.args);
+            // Arguments cut off mid-generation are worse than useless: the
+            // tool rejects them now and the server rejects the *recorded*
+            // call forever after, so drop the call and let the turn end.
+            if let Some(arguments) = replayable(&arguments) {
+                out.push(Piece::ToolCall { name, arguments });
+            }
         }
         self.sink = Sink::Drop;
         self.header.clear();
     }
+}
+
+/// Arguments in the form a local runtime will accept back. `mlx_lm.server`
+/// re-renders every recorded tool call through the Harmony template and
+/// `json.loads` its arguments, so one unparsable call fails *every* later
+/// request — `404 … Unterminated string starting at: line 1 column 99` —
+/// wedging the session exactly the way framed `content` used to. Empty
+/// arguments are a no-arg call and become `{}`; anything else that does not
+/// parse is unrecoverable, and `None` says so.
+fn replayable(arguments: &str) -> Option<String> {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return Some("{}".to_string());
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
+    Some(trimmed.to_string())
 }
 
 /// Decide from the buffered head whether the stream is framed.
@@ -268,24 +300,53 @@ pub fn sanitize(content: &str) -> Option<String> {
 }
 
 /// Repair a replayed history: assistant turns holding raw Harmony framing
-/// are rewritten to their visible text, since a local server rejects the
-/// whole request over one framed message. `None` when nothing needs
-/// repairing, so the usual path clones nothing.
+/// are rewritten to their visible text, and recorded tool calls whose
+/// arguments do not parse are reduced to `{}` — a local server rejects the
+/// whole request over either one. `None` when nothing needs repairing, so
+/// the usual path clones nothing.
 #[must_use]
 pub fn sanitize_history(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
-    let framed = |m: &ChatMessage| m.role == "assistant" && sanitize(&m.content).is_some();
-    if !messages.iter().any(framed) {
+    let broken = |m: &ChatMessage| {
+        m.role == "assistant" && (sanitize(&m.content).is_some() || repair_calls(m).is_some())
+    };
+    if !messages.iter().any(broken) {
         return None;
     }
     Some(
         messages
             .iter()
-            .map(|m| match sanitize(&m.content) {
-                Some(text) if m.role == "assistant" => ChatMessage {
-                    content: text,
+            .map(|m| {
+                if m.role != "assistant" {
+                    return m.clone();
+                }
+                ChatMessage {
+                    content: sanitize(&m.content).unwrap_or_else(|| m.content.clone()),
+                    tool_calls: repair_calls(m).or_else(|| m.tool_calls.clone()),
                     ..m.clone()
-                },
-                _ => m.clone(),
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Rewrite a recorded turn's unparsable tool arguments. The call itself is
+/// kept — dropping it would orphan the `tool` result that answers its id,
+/// which the server rejects just as hard — so the arguments become `{}` and
+/// the already-recorded result stands. `None` when every call replays.
+fn repair_calls(message: &ChatMessage) -> Option<Vec<ToolCall>> {
+    let calls = message.tool_calls.as_ref()?;
+    if calls
+        .iter()
+        .all(|call| replayable(&call.arguments).as_deref() == Some(call.arguments.as_str()))
+    {
+        return None;
+    }
+    Some(
+        calls
+            .iter()
+            .map(|call| ToolCall {
+                arguments: replayable(&call.arguments).unwrap_or_else(|| "{}".to_string()),
+                ..call.clone()
             })
             .collect(),
     )
@@ -383,6 +444,70 @@ mod tests {
             synthetic_call(2, "read_file".into(), "{}".into()).id,
             "harmony-2"
         );
+    }
+
+    #[test]
+    fn constrain_token_does_not_fuse_into_the_tool_name() {
+        // gpt-oss writes the recipient with no trailing space, so the
+        // constrain type used to fuse onto it and produce `batchjson`.
+        let turn = "<|channel|>commentary to=functions.batch<|constrain|>json<|message|>\
+{\"calls\":[]}<|call|>";
+        for chunk in [1, 5, turn.len()] {
+            assert!(
+                stream(turn, chunk).contains(&Piece::ToolCall {
+                    name: "batch".into(),
+                    arguments: "{\"calls\":[]}".into(),
+                }),
+                "chunk {chunk}"
+            );
+        }
+    }
+
+    #[test]
+    fn truncated_arguments_never_become_a_call() {
+        // Generation cut mid-string: the tool would reject these now and the
+        // server would reject the recorded call on every later request.
+        let turn = "<|channel|>commentary to=functions.batch <|constrain|>json<|message|>\
+{\"calls\":[{\"tool\":\"scripts\",\"action\":\"write\",\"path\":\"scripts";
+        let pieces = stream(turn, 6);
+        assert!(!pieces.iter().any(|p| matches!(p, Piece::ToolCall { .. })));
+        // A no-arg call is not truncated, it is empty — that one replays.
+        let empty = "<|channel|>commentary to=functions.ls <|constrain|>json<|message|><|call|>";
+        assert!(stream(empty, 4).contains(&Piece::ToolCall {
+            name: "ls".into(),
+            arguments: "{}".into(),
+        }));
+    }
+
+    #[test]
+    fn recorded_unparsable_arguments_are_repaired_before_replay() {
+        let call = |arguments: &str| ChatMessage {
+            role: "assistant".into(),
+            tool_calls: Some(vec![ToolCall {
+                id: "harmony-0".into(),
+                name: "batch".into(),
+                arguments: arguments.into(),
+            }]),
+            ..Default::default()
+        };
+        // A session already carrying a truncated call unwedges: the call is
+        // kept so its recorded result still has a parent, with empty args.
+        let history = vec![
+            call("{\"calls\":[{\"tool\":\"scripts"),
+            ChatMessage {
+                role: "tool".into(),
+                content: "error".into(),
+                tool_call_id: Some("harmony-0".into()),
+                ..Default::default()
+            },
+        ];
+        let repaired = sanitize_history(&history).expect("bad arguments need repair");
+        let calls = repaired[0].tool_calls.as_ref().expect("call is kept");
+        assert_eq!(calls[0].arguments, "{}");
+        assert_eq!(calls[0].id, "harmony-0");
+        assert_eq!(repaired[1].tool_call_id.as_deref(), Some("harmony-0"));
+        // Valid arguments are left exactly as recorded.
+        assert!(sanitize_history(&[call("{\"calls\":[]}")]).is_none());
     }
 
     #[test]
