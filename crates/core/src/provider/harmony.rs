@@ -510,6 +510,41 @@ mod tests {
         assert!(sanitize_history(&[call("{\"calls\":[]}")]).is_none());
     }
 
+    /// Verbatim captures from `mlx_lm.server` 0.32.0 streaming
+    /// `gpt-oss-20b`, one request apart. The first call spaces the
+    /// recipient off from `<|constrain|>` and the second does not — and
+    /// neither is closed by `<|call|>`, because the server stops *on* that
+    /// token and never emits it, so every call resolves in `finish`.
+    #[test]
+    fn real_mlx_captures_yield_the_same_call_either_way() {
+        const SPACED: &str = "<|channel|>analysis<|message|>We need to search web. Use \
+functions.search.<|end|><|start|>assistant<|channel|>commentary to=functions.search \
+<|constrain|>json<|message|>{\"query\":\"latest version of Codex CLI tool\",\"mode\":\"news\"}";
+        const FUSED: &str = "<|channel|>analysis<|message|>We need to search for Codex CLI. \
+Let's do that.<|end|><|start|>assistant<|channel|>commentary to=functions.search\
+<|constrain|>json<|message|>{\"query\":\"latest version of Codex CLI tool\",\"mode\":\"news\"}";
+        for (label, turn) in [("spaced", SPACED), ("fused", FUSED)] {
+            for chunk in [1, 9, turn.len()] {
+                let pieces = stream(turn, chunk);
+                assert!(
+                    pieces.contains(&Piece::ToolCall {
+                        name: "search".into(),
+                        arguments:
+                            "{\"query\":\"latest version of Codex CLI tool\",\"mode\":\"news\"}"
+                                .into(),
+                    }),
+                    "{label} capture, chunk {chunk}: {pieces:?}"
+                );
+                // The arguments went to the call, not to the transcript:
+                // this is the turn that used to render as a bare `{"query"
+                // …}` blob with no search behind it.
+                let (content, reasoning) = joined(&pieces);
+                assert!(content.is_empty(), "{label} chunk {chunk}: {content:?}");
+                assert!(!reasoning.contains("\"query\""), "{label} chunk {chunk}");
+            }
+        }
+    }
+
     #[test]
     fn commentary_preambles_stay_visible() {
         let turn = "<|channel|>commentary<|message|>Reading the file first.<|end|>";
