@@ -815,6 +815,9 @@ pub(crate) struct SelectionServer;
     unix,
     not(any(target_os = "macos", target_os = "android", target_os = "emscripten")),
 )))]
+// Mirrors the Unix signature so `main` has one call site; there is nothing
+// here that can fail.
+#[allow(clippy::unnecessary_wraps)]
 pub(crate) const fn start_selection_server() -> Result<(
     Option<SelectionServer>,
     Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
