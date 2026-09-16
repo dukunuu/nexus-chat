@@ -20,6 +20,7 @@ use crate::app::{
     SwarmUpdate,
 };
 use crate::db::Persona;
+use crate::provider::serve::RuntimeStatus;
 use crate::provider::{
     BackendTag, Model, ModelPricing, PromptConvention, ReasoningEffort, StreamEvent, Usage,
 };
@@ -88,6 +89,11 @@ pub enum WireEvent {
     Login(Option<WireLoginMsg>),
     /// A `/swarm` turn update, or `None` when its channel closed.
     Swarm(Option<WireSwarmMsg>),
+    /// A finished `/local` server survey. [`RuntimeStatus`] needs no mirror:
+    /// like [`AppCommand`](crate::app::AppCommand) it is a flat struct of
+    /// scalars that already carries the serde derives, so its `JSON` shape is
+    /// the wire shape.
+    LocalServers(Option<Vec<RuntimeStatus>>),
 }
 
 /// The wire mirror of provider [`StreamEvent`] — one chat-frame delta.
@@ -349,6 +355,7 @@ impl From<AppEvent> for WireEvent {
             ),
             AppEvent::Embed(e) => Self::Embed(e),
             AppEvent::OcrPull(p) => Self::OcrPull(p),
+            AppEvent::LocalServers(s) => Self::LocalServers(s),
             AppEvent::Research(r) => {
                 Self::Research(r.map(|(session_id, space_id, space_name, update)| {
                     (

@@ -112,7 +112,7 @@ pub enum Popup {
     /// `/login`'s provider selector (`OpenRouter` / `OpenCode` Go / `OpenAI` /
     /// Codex / local runtime).
     Login,
-    /// `/local`'s runtime selector (Ollama / MLX / LM Studio / off).
+    /// `/local`'s runtime selector (Ollama / MLX / LM Studio / edge0 / off).
     Local,
 }
 
@@ -777,6 +777,9 @@ pub enum AppEvent {
     Login(Option<LoginMsg>),
     /// A `/swarm` turn update, or `None` when its channel closed.
     Swarm(Option<swarm::SwarmMsg>),
+    /// A finished `/local` server survey: every runtime's liveness, memory and
+    /// budget verdict, or `None` when its channel closed.
+    LocalServers(Option<Vec<crate::provider::serve::RuntimeStatus>>),
 }
 
 // Channel/state fields share *_rx/*_tx postfixes by design — the postfix is the meaning.
@@ -896,6 +899,19 @@ pub struct App {
     pub embed_rx: Option<mpsc::UnboundedReceiver<EmbedMsg>>,
     /// A running local-OCR-model pull: model name on success, error text on failure.
     pub ocr_pull_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
+    /// Local provider servers Nexus started with `/local start`. Owning them
+    /// is what lets `/local stop` and the exit path reclaim their memory;
+    /// servers started outside Nexus are detected but never stopped.
+    pub local_servers: crate::provider::serve::ManagedServers,
+    /// Last local-server survey, cached for the `/local` picker. Domain state
+    /// that only a display reads, kept here like the files/scripts caches
+    /// because every frontend shows it.
+    pub local_status: Vec<crate::provider::serve::RuntimeStatus>,
+    pub local_status_rx:
+        Option<mpsc::UnboundedReceiver<Vec<crate::provider::serve::RuntimeStatus>>>,
+    /// The in-flight survey was asked for by the user, so its result should
+    /// report a line rather than only refresh the picker.
+    pub local_status_announce: bool,
     /// A running `/research` job's channel and cancellation handle.
     pub research_rx: Option<mpsc::UnboundedReceiver<ResearchMsg>>,
     pub research_abort: Option<tokio::task::AbortHandle>,
@@ -1108,6 +1124,10 @@ impl App {
             ocr_rx: None,
             embed_rx: None,
             ocr_pull_rx: None,
+            local_servers: crate::provider::serve::ManagedServers::default(),
+            local_status: Vec::new(),
+            local_status_rx: None,
+            local_status_announce: false,
             research_rx: None,
             research_abort: None,
             login_rx: None,
@@ -1623,6 +1643,12 @@ impl App {
                     None => std::future::pending().await,
                 }
             } => AppEvent::OcrPull(r),
+            r = async {
+                match self.local_status_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => AppEvent::LocalServers(r),
             r = async {
                 match self.research_rx.as_mut() {
                     Some(rx) => rx.recv().await,

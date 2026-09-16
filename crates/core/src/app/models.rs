@@ -1,9 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use chrono::Utc;
 
 use crate::provider::BackendTag;
-use crate::provider::local::LocalConfig;
+use crate::provider::local::{LocalConfig, LocalRuntime};
 use crate::provider::openrouter::OpenRouter;
+use crate::provider::serve::RuntimeStatus;
 
 use super::{App, ModelPickTarget, Popup};
 
@@ -50,7 +51,7 @@ impl App {
                     config.provider.label(),
                     config.endpoint()
                 ),
-                None => "local inference is off — /local <ollama|mlx|lmstudio>".to_string(),
+                None => "local inference is off — /local <ollama|mlx|lmstudio|edge0>".to_string(),
             };
             self.push_status(status);
             return;
@@ -60,6 +61,131 @@ impl App {
         if let Err(error) = applied {
             self.push_status(format!("local inference: {error}"));
         }
+    }
+
+    /// `/local start|stop|restart|status [<runtime>]` — manage the local
+    /// provider's own inference server. Every verb ends in a fresh survey, so
+    /// the reported state is measured rather than assumed.
+    pub fn manage_local_server(&mut self, verb: &str, runtime: &str) {
+        if let Err(error) = self.local_server_action(verb, runtime) {
+            self.push_status(format!("local server: {error}"));
+            return;
+        }
+        self.local_status_announce = true;
+        self.refresh_local_status();
+    }
+
+    /// The verb itself. Split out so every failure path is one `?` and lands
+    /// on the status line with the same prefix.
+    fn local_server_action(&mut self, verb: &str, runtime: &str) -> Result<()> {
+        if verb == "status" {
+            return Ok(());
+        }
+        let runtime = if runtime.trim().is_empty() {
+            self.saved
+                .local
+                .as_ref()
+                .map(|config| config.provider)
+                .context("local inference is off — /local <ollama|mlx|lmstudio|edge0> first")?
+        } else {
+            LocalRuntime::parse(runtime.trim())
+                .with_context(|| format!("unknown local runtime {:?}", runtime.trim()))?
+        };
+        let config = LocalConfig::for_runtime(runtime, self.saved.local.as_ref());
+        let port = config
+            .port()
+            .context("the configured endpoint has no port to serve on")?;
+        if matches!(verb, "stop" | "restart") {
+            // A restart waits for the port back before rebinding it.
+            self.local_servers.stop(runtime, port, verb == "restart")?;
+            self.push_status(format!("{} server stopped", runtime.label()));
+            if verb == "stop" {
+                return Ok(());
+            }
+        }
+        // MLX and edge0 serve exactly one model, so they launch with the
+        // selected one; the composite id carries a `local:` prefix.
+        let model = self
+            .current_model
+            .as_deref()
+            .and_then(|id| id.strip_prefix("local:"))
+            .map(str::to_owned);
+        let argv = self.local_servers.start(runtime, model.as_deref(), port)?;
+        self.push_status(format!(
+            "{} starting: {argv} — /local status when it answers",
+            runtime.label()
+        ));
+        Ok(())
+    }
+
+    /// Probe every local runtime in the background: which endpoints answer,
+    /// what their process trees cost, and whether that is over budget. One
+    /// survey at a time; the picker and the verbs share the result.
+    pub fn refresh_local_status(&mut self) {
+        if self.local_status_rx.is_some() {
+            return;
+        }
+        self.local_servers.reap();
+        let configured = self.saved.local.clone();
+        let managed: Vec<(LocalRuntime, Option<u32>)> = self
+            .local_servers
+            .managed_runtimes()
+            .into_iter()
+            .map(|runtime| (runtime, self.local_servers.pid(runtime)))
+            .collect();
+        // A survey shells out and talks to the network, so it needs a
+        // reactor. `cfg(test)` cannot express this: core is a dependency of
+        // the TUI's test binary, where it compiles with tests off. Asking the
+        // runtime directly is what actually holds, in every frontend and test.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.local_status_rx = Some(rx);
+        handle.spawn(async move {
+            let _ = tx.send(crate::provider::serve::survey(configured.as_ref(), &managed).await);
+        });
+    }
+
+    /// A finished survey: cache it for the picker, report it when the user
+    /// asked, and warn about anything over budget. Nothing is stopped here —
+    /// the budget is advisory, so a server mid-reply is never yanked.
+    pub fn on_local_status(&mut self, result: Option<Vec<RuntimeStatus>>) {
+        self.local_status_rx = None;
+        let Some(statuses) = result else {
+            return;
+        };
+        let announce = std::mem::take(&mut self.local_status_announce);
+        self.local_status = statuses;
+        if announce {
+            let line = self
+                .local_status
+                .iter()
+                .map(RuntimeStatus::summary)
+                .collect::<Vec<_>>()
+                .join("  ·  ");
+            self.push_status(format!("local: {line}"));
+        }
+        if let Some(over) = self.local_status.iter().find(|status| status.over_budget) {
+            let budget = over
+                .budget_kb
+                .map(crate::provider::serve::format_kb)
+                .unwrap_or_default();
+            self.push_status(format!(
+                "⚠ {} is using {} — over the {budget} budget; /local stop {} to reclaim it",
+                over.runtime.label(),
+                over.rss_kb
+                    .map(crate::provider::serve::format_kb)
+                    .unwrap_or_default(),
+                over.runtime.token()
+            ));
+        }
+    }
+
+    /// Stop every local server Nexus started. The exit path calls this so
+    /// quitting never leaves a multi-gigabyte server behind.
+    pub async fn stop_local_servers(&mut self) {
+        self.local_servers.stop_all().await;
     }
 
     /// Persist and activate (or clear) the local runtime, then refresh the

@@ -1,6 +1,7 @@
 pub mod harmony;
 pub mod local;
 pub mod openrouter;
+pub mod serve;
 
 use serde::{Deserialize, Serialize};
 

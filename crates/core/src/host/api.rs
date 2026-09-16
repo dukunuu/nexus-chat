@@ -2302,6 +2302,7 @@ fn apply_domain_event(app: &mut App, event: AppEvent) {
         AppEvent::Login(result) => app.on_login_result(result),
         AppEvent::UpdateCheck(result) => app.on_update_check(result),
         AppEvent::Swarm(result) => app.on_swarm_update(result),
+        AppEvent::LocalServers(result) => app.on_local_status(result),
         AppEvent::Status(_)
         | AppEvent::ComposerSet(_)
         | AppEvent::ComposerClear
@@ -2328,6 +2329,7 @@ fn clear_closed_source(app: &mut App, event: &AppEvent) {
         AppEvent::Login(None) => app.login_rx = None,
         AppEvent::Swarm(None) => app.swarm_rx = None,
         AppEvent::UpdateCheck(None) => app.update_rx = None,
+        AppEvent::LocalServers(None) => app.local_status_rx = None,
         _ => {}
     }
 }

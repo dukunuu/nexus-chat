@@ -1,8 +1,10 @@
-//! `/local`'s runtime selector: Ollama, MLX, LM Studio, or off. Unlike
+//! `/local`'s runtime selector: Ollama, MLX, LM Studio, edge0, or off. Unlike
 //! `/login` there is no key to paste — picking a row writes the
 //! machine-local `[local]` block and reloads the catalog. Custom endpoints
 //! and discovery commands stay a config-file (or `/local <runtime> <url>`)
 //! concern; this popup only switches runtimes.
+
+use std::fmt::Write as _;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -11,6 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState};
 
 use nexus_core::provider::local::{LocalConfig, LocalRuntime};
+use nexus_core::provider::serve::{RuntimeStatus, format_kb};
 
 use crate::app_view::AppView;
 
@@ -30,6 +33,7 @@ fn row(index: usize, current: Option<&LocalConfig>) -> (String, String, String, 
                 LocalRuntime::Ollama => "ollama list",
                 LocalRuntime::Mlx => "scans the Hugging Face cache",
                 LocalRuntime::Lmstudio => "lms ls --json",
+                LocalRuntime::Edge0 => "edge0 models",
             }
             .to_string(),
             LocalConfig::for_runtime(runtime, current)
@@ -46,6 +50,33 @@ fn row(index: usize, current: Option<&LocalConfig>) -> (String, String, String, 
     }
 }
 
+/// The server line for a row: whether the endpoint answers, what its process
+/// tree costs, and who started it. Rendered on the endpoint line so a row
+/// stays three lines tall.
+///
+/// Ordered by urgency, because the popup is narrow enough to truncate: the
+/// liveness dot, the memory, the budget warning, then ownership, and the
+/// endpoint last — it is the most predictable part and the one worth losing.
+fn server_line(status: Option<&RuntimeStatus>, endpoint: &str) -> (String, bool) {
+    let Some(status) = status else {
+        return (format!("○ {endpoint}"), false);
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(rss) = status.rss_kb {
+        parts.push(format_kb(rss));
+    }
+    if status.over_budget {
+        parts.push("⚠ over budget".to_string());
+    }
+    if status.managed {
+        parts.push("started here".to_string());
+    }
+    parts.push(endpoint.to_string());
+    let mut line = String::from(if status.running { '●' } else { '○' });
+    let _ = write!(line, " {}", parts.join(" · "));
+    (line, status.over_budget)
+}
+
 pub fn render(f: &mut Frame, app: &AppView) {
     let area = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
     let inner = chrome::render_hinted(
@@ -53,9 +84,9 @@ pub fn render(f: &mut Frame, app: &AppView) {
         area,
         chrome::popup_title(app, "🖥", "local runtime"),
         if app.local_from_login {
-            "↑↓ · PgUp/Dn · Enter pick · Esc back"
+            "↑↓ · Enter pick · s start · x stop · r refresh · Esc back"
         } else {
-            "↑↓ · PgUp/Dn · Enter pick · Esc close"
+            "↑↓ · Enter pick · s start · x stop · r refresh · Esc close"
         },
         app,
         true,
@@ -83,6 +114,22 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 Span::raw(" ".repeat(pad)),
                 chip,
             ]);
+            let status = LocalRuntime::ALL.get(i).and_then(|runtime| {
+                app.core
+                    .local_status
+                    .iter()
+                    .find(|status| status.runtime == *runtime)
+            });
+            let (server, warn) = if endpoint.is_empty() {
+                (String::new(), false)
+            } else {
+                server_line(status, &endpoint)
+            };
+            let server_style = if warn {
+                Style::default().fg(app.theme.warning)
+            } else {
+                dim
+            };
             ListItem::new(vec![
                 top,
                 Line::from(Span::styled(
@@ -90,8 +137,8 @@ pub fn render(f: &mut Frame, app: &AppView) {
                     dim,
                 )),
                 Line::from(Span::styled(
-                    format!("  {}", chrome::truncate(&endpoint, width)),
-                    dim,
+                    format!("  {}", chrome::truncate(&server, width)),
+                    server_style,
                 )),
             ])
         })
@@ -110,6 +157,11 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) {
         KeyCode::Up => app.move_local_selection(-1),
         KeyCode::Down => app.move_local_selection(1),
         KeyCode::Enter => app.confirm_local_selection(),
+        // Server lifecycle, on the row under the cursor. The "off" row has no
+        // server, so these are no-ops there.
+        KeyCode::Char('s') => app.local_server_key("start"),
+        KeyCode::Char('x') => app.local_server_key("stop"),
+        KeyCode::Char('r') => app.local_server_key("status"),
         _ => {}
     }
 }

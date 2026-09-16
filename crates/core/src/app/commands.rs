@@ -82,7 +82,9 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "local",
         desc: "local inference runtime",
-        aliases: &["ollama", "mlx", "lmstudio", "offline", "runtime"],
+        aliases: &[
+            "ollama", "mlx", "lmstudio", "edge0", "offline", "runtime", "serve",
+        ],
     },
     Command {
         name: "swarm",
@@ -245,8 +247,13 @@ pub enum AppCommand {
     OpenLogin,
     /// `/local [<runtime> [endpoint] | off]` — pick the local inference
     /// runtime. An empty `spec` opens the picker (reports the current
-    /// setting headless); `/ollama`, `/mlx` and `/lmstudio` fill it in.
+    /// setting headless); `/ollama`, `/mlx`, `/lmstudio` and `/edge0` fill
+    /// it in.
     ConfigureLocal { spec: String },
+    /// `/local start|stop|restart|status [<runtime>]` — manage the local
+    /// provider's own inference server. An empty `runtime` means the selected
+    /// one; `/edge0 start` names it through the alias.
+    LocalServer { verb: String, runtime: String },
     /// `/swarm` — the swarm roster popup.
     OpenSwarm,
     /// `/config` — the nerd-config popup.
@@ -317,13 +324,11 @@ impl App {
             "login" => Ok(AppCommand::OpenLogin),
             // `/local <spec>`, but also `/ollama` and friends: the runtime
             // aliases resolve to `local`, so the token *is* the spec.
-            "local" => Ok(AppCommand::ConfigureLocal {
-                spec: match (token, rest(cmd, token)) {
-                    ("local", arg) => arg,
-                    (runtime, arg) if arg.is_empty() => runtime.to_string(),
-                    (runtime, arg) => format!("{runtime} {arg}"),
-                },
-            }),
+            "local" => Ok(local_command(&match (token, rest(cmd, token)) {
+                ("local", arg) => arg,
+                (runtime, arg) if arg.is_empty() => runtime.to_string(),
+                (runtime, arg) => format!("{runtime} {arg}"),
+            })),
             "swarm" => Ok(AppCommand::OpenSwarm),
             "config" => Ok(AppCommand::OpenSettings),
             "theme" => Ok(AppCommand::SetTheme {
@@ -396,6 +401,7 @@ impl App {
             | AppCommand::OpenUsage
             | AppCommand::Watch { .. } => {}
             AppCommand::ConfigureLocal { spec } => self.configure_local(&spec),
+            AppCommand::LocalServer { verb, runtime } => self.manage_local_server(&verb, &runtime),
             AppCommand::Send { text } => self.send_message(text)?,
             AppCommand::Cancel { task } => match task {
                 Some(id) => self.cancel_chat_task(id)?,
@@ -457,5 +463,39 @@ impl App {
                 Ok(())
             }
         }
+    }
+}
+
+/// Split `/local`'s argument into the two things it can mean: managing a
+/// runtime's server, or selecting the runtime itself.
+///
+/// The verb is looked for in any position because the runtime aliases fold
+/// themselves into the spec — `/local start edge0` and `/edge0 start` both
+/// arrive here as the same two words in the opposite order.
+fn local_command(spec: &str) -> AppCommand {
+    let words: Vec<&str> = spec.split_whitespace().collect();
+    let verb = words.iter().position(|word| {
+        matches!(
+            word.to_ascii_lowercase().as_str(),
+            "start" | "serve" | "stop" | "restart" | "status"
+        )
+    });
+    match verb {
+        Some(index) => AppCommand::LocalServer {
+            verb: match words[index].to_ascii_lowercase().as_str() {
+                "serve" => "start".to_string(),
+                other => other.to_string(),
+            },
+            runtime: words
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| *position != index)
+                .map(|(_, word)| *word)
+                .collect::<Vec<_>>()
+                .join(" "),
+        },
+        None => AppCommand::ConfigureLocal {
+            spec: spec.to_string(),
+        },
     }
 }

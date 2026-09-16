@@ -18,6 +18,7 @@ async fn local_backend_discovers_models_and_uses_local_utility_fallback() {
             "/usr/bin/printf".into(),
             "mlx-community/test-model\\n".into(),
         ]),
+        memory_budget_mb: None,
     });
     app.rebuild_all_backends();
     assert!(app.backends.configured(BackendTag::Local));
@@ -60,6 +61,7 @@ fn bare_local_command_reports_the_current_runtime() {
         provider: crate::provider::local::LocalRuntime::Lmstudio,
         endpoint: None,
         list_command: None,
+        memory_budget_mb: None,
     });
     app.configure_local("  ");
     let status = last_status(&mut app);
@@ -67,6 +69,93 @@ fn bare_local_command_reports_the_current_runtime() {
         status.contains("LM Studio") && status.contains("http://localhost:1234/v1"),
         "{status}"
     );
+}
+
+#[test]
+fn local_survey_reports_liveness_and_warns_without_stopping_anything() {
+    use crate::provider::local::LocalRuntime;
+    use crate::provider::serve::RuntimeStatus;
+
+    let mut app = App::new(Db::open_in_memory().unwrap(), None, test_space());
+    let statuses = |over: bool| {
+        vec![
+            RuntimeStatus {
+                runtime: LocalRuntime::Edge0,
+                endpoint: "http://localhost:8000/v1".into(),
+                port: Some(8000),
+                running: true,
+                managed: true,
+                rss_kb: Some(4300 * 1024),
+                over_budget: over,
+                budget_kb: Some(3000 * 1024),
+            },
+            RuntimeStatus {
+                runtime: LocalRuntime::Ollama,
+                endpoint: "http://localhost:11434/v1".into(),
+                port: Some(11434),
+                running: false,
+                managed: false,
+                rss_kb: None,
+                over_budget: false,
+                budget_kb: Some(3000 * 1024),
+            },
+        ]
+    };
+    let drain = |app: &mut App| {
+        app.pending_events
+            .drain(..)
+            .filter_map(|event| match event {
+                AppEvent::Status(s) => Some(s),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // A survey the user asked for reports a line per runtime, and warns about
+    // the one over budget. (Boot queues a "no API key" line first.)
+    let _ = drain(&mut app);
+    app.local_status_announce = true;
+    app.on_local_status(Some(statuses(true)));
+    let lines = drain(&mut app);
+    assert!(lines[0].contains("edge0 ●4.2 GB ⚠"), "{lines:?}");
+    assert!(lines[0].contains("Ollama ○"), "{lines:?}");
+    let warning = lines.last().unwrap();
+    assert!(warning.contains("over the 2.9 GB budget"), "{warning}");
+    assert!(warning.contains("/local stop edge0"), "{warning}");
+    // Advisory only: warning about a server does not stop it.
+    assert!(!app.local_servers.manages(LocalRuntime::Edge0));
+    assert_eq!(app.local_status.len(), 2);
+
+    // A background refresh (the picker opening) caches without announcing;
+    // nothing is over budget, so it says nothing at all.
+    app.on_local_status(Some(statuses(false)));
+    assert!(drain(&mut app).is_empty());
+    assert!(app.local_status_rx.is_none());
+}
+
+#[test]
+fn stopping_a_server_nexus_did_not_start_is_refused() {
+    use crate::provider::local::LocalRuntime;
+
+    let mut app = App::new(Db::open_in_memory().unwrap(), None, test_space());
+    let last_status = |app: &mut App| {
+        app.pending_events
+            .drain(..)
+            .filter_map(|event| match event {
+                AppEvent::Status(s) => Some(s),
+                _ => None,
+            })
+            .next_back()
+            .unwrap()
+    };
+    app.manage_local_server("stop", "edge0");
+    let status = last_status(&mut app);
+    assert!(status.contains("did not start"), "{status}");
+    // A runtime that is off and unnamed cannot be started by guesswork.
+    app.manage_local_server("start", "");
+    let status = last_status(&mut app);
+    assert!(status.contains("local inference is off"), "{status}");
+    assert!(!app.local_servers.manages(LocalRuntime::Edge0));
 }
 
 #[test]
@@ -1970,6 +2059,7 @@ fn parse_command_maps_the_slash_catalog_into_the_seam() {
         ("local", ""),
         ("local off", "off"),
         ("ollama", "ollama"),
+        ("edge0", "edge0"),
         (
             "mlx http://localhost:8080/v1",
             "mlx http://localhost:8080/v1",
@@ -1978,6 +2068,27 @@ fn parse_command_maps_the_slash_catalog_into_the_seam() {
         assert_eq!(
             a.parse_command(line).unwrap(),
             AppCommand::ConfigureLocal { spec: spec.into() },
+            "{line}"
+        );
+    }
+    // Server verbs split off from runtime selection, in either word order:
+    // `/local stop edge0` and `/edge0 stop` are the same command.
+    for (line, verb, runtime) in [
+        ("local start", "start", ""),
+        ("local stop edge0", "stop", "edge0"),
+        ("edge0 stop", "stop", "edge0"),
+        ("local status", "status", ""),
+        ("local restart mlx", "restart", "mlx"),
+        // `/serve` is the alias that reads as the verb it is.
+        ("serve", "start", ""),
+        ("serve ollama", "start", "ollama"),
+    ] {
+        assert_eq!(
+            a.parse_command(line).unwrap(),
+            AppCommand::LocalServer {
+                verb: verb.into(),
+                runtime: runtime.into()
+            },
             "{line}"
         );
     }

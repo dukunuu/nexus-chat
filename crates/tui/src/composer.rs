@@ -525,6 +525,12 @@ impl AppView {
             AppCommand::ConfigureLocal { spec } if spec.trim().is_empty() => {
                 self.open_local_popup();
             }
+            // `/local status` has a table to show, so it opens the picker the
+            // survey renders into rather than only printing a summary line.
+            AppCommand::LocalServer { verb, runtime } if verb == "status" => {
+                self.core.manage_local_server(&verb, &runtime);
+                self.open_local_popup();
+            }
             AppCommand::OpenSwarm => self.open_swarm_popup(),
             AppCommand::OpenSettings => self.open_settings(),
             AppCommand::SetTheme { mode } => self.set_background_mode(&mode)?,

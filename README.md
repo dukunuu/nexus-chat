@@ -152,7 +152,7 @@ key is enough; models are fetched from the catalogs.
 ## Local inference (experimental)
 
 Pick a runtime from inside the TUI with `/local` (also the last row of
-`/login`), or name one directly: `/ollama`, `/mlx`, `/lmstudio`,
+`/login`), or name one directly: `/ollama`, `/mlx`, `/lmstudio`, `/edge0`,
 `/local mlx http://localhost:8080/v1`, `/local off`. Either way the choice is
 written to `~/.config/nexus-chat/config.toml` and the catalog reloads
 immediately — no restart.
@@ -161,7 +161,7 @@ The same block can be written by hand:
 
 ```toml
 [local]
-provider = "ollama" # or "mlx", "lmstudio"
+provider = "ollama" # or "mlx", "lmstudio", "edge0"
 # endpoint = "http://localhost:11434/v1" # optional inference URL override
 ```
 
@@ -176,11 +176,16 @@ Nexus runs the runtime's discovery command when loading/refreshing `/model`:
 | `ollama` | `ollama list` | `http://localhost:11434/v1` |
 | `lmstudio` | `lms ls --json` | `http://localhost:1234/v1` |
 | `mlx` | `python3` running a bundled, offline Hugging Face cache scanner | `http://localhost:8080/v1` |
+| `edge0` | `edge0 models` | `http://localhost:8000/v1` |
 
 These are **installed models**, not an online download catalog. MLX has no
 `mlx list` command: the scanner lists cached repositories with `config.json`
 and safetensors weights, respecting `HF_HOME`/`HF_HUB_CACHE`. These are candidates,
-not a guarantee of MLX compatibility or a complete download.
+not a guarantee of MLX compatibility or a complete download. `edge0 models`
+lists the tiers its registry knows (`edge0-35b`, `edge0-8b`) — likewise
+candidates: the checkpoint itself is located by the server through
+`EDGE0_<TIER>_MODEL`, and serving a checkpoint directory instead names the
+tier it auto-detects.
 
 Local models have their own **Local** backend filter and `local:` IDs; names also
 show the runtime. OpenAI and other cloud backends remain independent. Only one
@@ -200,14 +205,61 @@ Only put trusted commands in this machine-local config; discovery executes them
 automatically. Configuring a different inference endpoint does not change where
 the discovery command looks—configure that command/runtime accordingly.
 
-**Inference still requires a running server.** Start Ollama, enable LM Studio's
-server and load the selected model, or run `mlx_lm.server --model <model-id>`.
-MLX servers usually serve one model: selecting another in Nexus does not restart
-the server. The API must accept the discovered model ID. Automatic server
-launch/switching, downloads, authenticated local servers, host gateway forwarding,
-and capability/context discovery are not implemented yet. Tool calling depends
-on the runtime/model. Local utility fallback uses the selected/installed model
-rather than a cloud model name.
+### Managed servers
+
+Inference needs a server running behind the endpoint. Nexus can start one for
+you and tell you what it costs:
+
+| Command | What it does |
+| --- | --- |
+| `/local start [runtime]` | start that runtime's server (`/serve` is the same command) |
+| `/local stop [runtime]` | stop a server **Nexus started** |
+| `/local restart [runtime]` | stop then start, to pick up a new model |
+| `/local status` | probe every runtime: which answer, what they cost, what is over budget |
+
+Omit the runtime to act on the selected one, or name it — `/local stop edge0`
+and `/edge0 stop` are the same command. The `/local` picker shows the same
+survey live, with `s` start, `x` stop, `r` refresh on the row under the cursor.
+
+What gets launched:
+
+| Runtime | Server command | Needs a model |
+| --- | --- | --- |
+| `ollama` | `ollama serve` (with `OLLAMA_HOST`) | no — loads on demand |
+| `lmstudio` | `lms server start` (a daemon, stopped with `lms server stop`) | no |
+| `mlx` | `mlx_lm.server --model <selected>` | yes |
+| `edge0` | `edge0 serve <selected>` | yes |
+
+MLX and edge0 serve exactly one model, taken from your `/model` selection at
+launch — switching models in Nexus does not restart them, so use
+`/local restart`. Ollama and LM Studio load models through their own API.
+
+**Ownership is explicit.** A server Nexus started is stopped by `/local stop`
+and when Nexus exits, so quitting never strands a multi-gigabyte process. A
+server already answering on the endpoint — one you started in another terminal,
+or a system service — is detected and used, but never stopped by Nexus.
+
+**Memory is advisory.** `/local status` reports the resident memory of the
+listener's whole process tree, which is what you want: Ollama's weights live in
+a `runner` child, not the server that holds the port. Going over budget warns
+on the status line and marks the row; it never kills a server, so a reply that
+is mid-generation is never yanked. The budget defaults to 70% of physical
+memory and is configurable:
+
+```toml
+[local]
+provider = "edge0"
+memory_budget_mb = 8000 # optional; default is 70% of physical RAM
+```
+
+Reading memory needs `ps`, and `lsof` for servers Nexus did not start; without
+them liveness still works and the size column is simply blank.
+
+The server's API must accept the discovered model ID. Model downloads,
+authenticated local servers, host gateway forwarding, and capability/context
+discovery are not implemented yet. Tool calling depends on the runtime/model.
+Local utility fallback uses the selected/installed model rather than a cloud
+model name.
 
 ## Features
 

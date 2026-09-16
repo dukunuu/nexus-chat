@@ -36,6 +36,7 @@ fn local_popup_lists_runtimes_with_discovery_and_endpoint() {
         provider: nexus_core::provider::local::LocalRuntime::Mlx,
         endpoint: None,
         list_command: None,
+        memory_budget_mb: None,
     });
     app.open_local_popup();
     let screen = render_to_string(80, 24, |f| super::local::render(f, &app));
@@ -46,6 +47,34 @@ fn local_popup_lists_runtimes_with_discovery_and_endpoint() {
     assert!(screen.contains("✓ active"), "{screen}");
     // The picker opens on the configured runtime, not on row 0.
     assert_eq!(app.local_selected, 1);
+
+    // Rows past the fold scroll into view with their own discovery hint, and
+    // a surveyed row shows what its server is costing.
+    app.core.local_status = vec![nexus_core::provider::serve::RuntimeStatus {
+        runtime: nexus_core::provider::local::LocalRuntime::Edge0,
+        endpoint: "http://localhost:8000/v1".into(),
+        port: Some(8000),
+        running: true,
+        managed: true,
+        rss_kb: Some(4300 * 1024),
+        over_budget: true,
+        budget_kb: Some(3000 * 1024),
+    }];
+    app.local_selected = 3;
+    let screen = render_to_string(80, 24, |f| super::local::render(f, &app));
+    assert!(screen.contains("edge0 models"), "{screen}");
+    // Urgency order: the size and the warning survive the truncation that
+    // eats the endpoint at this width.
+    assert!(screen.contains("● 4.2 GB · ⚠ over budget"), "{screen}");
+    // A runtime with no survey row yet reads as down rather than blank.
+    assert!(screen.contains("○ http://localhost:1234/v1"), "{screen}");
+    assert!(screen.contains("s start"), "{screen}");
+    // Given the room, ownership and the endpoint follow the warning.
+    let wide = render_to_string(120, 30, |f| super::local::render(f, &app));
+    assert!(
+        wide.contains("● 4.2 GB · ⚠ over budget · started here · http://localhost:80"),
+        "{wide}"
+    );
 
     // Esc closes a bare `/local`, but steps back when `/login` opened it.
     let esc = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Esc);

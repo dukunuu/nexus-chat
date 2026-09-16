@@ -10,17 +10,18 @@ use tokio::io::AsyncReadExt as _;
 use super::{BackendTag, Model};
 
 /// Local runtime used for model discovery and inference.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalRuntime {
     Ollama,
     Mlx,
     Lmstudio,
+    Edge0,
 }
 
 impl LocalRuntime {
     /// Every runtime, in the order `/local` lists them.
-    pub const ALL: [Self; 3] = [Self::Ollama, Self::Mlx, Self::Lmstudio];
+    pub const ALL: [Self; 4] = [Self::Ollama, Self::Mlx, Self::Lmstudio, Self::Edge0];
 
     /// Human-readable runtime name, shown in model names and the picker.
     #[must_use]
@@ -29,6 +30,19 @@ impl LocalRuntime {
             Self::Ollama => "Ollama",
             Self::Mlx => "MLX",
             Self::Lmstudio => "LM Studio",
+            Self::Edge0 => "edge0",
+        }
+    }
+
+    /// The canonical `/local <token>` spelling, for echoing a runtime back
+    /// in a command the user can retype.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::Mlx => "mlx",
+            Self::Lmstudio => "lmstudio",
+            Self::Edge0 => "edge0",
         }
     }
 
@@ -44,6 +58,7 @@ impl LocalRuntime {
             "ollama" => Some(Self::Ollama),
             "mlx" | "mlxlm" => Some(Self::Mlx),
             "lmstudio" | "lms" => Some(Self::Lmstudio),
+            "edge0" | "edge" => Some(Self::Edge0),
             _ => None,
         }
     }
@@ -58,6 +73,10 @@ pub struct LocalConfig {
     pub endpoint: Option<String>,
     /// Optional discovery command; stdout must contain one model ID per line.
     pub list_command: Option<Vec<String>>,
+    /// Warn once a local server's process tree passes this many mebibytes.
+    /// Unset means a fraction of physical memory. Advisory only: Nexus warns,
+    /// it never stops a server on its own.
+    pub memory_budget_mb: Option<u64>,
 }
 
 impl LocalConfig {
@@ -68,7 +87,16 @@ impl LocalConfig {
             LocalRuntime::Ollama => "http://localhost:11434/v1",
             LocalRuntime::Mlx => "http://localhost:8080/v1",
             LocalRuntime::Lmstudio => "http://localhost:1234/v1",
+            LocalRuntime::Edge0 => "http://localhost:8000/v1",
         })
+    }
+
+    /// The TCP port the runtime's server listens on, from the endpoint.
+    #[must_use]
+    pub fn port(&self) -> Option<u16> {
+        reqwest::Url::parse(self.endpoint())
+            .ok()
+            .and_then(|url| url.port_or_known_default())
     }
 
     /// Validate settings without executing commands or contacting a server.
@@ -91,6 +119,8 @@ impl LocalConfig {
     /// Switch to `provider`, carrying over the settings that still apply: a
     /// custom endpoint and discovery command are written for one runtime, so
     /// they survive re-selecting it and are dropped when the runtime changes.
+    /// The memory budget describes the machine rather than the runtime, so it
+    /// always carries.
     #[must_use]
     pub fn for_runtime(provider: LocalRuntime, current: Option<&Self>) -> Self {
         let carried = current.filter(|config| config.provider == provider);
@@ -98,6 +128,7 @@ impl LocalConfig {
             provider,
             endpoint: carried.and_then(|config| config.endpoint.clone()),
             list_command: carried.and_then(|config| config.list_command.clone()),
+            memory_budget_mb: current.and_then(|config| config.memory_budget_mb),
         }
     }
 
@@ -118,7 +149,9 @@ impl LocalConfig {
             return Ok(None);
         }
         let provider = LocalRuntime::parse(runtime).with_context(|| {
-            format!("unknown local runtime {runtime:?} — expected ollama, mlx, lmstudio or off")
+            format!(
+                "unknown local runtime {runtime:?} — expected ollama, mlx, lmstudio, edge0 or off"
+            )
         })?;
         let mut config = Self::for_runtime(provider, current);
         if let Some(endpoint) = words.next() {
@@ -139,6 +172,7 @@ impl LocalConfig {
         match self.provider {
             LocalRuntime::Ollama => vec!["ollama".into(), "list".into()],
             LocalRuntime::Lmstudio => vec!["lms".into(), "ls".into(), "--json".into()],
+            LocalRuntime::Edge0 => vec!["edge0".into(), "models".into()],
             LocalRuntime::Mlx => vec![
                 "python3".into(),
                 "-c".into(),
@@ -162,10 +196,13 @@ impl LocalConfig {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
                 .collect()
-        } else if self.provider == LocalRuntime::Ollama {
-            parse_ollama(&output)?
         } else {
-            parse_lmstudio(&output)?
+            match self.provider {
+                LocalRuntime::Ollama => parse_ollama(&output)?,
+                LocalRuntime::Lmstudio => parse_lmstudio(&output)?,
+                LocalRuntime::Edge0 => parse_edge0(&output)?,
+                LocalRuntime::Mlx => unreachable!("mlx takes the line-per-id path"),
+            }
         };
         let mut ids: Vec<String> = ids;
         ids.sort();
@@ -242,6 +279,26 @@ fn parse_ollama(output: &str) -> Result<Vec<String>> {
         .collect())
 }
 
+/// `edge0 models` prints one flush-left `<tier>  (port …)` line per
+/// registered tier, each followed by indented detail lines. Only the
+/// flush-left lines name a model, and the first one must be flush left —
+/// anything else means we are not reading `edge0 models` output.
+fn parse_edge0(output: &str) -> Result<Vec<String>> {
+    let mut lines = output.lines().filter(|line| !line.trim().is_empty());
+    anyhow::ensure!(
+        !lines
+            .next()
+            .is_some_and(|first| first.starts_with(char::is_whitespace)),
+        "unexpected edge0 models output"
+    );
+    Ok(output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| !line.starts_with(char::is_whitespace))
+        .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
+        .collect())
+}
+
 fn parse_lmstudio(output: &str) -> Result<Vec<String>> {
     let value: serde_json::Value =
         serde_json::from_str(output).context("invalid lms ls --json output")?;
@@ -283,6 +340,19 @@ mod tests {
             ["org/model"]
         );
         assert!(parse_lmstudio("{}").is_err());
+        assert_eq!(
+            parse_edge0(concat!(
+                "edge0-35b  (port 8000, target 20 tok/s, peak \u{2248} 3000 MB)\n",
+                "  experts=128 top_k=4 quant=4bit/g64\n",
+                "  prerouter: start=4 hidden=512\n",
+                "edge0-8b  (port 8000, target 25 tok/s, peak \u{2248} 900 MB)\n",
+                "  lora: recover (r=16 alpha=32)\n",
+            ))
+            .unwrap(),
+            ["edge0-35b", "edge0-8b"]
+        );
+        assert!(parse_edge0("").unwrap().is_empty());
+        assert!(parse_edge0("  experts=128\n").is_err());
     }
 
     #[test]
@@ -290,6 +360,8 @@ mod tests {
         let config: LocalConfig = toml::from_str("provider = 'ollama'").unwrap();
         assert_eq!(config.endpoint(), "http://localhost:11434/v1");
         assert_eq!(config.command(), ["ollama", "list"]);
+        assert_eq!(config.port(), Some(11434));
+        assert_eq!(config.memory_budget_mb, None);
         config.validate().unwrap();
         let invalid: LocalConfig = toml::from_str("provider = 'mlx'\nlist_command = []").unwrap();
         assert!(invalid.validate().is_err());
@@ -301,6 +373,7 @@ mod tests {
             provider: LocalRuntime::Ollama,
             endpoint: Some("http://127.0.0.1:9999/v1".into()),
             list_command: Some(vec!["my-list".into()]),
+            memory_budget_mb: Some(4096),
         };
         // Re-selecting a runtime keeps the settings written for it; an
         // explicit endpoint wins; switching runtimes drops both.
@@ -309,12 +382,22 @@ mod tests {
             .unwrap();
         assert_eq!(same.endpoint(), "http://127.0.0.1:9999/v1");
         assert_eq!(same.list_command, current.list_command);
+        let edge0 = LocalConfig::from_spec("edge0", Some(&current))
+            .unwrap()
+            .unwrap();
+        assert_eq!(edge0.provider, LocalRuntime::Edge0);
+        assert_eq!(edge0.endpoint(), "http://localhost:8000/v1");
+        assert_eq!(edge0.command(), ["edge0", "models"]);
+        assert_eq!(edge0.port(), Some(8000));
         let moved = LocalConfig::from_spec("lm-studio", Some(&current))
             .unwrap()
             .unwrap();
         assert_eq!(moved.provider, LocalRuntime::Lmstudio);
         assert_eq!(moved.endpoint(), "http://localhost:1234/v1");
         assert_eq!(moved.list_command, None);
+        // The budget is about the machine, so it survives the switch that
+        // drops the runtime-specific endpoint and discovery command.
+        assert_eq!(moved.memory_budget_mb, Some(4096));
         let retargeted = LocalConfig::from_spec("ollama http://localhost:1234/v1", Some(&current))
             .unwrap()
             .unwrap();
@@ -363,6 +446,7 @@ mod tests {
                 "/usr/bin/printf".into(),
                 "org/model\norg/model\nother/model\n".into(),
             ]),
+            memory_budget_mb: None,
         };
         let models = config.list_models().await.unwrap();
         assert_eq!(models.len(), 2);

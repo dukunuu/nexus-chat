@@ -156,6 +156,19 @@ impl AppView {
         }
     }
 
+    /// `s`/`x`/`r` in the `/local` picker: run a server verb against the row
+    /// under the cursor. The trailing "off" row names no runtime, so it only
+    /// re-surveys.
+    pub fn local_server_key(&mut self, verb: &str) {
+        let runtime = LocalRuntime::ALL
+            .get(self.local_selected)
+            .map_or_else(String::new, |runtime| runtime.token().to_string());
+        if runtime.is_empty() && verb != "status" {
+            return;
+        }
+        self.core.manage_local_server(verb, &runtime);
+    }
+
     /// `/local`: open the runtime selector, parked on whatever is active.
     pub fn open_local_popup(&mut self) {
         self.local_from_login = false;
@@ -169,6 +182,8 @@ impl AppView {
             },
         );
         self.popup = Popup::Local;
+        // The rows show liveness and memory, so opening the picker measures.
+        self.core.refresh_local_status();
     }
 
     pub fn move_local_selection(&mut self, delta: i32) {

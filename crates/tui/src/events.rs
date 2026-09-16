@@ -60,6 +60,9 @@ pub async fn run(
 ) -> Result<()> {
     let result = run_loop(&mut app, terminal, selection_requests).await;
     app.cancel_chat_tasks();
+    // Servers started with `/local start` are Nexus's to clean up; ones the
+    // user started elsewhere are untouched.
+    app.stop_local_servers().await;
     result
 }
 
@@ -201,6 +204,7 @@ async fn run_loop(
                     AppEvent::Ocr(r) => app.on_ocr_done(r),
                     AppEvent::Embed(r) => app.on_embed_done(r),
                     AppEvent::OcrPull(r) => app.on_ocr_pull(r),
+                    AppEvent::LocalServers(r) => app.on_local_status(r),
                     AppEvent::Research(r) => {
                         app.on_research_done(r);
                         // The job's channel closed: close the live view and
