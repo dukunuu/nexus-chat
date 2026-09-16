@@ -928,6 +928,19 @@ impl OpenRouter {
                     backend: crate::provider::BackendTag::Codex,
                     pricing: None,
                 },
+                // ChatGPT's backend alias for the lower-capability model
+                // available after a primary model's usage limit is hit.
+                Model {
+                    id: "gpt-reserve".into(),
+                    name: "Luna Reserve".into(),
+                    reasoning_efforts: ReasoningEffort::STANDARD.to_vec(),
+                    context_length: Some(272_000),
+                    supports_images: true,
+                    supports_image_generation: false,
+                    supports_video_generation: false,
+                    backend: crate::provider::BackendTag::Codex,
+                    pricing: None,
+                },
                 Model {
                     id: "gpt-5.5".into(),
                     name: "GPT-5.5".into(),
@@ -3505,6 +3518,7 @@ mod tests {
             ids,
             [
                 "gpt-5.3-codex-spark",
+                "gpt-reserve",
                 "gpt-5.5",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
