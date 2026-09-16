@@ -14,7 +14,7 @@ test("research projection keeps stage updates and parked gates on reconnect", ()
   expect(next.stages[1].detail).toBe("3 sources");
 });
 
-test("research activity starts a project and exposes the steering controls", async ({ page }) => {
+test("research activity starts a project and exposes the steering controls", async ({ page, isMobile }) => {
   let started = false;
   let running = false;
   const session = { id: "research-1", title: "Research", model: "test", kind: "research", web_mode: false, created_at: "now" };
@@ -33,7 +33,9 @@ test("research activity starts a project and exposes the steering controls", asy
   await page.getByLabel("Host token").fill("test-token");
   await page.getByRole("button", { name: "Connect", exact: false }).click();
   const nav = page.getByRole("navigation", { name: "Workspace", exact: true });
-  if (await page.getByRole("button", { name: "Open sidebar" }).isVisible()) await page.getByRole("button", { name: "Open sidebar" }).click();
+  // See research-flow.spec.ts: `isVisible()` does not wait, so it races the
+  // first render and leaves the mobile drawer shut.
+  if (isMobile) await page.getByRole("button", { name: "Open sidebar" }).click();
   await nav.getByRole("button", { name: "Research activity", exact: true }).click();
   await page.getByLabel("Start research").fill("browser reconnects");
   await page.getByRole("button", { name: "Start", exact: true }).click();

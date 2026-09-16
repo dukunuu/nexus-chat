@@ -32,15 +32,20 @@ async function connectResearch(page: Page, options: { selected: boolean; running
   return requests;
 }
 
-async function openWorkspace(page: Page, name: string) {
-  const sidebar = page.getByRole("button", { name: "Open sidebar" });
-  if (await sidebar.isVisible()) await sidebar.click();
+// The mobile sidebar is an off-canvas drawer, so the nav is rendered but
+// translated out of the viewport until it is opened. `isVisible()` reports
+// the state right now without waiting, so checking it straight after Connect
+// races the first render: it reads false before the shell mounts, the drawer
+// stays shut, and the nav button can never be clicked. The project's
+// `isMobile` flag is known up front, and `click()` waits on its own.
+async function openWorkspace(page: Page, isMobile: boolean, name: string) {
+  if (isMobile) await page.getByRole("button", { name: "Open sidebar" }).click();
   await page.getByRole("navigation", { name: "Workspace", exact: true }).getByRole("button", { name, exact: true }).click();
 }
 
-test("research flow targets the selected session and exposes gate, steer, context and export", async ({ page }) => {
+test("research flow targets the selected session and exposes gate, steer, context and export", async ({ page, isMobile }) => {
   const requests = await connectResearch(page);
-  await openWorkspace(page, "Research activity");
+  await openWorkspace(page, isMobile, "Research activity");
   await expect(page.getByText("Which scope?", { exact: true })).toBeVisible();
   await page.getByLabel("Steer this research").fill("Check primary sources");
   await page.getByRole("button", { name: /Queue steer/i }).click();
@@ -61,14 +66,14 @@ test("research flow targets the selected session and exposes gate, steer, contex
     await exportButton.click();
     await expect((await download).suggestedFilename()).toMatch(/\.md$/);
   }
-  await openWorkspace(page, "Chat");
+  await openWorkspace(page, isMobile, "Chat");
   await page.getByRole("button", { name: "Tools", exact: true }).click();
   await expect(page.getByText(/20 conversation tokens/)).toBeVisible();
 });
 
-test("research starts without a selected session and can stop a running job", async ({ page }) => {
+test("research starts without a selected session and can stop a running job", async ({ page, isMobile }) => {
   const requests = await connectResearch(page, { selected: false, running: false });
-  await openWorkspace(page, "Research activity");
+  await openWorkspace(page, isMobile, "Research activity");
   await page.getByLabel("Start research").fill("Fresh topic");
   await page.getByRole("button", { name: "Start", exact: true }).click();
   const start = requests.find((request) => request.path === "/v1/research/start");
