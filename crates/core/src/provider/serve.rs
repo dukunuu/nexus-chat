@@ -49,8 +49,8 @@ pub enum Launch {
 
 impl LocalRuntime {
     /// Whether starting this runtime's server requires naming a model.
-    /// Ollama and LM Studio load models on demand through their own API;
-    /// MLX and edge0 each serve exactly one model, chosen at launch.
+    /// Ollama, mlx-serve and LM Studio load models on demand through their own API;
+    /// mlx-lm and edge0 each serve exactly one model, chosen at launch.
     #[must_use]
     pub const fn serves_one_model(self) -> bool {
         matches!(self, Self::Mlx | Self::Edge0)
@@ -83,6 +83,17 @@ impl LocalRuntime {
                     "mlx_lm.server".into(),
                     "--model".into(),
                     model()?,
+                    "--host".into(),
+                    "127.0.0.1".into(),
+                    "--port".into(),
+                    port.to_string(),
+                ],
+                env: Vec::new(),
+            },
+            Self::MlxServe => Launch::Owned {
+                argv: vec![
+                    "mlx-serve".into(),
+                    "serve".into(),
                     "--host".into(),
                     "127.0.0.1".into(),
                     "--port".into(),
@@ -540,6 +551,22 @@ mod tests {
         };
         assert_eq!(argv, ["ollama", "serve"]);
         assert_eq!(env, [("OLLAMA_HOST".to_string(), "127.0.0.1:11434".into())]);
+
+        let Launch::Owned { argv, .. } = LocalRuntime::MlxServe.launch(None, 11234).unwrap() else {
+            panic!("mlx-serve is an owned server");
+        };
+        assert_eq!(
+            argv,
+            [
+                "mlx-serve",
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "11234"
+            ]
+        );
+        assert!(!LocalRuntime::MlxServe.serves_one_model());
 
         let Launch::Owned { argv, .. } =
             LocalRuntime::Edge0.launch(Some("edge0-8b"), 8000).unwrap()

@@ -152,8 +152,8 @@ key is enough; models are fetched from the catalogs.
 ## Local inference (experimental)
 
 Pick a runtime from inside the TUI with `/local` (also the last row of
-`/login`), or name one directly: `/ollama`, `/mlx`, `/lmstudio`, `/edge0`,
-`/local mlx http://localhost:8080/v1`, `/local off`. Either way the choice is
+`/login`), or name one directly: `/ollama`, `/mlx`, `/mlx-serve`,
+`/lmstudio`, `/edge0`, `/local mlx-serve http://localhost:11234/v1`, `/local off`. Either way the choice is
 written to `~/.config/nexus-chat/config.toml` and the catalog reloads
 immediately — no restart.
 
@@ -161,7 +161,7 @@ The same block can be written by hand:
 
 ```toml
 [local]
-provider = "ollama" # or "mlx", "lmstudio", "edge0"
+provider = "ollama" # or "mlx", "mlx_serve", "lmstudio", "edge0"
 # endpoint = "http://localhost:11434/v1" # optional inference URL override
 ```
 
@@ -175,13 +175,18 @@ Nexus runs the runtime's discovery command when loading/refreshing `/model`:
 | --- | --- | --- |
 | `ollama` | `ollama list` | `http://localhost:11434/v1` |
 | `lmstudio` | `lms ls --json` | `http://localhost:1234/v1` |
-| `mlx` | `python3` running a bundled, offline Hugging Face cache scanner | `http://localhost:8080/v1` |
+| `mlx` (mlx-lm) | `python3` running a bundled, offline Hugging Face cache scanner | `http://localhost:8080/v1` |
+| `mlx_serve` | `mlx-serve list` | `http://localhost:11234/v1` |
 | `edge0` | `edge0 models` | `http://localhost:8000/v1` |
 
-These are **installed models**, not an online download catalog. MLX has no
-`mlx list` command: the scanner lists cached repositories with `config.json`
-and safetensors weights, respecting `HF_HOME`/`HF_HUB_CACHE`. These are candidates,
-not a guarantee of MLX compatibility or a complete download. `edge0 models`
+These are **installed models**, not an online download catalog. The legacy
+`mlx` runtime uses mlx-lm, which has no list command: the scanner lists cached
+repositories with `config.json` and safetensors weights, respecting
+`HF_HOME`/`HF_HUB_CACHE`. These are candidates, not a guarantee of MLX
+compatibility or a complete download. The separate `mlx-serve` runtime reads
+its own `~/.mlx-serve/models` catalog; entries marked `unsupported` (such as
+an incomplete download) are not offered in `/model`. Pull models with
+`mlx-serve pull <org/repo>` before selecting them. `edge0 models`
 lists the tiers its registry knows (`edge0-35b`, `edge0-8b`) — likewise
 candidates: the checkpoint itself is located by the server through
 `EDGE0_<TIER>_MODEL`, and serving a checkpoint directory instead names the
@@ -227,12 +232,15 @@ What gets launched:
 | --- | --- | --- |
 | `ollama` | `ollama serve` (with `OLLAMA_HOST`) | no — loads on demand |
 | `lmstudio` | `lms server start` (a daemon, stopped with `lms server stop`) | no |
-| `mlx` | `mlx_lm.server --model <selected>` | yes |
+| `mlx` (mlx-lm) | `mlx_lm.server --model <selected>` | yes |
+| `mlx_serve` | `mlx-serve serve --host 127.0.0.1 --port 11234` | no — loads on demand |
 | `edge0` | `edge0 serve <selected>` | yes |
 
-MLX and edge0 serve exactly one model, taken from your `/model` selection at
+mlx-lm and edge0 serve exactly one model, taken from your `/model` selection at
 launch — switching models in Nexus does not restart them, so use
-`/local restart`. Ollama and LM Studio load models through their own API.
+`/local restart`. Ollama, mlx-serve and LM Studio load models through their own API.
+If `mlx-serve run <model>` is already serving on port 11234, Nexus can use it
+without taking ownership; `mlx-serve serve` is the managed, on-demand mode.
 
 **Ownership is explicit.** A server Nexus started is stopped by `/local stop`
 and when Nexus exits, so quitting never strands a multi-gigabyte process. A

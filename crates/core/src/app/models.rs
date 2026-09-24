@@ -51,7 +51,8 @@ impl App {
                     config.provider.label(),
                     config.endpoint()
                 ),
-                None => "local inference is off — /local <ollama|mlx|lmstudio|edge0>".to_string(),
+                None => "local inference is off — /local <ollama|mlx|mlx-serve|lmstudio|edge0>"
+                    .to_string(),
             };
             self.push_status(status);
             return;
@@ -86,7 +87,9 @@ impl App {
                 .local
                 .as_ref()
                 .map(|config| config.provider)
-                .context("local inference is off — /local <ollama|mlx|lmstudio|edge0> first")?
+                .context(
+                    "local inference is off — /local <ollama|mlx|mlx-serve|lmstudio|edge0> first",
+                )?
         } else {
             LocalRuntime::parse(runtime.trim())
                 .with_context(|| format!("unknown local runtime {:?}", runtime.trim()))?
@@ -103,7 +106,7 @@ impl App {
                 return Ok(());
             }
         }
-        // MLX and edge0 serve exactly one model, so they launch with the
+        // mlx-lm and edge0 serve exactly one model, so they launch with the
         // selected one; the composite id carries a `local:` prefix.
         let model = self
             .current_model

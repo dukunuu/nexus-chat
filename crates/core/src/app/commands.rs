@@ -83,7 +83,14 @@ pub const COMMANDS: &[Command] = &[
         name: "local",
         desc: "local inference runtime",
         aliases: &[
-            "ollama", "mlx", "lmstudio", "edge0", "offline", "runtime", "serve",
+            "ollama",
+            "mlx",
+            "mlx-serve",
+            "lmstudio",
+            "edge0",
+            "offline",
+            "runtime",
+            "serve",
         ],
     },
     Command {
@@ -247,7 +254,7 @@ pub enum AppCommand {
     OpenLogin,
     /// `/local [<runtime> [endpoint] | off]` — pick the local inference
     /// runtime. An empty `spec` opens the picker (reports the current
-    /// setting headless); `/ollama`, `/mlx`, `/lmstudio` and `/edge0` fill
+    /// setting headless); `/ollama`, `/mlx`, `/mlx-serve`, `/lmstudio` and `/edge0` fill
     /// it in.
     ConfigureLocal { spec: String },
     /// `/local start|stop|restart|status [<runtime>]` — manage the local

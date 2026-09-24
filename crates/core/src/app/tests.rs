@@ -2060,6 +2060,7 @@ fn parse_command_maps_the_slash_catalog_into_the_seam() {
         ("local off", "off"),
         ("ollama", "ollama"),
         ("edge0", "edge0"),
+        ("mlx-serve", "mlx-serve"),
         (
             "mlx http://localhost:8080/v1",
             "mlx http://localhost:8080/v1",
@@ -2079,6 +2080,7 @@ fn parse_command_maps_the_slash_catalog_into_the_seam() {
         ("edge0 stop", "stop", "edge0"),
         ("local status", "status", ""),
         ("local restart mlx", "restart", "mlx"),
+        ("mlx-serve start", "start", "mlx-serve"),
         // `/serve` is the alias that reads as the verb it is.
         ("serve", "start", ""),
         ("serve ollama", "start", "ollama"),

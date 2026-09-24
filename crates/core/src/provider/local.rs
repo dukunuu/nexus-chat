@@ -15,20 +15,28 @@ use super::{BackendTag, Model};
 pub enum LocalRuntime {
     Ollama,
     Mlx,
+    MlxServe,
     Lmstudio,
     Edge0,
 }
 
 impl LocalRuntime {
     /// Every runtime, in the order `/local` lists them.
-    pub const ALL: [Self; 4] = [Self::Ollama, Self::Mlx, Self::Lmstudio, Self::Edge0];
+    pub const ALL: [Self; 5] = [
+        Self::Ollama,
+        Self::Mlx,
+        Self::MlxServe,
+        Self::Lmstudio,
+        Self::Edge0,
+    ];
 
     /// Human-readable runtime name, shown in model names and the picker.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Ollama => "Ollama",
-            Self::Mlx => "MLX",
+            Self::Mlx => "MLX (mlx-lm)",
+            Self::MlxServe => "mlx-serve",
             Self::Lmstudio => "LM Studio",
             Self::Edge0 => "edge0",
         }
@@ -41,6 +49,7 @@ impl LocalRuntime {
         match self {
             Self::Ollama => "ollama",
             Self::Mlx => "mlx",
+            Self::MlxServe => "mlx-serve",
             Self::Lmstudio => "lmstudio",
             Self::Edge0 => "edge0",
         }
@@ -57,6 +66,7 @@ impl LocalRuntime {
         {
             "ollama" => Some(Self::Ollama),
             "mlx" | "mlxlm" => Some(Self::Mlx),
+            "mlxserve" => Some(Self::MlxServe),
             "lmstudio" | "lms" => Some(Self::Lmstudio),
             "edge0" | "edge" => Some(Self::Edge0),
             _ => None,
@@ -86,6 +96,7 @@ impl LocalConfig {
         self.endpoint.as_deref().unwrap_or(match self.provider {
             LocalRuntime::Ollama => "http://localhost:11434/v1",
             LocalRuntime::Mlx => "http://localhost:8080/v1",
+            LocalRuntime::MlxServe => "http://localhost:11234/v1",
             LocalRuntime::Lmstudio => "http://localhost:1234/v1",
             LocalRuntime::Edge0 => "http://localhost:8000/v1",
         })
@@ -150,7 +161,7 @@ impl LocalConfig {
         }
         let provider = LocalRuntime::parse(runtime).with_context(|| {
             format!(
-                "unknown local runtime {runtime:?} — expected ollama, mlx, lmstudio, edge0 or off"
+                "unknown local runtime {runtime:?} — expected ollama, mlx, mlx-serve, lmstudio, edge0 or off"
             )
         })?;
         let mut config = Self::for_runtime(provider, current);
@@ -173,6 +184,7 @@ impl LocalConfig {
             LocalRuntime::Ollama => vec!["ollama".into(), "list".into()],
             LocalRuntime::Lmstudio => vec!["lms".into(), "ls".into(), "--json".into()],
             LocalRuntime::Edge0 => vec!["edge0".into(), "models".into()],
+            LocalRuntime::MlxServe => vec!["mlx-serve".into(), "list".into()],
             LocalRuntime::Mlx => vec![
                 "python3".into(),
                 "-c".into(),
@@ -201,6 +213,7 @@ impl LocalConfig {
                 LocalRuntime::Ollama => parse_ollama(&output)?,
                 LocalRuntime::Lmstudio => parse_lmstudio(&output)?,
                 LocalRuntime::Edge0 => parse_edge0(&output)?,
+                LocalRuntime::MlxServe => parse_mlx_serve(&output)?,
                 LocalRuntime::Mlx => unreachable!("mlx takes the line-per-id path"),
             }
         };
@@ -265,6 +278,25 @@ async fn run_command(argv: &[String]) -> Result<String> {
             }
         }
     }
+}
+
+/// `mlx-serve list` prints NAME TYPE SIZE; incomplete downloads are marked
+/// unsupported and must not be offered as inference-ready models.
+fn parse_mlx_serve(output: &str) -> Result<Vec<String>> {
+    let mut lines = output.lines().filter(|line| !line.trim().is_empty());
+    let header = lines.next().context("mlx-serve list returned no header")?;
+    anyhow::ensure!(
+        header.split_whitespace().take(2).collect::<Vec<_>>() == ["NAME", "TYPE"],
+        "unexpected mlx-serve list output"
+    );
+    Ok(lines
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let name = fields.next()?;
+            let kind = fields.next()?;
+            (kind != "unsupported").then(|| name.to_string())
+        })
+        .collect())
 }
 
 fn parse_ollama(output: &str) -> Result<Vec<String>> {
@@ -333,6 +365,15 @@ mod tests {
         assert!(parse_ollama("server unavailable").is_err());
         assert!(parse_ollama("NAME ID SIZE MODIFIED\n").unwrap().is_empty());
         assert_eq!(
+            parse_mlx_serve(
+                "NAME TYPE SIZE\norg/model text 5 GB\norg/partial unsupported 900 MB\n"
+            )
+            .unwrap(),
+            ["org/model"]
+        );
+        assert!(parse_mlx_serve("unexpected output").is_err());
+        assert!(parse_mlx_serve("NAME TYPE SIZE\n").unwrap().is_empty());
+        assert_eq!(
             parse_lmstudio(
                 r#"[{"modelKey":"org/model","type":"llm"},{"modelKey":"embed","type":"embedding"}]"#
             )
@@ -363,6 +404,14 @@ mod tests {
         assert_eq!(config.port(), Some(11434));
         assert_eq!(config.memory_budget_mb, None);
         config.validate().unwrap();
+        let serve: LocalConfig = toml::from_str("provider = 'mlx_serve'").unwrap();
+        assert_eq!(serve.endpoint(), "http://localhost:11234/v1");
+        assert_eq!(serve.command(), ["mlx-serve", "list"]);
+        assert_eq!(serve.port(), Some(11234));
+        assert_eq!(
+            LocalRuntime::parse("mlx-serve"),
+            Some(LocalRuntime::MlxServe)
+        );
         let invalid: LocalConfig = toml::from_str("provider = 'mlx'\nlist_command = []").unwrap();
         assert!(invalid.validate().is_err());
     }

@@ -1,4 +1,4 @@
-//! `/local`'s runtime selector: Ollama, MLX, LM Studio, edge0, or off. Unlike
+//! `/local`'s runtime selector: Ollama, mlx-lm, mlx-serve, LM Studio, edge0, or off. Unlike
 //! `/login` there is no key to paste — picking a row writes the
 //! machine-local `[local]` block and reloads the catalog. Custom endpoints
 //! and discovery commands stay a config-file (or `/local <runtime> <url>`)
@@ -32,6 +32,7 @@ fn row(index: usize, current: Option<&LocalConfig>) -> (String, String, String, 
             match runtime {
                 LocalRuntime::Ollama => "ollama list",
                 LocalRuntime::Mlx => "scans the Hugging Face cache",
+                LocalRuntime::MlxServe => "mlx-serve list",
                 LocalRuntime::Lmstudio => "lms ls --json",
                 LocalRuntime::Edge0 => "edge0 models",
             }

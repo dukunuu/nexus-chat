@@ -60,7 +60,12 @@ fn local_popup_lists_runtimes_with_discovery_and_endpoint() {
         over_budget: true,
         budget_kb: Some(3000 * 1024),
     }];
-    app.local_selected = 3;
+    app.local_selected = 2;
+    let screen = render_to_string(80, 24, |f| super::local::render(f, &app));
+    assert!(screen.contains("mlx-serve list"), "{screen}");
+    assert!(screen.contains("http://localhost:11234/v1"), "{screen}");
+
+    app.local_selected = 4;
     let screen = render_to_string(80, 24, |f| super::local::render(f, &app));
     assert!(screen.contains("edge0 models"), "{screen}");
     // Urgency order: the size and the warning survive the truncation that
