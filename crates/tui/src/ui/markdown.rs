@@ -115,19 +115,8 @@ fn render_text(r: &mut Rendered, content: &str, width: usize) {
         let id = None;
         match classify(line, &plain) {
             Block::Drop => {}
-            Block::Header(body) => {
-                let styled = Span::styled(
-                    body,
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                );
-                for l in wrap_styled_line(&Line::from(styled), width) {
-                    r.push(l, id);
-                }
-            }
-            Block::List(body) => {
-                for l in wrap_styled_line(&Line::from(body), width) {
+            Block::Header(body) | Block::List(body) => {
+                for l in wrap_styled_line(&body, width) {
                     r.push(l, id);
                 }
             }
@@ -285,52 +274,65 @@ fn styled_cell(text: &str) -> Vec<Span<'static>> {
 
 enum Block {
     Drop,
-    Header(String),
-    List(String),
+    Header(Line<'static>),
+    List(Line<'static>),
     Plain,
 }
 
-/// Decide how a rendered markdown line should be treated. Only *unstyled* lines
-/// are candidates for block-marker stripping — styled ones are inline-formatted
-/// or syntax-highlighted code, which we leave untouched.
+/// Decide how a rendered markdown line should be treated. Fenced code is
+/// handled before this, so a styled line here is prose with inline
+/// formatting (`code`, **bold**): its block marker is rewritten inside the
+/// first span and the other spans keep their styles.
 fn classify(line: &Line, plain: &str) -> Block {
-    let unstyled = line.spans.iter().all(|s| s.style == Style::default());
-    if !unstyled {
-        return Block::Plain;
-    }
     let trimmed = plain.trim_start();
-    if trimmed.starts_with("```") {
+    let unstyled = line.spans.iter().all(|s| s.style == Style::default());
+    if unstyled && trimmed.starts_with("```") {
         return Block::Drop;
     }
-    if let Some(rest) = header_rest(trimmed) {
-        return Block::Header(rest);
+    let indent = plain.len() - trimmed.len();
+    let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+    if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
+        let header_style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        if let Some(mut l) = replace_prefix(line, indent + hashes + 1, "") {
+            // `##   Heading`: extra spaces after the marker aren't content.
+            if let Some(first) = l.spans.first_mut() {
+                first.content = first.content.trim_start().to_string().into();
+            }
+            for span in &mut l.spans {
+                span.style = span.style.patch(header_style);
+            }
+            return Block::Header(l);
+        }
     }
-    if let Some(rest) = list_rest(plain) {
-        return Block::List(rest);
+    for marker in ["- ", "* ", "+ "] {
+        if trimmed.starts_with(marker) {
+            let bullet = format!("{}• ", &plain[..indent]);
+            if let Some(l) = replace_prefix(line, indent + marker.len(), &bullet) {
+                return Block::List(l);
+            }
+        }
     }
     Block::Plain
 }
 
-/// `## Heading` -> `Heading` (1–6 `#` then a space).
-fn header_rest(trimmed: &str) -> Option<String> {
-    let hashes = trimmed.chars().take_while(|&c| c == '#').count();
-    if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
-        Some(trimmed[hashes..].trim_start().to_string())
-    } else {
-        None
+/// `line` with its first `len` bytes (which must sit inside the first span)
+/// replaced by `with`; `None` when the prefix straddles a span boundary.
+fn replace_prefix(line: &Line, len: usize, with: &str) -> Option<Line<'static>> {
+    let first = line.spans.first()?;
+    let rest = first.content.get(len..)?;
+    let mut spans = Vec::with_capacity(line.spans.len());
+    let head = format!("{with}{rest}");
+    if !head.is_empty() {
+        spans.push(Span::styled(head, first.style));
     }
-}
-
-/// `- item` / `* item` / `+ item` -> `• item`, preserving indentation.
-fn list_rest(plain: &str) -> Option<String> {
-    let indent_len = plain.len() - plain.trim_start().len();
-    let (indent, s) = plain.split_at(indent_len);
-    for marker in ["- ", "* ", "+ "] {
-        if let Some(rest) = s.strip_prefix(marker) {
-            return Some(format!("{indent}• {rest}"));
-        }
-    }
-    None
+    spans.extend(
+        line.spans[1..]
+            .iter()
+            .map(|s| Span::styled(s.content.to_string(), s.style)),
+    );
+    Some(Line::from(spans))
 }
 
 /// Word-wrap a styled `Line` to `width` terminal columns, preserving per-span
@@ -490,5 +492,30 @@ mod table_tests {
         assert!(text[1].contains("Name") && text[1].contains("Age"));
         assert!(text[2].starts_with('├') && text[2].ends_with('┤'));
         assert!(text[5].starts_with('└') && text[5].ends_with('┘'));
+    }
+
+    /// Inline formatting used to block marker stripping: a bullet or heading
+    /// containing `code` kept its raw `- ` / `## ` while plain ones didn't.
+    #[test]
+    fn markers_are_stripped_from_lines_with_inline_formatting() {
+        let r = render("- plain item\n- has `ip` inside\n\n## Use `nmcli` here", 80);
+        let text: Vec<String> = r.lines.iter().map(line_text).collect();
+        assert!(text.iter().any(|l| l == "• plain item"), "{text:?}");
+        assert!(
+            text.iter()
+                .any(|l| l.starts_with("• has ") && l.contains("ip")),
+            "{text:?}"
+        );
+        assert!(
+            text.iter()
+                .any(|l| l.starts_with("Use ") && l.contains("nmcli")),
+            "{text:?}"
+        );
+        assert!(
+            !text
+                .iter()
+                .any(|l| l.starts_with("- ") || l.starts_with('#')),
+            "{text:?}"
+        );
     }
 }
