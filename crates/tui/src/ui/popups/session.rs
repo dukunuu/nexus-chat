@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState};
 
@@ -32,19 +32,14 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         .unwrap_or_default();
 
     let sessions = app.filtered_sessions();
-    let width = area.width.saturating_sub(4) as usize; // inside border + highlight symbol
+    // Inside the border, minus the scrollbar gutter and the `▸ ` highlight.
+    let width = area.width.saturating_sub(5) as usize;
     let dim = Style::default().fg(app.theme.fg_dim);
+    let active_id = app.session.as_ref().map(|s| s.id.clone());
 
     let items: Vec<ListItem> = sessions
         .iter()
         .map(|s| {
-            // id on top (model-generated slug, else a uuid prefix), with the
-            // created-at date right-aligned on the same row.
-            let id = s
-                .slug
-                .clone()
-                .unwrap_or_else(|| format!("{}…", &s.id[..8.min(s.id.len())]));
-            let when = crate::ui::fmt_created(&s.created_at);
             // ⟳ = a response or compaction is running here; 🔎 = a research
             // job is running here; ● = finished while unviewed.
             let compacting_here = app.is_compacting_session(&s.id);
@@ -53,8 +48,6 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
                 .research_running
                 .as_ref()
                 .is_some_and(|(id, _)| *id == s.id);
-            let is_research = s.kind == "research";
-            let is_linked_research = s.research_parent_id.is_some();
             let marker = if compacting_here {
                 Some(Span::styled("⟳ ", Style::default().fg(app.theme.accent2)))
             } else if streaming_here {
@@ -63,41 +56,47 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
                 Some(Span::styled("🔎 ", Style::default().fg(app.theme.accent2)))
             } else if app.unread.contains(&s.id) {
                 Some(Span::styled("● ", Style::default().fg(app.theme.warning)))
-            } else if is_linked_research {
+            } else if s.research_parent_id.is_some() {
                 Some(Span::styled("↪ ", dim))
-            } else if is_research {
+            } else if s.kind == "research" {
                 Some(Span::styled("🔬 ", Style::default().fg(app.theme.accent2)))
             } else {
                 None
             };
-            let mlen = if marker.is_some() { 2 } else { 0 };
-            let gap =
-                width.saturating_sub(mlen + id.chars().count() + 1 + when.chars().count() + 2);
-            let mut top_spans = Vec::new();
-            if let Some(m) = marker {
-                top_spans.push(m);
-            }
+            // Title first — it's what people scan for — with the date
+            // right-aligned; widths are display cells (emoji markers are 2).
+            let when = crate::ui::fmt_created(&s.created_at);
+            let marker_w = marker.as_ref().map_or(0, Span::width);
+            let title_max = width.saturating_sub(marker_w + when.chars().count() + 2);
+            let title = chrome::truncate(&s.title, title_max);
+            let gap = width.saturating_sub(marker_w + title.chars().count() + when.chars().count());
+            let mut top_spans: Vec<Span> = marker.into_iter().collect();
             top_spans.extend([
-                Span::styled(format!("#{id}"), Style::default().fg(app.theme.accent)),
+                Span::styled(
+                    title,
+                    Style::default()
+                        .fg(app.theme.fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" ".repeat(gap)),
                 Span::styled(when, dim),
             ]);
-            let top = Line::from(top_spans);
-            // title (truncated) with the model dimmed after it. A running
-            // compaction replaces the model suffix with an explicit label so
-            // the history picker doesn't make the user guess what ⟳ means.
-            let detail = if compacting_here {
-                "  ⟳ compacting…".to_string()
+            // Second line: slug (else a uuid prefix) · model, or an explicit
+            // label while compaction runs so ⟳ never needs guessing.
+            let slug = s
+                .slug
+                .clone()
+                .unwrap_or_else(|| format!("{}…", &s.id[..8.min(s.id.len())]));
+            let mut detail = if compacting_here {
+                format!("#{slug} · ⟳ compacting…")
             } else {
-                format!("  {}", s.model)
+                format!("#{slug} · {}", crate::ui::short_model_label(&s.model))
             };
-            let title =
-                chrome::truncate(&s.title, width.saturating_sub(detail.chars().count() + 1));
-            let body = Line::from(vec![
-                Span::styled(title, Style::default().fg(app.theme.fg)),
-                Span::styled(detail, dim),
-            ]);
-            ListItem::new(vec![top, body, Line::from("")])
+            if active_id.as_deref() == Some(s.id.as_str()) {
+                detail.push_str(" · open");
+            }
+            let body = Line::from(Span::styled(chrome::truncate(&detail, width), dim));
+            ListItem::new(vec![Line::from(top_spans), body, Line::from("")])
         })
         .collect();
 

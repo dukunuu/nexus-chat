@@ -460,7 +460,7 @@ fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
 /// backend named when it isn't `OpenRouter` — `local:org/Model-7B` reads as
 /// `Model-7B · local`. `OpenRouter` ids may contain `:` (`…:free`), so only a
 /// known backend prefix is split off.
-fn short_model_label(id: &str) -> String {
+pub(crate) fn short_model_label(id: &str) -> String {
     let (backend, rest) = match id.split_once(':') {
         Some((tag, rest)) if matches!(tag, "openai" | "opencode" | "go" | "codex" | "local") => {
             (Some(tag), rest)

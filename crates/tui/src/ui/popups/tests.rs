@@ -926,3 +926,44 @@ fn fit_line_ellipsizes_across_spans() {
     );
     assert_eq!(super::chrome::fit_line(line, 0).to_string(), "");
 }
+
+#[test]
+fn session_picker_leads_with_the_title_and_marks_the_open_session() {
+    let mut app = test_app();
+    let space = app.core.active_space.id.clone();
+    let a = app
+        .core
+        .db
+        .create_session(
+            "Japanese Fluency Roadmap",
+            "local:org/Big-Model-7B",
+            &space,
+            "chat",
+        )
+        .unwrap();
+    app.core
+        .db
+        .create_session(
+            "Pomodoro Effectiveness Research",
+            "a/one",
+            &space,
+            "research",
+        )
+        .unwrap();
+    app.core.session = Some(a);
+    app.open_session_picker().unwrap();
+    let screen = render_to_string(100, 40, |f| super::session::render(f, &mut app));
+    let title_row = screen
+        .lines()
+        .find(|l| l.contains("Japanese Fluency Roadmap"))
+        .unwrap_or_else(|| panic!("{screen}"));
+    let when = crate::ui::fmt_created(&app.core.sessions_cache[0].created_at);
+    assert!(
+        title_row.contains(&when),
+        "date beside the title:\n{screen}"
+    );
+    assert!(screen.contains("Big-Model-7B · local · open"), "{screen}");
+    // Emoji-marked rows (🔬) still end inside the frame, not over the border.
+    let research_row = screen.lines().find(|l| l.contains("Pomodoro")).unwrap();
+    assert!(research_row.trim_end().ends_with('│'), "{research_row}");
+}
