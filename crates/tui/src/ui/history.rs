@@ -50,6 +50,7 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
         render_welcome(f, app, area);
         return;
     }
+    app.welcome_targets.clear();
     let width = inner.width.max(1) as usize;
     sync_cache(app, width);
 
@@ -484,7 +485,7 @@ fn sync_cache(app: &mut AppView, width: usize) {
 /// The empty start screen: a rounded panel holding the gradient banner, a
 /// random greeting, a live clock, quick-start chips, and the most recent
 /// sessions.
-fn render_welcome(f: &mut Frame, app: &AppView, area: Rect) {
+fn render_welcome(f: &mut Frame, app: &mut AppView, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     // Per-line gradient across the accent ramp: accent -> accent2.
     let banner_lines: Vec<&str> = app.banner.lines().collect();
@@ -519,18 +520,21 @@ fn render_welcome(f: &mut Frame, app: &AppView, area: Rect) {
             &app.theme,
         ));
     }
-    // Most recent sessions across this space, as a quick-jump list.
+    // Most recent sessions across this space, as a quick-jump list: click a
+    // row or press Alt+1…4. Row indices are remembered to map clicks back.
+    let mut recent_rows: Vec<(usize, String)> = Vec::new();
     if let Ok(sessions) = app.db.list_sessions(&app.active_space.id) {
         let recent: Vec<_> = sessions.into_iter().take(4).collect();
         if !recent.is_empty() {
             lines.push(Line::from(""));
             let inner_w = area.width.saturating_sub(4) as usize;
             rule_line(&mut lines, "recent", inner_w, &app.theme);
-            for s in &recent {
+            for (i, s) in recent.iter().enumerate() {
                 let when = super::fmt_created(&s.created_at);
+                recent_rows.push((lines.len(), s.id.clone()));
                 lines.push(Line::from(vec![
                     Span::styled(
-                        "▸ ",
+                        format!("{} ", i + 1),
                         Style::default()
                             .fg(app.theme.accent)
                             .add_modifier(Modifier::BOLD),
@@ -538,6 +542,9 @@ fn render_welcome(f: &mut Frame, app: &AppView, area: Rect) {
                     Span::styled(s.title.clone(), Style::default().fg(app.theme.fg)),
                     Span::styled(format!("  {when}"), Style::default().fg(app.theme.fg_dim)),
                 ]));
+            }
+            if !app.settings.hide_hints {
+                lines.push(Line::from(dim("Alt+1–4 or click to reopen", &app.theme)));
             }
         }
     }
@@ -558,6 +565,13 @@ fn render_welcome(f: &mut Frame, app: &AppView, area: Rect) {
     let inner = block.inner(panel);
     f.render_widget(block, panel);
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+    app.welcome_targets = recent_rows
+        .into_iter()
+        .filter_map(|(row, id)| {
+            let y = inner.y + u16::try_from(row).ok()?;
+            (y < inner.bottom()).then(|| (Rect::new(inner.x, y, inner.width, 1), id))
+        })
+        .collect();
 }
 
 /// Linear blend between two colors at `t` in 0.0..=1.0.

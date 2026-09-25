@@ -47,6 +47,7 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("Ctrl+N", "new session"),
             ("Ctrl+Shift+N", "new incognito session"),
+            ("Alt+1–4", "reopen a recent session (start screen)"),
             ("Ctrl+G", "context breakdown"),
             ("Ctrl+↑", "live research view (while research runs)"),
         ],

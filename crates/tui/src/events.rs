@@ -516,6 +516,12 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
         // Kitty keyboard protocol, so it'd be unreachable on many of them.)
         KeyCode::Char('g') if ctrl => app.popup = Popup::Context,
         KeyCode::F(1) => app.open_help(),
+        // Alt+1…4 reopen the welcome screen's recent sessions.
+        KeyCode::Char(c @ '1'..='4')
+            if key.modifiers.contains(KeyModifiers::ALT) && !app.welcome_targets.is_empty() =>
+        {
+            app.open_welcome_session(c as usize - '1' as usize)?;
+        }
         // Ctrl+Backspace deletes the previous word. (Alt+Backspace and Ctrl+W
         // also do this via the editor's default keymap.)
         KeyCode::Backspace if ctrl => {
@@ -732,6 +738,13 @@ fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
                 app.activate_notification(index)?;
                 return Ok(());
             }
+            if let Some(n) = app
+                .welcome_targets
+                .iter()
+                .position(|(area, _)| area.contains(pos))
+            {
+                return app.open_welcome_session(n);
+            }
         }
         handle_input_mouse(app, m);
         return Ok(());
@@ -921,6 +934,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(app.session_selected, 0);
+    }
+
+    #[test]
+    fn welcome_recent_sessions_open_by_alt_digit_and_click() {
+        let mut app = test_app();
+        let space = app.core.active_space.id.clone();
+        for title in ["alpha", "bravo"] {
+            let s = app
+                .core
+                .db
+                .create_session(title, "a/one", &space, "chat")
+                .unwrap();
+            app.core.db.add_user_message(&s.id, "hi").unwrap();
+        }
+        let screen = draw(&mut app, 100, 40);
+        assert_eq!(app.welcome_targets.len(), 2, "{}", screen.join("\n"));
+        let second = app.welcome_targets[1].1.clone();
+
+        let alt2 = KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT);
+        handle_key(&mut app, alt2).unwrap();
+        assert_eq!(app.session.as_ref().map(|s| s.id.clone()), Some(second));
+
+        // A conversation is showing now: the stale welcome targets are gone.
+        draw(&mut app, 100, 40);
+        assert!(app.welcome_targets.is_empty());
+
+        // Back on the start screen, a click on the first row opens it.
+        app.new_session();
+        draw(&mut app, 100, 40);
+        let (rect, first) = app.welcome_targets[0].clone();
+        click(&mut app, rect.x + rect.width / 2, rect.y);
+        assert_eq!(app.session.as_ref().map(|s| s.id.clone()), Some(first));
     }
 
     #[test]

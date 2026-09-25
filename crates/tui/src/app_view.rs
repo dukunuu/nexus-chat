@@ -176,6 +176,9 @@ pub struct AppView {
     /// Whether tool-call blocks show full arguments/results (Ctrl+T).
     pub show_tool_detail: bool,
     pub notification_areas: Vec<(Rect, usize)>,
+    /// The welcome screen's recent-session rows from the last frame, as
+    /// (row rect, session id) — click targets, in `Alt+1…` order.
+    pub welcome_targets: Vec<(Rect, String)>,
     /// Start-screen banner (custom or built-in) and a greeting picked at launch.
     pub banner: String,
     pub greeting: &'static str,
@@ -233,6 +236,8 @@ fn load_background_mode(core: &App) -> BackgroundMode {
 }
 
 impl AppView {
+    // Long by design (one initializer per view-state field).
+    #[allow(clippy::too_many_lines)]
     pub fn new(mut core: App) -> Self {
         // `App::new` queues the launch status line as an event; seed the
         // view's status field from it so the first frame reads correctly.
@@ -323,6 +328,7 @@ impl AppView {
             session_caches: HashMap::new(),
             show_tool_detail: false,
             notification_areas: Vec::new(),
+            welcome_targets: Vec::new(),
             banner: nexus_core::config::load_banner()
                 .unwrap_or_else(|| BANNER.trim_matches('\n').to_string()),
             greeting: nexus_core::app::pick_greeting(),
@@ -533,5 +539,15 @@ impl AppView {
     /// overlap so the reader keeps their place.
     pub fn history_page(&self) -> usize {
         self.history_height.saturating_sub(2).max(1)
+    }
+}
+
+impl AppView {
+    /// Open the `n`th (0-based) recent session listed on the welcome screen.
+    pub fn open_welcome_session(&mut self, n: usize) -> anyhow::Result<()> {
+        let Some((_, id)) = self.welcome_targets.get(n).cloned() else {
+            return Ok(());
+        };
+        self.core.switch_to_session_by_id(&id)
     }
 }
