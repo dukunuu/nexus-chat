@@ -511,6 +511,9 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
         // Ctrl+↑ opens the live research-activity view (per-searcher
         // reasoning/tool calls) — only while a research job is running.
         KeyCode::Up if ctrl && app.research_rx.is_some() => app.open_research_live(),
+        // Alt+↑/↓ recall this session's sent messages into the composer.
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => app.recall_prev(),
+        KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => app.recall_next(),
         // Ctrl+G opens the context breakdown (system/memory/conversation/skills).
         // (Not Ctrl+I: that's the same byte as Tab on terminals without the
         // Kitty keyboard protocol, so it'd be unreachable on many of them.)

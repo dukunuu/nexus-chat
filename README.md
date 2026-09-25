@@ -336,6 +336,8 @@ Type `/` in the composer for autocomplete. Aliases in parentheses.
 | `Ctrl+Shift+C` / `Ctrl+X` | copy / cut composer selection |
 | `Ctrl+A` | select all in composer |
 | `Ctrl+Backspace` | delete previous word |
+| `Alt+↑` / `Alt+↓` | recall messages you sent this session |
+| `Alt+1`–`Alt+4` | reopen a recent session from the start screen |
 | `Ctrl+R` | expand/collapse reasoning traces |
 | `Ctrl+T` | expand/collapse tool-call detail blocks |
 | `Ctrl+G` | context breakdown (system/memory/skills/conversation) |

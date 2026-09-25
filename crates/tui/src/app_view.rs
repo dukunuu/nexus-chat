@@ -62,6 +62,10 @@ pub struct AppView {
     pub composer_word_anchor: Option<(usize, usize)>,
     /// Highlighted row in the slash-command autocomplete popup.
     pub cmd_selected: usize,
+    /// Alt+↑/↓ recall: how far back (0 = newest) through this session's sent
+    /// messages, and the draft stashed when recall started.
+    pub recall: Option<usize>,
+    pub recall_draft: String,
     /// `@` file autocomplete: (matches, selected, cursor byte offset of `@`).
     pub at_state: Option<(Vec<FileRow>, usize, usize)>,
 
@@ -260,6 +264,8 @@ impl AppView {
             composer_click_count: 0,
             composer_word_anchor: None,
             cmd_selected: 0,
+            recall: None,
+            recall_draft: String::new(),
             at_state: None,
             popup: Popup::None,
             spaces_cache: Vec::new(),

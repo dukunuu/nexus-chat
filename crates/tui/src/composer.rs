@@ -468,10 +468,59 @@ impl AppView {
         *selected = (*selected as i32 + delta).rem_euclid(n) as usize;
     }
 
+    /// Alt+↑: replace the composer with the previous message this session
+    /// sent, stashing the current draft on the first step.
+    pub fn recall_prev(&mut self) {
+        let sent: Vec<String> = self
+            .core
+            .messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .collect();
+        if sent.is_empty() {
+            return;
+        }
+        let back = self.recall.map_or(0, |i| (i + 1).min(sent.len() - 1));
+        if self.recall.is_none() {
+            self.recall_draft = self.input_text();
+        }
+        self.recall = Some(back);
+        self.set_input(&sent[sent.len() - 1 - back]);
+    }
+
+    /// Alt+↓: step forward through recalled messages, back to the stashed
+    /// draft past the newest one.
+    pub fn recall_next(&mut self) {
+        match self.recall {
+            None => {}
+            Some(0) => {
+                self.recall = None;
+                let draft = std::mem::take(&mut self.recall_draft);
+                self.set_input(&draft);
+            }
+            Some(i) => {
+                self.recall = Some(i - 1);
+                let sent: Vec<&str> = self
+                    .core
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == "user")
+                    .map(|m| m.content.as_str())
+                    .collect();
+                if let Some(text) = sent.len().checked_sub(i).and_then(|n| sent.get(n)) {
+                    let text = (*text).to_string();
+                    self.set_input(&text);
+                }
+            }
+        }
+    }
+
     /// Send the composer's current text (Enter): clear, then route through
     /// `run_command` for `/`-commands or `Send` for plain messages. Domain
     /// failure paths restore the text via `AppEvent::ComposerSet`.
     pub fn submit(&mut self) -> Result<()> {
+        self.recall = None;
         let text = self.input_text();
         self.clear_input();
         self.sel.clear(); // history line indices are about to shift
@@ -812,5 +861,36 @@ mod tests {
         a.run_command("watch rust async").unwrap();
         assert!(a.last_status().contains("research session"));
         assert!(a.popup == Popup::None);
+    }
+
+    #[test]
+    fn alt_arrows_recall_sent_messages_and_restore_the_draft() {
+        let mut a = test_app();
+        let user = |content: &str| nexus_core::db::Message {
+            role: "user".into(),
+            content: content.into(),
+            model: None,
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            cost: None,
+            phrase: None,
+            persona: None,
+            created_at: None,
+        };
+        a.core.messages = vec![user("first"), user("second")];
+        a.set_input("half-typed");
+        a.recall_prev();
+        assert_eq!(a.input_text(), "second");
+        a.recall_prev();
+        assert_eq!(a.input_text(), "first");
+        a.recall_prev();
+        assert_eq!(a.input_text(), "first", "stops at the oldest");
+        a.recall_next();
+        assert_eq!(a.input_text(), "second");
+        a.recall_next();
+        assert_eq!(a.input_text(), "half-typed", "the draft comes back");
+        a.recall_next();
+        assert_eq!(a.input_text(), "half-typed");
     }
 }

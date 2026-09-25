@@ -26,6 +26,7 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+A · Ctrl+X", "select all · cut"),
             ("Ctrl+Shift+C · Ctrl+V", "copy selection · paste"),
             ("Ctrl+Backspace", "delete the previous word"),
+            ("Alt+↑/↓", "recall messages you sent this session"),
             ("Ctrl+C", "back out one step; twice to quit"),
         ],
     ),
