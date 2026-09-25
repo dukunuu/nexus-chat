@@ -1001,3 +1001,15 @@ fn files_popup_title_shows_every_tab() {
         assert!(screen.contains("files · images · scripts"), "{screen}");
     }
 }
+
+#[test]
+fn status_badge_keeps_the_backend_tag_when_shortened() {
+    let long = "Ternary-Bonsai-2-27B-mlx-2bit · local";
+    let fitted = crate::ui::fit_badge("", long, 24);
+    assert_eq!(fitted.chars().count(), 24);
+    assert!(fitted.ends_with(" · local"), "{fitted}");
+    assert_eq!(
+        crate::ui::fit_badge("[work] ", "gpt-5.5", 40),
+        "[work] gpt-5.5"
+    );
+}

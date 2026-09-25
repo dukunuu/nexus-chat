@@ -405,8 +405,9 @@ fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
     // Model badge (accent bold), capped so a long id can't push the status
     // off-screen; then the optional context gauge; then numbers + status.
     let badge_max = (area.width as usize * 2 / 5).max(12);
-    let badge_s = popups::chrome::truncate(
-        &format!("{space_tag}{incog_tag}{web_tag}{model}"),
+    let badge_s = fit_badge(
+        &format!("{space_tag}{incog_tag}{web_tag}"),
+        &model,
         badge_max,
     );
     let badge_w = badge_s.chars().count() as u16;
@@ -454,6 +455,23 @@ fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
         ))),
         cols[2],
     );
+}
+
+/// `prefix` + `model` within `max` chars. A too-long label shortens the model
+/// name but keeps its ` · backend` tag, which is the part that disambiguates.
+fn fit_badge(prefix: &str, model: &str, max: usize) -> String {
+    let full = format!("{prefix}{model}");
+    if full.chars().count() <= max {
+        return full;
+    }
+    let (name, tag) = model
+        .rsplit_once(" · ")
+        .map_or((model, String::new()), |(n, t)| (n, format!(" · {t}")));
+    let room = max.saturating_sub(prefix.chars().count() + tag.chars().count());
+    if room < 4 {
+        return popups::chrome::truncate(&full, max);
+    }
+    format!("{prefix}{}{tag}", popups::chrome::truncate(name, room))
 }
 
 /// The status-bar name for a model id: the last path segment, with the
