@@ -29,6 +29,10 @@ pub const STANDARD: (u16, u16) = (64, 60);
 pub const TALL: (u16, u16) = (64, 74);
 pub const WIDE: (u16, u16) = (78, 66);
 
+/// Horizontal padding inside every popup frame, in cells per side. Row-width
+/// math that starts from a popup's outer width subtracts `2 * PAD`.
+pub const PAD: u16 = 1;
+
 /// Frame tone: Normal (focused border brightens) or Danger (error-colored
 /// border, for destructive confirm states — matches `danger_title`).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -56,6 +60,7 @@ pub fn popup_block_focused<'a>(
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border))
         .style(theme.background_style())
+        .padding(ratatui::widgets::Padding::horizontal(PAD))
         .title(title)
 }
 

@@ -38,7 +38,10 @@ pub fn render(f: &mut Frame, app: &AppView) {
             .iter()
             .map(|o| {
                 ListItem::new(Line::from(Span::styled(
-                    chrome::truncate(&o.label, (area.width.saturating_sub(5)) as usize),
+                    chrome::truncate(
+                        &o.label,
+                        (area.width.saturating_sub(5 + 2 * chrome::PAD)) as usize,
+                    ),
                     Style::default().fg(app.theme.fg),
                 )))
             })

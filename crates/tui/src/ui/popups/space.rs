@@ -36,7 +36,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 crate::ui::fmt_created(&s.created_at)
             );
             // border 2 + scrollbar 1 + highlight 2
-            let content_w = area.width.saturating_sub(5) as usize;
+            let content_w = area.width.saturating_sub(5 + 2 * chrome::PAD) as usize;
             let name = chrome::truncate(&base, content_w.saturating_sub(meta.chars().count() + 1));
             let line = Line::from(vec![
                 Span::styled(format!("{mark}{name}"), Style::default().fg(app.theme.fg)),

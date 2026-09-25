@@ -23,7 +23,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
         app.watches_cache
             .iter()
             .map(|w| {
-                let width = area.width.saturating_sub(6) as usize;
+                let width = area.width.saturating_sub(6 + 2 * chrome::PAD) as usize;
                 let last_run = match &w.last_run_at {
                     Some(t) => crate::ui::fmt_created(t),
                     None => "never".to_string(),
@@ -69,7 +69,10 @@ pub fn render(f: &mut Frame, app: &AppView) {
                     state,
                 ]);
                 let meta = format!("every {}h · last run: {last_run}", w.interval_hours);
-                let meta = chrome::truncate(&meta, (area.width.saturating_sub(4)) as usize);
+                let meta = chrome::truncate(
+                    &meta,
+                    (area.width.saturating_sub(4 + 2 * chrome::PAD)) as usize,
+                );
                 ListItem::new(vec![
                     top,
                     Line::from(Span::styled(meta, dim)),

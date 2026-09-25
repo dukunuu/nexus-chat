@@ -77,7 +77,7 @@ fn local_popup_lists_runtimes_with_discovery_and_endpoint() {
     // Given the room, ownership and the endpoint follow the warning.
     let wide = render_to_string(120, 30, |f| super::local::render(f, &app));
     assert!(
-        wide.contains("● 4.2 GB · ⚠ over budget · started here · http://localhost:80"),
+        wide.contains("● 4.2 GB · ⚠ over budget · started here · http://localhos…"),
         "{wide}"
     );
 
@@ -876,6 +876,10 @@ fn short_model_label_keeps_openrouter_suffixes() {
         "gpt-5.5 · codex"
     );
     assert_eq!(
+        crate::ui::short_model_label("opencode:go:deepseek-v4-flash"),
+        "deepseek-v4-flash · go"
+    );
+    assert_eq!(
         crate::ui::short_model_label("local:mlx-community/Qwen3-8B"),
         "Qwen3-8B · local"
     );
@@ -900,15 +904,18 @@ fn status_line_expires_after_its_ttl() {
 
 #[test]
 fn an_open_popup_dims_the_screen_behind_it_but_not_itself() {
-    use ratatui::style::Modifier;
     let mut app = test_app();
     app.open_help();
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-    let buffer = terminal.backend().buffer();
-    // Corner cell: behind the popup. Center cell: inside it.
-    assert!(buffer[(0, 0)].modifier.contains(Modifier::DIM));
-    assert!(!buffer[(50, 20)].modifier.contains(Modifier::DIM));
+    let buf = terminal.backend().buffer();
+    // Corner cell: behind the popup, receded. Center cell: inside it.
+    assert_eq!(buf[(0, 0)].fg, app.theme.border_dim);
+    let inside = (0..100)
+        .map(|x| buf[(x, 20)].fg)
+        .filter(|c| *c != app.theme.border_dim)
+        .count();
+    assert!(inside > 0, "popup text stays bright");
 }
 
 #[test]
@@ -1102,7 +1109,12 @@ fn notification_toasts_hug_their_content() {
         "toast sized to its text, got {}",
         rect.width
     );
-    assert_eq!(rect.x + rect.width, 119, "flush with the pane's right edge");
+    let col = crate::ui::reading_column(ratatui::layout::Rect::new(0, 0, 120, 30));
+    assert_eq!(
+        rect.x + rect.width,
+        col.right() - 1,
+        "flush with the column's edge, clear of the scrollbar gutter"
+    );
     let buf = terminal.backend().buffer();
     let row: String = (rect.x..rect.x + rect.width)
         .map(|x| buf[(x, rect.y)].symbol())

@@ -47,7 +47,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
                     .app_url(name)
                     .unwrap_or_else(|| "server not running".to_string());
                 let meta = format!("{n} file{} · {url}", if n == 1 { "" } else { "s" });
-                let content_w = (area.width.saturating_sub(5)) as usize;
+                let content_w = (area.width.saturating_sub(5 + 2 * chrome::PAD)) as usize;
                 let short = chrome::truncate(name, content_w.saturating_sub(1));
                 let meta = chrome::truncate(&meta, content_w.saturating_sub(3));
                 ListItem::new(vec![

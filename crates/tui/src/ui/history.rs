@@ -1137,7 +1137,8 @@ mod tests {
         terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
     ) -> Vec<(String, ratatui::style::Color)> {
         let buf = terminal.backend().buffer();
-        let x = buf.area.width - 1;
+        // The scrollbar gutter is the reading column's last cell.
+        let x = crate::ui::reading_column(buf.area).right() - 1;
         (0..buf.area.height)
             .map(|y| (buf[(x, y)].symbol().to_string(), buf[(x, y)].fg))
             .collect()
@@ -1235,7 +1236,8 @@ mod tests {
         // The pane's bottom row shows the last rendered line of the message
         // (its trailing blank card row) — nothing is cut off below it.
         let buf = terminal.backend().buffer();
-        let bottom_row: String = (0..buf.area.width - 1)
+        let col = crate::ui::reading_column(buf.area);
+        let bottom_row: String = (col.x..col.right() - 1)
             .map(|x| buf[(x, HISTORY_H as u16 - 1)].symbol().to_string())
             .collect();
         assert!(

@@ -49,7 +49,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
             } else {
                 Span::styled("○ no key", dim)
             };
-            let width = area.width.saturating_sub(6) as usize;
+            let width = area.width.saturating_sub(6 + 2 * chrome::PAD) as usize;
             let name =
                 chrome::truncate(name, width.saturating_sub(chip.content.chars().count() + 2));
             let pad = width.saturating_sub(name.chars().count() + chip.content.chars().count() + 2);

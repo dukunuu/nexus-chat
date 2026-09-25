@@ -41,10 +41,13 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         f.area(),
     );
 
+    // Transcript, composer, and status share one reading column.
+    let column = reading_column(f.area());
+
     // Grow the input box with its wrapped content (1–20 rows) plus 2 for the
     // border. `measure` wants the width the widget renders at: inside the
     // border and its one-column padding on each side.
-    let inner_w = f.area().width.saturating_sub(4);
+    let inner_w = column.width.saturating_sub(4);
     let content_rows = app.input.measure(inner_w).preferred_rows;
     let input_h = content_rows.saturating_add(2);
 
@@ -55,7 +58,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
             Constraint::Length(input_h), // input (auto-height, max 22)
             Constraint::Length(1),       // status (with inline context bar)
         ])
-        .split(f.area());
+        .split(column);
 
     render_history(f, app, chunks[0]);
     render_input(f, app, chunks[1]);
@@ -69,12 +72,17 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         app.notification_areas.clear();
     }
 
-    // Dim everything behind an open popup so the modal reads as the focus
-    // (every popup clears its own rect first, so it stays at full strength).
+    // Recede everything behind an open popup into the quiet border color, so
+    // the modal reads as the focus even on a transparent terminal (every
+    // popup clears its own rect first, so it stays at full strength).
     if app.popup != Popup::None {
         let area = f.area();
-        f.buffer_mut()
-            .set_style(area, Style::default().add_modifier(Modifier::DIM));
+        f.buffer_mut().set_style(
+            area,
+            Style::default()
+                .fg(app.theme.border_dim)
+                .remove_modifier(Modifier::BOLD),
+        );
     }
 
     match app.popup {
@@ -96,6 +104,30 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         Popup::Local => popups::local::render(f, app),
         Popup::Help => popups::help::render(f, app),
         Popup::None => {}
+    }
+}
+
+/// Widest the reading column gets. Past this, lines get too long to read
+/// comfortably, so wide terminals center the column instead of stretching.
+const COLUMN_MAX: u16 = 112;
+
+/// The centered column the conversation lives in: `COLUMN_MAX` wide on big
+/// terminals, else the full width minus a one-column margin each side.
+pub(crate) fn reading_column(area: Rect) -> Rect {
+    if area.width > COLUMN_MAX + 2 {
+        Rect {
+            x: area.x + (area.width - COLUMN_MAX) / 2,
+            width: COLUMN_MAX,
+            ..area
+        }
+    } else if area.width > 40 {
+        Rect {
+            x: area.x + 1,
+            width: area.width - 2,
+            ..area
+        }
+    } else {
+        area
     }
 }
 

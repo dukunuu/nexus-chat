@@ -104,7 +104,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
             } else {
                 Span::styled("○", dim)
             };
-            let width = area.width.saturating_sub(6) as usize;
+            let width = area.width.saturating_sub(6 + 2 * chrome::PAD) as usize;
             let name = chrome::truncate(
                 &name,
                 width.saturating_sub(chip.content.chars().count() + 2),
@@ -134,11 +134,11 @@ pub fn render(f: &mut Frame, app: &AppView) {
             ListItem::new(vec![
                 top,
                 Line::from(Span::styled(
-                    format!("  {}", chrome::truncate(&hint, width)),
+                    format!("  {}", chrome::truncate(&hint, width.saturating_sub(2))),
                     dim,
                 )),
                 Line::from(Span::styled(
-                    format!("  {}", chrome::truncate(&server, width)),
+                    format!("  {}", chrome::truncate(&server, width.saturating_sub(2))),
                     server_style,
                 )),
             ])

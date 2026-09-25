@@ -18,7 +18,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
             &app.theme,
         )]
     } else {
-        let width = area.width.saturating_sub(5) as usize;
+        let width = area.width.saturating_sub(5 + 2 * chrome::PAD) as usize;
         app.skills
             .iter()
             .map(|s| {

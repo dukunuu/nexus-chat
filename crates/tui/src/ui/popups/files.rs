@@ -67,7 +67,7 @@ fn render_files(f: &mut Frame, app: &AppView) {
         let items: Vec<ListItem> = entries
             .iter()
             .map(|e| {
-                let max = (area.width.saturating_sub(5)) as usize;
+                let max = (area.width.saturating_sub(5 + 2 * chrome::PAD)) as usize;
                 if e.is_dir {
                     ListItem::new(Line::from(Span::styled(
                         chrome::truncate(&format!("{}/", e.name), max),
@@ -105,7 +105,7 @@ fn render_files(f: &mut Frame, app: &AppView) {
     }
 
     let dim = Style::default().fg(app.theme.fg_dim);
-    let content_w = (area.width.saturating_sub(5)) as usize; // border + scrollbar + highlight
+    let content_w = (area.width.saturating_sub(5 + 2 * chrome::PAD)) as usize; // border + scrollbar + highlight
     let items: Vec<ListItem> = app
         .files_cache
         .iter()
@@ -193,7 +193,7 @@ fn render_images(f: &mut Frame, app: &AppView) {
                 let meta = format!("  {}  {created}", nexus_core::app::human_size(img.size));
                 let name = chrome::truncate_middle(
                     &img.name,
-                    (area.width.saturating_sub(5) as usize)
+                    (area.width.saturating_sub(5 + 2 * chrome::PAD) as usize)
                         .saturating_sub(meta.chars().count() + 1),
                 );
                 ListItem::new(Line::from(vec![
@@ -281,7 +281,8 @@ fn render_scripts(f: &mut Frame, app: &AppView) {
             let meta = format!("  {}  {created}", nexus_core::app::human_size(s.size));
             let name = chrome::truncate_middle(
                 &s.name,
-                (area.width.saturating_sub(5) as usize).saturating_sub(meta.chars().count() + 1),
+                (area.width.saturating_sub(5 + 2 * chrome::PAD) as usize)
+                    .saturating_sub(meta.chars().count() + 1),
             );
             ListItem::new(Line::from(vec![
                 Span::styled(name, Style::default().fg(app.theme.fg)),

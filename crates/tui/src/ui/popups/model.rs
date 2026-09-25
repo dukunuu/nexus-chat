@@ -49,7 +49,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         fav_focused,
         chrome::Tone::Normal,
     );
-    let fav_items = model_items(app, &app.favorite_models(), row_width(fav_inner));
+    let fav_items = model_items(app, &app.favorite_models(), row_width(fav_inner), true);
     let fav_total = app.favorite_models().len();
     // Core keeps selection as plain indices; the widget state is render-local.
     let mut fav_state = ListState::default();
@@ -97,7 +97,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         !fav_focused,
         chrome::Tone::Normal,
     );
-    let avail_items = model_items(app, &app.available_models(), row_width(avail_inner));
+    let avail_items = model_items(app, &app.available_models(), row_width(avail_inner), false);
     let avail_total = app.available_models().len();
     let mut avail_state = ListState::default();
     avail_state.select(Some(app.avail_selected));
@@ -124,20 +124,32 @@ fn row_width(inner: Rect) -> usize {
 const VISION_W: usize = 2;
 const CTX_W: usize = 7;
 
-fn model_items(app: &AppView, models: &[&Model], width: usize) -> Vec<ListItem<'static>> {
+/// `short` shows the compact `name · backend` label (favorites, where the
+/// model is already known) instead of the full searchable id.
+fn model_items(
+    app: &AppView,
+    models: &[&Model],
+    width: usize,
+    short: bool,
+) -> Vec<ListItem<'static>> {
     models
         .iter()
         .map(|m| {
-            let mut id = nexus_core::app::composite_id(m);
-            let marker = if app.favorites.contains(&id) {
+            let key = nexus_core::app::composite_id(m);
+            let mut id = if short {
+                crate::ui::short_model_label(&key)
+            } else {
+                key.clone()
+            };
+            let marker = if app.favorites.contains(&key) {
                 "★ "
-            } else if app.last_used.contains_key(&id) {
+            } else if app.last_used.contains_key(&key) {
                 "• "
             } else {
                 "  "
             };
             // Reasoning badge: [r:high] if set, [r] if supported but off.
-            let badge = match app.reasoning_of(&id) {
+            let badge = match app.reasoning_of(&key) {
                 Some("none") => "  [r:off]".to_string(),
                 Some(effort) => format!("  [r:{effort}]"),
                 None if !m.reasoning_efforts.is_empty() => "  [r]".to_string(),
@@ -170,13 +182,16 @@ fn model_items(app: &AppView, models: &[&Model], width: usize) -> Vec<ListItem<'
 pub fn model_popup_areas(screen: Rect) -> (Rect, Rect) {
     let outer = crate::ui::centered(screen, 82, 74);
     let cols =
-        Layout::horizontal([Constraint::Percentage(36), Constraint::Percentage(64)]).split(outer);
+        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(outer);
     (cols[0], cols[1])
 }
 
 /// The clickable list area inside a bordered popup column.
 pub fn list_inner(outer: Rect) -> Rect {
-    Block::default().borders(Borders::ALL).inner(outer)
+    Block::default()
+        .borders(Borders::ALL)
+        .padding(ratatui::widgets::Padding::horizontal(chrome::PAD))
+        .inner(outer)
 }
 
 pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {

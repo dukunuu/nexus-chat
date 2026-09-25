@@ -23,7 +23,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
         app.swarm_cache
             .iter()
             .map(|p| {
-                let content_w = (area.width.saturating_sub(5)) as usize;
+                let content_w = (area.width.saturating_sub(5 + 2 * chrome::PAD)) as usize;
                 let name = chrome::truncate(
                     &p.name,
                     content_w.saturating_sub(p.model.chars().count() + 3),
