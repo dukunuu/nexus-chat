@@ -25,7 +25,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
         f,
         area,
         chrome::popup_title(app, "🔑", "login"),
-        "↑↓ · PgUp/Dn · Enter pick · Esc close",
+        "↑↓ · Enter pick · Esc close",
         app,
         true,
         chrome::Tone::Normal,

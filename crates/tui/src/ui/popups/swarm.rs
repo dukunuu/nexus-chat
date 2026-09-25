@@ -68,7 +68,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
             "Ctrl+N add · Ctrl+G toggle · Ctrl+X stop".to_string()
         }
         SwarmPopupMode::Browse => format!(
-            "{}↑↓ · Enter edit · Ctrl+N add · Ctrl+G toggle · Ctrl+M model · Ctrl+D remove · Ctrl+X stop",
+            "{}↑↓ · Enter edit · Ctrl+N add · Ctrl+G toggle · m model · Ctrl+D remove · Ctrl+X stop",
             chrome::count_hint(app.swarm_cache.len(), "persona")
         ),
     };
@@ -97,7 +97,9 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
             None => {}
         },
         SwarmPopupMode::Browse => {
-            if key.code == KeyCode::Char('m') && ctrl {
+            // Plain `m` (browse mode types nothing): Ctrl+M is the same byte
+            // as Enter on terminals without the kitty keyboard protocol.
+            if key.code == KeyCode::Char('m') {
                 if !app.swarm_cache.is_empty() {
                     app.open_model_picker_for_swarm_persona(app.swarm_selected);
                 }

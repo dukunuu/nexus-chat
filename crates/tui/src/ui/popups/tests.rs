@@ -1034,3 +1034,34 @@ fn context_popup_fits_its_content_and_ctrl_g_closes_it() {
     super::context::handle_key(&mut app, ctrl_g);
     assert!(app.popup == nexus_core::app::Popup::None);
 }
+
+#[test]
+fn research_steer_input_ignores_ctrl_chords() {
+    let mut app = test_app();
+    app.popup = nexus_core::app::Popup::ResearchLive;
+    let key = |c, m| crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char(c), m);
+    super::research_live::handle_key(&mut app, key('a', crossterm::event::KeyModifiers::CONTROL));
+    super::research_live::handle_key(&mut app, key('b', crossterm::event::KeyModifiers::NONE));
+    assert_eq!(app.core.research_live_input, "b");
+}
+
+// Async: an empty catalog makes the picker kick off a model fetch.
+#[tokio::test]
+async fn plain_m_opens_the_swarm_persona_model_picker() {
+    let mut app = test_app();
+    app.core.swarm_cache = vec![nexus_core::db::Persona {
+        name: "Critic".into(),
+        model: "a/one".into(),
+        blurb: "pokes holes".into(),
+    }];
+    app.popup = nexus_core::app::Popup::Swarm;
+    super::swarm::handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('m')),
+    )
+    .unwrap();
+    assert!(matches!(
+        app.core.model_pick_target,
+        nexus_core::app::ModelPickTarget::SwarmPersona(0)
+    ));
+}

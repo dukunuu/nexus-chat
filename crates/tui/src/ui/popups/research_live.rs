@@ -98,7 +98,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
             app,
             "research agents · steer",
             &app.research_live_input,
-            "type instruction · Enter send · Ctrl+↑ agents · Ctrl+X stop · Esc close",
+            "type instruction · Enter send · Ctrl+X stop · Esc close",
         ),
         &app.theme,
         true,
@@ -126,7 +126,14 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) {
         KeyCode::Backspace => {
             app.research_live_input.pop();
         }
-        KeyCode::Char(c) => app.research_live_input.push(c),
+        // Unbound Ctrl/Alt chords must not type their letter into the steer.
+        KeyCode::Char(c)
+            if !key.modifiers.intersects(
+                crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+            ) =>
+        {
+            app.research_live_input.push(c);
+        }
         _ => {}
     }
 }

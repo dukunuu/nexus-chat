@@ -157,7 +157,7 @@ fn render_files(f: &mut Frame, app: &AppView) {
         FilesMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
         FilesMode::Browse if app.files_cache.is_empty() => "Ctrl+N add · Tab tab".to_string(),
         FilesMode::Browse => format!(
-            "{}↑↓ · Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+D remove · Tab tab",
+            "{}↑↓ · Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+D remove · Ctrl+O re-extract · Ctrl+F OCR · Tab tab",
             chrome::count_hint(app.files_cache.len(), "file")
         ),
         FilesMode::Pick => String::new(),
