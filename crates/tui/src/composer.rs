@@ -543,15 +543,17 @@ impl AppView {
             }
             AppCommand::OpenUsage => self.open_usage_popup(),
             AppCommand::OpenHelp => self.open_help(),
-            AppCommand::Watch { topic } => {
-                if !self.core.is_research_session() {
-                    self.push_status(
-                        "watch is only available in research sessions — use /research first",
-                    );
-                } else if let Some(t) = topic {
+            // The picker (browse/open/delete watches) works anywhere; creating
+            // one starts research, which from a plain chat would migrate the
+            // conversation — so that part stays research-session-only.
+            AppCommand::Watch { topic: None } => self.open_watch_picker()?,
+            AppCommand::Watch { topic: Some(t) } => {
+                if self.core.is_research_session() {
                     self.core.create_watch(&t);
                 } else {
-                    self.open_watch_picker()?;
+                    self.push_status(
+                        "new watches start from a research session — use /research first",
+                    );
                 }
             }
             other => self.core.execute(other)?,
@@ -796,5 +798,19 @@ mod tests {
         // Non-subsequence garbage matches nothing.
         a.set_input("/zzzz");
         assert!(a.command_matches().is_empty());
+    }
+
+    #[test]
+    fn watch_picker_opens_anywhere_but_new_watches_need_research() {
+        let mut a = test_app();
+        a.run_command("watch").unwrap();
+        assert!(
+            a.popup == Popup::Watch,
+            "the picker needs no research session"
+        );
+        a.popup = Popup::None;
+        a.run_command("watch rust async").unwrap();
+        assert!(a.last_status().contains("research session"));
+        assert!(a.popup == Popup::None);
     }
 }
