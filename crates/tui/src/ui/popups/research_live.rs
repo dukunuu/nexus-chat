@@ -127,13 +127,7 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) {
             app.research_live_input.pop();
         }
         // Unbound Ctrl/Alt chords must not type their letter into the steer.
-        KeyCode::Char(c)
-            if !key.modifiers.intersects(
-                crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
-            ) =>
-        {
-            app.research_live_input.push(c);
-        }
+        KeyCode::Char(c) if !super::is_chord(key) => app.research_live_input.push(c),
         _ => {}
     }
 }

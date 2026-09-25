@@ -63,7 +63,7 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => app.popup = Popup::Login,
         KeyCode::Enter => app.confirm_key(),
-        KeyCode::Char(c) => app.key_input.push(c),
+        KeyCode::Char(c) if !super::is_chord(key) => app.key_input.push(c),
         KeyCode::Backspace => {
             app.key_input.pop();
         }

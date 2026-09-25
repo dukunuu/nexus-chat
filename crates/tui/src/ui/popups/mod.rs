@@ -106,9 +106,16 @@ pub(super) const fn classify_edit_key(key: KeyEvent) -> Option<EditAction> {
         KeyCode::Esc => Some(EditAction::Cancel),
         KeyCode::Enter => Some(EditAction::Save),
         KeyCode::Backspace => Some(EditAction::Backspace),
-        KeyCode::Char(c) => Some(EditAction::Push(c)),
+        // An unbound Ctrl/Alt chord is not text.
+        KeyCode::Char(c) if !is_chord(key) => Some(EditAction::Push(c)),
         _ => None,
     }
+}
+
+/// Whether a key carries Ctrl or Alt — a shortcut, never typed text.
+pub(super) const fn is_chord(key: KeyEvent) -> bool {
+    key.modifiers
+        .intersects(KeyModifiers::CONTROL.union(KeyModifiers::ALT))
 }
 
 /// Actions available while a delete confirmation is showing. Identical

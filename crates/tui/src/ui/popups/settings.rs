@@ -195,7 +195,7 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
         KeyCode::Home => app.move_settings_selection(i32::MIN / 2),
         KeyCode::End => app.move_settings_selection(i32::MAX / 2),
         KeyCode::Char(' ') => app.toggle_settings_field(),
-        KeyCode::Char(c) => app.settings_input_char(c),
+        KeyCode::Char(c) if !super::is_chord(key) => app.settings_input_char(c),
         KeyCode::Backspace => app.settings_input_backspace(),
         _ => {}
     }

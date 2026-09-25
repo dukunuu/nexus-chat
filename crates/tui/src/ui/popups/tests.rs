@@ -1065,3 +1065,15 @@ async fn plain_m_opens_the_swarm_persona_model_picker() {
         nexus_core::app::ModelPickTarget::SwarmPersona(0)
     ));
 }
+
+#[test]
+fn edit_fields_ignore_ctrl_and_alt_chords() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let key = |m| KeyEvent::new(KeyCode::Char('a'), m);
+    assert!(super::classify_edit_key(key(KeyModifiers::CONTROL)).is_none());
+    assert!(super::classify_edit_key(key(KeyModifiers::ALT)).is_none());
+    assert!(matches!(
+        super::classify_edit_key(key(KeyModifiers::SHIFT)),
+        Some(super::EditAction::Push('a'))
+    ));
+}
