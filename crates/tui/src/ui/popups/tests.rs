@@ -844,7 +844,7 @@ fn status_bar_names_the_model_and_keeps_the_space_tag_beside_the_gauge() {
     app.settings.show_stats = true;
     app.status = "ready".into();
     let screen = render_to_string(100, 1, |f| {
-        crate::ui::render_status(f, &app, f.area());
+        crate::ui::status::render_status(f, &app, f.area());
     });
     assert!(
         screen.contains("◆ Big-Model-7B · local · ⌂ work"),
@@ -860,7 +860,7 @@ fn status_bar_names_the_model_and_keeps_the_space_tag_beside_the_gauge() {
     // A status too long for the bar ends in an ellipsis instead of a cut.
     app.status = "x".repeat(200);
     let screen = render_to_string(100, 1, |f| {
-        crate::ui::render_status(f, &app, f.area());
+        crate::ui::status::render_status(f, &app, f.area());
     });
     assert!(screen.contains('…'), "{screen}");
 }
@@ -1012,11 +1012,11 @@ fn files_popup_title_shows_every_tab() {
 #[test]
 fn status_badge_keeps_the_backend_tag_when_shortened() {
     let long = "Ternary-Bonsai-2-27B-mlx-2bit · local";
-    let fitted = crate::ui::fit_badge("", long, 24);
+    let fitted = crate::ui::status::fit_badge("", long, 24);
     assert_eq!(fitted.chars().count(), 24);
     assert!(fitted.ends_with(" · local"), "{fitted}");
     assert_eq!(
-        crate::ui::fit_badge("[work] ", "gpt-5.5", 40),
+        crate::ui::status::fit_badge("[work] ", "gpt-5.5", 40),
         "[work] gpt-5.5"
     );
 }
