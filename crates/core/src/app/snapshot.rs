@@ -1,7 +1,5 @@
-//! The serde-shaped view of app state the Phase 4 nexus host API will
-//! consume: sessions, models, settings, tasks. Designed now so the wire
-//! shape is stable before the API lands; the TUI does not consume this
-//! (it reads fields directly until 2e).
+//! The serde-shaped view of app state the `nexus host` API serves: sessions,
+//! models, settings, tasks. The TUI reads domain state directly instead.
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -150,7 +148,7 @@ impl App {
             })
     }
 
-    /// Serde-shaped state for API consumers (the Phase 4 host). Sessions
+    /// Serde-shaped state for API consumers (the host). Sessions
     /// come from the picker cache when loaded, else a fresh db read — a
     /// failed read is an error, never a silently-empty session list.
     pub fn snapshot(&self) -> Result<CoreSnapshot> {
@@ -238,7 +236,7 @@ impl App {
 mod tests {
     use super::*;
 
-    /// Phase 5 clients (web/mobile/`--remote`) parse `CoreSnapshot` `JSON`
+    /// Clients (web/mobile/`--remote`) parse `CoreSnapshot` `JSON`
     /// — this golden string locks the wire shape so a field rename or
     /// reorder can never silently break a client. Update it deliberately
     /// when the shape changes.

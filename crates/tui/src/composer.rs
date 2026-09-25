@@ -1,8 +1,6 @@
-//! The composer half of the old core `input.rs` (2e split): everything that
-//! operates on the view-owned `TextArea` — text editing, OS-clipboard
+//! The composer: text editing on the view-owned `TextArea`, OS-clipboard
 //! cut/copy/paste, slash-command autocomplete, and `@`-file autocomplete.
-//! The pure command catalog (`COMMANDS`, `fuzzy_score`) stayed in core
-//! (`nexus_core::app::commands`).
+//! The command catalog itself lives in `nexus_core::app::commands`.
 
 // Casts here are on terminal-bounded values (u16/u32 dims, byte colors,
 // glyph counts) — never on unbounded user data. JSON-derived indices in
@@ -70,7 +68,6 @@ fn pasted_file_path(text: &str) -> Option<std::path::PathBuf> {
 }
 
 impl AppView {
-    /// Current composer text, newlines joined.
     pub fn input_text(&self) -> String {
         self.input.lines().join("\n")
     }
@@ -88,7 +85,7 @@ impl AppView {
     }
 
     /// Copy the current selection to the OS clipboard, then clear the highlight
-    /// (so a following Ctrl+C quits, and the cleared highlight signals success).
+    /// (the cleared highlight signals success).
     pub fn copy_selection(&mut self) {
         self.input.copy();
         let text = self.input.yank_text();
@@ -126,7 +123,6 @@ impl AppView {
         }
     }
 
-    /// Cut the current selection to the OS clipboard.
     pub fn cut_selection(&mut self) {
         if self.input.cut()
             && let Some(cb) = self.clipboard.as_mut()
@@ -261,7 +257,6 @@ impl AppView {
         self.input.move_cursor(CursorMove::Forward);
     }
 
-    /// Select the whole line at the cursor.
     pub fn select_composer_line(&mut self) {
         self.input.cancel_selection();
         self.input.move_cursor(CursorMove::Head);
@@ -394,21 +389,18 @@ impl AppView {
         let before = text.get(..pos)?;
         let at = before.rfind('@')?;
         let rest = &text[at + 1..pos];
-        // Only match if there's no whitespace or `/` between @ and cursor.
         if rest.contains(char::is_whitespace) || rest.contains('/') {
             return None;
         }
         Some((rest.to_string(), at))
     }
 
-    /// Compute @-autocomplete matches from the space's file cache.
     pub fn refresh_at_matches(&mut self) {
         let Some((query, at_offset)) = self.at_query() else {
             self.at_state = None;
             return;
         };
         if query.is_empty() {
-            // Show all files when @ is typed with no query yet
             let all = self.files_cache.clone();
             if all.is_empty() {
                 self.at_state = None;
@@ -465,7 +457,6 @@ impl AppView {
         self.at_state = None;
     }
 
-    /// Move @-autocomplete selection.
     pub const fn move_at_selection(&mut self, delta: i32) {
         let Some((ref matches, ref mut selected, _)) = self.at_state else {
             return;

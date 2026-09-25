@@ -1,8 +1,7 @@
 //! Tools the model can call mid-response, advertised as nine consolidated
 //! names (`batch`, `skills`, `scripts`, `search`, `fetch_url`,
 //! `research_lookup`, `files`, `app`, `media`) that dispatch onto a larger
-//! set of specialized implementations below. Concrete (no trait) —
-//! there's exactly one implementation and no need for one yet.
+//! set of specialized implementations below, behind the `ToolExecutor` seam.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -462,7 +461,7 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
 /// The tool-calling seam: everything an agent loop needs from the tool
 /// layer — definitions for the request, read-only classification for
 /// parallelizing independent calls, and execution. `ToolBox` is the local
-/// implementation; a Phase 4 remote implementation (nexus host) speaks the
+/// implementation; a remote implementation (nexus host) speaks the
 /// same methods over the wire, and the loops don't know the difference.
 /// `supports_images`/`space_files_dir` are required because the tool loop
 /// injects image references from tool results as vision content (the host
@@ -604,7 +603,7 @@ impl ToolBox {
 
     /// Restrict `fetch_url` to serving from `web_cache` only — a cache miss
     /// returns `[not cached]` instead of fetching. Used for the Verifier's
-    /// quote-checking pass (Task 8).
+    /// quote-checking pass.
     #[must_use]
     pub const fn cache_only(mut self) -> Self {
         self.cache_only = true;
@@ -734,9 +733,8 @@ impl ToolBox {
         Ok(text)
     }
 
-    /// Tool definitions to attach to the request, or empty to send a request
-    /// identical to one from before tool-calling existed (keeps models that
-    /// don't support tools working unchanged). `search` always works —
+    /// Tool definitions to attach to the request, or empty to send a plain
+    /// request (keeps models that don't support tools working). `search` always works —
     /// it prefers configured API backends, then uses keyless HTML fallbacks
     /// when those are unavailable, so it needs no setup.
     // Long by design (tool-definition table).
@@ -1613,7 +1611,6 @@ impl ToolBox {
                 let status = "Searching HN and Reddit…".to_string();
                 let cache_key = format!("discussion://{query}");
 
-                // Check cache first if enabled
                 let cached = if let Some(db_path) = &self.db_path {
                     crate::db::open_attached(db_path)
                         .ok()
@@ -1638,7 +1635,6 @@ impl ToolBox {
                     cached_text
                 } else {
                     let text = discussion_search(&self.client, &query).await;
-                    // Write through to cache if enabled
                     if text != "no results"
                         && let Some(db_path) = &self.db_path
                         && let Ok(conn) = crate::db::open_attached(db_path)
@@ -3288,7 +3284,7 @@ must land in dist/ for the app server to serve it"
 /// Consolidated names (`search`, `files`, `skills`, `scripts`, `app`, `media`,
 /// `research_lookup`) count as read-only only for their read-only actions —
 /// the `action` argument decides. Legacy names (`skill`, `web_search`, …)
-/// classify as before; mutating consolidations (`batch`) are never read-only.
+/// are still classified; mutating consolidations (`batch`) are never read-only.
 pub fn is_read_only_tool(name: &str, args: &str) -> bool {
     let action_is = |actions: &[&str]| {
         serde_json::from_str::<serde_json::Value>(args)
@@ -3462,8 +3458,6 @@ fn valid_relative_path(path: &str) -> bool {
             .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
-/// `cat -n`-style numbering for ranged reads, matching what agent harnesses
-/// feed models so line references and edits anchor reliably.
 /// Search imported files: embed the query and rank chunks by cosine when an
 /// embedder is configured; otherwise (or when embedding fails / no vectors
 /// are stored yet) fall back to FTS keywords, tagged so the model knows the
@@ -3523,6 +3517,8 @@ fn semantic_snippets(conn: &rusqlite::Connection, space_id: &str, query: &[f32])
     )
 }
 
+/// `cat -n`-style numbering for ranged reads, matching what agent harnesses
+/// feed models so line references and edits anchor reliably.
 fn number_lines(slice: &[&str], start: usize) -> String {
     slice
         .iter()

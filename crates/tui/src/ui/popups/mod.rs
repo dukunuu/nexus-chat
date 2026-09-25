@@ -22,23 +22,17 @@ mod tests;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-// Shared state-machine helpers for the session/space/skills popups, which all
-// hand-roll the same "Browse list (filter as you type) / Edit text field /
-// confirm-delete" shape. Each popup's own `handle_key` still owns *what*
-// happens for a given action (e.g. what "Close" clears) — these helpers only
-// centralize *which* keys map to which action, since that mapping is
-// identical across the 3 (module-doc'd divergences: skills has no rename and
-// no Browse-mode text filter; space gates its delete-confirm key on the
-// selected space not being the default one — that guard stays in space.rs).
+// Shared key classification for the session/space/skills popups, which share
+// a "browse (filter as you type) / edit text / confirm delete" shape. These
+// helpers decide *which* action a key maps to; each popup's `handle_key`
+// decides what the action does.
 
 /// Actions available while browsing a popup's list (the default mode).
 ///
 /// `Close`/`MoveUp`/`MoveDown`/`Backspace`/`Filter` are common to all 3
 /// popups' Browse mode. `Create` and `Rename` are gated by
 /// `classify_browse_key`'s `supports_create`/`supports_rename` flags so a
-/// popup that doesn't support one simply never receives it (matching the
-/// current behavior where, e.g., skills' Browse arm has no Ctrl+R case at
-/// all and falls through to its `_ => {}`).
+/// popup that doesn't support one never receives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BrowseAction {
     Close,

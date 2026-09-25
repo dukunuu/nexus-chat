@@ -343,7 +343,7 @@ impl App {
     }
 
     /// System/memory/conversation token estimate for the context breakdown
-    /// popup (Ctrl+I). Each bucket is a ~4-chars/token estimate, same method
+    /// popup (Ctrl+G). Each bucket is a ~4-chars/token estimate, same method
     /// `context_used` falls back to, so the parts add up to (roughly) the whole.
     pub fn context_breakdown(&self) -> ContextBreakdown {
         let mut instructions_chars = self.resolved_base_system_prompt().chars().count();

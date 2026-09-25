@@ -22,10 +22,8 @@ impl App {
     }
 
     /// Domain half of `/skills` install: parse the typed `owner/repo/path`
-    /// (or `owner/repo`) and kick off the background GitHub fetch. Same
-    /// bg-task shape as memory extraction. The view owns the edit buffer and
-    /// mode; `Ok(())` means the task started (or the spec was invalid — the
-    /// message is pushed as a status line).
+    /// (or `owner/repo`) and kick off the background GitHub fetch. An invalid
+    /// spec is reported as a status line.
     pub fn start_skill_install(&mut self, spec: &str) {
         let spec = spec.trim().to_string();
         let Some((owner, repo, path)) = crate::skills::parse_gh_shorthand(&spec) else {

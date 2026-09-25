@@ -1,7 +1,7 @@
 //! The `/usage` popup's domain half: aggregate token/cache/cost analytics
 //! drawn from the per-request `usage_log`. Content-free — only
 //! backend/model/tokens — so it works even for sessions long compacted
-//! away. The popup's cursor/range flow lives in the view layer.
+//! away.
 
 use super::App;
 
@@ -17,8 +17,7 @@ pub struct UsageData {
 }
 
 impl App {
-    /// Load the aggregates for the currently selected range (the view owns
-    /// the cursor; the range is a persisted core preference).
+    /// Load the aggregates for the persisted range preference.
     pub fn load_usage(&self) -> UsageData {
         self.load_usage_for_range(self.usage_range)
     }

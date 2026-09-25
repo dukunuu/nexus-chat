@@ -1,7 +1,7 @@
 //! Deep research: a background multi-agent pipeline triggered by `/research`.
 //! Every stage but the Searcher fan-out is a single `Provider::complete`
 //! call; parsing/prompt-building here is pure and unit tested. The async
-//! orchestration (Task 9) calls real network endpoints and is exercised
+//! orchestration calls real network endpoints and is exercised
 //! manually, like every other network-calling background job in this
 //! codebase (`maybe_generate_title`, image description, embedding).
 
@@ -1520,7 +1520,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
     );
     let critic_detail = match &critique {
         Critique::Satisfied => "done — draft is sufficiently complete".to_string(),
-        // Quick win: surface the actual gap questions, not just a count — the
+        // Surface the actual gap questions, not just a count — the
         // follow-up searchers are about to investigate exactly these.
         Critique::Gaps(gaps) => {
             let list = gaps
@@ -1588,7 +1588,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
             "working — merging follow-up findings",
         );
         // Continue the original synthesis conversation instead of
-        // rebuilding one giant user message. The old request remains an
+        // rebuilding one giant user message. The earlier request remains an
         // exact prefix and only the new findings are appended.
         synthesizer_history.push(ChatMessage::text("assistant", draft.clone()));
         synthesizer_history.push(ChatMessage::text(
@@ -1878,7 +1878,7 @@ impl super::App {
             return;
         }
         // Research inherits the session's model (or the global default) —
-        // there is no separate researcher-model setting anymore.
+        // there is no separate researcher-model setting.
         let Some(model) = self.current_model.clone() else {
             self.push_status("no model configured — set one in /login or /model".to_string());
             return;
@@ -2099,8 +2099,7 @@ impl super::App {
     /// Whether the survey gate (clarifying questions or plan approval) is
     /// armed for the currently viewed session — the only case where Enter is
     /// intercepted and routed to the pipeline instead of a normal chat send.
-    /// A gate in another session must never swallow typing (the old
-    /// cross-session hijack).
+    /// A gate in another session must never swallow typing.
     pub fn survey_gate_targets_current_session(&self) -> bool {
         self.survey_gate
             .as_ref()

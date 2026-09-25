@@ -1109,9 +1109,8 @@ struct BackendInfo {
     tag: WireBackendTag,
     name: &'static str,
     configured: bool,
-    /// Whether `/v1/chat/completions` can route this backend. Always true
-    /// now that Codex is translated too; kept in the wire shape so existing
-    /// clients keep parsing `/v1/backends`.
+    /// Whether `/v1/chat/completions` can route this backend. Always true;
+    /// kept in the wire shape so existing clients keep parsing `/v1/backends`.
     gateway_supported: bool,
     /// Stable explanation when a backend cannot be routed. Always `None`
     /// today — retained alongside `gateway_supported` for the same reason.
@@ -2849,7 +2848,7 @@ mod tests {
         app.models = vec![test_model("gpt-5-codex", BackendTag::Codex)];
 
         // Resolvable by raw id, by composite id, and by the public
-        // `codex:`-prefixed id `/v1/models` now advertises.
+        // `codex:`-prefixed id `/v1/models` advertises.
         for model in ["gpt-5-codex", "codex:gpt-5-codex"] {
             let route = gateway_route(&app, model, None).expect("codex model routes");
             assert_eq!(route.tag, BackendTag::Codex);

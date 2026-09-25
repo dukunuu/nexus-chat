@@ -799,7 +799,7 @@ mod tests {
         assert!(f.ends_with("deck/dist/index.html"), "{f:?}");
         let f = resolve(root, &reg, "/default/deck/").unwrap();
         assert!(f.ends_with("deck/dist/index.html"), "{f:?}");
-        // Source files outside dist are no longer served.
+        // Source files outside dist aren't served.
         assert!(resolve(root, &reg, "/default/deck/style.css").is_none());
         // The KV API still resolves to the app root.
         assert!(resolve(root, &reg, &format!("/{uuid}/_api/")).is_some());

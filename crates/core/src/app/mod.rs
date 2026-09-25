@@ -205,7 +205,7 @@ pub struct CopyOption {
     pub text: String,
 }
 
-/// Token estimate breakdown shown in the context popup (Ctrl+I).
+/// Token estimate breakdown shown in the context popup (Ctrl+G).
 pub struct ContextBreakdown {
     pub system_tokens: u64,
     pub memory_tokens: u64,
@@ -304,7 +304,7 @@ impl CacheTally {
 }
 
 /// What a confirmed model picker selection is for: the active session's model,
-/// or the background memory-extraction model.
+/// or one of the feature models in `/config`.
 #[derive(PartialEq, Eq, Clone, Copy, Default)]
 pub enum ModelPickTarget {
     #[default]
@@ -562,7 +562,7 @@ const THINKING: [(&str, &str); 16] = [
 
 /// Spinner colour for an in-flight response. Core names the palette
 /// abstractly (the TUI maps it to terminal colors) so this type can cross
-/// the Phase 4 API boundary unchanged.
+/// the host API boundary unchanged.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SpinnerColor {
     Green,
@@ -657,8 +657,6 @@ pub struct ChatNotification {
     pub success: bool,
 }
 
-/// A background event surfaced to the event loop. `None` means that source's
-/// channel closed (task ended).
 /// One file's embedding result: (space id, file id, (seq, vector) pairs or error).
 pub type EmbedMsg = (
     String,
@@ -723,10 +721,11 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// A background event surfaced to the event loop. `None` means that source's
+/// channel closed (task ended).
 #[derive(Clone)]
 pub enum AppEvent {
-    /// A one-line status update from a domain path (the 2e step converts the
-    /// `status` field writes into these; the field still exists until then).
+    /// A one-line status update from a domain path.
     Status(String),
     /// The composer should be replaced with this text (e.g. a send-failure
     /// path restoring the user's message). The view layer applies it to its
@@ -812,7 +811,7 @@ pub struct App {
     /// `{{datetime}}` expansion stable prevents a clock tick from invalidating
     /// the entire serialized prefix on every request.
     pub(crate) prompt_datetime: String,
-    /// Model used for image transcription (empty = disabled).
+    /// Image model: describes image files (empty = the OCR model does).
     pub transcriber_model: String,
     /// Vision model for scanned-PDF OCR (empty = tesseract only).
     pub ocr_model: String,
@@ -828,7 +827,7 @@ pub struct App {
     /// Model used for AI video generation (empty = disabled).
     pub video_gen_model: String,
     /// Base URL of a `SearXNG` instance for the web-search tool, or empty to
-    /// disable it. Configured in-app (Ctrl+O settings), not a config file.
+    /// disable it. Configured in-app (`/config`), not a config file.
     pub searxng_url: String,
     /// `LangSearch` API key (free tier), or empty to disable it.
     pub langsearch_key: String,
@@ -934,14 +933,14 @@ pub struct App {
 
     /// The active space's imported files (refreshed by `rescan_files`).
     pub files_cache: Vec<crate::db::FileRow>,
-    /// The space's apps (`/apps` popup): names, cursor, and mode.
+    /// The space's apps (`/apps` popup).
     pub apps_cache: Vec<String>,
-    /// The space's images (`/image` popup): cache and cursor.
+    /// The space's images (`/image` popup).
     pub images_cache: Vec<ImageMeta>,
 
-    /// The space's scripts (`/script` popup): cache, cursor, and edit buffer.
+    /// The space's scripts (`/script` popup).
     pub scripts_cache: Vec<ScriptMeta>,
-    /// The space's standing research watches (`/watch` picker): cache + cursor.
+    /// The space's standing research watches (`/watch` picker).
     pub watches_cache: Vec<crate::db::Watch>,
     /// Time window the `/usage` dashboard aggregates (`24h/7d/30d/all`) — a
     /// persisted preference, applied by `apply_setting` on load.
@@ -1294,7 +1293,7 @@ impl App {
             (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
         let key = (!self.langsearch_key.trim().is_empty())
             .then(|| self.langsearch_key.trim().to_string());
-        // The toolbox sits behind the `ToolExecutor` seam now. It writes only
+        // The toolbox sits behind the `ToolExecutor` seam. It writes only
         // to the app-managed root but reads the full Agent Skills search path.
         let skills_dir = crate::skills::skills_dir(&self.space.root);
         crate::skills::install_builtin(&skills_dir);
@@ -1516,9 +1515,9 @@ impl App {
 
     // --- async event sources (drained by the event loop) ---
 
-    /// Queue a one-line status update as `AppEvent::Status`. The 2e view
-    /// layer keeps its own `status` field, fed by these events; headless
-    /// consumers track them locally.
+    /// Queue a one-line status update as `AppEvent::Status`. The TUI keeps
+    /// its own `status` field fed by these events; headless consumers track
+    /// them locally.
     pub fn push_status(&mut self, s: impl Into<String>) {
         self.pending_events.push_back(AppEvent::Status(s.into()));
     }
@@ -1557,8 +1556,8 @@ impl App {
     }
 
     /// Test helper: drain the pending event queue in one pass, returning
-    /// `(composer sets in order, last status line)` — the 2e status field and
-    /// the composer live in the view, so tests assert on the events.
+    /// `(composer sets in order, last status line)` — the status line and the
+    /// composer live in the view, so tests assert on the events.
     #[cfg(feature = "test-helpers")]
     pub fn drain_ui_events(&mut self) -> (Vec<String>, String) {
         let mut sets = Vec::new();
@@ -1716,7 +1715,7 @@ impl App {
                 // Re-check it now so old, already-large conversations are
                 // compacted without requiring another user turn.
                 self.maybe_compact();
-                // The 2e view layer opens the model picker here: it owns the
+                // The view layer opens the model picker here: it owns the
                 // `popup` state, and checks `models`/`current_model` after
                 // this handler runs.
             }
@@ -1724,7 +1723,6 @@ impl App {
         }
     }
 
-    // --- input handling ---
     // --- nerd config (settings popup) ---
 
     /// Whether scanned PDFs should OCR through the `OpenRouter` vision model:

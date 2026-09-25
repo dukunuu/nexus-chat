@@ -1,4 +1,4 @@
-//! Phase 3 merge engine: changeset build/apply, per-table sync rules,
+//! The sync merge engine: changeset build/apply, per-table sync rules,
 //! cursor + ack bookkeeping, and the file blob channel.
 //!
 //! Every table that syncs declares itself in the registry below — its
@@ -10,8 +10,7 @@
 //!   compare lexically, so both devices compute the same winner with no
 //!   origin columns. A tie (same row written in the same nanosecond on two
 //!   clocks — the clock-skew residual) keeps the local row on both sides;
-//!   it is stable, never flip-flops, and is accepted per the Phase 1
-//!   decision.
+//!   it is stable and never flip-flops.
 //! - **Append** (`(created_at, id)` tuple or AUTOINCREMENT cursor):
 //!   INSERT OR IGNORE by the row's sync identity (uuid id, or `sync_id`
 //!   for the AUTOINCREMENT tables). Idempotent union — the exactly-once
@@ -21,7 +20,7 @@
 //!   tombstone removes the space row and its directory, a file tombstone
 //!   removes the row and the local blob.
 //! - **`swarm_personas`** has no cursor of its own: it is versioned by the
-//!   owning session (Phase 1 decision). Persona rows travel attached to
+//!   owning session. Persona rows travel attached to
 //!   their session row and are applied only when that session row wins
 //!   LWW, as a wholesale roster replace.
 //!

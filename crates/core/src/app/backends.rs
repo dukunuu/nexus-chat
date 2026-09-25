@@ -1,8 +1,6 @@
-//! Every backend the app can be logged into at once. Replaces the old
-//! single active `self.provider` — since `/model` now merges every
-//! configured backend's models into one list, sending a request has to
-//! resolve *which* backend a picked model belongs to, not just use "the"
-//! provider.
+//! Every backend the app can be logged into at once. `/model` merges every
+//! configured backend's models into one list, so sending a request resolves
+//! *which* backend a picked model belongs to.
 
 use crate::provider::openrouter::OpenRouter;
 use crate::provider::{BackendTag, Model};

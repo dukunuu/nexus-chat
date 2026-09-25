@@ -139,7 +139,7 @@ const SCHEMA_VERSION: i64 = 3;
 /// `PRAGMA table_info` (the only tolerated "duplicate" is an existing
 /// column — real errors propagate). `files.mtime` is deliberately absent:
 /// it moved to `cache.file_index_state` and stays a dead column on legacy
-/// dbs (see the roadmap, Phase 1).
+/// dbs.
 const LEGACY_COLUMN_ADDS: &[(&str, &str, &str)] = &[
     (
         "messages",
@@ -735,7 +735,7 @@ impl Db {
         // Ensure the default space exists, then backfill any session left
         // without a space (pre-spaces db, or a space that got deleted). The
         // default space's id is the deterministic string `default` (not a
-        // uuid) — it is the same sync row on every device, so Phase 3's LWW
+        // uuid) — it is the same sync row on every device, so the sync LWW
         // merge treats it as one row instead of a name collision.
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
@@ -2960,7 +2960,7 @@ impl Db {
     }
 }
 
-// --- sync groundwork (Phase 3 consumes this) ---
+// --- sync bookkeeping ---
 
 /// One peer's sync cursor for one table. Cursors are opaque strings; for
 /// append-only tables they are `(created_at, id)` tuples (so equal
@@ -2979,7 +2979,7 @@ pub struct SyncState {
 impl Db {
     /// This device's stable id, created on first use. Sync identity for
     /// everything this device writes (tombstones, LWW tie-breaks on
-    /// `updated_at + device_id` in Phase 3).
+    /// `updated_at + device_id`).
     pub fn device_id(&self) -> Result<String> {
         if let Some(id) = self
             .conn
@@ -4322,7 +4322,7 @@ mod tests {
 
     /// Every mutable table bumps its version (`updated_at`, RFC3339 so
     /// lexical order = time order) on every mutation path — the LWW input
-    /// for the Phase 3 merge engine. Reads happen 2ms after each write so
+    /// for the sync merge engine. Reads happen 2ms after each write so
     /// equal-microsecond timestamps can't pass a `>` check by accident.
     // Long by design (one assertion per mutation path).
     #[allow(clippy::too_many_lines)]
@@ -4545,7 +4545,7 @@ mod tests {
         assert_eq!(tombstones("swarm_personas"), expected_persona_tombstones);
     }
 
-    /// A v1 db (Phase 1 layout: random uuid for the default space) gets
+    /// A v1 db (random uuid for the default space) gets
     /// renumbered once on open: the default space becomes the deterministic
     /// `default` row, and every space_id reference (and the tombstone)
     /// follows — two devices' default spaces then merge as one LWW row.

@@ -1,14 +1,11 @@
 //! nexus-chat-core (lib crate `nexus_core`): the engine behind the `nexus`
-//! TUI and (later) the nexus host API. Owns all domain logic — sessions, research pipeline, provider
-//! clients, tools, files, skills, `SQLite` state — with no knowledge of the
-//! terminal UI. Phase 2e moved every piece of view state (composer, popup
-//! chrome, render caches, theme) into the TUI crate's `AppView`.
+//! TUI, CLI, and `nexus host` API. Owns all domain logic — sessions, research
+//! pipeline, provider clients, tools, files, skills, `SQLite` state — with no
+//! knowledge of the terminal UI.
 //!
-//! Doc-lint allows: the domain surface the TUI/CLI/host drive directly
-//! (`Db`, provider, config, `App`'s event handlers) is still pub, so the
-//! per-item doc lints would be noise until the Phase 4 host API pass
-//! privatizes it. They're crate-scoped deliberately — the 2e goal (zero
-//! TUI deps) is unaffected.
+//! Doc-lint allows: the domain surface the frontends drive directly (`Db`,
+//! provider, config, `App`'s event handlers) is pub, and per-item error/panic
+//! docs on all of it would be noise.
 #![allow(
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
@@ -33,9 +30,8 @@ pub mod update;
 
 use anyhow::Result;
 
-/// One bootstrap for every frontend (TUI, CLI, Phase 4 host): credentials →
-/// space → db → appserver → toolbox. This is what `main.rs` and
-/// `cli.rs::build_app` both used to hand-roll.
+/// One bootstrap for every frontend (TUI, CLI, host): credentials → space →
+/// db → appserver → toolbox.
 pub async fn boot(saved: config::SavedCreds) -> Result<app::App> {
     // A single bootstrap key just seeds App::new's "reasonable defaults"
     // guess (utility model strings); rebuild_all_backends below populates

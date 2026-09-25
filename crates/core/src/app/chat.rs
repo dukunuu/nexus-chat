@@ -18,9 +18,7 @@ use crate::provider::{ChatMessage, ChatParams, StreamEvent, ToolCall, Usage};
 use super::{App, SPINNER_COLORS, SpinnerColor, THINKING, parse_topic, verbosity_clause};
 
 impl App {
-    /// Send one chat message. `AppView::submit` is the composer front — it
-    /// reads the `TextArea` and routes through `run_command` / `Send` — so this
-    /// is the domain half: validation, session auto-creation, persistence.
+    /// Send one chat message: validation, session auto-creation, persistence.
     pub fn send_message(&mut self, text: String) -> Result<()> {
         if let Some(session) = self.session.as_ref()
             && let Some(task) = self.chat_task_for_session(&session.id)
@@ -933,15 +931,10 @@ impl App {
         parts.join("\n\n")
     }
 
-    /// `o` in the history pane: open the `[n]` citation under the current
-    /// text selection (via the `open` crate), resolved against the Sources
-    /// list of the message the selection belongs to. Every miss surfaces as
-    /// a status message rather than doing nothing silently.
-    /// `owner` is the message index at the selection start, computed by the
-    /// view layer from its `HistorySel` state.
     /// Ctrl+O: navigate to the session linked in a `session_link` message
     /// under the text selection. Expects the message content's first line to
-    /// be the target session id.
+    /// be the target session id. `owner` is the message index at the
+    /// selection start.
     pub fn open_session_link(&mut self, owner: Option<usize>) {
         let Some(msg) = owner.and_then(|i| self.messages.get(i)) else {
             self.push_status(
@@ -1263,8 +1256,6 @@ impl App {
     }
 }
 
-/// Pick a thinking-phrase index and spinner colour pseudo-randomly (seeded from
-/// the clock; no rng dep).
 /// Each fenced code block in `md` as `(language, code)`.
 pub fn code_blocks(md: &str) -> Vec<(Option<String>, String)> {
     let mut out = Vec::new();
@@ -1308,7 +1299,6 @@ pub fn pick_flavor() -> (usize, SpinnerColor) {
     (n % THINKING.len(), SPINNER_COLORS[n % SPINNER_COLORS.len()])
 }
 
-/// Short session title from the first user message.
 /// The instruction block appended to the system prompt when web mode is on:
 /// forces search-first, inline `[n]` citations, and a trailing Sources list.
 /// `today` keeps the model from hedging with stale training-data dates.
@@ -1352,7 +1342,7 @@ fn append_tool_call_history(
         *index += 1;
     }
     if rows.is_empty() {
-        // Keep malformed legacy rows out of the model, as before.
+        // Keep malformed legacy rows out of the model.
         debug_assert!(*index > start);
         return;
     }

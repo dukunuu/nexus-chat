@@ -61,9 +61,8 @@ impl App {
         self.images_cache.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    /// The popup's confirm-delete lives in the view; this is the disk half:
-    /// remove the file (if any) and refresh the cache. Returns whether a row
-    /// existed. `images_mode` reset is the view's job.
+    /// Remove the image file (if any) and refresh the cache. Returns whether a
+    /// row existed.
     pub fn delete_image_file(&mut self, name: &str) -> Result<bool> {
         let dir = self.space.files_dir(&self.active_space.name);
         let path = dir.join(name);

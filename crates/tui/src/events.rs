@@ -98,7 +98,6 @@ async fn run_loop(
             break;
         }
 
-        // Animate the thinking spinner only while a response streams.
         let streaming = app.is_streaming();
         let long_deadline = app.sel.deadline();
         let welcome = app.is_welcome();
@@ -183,8 +182,7 @@ async fn run_loop(
                     AppEvent::Research(r) => {
                         app.on_research_done(r);
                         // The job's channel closed: close the live view and
-                        // clear its steer input (view state the domain no
-                        // longer owns).
+                        // clear its steer input.
                         if app.core.research_rx.is_none() {
                             app.core.research_live_input.clear();
                             if app.popup == Popup::ResearchLive {
@@ -205,7 +203,8 @@ async fn run_loop(
                     std::future::pending::<()>().await;
                 }
             } => app.tick_spinner(),
-            // Long-press (held, unmoved) selects the whole conversation.
+            // Long-press (held, unmoved) copies the message, code block, or
+            // link under the pointer.
             () = async {
                 match long_deadline {
                     Some(d) => tokio::time::sleep(d.saturating_duration_since(std::time::Instant::now())).await,
@@ -219,7 +218,6 @@ async fn run_loop(
                     None => {}
                 }
             }
-            // Stale status lines clear themselves.
             () = async {
                 match status_deadline {
                     Some(d) => tokio::time::sleep_until(d.into()).await,
@@ -301,7 +299,6 @@ fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
     // Ctrl+C backs out one step — close the popup, stop the reply being
     // viewed, clear the draft — and quits only on a second press with
     // nothing left to undo, so a stray press can't kill streams or a draft.
-    // (Selecting text copies on release, so Ctrl+C isn't needed for copy.)
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && !key.modifiers.contains(KeyModifiers::SHIFT)
         && key.code == KeyCode::Char('c')
@@ -480,7 +477,6 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
     }
 
     match key.code {
-        // Shift+Enter and Ctrl+Enter insert a newline; plain Enter sends.
         KeyCode::Enter if shift || ctrl => app.input.insert_newline(),
         // A parked survey gate (survey answer or plan approval) intercepts
         // Enter — but only while the *viewed* session is the gated one, so a
@@ -493,17 +489,14 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
             app.reply_to_survey_gate(&text);
         }
         KeyCode::Enter => app.submit()?,
-        // Paste is handled by the terminal's bracketed paste (Event::Paste).
-        // Ctrl+Shift+C copies the composer's selection to the OS clipboard for
-        // terminals that forward it; otherwise the terminal's own copy works on
-        // a mouse selection. Ctrl+X cuts.
+        // Ctrl+Shift+C copies the composer's selection for terminals that
+        // forward it (a mouse selection copies on release everywhere).
         KeyCode::Char('a') if ctrl => app.input.select_all(),
         KeyCode::Char('c' | 'C') if ctrl && shift => app.copy_selection(),
         KeyCode::Char('x') if ctrl => app.cut_selection(),
         // Ctrl+R expands/collapses stored reasoning traces (editor's redo is
         // shadowed here — the composer rarely needs it).
         KeyCode::Char('r') if ctrl => app.toggle_reasoning_view()?,
-        // Ctrl+T expands/collapses tool-call detail blocks in the transcript.
         KeyCode::Char('t') if ctrl => {
             app.show_tool_detail = !app.show_tool_detail;
             app.pin_viewport_top = true;
@@ -512,7 +505,6 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
         // session. Both shortcuts also switch modes when needed.
         KeyCode::Char('n' | 'N') if ctrl && shift => open_new_session(app, true)?,
         KeyCode::Char('n' | 'N') if ctrl => open_new_session(app, false)?,
-        // Ctrl+O navigates a session link message under the current selection.
         KeyCode::Char('o') if ctrl && app.sel.selected_text().is_some() => {
             app.open_session_link();
         }
@@ -564,10 +556,8 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
         // Home/End stay with the composer's line editing).
         KeyCode::Home if ctrl => app.scroll = app.max_scroll,
         KeyCode::End if ctrl => app.scroll = 0,
-        // Esc stops the streaming response or clears the composer. (The old
-        // Esc-stops-a-parked-plan-gate intercept is gone — approval is a chat
-        // reply now; stopping a parked job is Ctrl+↑ then Ctrl+X in the live
-        // view.)
+        // Esc stops the streaming response or clears the composer. A parked
+        // research job is stopped from the live view (Ctrl+↑, then Ctrl+X).
         KeyCode::Esc if app.viewing_stream() => app.stop_stream()?,
         KeyCode::Esc => {
             app.set_input("");
@@ -663,9 +653,6 @@ fn handle_input_mouse(app: &mut AppView, m: MouseEvent) {
                         }
                         None if !long_press_handled
                             && p.is_some_and(|p| app.open_image_at_line(p.0)) => {}
-                        None if !long_press_handled && p.is_some() => {
-                            // Click without drag on a non-image line: open URLs or start selection.
-                        }
                         None => {}
                     }
                 }
@@ -678,7 +665,6 @@ fn handle_input_mouse(app: &mut AppView, m: MouseEvent) {
             }
             app.mouse_target = MouseTarget::None;
         }
-        // Wheel scrolls the conversation history.
         MouseEventKind::ScrollUp => {
             app.scroll = app.scroll.saturating_add(3).min(app.max_scroll);
         }
@@ -758,7 +744,6 @@ fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
     let avail_inner = ui::popups::model::list_inner(avail_outer);
     let pos = Position::new(m.column, m.row);
 
-    // Which panel is the cursor over?
     let panel = if fav_inner.contains(pos) {
         Some((ModelPanel::Favorites, fav_inner, app.fav_offset))
     } else if avail_inner.contains(pos) {

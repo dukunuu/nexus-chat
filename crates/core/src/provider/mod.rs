@@ -6,7 +6,7 @@ pub mod serve;
 use serde::{Deserialize, Serialize};
 
 /// A tool the model may call, in `OpenAI` function-calling shape. Serde
-/// derives so the Phase 4 remote `ToolExecutor` can ship the same wire
+/// derives so a remote `ToolExecutor` can ship the same wire
 /// shape without churning this type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDef {
@@ -307,9 +307,6 @@ impl Serialize for ChatMessage {
     }
 }
 
-/// Events emitted while a completion streams. Delivered over an mpsc channel so
-/// the UI event loop can interleave them with keypresses.
-/// Exact token accounting reported by the provider at end of stream.
 /// Which convention the provider used for its prompt-token count, recorded at
 /// the parse boundary so nothing downstream has to guess.
 ///
@@ -318,7 +315,7 @@ impl Serialize for ChatMessage {
 /// tokens. Anthropic-shaped payloads report `input_tokens` alongside
 /// `cache_read_input_tokens`/`cache_creation_input_tokens`, where the input
 /// count *excludes* both. A ratio computed without knowing which is which is
-/// meaningless — and, before this was tracked, was clamped into looking fine.
+/// meaningless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptConvention {
@@ -363,6 +360,7 @@ impl PromptConvention {
     }
 }
 
+/// Exact token accounting reported by the provider at end of stream.
 #[derive(Debug, Clone, Copy, Default)]
 // _tokens postfix is the unit — removing it would make the fields ambiguous.
 #[allow(clippy::struct_field_names)]
@@ -391,8 +389,7 @@ impl Usage {
     /// `None` when there is nothing honest to report: no prompt tokens, or a
     /// payload whose convention could not be identified. Deliberately *not*
     /// clamped — a ratio above 1.0 means the normalization missed a provider
-    /// shape, and clamping it to a plausible 100% is exactly how that stayed
-    /// invisible before.
+    /// shape, and clamping it to a plausible 100% would hide that.
     #[allow(clippy::cast_precision_loss)] // token counts are too large for u32; a ratio loses nothing meaningful
     pub fn cache_hit_rate(&self) -> Option<f64> {
         if self.prompt_tokens == 0 || !self.prompt_convention.ratio_is_meaningful() {
@@ -452,6 +449,8 @@ pub fn seed_tool_result_dedup(
     seen
 }
 
+/// Events emitted while a completion streams. Delivered over an mpsc channel so
+/// the UI event loop can interleave them with keypresses.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     /// A chunk of the visible answer.

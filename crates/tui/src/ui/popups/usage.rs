@@ -43,9 +43,8 @@ pub fn render(f: &mut Frame, app: &AppView) {
     }
 
     // Allocate rows top-down by priority — summary, backends, models, then
-    // the recent feed takes what's left. (A solver layout squeezed every
-    // section at once on short terminals, hiding the backend rows under
-    // their own header.)
+    // the recent feed takes what's left — so short terminals lose the feed
+    // first rather than squeezing every section at once.
     let mut next_y = inner.y;
     let mut rows_left = inner.height;
     let mut take = |n: u16| {
@@ -183,10 +182,8 @@ pub fn render(f: &mut Frame, app: &AppView) {
             Span::styled(format!("{time} "), dim),
             Span::styled("● ", Style::default().fg(backend_color(theme, &r.backend))),
             Span::styled(format!("{model:<24}"), Style::default().fg(theme.fg)),
-            // 13 cells fits the widest possible pair ("999.9m→999.9m"); the
-            // old 9-cell field overflowed on realistic values like
-            // "122.2k→672", shoving the bar/percent/cost columns right by
-            // the overflow amount — which varied row to row.
+            // 13 cells fits the widest possible pair ("999.9m→999.9m"), so
+            // the bar/percent/cost columns never shift row to row.
             Span::styled(format!("{tokens:>13} "), dim),
             Span::styled(
                 "█".repeat(cached.map_or(0, |c| (c * 8.0).round() as usize)),

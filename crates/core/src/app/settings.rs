@@ -14,8 +14,7 @@ use super::{App, OCR_ENGINES, SEARCH_PROVIDERS, VERBOSITY_LEVELS};
 impl App {
     /// Advance the OCR engine auto → tesseract → vlm → local → auto,
     /// persisted. Cycling into "local" pulls the configured model via ollama
-    /// in the background (formerly the separate `/ocr-local` command) —
-    /// `ocr_local_install` itself flips the engine to "local" and persists it
+    /// in the background — `ocr_local_install` itself flips the engine to "local" and persists it
     /// once the pull actually succeeds, so a failed pull doesn't leave the
     /// engine silently pointed at a model that was never fetched.
     pub fn cycle_ocr_engine(&mut self) -> Result<()> {
@@ -34,7 +33,7 @@ impl App {
     }
 
     /// Set one named setting by key, persisting it and applying it live —
-    /// the `SetSetting` command the host (and later the TUI) uses. Unlike
+    /// the host's `SetSetting` command. Unlike
     /// `load_settings` (which ignores unknown persisted rows), this fails
     /// fast: an unknown key or an invalid value for a constrained key is an
     /// error, never a silent no-op reported as success.

@@ -1,16 +1,14 @@
 //! The command seam: one enum for every user intent, parsed from the
-//! `/`-command line (or synthesized by the TUI keys, the CLI, or the Phase 4
-//! host). `run_command` stays the string front; everything that mutates the
-//! app goes through `App::execute`. The slash-command catalog (`COMMANDS`,
-//! `Command`, `Match`, `fuzzy_score`) also lives here — it's the pure,
-//! dependency-free half of the old `input.rs`, which 2e split into this
-//! catalog plus the TUI's composer ops (`crates/tui/src/composer.rs`).
+//! `/`-command line (or synthesized by the TUI keys, the CLI, or the host).
+//! `run_command` is the string front; everything that mutates the app goes
+//! through `App::execute`. The slash-command catalog (`COMMANDS`, `Command`,
+//! `Match`, `fuzzy_score`) lives here too.
 
 use anyhow::Result;
 
 use super::{App, FilesTab};
 
-/// A slash command: canonical `name`, a short (≤20 char) `desc`, and alias
+/// A slash command: canonical `name`, a short `desc`, and alias
 /// keywords. Names, aliases, and the description are all fuzzy-searchable, so
 /// typing `/history` surfaces `session`.
 pub struct Command {
@@ -228,7 +226,7 @@ pub fn command_score(c: &Command, needle: &str) -> Option<i32> {
 
 /// One user intent, in the seam's own words. Parsed from the `/`-command
 /// line (`App::parse_command`) or synthesized by the TUI keys, the CLI, or
-/// the Phase 4 host; `App::execute` is the only mutation path.
+/// the host; `App::execute` is the only mutation path.
 ///
 /// Serde: `POST /v1/command` ships this enum directly — every payload is
 /// plain (strings, bools, optionals, [`FilesTab`](super::FilesTab)), so the

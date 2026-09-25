@@ -11,8 +11,7 @@ use super::App;
 
 impl App {
     /// Read the space's scripts dir and populate `scripts_cache`. A missing or
-    /// empty dir produces an empty cache, never an error. The scripts popup's
-    /// flow (selection/edit state, $EDITOR handoff) lives in the view layer.
+    /// empty dir produces an empty cache, never an error.
     pub fn refresh_scripts(&mut self) {
         let dir = self.space.scripts_dir(&self.active_space.name);
         let _ = std::fs::create_dir_all(&dir);
@@ -45,9 +44,8 @@ impl App {
         self.scripts_cache.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    /// Domain half of script create: touch the file (if absent) and refresh
-    /// the cache. Returns the created path. The view owns the edit buffer and
-    /// the $EDITOR handoff.
+    /// Touch the script file (if absent) and refresh the cache. Returns the
+    /// created path.
     pub fn ensure_script_file(&mut self, name: &str) -> anyhow::Result<std::path::PathBuf> {
         use anyhow::Context as _;
         let dir = self.space.scripts_dir(&self.active_space.name);

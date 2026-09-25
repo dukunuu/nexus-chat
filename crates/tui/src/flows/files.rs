@@ -13,7 +13,6 @@ use nexus_core::app::{FilesMode, FilesTab, Popup};
 
 use crate::app_view::AppView;
 
-/// One row of the file-picker browser.
 pub struct PickerEntry {
     pub name: String,
     pub is_dir: bool,

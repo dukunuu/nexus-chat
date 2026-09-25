@@ -1061,7 +1061,6 @@ fn usage(range_key: &str, json: bool, top: u64, by_day: bool) -> Result<()> {
     Ok(())
 }
 
-/// The `--json` variant of `usage` — the same aggregates, machine-readable.
 /// The headline block: counts, cost, and the hit rate over the rows that can
 /// actually support one.
 fn print_usage_totals(totals: &nexus_core::db::UsageTotals) {
@@ -1672,9 +1671,8 @@ async fn models(backend: Option<&str>) -> Result<()> {
         })
         .collect();
     if app.models.is_empty() {
-        // The fetch itself failed — status carries "model fetch failed: …".
-        // The status is an event now (2e); drain locally-queued events and
-        // surface the last status line.
+        // The fetch itself failed: surface the last queued status line
+        // ("model fetch failed: …").
         let mut status = String::new();
         while let Some(ev) = app.pop_pending_event() {
             if let app::AppEvent::Status(s) = ev {
@@ -1768,7 +1766,7 @@ async fn skills_install(spec: &str) -> Result<()> {
     Ok(())
 }
 
-// --- host daemon (Phase 4) ---
+// --- host daemon ---
 
 struct HostOptions {
     port: u16,
@@ -2151,7 +2149,7 @@ fn prompt(label: &str, default: &str) -> String {
     }
 }
 
-// --- sync commands (Phase 3 merge engine) ---
+// --- sync commands ---
 
 /// Temporary workspace for bundle extraction and SSH replies. Cleanup runs
 /// on every return path, including malformed bundles and failed SSH calls.

@@ -90,7 +90,7 @@ impl App {
         if self.current_model.is_none() {
             bail!("no model selected — pass --model, or pick one in the TUI first");
         }
-        // Drive through the seam, like the host API will: boot → command →
+        // Drive through the seam, like the host API does: boot → command →
         // event drain. The guard checks above already validated the preconditions.
         self.execute(AppCommand::Send { text: prompt })?;
 

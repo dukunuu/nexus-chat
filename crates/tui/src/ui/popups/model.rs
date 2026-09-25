@@ -199,8 +199,8 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
             };
         }
         KeyCode::Enter => app.confirm_model()?,
-        // Tab now owns panel-switching — Left/Right/Home/End/Delete/Ctrl+A/C/X/V
-        // are claimed by the filter box below (cursor move, select, clipboard).
+        // Tab switches panels; Left/Right/Home/End/Delete/Ctrl+A/C/X/V belong
+        // to the filter box below (cursor move, select, clipboard).
         KeyCode::Tab => app.toggle_model_focus(),
         KeyCode::Up => app.move_model_selection(-1),
         KeyCode::Down => app.move_model_selection(1),

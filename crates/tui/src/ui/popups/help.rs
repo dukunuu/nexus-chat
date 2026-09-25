@@ -62,7 +62,6 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
-/// The full help text, one `Line` per row.
 pub fn help_lines(theme: &Theme) -> Vec<Line<'static>> {
     let heading = |s: &str| {
         Line::from(Span::styled(

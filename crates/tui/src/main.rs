@@ -42,9 +42,9 @@ async fn main() -> Result<()> {
     let (selection_server, selection_requests) = cli::start_selection_server()?;
 
     let mut terminal = ratatui::init();
-    // Capture mouse so popups are clickable/scrollable and the terminal doesn't do
-    // its own screen-wide text selection (composer selection is Shift/Ctrl+arrows,
-    // copied with Ctrl+C). Bracketed paste delivers native paste as one event.
+    // Capture mouse so popups are clickable/scrollable and the terminal doesn't
+    // do its own screen-wide text selection. Bracketed paste delivers a native
+    // paste as one event.
     let _ = crossterm::execute!(
         std::io::stdout(),
         crossterm::event::EnableMouseCapture,

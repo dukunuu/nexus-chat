@@ -1,10 +1,8 @@
-//! Styled markdown rendering for the history pane (the `2e` half of the
-//! markdown split: `nexus_core::markdown` keeps the pure `to_plain` copy path
-//! and the shared GFM table splitter; this module owns everything that touches
-//! ratatui/`tui_markdown`). `tui_markdown` styles inline emphasis/code and
-//! highlights fenced code, but leaves block markers as literal text (`# `,
-//! `- `, ```` ``` ````). We strip those so the display — and anything copied
-//! from it — is clean text.
+//! Styled markdown rendering for the history pane (`nexus_core::markdown`
+//! holds the plain-text copy path and the GFM table splitter).
+//! `tui_markdown` styles inline emphasis/code and highlights fenced code, but
+//! leaves block markers as literal text (`# `, `- `, ```` ``` ````); we strip
+//! those so the display — and anything copied from it — is clean text.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -13,7 +11,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use nexus_core::markdown::{TableAlign, TableSegment};
 
-/// The plain text of a rendered line (all spans concatenated).
 pub fn line_text(line: &Line) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
@@ -339,8 +336,8 @@ fn list_rest(plain: &str) -> Option<String> {
 /// Word-wrap a styled `Line` to `width` terminal columns, preserving per-span
 /// styling. Wraps by display width (CJK/emoji are 2 columns), not char count,
 /// so wide-glyph content — like a Japanese vocab table — doesn't overflow its
-/// budget. Mouse selection still maps by char index (`selection.rs`), which
-/// stays a close-enough approximation for wide glyphs, same as before.
+/// budget. Mouse selection still maps by char index (`selection.rs`), a
+/// close-enough approximation for wide glyphs.
 fn wrap_styled_line(line: &Line, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
     let chars: Vec<(char, Style)> = line
@@ -377,7 +374,6 @@ fn wrap_styled_line(line: &Line, width: usize) -> Vec<Line<'static>> {
     rows.into_iter().map(row_to_line).collect()
 }
 
-/// Total display width of a run of styled chars.
 fn width_of(v: &[(char, Style)]) -> usize {
     v.iter().map(|&(c, _)| char_width(c)).sum()
 }

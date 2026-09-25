@@ -255,7 +255,7 @@ impl Demux {
 /// re-renders every recorded tool call through the Harmony template and
 /// `json.loads` its arguments, so one unparsable call fails *every* later
 /// request — `404 … Unterminated string starting at: line 1 column 99` —
-/// wedging the session exactly the way framed `content` used to. Empty
+/// wedging the session exactly the way framed `content` does. Empty
 /// arguments are a no-arg call and become `{}`; anything else that does not
 /// parse is unrecoverable, and `None` says so.
 fn replayable(arguments: &str) -> Option<String> {
@@ -448,8 +448,8 @@ mod tests {
 
     #[test]
     fn constrain_token_does_not_fuse_into_the_tool_name() {
-        // gpt-oss writes the recipient with no trailing space, so the
-        // constrain type used to fuse onto it and produce `batchjson`.
+        // gpt-oss writes the recipient with no trailing space; the constrain
+        // type must not fuse onto it and produce `batchjson`.
         let turn = "<|channel|>commentary to=functions.batch<|constrain|>json<|message|>\
 {\"calls\":[]}<|call|>";
         for chunk in [1, 5, turn.len()] {
@@ -535,9 +535,8 @@ Let's do that.<|end|><|start|>assistant<|channel|>commentary to=functions.search
                     }),
                     "{label} capture, chunk {chunk}: {pieces:?}"
                 );
-                // The arguments went to the call, not to the transcript:
-                // this is the turn that used to render as a bare `{"query"
-                // …}` blob with no search behind it.
+                // The arguments went to the call, not to the transcript as a
+                // bare `{"query" …}` blob with no search behind it.
                 let (content, reasoning) = joined(&pieces);
                 assert!(content.is_empty(), "{label} chunk {chunk}: {content:?}");
                 assert!(!reasoning.contains("\"query\""), "{label} chunk {chunk}");

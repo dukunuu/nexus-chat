@@ -1,4 +1,4 @@
-//! Phase 4 `nexus host` — the daemon surface.
+//! `nexus host` — the daemon surface.
 //!
 //! One subcommand turns the current machine into the hub: an `HTTP`/`SSE`
 //! session API, a byte-passthrough provider gateway, worker routes, and

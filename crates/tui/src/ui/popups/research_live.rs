@@ -24,8 +24,8 @@ pub fn render(f: &mut Frame, app: &AppView) {
     // job's searchers and steers.
     let rows = &app.research_stage_rows;
     let mut items: Vec<ListItem> = Vec::new();
-    // Quick win: steers queued but not yet drained at a round boundary stay
-    // visible here. The pipeline acknowledges drained steers as `steer #N`
+    // Steers queued but not yet drained at a round boundary stay visible
+    // here. The pipeline acknowledges drained steers as `steer #N`
     // stage rows and the App records those positions in
     // `research_steer_acked` (parsed from `Stage` updates, so it's correct
     // even when the popup is opened from another session); steer k is
@@ -115,8 +115,6 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) {
     match key.code {
         KeyCode::Char('x') if ctrl => {
             app.stop_research();
-            // 2e: the domain no longer owns the popup — close it here (the
-            // old core `stop_research` did, and Esc also closes).
             app.popup = nexus_core::app::Popup::None;
         }
         KeyCode::Esc => app.popup = nexus_core::app::Popup::None,

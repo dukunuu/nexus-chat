@@ -159,12 +159,11 @@ fn render_input(f: &mut Frame, app: &mut AppView, area: Rect) {
     let inner = block.inner(area);
     app.input_inner = inner; // remembered for mouse click -> cursor mapping
     f.render_widget(block, area);
-    // The editor draws its own cursor + selection highlight inside the border.
     f.render_widget(&app.input, inner);
 }
 
 /// Slash-command autocomplete: a fuzzy-ranked list floating just above the
-/// input box. `/name` in cyan, ≤20-char description dimmed alongside.
+/// input box: `/name` in the accent color, its description dimmed alongside.
 // Terminal popup geometry — n/h/w/y/x are idiomatic for rect math.
 #[allow(clippy::many_single_char_names)]
 fn render_command_popup(f: &mut Frame, app: &AppView, input_area: Rect) {
@@ -310,7 +309,6 @@ fn render_context_bar(f: &mut Frame, app: &AppView, area: Rect) {
     let mut spans: Vec<Span> = Vec::with_capacity(width);
     for x in 0..width {
         if x < filled {
-            // Position along the whole bar → gradient stop.
             let t = if width > 1 {
                 x as f64 / (width - 1) as f64
             } else {

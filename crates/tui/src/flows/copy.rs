@@ -112,7 +112,7 @@ mod tests {
         assert_ne!(a.last_status(), "sentinel");
 
         // An out-of-range index is a no-op when no response is active — no
-        // status event is pushed (the 2e status lives in the view, fed by events).
+        // status event is pushed.
         let _ = a.last_status(); // drain so the next action must produce a fresh status
         a.copy_message(2);
         assert_eq!(a.last_status(), "");

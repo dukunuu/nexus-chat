@@ -142,8 +142,8 @@ pub fn render(f: &mut Frame, app: &AppView) {
 
 pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
     use nexus_core::app::SettingsField;
-    // The memory-model and transcriber-model rows are picked, not typed:
-    // Enter opens the same model picker /model uses, Backspace clears it.
+    // Model rows are picked, not typed: Enter opens the same model picker
+    // /model uses, Backspace clears it.
     let picker = matches!(
         app.settings_field(),
         Some(

@@ -4,8 +4,7 @@ use super::App;
 use crate::db::Space as SpaceRow;
 
 impl App {
-    /// Switch back to the default space (used when the active space is
-    /// deleted from the picker — view layer calls this, so it's pub).
+    /// Switch back to the default space (after the active space is deleted).
     pub fn switch_to_default_space(&mut self) -> Result<()> {
         let default_id = self.db.default_space_id()?;
         let row = self
@@ -36,8 +35,7 @@ impl App {
 
     /// Path to the highlighted space's instructions file, creating a stub with
     /// a short header comment if it doesn't exist yet (so $EDITOR has something
-    /// to open). The picker cursor lives in the view layer; callers pass the
-    /// selected space's name.
+    /// to open).
     pub fn instructions_path_for_space(&self, name: &str) -> Option<std::path::PathBuf> {
         let path = self.space.instructions_path(name);
         if !path.exists() {

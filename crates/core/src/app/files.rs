@@ -145,8 +145,6 @@ impl OcrBackend {
     }
 }
 
-/// First ~90 chars of an error, so a page failure fits in the status column
-/// without swallowing the reason.
 /// A stem that looks like a UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).
 fn is_uuid_like(stem: &str) -> bool {
     let hex = |s: &str| s.chars().all(|c| c.is_ascii_hexdigit());
@@ -164,6 +162,8 @@ fn is_uuid_like(stem: &str) -> bool {
         && hex(parts[4])
 }
 
+/// First ~90 chars of an error, so a page failure fits in the status column
+/// without swallowing the reason.
 fn clip_err(e: &str) -> String {
     let mut s: String = e.chars().take(90).collect();
     if s.len() < e.len() {
@@ -187,7 +187,7 @@ fn ollama_ocr_body(model: &str, png_b64: &str) -> serde_json::Value {
 }
 
 /// OCR a scanned PDF through a vision backend: render pages at 300 DPI color,
-/// transcribe up to 4 pages concurrently (one retry each), and join with
+/// transcribe up to 16 pages concurrently (one retry each), and join with
 /// `[page N]` markers — a page that fails twice becomes a `[page N: ocr
 /// failed]` marker instead of sinking the document.
 /// Rendered page PNGs are saved permanently to `<files_dir>/<pdf_stem>/` so
@@ -531,7 +531,7 @@ impl App {
             .unwrap_or_default();
     }
 
-    /// OCR queued scanned PDFs sequentially off the UI thread. One batch at a
+    /// OCR queued scanned PDFs and images sequentially off the UI thread. One batch at a
     /// time: jobs arriving while a batch runs stay at "ocr…" and re-queue on a
     /// later rescan.
     pub fn start_ocr(&mut self, jobs: Vec<(String, String, std::path::PathBuf)>) {
@@ -681,9 +681,8 @@ impl App {
         }
     }
 
-    /// The `reextract`/`reocr`/delete popup flows live in the view layer;
-    /// this is the re-extract half: zero the selected file's chunks and
-    /// hash/size so the next rescan re-indexes from disk.
+    /// Zero a file's chunks and hash/size so the next rescan re-indexes it
+    /// from disk.
     pub fn reextract_file(&mut self, name: &str) {
         let Some(f) = self.files_cache.iter().find(|f| f.name == name).cloned() else {
             return;
@@ -698,8 +697,7 @@ impl App {
         self.rescan_files();
     }
 
-    /// The `reocr` popup flow lives in the view layer; this is the OCR half:
-    /// force an OCR pass on one file, bypassing text extraction entirely.
+    /// Force an OCR pass on one file, bypassing text extraction entirely.
     /// Useful when `pdf_extract` gives unreliable text and you want VLM OCR
     /// output instead.
     pub fn reocr_file(&mut self, name: &str) {
@@ -1013,8 +1011,7 @@ impl App {
         Ok(name)
     }
 
-    /// Domain half of the files popup's delete: remove the disk copy and
-    /// index rows, refresh the cache. The view owns the mode/selection state.
+    /// Remove a file's disk copy and index rows, then refresh the cache.
     pub fn delete_file(&mut self, name: &str) -> Result<()> {
         let Some(f) = self.files_cache.iter().find(|f| f.name == name).cloned() else {
             return Ok(());
@@ -1029,10 +1026,10 @@ impl App {
         Ok(())
     }
 
-    /// Domain half of the files popup's rename: move the file on disk; the
+    /// Move a file on disk; the
     /// rescan swaps the index rows (old name dropped, new name re-extracted).
     /// Returns an error message string when the target already exists or the
-    /// name is invalid; the view turns it into a status line.
+    /// name is invalid.
     pub fn rename_file(&mut self, name: &str, new: &str) -> Result<()> {
         if new.is_empty() || new == name {
             return Ok(());
@@ -1287,8 +1284,8 @@ mod tests {
         assert!(a.ocr_backend().is_none());
     }
 
-    /// The "image model" setting describes image files; it sat unread for a
-    /// while, so images silently went to the OCR model instead.
+    /// The image model describes image files; images use the OCR model only
+    /// when it's unset or the engine is local-only.
     #[test]
     fn image_backend_uses_the_image_model_under_vlm_engines() {
         let mut a = test_app();

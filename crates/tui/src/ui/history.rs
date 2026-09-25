@@ -278,16 +278,9 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
 
     f.render_widget(Paragraph::new(visible), inner);
 
-    // Scrollbar in the gutter: only when the conversation overflows. Drawn
-    // directly rather than with ratatui's `Scrollbar` widget — that widget
-    // proportions the thumb against `content_length - 1 + viewport`, which
-    // inflates it when the content barely overflows, re-rounds its size and
-    // position on every streamed line (the thumb visibly jumps while
-    // thinking or tool output grows), and never maps it flush to the track
-    // bottom — following the stream leaves a dead gap under the thumb.
-    // Here the thumb is the true viewport fraction and its travel maps
-    // linearly onto the track: flush at the top when scrolled to the start,
-    // flush at the bottom when following.
+    // Scrollbar in the gutter, only when the conversation overflows. Hand-
+    // drawn: ratatui's `Scrollbar` thumb jumps on every streamed line and
+    // never sits flush at the track bottom (see `render_scrollbar`).
     if total > height {
         render_scrollbar(f, area, total, top, &app.theme);
     }
@@ -549,7 +542,6 @@ fn render_welcome(f: &mut Frame, app: &AppView, area: Rect) {
         }
     }
 
-    // Frame it in a rounded panel, centered.
     let panel_w = area.width.min(86);
     let panel_h = (lines.len() + 2).min(area.height as usize) as u16;
     let panel = Rect {
@@ -1058,8 +1050,7 @@ fn push_assistant_stored(
     rendered.lines = crate::ui::citations_style::style_confidence_tags(rendered.lines);
     push_rendered(out, code, blocks, rendered, Some(rail));
 
-    // Footer below the response: phrase + stats (the model lives in the
-    // header now).
+    // Footer below the response: phrase + stats.
     let mut footer = String::new();
     if let Some(p) = &msg.phrase {
         footer.push_str("· ");
@@ -1130,8 +1121,6 @@ fn push_session_link(
     out.push(Line::from(""));
 }
 
-/// The in-progress reply: "spinner Phrase" on one line in a random colour, live
-/// reasoning below, then the answer as it streams.
 /// The in-progress reply: a `⠹ <model> — <phrase>` header in the spinner
 /// color, the thinking block when present, then the live markdown stream.
 fn push_assistant_streaming(
@@ -1333,7 +1322,6 @@ fn image_to_halfblock_lines(path: &str, max_width: usize) -> Vec<Line<'static>> 
     lines
 }
 
-/// Wrap text to `width`, preserving explicit newlines.
 fn wrap_plain(content: &str, width: usize) -> Vec<String> {
     let w = width.max(1);
     let mut out = Vec::new();

@@ -174,8 +174,7 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
             if app.session_filter.key(key, &mut app.clipboard) {
                 return Ok(());
             }
-            // No create/rename-gating divergence here: session supports
-            // rename but not create.
+            // Sessions support rename but not create.
             match classify_browse_key(key, false, true) {
                 Some(super::BrowseAction::Close) => app.popup = nexus_core::app::Popup::None,
                 Some(super::BrowseAction::MoveUp) => app.move_session_selection(-1),

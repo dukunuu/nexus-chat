@@ -41,7 +41,6 @@ impl BackgroundMode {
         self.key()
     }
 
-    /// Cycle between the two background modes.
     #[must_use]
     pub const fn next(self) -> Self {
         match self {
@@ -187,7 +186,6 @@ impl Theme {
         };
     }
 
-    /// Style used to paint the TUI's general surface.
     #[must_use]
     pub fn background_style(&self) -> Style {
         Style::default().bg(self.surface)

@@ -268,7 +268,7 @@ fn message_without_model_is_rejected() {
     })
     .unwrap();
     assert!(a.session.is_none());
-    // The composer restore is an event now (2e) — the view would re-apply it.
+    // The composer restore is an event — the view re-applies it.
     let (sets, status) = a.drain_ui_events();
     assert_eq!(sets, vec!["hello".to_string()]);
     assert!(status.contains("pick a model"));
@@ -1997,7 +1997,7 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
     );
 }
 
-// ── Phase 2c: the command/event seam ─────────────────────────────────────
+// ── the command/event seam ─────────────────────────────────────────────────
 
 /// Every catalog entry must parse: the composer advertised `/help` for a
 /// while with no parser arm behind it ("unknown command: /help").

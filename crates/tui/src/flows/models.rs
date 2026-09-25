@@ -53,8 +53,8 @@ impl AppView {
         self.open_model_picker_impl();
     }
 
-    /// Open the same model picker, but a confirmed pick sets the transcriber
-    /// model (in `/config`) instead of the active session's model.
+    /// Open the same model picker, but a confirmed pick sets the image model
+    /// (`transcriber_model`, in `/config`) instead of the active session's model.
     pub fn open_model_picker_for_transcriber(&mut self) {
         self.core.model_pick_target = ModelPickTarget::Transcriber;
         self.open_model_picker_impl();
@@ -274,7 +274,6 @@ impl AppView {
     }
 
     /// Favorite models matching the search filter, most-recently-used first.
-    /// When `image_gen_only` is true, only includes models that support image generation.
     pub fn favorite_models(&self) -> Vec<&Model> {
         self.filtered_panel(true)
     }
@@ -389,7 +388,7 @@ impl AppView {
 
         // A missing, explicit-none, or stale stored value starts at the first
         // enabled tier. The final tier wraps to explicit `none` when accepted,
-        // otherwise it removes the parameter as before.
+        // otherwise it removes the parameter.
         let stored = self.core.reasoning.get(&id).map(String::as_str);
         let pos = stored.and_then(|s| enabled.iter().position(|e| e.as_str() == s));
         let next = match pos {

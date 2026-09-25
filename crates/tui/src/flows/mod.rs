@@ -1,8 +1,6 @@
-//! Popup flow logic moved from core by Phase 2e: the cursor/mode/edit-state
-//! methods for each popup, operating on `AppView` (view fields resolve to the
-//! view, domain fields/methods fall through the `Deref` to `App`). Domain
-//! halves — db reads, disk ops, background jobs — stay in
-//! `nexus_core::app::*`.
+//! Popup flow logic: the cursor/mode/edit-state methods for each popup,
+//! operating on `AppView`. Domain halves — db reads, disk ops, background
+//! jobs — live in `nexus_core::app::*`.
 
 pub mod apps;
 pub mod copy;

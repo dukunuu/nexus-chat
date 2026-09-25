@@ -121,8 +121,6 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
                 }
                 KeyCode::Char('x') if ctrl && app.swarm_rx.is_some() => {
                     app.stop_swarm();
-                    // 2e: the domain no longer owns the popup — close it
-                    // here (the old core `stop_swarm` did).
                     app.popup = nexus_core::app::Popup::None;
                 }
                 KeyCode::Char('d') if ctrl && !app.swarm_cache.is_empty() => {

@@ -90,7 +90,7 @@ impl AppView {
     }
 
     /// Space (or Enter) on a group header collapses/expands it; on a field it
-    /// runs that field's own toggle/cycle behavior, same as before.
+    /// runs that field's own toggle/cycle behavior.
     pub fn toggle_settings_field(&mut self) {
         match self.settings_row() {
             SettingsRow::Group(i) => {
@@ -319,7 +319,7 @@ mod tests {
         a.save_settings().unwrap();
 
         assert_eq!(a.core.searxng_url, "http://localhost:8080"); // trailing slash trimmed
-        // The toolbox sits behind the `ToolExecutor` seam now — the URL wiring
+        // The toolbox sits behind the `ToolExecutor` seam — the URL wiring
         // itself is covered by tools::tests::new_wires_searxng_url_and_langsearch_key.
         assert!(!a.skills.iter().any(|s| s.name == "web-search")); // /web injects prompt text directly
 

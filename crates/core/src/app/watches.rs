@@ -23,9 +23,8 @@ pub fn due_watches(watches: &[Watch], now: DateTime<Utc>) -> Vec<Watch> {
 
 /// A "## What changed since last run" section prepended to a watch's new
 /// report: lists newly-seen sources (by URL) not cited in the previous
-/// report. Does not diff prose — an LLM-generated summary of what changed
-/// is out of scope for this pass (YAGNI: a source-level diff is what a
-/// user actually scans for first).
+/// report. Does not diff prose: a source-level diff is what a user scans
+/// for first.
 pub fn diff_section(previous_report: &str, new_report: &str, new_sources: &[String]) -> String {
     let _ = (previous_report, new_report); // reserved for a future prose diff; unused today
     let mut out = String::from("## What changed since last run\n\n");
@@ -77,9 +76,8 @@ impl super::App {
         }
     }
 
-    /// The watch picker's confirm/delete flows live in the view layer; this
-    /// is the delete half: drop the row from the db and refresh the cache.
-    /// Returns whether a row existed.
+    /// Drop a watch row from the db and refresh the cache. Returns whether a
+    /// row existed.
     pub fn delete_watch(&mut self, id: &str) -> anyhow::Result<bool> {
         let existed = self.watches_cache.iter().any(|w| w.id == id);
         if existed {
@@ -471,11 +469,8 @@ mod tests {
         )
         .unwrap();
 
-        // The "rust" watch should NOT see the "rust async" watch's citations,
+        // The "rust" watch must not see the "rust async" watch's citations,
         // even though "research-rust-async-..." starts with "research-rust-".
-        // With the bug unfixed, the "rust" watch would incorrectly pull in the
-        // "rust-async" watch's citations since "research-rust-async-20260101-000000.md"
-        // starts with the prefix "research-rust-".
         let prev_rust = a
             .previous_citations_for_watch_session(&session_rust.id, &space_id)
             .unwrap();

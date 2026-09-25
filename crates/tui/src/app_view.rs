@@ -1,12 +1,8 @@
-//! The TUI's view layer (Phase 2e): `AppView` wraps the domain `App` plus
-//! every piece of UI state extracted from core — composer, popup chrome and
-//! caches, render state, theme, status line. `Deref<Target = App>` keeps the
-//! existing `app.*` call sites compiling unchanged: fields the view owns
-//! resolve to `AppView`, everything else falls through to the domain `App`,
-//! and method calls on the domain (`send_message`, `push_status`, …) resolve via
-//! deref. Events carry UI feedback the other way (`AppEvent::Status`,
-//! `ComposerSet`/`ComposerClear`, `ViewportReset`, `HistoryInvalidated`,
-//! `OpenLoginPopup`) — `apply_event` applies them to this layer.
+//! The TUI's view layer: `AppView` wraps the domain `App` plus all UI state —
+//! composer, popup chrome and caches, render state, theme, status line.
+//! `Deref<Target = App>` resolves view-owned fields here and falls through to
+//! the domain for everything else. UI feedback comes back as `AppEvent`s,
+//! which `apply_event` applies to this layer.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
@@ -80,9 +76,7 @@ pub struct AppView {
     pub session_selected: usize,
     /// Fuzzy filter typed in the session picker (matches title, slug, and id).
     pub session_filter: FilterInput,
-    /// Whether the picker is browsing, renaming, or confirming a delete.
     pub session_mode: SessionMode,
-    /// Edit buffer while renaming a session.
     pub session_edit: String,
     /// (session id, preview text) of the last session the picker previewed
     /// from the db — recomputed only when the selection moves.
@@ -121,7 +115,6 @@ pub struct AppView {
     pub key_input: String,
     /// Which backend the current `Popup::Key` entry is for.
     pub key_target: KeyTarget,
-    /// Highlighted row in the `/login` provider selector.
     pub login_selected: usize,
     /// Cursor in the `/local` runtime selector, and whether it was reached
     /// through `/login` — Esc goes back there, but closes for a bare `/local`.
@@ -142,7 +135,6 @@ pub struct AppView {
     /// stashed for click mapping).
     pub fav_offset: usize,
     pub avail_offset: usize,
-    /// `/copy` menu entries and the highlighted row.
     pub copy_options: Vec<CopyOption>,
     pub copy_selected: usize,
 
@@ -183,7 +175,6 @@ pub struct AppView {
     pub session_caches: HashMap<String, HistoryCache>,
     /// Whether tool-call blocks show full arguments/results (Ctrl+T).
     pub show_tool_detail: bool,
-    /// Screen rectangles for the currently rendered notification rows.
     pub notification_areas: Vec<(Rect, usize)>,
     /// Start-screen banner (custom or built-in) and a greeting picked at launch.
     pub banner: String,
@@ -201,8 +192,7 @@ pub struct AppView {
     pub theme_gen: usize,
 
     // ── Flow chrome ───────────────────────────────────────────────────────
-    /// One-line status, fed by `AppEvent::Status` (domain code pushes status
-    /// lines; it no longer owns this field).
+    /// One-line status, fed by `AppEvent::Status`.
     pub status: String,
     /// When `status` was set; it clears itself after [`STATUS_TTL`] (errors
     /// after [`ERROR_STATUS_TTL`]) so stale lines don't linger.
@@ -243,7 +233,6 @@ fn load_background_mode(core: &App) -> BackgroundMode {
 }
 
 impl AppView {
-    /// Wrap a freshly-booted domain `App` with a fresh view layer.
     pub fn new(mut core: App) -> Self {
         // `App::new` queues the launch status line as an event; seed the
         // view's status field from it so the first frame reads correctly.
@@ -444,16 +433,13 @@ impl AppView {
         }
     }
 
-    /// `o` in the history pane: open the `[n]` citation under the current
-    /// text selection, resolved against the Sources list of the message the
-    /// selection belongs to (Ctrl+O navigates session links instead).
-    /// Selection state is read here; the domain resolves the link.
+    /// Ctrl+O: navigate to the session linked in the message under the
+    /// selection. Selection state is read here; the domain resolves the link.
     pub fn open_session_link(&mut self) {
         let owner = self.sel.owner_at_selection_start();
         self.core.open_session_link(owner);
     }
 
-    /// Copy arbitrary text to the clipboard and report it in the status line.
     pub fn copy_text(&mut self, text: &str) {
         let msg = crate::composer::copy_to_clipboard(&mut self.clipboard, text);
         if !msg.is_empty() {
@@ -479,7 +465,6 @@ impl AppView {
         }
     }
 
-    /// The settings popup's text-index helper (moved with the popup state).
     /// Index into `settings_inputs` for any typed (non-toggle, non-picker)
     /// field. `None` both for non-text fields and when a group header is
     /// selected.
@@ -521,7 +506,6 @@ pub const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 pub const ERROR_STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl AppView {
-    /// When the current status line should clear, if one is showing.
     pub fn status_deadline(&self) -> Option<std::time::Instant> {
         let at = self.status_at?;
         let lower = self.status.to_lowercase();
@@ -533,7 +517,6 @@ impl AppView {
         Some(at + ttl)
     }
 
-    /// Clear the status line once its deadline has passed.
     pub fn expire_status(&mut self) {
         if self
             .status_deadline()

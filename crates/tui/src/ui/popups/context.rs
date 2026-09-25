@@ -9,8 +9,8 @@ use nexus_core::app::Popup;
 
 use super::chrome;
 
-/// Context breakdown popup (Ctrl+I): estimated tokens spent on system
-/// instructions, memory, conversation, and (pending) skills.
+/// Context breakdown popup (Ctrl+G): estimated tokens spent on system
+/// instructions, memory, skills, and conversation.
 pub fn render(f: &mut Frame, app: &AppView) {
     let area = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
     let b = app.context_breakdown();

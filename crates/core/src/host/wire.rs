@@ -1,4 +1,4 @@
-//! Wire types for the Phase 4 `nexus host` `HTTP`/`SSE` API.
+//! Wire types for the `nexus host` `HTTP`/`SSE` API.
 //!
 //! The daemon never leaks domain internals onto the wire: [`AppEvent`]
 //! nests provider ([`StreamEvent`]), research, swarm, and file types that
@@ -703,7 +703,7 @@ mod tests {
         }
     }
 
-    /// A golden frame locks the `SSE` wire shape for Phase 5 clients: the
+    /// A golden frame locks the `SSE` wire shape for clients: the
     /// adjacently-tagged envelope, snake_case type names, and the exact
     /// payload nesting.
     #[test]

@@ -445,8 +445,7 @@ impl App {
             .is_none_or(|m| m.reasoning_efforts.iter().any(|e| e.as_str() == effort))
     }
 
-    /// Set the active model (or a feature model, per the pick target). The
-    /// view layer owns the popup routing; this is the domain half.
+    /// Set the active model (or a feature model, per the pick target).
     pub fn pick_model(&mut self, id: &str) -> Result<()> {
         match self.model_pick_target {
             ModelPickTarget::Session => {
@@ -523,8 +522,8 @@ impl App {
         Ok(())
     }
 
-    /// Disable image transcription entirely (Backspace on the
-    /// transcriber-model row in `/config`).
+    /// Clear the image model so image files fall back to the OCR model
+    /// (Backspace on the image-model row in `/config`).
     pub fn clear_transcriber_model(&mut self) -> Result<()> {
         self.transcriber_model.clear();
         self.db.set_setting("transcriber_model", "")?;
@@ -557,8 +556,7 @@ impl App {
     }
 
     /// `/login`: start the `OpenAI` Codex device-code login (the only backend
-    /// without a plain API key). Domain side: spawns the task and owns the
-    /// result channel; the view layer shows the selector.
+    /// without a plain API key): spawns the task and owns the result channel.
     pub fn start_codex_login(&mut self) {
         // A previous login task can be left around after cancellation/timeout while
         // the UI has no useful way to resume it. Starting again should replace the

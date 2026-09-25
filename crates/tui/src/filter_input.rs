@@ -1,9 +1,6 @@
 //! A single-line, cursor-addressable text field with selection and OS
-//! clipboard copy/paste — used by the popup search/filter boxes (session,
-//! space, model picker, skills install). These used to be raw `String` with
-//! push/pop-only editing: no cursor movement, no selection, no clipboard.
-//! `Deref<Target = str>` keeps existing `.trim()`/`.to_lowercase()`/
-//! `.is_empty()` call sites unchanged.
+//! clipboard copy/paste — the popup search/filter boxes (session, space,
+//! model picker, skills install). `Deref<Target = str>` exposes the text.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

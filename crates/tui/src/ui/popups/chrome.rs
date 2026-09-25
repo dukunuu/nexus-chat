@@ -170,7 +170,6 @@ pub fn fit_line(line: Line<'_>, width: usize) -> Line<'_> {
     }
     let mut spans = Vec::with_capacity(line.spans.len());
     if width > 0 {
-        // Room for the content before the ellipsis.
         let mut left = width - 1;
         for span in line.spans {
             let n = span.content.chars().count();
@@ -244,7 +243,6 @@ pub fn render_list(
         height: area.height,
     };
     f.render_stateful_widget(list, list_area, state);
-    // Record the drawn geometry so a click can map back to an item.
     app.list_hit.set(Some(ListHit {
         area: list_area,
         item_lines: item_lines.max(1),

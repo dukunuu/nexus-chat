@@ -2,7 +2,7 @@
 //! space: `(line, col)` where `line` indexes the fully-wrapped conversation and
 //! `col` is a char offset into that line. The UI records the rendered layout each
 //! frame (`record_render`); the event loop drives gestures (down/drag/up + a
-//! long-press timer). Copy lives on `App` (it owns the clipboard).
+//! long-press timer). Copy lives on `AppView` (it owns the clipboard).
 
 use std::time::{Duration, Instant};
 
@@ -16,7 +16,6 @@ const LONG_PRESS: Duration = Duration::from_millis(450);
 /// (line, col) in wrapped-line space.
 pub type Pos = (usize, usize);
 
-/// What a long press produced.
 pub enum LongPress {
     /// Raw code text, already exact — copy verbatim.
     Code(String),
@@ -28,7 +27,6 @@ pub enum LongPress {
     Url(String),
 }
 
-/// What releasing a press should do.
 pub enum Action {
     Copy(String),
     OpenUrl(String),
@@ -238,7 +236,6 @@ impl HistorySel {
         self.long_pressed
     }
 
-    /// Select every line belonging to code block `id`.
     fn select_code_block(&mut self, id: usize) {
         let first = self.code.iter().position(|c| *c == Some(id));
         let last = self.code.iter().rposition(|c| *c == Some(id));
@@ -302,7 +299,6 @@ impl HistorySel {
         ((lo_line, 0), (hi_line, len))
     }
 
-    /// Select every line belonging to the same message as `pos`.
     fn select_message(&mut self, (line, _): Pos) {
         let Some(&Some(msg)) = self.owner.get(line) else {
             return;

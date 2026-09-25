@@ -103,10 +103,8 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) {
             Some(ConfirmDeleteAction::No) => app.skills_mode = SkillsMode::Browse,
             None => {}
         },
-        // skills' Browse mode has no Enter binding, and (unlike session/space)
-        // no text filter — Ctrl+R rename is unsupported and plain
-        // chars/Backspace are intentionally left as no-ops, matching the
-        // original match arm's fallthrough to `_ => {}`.
+        // Skills browse has no Enter binding, no rename, and (unlike
+        // session/space) no text filter: plain chars/Backspace are no-ops.
         SkillsMode::Browse => match classify_browse_key(key, true, false) {
             Some(super::BrowseAction::Close) => app.popup = nexus_core::app::Popup::None,
             Some(super::BrowseAction::MoveUp) => app.move_skills_selection(-1),

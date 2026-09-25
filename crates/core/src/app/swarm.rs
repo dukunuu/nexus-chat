@@ -124,8 +124,7 @@ impl App {
         self.swarm_session = Some(swarm_session_id);
     }
 
-    /// Domain half of the roster save: drop blank rows and persist. The
-    /// view clamps its cursor after calling this.
+    /// Drop blank roster rows and persist.
     pub fn save_swarm_roster(&mut self) -> Result<()> {
         self.swarm_cache.retain(|p| !p.name.trim().is_empty());
         if let Some(session) = &self.session {
@@ -137,7 +136,6 @@ impl App {
 
     /// Stop the running swarm immediately. Persona model/tool streams are
     /// children of the aborted orchestration task and are dropped with it.
-    /// The view closes its popup after calling this.
     pub fn stop_swarm(&mut self) {
         if let Some(abort) = self.swarm_abort.take() {
             abort.abort();

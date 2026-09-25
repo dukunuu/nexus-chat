@@ -297,14 +297,12 @@ fn render_scripts(f: &mut Frame, app: &AppView) {
 }
 
 pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
-    // Tab switches tab
     if key.code == KeyCode::Tab {
         app.files_tab = match app.files_tab {
             FilesTab::Files => FilesTab::Images,
             FilesTab::Images => FilesTab::Scripts,
             FilesTab::Scripts => FilesTab::Files,
         };
-        // Refresh cache for the new tab
         match app.files_tab {
             FilesTab::Files => app.rescan_files(),
             FilesTab::Images => app.refresh_images(),

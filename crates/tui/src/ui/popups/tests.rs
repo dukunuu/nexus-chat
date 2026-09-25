@@ -441,9 +441,8 @@ mod usage_render_tests {
                 .map(|i| UsageRow {
                     created_at: format!("2026-08-12T23:{:02}:00Z", 15 - i),
                     backend: "OpenRouter".into(),
-                    // Realistic overflow-prone values: "122.2k→672" (10
-                    // chars) and "120.1k→2.1k" (11 chars) exceed a 9-cell
-                    // field and used to shove the trailing columns around.
+                    // Overflow-prone values: "122.2k→672" (10 chars) and
+                    // "120.1k→2.1k" (11 chars) exceed a 9-cell field.
                     model: format!("deepseek/deepseek-v4-flash-0731 ({i})"),
                     prompt_tokens: [122_221, 120_086, 118_690][i],
                     completion_tokens: [672, 2126, 592][i],
@@ -501,9 +500,8 @@ mod usage_render_tests {
         );
     }
 
-    /// At 80×24 the popup has ~13 inner rows. The backend rows used to be
-    /// squeezed out entirely (header drawn, rows gone), and wide lines were
-    /// cut mid-word with no ellipsis.
+    /// At 80×24 the popup has ~13 inner rows: the backend rows must survive,
+    /// and wide lines end in an ellipsis rather than a mid-word cut.
     #[test]
     fn small_terminal_keeps_backend_rows_and_ellipsizes_overflow() {
         let app = populated_app();
@@ -608,9 +606,8 @@ mod usage_render_tests {
     }
 }
 
-/// Watch-picker key-flow tests. The picker's `handle_key` lives in this
-/// crate (ui/popups/watches.rs); the state it drives lives in core — this
-/// is the first seam test: TUI keys driving core state through the popup.
+/// Watch-picker key-flow tests: TUI keys (ui/popups/watches.rs) driving core
+/// state through the popup.
 mod watch_popup_tests {
     use crate::app_view::AppView;
     use nexus_core::app::{App, WatchMode};
@@ -683,9 +680,8 @@ mod watch_popup_tests {
     }
 }
 
-/// 2e regression tests: `stop_research`/`stop_swarm` no longer own the popup
-/// (it's view state), so the popups' Ctrl+X handlers must close it
-/// themselves — the old core methods did, and the refactor dropped it.
+/// The popups' Ctrl+X handlers close the popup themselves:
+/// `stop_research`/`stop_swarm` are domain calls and never touch view state.
 mod stop_closes_popup_tests {
     use crate::app_view::AppView;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -753,8 +749,8 @@ fn picker_app(ids: &[&str]) -> AppView {
 
 #[test]
 fn model_picker_available_panel_uses_its_own_width() {
-    // Near-identical long ids used to collapse to `aion-labs/aion…` because
-    // the wide panel truncated to the narrow favorites column's width.
+    // Near-identical long ids stay distinguishable: the wide panel sizes rows
+    // to its own width, not the favorites column's.
     let ids = [
         "aion-labs/aion-2.0-reasoning-preview",
         "aion-labs/aion-2.0-reasoning-mini",

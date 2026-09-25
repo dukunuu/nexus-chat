@@ -1,6 +1,5 @@
-//! Image handling: encode clipboard images to PNG, attach them as markdown
-//! `![alt](filename.ext)` in message content, and describe images for
-//! non-vision models.
+//! Image handling: encode clipboard images to PNG and attach them as markdown
+//! `![alt](filename.ext)` in message content.
 
 // Casts here are on bounded values: token counts, byte sizes, and
 // selection indices — never on unbounded input. JSON-derived indices in
@@ -35,8 +34,8 @@ pub fn png_bytes_data_url(bytes: &[u8]) -> String {
     )
 }
 
-/// Encode raw RGBA pixels as a `data:image/png;base64,…` URL. Only exercised
-/// directly by tests now — production code goes through `encode_png` +
+/// Encode raw RGBA pixels as a `data:image/png;base64,…` URL. Test-only:
+/// production code goes through `encode_png` +
 /// `png_bytes_data_url` separately to avoid re-decoding the PNG it just wrote.
 #[cfg(test)]
 pub fn png_data_url(width: usize, height: usize, rgba: &[u8]) -> Result<String> {

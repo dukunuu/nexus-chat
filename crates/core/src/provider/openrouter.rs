@@ -913,7 +913,7 @@ impl OpenRouter {
         if self.flavor == ProviderFlavor::OpenAiCodex {
             // Codex-only models — deliberately not merged with OpenRouter's
             // catalog (switch backends with Ctrl+P to see that instead): a few
-            // hundred OpenRouter entries used to bury these alphabetically,
+            // hundred OpenRouter entries would bury these alphabetically,
             // making it look like Codex had no models. Mirrors the official
             // ChatGPT sign-in catalog (gpt-5.4/-mini retired 2026-08-31).
             return Ok(vec![
@@ -1358,8 +1358,8 @@ impl OpenRouter {
             // DALL-E uses OpenAI's legacy pixel-size parameter.
             body["size"] = serde_json::json!(size);
         } else {
-            // OpenRouter's image catalog uses normalized capabilities. The
-            // old 1024x1024 size is not accepted by several newer models.
+            // OpenRouter's image catalog uses normalized capabilities; a
+            // fixed 1024x1024 size isn't accepted by several newer models.
             body["aspect_ratio"] = serde_json::json!(Self::image_aspect_ratio(size));
             if model.starts_with("google/gemini-3") {
                 body["resolution"] = serde_json::json!(Self::image_resolution(size));
