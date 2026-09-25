@@ -190,94 +190,78 @@ impl AppView {
         self.core.settings.compact_threshold =
             self.settings_inputs[3].trim().parse().unwrap_or(0).min(100);
 
-        let stats = if self.core.settings.show_stats {
-            "1"
-        } else {
-            "0"
-        };
-        let reason = if self.core.settings.show_reasoning {
-            "1"
-        } else {
-            "0"
-        };
-        let hints = if self.core.settings.hide_hints {
-            "1"
-        } else {
-            "0"
-        };
-        self.core.db.set_setting("show_stats", stats)?;
-        self.core.db.set_setting("show_reasoning", reason)?;
-        self.core.db.set_setting("hide_hints", hints)?;
-        self.core
-            .db
-            .set_setting("temperature", self.settings_inputs[0].trim())?;
-        self.core
-            .db
-            .set_setting("top_p", self.settings_inputs[1].trim())?;
-        self.core
-            .db
-            .set_setting("max_tokens", self.settings_inputs[2].trim())?;
-        self.core.db.set_setting(
-            "compact_threshold",
-            &self.core.settings.compact_threshold.to_string(),
-        )?;
+        let flag = |on: bool| if on { "1" } else { "0" }.to_string();
         self.core.memory_model = self.core.memory_model.trim().to_string();
-        self.core
-            .db
-            .set_setting("memory_model", &self.core.memory_model)?;
         self.core.transcriber_model = self.core.transcriber_model.trim().to_string();
-        self.core
-            .db
-            .set_setting("transcriber_model", &self.core.transcriber_model)?;
         self.core.searxng_url = self.settings_inputs[4]
             .trim()
             .trim_end_matches('/')
             .to_string();
-        self.core
-            .db
-            .set_setting("searxng_url", &self.core.searxng_url)?;
-        self.core
-            .db
-            .set_setting("verbosity", &self.core.verbosity)?;
         self.core.langsearch_key = self.settings_inputs[5].trim().to_string();
-        self.core
-            .db
-            .set_setting("langsearch_key", &self.core.langsearch_key)?;
-        self.core
-            .db
-            .set_setting("search_provider", &self.core.search_provider)?;
         self.core.ocr_model = self.core.ocr_model.trim().to_string();
-        self.core
-            .db
-            .set_setting("ocr_model", &self.core.ocr_model)?;
-        self.core
-            .db
-            .set_setting("ocr_engine", &self.core.ocr_engine)?;
+        self.core.image_gen_model = self.core.image_gen_model.trim().to_string();
         let embedding_model = self.settings_inputs[6].trim().to_string();
         if self.core.embedding_model != embedding_model {
             self.core.embed_rx = None;
             self.core.db.clear_chunk_embeddings()?;
         }
         self.core.embedding_model = embedding_model;
-        self.core
-            .db
-            .set_setting("embedding_model", &self.core.embedding_model)?;
-        self.core.image_gen_model = self.core.image_gen_model.trim().to_string();
-        self.core
-            .db
-            .set_setting("image_gen_model", &self.core.image_gen_model)?;
+
+        // Write only what changed: every write bumps the row's sync version,
+        // so rewriting untouched settings would make this device win LWW
+        // over edits made elsewhere.
+        let values = [
+            ("show_stats", flag(self.core.settings.show_stats)),
+            ("show_reasoning", flag(self.core.settings.show_reasoning)),
+            ("hide_hints", flag(self.core.settings.hide_hints)),
+            ("temperature", self.settings_inputs[0].trim().to_string()),
+            ("top_p", self.settings_inputs[1].trim().to_string()),
+            ("max_tokens", self.settings_inputs[2].trim().to_string()),
+            (
+                "compact_threshold",
+                self.core.settings.compact_threshold.to_string(),
+            ),
+            ("memory_model", self.core.memory_model.clone()),
+            ("transcriber_model", self.core.transcriber_model.clone()),
+            ("searxng_url", self.core.searxng_url.clone()),
+            ("verbosity", self.core.verbosity.clone()),
+            ("langsearch_key", self.core.langsearch_key.clone()),
+            ("search_provider", self.core.search_provider.clone()),
+            ("ocr_model", self.core.ocr_model.clone()),
+            ("ocr_engine", self.core.ocr_engine.clone()),
+            ("embedding_model", self.core.embedding_model.clone()),
+            ("image_gen_model", self.core.image_gen_model.clone()),
+        ];
+        let stored: std::collections::HashMap<String, String> =
+            self.core.db.load_settings()?.into_iter().collect();
+        let mut changed = false;
+        for (key, value) in values {
+            if stored.get(key).map(String::as_str) != Some(value.as_str()) {
+                self.core.db.set_setting(key, &value)?;
+                changed = true;
+            }
+        }
         // Per-space (not a db setting): lives next to the space's other
         // config files so it travels with the space.
-        let _ = std::fs::write(
-            self.core
-                .space
-                .blocked_domains_path(&self.core.active_space.name),
-            self.settings_inputs[7].trim(),
-        );
-        self.core.refresh_toolbox();
-        self.core.start_embedding();
+        let blocked_path = self
+            .core
+            .space
+            .blocked_domains_path(&self.core.active_space.name);
+        let blocked = self.settings_inputs[7].trim();
+        if std::fs::read_to_string(&blocked_path)
+            .unwrap_or_default()
+            .trim()
+            != blocked
+        {
+            let _ = std::fs::write(&blocked_path, blocked);
+            changed = true;
+        }
         self.popup = Popup::None;
-        self.push_status("settings saved".to_string());
+        if changed {
+            self.core.refresh_toolbox();
+            self.core.start_embedding();
+            self.push_status("settings saved".to_string());
+        }
         Ok(())
     }
 }
@@ -409,5 +393,26 @@ mod tests {
                 .any(|(k, v)| k == "temperature" && v == "0.7")
         );
         assert!(reloaded.iter().any(|(k, v)| k == "show_stats" && v == "1"));
+    }
+
+    /// Closing /config without edits rewrites nothing (each write bumps the
+    /// row's sync version and would win LWW over other devices), so it says
+    /// nothing either; a real edit still reports the save.
+    #[test]
+    fn closing_settings_unchanged_is_a_silent_no_op() {
+        let mut a = test_app();
+        a.open_settings();
+        a.save_settings().unwrap();
+        let _ = a.last_status();
+        a.open_settings();
+        let _ = a.last_status(); // the popup's own hint line
+        a.save_settings().unwrap();
+        assert_eq!(a.last_status(), "", "no 'settings saved' for a no-op close");
+
+        a.open_settings();
+        let _ = a.last_status();
+        a.settings_inputs[0] = "0.3".into();
+        a.save_settings().unwrap();
+        assert_eq!(a.last_status(), "settings saved");
     }
 }
