@@ -85,6 +85,7 @@ pub(super) fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
         ));
     }
     if !right.is_empty() {
+        right.insert(0, Span::raw("  "));
         right.push(Span::raw(" "));
     }
 
@@ -190,6 +191,11 @@ pub(crate) fn short_model_label(id: &str) -> String {
             (Some(tag), rest)
         }
         _ => (None, id),
+    };
+    // OpenCode's flat-fee bundle nests its own `go:` tag inside the id.
+    let (backend, rest) = match rest.strip_prefix("go:") {
+        Some(inner) if backend == Some("opencode") => (Some("go"), inner),
+        _ => (backend, rest),
     };
     let name = rest.rsplit('/').next().unwrap_or(rest);
     match backend {

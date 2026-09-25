@@ -408,7 +408,8 @@ pub(super) fn push_assistant_stored(
     }
     out.push(Line::from(head));
 
-    let rail = Span::styled("▎ ", Style::default().fg(theme.accent2));
+    // A quiet rail for stored replies; only the live reply's rail is bright.
+    let rail = Span::styled("▎ ", Style::default().fg(theme.border_dim));
     if let Some(r) = &msg.reasoning {
         if settings.show_reasoning {
             out.push(Line::from(vec![rail.clone(), dim("▾ reasoning", theme)]));
@@ -445,10 +446,7 @@ pub(super) fn push_assistant_stored(
         &strip_markdown_images(content),
         // Rail (2) plus a one-column margin before the scrollbar gutter.
         width.saturating_sub(3),
-        crate::ui::markdown::MdColors {
-            heading: theme.accent,
-            rule: theme.border_dim,
-        },
+        md_colors(theme),
     );
     rendered.lines = crate::ui::citations_style::style_citations(rendered.lines, theme.accent);
     rendered.lines = crate::ui::citations_style::style_confidence_tags(rendered.lines);
@@ -581,10 +579,7 @@ pub(super) fn push_assistant_streaming(
     let mut rendered = crate::ui::markdown::render(
         &strip_markdown_images(buf),
         width.saturating_sub(3),
-        crate::ui::markdown::MdColors {
-            heading: app.theme.accent,
-            rule: app.theme.border_dim,
-        },
+        md_colors(&app.theme),
     );
     rendered.lines = crate::ui::citations_style::style_citations(rendered.lines, app.theme.accent);
     rendered.lines = crate::ui::citations_style::style_confidence_tags(rendered.lines);
@@ -746,10 +741,20 @@ pub(super) fn image_to_halfblock_lines(path: &str, max_width: usize) -> Vec<Line
 pub(super) fn wrap_plain(content: &str, width: usize) -> Vec<String> {
     let w = width.max(1);
     let mut out = Vec::new();
+    let content = crate::ui::markdown::terminal_safe(content);
     for raw in content.split('\n') {
         for piece in textwrap::wrap(raw, w) {
             out.push(piece.into_owned());
         }
     }
     out
+}
+
+/// The markdown palette for the transcript, from the theme.
+fn md_colors(theme: &crate::theme::Theme) -> crate::ui::markdown::MdColors {
+    crate::ui::markdown::MdColors {
+        heading: theme.accent,
+        rule: theme.border_dim,
+        code: theme.warning,
+    }
 }

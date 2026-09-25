@@ -20,21 +20,27 @@ fn char_width(c: char) -> usize {
     c.width().unwrap_or(0)
 }
 
-/// `tui_markdown`'s default inline-code style is white-on-black, which is
-/// invisible against the (very common) black-background terminal. Everything
-/// else defers to the library's own defaults.
-#[derive(Clone, Copy, Debug, Default)]
-struct NexusStyleSheet;
+/// Inline styles in theme colors: code is tinted text rather than a heavy
+/// background block (the library default is white-on-black, invisible on a
+/// dark terminal), links are underlined accent. Everything else defers to
+/// the library's own defaults.
+#[derive(Clone, Copy, Debug)]
+struct NexusStyleSheet {
+    code: Color,
+    link: Color,
+}
 
 impl StyleSheet for NexusStyleSheet {
     fn heading(&self, level: u8) -> Style {
         DefaultStyleSheet.heading(level)
     }
     fn code(&self) -> Style {
-        Style::new().fg(Color::Yellow).bg(Color::DarkGray)
+        Style::new().fg(self.code)
     }
     fn link(&self) -> Style {
-        DefaultStyleSheet.link()
+        Style::new()
+            .fg(self.link)
+            .add_modifier(Modifier::UNDERLINED)
     }
     fn blockquote(&self) -> Style {
         DefaultStyleSheet.blockquote()
@@ -47,8 +53,11 @@ impl StyleSheet for NexusStyleSheet {
     }
 }
 
-fn md_options() -> Options<NexusStyleSheet> {
-    Options::new(NexusStyleSheet)
+fn md_options(colors: MdColors) -> Options<NexusStyleSheet> {
+    Options::new(NexusStyleSheet {
+        code: colors.code,
+        link: colors.heading,
+    })
 }
 
 /// Rendered markdown: styled/wrapped `lines`, plus, per line, which fenced code
@@ -72,6 +81,18 @@ impl Rendered {
 /// GFM pipe tables — which `tui_markdown` doesn't support (it just warns and
 /// drops them) — are pulled out and rendered as a bordered, column-aligned
 /// table before the rest of the content goes through the normal pipeline.
+/// `s` without emoji-presentation selectors (U+FE0F). `⚠️` is `⚠` + VS16:
+/// width tables call it one column, but terminals draw the emoji form two
+/// wide, shifting every table row and wrapped line it sits in. Without the
+/// selector the base glyph renders in its one-column text form everywhere.
+pub fn terminal_safe(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains('\u{FE0F}') {
+        s.replace('\u{FE0F}', "").into()
+    } else {
+        s.into()
+    }
+}
+
 /// Theme colors the renderer paints with.
 #[derive(Clone, Copy)]
 pub struct MdColors {
@@ -79,6 +100,8 @@ pub struct MdColors {
     pub heading: Color,
     /// Code-box and table rules.
     pub rule: Color,
+    /// Inline `code`.
+    pub code: Color,
 }
 
 impl Default for MdColors {
@@ -86,13 +109,15 @@ impl Default for MdColors {
         Self {
             heading: Color::Cyan,
             rule: Color::DarkGray,
+            code: Color::Yellow,
         }
     }
 }
 
 pub fn render(content: &str, width: usize, colors: MdColors) -> Rendered {
+    let content = terminal_safe(content);
     let mut r = Rendered::default();
-    for seg in nexus_core::markdown::split_tables(content) {
+    for seg in nexus_core::markdown::split_tables(&content) {
         match seg {
             TableSegment::Table(rows, aligns) => {
                 render_table(&mut r, &rows, &aligns, width, colors);
@@ -104,7 +129,7 @@ pub fn render(content: &str, width: usize, colors: MdColors) -> Rendered {
 }
 
 fn render_text(r: &mut Rendered, content: &str, width: usize, colors: MdColors) {
-    let text = tui_markdown::from_str_with_options(content, &md_options());
+    let text = tui_markdown::from_str_with_options(content, &md_options(colors));
     let mut in_code = false;
     let mut raw: Vec<String> = Vec::new();
 
@@ -186,7 +211,7 @@ fn push_code_content(r: &mut Rendered, line: &Line, width: usize, rule: Color) {
     let border_style = || Style::default().fg(rule);
     let id = Some(r.blocks.len());
     let interior = width.saturating_sub(4).max(1);
-    for row in wrap_styled_line(line, interior) {
+    for row in wrap_code_line(line, interior) {
         let used: usize = row.spans.iter().map(|s| s.content.width()).sum();
         let pad = interior.saturating_sub(used);
         let mut spans: Vec<Span<'static>> = vec![Span::styled("│ ", border_style())];
@@ -239,10 +264,21 @@ fn render_table(
         Line::from(Span::styled(s, border_style()))
     };
 
+    // When any body row wraps onto several lines, rule between every body
+    // row so wrapped cells can't run into the next row visually.
+    let wraps = rows.iter().skip(1).any(|row| {
+        row.iter().zip(&colw).any(|(cell, &w)| {
+            styled_cell(cell, colors)
+                .iter()
+                .map(Span::width)
+                .sum::<usize>()
+                > w
+        })
+    });
     r.push(border('┌', '┬', '┐'), None);
     for (ri, row) in rows.iter().enumerate() {
-        push_table_row(r, row, aligns, &colw, ri == 0, colors.rule);
-        if ri == 0 {
+        push_table_row(r, row, aligns, &colw, ri == 0, colors);
+        if ri == 0 || (wraps && ri + 1 < rows.len()) {
             r.push(border('├', '┼', '┤'), None);
         }
     }
@@ -257,12 +293,12 @@ fn push_table_row(
     aligns: &[TableAlign],
     colw: &[usize],
     is_header: bool,
-    rule: Color,
+    colors: MdColors,
 ) {
-    let border_style = || Style::default().fg(rule);
+    let border_style = || Style::default().fg(colors.rule);
     let wrapped: Vec<Vec<Line<'static>>> = (0..colw.len())
         .map(|i| {
-            let mut spans = styled_cell(row.get(i).map_or("", String::as_str));
+            let mut spans = styled_cell(row.get(i).map_or("", String::as_str), colors);
             if is_header {
                 for s in &mut spans {
                     s.style = s.style.add_modifier(Modifier::BOLD);
@@ -297,8 +333,8 @@ fn push_table_row(
 
 /// Inline-styled spans for one table cell (bold/italic/code), via
 /// `tui_markdown`'s single-line rendering of the cell's own text.
-fn styled_cell(text: &str) -> Vec<Span<'static>> {
-    let rendered = tui_markdown::from_str_with_options(text, &md_options());
+fn styled_cell(text: &str, colors: MdColors) -> Vec<Span<'static>> {
+    let rendered = tui_markdown::from_str_with_options(text, &md_options(colors));
     rendered
         .lines
         .into_iter()
@@ -378,6 +414,29 @@ fn replace_prefix(line: &Line, len: usize, with: &str) -> Option<Line<'static>> 
 /// so wide-glyph content — like a Japanese vocab table — doesn't overflow its
 /// budget. Mouse selection still maps by char index (`selection.rs`), a
 /// close-enough approximation for wide glyphs.
+/// Hard-wrap a code line at `width` display columns, keeping every
+/// character — unlike prose wrapping, leading indentation and runs of
+/// spaces are content here.
+fn wrap_code_line(line: &Line, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut rows: Vec<Vec<(char, Style)>> = vec![Vec::new()];
+    let mut used = 0;
+    for (c, st) in line
+        .spans
+        .iter()
+        .flat_map(|sp| sp.content.chars().map(move |c| (c, sp.style)))
+    {
+        let cw = char_width(c);
+        if used + cw > width && used > 0 {
+            rows.push(Vec::new());
+            used = 0;
+        }
+        rows.last_mut().expect("never empty").push((c, st));
+        used += cw;
+    }
+    rows.into_iter().map(row_to_line).collect()
+}
+
 fn wrap_styled_line(line: &Line, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
     let chars: Vec<(char, Style)> = line
@@ -493,7 +552,7 @@ mod inline_code_tests {
             span.style,
             Style::default().fg(Color::White).bg(Color::Black)
         );
-        assert_eq!(span.style.bg, Some(Color::DarkGray));
+        assert_eq!(span.style.fg, Some(MdColors::default().code));
     }
 }
 
@@ -569,5 +628,39 @@ mod table_tests {
         assert_eq!(top.chars().count(), 40);
         let bare = render("```\nx\n```", 20, MdColors::default());
         assert_eq!(line_text(&bare.lines[0]), format!("┌{}┐", "─".repeat(18)));
+    }
+
+    #[test]
+    fn code_keeps_its_indentation() {
+        let r = render("```python\nf(\n    x=1,\n)\n```", 40, MdColors::default());
+        let text: Vec<String> = r.lines.iter().map(line_text).collect();
+        assert!(
+            text.iter().any(|l| l.starts_with("│     x=1,")),
+            "{text:#?}"
+        );
+    }
+
+    #[test]
+    fn emoji_selectors_cannot_skew_table_rows() {
+        let md = "| a | b |\n|---|---|\n| ⚠\u{FE0F} warn | ✅ ok |\n| x | y |";
+        let r = render(md, 60, MdColors::default());
+        let text: Vec<String> = r.lines.iter().map(line_text).collect();
+        let w = text[0].width();
+        assert!(text.iter().all(|l| l.width() == w), "{text:#?}");
+        assert!(!text.concat().contains('\u{FE0F}'));
+    }
+
+    #[test]
+    fn wrapped_table_rows_are_ruled_apart() {
+        let long = "word ".repeat(20);
+        let md = format!("| k | v |\n|---|---|\n| a | {long} |\n| b | short |");
+        let r = render(&md, 40, MdColors::default());
+        let rules = r
+            .lines
+            .iter()
+            .map(line_text)
+            .filter(|l| l.starts_with('├'))
+            .count();
+        assert_eq!(rules, 2, "header rule plus one between the two body rows");
     }
 }
