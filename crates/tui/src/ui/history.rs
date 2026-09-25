@@ -527,10 +527,18 @@ fn render_welcome(f: &mut Frame, app: &mut AppView, area: Rect) {
         let recent: Vec<_> = sessions.into_iter().take(4).collect();
         if !recent.is_empty() {
             lines.push(Line::from(""));
-            let inner_w = area.width.saturating_sub(4) as usize;
-            rule_line(&mut lines, "recent", inner_w, &app.theme);
+            // The panel is at most 86 wide; the rule spans the table below
+            // it, so both center on the same axis.
+            let inner_w = area.width.min(86).saturating_sub(4) as usize;
+            // One fixed-width table, centered as a block: numbers, titles,
+            // and right-aligned dates line up instead of zigzagging.
+            let row_w = inner_w.min(60);
+            rule_line(&mut lines, "recent", row_w, &app.theme);
             for (i, s) in recent.iter().enumerate() {
                 let when = super::fmt_created(&s.created_at);
+                let title_w = row_w.saturating_sub(4 + when.chars().count());
+                let title = crate::ui::popups::chrome::truncate(&s.title, title_w);
+                let pad = title_w.saturating_sub(title.chars().count());
                 recent_rows.push((lines.len(), s.id.clone()));
                 lines.push(Line::from(vec![
                     Span::styled(
@@ -539,8 +547,9 @@ fn render_welcome(f: &mut Frame, app: &mut AppView, area: Rect) {
                             .fg(app.theme.accent)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(s.title.clone(), Style::default().fg(app.theme.fg)),
-                    Span::styled(format!("  {when}"), Style::default().fg(app.theme.fg_dim)),
+                    Span::styled(title, Style::default().fg(app.theme.fg)),
+                    Span::raw(" ".repeat(pad + 2)),
+                    Span::styled(when, Style::default().fg(app.theme.fg_dim)),
                 ]));
             }
             if !app.settings.hide_hints {
@@ -618,7 +627,7 @@ fn rule_line(out: &mut Vec<Line<'static>>, label: &str, width: usize, theme: &cr
     );
     out.push(Line::from(Span::styled(
         line,
-        Style::default().fg(theme.fg_dim),
+        Style::default().fg(theme.border_dim),
     )));
 }
 
