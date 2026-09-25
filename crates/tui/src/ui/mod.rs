@@ -16,12 +16,14 @@ use ratatui::widgets::Block;
 use crate::app_view::AppView;
 use nexus_core::app::Popup;
 
+mod cards;
 pub mod citations_style;
 pub mod history;
 mod input;
 pub mod markdown;
 pub mod popups;
 mod status;
+mod welcome;
 
 use history::render_history;
 use input::{render_at_popup, render_command_popup, render_input};
