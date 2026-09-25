@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 const MULTI_CLICK: Duration = Duration::from_millis(400);
@@ -332,7 +332,7 @@ impl HistorySel {
 
     /// Restyle `line` (at absolute index `li`) with the selection highlight, or
     /// None if the selection doesn't touch this line.
-    pub fn highlight(&self, li: usize, line: &Line) -> Option<Line<'static>> {
+    pub fn highlight(&self, li: usize, line: &Line, hl: Style) -> Option<Line<'static>> {
         let (a, b) = self.ordered()?;
         if li < a.0 || li > b.0 {
             return None;
@@ -343,7 +343,6 @@ impl HistorySel {
         if lo >= hi {
             return None;
         }
-        let hl = Style::default().bg(Color::Blue).fg(Color::White);
         let mut out: Vec<(char, Style)> = Vec::new();
         let mut idx = 0;
         for sp in &line.spans {

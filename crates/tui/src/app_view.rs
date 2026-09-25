@@ -186,14 +186,14 @@ pub struct AppView {
     /// Start-screen banner (custom or built-in) and a greeting picked at launch.
     pub banner: String,
     pub greeting: &'static str,
-    /// Color palette — the active omarchy theme when present, else the
-    /// built-in default. `theme_link` is the last-seen omarchy symlink
-    /// target, polled by the event loop to detect a theme switch.
+    /// Color palette — omarchy's theme, else Ghostty's, else the built-in
+    /// ANSI palette. `theme_link` is the last-seen `theme::source_stamp`,
+    /// polled by the event loop to pick up a theme switch live.
     pub theme: Theme,
     /// How the TUI surface background is painted; persisted per device and
     /// changed with `/theme opaque` or `/theme transparent`.
     pub background_mode: BackgroundMode,
-    pub theme_link: Option<PathBuf>,
+    pub theme_link: String,
     /// Bumped every time `theme` changes, so the history render cache (which
     /// bakes colors into cached `Line`s) knows to re-wrap on a theme switch.
     pub theme_gen: usize,
@@ -340,7 +340,7 @@ impl AppView {
             greeting: nexus_core::app::pick_greeting(),
             theme,
             background_mode,
-            theme_link: crate::theme::current_link_target(),
+            theme_link: crate::theme::source_stamp(),
             theme_gen: 0,
             status,
             status_at: Some(std::time::Instant::now()),

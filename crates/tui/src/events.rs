@@ -83,8 +83,8 @@ async fn run_loop(
     mut selection_requests: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
 ) -> Result<()> {
     let mut reader = EventStream::new();
-    // Cheap poll for an omarchy theme switch (symlink target change) so a
-    // `omarchy theme set` while nexus-chat is running takes effect live.
+    // Cheap poll for a theme switch (omarchy's symlink, Ghostty's config) so
+    // changing the terminal theme restyles the running app.
     let mut theme_poll = tokio::time::interval(std::time::Duration::from_secs(2));
     loop {
         // Locally-queued UI feedback (status lines, composer restore,
@@ -233,7 +233,7 @@ async fn run_loop(
                 }
             } => {}
             _ = theme_poll.tick() => {
-                let target = crate::theme::current_link_target();
+                let target = crate::theme::source_stamp();
                 if target != app.theme_link {
                     let mode = app.background_mode;
                     app.theme = crate::theme::load();
