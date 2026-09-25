@@ -113,10 +113,10 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     app.avail_offset = avail_state.offset();
 }
 
-/// Row text width inside a panel: the inner rect minus the scrollbar gutter
-/// and the `▸ ` highlight symbol.
+/// Row text width inside a panel: the inner rect minus the scrollbar gutter,
+/// the `▸ ` highlight symbol, and a column of air before the scrollbar.
 fn row_width(inner: Rect) -> usize {
-    inner.width.saturating_sub(3) as usize
+    inner.width.saturating_sub(4) as usize
 }
 
 /// Trailing columns every model row reserves: the vision glyph (" ⊡") and

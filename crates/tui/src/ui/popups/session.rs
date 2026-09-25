@@ -32,8 +32,9 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         .unwrap_or_default();
 
     let sessions = app.filtered_sessions();
-    // Inside the border, minus the scrollbar gutter and the `▸ ` highlight.
-    let width = area.width.saturating_sub(5) as usize;
+    // Inside the border, minus the scrollbar gutter, the `▸ ` highlight, and
+    // one column of air before the scrollbar.
+    let width = area.width.saturating_sub(6) as usize;
     let dim = Style::default().fg(app.theme.fg_dim);
     let active_id = app.session.as_ref().map(|s| s.id.clone());
 

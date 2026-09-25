@@ -1084,3 +1084,31 @@ fn edit_fields_ignore_ctrl_and_alt_chords() {
         Some(super::EditAction::Push('a'))
     ));
 }
+
+#[test]
+fn notification_toasts_hug_their_content() {
+    let mut app = test_app();
+    app.core.notifications.push_back(ChatNotification {
+        session_id: "s1".into(),
+        title: "Japanese Fluency Roadmap".into(),
+        text: "response complete".into(),
+        success: true,
+    });
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+    let (rect, _) = app.notification_areas[0];
+    assert!(
+        rect.width < 64,
+        "toast sized to its text, got {}",
+        rect.width
+    );
+    assert_eq!(rect.x + rect.width, 119, "flush with the pane's right edge");
+    let buf = terminal.backend().buffer();
+    let row: String = (rect.x..rect.x + rect.width)
+        .map(|x| buf[(x, rect.y)].symbol())
+        .collect();
+    assert!(
+        row.starts_with("▎✓ Japanese Fluency Roadmap · response complete"),
+        "{row}"
+    );
+}

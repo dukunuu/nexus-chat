@@ -514,32 +514,50 @@ fn render_notifications(f: &mut Frame, app: &mut AppView, area: Rect) {
         return;
     }
     let width = area.width.min(64);
-    let x = area.x + area.width.saturating_sub(width);
     let start = app.notifications.len().saturating_sub(rows as usize);
     let y = area.y + area.height.saturating_sub(rows);
     for (offset, index) in (start..app.notifications.len()).enumerate() {
+        let notification = &app.notifications[index];
+        let (glyph, color) = if notification.success {
+            ("✓", app.theme.success)
+        } else {
+            ("×", app.theme.error)
+        };
+        // A toast: colored rail and glyph, the session in bold, the outcome
+        // dimmed — clicking it opens that session.
+        let bg = Style::default().bg(app.theme.raised);
+        let line = popups::chrome::fit_line(
+            Line::from(vec![
+                Span::styled("▎", Style::default().fg(color)),
+                Span::styled(
+                    format!("{glyph} "),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    notification.title.clone(),
+                    Style::default()
+                        .fg(app.theme.fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" · {} ", notification.text),
+                    Style::default().fg(app.theme.fg_dim),
+                ),
+            ]),
+            width as usize,
+        );
+        // The toast hugs its content at the pane's right edge, clear of the
+        // scrollbar gutter; the rect is also its click target.
+        let w = u16::try_from(line.width()).unwrap_or(width).min(width);
         let rect = Rect {
-            x,
+            x: area.x + area.width.saturating_sub(w + 1),
             y: y + offset as u16,
-            width,
+            width: w,
             height: 1,
         };
-        let notification = &app.notifications[index];
-        let glyph = if notification.success { "✓ " } else { "× " };
-        let color = if notification.success {
-            app.theme.success
-        } else {
-            app.theme.error
-        };
-        let label = format!("{glyph}{} — {}", notification.title, notification.text);
-        let label: String = label.chars().take(width as usize).collect();
         f.render_widget(Clear, rect);
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                label,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            )))
-            .style(app.theme.background_style()),
+            Paragraph::new(line).style(app.theme.background_style().patch(bg)),
             rect,
         );
         app.notification_areas.push((rect, index));
