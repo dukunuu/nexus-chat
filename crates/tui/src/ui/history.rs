@@ -1058,8 +1058,11 @@ fn push_assistant_stored(
         Some(&rail),
     );
 
-    let mut rendered =
-        crate::ui::markdown::render(&strip_markdown_images(content), width.saturating_sub(2));
+    let mut rendered = crate::ui::markdown::render(
+        &strip_markdown_images(content),
+        width.saturating_sub(2),
+        theme.accent,
+    );
     rendered.lines = crate::ui::citations_style::style_citations(rendered.lines, theme.accent);
     rendered.lines = crate::ui::citations_style::style_confidence_tags(rendered.lines);
     push_rendered(out, code, blocks, rendered, Some(rail));
@@ -1177,8 +1180,11 @@ fn push_assistant_streaming(
     }
 
     let buf = app.active_streaming_text().unwrap_or("");
-    let mut rendered =
-        crate::ui::markdown::render(&strip_markdown_images(buf), width.saturating_sub(2));
+    let mut rendered = crate::ui::markdown::render(
+        &strip_markdown_images(buf),
+        width.saturating_sub(2),
+        app.theme.accent,
+    );
     rendered.lines = crate::ui::citations_style::style_citations(rendered.lines, app.theme.accent);
     rendered.lines = crate::ui::citations_style::style_confidence_tags(rendered.lines);
     push_rendered(out, code, blocks, rendered, Some(rail));

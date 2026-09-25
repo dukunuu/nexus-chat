@@ -72,18 +72,19 @@ impl Rendered {
 /// GFM pipe tables — which `tui_markdown` doesn't support (it just warns and
 /// drops them) — are pulled out and rendered as a bordered, column-aligned
 /// table before the rest of the content goes through the normal pipeline.
-pub fn render(content: &str, width: usize) -> Rendered {
+/// `heading` colors `#` headings (the theme accent).
+pub fn render(content: &str, width: usize, heading: Color) -> Rendered {
     let mut r = Rendered::default();
     for seg in nexus_core::markdown::split_tables(content) {
         match seg {
             TableSegment::Table(rows, aligns) => render_table(&mut r, &rows, &aligns, width),
-            TableSegment::Text(text) => render_text(&mut r, &text, width),
+            TableSegment::Text(text) => render_text(&mut r, &text, width, heading),
         }
     }
     r
 }
 
-fn render_text(r: &mut Rendered, content: &str, width: usize) {
+fn render_text(r: &mut Rendered, content: &str, width: usize, heading: Color) {
     let text = tui_markdown::from_str_with_options(content, &md_options());
     let mut in_code = false;
     let mut raw: Vec<String> = Vec::new();
@@ -113,7 +114,7 @@ fn render_text(r: &mut Rendered, content: &str, width: usize) {
         }
 
         let id = None;
-        match classify(line, &plain) {
+        match classify(line, &plain, heading) {
             Block::Drop => {}
             Block::Header(body) | Block::List(body) => {
                 for l in wrap_styled_line(&body, width) {
@@ -283,7 +284,7 @@ enum Block {
 /// handled before this, so a styled line here is prose with inline
 /// formatting (`code`, **bold**): its block marker is rewritten inside the
 /// first span and the other spans keep their styles.
-fn classify(line: &Line, plain: &str) -> Block {
+fn classify(line: &Line, plain: &str, heading: Color) -> Block {
     let trimmed = plain.trim_start();
     let unstyled = line.spans.iter().all(|s| s.style == Style::default());
     if unstyled && trimmed.starts_with("```") {
@@ -292,9 +293,7 @@ fn classify(line: &Line, plain: &str) -> Block {
     let indent = plain.len() - trimmed.len();
     let hashes = trimmed.chars().take_while(|&c| c == '#').count();
     if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
-        let header_style = Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD);
+        let header_style = Style::default().fg(heading).add_modifier(Modifier::BOLD);
         if let Some(mut l) = replace_prefix(line, indent + hashes + 1, "") {
             // `##   Heading`: extra spaces after the marker aren't content.
             if let Some(first) = l.spans.first_mut() {
@@ -444,7 +443,7 @@ mod inline_code_tests {
 
     #[test]
     fn inline_code_is_visible_on_a_black_background_terminal() {
-        let r = render("run `cargo test` now", 80);
+        let r = render("run `cargo test` now", 80, Color::Cyan);
         let code_span = r.lines[0]
             .spans
             .iter()
@@ -470,7 +469,7 @@ mod table_tests {
         // Double-width glyphs must not desync the border from the content —
         // every row's rendered display width has to match the border's.
         let table = "| 単語 | 読み |\n| --- | --- |\n| 会う | あう |\n| 会社 | かいしゃ |";
-        let r = render(table, 40);
+        let r = render(table, 40, Color::Cyan);
         let widths: Vec<usize> = r
             .lines
             .iter()
@@ -484,7 +483,7 @@ mod table_tests {
 
     #[test]
     fn render_produces_a_bordered_box_with_header_separator() {
-        let r = render(TABLE, 40);
+        let r = render(TABLE, 40, Color::Cyan);
         let text: Vec<String> = r.lines.iter().map(line_text).collect();
         // top border, header, header/body separator, 2 data rows, bottom border.
         assert_eq!(text.len(), 6);
@@ -498,7 +497,11 @@ mod table_tests {
     /// containing `code` kept its raw `- ` / `## ` while plain ones didn't.
     #[test]
     fn markers_are_stripped_from_lines_with_inline_formatting() {
-        let r = render("- plain item\n- has `ip` inside\n\n## Use `nmcli` here", 80);
+        let r = render(
+            "- plain item\n- has `ip` inside\n\n## Use `nmcli` here",
+            80,
+            Color::Cyan,
+        );
         let text: Vec<String> = r.lines.iter().map(line_text).collect();
         assert!(text.iter().any(|l| l == "• plain item"), "{text:?}");
         assert!(
