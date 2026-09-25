@@ -11,7 +11,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, ListItem, ListState, Padding, Paragraph,
+};
 
 use crate::app_view::AppView;
 use nexus_core::app::Popup;
@@ -35,9 +37,9 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     );
 
     // Grow the input box with its wrapped content (1–20 rows) plus 2 for the
-    // border. `measure` wants the width the widget renders at, i.e. inside the
-    // border (full width - 2).
-    let inner_w = f.area().width.saturating_sub(2);
+    // border. `measure` wants the width the widget renders at: inside the
+    // border and its one-column padding on each side.
+    let inner_w = f.area().width.saturating_sub(4);
     let content_rows = app.input.measure(inner_w).preferred_rows;
     let input_h = content_rows.saturating_add(2);
 
@@ -106,84 +108,82 @@ pub fn to_color(c: nexus_core::app::SpinnerColor) -> Color {
 }
 
 fn render_input(f: &mut Frame, app: &mut AppView, area: Rect) {
-    let hint = if app.settings.hide_hints {
-        String::new()
-    } else if app.viewing_stream() {
-        " …working (Esc to stop) ".to_string()
-    } else if app.is_streaming() {
-        format!(
-            " ⟳ {} chat{} running ",
-            app.chat_task_count(),
-            if app.chat_task_count() == 1 { "" } else { "s" }
-        )
+    let hints = !app.settings.hide_hints;
+    let busy = app.is_streaming() || app.is_compacting_current_session();
+    // What's running shows regardless of `hide_hints` — it's state, not key
+    // help; only the "Esc to stop" part is a hint.
+    let activity = if app.viewing_stream() {
+        Some(if hints {
+            "working · Esc to stop".to_string()
+        } else {
+            "working".into()
+        })
     } else if app.is_compacting_current_session() {
-        // Compaction is a background job on this session — keep its state on
-        // the input bar for as long as it runs, not in a status message that
-        // the next event overwrites. The history pane also shows a transient
-        // block so the work is visible away from the composer.
-        " ⟳ compacting… ".to_string()
-    } else if let Some((_, topic)) = app
-        .research_running
-        .as_ref()
-        .filter(|(id, _)| app.session.as_ref().is_none_or(|s| &s.id != id))
-    {
-        format!(" 🔎 researching: {topic} ")
+        Some("⟳ compacting…".to_string())
+    } else if app.is_streaming() {
+        let n = app.chat_task_count();
+        Some(format!(
+            "⟳ {n} chat{} running",
+            if n == 1 { "" } else { "s" }
+        ))
     } else {
-        " message (Enter to send, /help) ".to_string()
+        app.research_running
+            .as_ref()
+            .filter(|(id, _)| app.session.as_ref().is_none_or(|s| &s.id != id))
+            .map(|(_, topic)| format!("🔎 researching: {topic}"))
     };
-    // Session title sits in the top-right corner of the input box; the
-    // border brightens while a stream or compaction is running so the active
-    // state reads at a glance.
-    let name = match &app.session {
-        Some(s) => s.title.clone(),
-        None => "nexus-chat".to_string(),
-    };
-    let border_color = if app.is_streaming() || app.is_compacting_current_session() {
+    // The border takes the spinner's color while something runs, so the
+    // active state reads at a glance.
+    let border_color = if busy {
         to_color(app.spinner_color())
     } else {
         app.theme.border_dim
     };
+    let mut title = vec![Span::styled(
+        " ❯ ",
+        Style::default()
+            .fg(if busy { border_color } else { app.theme.accent })
+            .add_modifier(Modifier::BOLD),
+    )];
+    if let Some(activity) = activity {
+        title.push(Span::styled(
+            format!("{activity} "),
+            Style::default().fg(app.theme.fg_dim),
+        ));
+    }
+    let name = app.session.as_ref().map(|s| s.title.clone());
     let mut block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
-        .title_top(Line::from(hint));
-    block = block.title_top(
-        Line::from(Span::styled(
-            format!(" {name} "),
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .right_aligned(),
-    );
+        .padding(Padding::horizontal(1))
+        .title_top(Line::from(title));
+    if let Some(name) = name {
+        block = block.title_top(
+            Line::from(Span::styled(
+                format!(" {} ", popups::chrome::truncate(&name, 40)),
+                Style::default().fg(app.theme.fg_dim),
+            ))
+            .right_aligned(),
+        );
+    }
     let inner = block.inner(area);
     app.input_inner = inner; // remembered for mouse click -> cursor mapping
     f.render_widget(block, area);
+    app.input
+        .set_selection_style(Style::default().bg(app.theme.selection).fg(app.theme.fg));
+    app.input
+        .set_placeholder_style(Style::default().fg(app.theme.fg_dim));
     f.render_widget(&app.input, inner);
 }
 
 /// Slash-command autocomplete: a fuzzy-ranked list floating just above the
 /// input box: `/name` in the accent color, its description dimmed alongside.
-// Terminal popup geometry — n/h/w/y/x are idiomatic for rect math.
-#[allow(clippy::many_single_char_names)]
 fn render_command_popup(f: &mut Frame, app: &AppView, input_area: Rect) {
     let matches = app.command_matches();
     if matches.is_empty() {
         return;
     }
-    let hints = !app.settings.hide_hints;
-    let title_rows = u16::from(hints);
-    let n = matches.len() as u16;
-    let h = n + title_rows;
-    let w = input_area.width; // full width, no border
-    let y = input_area.y.saturating_sub(h);
-    let area = Rect {
-        x: input_area.x,
-        y,
-        width: w,
-        height: h,
-    };
-
     // Pad the `/name` column so every description starts at the same column.
     let name_w = matches
         .iter()
@@ -191,6 +191,7 @@ fn render_command_popup(f: &mut Frame, app: &AppView, input_area: Rect) {
         .max()
         .unwrap_or(0)
         + 1;
+    let desc_w = usize::from(MENU_W).saturating_sub(name_w + 8);
     let items: Vec<ListItem> = matches
         .iter()
         .map(|c| {
@@ -200,126 +201,99 @@ fn render_command_popup(f: &mut Frame, app: &AppView, input_area: Rect) {
                     format!("{name:<name_w$}"),
                     Style::default().fg(app.theme.accent),
                 ),
-                Span::raw("   "),
-                Span::styled(c.desc().to_string(), Style::default().fg(app.theme.fg_dim)),
-            ]))
-        })
-        .collect();
-
-    let mut block = Block::default().style(app.theme.background_style());
-    if hints {
-        block = block.title(Line::from(Span::styled(
-            "commands (Tab fill · Enter run)",
-            Style::default().fg(app.theme.fg_dim),
-        )));
-    }
-    let mut state = ListState::default();
-    state.select(Some(app.command_selected()));
-    // Mark the selection by making its text bold + an arrow — no inverse/white bg.
-    let list = List::new(items)
-        .block(block)
-        .highlight_symbol("› ")
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
-
-    f.render_widget(Clear, area);
-    f.render_stateful_widget(list, area, &mut state);
-}
-
-/// `@` file autocomplete: space files matching the text after `@`.
-// Terminal popup geometry — n/h/w/y/x are idiomatic for rect math.
-#[allow(clippy::many_single_char_names)]
-fn render_at_popup(f: &mut Frame, app: &AppView, input_area: Rect) {
-    let Some((ref matches, selected, _)) = app.at_state else {
-        return;
-    };
-    let n = matches.len() as u16;
-    let h = n.min(10) + 1; // max 10 rows + title
-    let w = input_area.width.min(60);
-    let x = input_area.x;
-    let y = input_area.y.saturating_sub(h);
-    let area = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-
-    let name_w = matches
-        .iter()
-        .map(|f| f.name.chars().count())
-        .max()
-        .unwrap_or(0)
-        + 1;
-    let items: Vec<ListItem> = matches
-        .iter()
-        .take(10)
-        .map(|f| {
-            ListItem::new(Line::from(vec![
+                Span::raw("  "),
                 Span::styled(
-                    format!("{:<name_w$}", f.name),
-                    Style::default().fg(app.theme.fg),
-                ),
-                Span::styled(
-                    format!(
-                        "  {}  {}",
-                        nexus_core::app::human_size(f.size.unsigned_abs()),
-                        f.status
-                    ),
+                    popups::chrome::truncate(c.desc(), desc_w),
                     Style::default().fg(app.theme.fg_dim),
                 ),
             ]))
         })
         .collect();
+    floating_menu(
+        f,
+        app,
+        input_area,
+        ("commands", "Tab fill · Enter run"),
+        items,
+        app.command_selected(),
+    );
+}
 
-    let block = Block::default()
-        .style(app.theme.background_style())
-        .title(Line::from(Span::styled(
-            "files (Tab insert · Esc cancel)",
+/// Widest a floating composer menu gets.
+const MENU_W: u16 = 76;
+
+/// A rounded menu floating just above the composer's left edge, at most ten
+/// rows tall (it scrolls), selection styled like every popup list.
+fn floating_menu(
+    f: &mut Frame,
+    app: &AppView,
+    input_area: Rect,
+    (title, hint): (&str, &str),
+    items: Vec<ListItem<'static>>,
+    selected: usize,
+) {
+    let rows = u16::try_from(items.len()).unwrap_or(u16::MAX).min(10);
+    let h = (rows + 2).min(input_area.y);
+    if h < 3 {
+        return;
+    }
+    let area = Rect {
+        x: input_area.x,
+        y: input_area.y - h,
+        width: input_area.width.min(MENU_W),
+        height: h,
+    };
+    let hint = if app.settings.hide_hints { "" } else { hint };
+    let block = popups::chrome::hinted_block(
+        Line::from(Span::styled(
+            format!(" {title} "),
             Style::default().fg(app.theme.fg_dim),
-        )));
+        )),
+        hint,
+        app,
+        false,
+        popups::chrome::Tone::Normal,
+        area.width,
+    );
     let mut state = ListState::default();
     state.select(Some(selected.min(items.len().saturating_sub(1))));
-    let list = List::new(items)
-        .block(block)
-        .highlight_symbol("› ")
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
-
+    let list = popups::chrome::standard_list(items, &app.theme).block(block);
     f.render_widget(Clear, area);
     f.render_stateful_widget(list, area, &mut state);
 }
 
-/// A filling context-usage bar drawn as a gradient: each filled cell is
-/// coloured by its position, green (fresh) sliding through yellow to red
-/// (refill) as the bar fills toward the right.
-fn render_context_bar(f: &mut Frame, app: &AppView, area: Rect) {
-    let Some(limit) = app.context_limit() else {
+/// `@` file autocomplete: space files matching the text after `@`.
+fn render_at_popup(f: &mut Frame, app: &AppView, input_area: Rect) {
+    let Some((ref matches, selected, _)) = app.at_state else {
         return;
     };
-    let ratio = if limit > 0 {
-        (app.context_used() as f64 / limit as f64).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let width = area.width as usize;
-    if width == 0 {
-        return;
-    }
-    let filled = (ratio * width as f64).round() as usize;
-
-    let mut spans: Vec<Span> = Vec::with_capacity(width);
-    for x in 0..width {
-        if x < filled {
-            let t = if width > 1 {
-                x as f64 / (width - 1) as f64
-            } else {
-                0.0
-            };
-            spans.push(Span::styled("█", Style::default().fg(gradient(t))));
-        } else {
-            spans.push(Span::styled("░", Style::default().fg(app.theme.border_dim)));
-        }
-    }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    let row_w = usize::from(input_area.width.min(MENU_W)).saturating_sub(5);
+    let items: Vec<ListItem> = matches
+        .iter()
+        .map(|f| {
+            let meta = format!(
+                "  {}  {}",
+                nexus_core::app::human_size(f.size.unsigned_abs()),
+                f.status
+            );
+            let name = popups::chrome::truncate_middle(
+                &f.name,
+                row_w.saturating_sub(meta.chars().count()),
+            );
+            ListItem::new(Line::from(vec![
+                Span::styled(name, Style::default().fg(app.theme.fg)),
+                Span::styled(meta, Style::default().fg(app.theme.fg_dim)),
+            ]))
+        })
+        .collect();
+    floating_menu(
+        f,
+        app,
+        input_area,
+        ("files", "Tab insert · Esc cancel"),
+        items,
+        selected,
+    );
 }
 
 /// Green → yellow → red gradient for `t` in 0.0..=1.0.
@@ -333,30 +307,6 @@ fn gradient(t: f64) -> Color {
         (230u8, (200.0 - k * 190.0) as u8) // red steady, green 200→10
     };
     Color::Rgb(r, g, 40)
-}
-
-/// `"34% 44k/128k"` for the status line, or None when unavailable. Appends
-/// the last request's prompt-cache hit rate when one was reported.
-fn context_label(app: &AppView) -> Option<String> {
-    let limit = app.context_limit()?;
-    let used = app.context_used();
-    let pct = if limit > 0 {
-        used as f64 / limit as f64 * 100.0
-    } else {
-        0.0
-    };
-    let mut label = format!("{pct:.0}% {}/{}", humanize(used), humanize(limit));
-    // The whole turn, not its last request: a tool loop's final request sits
-    // on the longest cached prefix, so reporting it alone always flattered
-    // the number. A `~` marks a turn some provider did not fully account for.
-    if let Some(rate) = app.turn_cache.rate() {
-        let partial = if app.turn_cache.is_partial() { "~" } else { "" };
-        let _ = std::fmt::Write::write_fmt(
-            &mut label,
-            format_args!(" · {partial}{:.0}% cached", rate * 100.0),
-        );
-    }
-    Some(label)
 }
 
 /// Compact token counts: 940, 1.2k, 128k, 1.0m.
@@ -389,72 +339,134 @@ fn fmt_cost(cost: Option<f64>) -> String {
 
 fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
     use nexus_core::db::DEFAULT_SPACE;
+    let theme = &app.theme;
+    let dim = Style::default().fg(theme.fg_dim);
+    let sep = || Span::styled(" · ", Style::default().fg(theme.border_dim));
+
+    // Left: the model (accent), then the quiet mode tags.
     let model = app
         .current_model
         .as_deref()
-        .map_or_else(|| "(no model)".to_string(), short_model_label);
-    let space_tag = if app.active_space.name == DEFAULT_SPACE {
-        String::new()
-    } else {
-        format!("[{}] ", app.active_space.name)
-    };
-    let web_tag = if app.web_mode { "🌐 web " } else { "" };
-    let incog_tag = if app.incognito { "🕶️ " } else { "" };
-    let show_bar = app.settings.show_stats && app.context_limit().is_some();
-
-    // Model badge (accent bold), capped so a long id can't push the status
-    // off-screen; then the optional context gauge; then numbers + status.
+        .map_or_else(|| "no model".to_string(), short_model_label);
+    let mut tags: Vec<String> = Vec::new();
+    if app.active_space.name != DEFAULT_SPACE {
+        tags.push(format!("⌂ {}", app.active_space.name));
+    }
+    if app.web_mode {
+        tags.push("🌐 web".into());
+    }
+    if app.incognito {
+        tags.push("🕶 incognito".into());
+    }
     let badge_max = (area.width as usize * 2 / 5).max(12);
-    let badge_s = fit_badge(
-        &format!("{space_tag}{incog_tag}{web_tag}"),
-        &model,
-        badge_max,
-    );
-    let badge_w = badge_s.chars().count() as u16;
-    let sep = Span::styled("  |  ", Style::default().fg(app.theme.border_dim));
-    let gauge_w = if show_bar {
-        18u16.min(area.width.saturating_sub(badge_w + 9))
-    } else {
+    let tag_w: usize = tags.iter().map(|t| t.chars().count() + 3).sum();
+    let model = fit_badge("", &model, badge_max.saturating_sub(tag_w + 2).max(8));
+    let mut left = vec![
+        Span::styled(" ◆ ", Style::default().fg(theme.accent)),
+        Span::styled(
+            model,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    for tag in tags {
+        left.push(sep());
+        left.push(Span::styled(tag, Style::default().fg(theme.accent2)));
+    }
+
+    // Right: the context meter and numbers, when the window is known.
+    let mut right: Vec<Span> = Vec::new();
+    if app.settings.show_stats
+        && let Some(limit) = app.context_limit()
+    {
+        right.extend(context_meter(app, limit, 10));
+        right.push(Span::raw(" "));
+        right.push(Span::styled(context_numbers(app, limit), dim));
+    } else if let Some(rate) = app.turn_cache.rate() {
+        let partial = if app.turn_cache.is_partial() { "~" } else { "" };
+        right.push(Span::styled(
+            format!("{partial}{:.0}% cached", rate * 100.0),
+            dim,
+        ));
+    }
+    if !right.is_empty() {
+        right.push(Span::raw(" "));
+    }
+
+    let width_of = |spans: &[Span]| -> u16 {
+        u16::try_from(spans.iter().map(Span::width).sum::<usize>()).unwrap_or(u16::MAX)
+    };
+    let (left_w, right_w) = (width_of(&left), width_of(&right));
+    // On a narrow bar the meter yields first, then the status text.
+    let right_w = if left_w + right_w + 8 > area.width {
         0
+    } else {
+        right_w
     };
     let cols = Layout::horizontal([
-        Constraint::Length(badge_w + 5),
-        Constraint::Length(gauge_w),
+        Constraint::Length(left_w),
         Constraint::Min(0),
+        Constraint::Length(right_w),
     ])
     .split(area);
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                badge_s,
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            sep,
-        ])),
-        cols[0],
-    );
-    if show_bar {
-        render_context_bar(f, app, cols[1]);
+    f.render_widget(Paragraph::new(Line::from(left)), cols[0]);
+    if !app.status.is_empty() {
+        let text = popups::chrome::truncate(&app.status, cols[1].width.saturating_sub(3) as usize);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![sep(), Span::styled(text, dim)])),
+            cols[1],
+        );
     }
-    let numbers = if show_bar {
-        context_label(app).map(|l| format!(" {l}  |  "))
+    if right_w > 0 {
+        f.render_widget(
+            Paragraph::new(Line::from(right)).alignment(ratatui::layout::Alignment::Right),
+            cols[2],
+        );
+    }
+}
+
+/// `▰▰▰▱▱▱▱▱` — how full the context window is, each filled cell colored by
+/// its position along a green → yellow → red ramp.
+fn context_meter(app: &AppView, limit: u64, cells: usize) -> Vec<Span<'static>> {
+    let ratio = if limit > 0 {
+        (app.context_used() as f64 / limit as f64).clamp(0.0, 1.0)
     } else {
-        // Without the gauge, still report the turn's cache hit rate.
-        app.turn_cache.rate().map(|rate| {
-            let partial = if app.turn_cache.is_partial() { "~" } else { "" };
-            format!("{partial}{:.0}% cached  |  ", rate * 100.0)
-        })
+        0.0
     };
-    let tail = format!("{}{}", numbers.unwrap_or_default(), app.status);
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            popups::chrome::truncate(&tail, cols[2].width as usize),
-            Style::default().fg(app.theme.fg_dim),
-        ))),
-        cols[2],
-    );
+    let filled = (ratio * cells as f64).ceil() as usize;
+    (0..cells)
+        .map(|x| {
+            if x < filled {
+                let t = x as f64 / (cells - 1).max(1) as f64;
+                Span::styled("▰", Style::default().fg(gradient(t)))
+            } else {
+                Span::styled("▱", Style::default().fg(app.theme.border_dim))
+            }
+        })
+        .collect()
+}
+
+/// `34% 44k/128k · 82% cached`. The cache rate covers the whole turn, not
+/// its last request: a tool loop's final request sits on the longest cached
+/// prefix, so reporting it alone would flatter the number. `~` marks a turn
+/// some provider did not fully account for.
+fn context_numbers(app: &AppView, limit: u64) -> String {
+    let used = app.context_used();
+    let pct = if limit > 0 {
+        used as f64 / limit as f64 * 100.0
+    } else {
+        0.0
+    };
+    let mut label = format!("{pct:.0}% {}/{}", humanize(used), humanize(limit));
+    if let Some(rate) = app.turn_cache.rate() {
+        let partial = if app.turn_cache.is_partial() { "~" } else { "" };
+        let _ = std::fmt::Write::write_fmt(
+            &mut label,
+            format_args!(" · {partial}{:.0}% cached", rate * 100.0),
+        );
+    }
+    label
 }
 
 /// `prefix` + `model` within `max` chars. A too-long label shortens the model

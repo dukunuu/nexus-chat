@@ -32,6 +32,7 @@ pub fn new_textarea() -> TextArea<'static> {
     // Soft-wrap long lines and grow up to 20 rows like an HTML textarea.
     ta.set_wrap_mode(tui_textarea::WrapMode::WordOrGlyph);
     ta.set_max_rows(20);
+    ta.set_placeholder_text("Ask anything · / commands · @ files · F1 help");
     ta
 }
 

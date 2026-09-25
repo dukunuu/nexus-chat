@@ -846,16 +846,23 @@ fn status_bar_names_the_model_and_keeps_the_space_tag_beside_the_gauge() {
     let screen = render_to_string(100, 1, |f| {
         crate::ui::render_status(f, &app, f.area());
     });
-    assert!(screen.contains("[work] Big-Model-7B · local"), "{screen}");
+    assert!(
+        screen.contains("◆ Big-Model-7B · local · ⌂ work"),
+        "{screen}"
+    );
     assert!(!screen.contains("local:org/"), "{screen}");
     assert!(screen.contains("ready"), "{screen}");
+    assert!(
+        screen.contains('▱'),
+        "context meter on the right:\n{screen}"
+    );
 
     // A status too long for the bar ends in an ellipsis instead of a cut.
     app.status = "x".repeat(200);
     let screen = render_to_string(100, 1, |f| {
         crate::ui::render_status(f, &app, f.area());
     });
-    assert!(screen.trim_end().ends_with('…'), "{screen}");
+    assert!(screen.contains('…'), "{screen}");
 }
 
 #[test]

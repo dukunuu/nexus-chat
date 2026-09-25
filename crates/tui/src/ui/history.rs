@@ -269,10 +269,11 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
             &tail[i - cached_lines]
         }
     };
+    let hl = Style::default().bg(app.theme.selection).fg(app.theme.fg);
     let visible: Vec<Line> = (top..total.min(top + height))
         .map(|li| {
             app.sel
-                .highlight(li, line_at(li))
+                .highlight(li, line_at(li), hl)
                 .unwrap_or_else(|| line_at(li).clone())
         })
         .collect();
@@ -691,7 +692,7 @@ fn push_user_card(
         .clamp(24, 64)
         .min(width.saturating_sub(6).max(24));
     let inner = card_w.saturating_sub(4);
-    let bg_style = theme.background_style();
+    let bg_style = Style::default().bg(theme.raised);
 
     let mut card: Vec<Line<'static>> = Vec::new();
     let mut card_img: Vec<Option<String>> = Vec::new();
@@ -727,8 +728,11 @@ fn push_user_card(
         card_img.push(None);
     }
 
-    // Emit: left margin (pane bg) + 2-col pad + content + pad to card width.
+    // Emit: left margin (pane bg) + a rail in the user color + content + pad
+    // to card width. The rail makes the bubble read as a card even when the
+    // raised shade is the terminal's own (transparent) background.
     let lead = width.saturating_sub(card_w);
+    let rail = Style::default().fg(theme.user_msg).patch(bg_style);
     for (li, line) in card.into_iter().enumerate() {
         let len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
         let is_image = card_img[li].is_some();
@@ -736,7 +740,7 @@ fn push_user_card(
         if lead > 0 {
             spans.push(Span::raw(" ".repeat(lead)));
         }
-        spans.push(Span::styled("  ", bg_style));
+        spans.push(Span::styled("▎ ", rail));
         for sp in line.spans {
             // Image rows carry their own per-pixel backgrounds — the card
             // tint must not override them.
@@ -2117,8 +2121,8 @@ mod card_background_tests {
         }
         let (body_start, body_bg) = body_start.expect("user message should be rendered");
         assert_eq!(
-            body_bg, app.theme.surface,
-            "card should use the configured UI background"
+            body_bg, app.theme.raised,
+            "card should use the raised shade (the terminal's own bg when transparent)"
         );
         // Right-aligned: the body starts well past the pane's midpoint.
         assert!(

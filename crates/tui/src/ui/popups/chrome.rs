@@ -124,12 +124,16 @@ pub fn render_hinted<'a>(
     inner
 }
 
-/// Standard popup list selection: accent `▸ ` marker + bold selection
-/// without an extra row fill, so the configured surface stays consistent.
+/// Standard popup list selection: accent `▸ ` marker, bold text, and the
+/// theme's raised shade across the row.
 pub fn standard_list<'a>(items: Vec<ListItem<'a>>, theme: &Theme) -> List<'a> {
     List::new(items)
         .highlight_symbol(Span::styled("▸ ", Style::default().fg(theme.accent)))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .highlight_style(
+            Style::default()
+                .bg(theme.raised)
+                .add_modifier(Modifier::BOLD),
+        )
 }
 
 /// Truncate `s` to `max` chars, appending `…` when it overflows — the same
