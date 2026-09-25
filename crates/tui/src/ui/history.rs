@@ -14,7 +14,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use std::collections::HashMap;
-use std::fmt::Write as _;
 
 use super::{dim, fmt_cost, to_color};
 use crate::app_view::AppView;
@@ -796,8 +795,10 @@ fn push_tool_call(
         for line in wrap_plain(&result, width.saturating_sub(2)) {
             out.push(Line::from(dim(format!("│ {line}"), theme)));
         }
+        // Expanded detail gets breathing room; collapsed calls stack into
+        // one compact block above the reply they fed.
+        out.push(Line::from(""));
     }
-    out.push(Line::from(""));
 }
 
 /// A compaction-digest block: the digest of the earlier conversation, shown
@@ -993,7 +994,10 @@ fn push_assistant_stored(
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ));
-            head.push(dim(format!(" · {m}"), theme));
+            head.push(dim(
+                format!(" · {}", crate::ui::short_model_label(m)),
+                theme,
+            ));
         }
         (Some(p), None) => {
             head.push(Span::styled(
@@ -1005,7 +1009,7 @@ fn push_assistant_stored(
         }
         (None, Some(m)) => {
             head.push(Span::styled(
-                m.to_string(),
+                crate::ui::short_model_label(m),
                 Style::default()
                     .fg(theme.assistant_msg)
                     .add_modifier(Modifier::BOLD),
@@ -1064,32 +1068,46 @@ fn push_assistant_stored(
 
     let mut rendered = crate::ui::markdown::render(
         &strip_markdown_images(content),
-        width.saturating_sub(2),
-        theme.accent,
+        // Rail (2) plus a one-column margin before the scrollbar gutter.
+        width.saturating_sub(3),
+        crate::ui::markdown::MdColors {
+            heading: theme.accent,
+            rule: theme.border_dim,
+        },
     );
     rendered.lines = crate::ui::citations_style::style_citations(rendered.lines, theme.accent);
     rendered.lines = crate::ui::citations_style::style_confidence_tags(rendered.lines);
     push_rendered(out, code, blocks, rendered, Some(rail));
 
-    // Footer below the response: phrase + stats.
-    let mut footer = String::new();
-    if let Some(p) = &msg.phrase {
-        footer.push_str("· ");
-        footer.push_str(p);
-    }
+    // Footer below the response: the phrase, then stats, one separator style.
+    let mut stats: Vec<String> = Vec::new();
     if settings.show_stats
         && let (Some(tok), Some(secs)) = (msg.tokens, msg.secs)
     {
         let tps = if secs > 0.0 { tok as f64 / secs } else { 0.0 };
-        let _ = write!(footer, "  ·  {tps:.1} tok/s · ~{tok} tok · {secs:.2}s");
+        stats.push(format!("{tps:.1} tok/s · ~{tok} tok · {secs:.1}s"));
     }
     if settings.show_stats
         && let Some(cost) = msg.cost.filter(|c| *c > 0.0)
     {
-        let _ = write!(footer, "  ·  {}", fmt_cost(Some(cost)));
+        stats.push(fmt_cost(Some(cost)));
+    }
+    let mut footer: Vec<Span> = Vec::new();
+    if let Some(p) = &msg.phrase {
+        footer.push(Span::styled(
+            p.clone(),
+            Style::default()
+                .fg(theme.fg_dim)
+                .add_modifier(Modifier::ITALIC),
+        ));
+    }
+    if !stats.is_empty() {
+        let sep = if footer.is_empty() { "" } else { " · " };
+        footer.push(dim(format!("{sep}{}", stats.join(" · ")), theme));
     }
     if !footer.is_empty() {
-        out.push(Line::from(dim(footer, theme)));
+        footer.insert(0, dim("· ", theme));
+        out.push(Line::from(footer));
     }
     out.push(Line::from(""));
 }
@@ -1152,9 +1170,10 @@ fn push_assistant_streaming(
     blocks: &mut Vec<String>,
 ) {
     let color = to_color(app.spinner_color());
-    let name = app
-        .active_chat_task()
-        .map_or("assistant", |t| t.model.as_str());
+    let name = app.active_chat_task().map_or_else(
+        || "assistant".to_string(),
+        |t| crate::ui::short_model_label(&t.model),
+    );
     let mut head = vec![
         Span::styled(
             format!("{} ", app.spinner_char()),
@@ -1186,8 +1205,11 @@ fn push_assistant_streaming(
     let buf = app.active_streaming_text().unwrap_or("");
     let mut rendered = crate::ui::markdown::render(
         &strip_markdown_images(buf),
-        width.saturating_sub(2),
-        app.theme.accent,
+        width.saturating_sub(3),
+        crate::ui::markdown::MdColors {
+            heading: app.theme.accent,
+            rule: app.theme.border_dim,
+        },
     );
     rendered.lines = crate::ui::citations_style::style_citations(rendered.lines, app.theme.accent);
     rendered.lines = crate::ui::citations_style::style_confidence_tags(rendered.lines);

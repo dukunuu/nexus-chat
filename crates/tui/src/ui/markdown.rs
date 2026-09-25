@@ -72,19 +72,38 @@ impl Rendered {
 /// GFM pipe tables — which `tui_markdown` doesn't support (it just warns and
 /// drops them) — are pulled out and rendered as a bordered, column-aligned
 /// table before the rest of the content goes through the normal pipeline.
-/// `heading` colors `#` headings (the theme accent).
-pub fn render(content: &str, width: usize, heading: Color) -> Rendered {
+/// Theme colors the renderer paints with.
+#[derive(Clone, Copy)]
+pub struct MdColors {
+    /// `#` headings.
+    pub heading: Color,
+    /// Code-box and table rules.
+    pub rule: Color,
+}
+
+impl Default for MdColors {
+    fn default() -> Self {
+        Self {
+            heading: Color::Cyan,
+            rule: Color::DarkGray,
+        }
+    }
+}
+
+pub fn render(content: &str, width: usize, colors: MdColors) -> Rendered {
     let mut r = Rendered::default();
     for seg in nexus_core::markdown::split_tables(content) {
         match seg {
-            TableSegment::Table(rows, aligns) => render_table(&mut r, &rows, &aligns, width),
-            TableSegment::Text(text) => render_text(&mut r, &text, width, heading),
+            TableSegment::Table(rows, aligns) => {
+                render_table(&mut r, &rows, &aligns, width, colors);
+            }
+            TableSegment::Text(text) => render_text(&mut r, &text, width, colors),
         }
     }
     r
 }
 
-fn render_text(r: &mut Rendered, content: &str, width: usize, heading: Color) {
+fn render_text(r: &mut Rendered, content: &str, width: usize, colors: MdColors) {
     let text = tui_markdown::from_str_with_options(content, &md_options());
     let mut in_code = false;
     let mut raw: Vec<String> = Vec::new();
@@ -97,24 +116,26 @@ fn render_text(r: &mut Rendered, content: &str, width: usize, heading: Color) {
         if unstyled && plain.trim_start().starts_with("```") {
             if in_code {
                 in_code = false;
-                push_code_border(r, width, false);
+                push_code_border(r, width, None, colors.rule);
                 r.blocks.push(raw.join("\n"));
             } else {
                 in_code = true;
                 raw.clear();
-                push_code_border(r, width, true);
+                // ```rust → the box's top rule is labelled `rust`.
+                let lang = plain.trim_start().trim_start_matches('`').trim();
+                push_code_border(r, width, Some(lang), colors.rule);
             }
             continue;
         }
 
         if in_code {
             raw.push(plain);
-            push_code_content(r, line, width);
+            push_code_content(r, line, width, colors.rule);
             continue;
         }
 
         let id = None;
-        match classify(line, &plain, heading) {
+        match classify(line, &plain, colors.heading) {
             Block::Drop => {}
             Block::Header(body) | Block::List(body) => {
                 for l in wrap_styled_line(&body, width) {
@@ -131,29 +152,38 @@ fn render_text(r: &mut Rendered, content: &str, width: usize, heading: Color) {
 
     // Unterminated block (e.g. mid-stream): close it so metadata stays valid.
     if in_code {
-        push_code_border(r, width, false);
+        push_code_border(r, width, None, colors.rule);
         r.blocks.push(raw.join("\n"));
     }
 }
 
-fn border_style() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
-
-/// Top (`top=true`) or bottom rule of a code box, tagged with the current block id.
-fn push_code_border(r: &mut Rendered, width: usize, top: bool) {
+/// Top (`lang` given, maybe empty) or bottom rule of a code box, tagged with
+/// the current block id. A non-empty `lang` labels the top rule: `┌─ rust ─┐`.
+fn push_code_border(r: &mut Rendered, width: usize, lang: Option<&str>, rule: Color) {
     let id = Some(r.blocks.len());
     if width < 2 {
         r.push(Line::from(""), id);
         return;
     }
-    let (l, rt) = if top { ('┌', '┐') } else { ('└', '┘') };
-    let bar = format!("{l}{}{rt}", "─".repeat(width - 2));
-    r.push(Line::from(Span::styled(bar, border_style())), id);
+    let style = Style::default().fg(rule);
+    let line = match lang {
+        Some(lang) if !lang.is_empty() && width > lang.chars().count() + 6 => {
+            let fill = width - lang.chars().count() - 5;
+            Line::from(vec![
+                Span::styled("┌─ ", style),
+                Span::styled(lang.to_string(), style.add_modifier(Modifier::ITALIC)),
+                Span::styled(format!(" {}┐", "─".repeat(fill)), style),
+            ])
+        }
+        Some(_) => Line::from(Span::styled(format!("┌{}┐", "─".repeat(width - 2)), style)),
+        None => Line::from(Span::styled(format!("└{}┘", "─".repeat(width - 2)), style)),
+    };
+    r.push(line, id);
 }
 
 /// A code content line: wrapped to the box interior, framed with `│ … │`.
-fn push_code_content(r: &mut Rendered, line: &Line, width: usize) {
+fn push_code_content(r: &mut Rendered, line: &Line, width: usize, rule: Color) {
+    let border_style = || Style::default().fg(rule);
     let id = Some(r.blocks.len());
     let interior = width.saturating_sub(4).max(1);
     for row in wrap_styled_line(line, interior) {
@@ -172,7 +202,14 @@ fn push_code_content(r: &mut Rendered, line: &Line, width: usize) {
 /// Render a parsed table as a bordered, column-aligned box. Cell text still
 /// gets inline styling (bold/italic/code) via `tui_markdown`, and wraps within
 /// its column if the table doesn't fit `width`.
-fn render_table(r: &mut Rendered, rows: &[Vec<String>], aligns: &[TableAlign], width: usize) {
+fn render_table(
+    r: &mut Rendered,
+    rows: &[Vec<String>],
+    aligns: &[TableAlign],
+    width: usize,
+    colors: MdColors,
+) {
+    let border_style = || Style::default().fg(colors.rule);
     let ncols = rows.iter().map(Vec::len).max().unwrap_or(0);
     if ncols == 0 {
         return;
@@ -204,7 +241,7 @@ fn render_table(r: &mut Rendered, rows: &[Vec<String>], aligns: &[TableAlign], w
 
     r.push(border('┌', '┬', '┐'), None);
     for (ri, row) in rows.iter().enumerate() {
-        push_table_row(r, row, aligns, &colw, ri == 0);
+        push_table_row(r, row, aligns, &colw, ri == 0, colors.rule);
         if ri == 0 {
             r.push(border('├', '┼', '┤'), None);
         }
@@ -220,7 +257,9 @@ fn push_table_row(
     aligns: &[TableAlign],
     colw: &[usize],
     is_header: bool,
+    rule: Color,
 ) {
+    let border_style = || Style::default().fg(rule);
     let wrapped: Vec<Vec<Line<'static>>> = (0..colw.len())
         .map(|i| {
             let mut spans = styled_cell(row.get(i).map_or("", String::as_str));
@@ -443,7 +482,7 @@ mod inline_code_tests {
 
     #[test]
     fn inline_code_is_visible_on_a_black_background_terminal() {
-        let r = render("run `cargo test` now", 80, Color::Cyan);
+        let r = render("run `cargo test` now", 80, MdColors::default());
         let code_span = r.lines[0]
             .spans
             .iter()
@@ -469,7 +508,7 @@ mod table_tests {
         // Double-width glyphs must not desync the border from the content —
         // every row's rendered display width has to match the border's.
         let table = "| 単語 | 読み |\n| --- | --- |\n| 会う | あう |\n| 会社 | かいしゃ |";
-        let r = render(table, 40, Color::Cyan);
+        let r = render(table, 40, MdColors::default());
         let widths: Vec<usize> = r
             .lines
             .iter()
@@ -483,7 +522,7 @@ mod table_tests {
 
     #[test]
     fn render_produces_a_bordered_box_with_header_separator() {
-        let r = render(TABLE, 40, Color::Cyan);
+        let r = render(TABLE, 40, MdColors::default());
         let text: Vec<String> = r.lines.iter().map(line_text).collect();
         // top border, header, header/body separator, 2 data rows, bottom border.
         assert_eq!(text.len(), 6);
@@ -500,7 +539,7 @@ mod table_tests {
         let r = render(
             "- plain item\n- has `ip` inside\n\n## Use `nmcli` here",
             80,
-            Color::Cyan,
+            MdColors::default(),
         );
         let text: Vec<String> = r.lines.iter().map(line_text).collect();
         assert!(text.iter().any(|l| l == "• plain item"), "{text:?}");
@@ -520,5 +559,15 @@ mod table_tests {
                 .any(|l| l.starts_with("- ") || l.starts_with('#')),
             "{text:?}"
         );
+    }
+
+    #[test]
+    fn code_boxes_label_their_language() {
+        let r = render("```rust\nlet x = 1;\n```", 40, MdColors::default());
+        let top = line_text(&r.lines[0]);
+        assert!(top.starts_with("┌─ rust ─") && top.ends_with('┐'), "{top}");
+        assert_eq!(top.chars().count(), 40);
+        let bare = render("```\nx\n```", 20, MdColors::default());
+        assert_eq!(line_text(&bare.lines[0]), format!("┌{}┐", "─".repeat(18)));
     }
 }
