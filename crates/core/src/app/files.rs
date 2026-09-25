@@ -448,7 +448,7 @@ impl App {
                         .unwrap_or("")
                         .to_lowercase();
                     if ext == "pdf" || crate::extract::is_image_ext(&ext) {
-                        ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
+                        // Queued below, once the row exists.
                         ("ocr…".to_string(), Vec::new())
                     } else {
                         (
@@ -473,12 +473,21 @@ impl App {
                     crate::extract::metadata_chunks(&name),
                 ),
             };
-            if let Ok(id) = self
+            match self
                 .db
                 .upsert_file(&self.active_space.id, &name, &hash, size, &status)
             {
-                let _ = self.db.set_file_chunks(&id, &chunks);
-                let _ = self.db.set_file_mtime(&id, mtime);
+                Ok(id) => {
+                    let _ = self.db.set_file_chunks(&id, &chunks);
+                    let _ = self.db.set_file_mtime(&id, mtime);
+                    // Only OCR a file whose row exists: without one the
+                    // result can't be recorded, and the batch-done rescan
+                    // would queue the same file again — a paid call loop.
+                    if status == "ocr…" {
+                        ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
+                    }
+                }
+                Err(e) => self.push_status(format!("could not index {name}: {e:#}")),
             }
         }
         for gone in known.iter().filter(|f| !seen.contains(&f.name)) {

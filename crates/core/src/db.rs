@@ -129,8 +129,10 @@ pub const DEFAULT_SPACE: &str = "default";
 /// device-local table move into `cache.db`; fresh dbs are created complete
 /// and stamped 2 immediately. v2: the default space's sync identity becomes
 /// deterministic (id `default`) so two devices' default spaces merge as one
-/// LWW row instead of colliding by name.
-const SCHEMA_VERSION: i64 = 2;
+/// LWW row instead of colliding by name. v3: the dead legacy `files.status`
+/// column is dropped — it is `NOT NULL` with no default, so it rejected every
+/// new `files` row once status moved to `cache.file_index_state`.
+const SCHEMA_VERSION: i64 = 3;
 
 /// Columns added since the v1 schema. Fresh dbs declare them inline; legacy
 /// dbs get them via `user_version`-gated `ALTER TABLE` adds guarded by
@@ -636,12 +638,22 @@ impl Db {
             // copy preserves behavior exactly). Each copy is guarded by
             // table existence — fresh dbs have nothing to move.
             let now = Utc::now().to_rfc3339();
-            if has_column(&self.conn, "files", "mtime")? {
+            if has_column(&self.conn, "files", "mtime")?
+                && has_column(&self.conn, "files", "status")?
+            {
                 self.conn.execute(
                     "INSERT OR IGNORE INTO cache.file_index_state (file_id, mtime, status, updated_at)
                      SELECT id, mtime, status, ?1 FROM files",
                     [&now],
                 )?;
+            }
+            // Once seeded into cache, the legacy status column is dead — and
+            // harmful: it is NOT NULL with no default, so inserts that omit
+            // it fail. `files.mtime` stays (it has a default).
+            if has_column(&self.conn, "files", "status")? {
+                self.conn
+                    .execute("ALTER TABLE files DROP COLUMN status", [])
+                    .context("dropping legacy files.status")?;
             }
             if has_column(&self.conn, "web_cache", "url_norm")? {
                 self.conn.execute(
@@ -4255,6 +4267,29 @@ mod tests {
             })
             .unwrap();
         assert!(!sync.is_empty());
+    }
+
+    /// Legacy `files` rows carried a `status TEXT NOT NULL` column with no
+    /// default. Once status moved to `cache.file_index_state`, inserts that
+    /// omit it failed on those dbs — the rescan swallowed the error, so every
+    /// new file stayed unindexed and was re-OCR'd on every rescan, forever.
+    #[test]
+    fn legacy_files_status_column_no_longer_blocks_new_files() {
+        let dir = std::env::temp_dir().join(format!("nexus-status-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("nexus.db");
+        legacy_db(&db_path, &Utc::now().to_rfc3339());
+        let db = Db::open(&db_path).unwrap();
+        assert!(!has_column(db.raw(), "files", "status").unwrap());
+        let space = db.default_space_id().unwrap();
+        db.upsert_file(&space, "pasted.png", "h2", 5, "ocr…")
+            .unwrap();
+        let files = db.list_files(&space).unwrap();
+        let legacy = files.iter().find(|f| f.name == "a.txt").unwrap();
+        assert_eq!(legacy.status, "ok", "index state survived the drop");
+        let new = files.iter().find(|f| f.name == "pasted.png").unwrap();
+        assert_eq!(new.status, "ocr…");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
