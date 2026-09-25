@@ -19,6 +19,36 @@ use nexus_core::app::{FilesMode, FilesTab, ImagesMode, ScriptsMode};
 
 use super::chrome;
 
+/// Browse title as a tab strip — `📁 files · images · scripts` with the
+/// active tab bold — so the other tabs (Tab cycles) are visible even with
+/// hints hidden.
+fn tab_title(app: &AppView, glyph: &str, active: FilesTab) -> Line<'static> {
+    let mut title = chrome::popup_title(app, glyph, "");
+    title.spans.pop(); // drop the empty name span; the strip replaces it
+    let tabs = [
+        (FilesTab::Files, "files"),
+        (FilesTab::Images, "images"),
+        (FilesTab::Scripts, "scripts"),
+    ];
+    for (i, (tab, name)) in tabs.into_iter().enumerate() {
+        if i > 0 {
+            title
+                .spans
+                .push(Span::styled(" · ", Style::default().fg(app.theme.fg_dim)));
+        }
+        let style = if tab == active {
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(ratatui::style::Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.fg_dim)
+        };
+        title.spans.push(Span::styled(name, style));
+    }
+    title.spans.push(Span::raw(" "));
+    title
+}
+
 pub fn render(f: &mut Frame, app: &AppView) {
     match app.files_tab {
         FilesTab::Files => render_files(f, app),
@@ -118,7 +148,7 @@ fn render_files(f: &mut Frame, app: &AppView) {
                 .unwrap_or_default();
             chrome::danger_title(app, format!("remove \"{name}\"?"), "")
         }
-        FilesMode::Browse => chrome::popup_title(app, "📁", "files"),
+        FilesMode::Browse => tab_title(app, "📁", FilesTab::Files),
         FilesMode::Pick => Line::from(""),
     };
     let hint = match app.files_mode {
@@ -183,7 +213,7 @@ fn render_images(f: &mut Frame, app: &AppView) {
                 .unwrap_or_default();
             chrome::danger_title(app, format!("remove \"{name}\"?"), "")
         }
-        ImagesMode::Browse => chrome::popup_title(app, "🖼", "images"),
+        ImagesMode::Browse => tab_title(app, "🖼", FilesTab::Images),
     };
     let hint = match app.images_mode {
         ImagesMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
@@ -269,7 +299,7 @@ fn render_scripts(f: &mut Frame, app: &AppView) {
                 .unwrap_or_default();
             chrome::danger_title(app, format!("remove \"{name}\"?"), "")
         }
-        ScriptsMode::Browse => chrome::popup_title(app, "📜", "scripts"),
+        ScriptsMode::Browse => tab_title(app, "📜", FilesTab::Scripts),
         _ => unreachable!(),
     };
     let hint = match app.scripts_mode {

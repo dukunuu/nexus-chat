@@ -986,3 +986,18 @@ fn enter_in_skills_arms_the_highlighted_skill() {
     assert!(app.popup == nexus_core::app::Popup::None);
     assert_eq!(app.core.forced_skill.as_deref(), Some("grill-me"));
 }
+
+#[test]
+fn files_popup_title_shows_every_tab() {
+    let mut app = test_app();
+    app.popup = nexus_core::app::Popup::Files;
+    for tab in [
+        nexus_core::app::FilesTab::Files,
+        nexus_core::app::FilesTab::Images,
+        nexus_core::app::FilesTab::Scripts,
+    ] {
+        app.files_tab = tab;
+        let screen = render_to_string(100, 30, |f| super::files::render(f, &app));
+        assert!(screen.contains("files · images · scripts"), "{screen}");
+    }
+}
