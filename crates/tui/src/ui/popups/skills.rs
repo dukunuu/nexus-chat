@@ -18,14 +18,25 @@ pub fn render(f: &mut Frame, app: &AppView) {
             &app.theme,
         )]
     } else {
+        let width = area.width.saturating_sub(5) as usize;
         app.skills
             .iter()
             .map(|s| {
-                let name = chrome::truncate(&s.name, (area.width.saturating_sub(5)) as usize);
-                ListItem::new(Line::from(Span::styled(
-                    name,
-                    Style::default().fg(app.theme.fg),
-                )))
+                // Where the skill lives: `nexus` (app-managed, removable) or
+                // the agent tool whose skills root it came from (read-only).
+                let source = if app.skill_is_app_managed(s) {
+                    "nexus".to_string()
+                } else {
+                    skill_source(&s.dir)
+                };
+                let name =
+                    chrome::truncate(&s.name, width.saturating_sub(source.chars().count() + 2));
+                let gap = width.saturating_sub(name.chars().count() + source.chars().count());
+                ListItem::new(Line::from(vec![
+                    Span::styled(name, Style::default().fg(app.theme.fg)),
+                    Span::raw(" ".repeat(gap)),
+                    Span::styled(source, Style::default().fg(app.theme.fg_dim)),
+                ]))
             })
             .collect()
     };
@@ -55,7 +66,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
             "no skills yet — Ctrl+N installs one from GitHub".to_string()
         }
         SkillsMode::Browse => format!(
-            "{}↑↓ · Ctrl+N install · Ctrl+D remove · Ctrl+E edit",
+            "{}↑↓ · Enter arm · Ctrl+N install · Ctrl+D remove · Ctrl+E edit",
             chrome::count_hint(app.skills.len(), "skill")
         ),
         SkillsMode::Install => "owner/repo/path · Enter install · Esc cancel".to_string(),
@@ -103,8 +114,19 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) {
             Some(ConfirmDeleteAction::No) => app.skills_mode = SkillsMode::Browse,
             None => {}
         },
-        // Skills browse has no Enter binding, no rename, and (unlike
-        // session/space) no text filter: plain chars/Backspace are no-ops.
+        // Enter arms the highlighted skill for the next message, like
+        // `/<skill-name>`. No rename, and (unlike session/space) no text
+        // filter: plain chars/Backspace are no-ops.
+        SkillsMode::Browse if key.code == crossterm::event::KeyCode::Enter => {
+            if let Some(name) = app.skills.get(app.skills_selected).map(|s| s.name.clone()) {
+                app.popup = nexus_core::app::Popup::None;
+                if let Err(e) =
+                    app.execute(nexus_core::app::AppCommand::ArmSkill { name, rest: None })
+                {
+                    app.push_status(format!("error: {e:#}"));
+                }
+            }
+        }
         SkillsMode::Browse => match classify_browse_key(key, true, false) {
             Some(super::BrowseAction::Close) => app.popup = nexus_core::app::Popup::None,
             Some(super::BrowseAction::MoveUp) => app.move_skills_selection(-1),
@@ -121,5 +143,33 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) {
             Some(super::BrowseAction::ConfirmDelete) => app.start_skill_remove(),
             _ => {}
         },
+    }
+}
+
+/// The agent tool a non-app skill came from: the directory holding its
+/// `skills` root (`~/.claude/skills/x` → `.claude`, `./.agents/skills/x` →
+/// `.agents`), looking past a `.system` namespace.
+fn skill_source(dir: &std::path::Path) -> String {
+    let parts: Vec<&str> = dir
+        .iter()
+        .filter_map(|p| p.to_str())
+        .filter(|p| *p != ".system")
+        .collect();
+    parts
+        .iter()
+        .rposition(|p| *p == "skills")
+        .and_then(|i| i.checked_sub(1))
+        .map_or_else(|| "external".to_string(), |i| parts[i].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn skill_source_names_the_tool_root() {
+        let src = |p: &str| super::skill_source(std::path::Path::new(p));
+        assert_eq!(src("/home/u/.claude/skills/grill-me"), ".claude");
+        assert_eq!(src("/repo/.agents/skills/tdd"), ".agents");
+        assert_eq!(src("/home/u/.codex/skills/.system/imagegen"), ".codex");
+        assert_eq!(src("/somewhere/else/tdd"), "external");
     }
 }

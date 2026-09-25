@@ -967,3 +967,22 @@ fn session_picker_leads_with_the_title_and_marks_the_open_session() {
     let research_row = screen.lines().find(|l| l.contains("Pomodoro")).unwrap();
     assert!(research_row.trim_end().ends_with('│'), "{research_row}");
 }
+
+#[test]
+fn enter_in_skills_arms_the_highlighted_skill() {
+    let mut app = test_app();
+    app.core.skills = vec![nexus_core::skills::Skill {
+        name: "grill-me".into(),
+        description: "stress-test a plan".into(),
+        dir: std::path::PathBuf::from("/home/u/.claude/skills/grill-me"),
+    }];
+    app.popup = nexus_core::app::Popup::Skills;
+    let screen = render_to_string(100, 30, |f| super::skills::render(f, &app));
+    assert!(screen.contains(".claude"), "source tag:\n{screen}");
+    super::skills::handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+    );
+    assert!(app.popup == nexus_core::app::Popup::None);
+    assert_eq!(app.core.forced_skill.as_deref(), Some("grill-me"));
+}
