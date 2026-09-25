@@ -49,6 +49,16 @@ pub(super) fn render_welcome(f: &mut Frame, app: &mut AppView, area: Rect) {
             .to_string(),
         &app.theme,
     )));
+    // What a message sent from here goes to: model and space.
+    let model = app.current_model.as_deref().map_or_else(
+        || "pick a model with /model".to_string(),
+        super::short_model_label,
+    );
+    lines.push(Line::from(vec![
+        Span::styled("◆ ", Style::default().fg(app.theme.accent)),
+        Span::styled(model, Style::default().fg(app.theme.accent)),
+        dim(format!(" · ⌂ {}", app.active_space.name), &app.theme),
+    ]));
     if !app.settings.hide_hints {
         lines.push(Line::from(""));
         lines.push(chip_row(

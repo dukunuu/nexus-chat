@@ -85,6 +85,12 @@ pub(super) fn render_input(f: &mut Frame, app: &mut AppView, area: Rect) {
         .set_selection_style(Style::default().bg(app.theme.selection).fg(app.theme.fg));
     app.input
         .set_placeholder_style(Style::default().fg(app.theme.fg_dim));
+    // Key tips are hints; with hints hidden the placeholder stays minimal.
+    app.input.set_placeholder_text(if app.settings.hide_hints {
+        "Ask anything"
+    } else {
+        "Ask anything · / commands · @ files · F1 help"
+    });
     f.render_widget(&app.input, inner);
 }
 
