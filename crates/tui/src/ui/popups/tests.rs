@@ -1013,3 +1013,24 @@ fn status_badge_keeps_the_backend_tag_when_shortened() {
         "[work] gpt-5.5"
     );
 }
+
+#[test]
+fn context_popup_fits_its_content_and_ctrl_g_closes_it() {
+    let mut app = test_app();
+    app.popup = nexus_core::app::Popup::Context;
+    let screen = render_to_string(100, 40, |f| super::context::render(f, &app));
+    assert!(screen.contains("unknown window"), "{screen}");
+    assert!(screen.contains('█'), "per-bucket bars:\n{screen}");
+    let framed_rows = screen.lines().filter(|l| l.contains('│')).count();
+    assert!(
+        framed_rows < 14,
+        "sized to content, not 40% of the screen:\n{screen}"
+    );
+
+    let ctrl_g = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('g'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    super::context::handle_key(&mut app, ctrl_g);
+    assert!(app.popup == nexus_core::app::Popup::None);
+}
