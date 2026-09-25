@@ -1124,3 +1124,24 @@ fn notification_toasts_hug_their_content() {
         "{row}"
     );
 }
+
+#[test]
+fn wrapped_list_items_hang_under_their_text() {
+    let lines = crate::ui::cards::wrap_plain(
+        " 1. Which specific outcomes or metrics of effectiveness matter here?\n- a bullet that wraps onto a second line",
+        30,
+    );
+    assert!(lines[0].starts_with(" 1. Which"), "{lines:#?}");
+    assert!(
+        lines[1].starts_with("    ") && !lines[1].starts_with("     "),
+        "{lines:#?}"
+    );
+    let bullet = lines
+        .iter()
+        .position(|l| l.starts_with("- a bullet"))
+        .unwrap();
+    assert!(
+        lines[bullet + 1].starts_with("  ") && !lines[bullet + 1].starts_with("   "),
+        "{lines:#?}"
+    );
+}

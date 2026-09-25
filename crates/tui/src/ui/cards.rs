@@ -290,6 +290,9 @@ pub(super) fn push_survey_section(
     theme: &crate::theme::Theme,
 ) {
     let mut first = true;
+    // The trailing guidance ("Answer in chat…") stays dim across its wrapped
+    // lines, indented with the body.
+    let mut footer = false;
     for line in wrap_plain(content, width.saturating_sub(2)) {
         if first {
             out.push(Line::from(vec![
@@ -302,8 +305,11 @@ pub(super) fn push_survey_section(
                 ),
             ]));
             first = false;
-        } else if line.starts_with("Answer in chat") {
-            out.push(Line::from(dim(line, theme)));
+            continue;
+        }
+        footer |= line.starts_with("Answer in chat");
+        if footer {
+            out.push(Line::from(dim(format!("  {line}"), theme)));
         } else {
             out.push(Line::from(format!("  {line}")));
         }
@@ -743,11 +749,36 @@ pub(super) fn wrap_plain(content: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
     let content = crate::ui::markdown::terminal_safe(content);
     for raw in content.split('\n') {
-        for piece in textwrap::wrap(raw, w) {
+        // List items hang: continuation lines sit under the item's text,
+        // not back at the margin.
+        let hang = " ".repeat(list_hang(raw));
+        let opts = textwrap::Options::new(w).subsequent_indent(&hang);
+        for piece in textwrap::wrap(raw, opts) {
             out.push(piece.into_owned());
         }
     }
     out
+}
+
+/// Columns before a list item's text — indent plus a `1.`/`1)`/`-`/`*`/`+`/`•`
+/// marker and its space — or the plain indent for a non-list line.
+fn list_hang(line: &str) -> usize {
+    let body = line.trim_start();
+    let indent = line.len() - body.len();
+    let digits = body.chars().take_while(char::is_ascii_digit).count();
+    let marker = if digits > 0 && matches!(body[digits..].chars().next(), Some('.' | ')')) {
+        digits + 1
+    } else if body.starts_with(['-', '*', '+', '•']) {
+        body.chars().next().map_or(0, char::len_utf8)
+    } else {
+        0
+    };
+    if marker > 0 && body[marker..].starts_with(' ') {
+        // `•` is multi-byte but one column wide.
+        indent + body[..marker].chars().count() + 1
+    } else {
+        indent
+    }
 }
 
 /// The markdown palette for the transcript, from the theme.
