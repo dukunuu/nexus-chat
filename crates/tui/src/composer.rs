@@ -551,6 +551,7 @@ impl AppView {
                 }
             }
             AppCommand::OpenUsage => self.open_usage_popup(),
+            AppCommand::OpenHelp => self.open_help(),
             AppCommand::Watch { topic } => {
                 if !self.core.is_research_session() {
                     self.push_status(

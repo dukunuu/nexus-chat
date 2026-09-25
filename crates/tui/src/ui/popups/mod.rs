@@ -3,6 +3,7 @@ pub mod chrome;
 pub mod context;
 pub mod copy;
 pub mod files;
+pub mod help;
 pub mod key;
 pub mod local;
 pub mod login;

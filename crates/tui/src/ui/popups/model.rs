@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
+use ratatui::widgets::{Block, Borders, ListItem, ListState};
 
 use crate::app_view::AppView;
 use crate::ui::popups::chrome;
@@ -13,8 +13,6 @@ use nexus_core::provider::Model;
 
 pub fn render(f: &mut Frame, app: &mut AppView) {
     let (fav_outer, avail_outer) = model_popup_areas(f.area());
-    f.render_widget(Clear, fav_outer);
-    f.render_widget(Clear, avail_outer);
 
     let fav_focused = app.model_focus == ModelPanel::Favorites;
     // Short title + the pick target as a footer hint, so the model picker
@@ -38,36 +36,37 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         )
     };
 
-    // Favorites column.
-    let content_w = (list_inner(fav_outer).width.saturating_sub(3)) as usize;
-    let fav_items = model_items(app, &app.favorite_models(), content_w);
-    let fav_list = panel_list(
-        fav_items,
+    // Favorites column. Each panel draws its frame through the shared chrome
+    // (so the border sits on the same rect the mouse hit-tests) and sizes
+    // its rows to its own width.
+    let theme = app.theme;
+    let fav_inner = chrome::render_hinted(
+        f,
+        fav_outer,
         fav_title,
         &fav_hint,
-        fav_focused,
-        fav_outer.width,
         app,
+        fav_focused,
+        chrome::Tone::Normal,
     );
-    let theme = app.theme;
+    let fav_items = model_items(app, &app.favorite_models(), row_width(fav_inner));
     let fav_total = app.favorite_models().len();
     // Core keeps selection as plain indices; the widget state is render-local.
     let mut fav_state = ListState::default();
     fav_state.select(Some(app.fav_selected));
     chrome::render_list(
         f,
-        fav_list,
+        chrome::standard_list(fav_items, &theme),
         &mut fav_state,
-        list_inner(fav_outer),
+        fav_inner,
         fav_total,
         1,
-        &theme,
+        app,
     );
     // The widget's scroll offset is render state; stash it for click mapping.
     app.fav_offset = fav_state.offset();
 
     // Available column (with the search box in the title).
-    let avail_items = model_items(app, &app.available_models(), content_w);
     let backend = app.model_backend_filter_label();
     // Show which effort values the focused model accepts, so the Ctrl+T
     // cycle is predictable before pressing it (e.g. Claude's extra minimal).
@@ -89,28 +88,41 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         format!("available [{backend}] — {picking}"),
         &app.model_filter,
     );
-    let avail_list = panel_list(
-        avail_items,
+    let avail_inner = chrome::render_hinted(
+        f,
+        avail_outer,
         avail_title,
         &avail_hint,
-        !fav_focused,
-        avail_outer.width,
         app,
+        !fav_focused,
+        chrome::Tone::Normal,
     );
+    let avail_items = model_items(app, &app.available_models(), row_width(avail_inner));
     let avail_total = app.available_models().len();
     let mut avail_state = ListState::default();
     avail_state.select(Some(app.avail_selected));
     chrome::render_list(
         f,
-        avail_list,
+        chrome::standard_list(avail_items, &theme),
         &mut avail_state,
-        list_inner(avail_outer),
+        avail_inner,
         avail_total,
         1,
-        &theme,
+        app,
     );
     app.avail_offset = avail_state.offset();
 }
+
+/// Row text width inside a panel: the inner rect minus the scrollbar gutter
+/// and the `▸ ` highlight symbol.
+fn row_width(inner: Rect) -> usize {
+    inner.width.saturating_sub(3) as usize
+}
+
+/// Trailing columns every model row reserves: the vision glyph (" ⊡") and
+/// the context window (" {:>6}" — `humanize` yields up to six chars, 131.1k).
+const VISION_W: usize = 2;
+const CTX_W: usize = 7;
 
 fn model_items(app: &AppView, models: &[&Model], width: usize) -> Vec<ListItem<'static>> {
     models
@@ -131,48 +143,26 @@ fn model_items(app: &AppView, models: &[&Model], width: usize) -> Vec<ListItem<'
                 None if !m.reasoning_efforts.is_empty() => "  [r]".to_string(),
                 None => String::new(),
             };
-            // Context window (dim, right-aligned) so the available size is
-            // visible before picking — OpenCode Zen models included.
-            let ctx_w = if m.context_length.is_some() { 7 } else { 0 };
-            let vision_w = if m.supports_images { 2 } else { 0 };
-            id = chrome::truncate(
-                &id,
-                width.saturating_sub(2 + badge.chars().count() + vision_w + ctx_w + 1),
+            // Every row reserves the same trailing columns — vision glyph,
+            // then the context window — so they line up right-aligned.
+            let name_w = width.saturating_sub(VISION_W + CTX_W);
+            id = chrome::truncate(&id, name_w.saturating_sub(2 + badge.chars().count()));
+            let name = format!("{marker}{id}{badge}");
+            let pad = name_w.saturating_sub(name.chars().count());
+            let dim = Style::default().fg(app.theme.fg_dim);
+            let vision = if m.supports_images { " ⊡" } else { "  " };
+            let ctx = m.context_length.map_or_else(
+                || " ".repeat(CTX_W),
+                |c| format!(" {:>6}", crate::ui::humanize(c)),
             );
-            let mut spans = vec![Span::raw(format!("{marker}{id}{badge}"))];
-            // Vision glyph (dim) for models with image support.
-            if m.supports_images {
-                spans.push(Span::styled(" ⊡", Style::default().fg(app.theme.fg_dim)));
-            }
-            // Context window (dim, right-aligned) so the available size is
-            // visible before picking — OpenCode Zen models included.
-            if let Some(ctx) = m.context_length {
-                spans.push(Span::styled(
-                    format!(" {:>5}", crate::ui::humanize(ctx)),
-                    Style::default().fg(app.theme.fg_dim),
-                ));
-            }
+            let spans = vec![
+                Span::raw(format!("{name}{}", " ".repeat(pad))),
+                Span::styled(vision, dim),
+                Span::styled(ctx, dim),
+            ];
             ListItem::new(Line::from(spans))
         })
         .collect()
-}
-
-fn panel_list<'a>(
-    items: Vec<ListItem<'a>>,
-    title: Line<'a>,
-    hint: &str,
-    focused: bool,
-    width: u16,
-    app: &AppView,
-) -> List<'a> {
-    chrome::standard_list(items, &app.theme).block(chrome::hinted_block(
-        title,
-        hint,
-        app,
-        focused,
-        chrome::Tone::Normal,
-        width,
-    ))
 }
 
 /// Outer rects of the model picker's two columns (Favorites, Available).

@@ -5,7 +5,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -42,18 +42,30 @@ pub fn render(f: &mut Frame, app: &AppView) {
         return;
     }
 
-    let rows = Layout::vertical([
-        Constraint::Length(4),                                // hero summary
-        Constraint::Length(1),                                // backends header
-        Constraint::Length(1 + data.by_backend.len() as u16), // backends rows
-        Constraint::Length(1),                                // gap
-        Constraint::Length(1),                                // models header
-        Constraint::Length(1 + data.by_model.len() as u16),   // models rows
-        Constraint::Length(1),                                // gap
-        Constraint::Length(1),                                // recent header
-        Constraint::Min(0),                                   // recent rows (scrolls)
-    ])
-    .split(inner);
+    // Allocate rows top-down by priority — summary, backends, models, then
+    // the recent feed takes what's left. (A solver layout squeezed every
+    // section at once on short terminals, hiding the backend rows under
+    // their own header.)
+    let mut next_y = inner.y;
+    let mut rows_left = inner.height;
+    let mut take = |n: u16| {
+        let n = n.min(rows_left);
+        let r = Rect::new(inner.x, next_y, inner.width, n);
+        next_y += n;
+        rows_left -= n;
+        r
+    };
+    let rows = [
+        take(4),                                // hero summary
+        take(1),                                // backends header
+        take(1 + data.by_backend.len() as u16), // backends rows
+        take(1),                                // gap
+        take(1),                                // models header
+        take(1 + data.by_model.len() as u16),   // models rows
+        take(1),                                // gap
+        take(1),                                // recent header
+        take(u16::MAX),                         // recent rows (scrolls)
+    ];
 
     render_summary(f, app, rows[0]);
     let width = rows[0].width;
@@ -93,7 +105,10 @@ pub fn render(f: &mut Frame, app: &AppView) {
         ));
         backend_lines.push(Line::from(row));
     }
-    f.render_widget(Paragraph::new(backend_lines), rows[2]);
+    f.render_widget(
+        Paragraph::new(chrome::fit_lines(backend_lines, width)),
+        rows[2],
+    );
 
     // --- most used models ---
     f.render_widget(
@@ -131,7 +146,10 @@ pub fn render(f: &mut Frame, app: &AppView) {
         ));
         model_lines.push(Line::from(row));
     }
-    f.render_widget(Paragraph::new(model_lines), rows[5]);
+    f.render_widget(
+        Paragraph::new(chrome::fit_lines(model_lines, width)),
+        rows[5],
+    );
 
     // --- recent requests (scrollable) ---
     f.render_widget(
@@ -190,7 +208,10 @@ pub fn render(f: &mut Frame, app: &AppView) {
             ),
         ]));
     }
-    f.render_widget(Paragraph::new(recent_lines), recent_area);
+    f.render_widget(
+        Paragraph::new(chrome::fit_lines(recent_lines, recent_area.width)),
+        recent_area,
+    );
 }
 
 /// One line explaining what an absent rate means, so `—` never reads as a
@@ -259,7 +280,7 @@ fn render_summary(f: &mut Frame, app: &AppView, area: Rect) {
     if t.prompt_tokens > t.rated_prompt_tokens {
         lines.push(cache_legend(theme));
     }
-    f.render_widget(Paragraph::new(lines), area);
+    f.render_widget(Paragraph::new(chrome::fit_lines(lines, area.width)), area);
 }
 
 /// The shared `req prompt out cached% cost` cells for a backend/model row.

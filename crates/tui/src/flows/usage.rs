@@ -23,6 +23,12 @@ impl AppView {
         }
     }
 
+    /// `/help` or F1: the keybinding + command reference, from the top.
+    pub fn open_help(&mut self) {
+        self.help_scroll = 0;
+        self.popup = Popup::Help;
+    }
+
     pub fn refresh_usage(&mut self) {
         self.core.backfill_usage_costs();
         self.usage_data = Some(self.core.load_usage());

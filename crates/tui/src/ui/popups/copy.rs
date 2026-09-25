@@ -49,15 +49,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     if !app.copy_options.is_empty() {
         state.select(Some(app.copy_selected.min(app.copy_options.len() - 1)));
     }
-    chrome::render_list(
-        f,
-        list,
-        &mut state,
-        inner,
-        app.copy_options.len(),
-        1,
-        &app.theme,
-    );
+    chrome::render_list(f, list, &mut state, inner, app.copy_options.len(), 1, app);
 }
 
 pub fn handle_key(app: &mut AppView, key: KeyEvent) {

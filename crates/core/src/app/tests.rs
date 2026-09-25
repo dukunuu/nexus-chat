@@ -1999,6 +1999,19 @@ fn build_history_skips_persona_round_replies_but_keeps_synthesis() {
 
 // ── Phase 2c: the command/event seam ─────────────────────────────────────
 
+/// Every catalog entry must parse: the composer advertised `/help` for a
+/// while with no parser arm behind it ("unknown command: /help").
+#[test]
+fn every_catalog_command_parses() {
+    let a = app_with_key();
+    for c in super::COMMANDS {
+        if let Err(e) = a.parse_command(c.name) {
+            assert!(!e.contains("unknown command"), "/{}: {e}", c.name);
+        }
+    }
+    assert_eq!(a.parse_command("help").unwrap(), AppCommand::OpenHelp);
+}
+
 #[test]
 fn parse_command_maps_the_slash_catalog_into_the_seam() {
     let a = app_with_key();

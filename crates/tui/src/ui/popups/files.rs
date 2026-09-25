@@ -70,7 +70,7 @@ fn render_files(f: &mut Frame, app: &AppView) {
         if !entries.is_empty() {
             state.select(Some(app.picker_selected.min(entries.len() - 1)));
         }
-        chrome::render_list(f, list, &mut state, inner, entries.len(), 1, &app.theme);
+        chrome::render_list(f, list, &mut state, inner, entries.len(), 1, app);
         return;
     }
 
@@ -96,7 +96,7 @@ fn render_files(f: &mut Frame, app: &AppView) {
                 ),
                 36,
             );
-            let name = chrome::truncate(
+            let name = chrome::truncate_middle(
                 &file.name,
                 content_w.saturating_sub(meta.chars().count() + 1),
             );
@@ -143,15 +143,7 @@ fn render_files(f: &mut Frame, app: &AppView) {
     if !app.files_cache.is_empty() {
         state.select(Some(app.files_selected.min(app.files_cache.len() - 1)));
     }
-    chrome::render_list(
-        f,
-        list,
-        &mut state,
-        inner,
-        app.files_cache.len(),
-        1,
-        &app.theme,
-    );
+    chrome::render_list(f, list, &mut state, inner, app.files_cache.len(), 1, app);
 }
 
 fn render_images(f: &mut Frame, app: &AppView) {
@@ -169,7 +161,7 @@ fn render_images(f: &mut Frame, app: &AppView) {
             .map(|img| {
                 let created = crate::ui::fmt_created(&img.modified);
                 let meta = format!("  {}  {created}", nexus_core::app::human_size(img.size));
-                let name = chrome::truncate(
+                let name = chrome::truncate_middle(
                     &img.name,
                     (area.width.saturating_sub(5) as usize)
                         .saturating_sub(meta.chars().count() + 1),
@@ -212,15 +204,7 @@ fn render_images(f: &mut Frame, app: &AppView) {
     if !app.images_cache.is_empty() {
         state.select(Some(app.images_selected.min(app.images_cache.len() - 1)));
     }
-    chrome::render_list(
-        f,
-        list,
-        &mut state,
-        inner,
-        app.images_cache.len(),
-        1,
-        &app.theme,
-    );
+    chrome::render_list(f, list, &mut state, inner, app.images_cache.len(), 1, app);
 }
 
 fn render_scripts(f: &mut Frame, app: &AppView) {
@@ -265,7 +249,7 @@ fn render_scripts(f: &mut Frame, app: &AppView) {
         .map(|s| {
             let created = crate::ui::fmt_created(&s.modified);
             let meta = format!("  {}  {created}", nexus_core::app::human_size(s.size));
-            let name = chrome::truncate(
+            let name = chrome::truncate_middle(
                 &s.name,
                 (area.width.saturating_sub(5) as usize).saturating_sub(meta.chars().count() + 1),
             );
@@ -309,15 +293,7 @@ fn render_scripts(f: &mut Frame, app: &AppView) {
     if !app.scripts_cache.is_empty() {
         state.select(Some(app.scripts_selected.min(app.scripts_cache.len() - 1)));
     }
-    chrome::render_list(
-        f,
-        list,
-        &mut state,
-        inner,
-        app.scripts_cache.len(),
-        1,
-        &app.theme,
-    );
+    chrome::render_list(f, list, &mut state, inner, app.scripts_cache.len(), 1, app);
 }
 
 pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {

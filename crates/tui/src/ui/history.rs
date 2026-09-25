@@ -72,6 +72,7 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
 
     // Scroll: app.scroll counts lines scrolled UP from the bottom (0 = follow bottom).
     let height = inner.height as usize;
+    app.history_height = height;
     let max_top = total.saturating_sub(height);
     app.max_scroll = max_top; // let the event loop clamp scrolling
 

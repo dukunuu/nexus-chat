@@ -36,7 +36,8 @@ pub enum OcrUpdate {
 /// Which service transcribes a rendered page image.
 #[derive(Clone)]
 pub enum OcrBackend {
-    /// `OpenRouter` vision model (`ocr_model`).
+    /// A router-backed vision model (`ocr_model` for PDFs, the image model
+    /// — `transcriber_model` — for image files).
     Router(crate::provider::openrouter::OpenRouter, String),
     /// Local Ollama model via its native /api/generate endpoint — the
     /// OpenAI-compatible route mishandles GLM-OCR's vision input.
@@ -360,6 +361,33 @@ async fn ocr_image_vlm(
     }
 }
 
+/// OCR a scanned PDF with local tesseract + poppler on a blocking thread.
+async fn ocr_pdf_tesseract(
+    path: std::path::PathBuf,
+    tx: tokio::sync::mpsc::UnboundedSender<(String, String, OcrUpdate)>,
+    space_id: String,
+    name: String,
+) -> std::result::Result<(String, Vec<(usize, String)>), String> {
+    tokio::task::spawn_blocking(move || {
+        let progress = move |done: usize, total: usize| {
+            let _ = tx.send((
+                space_id.clone(),
+                name.clone(),
+                OcrUpdate::Progress(done, total, 0),
+            ));
+        };
+        match crate::extract::ocr_pdf(&path, &progress) {
+            Ok(text) => Ok((text, Vec::new())),
+            Err(crate::extract::OcrError::MissingTools) => {
+                Err("scanned pdf — install tesseract + poppler for ocr".to_string())
+            }
+            Err(crate::extract::OcrError::Failed(e)) => Err(format!("error: ocr: {e}")),
+        }
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("error: ocr: {e}")))
+}
+
 impl App {
     /// Sync the active space's files directory with the db: new or changed
     /// files (by sha256) are re-extracted and re-indexed, rows for deleted
@@ -510,66 +538,50 @@ impl App {
         if jobs.is_empty() || self.ocr_rx.is_some() {
             return;
         }
-        let backend = self.ocr_backend();
+        let pdf_backend = self.ocr_backend();
+        // Images are described by the image model when one is set; otherwise
+        // the OCR backend handles them too.
+        let image_backend = self.image_backend().or_else(|| pdf_backend.clone());
         let files_dir = self.space.files_dir(&self.active_space.name);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.ocr_rx = Some(rx);
-        if let Some(backend) = backend {
-            tokio::spawn(async move {
-                for (space_id, name, path) in jobs {
-                    let is_image = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .is_some_and(crate::extract::is_image_ext);
-                    let result = if is_image {
-                        ocr_image_vlm(&backend, &path, &tx, &space_id, &name).await
-                    } else {
-                        ocr_pdf_vlm(&backend, &path, &tx, &space_id, &name, &files_dir).await
-                    };
-                    if tx.send((space_id, name, OcrUpdate::Done(result))).is_err() {
-                        return;
-                    }
-                }
-            });
-            return;
-        }
-        tokio::task::spawn_blocking(move || {
+        tokio::spawn(async move {
             for (space_id, name, path) in jobs {
                 let is_image = path
                     .extension()
                     .and_then(|e| e.to_str())
                     .is_some_and(crate::extract::is_image_ext);
-                if is_image {
-                    // Images can't be OCR'd via tesseract — skip, it'll re-queue
-                    // on next rescan if a VLM backend is configured.
-                    let _ = tx.send((
-                        space_id,
-                        name,
-                        OcrUpdate::Done(Err("no vlm backend for image ocr".to_string())),
-                    ));
-                    continue;
-                }
-                let progress_tx = tx.clone();
-                let (sid, fname) = (space_id.clone(), name.clone());
-                let progress = move |done: usize, total: usize| {
-                    let _ = progress_tx.send((
-                        sid.clone(),
-                        fname.clone(),
-                        OcrUpdate::Progress(done, total, 0),
-                    ));
-                };
-                let result = match crate::extract::ocr_pdf(&path, &progress) {
-                    Ok(text) => Ok((text, Vec::new())),
-                    Err(crate::extract::OcrError::MissingTools) => {
-                        Err("scanned pdf — install tesseract + poppler for ocr".to_string())
+                let result = match (is_image, &image_backend, &pdf_backend) {
+                    (true, Some(backend), _) => {
+                        ocr_image_vlm(backend, &path, &tx, &space_id, &name).await
                     }
-                    Err(crate::extract::OcrError::Failed(e)) => Err(format!("error: ocr: {e}")),
+                    // Images can't be OCR'd via tesseract — skip; the file keeps
+                    // its metadata chunk until a vision backend is configured.
+                    (true, None, _) => Err("no vlm backend for image ocr".to_string()),
+                    (false, _, Some(backend)) => {
+                        ocr_pdf_vlm(backend, &path, &tx, &space_id, &name, &files_dir).await
+                    }
+                    (false, _, None) => {
+                        ocr_pdf_tesseract(path, tx.clone(), space_id.clone(), name.clone()).await
+                    }
                 };
                 if tx.send((space_id, name, OcrUpdate::Done(result))).is_err() {
                     return;
                 }
             }
         });
+    }
+
+    /// The vision model that describes image files (pastes, generated media,
+    /// imports): the "image model" (`transcriber_model`) under the vlm/auto
+    /// OCR engines. None = images fall back to the OCR backend.
+    pub fn image_backend(&self) -> Option<OcrBackend> {
+        let model = self.transcriber_model.trim();
+        if model.is_empty() || !matches!(self.ocr_engine.as_str(), "vlm" | "auto") {
+            return None;
+        }
+        self.resolve_model_backend(model)
+            .map(|(p, raw_model)| OcrBackend::Router(p, raw_model))
     }
 
     /// The vision backend scanned PDFs OCR through, or None for tesseract:
@@ -1273,6 +1285,29 @@ mod tests {
         a.ocr_engine = "auto".to_string();
         a.backends = crate::app::Backends::default();
         assert!(a.ocr_backend().is_none());
+    }
+
+    /// The "image model" setting describes image files; it sat unread for a
+    /// while, so images silently went to the OCR model instead.
+    #[test]
+    fn image_backend_uses_the_image_model_under_vlm_engines() {
+        let mut a = test_app();
+        a.ocr_engine = "vlm".to_string();
+        a.ocr_model = "ocr/model".to_string();
+        a.transcriber_model = "vision/model".to_string();
+        match a.image_backend() {
+            Some(OcrBackend::Router(_, model)) => assert_eq!(model, "vision/model"),
+            _ => panic!("expected the image model's router backend"),
+        }
+        // Unset → None, so images fall back to the OCR backend.
+        a.transcriber_model.clear();
+        assert!(a.image_backend().is_none());
+        // Local-only engines never send images to a cloud image model.
+        a.transcriber_model = "vision/model".to_string();
+        for engine in ["local", "tesseract"] {
+            a.ocr_engine = engine.to_string();
+            assert!(a.image_backend().is_none(), "{engine}");
+        }
     }
 
     #[tokio::test]

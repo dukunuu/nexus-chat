@@ -40,6 +40,11 @@ impl Match {
 
 pub const COMMANDS: &[Command] = &[
     Command {
+        name: "help",
+        desc: "keys & commands",
+        aliases: &["keys", "shortcuts", "?"],
+    },
+    Command {
         name: "new",
         desc: "start new chat",
         aliases: &["chat", "clear"],
@@ -288,6 +293,8 @@ pub enum AppCommand {
     Watch { topic: Option<String> },
     /// `/usage` — the analytics popup.
     OpenUsage,
+    /// `/help` — the keybinding + command reference.
+    OpenHelp,
     /// `/<skill-name> [text]` — arm a skill; `text` sends it immediately.
     ArmSkill { name: String, rest: Option<String> },
     /// Switch the active space (CLI `--space`, host).
@@ -369,6 +376,7 @@ impl App {
                 })
             }
             "usage" => Ok(AppCommand::OpenUsage),
+            "help" => Ok(AppCommand::OpenHelp),
             other => {
                 if self.skills.iter().any(|s| s.name == other) {
                     let text = rest(cmd, token);
@@ -406,6 +414,7 @@ impl App {
             | AppCommand::OpenFiles { .. }
             | AppCommand::OpenApps
             | AppCommand::OpenUsage
+            | AppCommand::OpenHelp
             | AppCommand::Watch { .. } => {}
             AppCommand::ConfigureLocal { spec } => self.configure_local(&spec),
             AppCommand::LocalServer { verb, runtime } => self.manage_local_server(&verb, &runtime),

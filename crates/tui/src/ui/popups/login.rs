@@ -69,7 +69,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();
     state.select(Some(app.login_selected));
-    chrome::render_list(f, list, &mut state, inner, ROWS.len(), 3, &app.theme);
+    chrome::render_list(f, list, &mut state, inner, ROWS.len(), 3, app);
 }
 
 pub fn handle_key(app: &mut AppView, key: KeyEvent) {

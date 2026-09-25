@@ -116,6 +116,8 @@ pub struct AppView {
     /// The `/usage` popup: aggregates snapshot + recent-list cursor.
     pub usage_data: Option<nexus_core::app::usage::UsageData>,
     pub usage_scroll: usize,
+    /// `/help` popup scroll offset (clamped at render time).
+    pub help_scroll: u16,
     pub key_input: String,
     /// Which backend the current `Popup::Key` entry is for.
     pub key_target: KeyTarget,
@@ -150,6 +152,11 @@ pub struct AppView {
     /// Max useful `scroll` (lines above the viewport), refreshed each render so
     /// scrolling can be clamped instead of running off into empty space.
     pub max_scroll: usize,
+    /// Rows the history pane showed last frame — the PgUp/PgDn page size.
+    pub history_height: usize,
+    /// The popup list drawn last frame (set by `chrome::render_list`,
+    /// cleared at the start of each frame) — maps mouse clicks to rows.
+    pub list_hit: std::cell::Cell<Option<crate::ui::popups::chrome::ListHit>>,
     /// Total rendered lines from the previous render frame, used during streaming
     /// to keep the viewport pinned when the user has scrolled up.
     pub prev_total: usize,
@@ -197,7 +204,13 @@ pub struct AppView {
     /// One-line status, fed by `AppEvent::Status` (domain code pushes status
     /// lines; it no longer owns this field).
     pub status: String,
+    /// When `status` was set; it clears itself after [`STATUS_TTL`] (errors
+    /// after [`ERROR_STATUS_TTL`]) so stale lines don't linger.
+    pub status_at: Option<std::time::Instant>,
     pub should_quit: bool,
+    /// Set by a Ctrl+C that had nothing to undo; a second press soon after
+    /// quits. Any other key disarms it.
+    pub quit_armed_at: Option<std::time::Instant>,
     /// External edit queued for the event loop, which owns terminal
     /// suspension and knows which app callback should consume the saved file.
     pub pending_editor: Option<PendingEditor>,
@@ -290,6 +303,7 @@ impl AppView {
             skills_edit: String::new(),
             usage_data: None,
             usage_scroll: 0,
+            help_scroll: 0,
             key_input: String::new(),
             key_target: KeyTarget::OpenRouter,
             login_selected: 0,
@@ -309,6 +323,8 @@ impl AppView {
             copy_selected: 0,
             scroll: 0,
             max_scroll: 0,
+            history_height: 0,
+            list_hit: std::cell::Cell::new(None),
             prev_total: 0,
             prev_tail: Vec::new(),
             pin_viewport_top: false,
@@ -326,7 +342,9 @@ impl AppView {
             theme_link: crate::theme::current_link_target(),
             theme_gen: 0,
             status,
+            status_at: Some(std::time::Instant::now()),
             should_quit: false,
+            quit_armed_at: None,
             pending_editor: None,
         }
     }
@@ -337,7 +355,10 @@ impl AppView {
     /// and render-cache invalidation, the login fallback).
     pub fn apply_event(&mut self, ev: &AppEvent) {
         match ev {
-            AppEvent::Status(s) => self.status.clone_from(s),
+            AppEvent::Status(s) => {
+                self.status.clone_from(s);
+                self.status_at = Some(std::time::Instant::now());
+            }
             AppEvent::ComposerSet(s) => self.set_input(s),
             AppEvent::ComposerClear => self.clear_input(),
             AppEvent::ViewportReset => {
@@ -491,5 +512,43 @@ impl AppView {
     pub fn open_research_live(&mut self) {
         self.core.research_live_input.clear();
         self.popup = Popup::ResearchLive;
+    }
+}
+
+/// How long an ordinary status line stays up.
+pub const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+/// Errors stay long enough to read after looking back at the terminal.
+pub const ERROR_STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl AppView {
+    /// When the current status line should clear, if one is showing.
+    pub fn status_deadline(&self) -> Option<std::time::Instant> {
+        let at = self.status_at?;
+        let lower = self.status.to_lowercase();
+        let ttl = if lower.contains("error") || lower.contains("failed") {
+            ERROR_STATUS_TTL
+        } else {
+            STATUS_TTL
+        };
+        Some(at + ttl)
+    }
+
+    /// Clear the status line once its deadline has passed.
+    pub fn expire_status(&mut self) {
+        if self
+            .status_deadline()
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            self.status.clear();
+            self.status_at = None;
+        }
+    }
+}
+
+impl AppView {
+    /// One history page for PgUp/PgDn: the visible rows minus a two-line
+    /// overlap so the reader keeps their place.
+    pub fn history_page(&self) -> usize {
+        self.history_height.saturating_sub(2).max(1)
     }
 }

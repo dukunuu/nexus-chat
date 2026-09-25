@@ -501,6 +501,33 @@ mod usage_render_tests {
         );
     }
 
+    /// At 80×24 the popup has ~13 inner rows. The backend rows used to be
+    /// squeezed out entirely (header drawn, rows gone), and wide lines were
+    /// cut mid-word with no ellipsis.
+    #[test]
+    fn small_terminal_keeps_backend_rows_and_ellipsizes_overflow() {
+        let app = populated_app();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let screen: String = (0..buf.area.height)
+            .map(|y| {
+                let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                row + "\n"
+            })
+            .collect();
+        assert!(
+            screen.contains("OpenCode"),
+            "backend rows missing:\n{screen}"
+        );
+        assert!(
+            screen.contains("OpenRouter"),
+            "backend rows missing:\n{screen}"
+        );
+        assert!(screen.contains('…'), "overflow not ellipsized:\n{screen}");
+    }
+
     #[test]
     fn backend_header_columns_align_with_rows() {
         let app = populated_app();
@@ -702,4 +729,204 @@ mod stop_closes_popup_tests {
         assert_eq!(a.popup, Popup::None);
         assert!(a.core.swarm_rx.is_none()); // the turn was stopped
     }
+}
+
+fn picker_app(ids: &[&str]) -> AppView {
+    let mut app = test_app();
+    app.core.models = ids
+        .iter()
+        .map(|id| nexus_core::provider::Model {
+            id: (*id).into(),
+            name: (*id).into(),
+            reasoning_efforts: Vec::new(),
+            context_length: Some(262_144),
+            supports_images: false,
+            supports_image_generation: false,
+            supports_video_generation: false,
+            backend: nexus_core::provider::BackendTag::OpenRouter,
+            pricing: None,
+        })
+        .collect();
+    app.open_model_picker();
+    app
+}
+
+#[test]
+fn model_picker_available_panel_uses_its_own_width() {
+    // Near-identical long ids used to collapse to `aion-labs/aion…` because
+    // the wide panel truncated to the narrow favorites column's width.
+    let ids = [
+        "aion-labs/aion-2.0-reasoning-preview",
+        "aion-labs/aion-2.0-reasoning-mini",
+    ];
+    let mut app = picker_app(&ids);
+    let screen = render_to_string(150, 40, |f| super::model::render(f, &mut app));
+    for id in ids {
+        assert!(screen.contains(id), "{id} truncated:\n{screen}");
+    }
+    // Six-char context sizes fit their column whole.
+    assert!(screen.contains("262.1k"), "context size clipped:\n{screen}");
+}
+
+#[test]
+fn model_picker_click_row_maps_to_the_row_drawn_there() {
+    let ids = ["a/alpha", "b/bravo", "c/charlie"];
+    let mut app = picker_app(&ids);
+    let screen = render_to_string(150, 40, |f| super::model::render(f, &mut app));
+    let (_, avail_outer) =
+        super::model::model_popup_areas(ratatui::layout::Rect::new(0, 0, 150, 40));
+    let inner = super::model::list_inner(avail_outer);
+    let available = app.available_models();
+    for id in ids {
+        let row = screen
+            .lines()
+            .position(|l| l.contains(id))
+            .unwrap_or_else(|| panic!("{id} not drawn:\n{screen}"));
+        // Same arithmetic as the mouse handler in events.rs.
+        let index = app.avail_offset + (row - inner.y as usize);
+        assert_eq!(available[index].id, id, "clicking {id} picks another row");
+    }
+}
+
+#[test]
+fn help_popup_lists_keys_and_every_command() {
+    let mut app = test_app();
+    app.execute(nexus_core::app::AppCommand::OpenHelp).unwrap();
+    assert!(app.popup == nexus_core::app::Popup::Help);
+    // Tall enough to show everything without scrolling.
+    let screen = render_to_string(140, 120, |f| super::help::render(f, &mut app));
+    assert!(screen.contains("composer"), "{screen}");
+    assert!(screen.contains("Shift/Ctrl+Enter"), "{screen}");
+    for c in nexus_core::app::COMMANDS {
+        assert!(
+            screen.contains(&format!("/{}", c.name)),
+            "/{} missing:\n{screen}",
+            c.name
+        );
+    }
+}
+
+#[test]
+fn help_popup_scroll_clamps_to_content() {
+    let mut app = test_app();
+    app.open_help();
+    app.help_scroll = u16::MAX;
+    let screen = render_to_string(100, 30, |f| super::help::render(f, &mut app));
+    // Scrolled to the end: the last command is visible, not a blank pane.
+    let last = nexus_core::app::COMMANDS.last().unwrap().name;
+    assert!(screen.contains(&format!("/{last}")), "{screen}");
+    assert!(app.help_scroll < u16::MAX);
+}
+
+#[test]
+fn settings_popup_masks_the_langsearch_key() {
+    let mut app = test_app();
+    app.open_settings();
+    app.settings_inputs[5] = "sk-test0123456789abcdef".into();
+    let screen = render_to_string(120, 60, |f| super::settings::render(f, &mut app));
+    assert!(!screen.contains("sk-test0123456789abcdef"), "{screen}");
+    assert!(!screen.contains("sk-test"), "{screen}");
+    assert!(screen.contains("••••••cdef"), "{screen}");
+}
+
+#[test]
+fn status_bar_names_the_model_and_keeps_the_space_tag_beside_the_gauge() {
+    let mut app = test_app();
+    app.core.models = vec![nexus_core::provider::Model {
+        id: "org/Big-Model-7B".into(),
+        name: "Big Model".into(),
+        reasoning_efforts: Vec::new(),
+        context_length: Some(128_000),
+        supports_images: false,
+        supports_image_generation: false,
+        supports_video_generation: false,
+        backend: nexus_core::provider::BackendTag::Local,
+        pricing: None,
+    }];
+    app.core.current_model = Some("local:org/Big-Model-7B".into());
+    app.core.active_space.name = "work".into();
+    app.settings.show_stats = true;
+    app.status = "ready".into();
+    let screen = render_to_string(100, 1, |f| {
+        crate::ui::render_status(f, &app, f.area());
+    });
+    assert!(screen.contains("[work] Big-Model-7B · local"), "{screen}");
+    assert!(!screen.contains("local:org/"), "{screen}");
+    assert!(screen.contains("ready"), "{screen}");
+
+    // A status too long for the bar ends in an ellipsis instead of a cut.
+    app.status = "x".repeat(200);
+    let screen = render_to_string(100, 1, |f| {
+        crate::ui::render_status(f, &app, f.area());
+    });
+    assert!(screen.trim_end().ends_with('…'), "{screen}");
+}
+
+#[test]
+fn short_model_label_keeps_openrouter_suffixes() {
+    assert_eq!(
+        crate::ui::short_model_label("openai/gpt-oss-20b:free"),
+        "gpt-oss-20b:free"
+    );
+    assert_eq!(
+        crate::ui::short_model_label("codex:gpt-5.5"),
+        "gpt-5.5 · codex"
+    );
+    assert_eq!(
+        crate::ui::short_model_label("local:mlx-community/Qwen3-8B"),
+        "Qwen3-8B · local"
+    );
+}
+
+#[test]
+fn status_line_expires_after_its_ttl() {
+    let mut app = test_app();
+    app.apply_event(&nexus_core::app::AppEvent::Status("saved".into()));
+    app.expire_status();
+    assert_eq!(app.status, "saved", "fresh status stays");
+    app.status_at = Some(std::time::Instant::now() - crate::app_view::STATUS_TTL);
+    app.expire_status();
+    assert!(app.status.is_empty());
+
+    // Errors linger longer.
+    app.apply_event(&nexus_core::app::AppEvent::Status("error: boom".into()));
+    app.status_at = Some(std::time::Instant::now() - crate::app_view::STATUS_TTL);
+    app.expire_status();
+    assert_eq!(app.status, "error: boom");
+}
+
+#[test]
+fn an_open_popup_dims_the_screen_behind_it_but_not_itself() {
+    use ratatui::style::Modifier;
+    let mut app = test_app();
+    app.open_help();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    // Corner cell: behind the popup. Center cell: inside it.
+    assert!(buffer[(0, 0)].modifier.contains(Modifier::DIM));
+    assert!(!buffer[(50, 20)].modifier.contains(Modifier::DIM));
+}
+
+#[test]
+fn file_names_truncate_in_the_middle_to_keep_the_slug_and_extension() {
+    let name = "b0db75e4-2ccb-4a53-817e-6934389f1d66-description_for_reasoning_model_what.png";
+    let short = super::chrome::truncate_middle(name, 34);
+    assert_eq!(short.chars().count(), 34);
+    assert!(short.starts_with("b0db75e4"), "{short}");
+    assert!(short.ends_with("model_what.png"), "{short}");
+    assert_eq!(super::chrome::truncate_middle("short.png", 34), "short.png");
+}
+
+#[test]
+fn fit_line_ellipsizes_across_spans() {
+    use ratatui::text::{Line, Span};
+    let line = Line::from(vec![Span::raw("abc"), Span::raw("defgh")]);
+    let fitted = super::chrome::fit_line(line.clone(), 6);
+    assert_eq!(fitted.to_string(), "abcde…");
+    assert_eq!(
+        super::chrome::fit_line(line.clone(), 8).to_string(),
+        "abcdefgh"
+    );
+    assert_eq!(super::chrome::fit_line(line, 0).to_string(), "");
 }

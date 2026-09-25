@@ -83,15 +83,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     if !app.swarm_cache.is_empty() {
         state.select(Some(app.swarm_selected.min(app.swarm_cache.len() - 1)));
     }
-    chrome::render_list(
-        f,
-        list,
-        &mut state,
-        inner,
-        app.swarm_cache.len(),
-        3,
-        &app.theme,
-    );
+    chrome::render_list(f, list, &mut state, inner, app.swarm_cache.len(), 3, app);
 }
 
 pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {

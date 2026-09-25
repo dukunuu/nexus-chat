@@ -321,6 +321,7 @@ Type `/` in the composer for autocomplete. Aliases in parentheses.
 | `/web` | toggle search-first cited answering |
 | `/export` (`save-report`) | write the research report + sources to a file |
 | `/incognito` | toggle no-persistence mode |
+| `/help` (`keys`, `shortcuts`; also `F1`) | keybinding + command reference |
 | `/quit` | quit |
 | `<skill-name>` | arm a skill for the next message |
 
@@ -330,7 +331,7 @@ Type `/` in the composer for autocomplete. Aliases in parentheses.
 |---|---|
 | `Enter` | send (Shift/Ctrl+Enter inserts a newline) |
 | `Esc` | stop the streaming response / clear the composer |
-| `Ctrl+C` | quit |
+| `Ctrl+C` | close popup / stop stream / clear composer; press twice to quit |
 | `Ctrl+V` | paste (bracketed paste) |
 | `Ctrl+Shift+C` / `Ctrl+X` | copy / cut composer selection |
 | `Ctrl+A` | select all in composer |
@@ -342,7 +343,9 @@ Type `/` in the composer for autocomplete. Aliases in parentheses.
 | `Ctrl+Shift+N` | start a new incognito session |
 | `Ctrl+O` | open a session-link message under the selection |
 | `Ctrl+↑` | live research activity view (Ctrl+X there stops the job) |
-| `PageUp` / `PageDown` | scroll |
+| `PageUp` / `PageDown` | scroll a page |
+| `Ctrl+Home` / `Ctrl+End` | jump to the start / latest message |
+| `F1` | keybinding + command reference |
 | mouse drag | select + copy |
 
 While a research survey or plan approval is pending, Enter in that session

@@ -24,6 +24,9 @@ pub mod popups;
 use history::render_history;
 
 pub fn render(f: &mut Frame, app: &mut AppView) {
+    // Popups re-record their list geometry as they draw; a frame without a
+    // list must not leave a stale hit area behind.
+    app.list_hit.set(None);
     // Paint the base first so widgets that only set foreground colors inherit
     // the configured opaque or terminal-transparent surface.
     f.render_widget(
@@ -59,6 +62,14 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         app.notification_areas.clear();
     }
 
+    // Dim everything behind an open popup so the modal reads as the focus
+    // (every popup clears its own rect first, so it stays at full strength).
+    if app.popup != Popup::None {
+        let area = f.area();
+        f.buffer_mut()
+            .set_style(area, Style::default().add_modifier(Modifier::DIM));
+    }
+
     match app.popup {
         Popup::Model => popups::model::render(f, app),
         Popup::Session => popups::session::render(f, app),
@@ -76,6 +87,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         Popup::Usage => popups::usage::render(f, app),
         Popup::Login => popups::login::render(f, app),
         Popup::Local => popups::local::render(f, app),
+        Popup::Help => popups::help::render(f, app),
         Popup::None => {}
     }
 }
@@ -379,7 +391,10 @@ fn fmt_cost(cost: Option<f64>) -> String {
 
 fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
     use nexus_core::db::DEFAULT_SPACE;
-    let model = app.current_model.as_deref().unwrap_or("(no model)");
+    let model = app
+        .current_model
+        .as_deref()
+        .map_or_else(|| "(no model)".to_string(), short_model_label);
     let space_tag = if app.active_space.name == DEFAULT_SPACE {
         String::new()
     } else {
@@ -389,60 +404,76 @@ fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
     let incog_tag = if app.incognito { "🕶️ " } else { "" };
     let show_bar = app.settings.show_stats && app.context_limit().is_some();
 
-    // Model badge: accent bold; the rest dim.
-    let badge = |m: &str| {
-        Line::from(vec![
-            Span::styled(
-                m.to_string(),
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  |  ", Style::default().fg(app.theme.border_dim)),
-        ])
+    // Model badge (accent bold), capped so a long id can't push the status
+    // off-screen; then the optional context gauge; then numbers + status.
+    let badge_max = (area.width as usize * 2 / 5).max(12);
+    let badge_s = popups::chrome::truncate(
+        &format!("{space_tag}{incog_tag}{web_tag}{model}"),
+        badge_max,
+    );
+    let badge_w = badge_s.chars().count() as u16;
+    let sep = Span::styled("  |  ", Style::default().fg(app.theme.border_dim));
+    let gauge_w = if show_bar {
+        18u16.min(area.width.saturating_sub(badge_w + 9))
+    } else {
+        0
     };
-
-    if !show_bar {
-        let mut line = badge(&format!("{space_tag}{incog_tag}{web_tag}{model}"));
-        if let Some(rate) = app.turn_cache.rate() {
-            let partial = if app.turn_cache.is_partial() { "~" } else { "" };
-            line.spans.push(Span::styled(
-                format!(" · {partial}{:.0}% cached  |  ", rate * 100.0),
-                Style::default().fg(app.theme.fg_dim),
-            ));
-        }
-        line.spans.push(Span::styled(
-            app.status.clone(),
-            Style::default().fg(app.theme.fg_dim),
-        ));
-        f.render_widget(Paragraph::new(line), area);
-        return;
-    }
-
-    // Model badge, then the gradient context bar beside it, then numbers + status.
-    let model_s = format!("{incog_tag}{web_tag}{model}");
-    let model_w = model_s.chars().count() as u16 + 6;
-    let gauge_w = 18u16.min(area.width.saturating_sub(model_w + 4));
     let cols = Layout::horizontal([
-        Constraint::Length(model_w),
+        Constraint::Length(badge_w + 5),
         Constraint::Length(gauge_w),
         Constraint::Min(0),
     ])
     .split(area);
-
-    f.render_widget(badge(&model_s), cols[0]);
-    render_context_bar(f, app, cols[1]);
-    let tail = match context_label(app) {
-        Some(l) => format!(" {l}  |  {}", app.status),
-        None => format!("  |  {}", app.status),
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                badge_s,
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            sep,
+        ])),
+        cols[0],
+    );
+    if show_bar {
+        render_context_bar(f, app, cols[1]);
+    }
+    let numbers = if show_bar {
+        context_label(app).map(|l| format!(" {l}  |  "))
+    } else {
+        // Without the gauge, still report the turn's cache hit rate.
+        app.turn_cache.rate().map(|rate| {
+            let partial = if app.turn_cache.is_partial() { "~" } else { "" };
+            format!("{partial}{:.0}% cached  |  ", rate * 100.0)
+        })
     };
+    let tail = format!("{}{}", numbers.unwrap_or_default(), app.status);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            tail,
+            popups::chrome::truncate(&tail, cols[2].width as usize),
             Style::default().fg(app.theme.fg_dim),
         ))),
         cols[2],
     );
+}
+
+/// The status-bar name for a model id: the last path segment, with the
+/// backend named when it isn't `OpenRouter` — `local:org/Model-7B` reads as
+/// `Model-7B · local`. `OpenRouter` ids may contain `:` (`…:free`), so only a
+/// known backend prefix is split off.
+fn short_model_label(id: &str) -> String {
+    let (backend, rest) = match id.split_once(':') {
+        Some((tag, rest)) if matches!(tag, "openai" | "opencode" | "go" | "codex" | "local") => {
+            (Some(tag), rest)
+        }
+        _ => (None, id),
+    };
+    let name = rest.rsplit('/').next().unwrap_or(rest);
+    match backend {
+        Some(tag) => format!("{name} · {tag}"),
+        None => name.to_string(),
+    }
 }
 
 /// Persistent, direct-click targets for completed chat tasks. The queue keeps

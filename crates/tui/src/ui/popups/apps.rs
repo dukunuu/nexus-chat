@@ -94,15 +94,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     if !app.apps_cache.is_empty() {
         state.select(Some(app.apps_selected.min(app.apps_cache.len() - 1)));
     }
-    chrome::render_list(
-        f,
-        list,
-        &mut state,
-        inner,
-        app.apps_cache.len(),
-        3,
-        &app.theme,
-    );
+    chrome::render_list(f, list, &mut state, inner, app.apps_cache.len(), 3, app);
 }
 
 pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {

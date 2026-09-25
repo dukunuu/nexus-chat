@@ -102,55 +102,21 @@ async fn run_loop(
         let streaming = app.is_streaming();
         let long_deadline = app.sel.deadline();
         let welcome = app.is_welcome();
+        let status_deadline = app.status_deadline();
         tokio::select! {
             maybe = reader.next() => match maybe {
                 Some(Ok(Event::Key(k))) if k.kind == KeyEventKind::Press => {
-                    if let Some(path) = edit_file_target(app, &k) {
-                        edit_in_external_editor(terminal, &path)?;
-                    } else if let Some(path) = skill_edit_target(app, &k) {
-                        edit_in_external_editor(terminal, &path)?;
-                        app.reload_skills();
-                    } else if let Some(path) = system_prompt_edit_target(app, &k) {
-                        edit_in_external_editor(terminal, &path)?;
-                        app.reload_base_system_prompt();
-                    } else if app.popup == Popup::Context && k.code == KeyCode::Char('v') {
-                        match app.compact_summary_path() {
-                            Some(path) => {
-                                edit_in_external_editor(terminal, &path)?;
-                                app.reload_compact_summary(&path)?;
-                            }
-                            None => app.push_status("session hasn't been compacted yet".to_string()),
-                        }
-                    } else {
-                        handle_key(app, k)?;
-                        // /edit queued an app file — open it now (this loop
-                        // owns the terminal, run_command doesn't).
-                        if let Some(edit) = app.pending_editor.take() {
-                            match edit {
-                                nexus_core::app::PendingEditor::AppFile(path) => {
-                                    if let Err(e) = edit_in_external_editor(terminal, &path) {
-                                        app.push_status(format!("editor failed: {e}"));
-                                    }
-                                }
-                                nexus_core::app::PendingEditor::Persona(path) => {
-                                    match edit_in_external_editor(terminal, &path) {
-                                        Ok(()) => app.apply_swarm_persona_editor(&path)?,
-                                        Err(e) => app.push_status(format!("editor failed: {e}")),
-                                    }
-                                }
-                                nexus_core::app::PendingEditor::ScriptFile(path) => {
-                                    if let Err(e) = edit_in_external_editor(terminal, &path) {
-                                        app.push_status(format!("editor failed: {e}"));
-                                    }
-                                    app.refresh_scripts();
-                                }
-                            }
-                        }
+                    // A failed action is reported, never fatal: one bad db
+                    // write or editor exit must not kill in-flight streams.
+                    if let Err(e) = on_key(app, terminal, k) {
+                        app.push_status(format!("error: {e:#}"));
                     }
                 }
                 Some(Ok(Event::Mouse(m))) => {
                     let size = terminal.size()?;
-                    handle_mouse(app, m, Rect::new(0, 0, size.width, size.height))?;
+                    if let Err(e) = handle_mouse(app, m, Rect::new(0, 0, size.width, size.height)) {
+                        app.push_status(format!("error: {e:#}"));
+                    }
                 }
                 // Terminal-native paste (bracketed paste) — goes to whatever's
                 // focused: the composer, or a popup's text field.
@@ -163,10 +129,15 @@ async fn run_loop(
             },
             request = next_selection_request(&mut selection_requests) => {
                 if let Some(prompt) = request {
-                    if !app.web_mode {
-                        app.execute(nexus_core::app::AppCommand::ToggleWeb)?;
+                    let sent = if app.web_mode {
+                        Ok(())
+                    } else {
+                        app.execute(nexus_core::app::AppCommand::ToggleWeb)
                     }
-                    app.execute(nexus_core::app::AppCommand::Send { text: prompt })?;
+                    .and_then(|()| app.execute(nexus_core::app::AppCommand::Send { text: prompt }));
+                    if let Err(e) = sent {
+                        app.push_status(format!("error: {e:#}"));
+                    }
                 } else {
                     selection_requests = None;
                 }
@@ -185,7 +156,11 @@ async fn run_loop(
                     | AppEvent::ViewportReset
                     | AppEvent::HistoryInvalidated
                     | AppEvent::OpenLoginPopup => {}
-                    AppEvent::Stream(Some((task_id, e))) => app.on_chat_event(task_id, e)?,
+                    AppEvent::Stream(Some((task_id, e))) => {
+                        if let Err(e) = app.on_chat_event(task_id, e) {
+                            app.push_status(format!("error: {e:#}"));
+                        }
+                    }
                     AppEvent::Models(r) => {
                         app.on_models_result(r);
                         // First key just landed and nothing picked yet → jump
@@ -244,6 +219,13 @@ async fn run_loop(
                     None => {}
                 }
             }
+            // Stale status lines clear themselves.
+            () = async {
+                match status_deadline {
+                    Some(d) => tokio::time::sleep_until(d.into()).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => app.expire_status(),
             // Tick once a second on the start screen so the clock stays live.
             () = async {
                 if welcome {
@@ -267,16 +249,66 @@ async fn run_loop(
     Ok(())
 }
 
+/// One key press: external-editor shortcuts first (this loop owns the
+/// terminal), then the focused popup's or the composer's handler.
+fn on_key(app: &mut AppView, terminal: &mut DefaultTerminal, k: KeyEvent) -> Result<()> {
+    if let Some(path) = edit_file_target(app, &k) {
+        edit_in_external_editor(terminal, &path)?;
+    } else if let Some(path) = skill_edit_target(app, &k) {
+        edit_in_external_editor(terminal, &path)?;
+        app.reload_skills();
+    } else if let Some(path) = system_prompt_edit_target(app, &k) {
+        edit_in_external_editor(terminal, &path)?;
+        app.reload_base_system_prompt();
+    } else if app.popup == Popup::Context && k.code == KeyCode::Char('v') {
+        match app.compact_summary_path() {
+            Some(path) => {
+                edit_in_external_editor(terminal, &path)?;
+                app.reload_compact_summary(&path)?;
+            }
+            None => app.push_status("session hasn't been compacted yet".to_string()),
+        }
+    } else {
+        handle_key(app, k)?;
+        // /edit queued an app file — open it now (this loop
+        // owns the terminal, run_command doesn't).
+        if let Some(edit) = app.pending_editor.take() {
+            match edit {
+                nexus_core::app::PendingEditor::AppFile(path) => {
+                    if let Err(e) = edit_in_external_editor(terminal, &path) {
+                        app.push_status(format!("editor failed: {e}"));
+                    }
+                }
+                nexus_core::app::PendingEditor::Persona(path) => {
+                    match edit_in_external_editor(terminal, &path) {
+                        Ok(()) => app.apply_swarm_persona_editor(&path)?,
+                        Err(e) => app.push_status(format!("editor failed: {e}")),
+                    }
+                }
+                nexus_core::app::PendingEditor::ScriptFile(path) => {
+                    if let Err(e) = edit_in_external_editor(terminal, &path) {
+                        app.push_status(format!("editor failed: {e}"));
+                    }
+                    app.refresh_scripts();
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
-    // Ctrl+C always quits. Selecting text (mouse drag, in the composer or
-    // history) copies it on release, so Ctrl+C doesn't need to double as copy.
+    // Ctrl+C backs out one step — close the popup, stop the reply being
+    // viewed, clear the draft — and quits only on a second press with
+    // nothing left to undo, so a stray press can't kill streams or a draft.
+    // (Selecting text copies on release, so Ctrl+C isn't needed for copy.)
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && !key.modifiers.contains(KeyModifiers::SHIFT)
         && key.code == KeyCode::Char('c')
     {
-        app.should_quit = true;
-        return Ok(());
+        return ctrl_c(app);
     }
+    app.quit_armed_at = None;
     // Ctrl+V pastes into whatever's focused (composer or a popup's text
     // field) — a fallback for terminals that don't send bracketed paste for
     // every popup, or don't send it at all.
@@ -310,9 +342,35 @@ fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
         Popup::Local => {
             ui::popups::local::handle_key(app, key);
         }
+        Popup::Help => ui::popups::help::handle_key(app, key),
 
         Popup::None => handle_normal(app, key)?,
     }
+    Ok(())
+}
+
+/// How long a first Ctrl+C keeps the quit armed.
+const QUIT_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_millis(1500);
+
+fn ctrl_c(app: &mut AppView) -> Result<()> {
+    if app.popup != Popup::None {
+        app.popup = Popup::None;
+    } else if app.viewing_stream() {
+        app.stop_stream()?;
+    } else if !app.input_text().is_empty() {
+        app.set_input("");
+    } else if app
+        .quit_armed_at
+        .is_some_and(|at| at.elapsed() < QUIT_CONFIRM_WINDOW)
+    {
+        app.should_quit = true;
+        return Ok(());
+    } else {
+        app.quit_armed_at = Some(std::time::Instant::now());
+        app.push_status("press Ctrl+C again to quit");
+        return Ok(());
+    }
+    app.quit_armed_at = None;
     Ok(())
 }
 
@@ -465,6 +523,7 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
         // (Not Ctrl+I: that's the same byte as Tab on terminals without the
         // Kitty keyboard protocol, so it'd be unreachable on many of them.)
         KeyCode::Char('g') if ctrl => app.popup = Popup::Context,
+        KeyCode::F(1) => app.open_help(),
         // Ctrl+Backspace deletes the previous word. (Alt+Backspace and Ctrl+W
         // also do this via the editor's default keymap.)
         KeyCode::Backspace if ctrl => {
@@ -494,8 +553,17 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
             app.refresh_at_matches();
             return Ok(());
         }
-        KeyCode::PageUp => app.scroll = app.scroll.saturating_add(10).min(app.max_scroll),
-        KeyCode::PageDown => app.scroll = app.scroll.saturating_sub(10),
+        KeyCode::PageUp => {
+            app.scroll = app
+                .scroll
+                .saturating_add(app.history_page())
+                .min(app.max_scroll);
+        }
+        KeyCode::PageDown => app.scroll = app.scroll.saturating_sub(app.history_page()),
+        // Ctrl+Home/End jump to the start/end of the conversation (plain
+        // Home/End stay with the composer's line editing).
+        KeyCode::Home if ctrl => app.scroll = app.max_scroll,
+        KeyCode::End if ctrl => app.scroll = 0,
         // Esc stops the streaming response or clears the composer. (The old
         // Esc-stops-a-parked-plan-gate intercept is gone — approval is a chat
         // reply now; stopping a parked job is Ctrl+↑ then Ctrl+X in the live
@@ -628,8 +696,43 @@ fn composer_jump(app: &mut AppView, m: MouseEvent) {
     app.input.move_cursor(CursorMove::Jump(row, col));
 }
 
+/// Mouse over any popup but the model picker (which has its own dual-panel
+/// hit-testing): the wheel sends Up/Down to the popup's own key handler, so
+/// lists move their selection and text popups scroll; a click on a list row
+/// selects it, and a click on the already-selected row activates it (Enter).
+/// Routing through the key handlers keeps each popup's modes and filters.
+fn handle_popup_mouse(app: &mut AppView, m: MouseEvent) -> Result<()> {
+    let press = |app: &mut AppView, code: KeyCode| handle_key(app, KeyEvent::from(code));
+    match m.kind {
+        MouseEventKind::ScrollUp => press(app, KeyCode::Up),
+        MouseEventKind::ScrollDown => press(app, KeyCode::Down),
+        MouseEventKind::Down(MouseButton::Left) => {
+            let Some(hit) = app.list_hit.get() else {
+                return Ok(());
+            };
+            let (Some(index), Some(selected)) = (hit.index_at(m.column, m.row), hit.selected)
+            else {
+                return Ok(());
+            };
+            if index == selected {
+                return press(app, KeyCode::Enter);
+            }
+            let (code, steps) = if index > selected {
+                (KeyCode::Down, index - selected)
+            } else {
+                (KeyCode::Up, selected - index)
+            };
+            for _ in 0..steps {
+                press(app, code)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Route mouse events: composer click/drag when no popup is open, else the
-/// model picker (the only interactive popup).
+/// open popup.
 fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
     if app.popup == Popup::None {
         if m.kind == MouseEventKind::Down(MouseButton::Left) {
@@ -648,7 +751,7 @@ fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
         return Ok(());
     }
     if app.popup != Popup::Model {
-        return Ok(());
+        return handle_popup_mouse(app, m);
     }
     let (fav_outer, avail_outer) = ui::popups::model::model_popup_areas(screen);
     let fav_inner = ui::popups::model::list_inner(fav_outer);
@@ -686,4 +789,170 @@ fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nexus_core::app::App;
+    use nexus_core::db::Db;
+    use nexus_core::space::Space;
+
+    fn test_app() -> AppView {
+        let root = std::env::temp_dir().join(format!("nexus-events-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("spaces")).unwrap();
+        AppView::new(App::new(
+            Db::open_in_memory().unwrap(),
+            Some("k"),
+            Space { root },
+        ))
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_c_backs_out_before_quitting() {
+        let mut app = test_app();
+        app.popup = Popup::Help;
+        handle_key(&mut app, ctrl('c')).unwrap();
+        assert!(
+            app.popup == Popup::None && !app.should_quit,
+            "closes the popup first"
+        );
+
+        app.set_input("a draft");
+        handle_key(&mut app, ctrl('c')).unwrap();
+        assert!(
+            app.input_text().is_empty() && !app.should_quit,
+            "then clears the draft"
+        );
+
+        handle_key(&mut app, ctrl('c')).unwrap();
+        assert!(!app.should_quit, "an idle press only arms the quit");
+        handle_key(&mut app, ctrl('c')).unwrap();
+        assert!(app.should_quit, "a second press quits");
+    }
+
+    #[test]
+    fn page_keys_move_by_the_visible_height_and_ctrl_home_end_jump() {
+        let mut app = test_app();
+        app.history_height = 30;
+        app.max_scroll = 500;
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        handle_key(&mut app, key(KeyCode::PageUp, KeyModifiers::NONE)).unwrap();
+        assert_eq!(app.scroll, 28);
+        handle_key(&mut app, key(KeyCode::PageDown, KeyModifiers::NONE)).unwrap();
+        assert_eq!(app.scroll, 0);
+        handle_key(&mut app, key(KeyCode::Home, KeyModifiers::CONTROL)).unwrap();
+        assert_eq!(app.scroll, 500);
+        handle_key(&mut app, key(KeyCode::End, KeyModifiers::CONTROL)).unwrap();
+        assert_eq!(app.scroll, 0);
+    }
+
+    /// Draw one full frame and return the screen rows as text.
+    fn draw(app: &mut AppView, w: u16, h: u16) -> Vec<String> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    fn click(app: &mut AppView, column: u16, row: u16) {
+        let m = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(app, m, Rect::new(0, 0, 100, 40)).unwrap();
+    }
+
+    #[test]
+    fn clicking_a_popup_row_selects_it_and_a_second_click_opens_it() {
+        let mut app = test_app();
+        let space = app.core.active_space.id.clone();
+        for title in ["alpha", "bravo", "charlie"] {
+            app.core
+                .db
+                .create_session(title, "a/one", &space, "chat")
+                .unwrap();
+        }
+        app.open_session_picker().unwrap();
+        let screen = draw(&mut app, 100, 40);
+        let target = app.filtered_sessions()[2].title.clone();
+        let row = screen
+            .iter()
+            .position(|l| l.contains(&format!(" {target} ")))
+            .unwrap_or_else(|| panic!("{target} not drawn:\n{}", screen.join("\n")));
+        let row = u16::try_from(row).unwrap();
+        let column = 50; // the popup is centered, so mid-screen is inside it
+
+        click(&mut app, column, row);
+        assert_eq!(app.session_selected, 2, "first click selects the row");
+        assert!(app.popup == Popup::Session);
+
+        draw(&mut app, 100, 40);
+        click(&mut app, column, row);
+        assert!(app.popup == Popup::None, "second click opens it");
+        assert_eq!(
+            app.session.as_ref().map(|s| s.title.as_str()),
+            Some(target.as_str())
+        );
+    }
+
+    #[test]
+    fn wheel_over_a_popup_moves_its_selection() {
+        let mut app = test_app();
+        let space = app.core.active_space.id.clone();
+        for title in ["alpha", "bravo"] {
+            app.core
+                .db
+                .create_session(title, "a/one", &space, "chat")
+                .unwrap();
+        }
+        app.open_session_picker().unwrap();
+        let wheel = |kind| MouseEvent {
+            kind,
+            column: 50,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(
+            &mut app,
+            wheel(MouseEventKind::ScrollDown),
+            Rect::new(0, 0, 100, 40),
+        )
+        .unwrap();
+        assert_eq!(app.session_selected, 1);
+        handle_mouse(
+            &mut app,
+            wheel(MouseEventKind::ScrollUp),
+            Rect::new(0, 0, 100, 40),
+        )
+        .unwrap();
+        assert_eq!(app.session_selected, 0);
+    }
+
+    #[test]
+    fn ctrl_c_quit_disarms_on_other_keys_and_expires() {
+        let mut app = test_app();
+        handle_key(&mut app, ctrl('c')).unwrap();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        )
+        .unwrap();
+        app.set_input("");
+        handle_key(&mut app, ctrl('c')).unwrap();
+        assert!(!app.should_quit, "typing in between disarms");
+
+        app.quit_armed_at = Some(std::time::Instant::now() - QUIT_CONFIRM_WINDOW);
+        handle_key(&mut app, ctrl('c')).unwrap();
+        assert!(!app.should_quit, "a stale arm doesn't count");
+    }
 }

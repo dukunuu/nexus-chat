@@ -78,15 +78,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     if !app.skills.is_empty() {
         state.select(Some(app.skills_selected.min(app.skills.len() - 1)));
     }
-    chrome::render_list(
-        f,
-        list,
-        &mut state,
-        list_area,
-        app.skills.len(),
-        1,
-        &app.theme,
-    );
+    chrome::render_list(f, list, &mut state, list_area, app.skills.len(), 1, app);
     chrome::render_detail(f, detail_area, desc, &app.theme);
 }
 

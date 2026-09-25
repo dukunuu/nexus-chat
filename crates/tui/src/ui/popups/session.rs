@@ -139,15 +139,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     if !sessions.is_empty() {
         state.select(Some(app.session_selected.min(sessions.len() - 1)));
     }
-    chrome::render_list(
-        f,
-        list,
-        &mut state,
-        list_area,
-        sessions.len(),
-        3,
-        &app.theme,
-    );
+    chrome::render_list(f, list, &mut state, list_area, sessions.len(), 3, app);
 }
 
 pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {

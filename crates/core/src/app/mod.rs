@@ -114,6 +114,8 @@ pub enum Popup {
     Login,
     /// `/local`'s runtime selector (Ollama / MLX / LM Studio / edge0 / off).
     Local,
+    /// `/help` (or F1): keybindings plus the slash-command catalog.
+    Help,
 }
 
 /// Which backend a pasted key in `Popup::Key` is for — set by whichever

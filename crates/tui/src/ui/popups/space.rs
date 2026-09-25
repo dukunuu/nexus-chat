@@ -93,7 +93,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     if !spaces.is_empty() {
         state.select(Some(app.space_selected.min(spaces.len() - 1)));
     }
-    chrome::render_list(f, list, &mut state, inner, spaces.len(), 1, &app.theme);
+    chrome::render_list(f, list, &mut state, inner, spaces.len(), 1, app);
 }
 
 pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {

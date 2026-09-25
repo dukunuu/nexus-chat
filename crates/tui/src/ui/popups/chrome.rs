@@ -143,6 +143,83 @@ pub fn truncate(s: &str, max: usize) -> String {
     format!("{}…", s.chars().take(keep).collect::<String>())
 }
 
+/// Truncate `s` to `max` chars by cutting the middle — for file names, where
+/// the start tells files apart and the end carries the descriptive slug and
+/// extension (`b0db75e4-2…_reasoning_model_what.png`).
+pub fn truncate_middle(s: &str, max: usize) -> String {
+    let max = max.max(1);
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let keep = max - 1;
+    let head = keep / 3;
+    let tail = keep - head;
+    let start: String = s.chars().take(head).collect();
+    let end: String = s.chars().skip(n - tail).collect();
+    format!("{start}…{end}")
+}
+
+/// Fit a styled line to `width` columns: unchanged when it fits, otherwise
+/// cut across spans with a trailing `…` in the style of the span it lands in —
+/// so narrow terminals read "0 cache wr…" instead of a silent mid-word cut.
+pub fn fit_line(line: Line<'_>, width: usize) -> Line<'_> {
+    let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    if total <= width {
+        return line;
+    }
+    let mut spans = Vec::with_capacity(line.spans.len());
+    if width > 0 {
+        // Room for the content before the ellipsis.
+        let mut left = width - 1;
+        for span in line.spans {
+            let n = span.content.chars().count();
+            if n <= left {
+                left -= n;
+                spans.push(span);
+            } else {
+                let kept: String = span.content.chars().take(left).collect();
+                spans.push(Span::styled(format!("{kept}…"), span.style));
+                break;
+            }
+        }
+    }
+    Line { spans, ..line }
+}
+
+/// [`fit_line`] over every line.
+pub fn fit_lines(lines: Vec<Line<'_>>, width: u16) -> Vec<Line<'_>> {
+    lines
+        .into_iter()
+        .map(|l| fit_line(l, width as usize))
+        .collect()
+}
+
+/// Where a popup list was drawn last frame, for mouse clicks: row `r` of
+/// `area` shows item `offset + (r - area.y) / item_lines`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListHit {
+    pub area: Rect,
+    pub item_lines: u16,
+    pub offset: usize,
+    pub selected: Option<usize>,
+    pub total: usize,
+}
+
+impl ListHit {
+    /// The item index under a screen cell, if the cell is on a list row.
+    pub fn index_at(&self, column: u16, row: u16) -> Option<usize> {
+        if !self
+            .area
+            .contains(ratatui::layout::Position::new(column, row))
+        {
+            return None;
+        }
+        let index = self.offset + usize::from((row - self.area.y) / self.item_lines.max(1));
+        (index < self.total).then_some(index)
+    }
+}
+
 /// Render a popup list statefully with a right-edge scrollbar when the
 /// content overflows. `total` is the number of items, `item_lines` how many
 /// terminal rows each occupies (1 for single-line rows, 3 for two-line+
@@ -157,8 +234,9 @@ pub fn render_list(
     area: Rect,
     total: usize,
     item_lines: u16,
-    theme: &Theme,
+    app: &AppView,
 ) {
+    let theme = &app.theme;
     let list_area = Rect {
         x: area.x,
         y: area.y,
@@ -166,6 +244,14 @@ pub fn render_list(
         height: area.height,
     };
     f.render_stateful_widget(list, list_area, state);
+    // Record the drawn geometry so a click can map back to an item.
+    app.list_hit.set(Some(ListHit {
+        area: list_area,
+        item_lines: item_lines.max(1),
+        offset: state.offset(),
+        selected: state.selected(),
+        total,
+    }));
     let viewport = (area.height / item_lines.max(1)) as usize;
     if total > viewport {
         let gutter = Rect {

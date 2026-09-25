@@ -59,7 +59,8 @@ pub fn render(f: &mut Frame, app: &AppView) {
             SettingsField::Verbosity => {
                 Span::styled(app.verbosity.clone(), Style::default().fg(app.theme.accent))
             }
-            SettingsField::LangsearchKey => numeric(&app.settings_inputs[5]),
+            // Secrets never render in full (the key popup masks too).
+            SettingsField::LangsearchKey => numeric(&mask_secret(&app.settings_inputs[5])),
             SettingsField::SearchProvider => Span::styled(
                 app.search_provider.clone(),
                 Style::default().fg(app.theme.accent),
@@ -135,7 +136,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     if !rows.is_empty() {
         state.select(Some(app.settings_selected.min(rows.len() - 1)));
     }
-    chrome::render_list(f, list, &mut state, list_area, rows.len(), 1, &app.theme);
+    chrome::render_list(f, list, &mut state, list_area, rows.len(), 1, app);
     chrome::render_detail(f, detail_area, &desc, &app.theme);
 }
 
@@ -199,4 +200,19 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// `••••••3814`: enough to recognize which key is set, never the key.
+/// Short values mask fully so the tail can't be most of the secret.
+fn mask_secret(s: &str) -> String {
+    let s = s.trim();
+    let n = s.chars().count();
+    if n == 0 {
+        return String::new();
+    }
+    if n < 12 {
+        return "•".repeat(6);
+    }
+    let tail: String = s.chars().skip(n - 4).collect();
+    format!("••••••{tail}")
 }
