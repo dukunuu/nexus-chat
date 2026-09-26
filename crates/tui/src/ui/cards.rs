@@ -15,6 +15,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::HashMap;
 
+use super::style::{self, glyph};
 use super::{dim, fmt_cost, to_color};
 use crate::app_view::AppView;
 use nexus_core::db::Message;
@@ -72,7 +73,7 @@ pub(super) fn push_user_card(
     let mut card_img: Vec<Option<String>> = Vec::new();
 
     let mut head = vec![Span::styled(
-        "❯ you",
+        format!("{} you", glyph::YOU),
         Style::default()
             .fg(theme.user_msg)
             .add_modifier(Modifier::BOLD),
@@ -114,7 +115,7 @@ pub(super) fn push_user_card(
         if lead > 0 {
             spans.push(Span::raw(" ".repeat(lead)));
         }
-        spans.push(Span::styled("▎ ", rail));
+        spans.push(Span::styled(format!("{} ", glyph::RAIL), rail));
         for sp in line.spans {
             // Image rows carry their own per-pixel backgrounds — the card
             // tint must not override them.
@@ -160,7 +161,10 @@ pub(super) fn push_tool_call(
         " — Ctrl+T for detail"
     };
     out.push(Line::from(vec![
-        Span::styled("⚒ ", Style::default().fg(theme.tool_msg)),
+        Span::styled(
+            format!("{} ", glyph::TOOL),
+            Style::default().fg(theme.accent2),
+        ),
         dim(format!("{summary}{hint}"), theme),
     ]));
     if expanded {
@@ -176,167 +180,140 @@ pub(super) fn push_tool_call(
     }
 }
 
-/// A compaction-digest block: the digest of the earlier conversation, shown
-/// right at the compaction boundary in the transcript — what was folded
-/// away is visible in the chat itself, not only behind the context popup's
-/// editor. Header in accent2, digest body dimmed so the live conversation
-/// stays prominent.
+/// A compaction digest at the compaction boundary: what was folded away is
+/// visible in the transcript itself, dimmed so the live conversation leads.
 pub(super) fn push_compaction(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
     theme: &crate::theme::Theme,
 ) {
-    out.push(Line::from(vec![
-        Span::styled("📄 ", Style::default().fg(theme.accent2)),
-        Span::styled(
-            "conversation compacted — earlier messages summarized:",
-            Style::default()
-                .fg(theme.accent2)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
+    let agent = Style::default().fg(theme.accent2);
+    out.push(style::event_head(
+        glyph::DIGEST,
+        agent,
+        "earlier messages, summarized".into(),
+        agent.add_modifier(Modifier::BOLD),
+    ));
     for line in wrap_plain(content, width.saturating_sub(2)) {
-        out.push(Line::from(dim(format!("  {line}"), theme)));
+        out.push(style::event_body(&line, Style::default().fg(theme.fg_dim)));
     }
     out.push(Line::from(""));
 }
 
-/// A transient block shown in the transcript while a compaction request is
-/// running. It is deliberately not a `Message`: failed or cancelled jobs must
-/// disappear without leaving a fake conversation turn in the database.
+/// A transient row while a compaction request runs. Deliberately not a
+/// `Message`: failed or cancelled jobs must vanish without leaving a fake
+/// conversation turn in the database.
 pub(super) fn push_compaction_pending(
     out: &mut Vec<Line<'static>>,
-    width: usize,
+    _width: usize,
     theme: &crate::theme::Theme,
 ) {
-    out.push(Line::from(vec![
-        Span::styled("⟳ ", Style::default().fg(theme.accent2)),
-        Span::styled(
-            "compacting earlier messages…",
-            Style::default()
-                .fg(theme.accent2)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    for line in wrap_plain(
-        "building a conversation digest — please wait",
-        width.saturating_sub(2),
-    ) {
-        out.push(Line::from(dim(format!("  {line}"), theme)));
-    }
+    let agent = Style::default().fg(theme.accent2);
+    out.push(style::event_head(
+        glyph::RUNNING,
+        agent,
+        "summarizing earlier messages…".into(),
+        agent.add_modifier(Modifier::BOLD),
+    ));
     out.push(Line::from(""));
 }
 
-/// A background-research progress line: a dim one-liner with a 🔎 marker,
-/// no expand/collapse (unlike `tool_call` — there's no arguments/result pair,
-/// just a phase label).
+/// A research progress row: the stage and its detail, dimmed.
 pub(super) fn push_research_stage(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
     theme: &crate::theme::Theme,
 ) {
-    let mut first = true;
-    for line in wrap_plain(content, width.saturating_sub(2)) {
-        if first {
-            out.push(Line::from(vec![
-                Span::styled("🔎 ", Style::default().fg(theme.research_msg)),
-                dim(line, theme),
-            ]));
-            first = false;
-        } else {
-            out.push(Line::from(dim(format!("  {line}"), theme)));
-        }
+    let meta = Style::default().fg(theme.fg_dim);
+    let mut lines = wrap_plain(content, width.saturating_sub(2)).into_iter();
+    let head = lines.next().unwrap_or_default();
+    out.push(style::event_head(
+        glyph::RESEARCH,
+        Style::default().fg(theme.accent2),
+        head,
+        meta,
+    ));
+    for line in lines {
+        out.push(style::event_body(&line, meta));
     }
     out.push(Line::from(""));
 }
 
 /// A persistent request failure, kept in the transcript after the status bar
-/// changes. Use the theme's error color and a hanging indent for long errors.
+/// moves on.
 pub(super) fn push_error(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
     theme: &crate::theme::Theme,
 ) {
-    let style = Style::default().fg(theme.error);
-    let mut first = true;
-    for line in wrap_plain(content, width.saturating_sub(2)) {
-        if first {
-            out.push(Line::from(vec![
-                Span::styled("! ", style.add_modifier(Modifier::BOLD)),
-                Span::styled(line, style),
-            ]));
-            first = false;
-        } else {
-            out.push(Line::from(Span::styled(format!("  {line}"), style)));
-        }
-    }
-    if first {
-        out.push(Line::from(Span::styled("! request failed", style)));
+    let err = Style::default().fg(theme.error);
+    let mut lines = wrap_plain(content, width.saturating_sub(2)).into_iter();
+    let head = lines.next().unwrap_or_else(|| "request failed".into());
+    out.push(style::event_head(
+        glyph::FAIL,
+        err.add_modifier(Modifier::BOLD),
+        head,
+        err,
+    ));
+    for line in lines {
+        out.push(style::event_body(&line, err));
     }
     out.push(Line::from(""));
 }
 
-/// A pending research-survey section: the scoping agent's clarifying
-/// questions, awaiting a chat answer. Same family as `push_research_plan` —
-/// distinct ❓ marker, accent header line, questions plain, the guidance
-/// footer dimmed (it's the only passive part).
+/// Clarifying questions waiting on your chat answer: a question round in the
+/// interactive accent, questions in full text, the guidance footer dimmed.
 pub(super) fn push_survey_section(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
     theme: &crate::theme::Theme,
 ) {
-    let mut first = true;
-    // The trailing guidance ("Answer in chat…") stays dim across its wrapped
-    // lines, indented with the body.
+    let you = Style::default().fg(theme.accent);
+    let mut lines = wrap_plain(content, width.saturating_sub(2)).into_iter();
+    let head = lines.next().unwrap_or_default();
+    out.push(style::event_head(
+        glyph::QUESTION,
+        you.add_modifier(Modifier::BOLD),
+        head,
+        you.add_modifier(Modifier::BOLD),
+    ));
+    // The trailing guidance ("Answer in chat…") stays dim across its lines.
     let mut footer = false;
-    for line in wrap_plain(content, width.saturating_sub(2)) {
-        if first {
-            out.push(Line::from(vec![
-                Span::styled("❓ ", Style::default().fg(theme.accent)),
-                Span::styled(
-                    line,
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            first = false;
-            continue;
-        }
+    for line in lines {
         footer |= line.starts_with("Answer in chat");
-        if footer {
-            out.push(Line::from(dim(format!("  {line}"), theme)));
+        let style = if footer {
+            Style::default().fg(theme.fg_dim)
         } else {
-            out.push(Line::from(format!("  {line}")));
-        }
+            Style::default().fg(theme.fg)
+        };
+        out.push(style::event_body(&line, style));
     }
     out.push(Line::from(""));
 }
 
-/// A pending plan-approval message: like `push_research_stage` but with a
-/// distinct marker and full (non-dim) styling, since it's actionable —
-/// reply in chat to approve or change it — not passive progress.
+/// A plan waiting on your approval: same shape as a question round — it's
+/// actionable, so it takes the interactive accent.
 pub(super) fn push_research_plan(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
     theme: &crate::theme::Theme,
 ) {
-    let mut first = true;
-    for line in wrap_plain(content, width.saturating_sub(2)) {
-        if first {
-            out.push(Line::from(vec![
-                Span::styled("📋 ", Style::default().fg(theme.accent)),
-                Span::styled(line, Style::default().fg(theme.accent)),
-            ]));
-            first = false;
-        } else {
-            out.push(Line::from(format!("  {line}")));
-        }
+    let you = Style::default().fg(theme.accent);
+    let mut lines = wrap_plain(content, width.saturating_sub(2)).into_iter();
+    let head = lines.next().unwrap_or_default();
+    out.push(style::event_head(
+        glyph::PLAN,
+        you.add_modifier(Modifier::BOLD),
+        head,
+        you.add_modifier(Modifier::BOLD),
+    ));
+    for line in lines {
+        out.push(style::event_body(&line, Style::default().fg(theme.fg)));
     }
     out.push(Line::from(""));
 }
@@ -360,9 +337,10 @@ pub(super) fn push_assistant_stored(
     images_dir: &std::path::Path,
     image_cache: &mut HashMap<(String, usize), Vec<Line<'static>>>,
 ) {
-    // Header: ✦ + who answered (persona overrides the model name).
+    // Header: the assistant glyph + who answered (persona overrides the
+    // model name; personas are agents, so they take the agent color).
     let mut head = vec![Span::styled(
-        "✦ ",
+        format!("{} ", glyph::ASSISTANT),
         Style::default()
             .fg(theme.accent2)
             .add_modifier(Modifier::BOLD),
@@ -372,7 +350,7 @@ pub(super) fn push_assistant_stored(
             head.push(Span::styled(
                 p.clone(),
                 Style::default()
-                    .fg(theme.accent)
+                    .fg(theme.accent2)
                     .add_modifier(Modifier::BOLD),
             ));
             head.push(dim(
@@ -384,7 +362,7 @@ pub(super) fn push_assistant_stored(
             head.push(Span::styled(
                 p.clone(),
                 Style::default()
-                    .fg(theme.accent)
+                    .fg(theme.accent2)
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -415,10 +393,16 @@ pub(super) fn push_assistant_stored(
     out.push(Line::from(head));
 
     // A quiet rail for stored replies; only the live reply's rail is bright.
-    let rail = Span::styled("▎ ", Style::default().fg(theme.border_dim));
+    let rail = Span::styled(
+        format!("{} ", glyph::RAIL),
+        Style::default().fg(theme.border_dim),
+    );
     if let Some(r) = &msg.reasoning {
         if settings.show_reasoning {
-            out.push(Line::from(vec![rail.clone(), dim("▾ reasoning", theme)]));
+            out.push(Line::from(vec![
+                rail.clone(),
+                dim(format!("{} reasoning", glyph::EXPANDED), theme),
+            ]));
             for line in wrap_plain(r, width.saturating_sub(2)) {
                 out.push(Line::from(vec![rail.clone(), dim(line, theme)]));
             }
@@ -431,7 +415,10 @@ pub(super) fn push_assistant_stored(
             };
             out.push(Line::from(vec![
                 rail.clone(),
-                dim(format!("▸ reasoning ({n} chars){hint}"), theme),
+                dim(
+                    format!("{} reasoning ({n} chars){hint}", glyph::SELECTED),
+                    theme,
+                ),
             ]));
         }
     }
@@ -491,51 +478,30 @@ pub(super) fn push_assistant_stored(
     out.push(Line::from(""));
 }
 
-/// A session switch link: renders as a styled box with arrows and the
-/// linked session's name. Content format: `<target_sid>\n<label>`.
+/// A link to another session: the target in the interactive accent, how to
+/// follow it underneath. Content format: `<target_sid>\n<label>`.
 pub(super) fn push_session_link(
     out: &mut Vec<Line<'static>>,
     content: &str,
-    width: usize,
+    _width: usize,
     theme: &crate::theme::Theme,
 ) {
     let (sid, label) = match content.split_once('\n') {
         Some((sid, rest)) => (sid.to_string(), rest.trim().to_string()),
         None => (String::new(), content.to_string()),
     };
-    let arrow = if label.starts_with("🔗") {
-        "→"
-    } else {
-        "↩"
-    };
-    let color = theme.accent;
-    let dim = Style::default().fg(theme.fg_dim);
-
-    let w = width.min(60);
-    let inner = w.saturating_sub(4);
-    out.push(Line::from(Span::styled(
-        format!("┌{}┐", "─".repeat(inner)),
-        dim,
-    )));
-    out.push(Line::from(vec![
-        Span::styled("│ ", dim),
-        Span::styled(label.clone(), Style::default().fg(color)),
-        Span::raw(" ".repeat(inner.saturating_sub(label.chars().count()))),
-        Span::styled(" │", dim),
-    ]));
+    // Older link rows lead with an emoji; the glyph replaces it.
+    let label = label
+        .trim_start_matches(['\u{1F517}', '↩', ' '])
+        .to_string();
+    let you = Style::default().fg(theme.accent);
+    out.push(style::event_head(glyph::LINK, you, label, you));
     if !sid.is_empty() {
-        let hint = format!("   {arrow} select text + Ctrl+O to switch");
-        out.push(Line::from(vec![
-            Span::styled("│ ", dim),
-            Span::styled(hint.clone(), dim),
-            Span::raw(" ".repeat(inner.saturating_sub(hint.chars().count().min(inner)))),
-            Span::styled(" │", dim),
-        ]));
+        out.push(style::event_body(
+            "select this line + Ctrl+O to open",
+            Style::default().fg(theme.fg_dim),
+        ));
     }
-    out.push(Line::from(Span::styled(
-        format!("└{}┘", "─".repeat(inner)),
-        dim,
-    )));
     out.push(Line::from(""));
 }
 
@@ -574,7 +540,7 @@ pub(super) fn push_assistant_streaming(
     }
     out.push(Line::from(head));
 
-    let rail = Span::styled("▎ ", Style::default().fg(color));
+    let rail = Span::styled(format!("{} ", glyph::RAIL), Style::default().fg(color));
     if let Some(t) = app.thinking_text() {
         for line in wrap_plain(t, width.saturating_sub(2)) {
             out.push(Line::from(vec![rail.clone(), dim(line, &app.theme)]));
@@ -653,7 +619,7 @@ pub(super) fn render_markdown_images(
                         .unwrap_or_default()
                         .contains("[image]")
                 {
-                    let mut line = Line::from(dim(format!("🖼 {alt}"), theme));
+                    let mut line = Line::from(dim(format!("{} {alt}", glyph::MEDIA), theme));
                     if let Some(p) = prefix {
                         line.spans.insert(0, p.clone());
                     }
@@ -693,14 +659,14 @@ const MAX_IMAGE_ROWS: usize = 20;
 
 /// Render a PNG image as half-block ratatui lines for inline display in the
 /// terminal. Falls back to a text marker if the image can't be loaded.
-/// When the image is taller than `MAX_IMAGE_ROWS`, the last line says "🖼 image"
+/// When the image is taller than `MAX_IMAGE_ROWS`, the last line says "▣ click to open"
 /// so the user knows to click to open the full version.
 pub(super) fn image_to_halfblock_lines(path: &str, max_width: usize) -> Vec<Line<'static>> {
     let Ok(img) = image::open(path) else {
-        return vec![Line::from(Span::raw("🖼 [image]"))];
+        return vec![Line::from(Span::raw(format!("{} [image]", glyph::MEDIA)))];
     };
     if max_width < 4 {
-        return vec![Line::from(Span::raw("🖼"))];
+        return vec![Line::from(Span::raw(glyph::MEDIA))];
     }
     let mut cell_w = max_width.min(img.width() as usize);
     let aspect = f64::from(img.width()) / f64::from(img.height());
@@ -737,7 +703,7 @@ pub(super) fn image_to_halfblock_lines(path: &str, max_width: usize) -> Vec<Line
     }
     if truncated {
         lines.push(Line::from(Span::styled(
-            "🖼 click to open in viewer",
+            format!("{} click to open in viewer", glyph::MEDIA),
             ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
         )));
     }

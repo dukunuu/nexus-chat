@@ -52,7 +52,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     ];
     if b.compacted {
         lines.push(Line::from(Span::styled(
-            "  ⤷ this session has been auto-compacted — press v to view/edit the digest",
+            "  this session has been compacted · v views/edits the digest",
             dim,
         )));
     }
@@ -95,7 +95,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     let inner = chrome::render_hinted(
         f,
         area,
-        chrome::popup_title(app, "📊", "context"),
+        chrome::popup_title(app, "context"),
         hint,
         app,
         true,
@@ -132,7 +132,7 @@ fn cache_lines(app: &AppView) -> Vec<Line<'static>> {
         if turn.is_partial() {
             lines.push(Line::from(Span::styled(
                 format!(
-                    "  ⤷ {} request(s) this turn reported no cache accounting — excluded",
+                    "  {} request(s) this turn reported no cache accounting · excluded",
                     turn.unrated_requests
                 ),
                 dim,

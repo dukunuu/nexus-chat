@@ -133,7 +133,10 @@ pub fn render_hinted<'a>(
 /// theme's raised shade across the row.
 pub fn standard_list<'a>(items: Vec<ListItem<'a>>, theme: &Theme) -> List<'a> {
     List::new(items)
-        .highlight_symbol(Span::styled("▸ ", Style::default().fg(theme.accent)))
+        .highlight_symbol(Span::styled(
+            format!("{} ", crate::ui::style::glyph::SELECTED),
+            Style::default().fg(theme.accent),
+        ))
         .highlight_style(
             Style::default()
                 .bg(theme.raised)
@@ -314,44 +317,26 @@ fn titled_line(app: &AppView, text: impl Into<String>, color: Color, hint: &str)
 /// Browse-mode title for a filterable list popup: a per-popup glyph
 /// (accent2) + `label` alone when the filter is empty, `label: <filter>▏`
 /// (live cursor) while typing.
-pub fn filter_title(
-    app: &AppView,
-    glyph: &str,
-    label: impl Into<String>,
-    filter: &str,
-) -> Line<'static> {
-    let label = label.into();
-    let mut spans = vec![
-        Span::styled(format!(" {glyph} "), Style::default().fg(app.theme.accent2)),
+pub fn filter_title(app: &AppView, label: impl Into<String>, filter: &str) -> Line<'static> {
+    if filter.is_empty() {
+        return Line::from(crate::ui::style::title(&app.theme, label));
+    }
+    Line::from(vec![
         Span::styled(
-            label,
+            format!(" {}: ", label.into()),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-    ];
-    if !filter.is_empty() {
-        spans.push(Span::styled(
-            format!(": {filter}▏"),
-            Style::default().fg(app.theme.fg),
-        ));
-    }
-    Line::from(spans)
+        Span::styled(format!("{filter}▏ "), Style::default().fg(app.theme.fg)),
+    ])
 }
 
 /// The standard popup title: a per-popup glyph (accent2) + bold accent name.
 /// Every popup picks its own glyph so the family reads distinct at a glance
 /// while staying visually identical in frame.
-pub fn popup_title(app: &AppView, glyph: &str, name: impl Into<String>) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!(" {glyph} "), Style::default().fg(app.theme.accent2)),
-        Span::styled(
-            name.into(),
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])
+pub fn popup_title(app: &AppView, name: impl Into<String>) -> Line<'static> {
+    Line::from(crate::ui::style::title(&app.theme, name))
 }
 
 /// A title for text-entry popups: label + live value + trailing cursor.

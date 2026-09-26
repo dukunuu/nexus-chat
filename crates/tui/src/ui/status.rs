@@ -15,6 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
+use super::style::glyph;
 use super::{humanize, popups};
 use crate::app_view::AppView;
 
@@ -35,7 +36,7 @@ pub(super) fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
     use nexus_core::db::DEFAULT_SPACE;
     let theme = &app.theme;
     let dim = Style::default().fg(theme.fg_dim);
-    let sep = || Span::styled(" · ", Style::default().fg(theme.border_dim));
+    let sep = || super::style::sep(theme);
 
     // Left: the model (accent), then the quiet mode tags.
     let model = app
@@ -44,19 +45,22 @@ pub(super) fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
         .map_or_else(|| "no model".to_string(), short_model_label);
     let mut tags: Vec<String> = Vec::new();
     if app.active_space.name != DEFAULT_SPACE {
-        tags.push(format!("⌂ {}", app.active_space.name));
+        tags.push(format!("{} {}", glyph::SPACE, app.active_space.name));
     }
     if app.web_mode {
-        tags.push("🌐 web".into());
+        tags.push(format!("{} web", glyph::WEB));
     }
     if app.incognito {
-        tags.push("🕶 incognito".into());
+        tags.push(format!("{} incognito", glyph::INCOGNITO));
     }
     let badge_max = (area.width as usize * 2 / 5).max(12);
     let tag_w: usize = tags.iter().map(|t| t.chars().count() + 3).sum();
     let model = fit_badge("", &model, badge_max.saturating_sub(tag_w + 2).max(8));
     let mut left = vec![
-        Span::styled(" ◆ ", Style::default().fg(theme.accent)),
+        Span::styled(
+            format!(" {} ", glyph::MODEL),
+            Style::default().fg(theme.accent),
+        ),
         Span::styled(
             model,
             Style::default()
@@ -219,16 +223,16 @@ pub(super) fn render_notifications(f: &mut Frame, app: &mut AppView, area: Rect)
     for (offset, index) in (start..app.notifications.len()).enumerate() {
         let notification = &app.notifications[index];
         let (glyph, color) = if notification.success {
-            ("✓", app.theme.success)
+            (glyph::OK, app.theme.success)
         } else {
-            ("×", app.theme.error)
+            (glyph::FAIL, app.theme.error)
         };
         // A toast: colored rail and glyph, the session in bold, the outcome
         // dimmed — clicking it opens that session.
         let bg = Style::default().bg(app.theme.raised);
         let line = popups::chrome::fit_line(
             Line::from(vec![
-                Span::styled("▎", Style::default().fg(color)),
+                Span::styled(glyph::RAIL, Style::default().fg(color)),
                 Span::styled(
                     format!("{glyph} "),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),

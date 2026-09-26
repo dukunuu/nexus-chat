@@ -9,6 +9,7 @@ use crate::app_view::AppView;
 use nexus_core::app::SettingsRow;
 
 use super::chrome;
+use crate::ui::style::glyph;
 
 /// Split "label (description)" into the two display columns.
 fn split_label(label: &'static str) -> (String, String) {
@@ -33,9 +34,12 @@ pub fn render(f: &mut Frame, app: &AppView) {
 
     let toggle = |b: bool| -> Span<'static> {
         if b {
-            Span::styled("● on ", Style::default().fg(app.theme.success))
+            Span::styled(
+                format!("{} on ", glyph::DOT),
+                Style::default().fg(app.theme.success),
+            )
         } else {
-            Span::styled("○ off", dim)
+            Span::styled(format!("{} off", glyph::RING), dim)
         }
     };
     let numeric = |s: &str| -> Span<'static> {
@@ -85,14 +89,14 @@ pub fn render(f: &mut Frame, app: &AppView) {
             SettingsRow::Group(i) => {
                 let g = &SETTINGS_GROUPS[*i];
                 let arrow = if app.settings_collapsed.contains(i) {
-                    "▸"
+                    glyph::SELECTED
                 } else {
-                    "▾"
+                    glyph::EXPANDED
                 };
                 ListItem::new(Line::from(Span::styled(
                     format!("{arrow} {}", g.name),
                     Style::default()
-                        .fg(app.theme.accent2)
+                        .fg(app.theme.accent)
                         .add_modifier(Modifier::BOLD),
                 )))
             }
@@ -123,7 +127,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     let inner = chrome::render_hinted(
         f,
         area,
-        chrome::popup_title(app, "⚙", "nerd config"),
+        chrome::popup_title(app, "nerd config"),
         &hint,
         app,
         true,

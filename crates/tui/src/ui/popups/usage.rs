@@ -24,7 +24,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     };
     let theme = &app.theme;
     let dim = Style::default().fg(theme.fg_dim);
-    let title = chrome::popup_title(app, "📊", format!("usage · {}", app.usage_range.label()));
+    let title = chrome::popup_title(app, format!("usage · {}", app.usage_range.label()));
     let hint = format!(
         "{}←→/t {} · ↑↓ recent · Ctrl+R refresh · Esc close",
         chrome::count_hint(data.totals.requests as usize, "request"),
@@ -71,7 +71,11 @@ pub fn render(f: &mut Frame, app: &AppView) {
 
     // --- by backend ---
     f.render_widget(
-        Paragraph::new(section_header(theme, "by backend", width)),
+        Paragraph::new(crate::ui::style::section(
+            theme,
+            "by backend",
+            width as usize,
+        )),
         rows[1],
     );
     // Header mirrors the row layout exactly — the "  " prefix matches the
@@ -111,7 +115,11 @@ pub fn render(f: &mut Frame, app: &AppView) {
 
     // --- most used models ---
     f.render_widget(
-        Paragraph::new(section_header(theme, "most used models", width)),
+        Paragraph::new(crate::ui::style::section(
+            theme,
+            "most used models",
+            width as usize,
+        )),
         rows[4],
     );
     let mut model_lines: Vec<Line> = vec![Line::from(vec![
@@ -152,7 +160,11 @@ pub fn render(f: &mut Frame, app: &AppView) {
 
     // --- recent requests (scrollable) ---
     f.render_widget(
-        Paragraph::new(section_header(theme, "recent requests", width)),
+        Paragraph::new(crate::ui::style::section(
+            theme,
+            "recent requests",
+            width as usize,
+        )),
         rows[7],
     );
     let recent_area = rows[8];
@@ -312,21 +324,6 @@ fn numeric_cells(
             cost_style(theme, cost),
         ),
     ]
-}
-
-/// `▍title ───────────` — accent section marker with a dim rule.
-fn section_header(theme: &Theme, title: &str, width: u16) -> Line<'static> {
-    let rule = "─".repeat(width.saturating_sub(3 + title.len() as u16) as usize);
-    Line::from(vec![
-        Span::styled("▍", Style::default().fg(theme.accent)),
-        Span::styled(
-            title.to_string(),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(format!(" {rule}"), Style::default().fg(theme.border_dim)),
-    ])
 }
 
 /// Cache hit fraction 0..=1 over the rows whose accounting can be trusted.

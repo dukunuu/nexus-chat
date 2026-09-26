@@ -21,9 +21,9 @@ pub fn render(f: &mut Frame, app: &AppView) {
         .map(|s| {
             let n = app.db.count_sessions(&s.id).unwrap_or(0);
             let mark = if s.name == app.active_space.name {
-                "● "
+                format!("{} ", crate::ui::style::glyph::DOT)
             } else {
-                "  "
+                "  ".to_string()
             };
             let base = if s.name == DEFAULT_SPACE {
                 format!("{} (default)", s.name)
@@ -67,7 +67,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 "Ctrl+D confirm · Esc cancel",
             )
         }
-        SpaceMode::Browse => chrome::filter_title(app, "🗃", "spaces", &app.space_filter),
+        SpaceMode::Browse => chrome::filter_title(app, "spaces", &app.space_filter),
     };
 
     let hint = match app.space_mode {

@@ -15,6 +15,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, ListItem, ListState, Padding};
 
+use super::style::glyph;
 use super::{popups, to_color};
 use crate::app_view::AppView;
 
@@ -30,18 +31,19 @@ pub(super) fn render_input(f: &mut Frame, app: &mut AppView, area: Rect) {
             "working".into()
         })
     } else if app.is_compacting_current_session() {
-        Some("⟳ compacting…".to_string())
+        Some(format!("{} compacting…", glyph::RUNNING))
     } else if app.is_streaming() {
         let n = app.chat_task_count();
         Some(format!(
-            "⟳ {n} chat{} running",
+            "{} {n} chat{} running",
+            glyph::RUNNING,
             if n == 1 { "" } else { "s" }
         ))
     } else {
         app.research_running
             .as_ref()
             .filter(|(id, _)| app.session.as_ref().is_none_or(|s| &s.id != id))
-            .map(|(_, topic)| format!("🔎 researching: {topic}"))
+            .map(|(_, topic)| format!("{} researching: {topic}", glyph::RESEARCH))
     };
     // The border takes the spinner's color while something runs, so the
     // active state reads at a glance.
@@ -51,7 +53,7 @@ pub(super) fn render_input(f: &mut Frame, app: &mut AppView, area: Rect) {
         app.theme.border_dim
     };
     let mut title = vec![Span::styled(
-        " ❯ ",
+        format!(" {} ", glyph::YOU),
         Style::default()
             .fg(if busy { border_color } else { app.theme.accent })
             .add_modifier(Modifier::BOLD),

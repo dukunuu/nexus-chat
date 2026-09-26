@@ -8,6 +8,7 @@ use ratatui::widgets::{Block, Borders, ListItem, ListState};
 
 use crate::app_view::AppView;
 use crate::ui::popups::chrome;
+use crate::ui::style::glyph;
 use nexus_core::app::{ModelPanel, Popup};
 use nexus_core::provider::Model;
 
@@ -26,7 +27,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         nexus_core::app::ModelPickTarget::ImageGen => "picking image gen model",
         nexus_core::app::ModelPickTarget::VideoGen => "picking video gen model",
     };
-    let fav_title = chrome::popup_title(app, "★", "favorites");
+    let fav_title = chrome::popup_title(app, "favorites");
     let fav_hint = if app.favorite_models().is_empty() {
         "no favorites yet — Ctrl+S in the available list".to_string()
     } else {
@@ -84,8 +85,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     };
     let avail_title = chrome::filter_title(
         app,
-        "▦",
-        format!("available [{backend}] — {picking}"),
+        format!("available [{backend}] · {picking}"),
         &app.model_filter,
     );
     let avail_inner = chrome::render_hinted(
@@ -142,11 +142,11 @@ fn model_items(
                 key.clone()
             };
             let marker = if app.favorites.contains(&key) {
-                "★ "
+                format!("{} ", glyph::FAVORITE)
             } else if app.last_used.contains_key(&key) {
-                "• "
+                format!("{} ", glyph::DOT)
             } else {
-                "  "
+                "  ".to_string()
             };
             // Reasoning badge: [r:high] if set, [r] if supported but off.
             let badge = match app.reasoning_of(&key) {
@@ -162,7 +162,11 @@ fn model_items(
             let name = format!("{marker}{id}{badge}");
             let pad = name_w.saturating_sub(name.chars().count());
             let dim = Style::default().fg(app.theme.fg_dim);
-            let vision = if m.supports_images { " ⊡" } else { "  " };
+            let vision = if m.supports_images {
+                format!(" {}", glyph::VISION)
+            } else {
+                "  ".to_string()
+            };
             let ctx = m.context_length.map_or_else(
                 || " ".repeat(CTX_W),
                 |c| format!(" {:>6}", crate::ui::humanize(c)),

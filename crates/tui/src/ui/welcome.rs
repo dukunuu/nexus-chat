@@ -16,6 +16,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use super::dim;
 use super::history::rule_line;
+use super::style::glyph;
 use crate::app_view::AppView;
 
 /// The empty start screen: a rounded panel holding the gradient banner, a
@@ -55,9 +56,16 @@ pub(super) fn render_welcome(f: &mut Frame, app: &mut AppView, area: Rect) {
         super::short_model_label,
     );
     lines.push(Line::from(vec![
-        Span::styled("◆ ", Style::default().fg(app.theme.accent)),
+        Span::styled(
+            format!("{} ", glyph::MODEL),
+            Style::default().fg(app.theme.accent),
+        ),
         Span::styled(model, Style::default().fg(app.theme.accent)),
-        dim(format!(" · ⌂ {}", app.active_space.name), &app.theme),
+        super::style::sep(&app.theme),
+        dim(
+            format!("{} {}", glyph::SPACE, app.active_space.name),
+            &app.theme,
+        ),
     ]));
     if !app.settings.hide_hints {
         lines.push(Line::from(""));
@@ -66,43 +74,7 @@ pub(super) fn render_welcome(f: &mut Frame, app: &mut AppView, area: Rect) {
             &app.theme,
         ));
     }
-    // Most recent sessions across this space, as a quick-jump list: click a
-    // row or press Alt+1…4. Row indices are remembered to map clicks back.
-    let mut recent_rows: Vec<(usize, String)> = Vec::new();
-    if let Ok(sessions) = app.db.list_sessions(&app.active_space.id) {
-        let recent: Vec<_> = sessions.into_iter().take(4).collect();
-        if !recent.is_empty() {
-            lines.push(Line::from(""));
-            // The panel is at most 86 wide; the rule spans the table below
-            // it, so both center on the same axis.
-            let inner_w = area.width.min(86).saturating_sub(4) as usize;
-            // One fixed-width table, centered as a block: numbers, titles,
-            // and right-aligned dates line up instead of zigzagging.
-            let row_w = inner_w.min(60);
-            rule_line(&mut lines, "recent", row_w, &app.theme);
-            for (i, s) in recent.iter().enumerate() {
-                let when = super::fmt_created(&s.created_at);
-                let title_w = row_w.saturating_sub(4 + when.chars().count());
-                let title = crate::ui::popups::chrome::truncate(&s.title, title_w);
-                let pad = title_w.saturating_sub(title.chars().count());
-                recent_rows.push((lines.len(), s.id.clone()));
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{} ", i + 1),
-                        Style::default()
-                            .fg(app.theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(title, Style::default().fg(app.theme.fg)),
-                    Span::raw(" ".repeat(pad + 2)),
-                    Span::styled(when, Style::default().fg(app.theme.fg_dim)),
-                ]));
-            }
-            if !app.settings.hide_hints {
-                lines.push(Line::from(dim("Alt+1–4 or click to reopen", &app.theme)));
-            }
-        }
-    }
+    let recent_rows = push_recent(&mut lines, app, area);
 
     let panel_w = area.width.min(86);
     let panel_h = (lines.len() + 2).min(area.height as usize) as u16;
@@ -158,4 +130,46 @@ fn chip_row(cmds: &[&str], theme: &crate::theme::Theme) -> Line<'static> {
         spans.push(Span::styled(" ]", Style::default().fg(theme.border_dim)));
     }
     Line::from(spans)
+}
+
+/// The recent-sessions table (click a row or press Alt+1…4). Returns each
+/// row's line index and session id, to map clicks back after layout.
+fn push_recent(lines: &mut Vec<Line<'static>>, app: &AppView, area: Rect) -> Vec<(usize, String)> {
+    let mut recent_rows: Vec<(usize, String)> = Vec::new();
+    if let Ok(sessions) = app.db.list_sessions(&app.active_space.id) {
+        let recent: Vec<_> = sessions.into_iter().take(4).collect();
+        if !recent.is_empty() {
+            lines.push(Line::from(""));
+            // The panel is at most 86 wide; the rule spans the table below
+            // it, so both center on the same axis.
+            let inner_w = area.width.min(86).saturating_sub(4) as usize;
+            // One fixed-width table, centered as a block: numbers, titles,
+            // and right-aligned dates line up instead of zigzagging.
+            let row_w = inner_w.min(60);
+            rule_line(lines, "recent", row_w, &app.theme);
+            for (i, s) in recent.iter().enumerate() {
+                let when = super::fmt_created(&s.created_at);
+                let title_w = row_w.saturating_sub(4 + when.chars().count());
+                let title = crate::ui::popups::chrome::truncate(&s.title, title_w);
+                let pad = title_w.saturating_sub(title.chars().count());
+                recent_rows.push((lines.len(), s.id.clone()));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", i + 1),
+                        Style::default()
+                            .fg(app.theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(title, Style::default().fg(app.theme.fg)),
+                    Span::raw(" ".repeat(pad + 2)),
+                    Span::styled(when, Style::default().fg(app.theme.fg_dim)),
+                ]));
+            }
+            if !app.settings.hide_hints {
+                lines.push(Line::from(dim("Alt+1–4 or click to reopen", &app.theme)));
+            }
+        }
+    }
+
+    recent_rows
 }

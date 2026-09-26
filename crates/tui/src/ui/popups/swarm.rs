@@ -56,11 +56,9 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 "Ctrl+D confirm · Esc cancel",
             )
         }
-        SwarmPopupMode::Browse => chrome::popup_title(
-            app,
-            "👥",
-            format!("swarm — {}", if on { "ON" } else { "OFF" }),
-        ),
+        SwarmPopupMode::Browse => {
+            chrome::popup_title(app, format!("swarm — {}", if on { "ON" } else { "OFF" }))
+        }
     };
     let hint = match app.swarm_popup_mode {
         SwarmPopupMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),

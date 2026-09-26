@@ -23,6 +23,7 @@ mod input;
 pub mod markdown;
 pub mod popups;
 mod status;
+pub(crate) mod style;
 mod welcome;
 
 use history::render_history;

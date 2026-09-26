@@ -205,9 +205,9 @@ fn research_live_popup_shows_agent_lifecycle_and_activity() {
 
     assert!(screen.contains("research agents"), "{screen}");
     assert!(screen.contains("✓ planner"), "{screen}");
-    assert!(screen.contains("● searcher r1 1/4"), "{screen}");
+    assert!(screen.contains("⟳ searcher r1 1/4"), "{screen}");
     assert!(screen.contains("Searching the web"), "{screen}");
-    assert!(screen.contains("× verifier"), "{screen}");
+    assert!(screen.contains("✗ verifier"), "{screen}");
 }
 
 #[test]

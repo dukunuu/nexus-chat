@@ -674,7 +674,7 @@ mod tests {
             .map(line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("❓"), "{text}");
+        assert!(text.contains("? "), "{text}");
         assert!(text.contains("fine-tuning LLMs"), "{text}");
         assert!(text.contains("1. Depth or breadth?"), "{text}");
         assert!(text.contains("Answer in chat"), "{text}");
@@ -703,8 +703,8 @@ mod tests {
             .map(line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("📄"), "{text}");
-        assert!(text.contains("conversation compacted"), "{text}");
+        assert!(text.contains("≡ "), "{text}");
+        assert!(text.contains("earlier messages, summarized"), "{text}");
         assert!(text.contains("digest line one"), "{text}");
         assert!(text.contains("digest line two"), "{text}");
         // The digest appears in the copy/plain view too — it's visible
@@ -742,7 +742,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol().to_string())
             .collect::<String>();
-        assert!(text.contains("compacting earlier messages"), "{text}");
+        assert!(text.contains("summarizing earlier messages"), "{text}");
     }
 
     /// A conversation tall enough to overflow the history pane, with one

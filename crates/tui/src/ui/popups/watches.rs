@@ -53,7 +53,10 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 };
                 let active = app.chat_task_for_session(&w.session_id).is_some();
                 let state = if active {
-                    Span::styled("⟳ checking", Style::default().fg(app.theme.accent))
+                    Span::styled(
+                        format!("{} checking", crate::ui::style::glyph::RUNNING),
+                        Style::default().fg(app.theme.accent2),
+                    )
                 } else {
                     Span::styled(next, dim)
                 };
@@ -91,7 +94,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 .unwrap_or_default();
             chrome::danger_title(app, format!("delete watch \"{topic}\"?"), "")
         }
-        WatchMode::Browse => chrome::popup_title(app, "⏰", "watches"),
+        WatchMode::Browse => chrome::popup_title(app, "watches"),
     };
     let hint = match app.watch_mode {
         WatchMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),

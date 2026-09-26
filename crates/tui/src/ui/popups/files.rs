@@ -22,31 +22,31 @@ use super::chrome;
 /// Browse title as a tab strip — `📁 files · images · scripts` with the
 /// active tab bold — so the other tabs (Tab cycles) are visible even with
 /// hints hidden.
-fn tab_title(app: &AppView, glyph: &str, active: FilesTab) -> Line<'static> {
-    let mut title = chrome::popup_title(app, glyph, "");
-    title.spans.pop(); // drop the empty name span; the strip replaces it
+fn tab_title(app: &AppView, active: FilesTab) -> Line<'static> {
+    use crate::ui::style;
     let tabs = [
         (FilesTab::Files, "files"),
         (FilesTab::Images, "images"),
         (FilesTab::Scripts, "scripts"),
     ];
+    let mut spans = vec![Span::raw(" ")];
     for (i, (tab, name)) in tabs.into_iter().enumerate() {
         if i > 0 {
-            title
-                .spans
-                .push(Span::styled(" · ", Style::default().fg(app.theme.fg_dim)));
+            spans.push(style::sep(&app.theme));
         }
-        let style = if tab == active {
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(ratatui::style::Modifier::BOLD)
+        spans.push(if tab == active {
+            Span::styled(
+                name,
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )
         } else {
-            Style::default().fg(app.theme.fg_dim)
-        };
-        title.spans.push(Span::styled(name, style));
+            style::meta(&app.theme, name)
+        });
     }
-    title.spans.push(Span::raw(" "));
-    title
+    spans.push(Span::raw(" "));
+    Line::from(spans)
 }
 
 pub fn render(f: &mut Frame, app: &AppView) {
@@ -148,7 +148,7 @@ fn render_files(f: &mut Frame, app: &AppView) {
                 .unwrap_or_default();
             chrome::danger_title(app, format!("remove \"{name}\"?"), "")
         }
-        FilesMode::Browse => tab_title(app, "📁", FilesTab::Files),
+        FilesMode::Browse => tab_title(app, FilesTab::Files),
         FilesMode::Pick => Line::from(""),
     };
     let hint = match app.files_mode {
@@ -213,7 +213,7 @@ fn render_images(f: &mut Frame, app: &AppView) {
                 .unwrap_or_default();
             chrome::danger_title(app, format!("remove \"{name}\"?"), "")
         }
-        ImagesMode::Browse => tab_title(app, "🖼", FilesTab::Images),
+        ImagesMode::Browse => tab_title(app, FilesTab::Images),
     };
     let hint = match app.images_mode {
         ImagesMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
@@ -300,7 +300,7 @@ fn render_scripts(f: &mut Frame, app: &AppView) {
                 .unwrap_or_default();
             chrome::danger_title(app, format!("remove \"{name}\"?"), "")
         }
-        ScriptsMode::Browse => tab_title(app, "📜", FilesTab::Scripts),
+        ScriptsMode::Browse => tab_title(app, FilesTab::Scripts),
         _ => unreachable!(),
     };
     let hint = match app.scripts_mode {

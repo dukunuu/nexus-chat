@@ -91,6 +91,10 @@ Other structural facts worth knowing before editing:
 - **Popup chrome is shared.** New popups reuse `ui/popups/chrome.rs` rather than
   drawing their own borders/hints; snapshot tests live in `ui/popups/tests.rs`
   (ratatui `TestBackend`).
+- **One visual vocabulary.** Glyphs, the field separator, section headers, and
+  color roles (accent = you/interactive, accent2 = the assistant and its
+  agents, dim = metadata, border = chrome) come from `ui/style.rs`. No emoji
+  in UI strings — a test scans `src/ui` for them.
 - **Tool results are capped** and unchanged results are marked with a note;
   `batch` validates nesting, size, and read-only classification.
 - **Tests stay hermetic** — no network, no real keys, no XDG writes (use temp

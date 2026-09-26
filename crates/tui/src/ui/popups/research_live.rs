@@ -7,6 +7,7 @@ use ratatui::widgets::ListItem;
 use crate::app_view::AppView;
 
 use super::chrome;
+use crate::ui::style::glyph;
 
 /// Live per-searcher activity: the same `research_stage` rows shown inline in
 /// the transcript (one per searcher label, updated in place as
@@ -46,7 +47,10 @@ pub fn render(f: &mut Frame, app: &AppView) {
         ))));
         for (_, s) in pending {
             items.push(ListItem::new(Line::from(vec![
-                Span::styled("● ", Style::default().fg(app.theme.accent)),
+                Span::styled(
+                    format!("{} ", glyph::DOT),
+                    Style::default().fg(app.theme.accent),
+                ),
                 Span::styled(s.clone(), dim),
             ])));
         }
@@ -63,17 +67,18 @@ pub fn render(f: &mut Frame, app: &AppView) {
         for content in rows.iter().rev() {
             let (label, detail) = content.split_once(':').unwrap_or((content.as_str(), ""));
             let detail = detail.trim();
-            let (glyph, color, detail) = if let Some(rest) = detail.strip_prefix("done —") {
-                ("✓", app.theme.success, rest.trim())
+            // A working agent is the assistant busy: ⟳ in the agent color.
+            let (mark, color, detail) = if let Some(rest) = detail.strip_prefix("done —") {
+                (glyph::OK, app.theme.success, rest.trim())
             } else if let Some(rest) = detail.strip_prefix("error —") {
-                ("×", app.theme.error, rest.trim())
+                (glyph::FAIL, app.theme.error, rest.trim())
             } else if let Some(rest) = detail.strip_prefix("working —") {
-                ("●", app.theme.accent, rest.trim())
+                (glyph::RUNNING, app.theme.accent2, rest.trim())
             } else {
-                ("○", app.theme.fg_dim, detail)
+                (glyph::RING, app.theme.fg_dim, detail)
             };
             let mut lines = vec![Line::from(vec![
-                Span::styled(format!("{glyph} "), Style::default().fg(color)),
+                Span::styled(format!("{mark} "), Style::default().fg(color)),
                 Span::styled(
                     label.to_string(),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),

@@ -21,7 +21,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     let inner = chrome::render_hinted(
         f,
         area,
-        chrome::popup_title(app, "📋", "copy"),
+        chrome::popup_title(app, "copy"),
         &hint,
         app,
         true,

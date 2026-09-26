@@ -18,6 +18,7 @@ use nexus_core::provider::serve::{RuntimeStatus, format_kb};
 use crate::app_view::AppView;
 
 use super::chrome;
+use crate::ui::style::glyph;
 
 /// The runtime rows, plus a trailing "off" row.
 pub const ROW_COUNT: usize = LocalRuntime::ALL.len() + 1;
@@ -60,14 +61,14 @@ fn row(index: usize, current: Option<&LocalConfig>) -> (String, String, String, 
 /// endpoint last — it is the most predictable part and the one worth losing.
 fn server_line(status: Option<&RuntimeStatus>, endpoint: &str) -> (String, bool) {
     let Some(status) = status else {
-        return (format!("○ {endpoint}"), false);
+        return (format!("{} {endpoint}", glyph::RING), false);
     };
     let mut parts: Vec<String> = Vec::new();
     if let Some(rss) = status.rss_kb {
         parts.push(format_kb(rss));
     }
     if status.over_budget {
-        parts.push("⚠ over budget".to_string());
+        parts.push(format!("{} over budget", glyph::WARN));
     }
     if status.managed {
         parts.push("started here".to_string());
@@ -83,7 +84,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     let inner = chrome::render_hinted(
         f,
         area,
-        chrome::popup_title(app, "🖥", "local runtime"),
+        chrome::popup_title(app, "local runtime"),
         if app.local_from_login {
             "↑↓ · Enter pick · s start · x stop · r refresh · Esc back"
         } else {
@@ -100,9 +101,12 @@ pub fn render(f: &mut Frame, app: &AppView) {
         .map(|i| {
             let (name, hint, endpoint, active) = row(i, current);
             let chip = if active {
-                Span::styled("✓ active", Style::default().fg(app.theme.success))
+                Span::styled(
+                    format!("{} active", glyph::OK),
+                    Style::default().fg(app.theme.success),
+                )
             } else {
-                Span::styled("○", dim)
+                Span::styled(glyph::RING, dim)
             };
             let width = area.width.saturating_sub(6 + 2 * chrome::PAD) as usize;
             let name = chrome::truncate(

@@ -10,6 +10,7 @@ use ratatui::widgets::{ListItem, ListState};
 use crate::app_view::AppView;
 
 use super::chrome;
+use crate::ui::style::glyph;
 
 const ROWS: [(&str, &str); 5] = [
     ("OpenRouter", "paste a key, or reads $OPENROUTER_API_KEY"),
@@ -24,7 +25,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     let inner = chrome::render_hinted(
         f,
         area,
-        chrome::popup_title(app, "🔑", "login"),
+        chrome::popup_title(app, "login"),
         "↑↓ · Enter pick · Esc close",
         app,
         true,
@@ -45,9 +46,12 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 _ => app.backends.local.is_some(),
             };
             let chip = if configured {
-                Span::styled("✓ configured", Style::default().fg(app.theme.success))
+                Span::styled(
+                    format!("{} configured", glyph::OK),
+                    Style::default().fg(app.theme.success),
+                )
             } else {
-                Span::styled("○ no key", dim)
+                Span::styled(format!("{} no key", glyph::RING), dim)
             };
             let width = area.width.saturating_sub(6 + 2 * chrome::PAD) as usize;
             let name =

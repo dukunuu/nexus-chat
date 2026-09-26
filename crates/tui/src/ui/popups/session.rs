@@ -8,6 +8,7 @@ use ratatui::widgets::{ListItem, ListState};
 use crate::app_view::AppView;
 
 use super::chrome;
+use crate::ui::style::glyph;
 
 #[allow(clippy::too_many_lines)] // row design + preview strip
 pub fn render(f: &mut Frame, app: &mut AppView) {
@@ -28,7 +29,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     let preview = app
         .session_preview
         .as_ref()
-        .map(|(_, p)| format!("↳ {p}"))
+        .map(|(_, p)| p.clone())
         .unwrap_or_default();
 
     let sessions = app.filtered_sessions();
@@ -41,26 +42,28 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     let items: Vec<ListItem> = sessions
         .iter()
         .map(|s| {
-            // ⟳ = a response or compaction is running here; 🔎 = a research
-            // job is running here; ● = finished while unviewed.
+            // Running work (reply, compaction, research) is the assistant
+            // busy: ⟳ in the agent color. A finished-while-away reply waits
+            // on you: ● in the interactive accent. Otherwise the session's
+            // kind: ↪ linked research, ◇ research.
             let compacting_here = app.is_compacting_session(&s.id);
             let streaming_here = app.chat_task_for_session(&s.id).is_some();
             let researching_here = app
                 .research_running
                 .as_ref()
                 .is_some_and(|(id, _)| *id == s.id);
-            let marker = if compacting_here {
-                Some(Span::styled("⟳ ", Style::default().fg(app.theme.accent2)))
-            } else if streaming_here {
-                Some(Span::styled("⟳ ", Style::default().fg(app.theme.accent)))
-            } else if researching_here {
-                Some(Span::styled("🔎 ", Style::default().fg(app.theme.accent2)))
+            let agent = Style::default().fg(app.theme.accent2);
+            let marker = if compacting_here || streaming_here || researching_here {
+                Some(Span::styled(format!("{} ", glyph::RUNNING), agent))
             } else if app.unread.contains(&s.id) {
-                Some(Span::styled("● ", Style::default().fg(app.theme.warning)))
+                Some(Span::styled(
+                    format!("{} ", glyph::DOT),
+                    Style::default().fg(app.theme.accent),
+                ))
             } else if s.research_parent_id.is_some() {
-                Some(Span::styled("↪ ", dim))
+                Some(Span::styled(format!("{} ", glyph::LINK), dim))
             } else if s.kind == "research" {
-                Some(Span::styled("🔬 ", Style::default().fg(app.theme.accent2)))
+                Some(Span::styled(format!("{} ", glyph::RESEARCH), agent))
             } else {
                 None
             };
@@ -89,7 +92,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
                 .clone()
                 .unwrap_or_else(|| format!("{}…", &s.id[..8.min(s.id.len())]));
             let mut detail = if compacting_here {
-                format!("#{slug} · ⟳ compacting…")
+                format!("#{slug} · {} compacting…", glyph::RUNNING)
             } else {
                 format!("#{slug} · {}", crate::ui::short_model_label(&s.model))
             };
@@ -113,7 +116,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
                 "",
             )
         }
-        SessionMode::Browse => chrome::filter_title(app, "🗂", "sessions", &app.session_filter),
+        SessionMode::Browse => chrome::filter_title(app, "sessions", &app.session_filter),
     };
     let hint = match app.session_mode {
         SessionMode::Rename => "Enter save · Esc cancel".to_string(),

@@ -59,7 +59,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 "Ctrl+D confirm · Esc cancel",
             )
         }
-        SkillsMode::Browse => chrome::popup_title(app, "🧠", "skills"),
+        SkillsMode::Browse => chrome::popup_title(app, "skills"),
     };
     let hint = match app.skills_mode {
         SkillsMode::Browse if app.skills.is_empty() => {

@@ -4,7 +4,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -64,15 +64,8 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
-pub fn help_lines(theme: &Theme) -> Vec<Line<'static>> {
-    let heading = |s: &str| {
-        Line::from(Span::styled(
-            format!("▍{s}"),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ))
-    };
+pub fn help_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    let heading = |s: &str| crate::ui::style::section(theme, s, width);
     let row = |left: String, right: &str, left_w: usize| {
         Line::from(vec![
             Span::styled(
@@ -110,7 +103,7 @@ pub fn help_lines(theme: &Theme) -> Vec<Line<'static>> {
 pub fn render(f: &mut Frame, app: &mut AppView) {
     // Wide: the key column alone is ~28 cells.
     let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::TALL.1);
-    let title = chrome::popup_title(app, "?", "help");
+    let title = chrome::popup_title(app, "help");
     let inner = chrome::render_hinted(
         f,
         area,
@@ -120,7 +113,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         true,
         chrome::Tone::Normal,
     );
-    let lines = help_lines(&app.theme);
+    let lines = help_lines(&app.theme, inner.width as usize);
     // Clamp here, where the viewport height is known, so scrolling past the
     // end never leaves a blank pane.
     let max = u16::try_from(lines.len())

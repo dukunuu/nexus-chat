@@ -73,7 +73,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 "Ctrl+D confirm · Esc cancel",
             )
         }
-        AppsMode::Browse => chrome::popup_title(app, "🧩", "apps"),
+        AppsMode::Browse => chrome::popup_title(app, "apps"),
     };
     let hint = match app.apps_mode {
         AppsMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
