@@ -27,6 +27,9 @@ use crate::tools::ToolExecutor;
 const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api";
+/// The Codex CLI release whose catalog shape `parse_codex_catalog` reads; the
+/// backend filters its model list by this version.
+const CODEX_CLIENT_VERSION: &str = "0.158.0";
 /// The general Zen catalog: free-tier and pay-per-token models, plus
 /// whatever a Go subscription adds. This is the default/fallback base.
 const OPENCODE_ZEN_BASE: &str = "https://opencode.ai/zen/v1";
@@ -911,92 +914,14 @@ impl OpenRouter {
             return config.list_models().await;
         }
         if self.flavor == ProviderFlavor::OpenAiCodex {
-            // Codex-only models — deliberately not merged with OpenRouter's
-            // catalog (switch backends with Ctrl+P to see that instead): a few
-            // hundred OpenRouter entries would bury these alphabetically,
-            // making it look like Codex had no models. Mirrors the official
-            // ChatGPT sign-in catalog (gpt-5.4/-mini retired 2026-08-31).
-            return Ok(vec![
-                Model {
-                    id: "gpt-5.3-codex-spark".into(),
-                    name: "GPT-5.3 Codex Spark".into(),
-                    reasoning_efforts: ReasoningEffort::STANDARD.to_vec(),
-                    context_length: Some(128_000),
-                    supports_images: false,
-                    supports_image_generation: false,
-                    supports_video_generation: false,
-                    backend: crate::provider::BackendTag::Codex,
-                    pricing: None,
-                },
-                // ChatGPT's backend alias for the lower-capability model
-                // available after a primary model's usage limit is hit.
-                Model {
-                    id: "gpt-reserve".into(),
-                    name: "Luna Reserve".into(),
-                    reasoning_efforts: ReasoningEffort::STANDARD.to_vec(),
-                    context_length: Some(272_000),
-                    supports_images: true,
-                    supports_image_generation: false,
-                    supports_video_generation: false,
-                    backend: crate::provider::BackendTag::Codex,
-                    pricing: None,
-                },
-                Model {
-                    id: "gpt-5.5".into(),
-                    name: "GPT-5.5".into(),
-                    reasoning_efforts: ReasoningEffort::WITH_XHIGH_AND_NONE.to_vec(),
-                    context_length: Some(272_000),
-                    supports_images: true,
-                    supports_image_generation: false,
-                    supports_video_generation: false,
-                    backend: crate::provider::BackendTag::Codex,
-                    pricing: None,
-                },
-                Model {
-                    id: "gpt-5.6-sol".into(),
-                    name: "GPT-5.6 Sol".into(),
-                    reasoning_efforts: ReasoningEffort::WITH_MAX_XHIGH_AND_NONE.to_vec(),
-                    context_length: Some(1_000_000),
-                    supports_images: true,
-                    supports_image_generation: false,
-                    supports_video_generation: false,
-                    backend: crate::provider::BackendTag::Codex,
-                    pricing: None,
-                },
-                Model {
-                    id: "gpt-5.6-terra".into(),
-                    name: "GPT-5.6 Terra".into(),
-                    reasoning_efforts: ReasoningEffort::WITH_MAX_XHIGH_AND_NONE.to_vec(),
-                    context_length: Some(1_000_000),
-                    supports_images: true,
-                    supports_image_generation: false,
-                    supports_video_generation: false,
-                    backend: crate::provider::BackendTag::Codex,
-                    pricing: None,
-                },
-                Model {
-                    id: "gpt-5.6-luna".into(),
-                    name: "GPT-5.6 Luna".into(),
-                    reasoning_efforts: ReasoningEffort::WITH_MAX_XHIGH_AND_NONE.to_vec(),
-                    context_length: Some(1_000_000),
-                    supports_images: true,
-                    supports_image_generation: false,
-                    supports_video_generation: false,
-                    backend: crate::provider::BackendTag::Codex,
-                    pricing: None,
-                },
-                Model {
-                    id: "gpt-6-astra".into(),
-                    name: "GPT-6 Astra".into(),
-                    reasoning_efforts: ReasoningEffort::WITH_MAX_XHIGH.to_vec(),
-                    context_length: Some(1_050_000),
-                    supports_images: true,
-                    supports_image_generation: false,
-                    supports_video_generation: false,
-                    backend: crate::provider::BackendTag::Codex,
-                    pricing: None,
-                },
-            ]);
+            // The live catalog, like the Codex CLI's; the built-in list only
+            // covers a failed fetch. Codex models stay unmerged with
+            // OpenRouter's (Ctrl+P switches backends): a few hundred entries
+            // would bury them alphabetically.
+            return Ok(match self.fetch_codex_catalog().await {
+                Ok(models) if !models.is_empty() => models,
+                _ => codex_fallback_models(),
+            });
         }
         if self.flavor == ProviderFlavor::OpencodeGo {
             // Two distinct catalogs behind the same account key: Zen
@@ -1910,6 +1835,28 @@ impl OpenRouter {
     fn openrouter_delegate_for_body(&self, body: &serde_json::Value) -> Option<Self> {
         let model = body.get("model").and_then(|m| m.as_str())?;
         self.openrouter_delegate_for_model(model)
+    }
+
+    /// GET the ChatGPT-sign-in model catalog the Codex CLI reads
+    /// (`/codex/models`), filtered for this client version.
+    async fn fetch_codex_catalog(&self) -> Result<Vec<Model>> {
+        let body: serde_json::Value = self
+            .client
+            .get(format!(
+                "{}/codex/models?client_version={CODEX_CLIENT_VERSION}",
+                self.flavor.base()
+            ))
+            .headers(self.codex_headers(false)?)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+            .context("fetching the Codex model catalog")?
+            .error_for_status()
+            .context("Codex model catalog")?
+            .json()
+            .await
+            .context("parsing the Codex model catalog")?;
+        Ok(parse_codex_catalog(&body))
     }
 
     fn codex_headers(&self, sse: bool) -> Result<reqwest::header::HeaderMap> {
@@ -3434,6 +3381,98 @@ pub(crate) struct ImagesForTool {
     pub(crate) description: String,
 }
 
+/// Models from a `/codex/models` response: the picker-visible entries plus
+/// `gpt-reserve` (the alias `ChatGPT` serves after a model's usage limit), in
+/// the catalog's own order. Efforts this app can't drive — `ultra`, which
+/// delegates through the Codex CLI's own agent tools — are left out.
+fn parse_codex_catalog(body: &serde_json::Value) -> Vec<Model> {
+    let Some(entries) = body.get("models").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<&serde_json::Value> = entries
+        .iter()
+        .filter(|m| {
+            m.get("visibility").and_then(serde_json::Value::as_str) == Some("list")
+                || m.get("slug").and_then(serde_json::Value::as_str) == Some("gpt-reserve")
+        })
+        .collect();
+    entries.sort_by_key(|m| {
+        m.get("priority")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(i64::MAX)
+    });
+    entries
+        .into_iter()
+        .filter_map(|m| {
+            let id = m.get("slug")?.as_str()?.to_string();
+            let levels: Vec<&str> = m
+                .get("supported_reasoning_levels")
+                .and_then(serde_json::Value::as_array)
+                .map(|ls| {
+                    ls.iter()
+                        .filter_map(|l| l.get("effort").and_then(serde_json::Value::as_str))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let reasoning_efforts = ReasoningEffort::CYCLE_ORDER
+                .iter()
+                .copied()
+                .filter(|e| levels.contains(&e.as_str()))
+                .collect();
+            let supports_images = m
+                .get("input_modalities")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|ms| ms.iter().any(|x| x.as_str() == Some("image")));
+            Some(Model {
+                name: m
+                    .get("display_name")
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(|| id.clone(), str::to_string),
+                id,
+                reasoning_efforts,
+                context_length: m.get("context_window").and_then(serde_json::Value::as_u64),
+                supports_images,
+                supports_image_generation: false,
+                supports_video_generation: false,
+                backend: crate::provider::BackendTag::Codex,
+                pricing: None,
+            })
+        })
+        .collect()
+}
+
+/// The Codex catalog as of client 0.158.0 (2026-09-26), for when the live
+/// fetch fails.
+fn codex_fallback_models() -> Vec<Model> {
+    use ReasoningEffort as E;
+    let model = |id: &str, name: &str, efforts: &[E]| Model {
+        id: id.into(),
+        name: name.into(),
+        reasoning_efforts: efforts.to_vec(),
+        context_length: Some(272_000),
+        supports_images: true,
+        supports_image_generation: false,
+        supports_video_generation: false,
+        backend: crate::provider::BackendTag::Codex,
+        pricing: None,
+    };
+    let full = [E::Low, E::Medium, E::High, E::XHigh, E::Max];
+    vec![
+        model("gpt-6-astra", "GPT-6-Astra", &full),
+        model("gpt-6-sol", "GPT-6-Sol", &full),
+        model("gpt-6-luna", "GPT-6-Luna", &full),
+        model("gpt-reserve", "GPT-Reserve", &full),
+        model("gpt-5.6-sol", "GPT-5.6-Sol", &full),
+        model("gpt-5.6-terra", "GPT-5.6-Terra", &full),
+        model("gpt-5.6-luna", "GPT-5.6-Luna", &full),
+        model(
+            "gpt-5.5",
+            "GPT-5.5",
+            &[E::Low, E::Medium, E::High, E::XHigh],
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3506,29 +3545,65 @@ mod tests {
         assert_eq!(chat["choices"][0]["finish_reason"], "tool_calls");
     }
 
-    #[tokio::test]
-    async fn codex_catalog_matches_current_chatgpt_models() {
-        let models = OpenRouter::openai_codex("token".into())
-            .list_models()
-            .await
-            .unwrap();
-        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+    /// Shaped like a real `/codex/models` response (client 0.158.0).
+    #[test]
+    fn codex_catalog_parses_visible_models_in_priority_order() {
+        let body = serde_json::json!({ "models": [
+            { "slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list",
+              "priority": 12, "context_window": 272_000, "input_modalities": ["text", "image"],
+              "supported_reasoning_levels": [
+                  {"effort": "low"}, {"effort": "medium"}, {"effort": "high"}, {"effort": "xhigh"}] },
+            { "slug": "codex-auto-review", "display_name": "Codex Auto Review",
+              "visibility": "hide", "priority": 43, "supported_reasoning_levels": [] },
+            { "slug": "gpt-reserve", "display_name": "GPT-Reserve", "visibility": "hide",
+              "priority": 3, "context_window": 272_000,
+              "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}] },
+            { "slug": "gpt-6-astra", "display_name": "GPT-6-Astra", "visibility": "list",
+              "priority": 1, "context_window": 272_000, "input_modalities": ["text", "image"],
+              "supported_reasoning_levels": [
+                  {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                  {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"}] }
+        ]});
+        let models = parse_codex_catalog(&body);
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gpt-6-astra", "gpt-reserve", "gpt-5.5"]);
+        let astra = &models[0];
+        assert_eq!(astra.name, "GPT-6-Astra");
+        assert_eq!(astra.context_length, Some(272_000));
+        assert!(astra.supports_images);
+        // `ultra` needs the Codex CLI's own delegation tools, so it's dropped.
+        assert_eq!(
+            astra.reasoning_efforts,
+            [
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+                ReasoningEffort::Max
+            ]
+        );
+        assert!(parse_codex_catalog(&serde_json::json!({})).is_empty());
+    }
 
+    #[test]
+    fn codex_fallback_lists_the_current_models() {
+        let models = codex_fallback_models();
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(
             ids,
             [
-                "gpt-5.3-codex-spark",
+                "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6-luna",
                 "gpt-reserve",
-                "gpt-5.5",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
-                "gpt-6-astra",
+                "gpt-5.5",
             ]
         );
-        assert!(models.iter().all(|model| {
-            model.backend == crate::provider::BackendTag::Codex
-                && !model.reasoning_efforts.is_empty()
+        assert!(models.iter().all(|m| {
+            m.backend == crate::provider::BackendTag::Codex && !m.reasoning_efforts.is_empty()
         }));
     }
 
