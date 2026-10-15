@@ -196,13 +196,7 @@ fn document(app: &mut App, method: &str, query: &str, body: &[u8]) -> Result<Val
     };
     let content = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if kind == "system" {
-                app.base_system_prompt.clone()
-            } else {
-                String::new()
-            }
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(error.into()),
     };
     let hash = super::api::hex_string(&Sha256::digest(content.as_bytes()));

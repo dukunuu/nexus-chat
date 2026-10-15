@@ -1,10 +1,11 @@
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const OPENROUTER_ENV_KEY: &str = "OPENROUTER_API_KEY";
 pub const OPENAI_ENV_KEY: &str = "OPENAI_API_KEY";
@@ -18,7 +19,15 @@ pub const SECRET_ENV_VARS: &[&str] = &[
     "CF_API_TOKEN",
 ];
 
-const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../assets/system-prompt-base.md");
+/// Bundled base instructions, always used directly from the binary.
+pub const BASE_SYSTEM_PROMPT: &str = include_str!("../assets/system-prompt-base.md");
+
+// SHA-256 of every base prompt nexus ever copied into system_prompt.md.
+// This list is frozen because nexus no longer copies it.
+const SHIPPED_DEFAULT_SHA256: &[&str] = &[
+    "17219b05c779dc4051d0fc2baf9440d658b82f22efbf6f8415a8c0892eeb75f9",
+    "5a3b0d47f71d8aa2882a31cf3a96ac28afb2a8e285c6023ebb430ba41c4c6a0e",
+];
 
 /// Remove credential environment variables from children that run model-authored code.
 pub fn scrub_secret_env(cmd: &mut std::process::Command) {
@@ -127,25 +136,40 @@ pub fn load_banner() -> Option<String> {
     (!art.trim().is_empty()).then(|| art.trim_end().to_string())
 }
 
-/// The base system prompt file (identity/formatting/scope, with a
-/// `{{verbosity}}` placeholder App fills in). Lives beside config.toml, not
-/// per-space — this is app-level, not chat-level. Editable via `$EDITOR`.
+/// Optional user additions to the bundled base prompt. Lives beside config.toml,
+/// not per-space — this is app-level, not chat-level. Editable via `$EDITOR`.
 pub fn system_prompt_path() -> Result<PathBuf> {
     Ok(project_dirs()?.config_dir().join("system_prompt.md"))
 }
 
-/// Read the base system prompt, scaffolding the built-in default on first run.
-pub fn load_system_prompt() -> Result<String> {
-    let path = system_prompt_path()?;
-    if !path.exists() {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
-        std::fs::write(&path, DEFAULT_SYSTEM_PROMPT)
-            .with_context(|| format!("writing {}", path.display()))?;
-        return Ok(DEFAULT_SYSTEM_PROMPT.to_string());
+/// Read optional user additions without creating or writing the file.
+pub fn load_system_prompt_overlay() -> String {
+    system_prompt_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| text.trim_end().to_string())
+        .unwrap_or_default()
+}
+
+/// Remove unedited shipped defaults, or warn when an edited copy remains.
+pub fn migrate_system_prompt_overlay() -> Option<String> {
+    migrate_overlay_at(&system_prompt_path().ok()?)
+}
+
+fn migrate_overlay_at(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut hash = String::new();
+    for b in Sha256::digest(&bytes) {
+        let _ = write!(hash, "{b:02x}");
     }
-    std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
+    if SHIPPED_DEFAULT_SHA256.contains(&hash.as_str()) {
+        let _ = std::fs::remove_file(path);
+        return None;
+    }
+    let text = std::str::from_utf8(&bytes).ok()?;
+    text.contains("You are the assistant inside nexus-chat").then(|| {
+        "system_prompt.md now holds only your additions to the built-in prompt, and yours still contains a copy of the old built-in text; trim it to your own lines (Settings, Ctrl+E)".into()
+    })
 }
 
 /// Resolve every configured credential from disk + env, with no network
@@ -676,6 +700,67 @@ fn write_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_migration_deletes_every_shipped_default() {
+        let root =
+            std::env::temp_dir().join(format!("nexus-prompt-overlay-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("system_prompt.md");
+        for fixture in [
+            include_str!("../tests/fixtures/prompt-defaults/2026-07-02.md"),
+            include_str!("../tests/fixtures/prompt-defaults/2026-08-12.md"),
+        ] {
+            let mut hash = String::new();
+            for b in Sha256::digest(fixture.as_bytes()) {
+                let _ = write!(hash, "{b:02x}");
+            }
+            assert!(SHIPPED_DEFAULT_SHA256.contains(&hash.as_str()));
+            std::fs::write(&path, fixture).unwrap();
+            assert_eq!(migrate_overlay_at(&path), None);
+            assert!(!path.exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn overlay_migration_keeps_edited_copies_with_a_note() {
+        let root =
+            std::env::temp_dir().join(format!("nexus-prompt-overlay-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("system_prompt.md");
+        let edited = format!(
+            "{}\nAlways answer in French.",
+            include_str!("../tests/fixtures/prompt-defaults/2026-08-12.md")
+        );
+        std::fs::write(&path, &edited).unwrap();
+        assert!(migrate_overlay_at(&path).is_some());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn overlay_migration_leaves_plain_additions_silent() {
+        let root =
+            std::env::temp_dir().join(format!("nexus-prompt-overlay-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("system_prompt.md");
+        let additions = "Always answer in French.";
+        std::fs::write(&path, additions).unwrap();
+        assert_eq!(migrate_overlay_at(&path), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), additions);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn overlay_migration_never_creates_a_file() {
+        let root =
+            std::env::temp_dir().join(format!("nexus-prompt-overlay-{}", uuid::Uuid::new_v4()));
+        let path = root.join("system_prompt.md");
+        assert_eq!(migrate_overlay_at(&path), None);
+        assert!(!path.exists());
+        assert!(!root.exists());
+    }
 
     #[test]
     fn scrub_secret_env_removes_every_secret() {

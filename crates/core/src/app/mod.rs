@@ -817,9 +817,11 @@ pub struct App {
     pub langsearch_key: String,
     /// Which web-search backend to prefer: "auto"/"langsearch"/"searxng"/"duckduckgo".
     pub search_provider: String,
-    /// Raw contents of `system_prompt.md` (with an unresolved `{{verbosity}}`
-    /// placeholder) — the app's own base system prompt, `$EDITOR`-editable.
+    /// Bundled base system prompt with unresolved runtime placeholders.
     pub base_system_prompt: String,
+    /// App-level user additions from `system_prompt.md`, editable via `$EDITOR`.
+    /// Loaded by `boot()`; empty in a bare `App::new`.
+    pub system_prompt_overlay: String,
     /// Client capability advertised to the model, not persistent view state.
     pub interactive_ui: bool,
     /// Answer-length preference woven into the system prompt: "normal",
@@ -1142,7 +1144,8 @@ impl App {
             embedding_model,
             image_gen_model,
             video_gen_model,
-            base_system_prompt: config::load_system_prompt().unwrap_or_default(),
+            base_system_prompt: config::BASE_SYSTEM_PROMPT.to_string(),
+            system_prompt_overlay: String::new(),
             interactive_ui: false,
             verbosity: "concise".to_string(),
             memory_rx: None,

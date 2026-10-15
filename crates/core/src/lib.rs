@@ -40,7 +40,12 @@ pub async fn boot(saved: config::SavedCreds) -> Result<app::App> {
     let key = config::first_configured(&saved).map(|(_, k)| k);
     let space = space::Space::open()?;
     let db = db::Db::open(&space.db_path())?;
+    let prompt_note = config::migrate_system_prompt_overlay();
     let mut app = app::App::new(db, key.as_deref(), space);
+    app.system_prompt_overlay = config::load_system_prompt_overlay();
+    if let Some(note) = prompt_note {
+        app.push_status(note);
+    }
     app.saved = saved;
     app.rebuild_all_backends();
     app.app_server = appserver::AppServer::start(app.space.spaces_root()).await;

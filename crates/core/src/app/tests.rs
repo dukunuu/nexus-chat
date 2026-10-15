@@ -814,6 +814,28 @@ fn base_system_prompt_is_always_present_and_resolves_verbosity() {
 }
 
 #[test]
+fn system_prompt_appends_overlay_after_base() {
+    let mut a = app_with_key();
+    a.system_prompt_overlay = "Always answer in French. Today is {{datetime}}.".into();
+    let prompt = a.system_prompt();
+    let base_first_line = config::BASE_SYSTEM_PROMPT.lines().next().unwrap();
+    let overlay = format!("Always answer in French. Today is {}.", a.prompt_datetime);
+    assert!(prompt.find(base_first_line).unwrap() < prompt.find(&overlay).unwrap());
+    assert!(!prompt.contains("{{"));
+}
+
+#[test]
+fn empty_overlay_adds_nothing() {
+    let mut a = app_with_key();
+    a.system_prompt_overlay.clear();
+    let without_overlay = a.system_prompt();
+    for overlay in ["", " \t\n "] {
+        a.system_prompt_overlay = overlay.into();
+        assert_eq!(a.system_prompt(), without_overlay);
+    }
+}
+
+#[test]
 fn last_used_model_restored_on_startup() {
     let db = Db::open_in_memory().unwrap();
     db.mark_model_used("a/one").unwrap();

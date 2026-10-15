@@ -906,15 +906,19 @@ impl App {
     }
 
     /// Instructions + the active session's memory snapshot, combined into one
-    /// system message. The full system prompt puts the app's own base prompt
-    /// (identity/formatting rules, `$EDITOR`-editable) first, then space
-    /// instructions, skills, and the frozen memory snapshot layered on top.
-    /// Unlike those three, the base prompt is never empty — it's the app
-    /// speaking, not per-space configuration.
+    /// system message. The full system prompt puts the app's bundled base
+    /// prompt first, then interactive-UI instructions and user additions,
+    /// with space instructions, skills, and the frozen memory snapshot layered
+    /// on top. The base prompt is never empty — it's the app speaking, not
+    /// per-space configuration.
     pub fn system_prompt(&self) -> String {
         let mut parts: Vec<String> = vec![self.resolved_base_system_prompt()];
         if self.interactive_ui {
             parts.push(crate::interactive::INSTRUCTIONS.to_string());
+        }
+        let overlay = self.resolved_system_prompt_overlay();
+        if !overlay.is_empty() {
+            parts.push(overlay);
         }
         if !self.incognito {
             let instructions =
@@ -1073,23 +1077,29 @@ impl App {
         Ok(())
     }
 
-    /// `base_system_prompt` (raw, as read from `system_prompt.md`) with the
-    /// `{{verbosity}}` placeholder swapped for the level the user picked.
+    /// Bundled base prompt with `{{verbosity}}` and `{{datetime}}` resolved.
     pub fn resolved_base_system_prompt(&self) -> String {
         self.base_system_prompt
             .replace("{{verbosity}}", verbosity_clause(&self.verbosity))
             .replace("{{datetime}}", &self.prompt_datetime)
     }
 
-    /// Re-read `system_prompt.md` after a Ctrl+E hand-edit.
+    /// User additions with the same runtime placeholders as the bundled base.
+    pub(super) fn resolved_system_prompt_overlay(&self) -> String {
+        self.system_prompt_overlay
+            .trim()
+            .replace("{{verbosity}}", verbosity_clause(&self.verbosity))
+            .replace("{{datetime}}", &self.prompt_datetime)
+    }
+
+    /// Re-read the user additions in `system_prompt.md` after a Ctrl+E hand-edit.
     pub fn reload_base_system_prompt(&mut self) {
-        if let Ok(text) = crate::config::load_system_prompt() {
-            if text != self.base_system_prompt {
-                self.base_system_prompt = text;
-                self.bump_cache_epoch();
-            }
-            self.push_status("system prompt reloaded".to_string());
+        let text = crate::config::load_system_prompt_overlay();
+        if text != self.system_prompt_overlay {
+            self.system_prompt_overlay = text;
+            self.bump_cache_epoch();
         }
+        self.push_status("system prompt reloaded".to_string());
     }
 
     /// Names + descriptions of installed skills and how to invoke one — full

@@ -346,7 +346,8 @@ impl App {
     /// popup (Ctrl+G). Each bucket is a ~4-chars/token estimate, same method
     /// `context_used` falls back to, so the parts add up to (roughly) the whole.
     pub fn context_breakdown(&self) -> ContextBreakdown {
-        let mut instructions_chars = self.resolved_base_system_prompt().chars().count();
+        let mut instructions_chars = self.resolved_base_system_prompt().chars().count()
+            + self.resolved_system_prompt_overlay().chars().count();
         if self.interactive_ui {
             instructions_chars += crate::interactive::INSTRUCTIONS.chars().count();
         }
