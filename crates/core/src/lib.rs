@@ -28,6 +28,7 @@ pub mod skills;
 pub mod space;
 pub mod sync;
 pub mod tools;
+pub mod trace;
 pub mod update;
 
 use anyhow::Result;

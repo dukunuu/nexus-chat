@@ -53,6 +53,11 @@ impl Space {
         self.root.join("nexus.db")
     }
 
+    /// Device-local traces beside the shared database, never synced.
+    pub fn traces_dir(&self) -> PathBuf {
+        self.root.join("traces")
+    }
+
     /// Ensure `spaces/<name>/` exists, for a space just created in the db.
     pub fn ensure_space_dir(&self, name: &str) -> Result<()> {
         let dir = self.space_dir(name);
