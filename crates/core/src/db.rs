@@ -387,7 +387,19 @@ pub fn migrate_cache(conn: &Connection, schema: &str) -> Result<()> {
             mtime INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL
-        );",
+        );
+        CREATE TABLE IF NOT EXISTS {schema}.tool_events (
+            id INTEGER PRIMARY KEY,
+            at TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            tool TEXT NOT NULL,
+            action TEXT NOT NULL,
+            ok INTEGER NOT NULL,
+            error_kind TEXT,
+            latency_ms INTEGER NOT NULL,
+            result_chars INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS {schema}.tool_events_at ON tool_events(at);",
     ))?;
     Ok(())
 }

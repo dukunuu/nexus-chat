@@ -1341,6 +1341,7 @@ impl App {
         toolbox.space_apps_dir = self.space.apps_dir(&self.active_space.name);
         toolbox.space_scripts_dir = self.space.scripts_dir(&self.active_space.name);
         toolbox.supports_images = self.current_model_supports_images();
+        toolbox.record_events = !self.incognito;
         toolbox.session_id = self
             .session
             .as_ref()

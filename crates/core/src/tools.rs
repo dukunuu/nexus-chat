@@ -7,6 +7,7 @@ mod spec;
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde::Deserialize;
@@ -25,6 +26,65 @@ const MAX_BATCH_CALLS: usize = 8;
 /// while still bounding what a runaway batch pushes into the conversation.
 const MAX_BATCH_RESULT_CHARS: usize = MAX_TOOL_RESULT_CHARS * 4;
 
+const TOOL_ERROR_PREFIXES: &[(&str, &str)] = &[
+    ("missing required field", "invalid_args"),
+    ("invalid action for", "invalid_args"),
+    ("invalid mode for", "invalid_args"),
+    ("invalid scope for", "invalid_args"),
+    ("invalid tool arguments", "invalid_args"),
+    ("invalid path", "invalid_args"),
+    ("unknown tool:", "unknown_tool"),
+    ("path escapes", "confinement"),
+    ("unknown file:", "not_found"),
+    ("unknown skill:", "not_found"),
+    ("no such script:", "not_found"),
+    ("unknown app", "not_found"),
+    ("cannot read ", "not_found"),
+    ("write failed:", "io"),
+    ("db error:", "io"),
+    ("store error:", "io"),
+];
+
+pub(crate) struct ToolOutcome {
+    ok: bool,
+    error_kind: Option<&'static str>,
+    latency: Duration,
+    result_chars: usize,
+}
+
+fn classify_tool_result(result: &str, status: &str) -> Option<&'static str> {
+    let line = result.lines().next().unwrap_or_default().trim();
+    let prefix_kind = TOOL_ERROR_PREFIXES
+        .iter()
+        .find_map(|(prefix, kind)| line.starts_with(prefix).then_some(*kind));
+    if status == "invalid arguments" || prefix_kind == Some("invalid_args") {
+        return Some("invalid_args");
+    }
+    if status == "blocked" {
+        return Some("blocked");
+    }
+    if line.starts_with("hash ")
+        && [
+            "not found",
+            "matches multiple",
+            "targets a line already edited",
+        ]
+        .iter()
+        .any(|suffix| line.contains(suffix))
+    {
+        return Some("stale_edit");
+    }
+    if prefix_kind.is_some() {
+        return prefix_kind;
+    }
+    let (prefix, _) = line.split_once(" failed:")?;
+    (prefix.starts_with(|c: char| c.is_ascii_lowercase())
+        && prefix.bytes().all(|b| b.is_ascii_lowercase() || b == b' '))
+    .then_some("upstream")
+}
+
+// Independent capability and privacy switches, not mutually exclusive states.
+#[allow(clippy::struct_excessive_bools)]
 pub struct ToolBox {
     /// App-managed destination for newly created or downloaded skills.
     pub skills_dir: PathBuf,
@@ -52,6 +112,8 @@ pub struct ToolBox {
     /// (`web_cache`, `file_chunks`, `model_prices`) resolve on one
     /// connection. `None` disables the cache-backed tools (some tests).
     db_path: Option<PathBuf>,
+    /// Opt in to device-local tool outcome recording. Disabled in incognito.
+    pub record_events: bool,
     /// Set for follow-up turns inside a `/research` session: enables the
     /// `research_lookup(scope=session_sources)` over that session's gathered source bundle.
     research_session_id: Option<String>,
@@ -411,6 +473,7 @@ impl ToolBox {
             research_only: false,
             blocked_domains,
             db_path,
+            record_events: false,
             research_session_id: None,
             client: reqwest::Client::new(),
             files,
@@ -775,9 +838,61 @@ impl ToolBox {
 
     /// Run a tool by name. Returns `(result text sent back to the model,
     /// status label shown in the UI while it runs)`.
+    pub async fn run(&self, name: &str, args: &str) -> (String, String) {
+        let started = Instant::now();
+        let (result, status) = self.run_inner(name, args).await;
+        let latency = started.elapsed();
+        let error_kind = classify_tool_result(&result, &status);
+        let outcome = ToolOutcome {
+            ok: error_kind.is_none(),
+            error_kind,
+            latency,
+            result_chars: result.chars().count(),
+        };
+        self.record_tool_event(name, args, &outcome);
+        (result, status)
+    }
+
+    fn record_tool_event(&self, name: &str, args: &str, outcome: &ToolOutcome) {
+        if !self.record_events {
+            return;
+        }
+        let Some(db_path) = &self.db_path else {
+            return;
+        };
+        let Ok(conn) = crate::db::open_attached(db_path) else {
+            return;
+        };
+        let args: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
+        let action = ["action", "mode", "scope"]
+            .iter()
+            .find_map(|key| args.get(key).and_then(serde_json::Value::as_str))
+            .unwrap_or_default();
+        let now = chrono::Utc::now();
+        let _ = conn.execute(
+            "INSERT INTO cache.tool_events
+                (at, session_id, tool, action, ok, error_kind, latency_ms, result_chars)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                now.to_rfc3339(),
+                self.session_id,
+                name,
+                action,
+                outcome.ok,
+                outcome.error_kind,
+                i64::try_from(outcome.latency.as_millis()).unwrap_or(i64::MAX),
+                i64::try_from(outcome.result_chars).unwrap_or(i64::MAX),
+            ],
+        );
+        let _ = conn.execute(
+            "DELETE FROM cache.tool_events WHERE at < ?1",
+            [(now - chrono::Duration::days(90)).to_rfc3339()],
+        );
+    }
+
     // Long by design: the model tool dispatch (each arm is one tool).
     #[allow(clippy::too_many_lines)]
-    pub async fn run(&self, name: &str, args: &str) -> (String, String) {
+    async fn run_inner(&self, name: &str, args: &str) -> (String, String) {
         if self.research_only
             && !matches!(
                 name,
@@ -4851,6 +4966,187 @@ fn build_lighting_filter(preset: &str, intensity: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_tool_result_kinds() {
+        for (result, status, expected) in [
+            ("anything", "invalid arguments", Some("invalid_args")),
+            ("missing required field: name", "", Some("invalid_args")),
+            ("invalid action for scripts: x", "", Some("invalid_args")),
+            ("invalid mode for search: x", "", Some("invalid_args")),
+            (
+                "invalid scope for research_lookup: x",
+                "",
+                Some("invalid_args"),
+            ),
+            ("invalid tool arguments: bad JSON", "", Some("invalid_args")),
+            ("invalid path: ../x", "", Some("invalid_args")),
+            ("anything", "blocked", Some("blocked")),
+            (
+                "missing required field: name",
+                "blocked",
+                Some("invalid_args"),
+            ),
+            ("unknown tool: x", "", Some("unknown_tool")),
+            ("hash abc not found", "", Some("stale_edit")),
+            ("hash abc matches multiple lines", "", Some("stale_edit")),
+            (
+                "hash abc targets a line already edited",
+                "",
+                Some("stale_edit"),
+            ),
+            (
+                "path escapes the scripts directory",
+                "",
+                Some("confinement"),
+            ),
+            ("unknown file: x", "", Some("not_found")),
+            ("unknown skill: x", "", Some("not_found")),
+            ("no such script: x", "", Some("not_found")),
+            ("unknown app x", "", Some("not_found")),
+            ("cannot read x", "", Some("not_found")),
+            ("  write failed: denied  ", "", Some("io")),
+            ("db error: locked", "", Some("io")),
+            ("store error: locked", "", Some("io")),
+            ("search failed: offline", "", Some("upstream")),
+            ("pip install failed: offline", "", Some("upstream")),
+            ("video generation failed: offline", "", Some("upstream")),
+            ("venv creation failed: offline", "", Some("upstream")),
+            ("file search failed: offline", "", Some("upstream")),
+            ("citation lookup failed: offline", "", Some("upstream")),
+            ("normal result", "", None),
+            ("file.txt:\nwrite failed: this is file content", "", None),
+            ("file.txt: write failed: this is file content", "", None),
+            ("hash abc\nnot found", "", None),
+            ("Search failed: uppercase", "", None),
+            ("api2 failed: digit", "", None),
+            ("", "", None),
+        ] {
+            assert_eq!(
+                classify_tool_result(result, status),
+                expected,
+                "result={result:?}, status={status:?}"
+            );
+        }
+    }
+
+    fn tool_events_toolbox() -> (ToolBox, crate::db::Db) {
+        let dir = std::env::temp_dir().join(format!("nexus-tool-events-{}", uuid::Uuid::new_v4()));
+        let scripts = dir.join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        let path = dir.join("nexus.db");
+        let db = crate::db::Db::open(&path).unwrap();
+        let mut tb = ToolBox::new(
+            dir.join("skills"),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            Some(path),
+            None,
+            None,
+        );
+        tb.space_scripts_dir = scripts;
+        tb.session_id = "s1".to_string();
+        (tb, db)
+    }
+
+    #[tokio::test]
+    async fn tool_calls_are_recorded_with_outcome() {
+        let (mut tb, db) = tool_events_toolbox();
+        tb.record_events = true;
+        let (success, _) = tb.run("scripts", r#"{"action":"list"}"#).await;
+        let (failure, _) = tb.run("scripts", r#"{"action":"python","code":"x"}"#).await;
+        assert_eq!(success, "[]");
+        assert!(
+            failure.starts_with("missing required field: name"),
+            "{failure}"
+        );
+
+        let mut stmt = db
+            .raw()
+            .prepare(
+                "SELECT at, session_id, tool, action, ok, error_kind, latency_ms, result_chars
+                 FROM cache.tool_events ORDER BY id",
+            )
+            .unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        for (action, ok, error_kind, result) in [
+            ("list", true, None, success),
+            ("python", false, Some("invalid_args"), failure),
+        ] {
+            let row = rows.next().unwrap().unwrap();
+            let at =
+                chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(0).unwrap()).unwrap();
+            assert_eq!(at.offset().local_minus_utc(), 0);
+            assert_eq!(row.get::<_, String>(1).unwrap(), "s1");
+            assert_eq!(row.get::<_, String>(2).unwrap(), "scripts");
+            assert_eq!(row.get::<_, String>(3).unwrap(), action);
+            assert_eq!(row.get::<_, bool>(4).unwrap(), ok);
+            assert_eq!(
+                row.get::<_, Option<String>>(5).unwrap().as_deref(),
+                error_kind
+            );
+            assert!(row.get::<_, i64>(6).unwrap() >= 0);
+            assert_eq!(
+                row.get::<_, i64>(7).unwrap(),
+                i64::try_from(result.chars().count()).unwrap()
+            );
+        }
+        assert!(rows.next().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn no_events_without_opt_in() {
+        let (tb, db) = tool_events_toolbox();
+        assert!(!tb.record_events);
+        tb.run("scripts", r#"{"action":"list"}"#).await;
+        tb.run("scripts", r#"{"action":"python","code":"x"}"#).await;
+        let count: i64 = db
+            .raw()
+            .query_row("SELECT COUNT(*) FROM cache.tool_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn batch_records_each_sub_call() {
+        let (mut tb, db) = tool_events_toolbox();
+        tb.record_events = true;
+        tb.run(
+            "batch",
+            r#"{"calls":[
+                {"tool":"scripts","arguments":{"action":"list"}},
+                {"tool":"scripts","arguments":{"action":"list"}}
+            ]}"#,
+        )
+        .await;
+        let mut stmt = db
+            .raw()
+            .prepare("SELECT tool, action, ok FROM cache.tool_events ORDER BY id")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("scripts".to_string(), "list".to_string(), true),
+                ("scripts".to_string(), "list".to_string(), true),
+                ("batch".to_string(), String::new(), true),
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn run_cmd_env_never_passes_secrets() {
