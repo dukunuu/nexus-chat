@@ -22,6 +22,7 @@ use super::{
     ChatMessage, ChatParams, Completion, Model, ModelPricing, PromptConvention, ReasoningEffort,
     StreamEvent, ToolCall, ToolDef, Usage,
 };
+use crate::prompts;
 use crate::tools::ToolExecutor;
 
 const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
@@ -3080,13 +3081,7 @@ fn codex_usage(data: &str) -> Option<Usage> {
 /// Request body for a one-shot image-understanding call: a text part with the
 /// instruction plus the image as a data-URL content part (`OpenAI` vision shape).
 /// Shared page-transcription instructions (``OpenRouter`` VLMs and local Ollama).
-pub const OCR_PROMPT: &str = "Transcribe this scanned page to plain text, faithfully and completely. \
-     Output ONLY the transcription — no commentary, no markdown fences. \
-     Preserve the natural reading order; vertical Japanese text reads in \
-     columns from right to left. Transcribe the body text only: skip \
-     furigana/ruby annotations (the small kana printed above or beside \
-     kanji). Render tables as plain text rows. If the page contains no \
-     text, output nothing.";
+pub const OCR_PROMPT: &str = prompts::OCR.trim_ascii_end();
 
 fn ocr_body(model: &str, image_data_url: &str) -> serde_json::Value {
     serde_json::json!({
@@ -3097,7 +3092,7 @@ fn ocr_body(model: &str, image_data_url: &str) -> serde_json::Value {
         "messages": [{
             "role": "user",
             "content": [
-                { "type": "text", "text": OCR_PROMPT },
+                { "type": "text", "text": prompts::render(prompts::OCR, &[]) },
                 { "type": "image_url", "image_url": { "url": image_data_url } },
             ],
         }],

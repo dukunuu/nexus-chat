@@ -113,7 +113,7 @@ The README has the full tree; the parts agents touch most:
 - **Batch discipline**: models are encouraged to use the `batch` tool for
   independent operations; `batch` validates nesting, sizes, and read-only
   classification (see `tools.rs` tests).
-- **Model-facing text**: `crates/core/assets/system-prompt-base.md` is the base prompt
+- **Model-facing text**: `crates/core/assets/prompts/base.md` is the base prompt
   bundled into every session; changes there affect all backends.
 - **Skills**: `crates/core/assets/find-skills-SKILL.md` is the model-facing skill for
   discovering/installing skills. Skills are SKILL.md packs with sandboxed

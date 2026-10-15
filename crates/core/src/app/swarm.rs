@@ -15,6 +15,7 @@ use tokio::time::{Duration, timeout};
 use super::App;
 use crate::app::backends::Backends;
 use crate::db::Persona;
+use crate::prompts;
 use crate::provider::openrouter::OpenRouter;
 use crate::provider::{ChatMessage, ChatParams, StreamEvent};
 use crate::tools::ToolExecutor;
@@ -419,31 +420,28 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
             let mut messages = base_history.clone();
             messages.push(ChatMessage::text(
                 "system",
-                format!(
-                    "You are {} in a live group conversation with the other personas below. \
-                     Your persona: {}. This discussion proceeds in rounds and every persona \
-                     gets one response per round. Speak naturally and briefly (a few sentences), \
-                     stay in character, and actually engage with what the prior speakers said — \
-                     agree, push back, build on it, or ask a question. Use the available tools \
-                     when they would improve your answer. Don't just restate your opening \
-                     position every round.",
-                    p.name, p.blurb
+                prompts::render(
+                    prompts::SWARM_PERSONA,
+                    &[("name", &p.name), ("blurb", &p.blurb)],
                 ),
             ));
             match render_discussion(&discussion) {
                 Some(transcript) => messages.push(ChatMessage::text(
                     "user",
-                    format!(
-                        "Conversation so far:\n\n{transcript}\n\nRound {round}: it's your chance \
-                         to respond, {}. Engage with what was said.",
-                        p.name
+                    prompts::render(
+                        prompts::SWARM_REPLY_TURN,
+                        &[
+                            ("transcript", &transcript),
+                            ("round", &round.to_string()),
+                            ("name", &p.name),
+                        ],
                     ),
                 )),
                 None => messages.push(ChatMessage::text(
                     "user",
-                    format!(
-                        "Round {round}: you're opening the discussion, {}. Give your first take.",
-                        p.name
+                    prompts::render(
+                        prompts::SWARM_OPENING_TURN,
+                        &[("round", &round.to_string()), ("name", &p.name)],
                     ),
                 )),
             }
@@ -618,12 +616,7 @@ async fn suggest_personas(
     default_model: &str,
     prompt_cache_key: &str,
 ) -> Result<Vec<Persona>, String> {
-    let prompt = format!(
-        "Suggest exactly 3 distinct personas to discuss the following message from different \
-         points of view. Reply with ONLY a JSON array, no prose, no markdown fences, shaped \
-         like: [{{\"name\": \"short persona name\", \"blurb\": \"one-sentence personality and \
-         perspective\"}}, ...]\n\nMessage: {topic}"
-    );
+    let prompt = prompts::render(prompts::SWARM_ROSTER, &[("topic", topic)]);
     let params = ChatParams {
         prompt_cache_key: Some(prompt_cache_key.to_string()),
         ..ChatParams::default()
@@ -677,16 +670,9 @@ async fn moderator_check(
     prompt_cache_key: &str,
 ) -> Result<ModeratorVerdict, String> {
     let transcript = render_discussion(discussion).unwrap_or_default();
-    let prompt = format!(
-        "A panel of personas is having a live conversation about this message:\n\n{topic}\n\n\
-         Conversation so far:\n\n{transcript}\n\nDecide one of three things and reply with ONLY \
-         one line, no other text:\n\
-         - If they've reached a conclusion (agreement, a clear resolution, or a settled \
-         trade-off), reply exactly: CONVERGED\n\
-         - If the conversation is missing an important point of view that would meaningfully \
-         change it, reply exactly: ADD: <short persona name> | <one-sentence personality and \
-         perspective>\n\
-         - Otherwise, reply exactly: CONTINUE"
+    let prompt = prompts::render(
+        prompts::SWARM_MODERATOR,
+        &[("topic", topic), ("transcript", &transcript)],
     );
     let params = ChatParams {
         prompt_cache_key: Some(prompt_cache_key.to_string()),
@@ -730,13 +716,9 @@ async fn synthesize(
     prompt_cache_key: &str,
 ) -> Result<String> {
     let transcript = render_discussion(discussion).unwrap_or_default();
-    let prompt = format!(
-        "A panel of personas had this conversation about a message:\n\n{topic}\n\n\
-         Conversation:\n\n{transcript}\n\nWrite one final reply to the original message that \
-         states the conclusion this conversation actually reached — the agreement, resolution, \
-         or trade-off they settled on — as a clear, useful answer. If they genuinely disagreed \
-         to the end, say so and give the best-supported call. Markdown allowed. Don't mention \
-         that this came from a panel — just answer well, informed by the conversation."
+    let prompt = prompts::render(
+        prompts::SWARM_SYNTHESIS,
+        &[("topic", topic), ("transcript", &transcript)],
     );
     let params = ChatParams {
         prompt_cache_key: Some(prompt_cache_key.to_string()),

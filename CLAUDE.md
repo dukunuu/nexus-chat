@@ -105,7 +105,7 @@ Other structural facts worth knowing before editing:
 
 ## Model-facing text
 
-`crates/core/assets/system-prompt-base.md` is bundled into every session — edits
+`crates/core/assets/prompts/base.md` is bundled into every session — edits
 there change behavior on all backends. `crates/core/assets/find-skills-SKILL.md`
 is the skill-discovery pack. Skills are `SKILL.md` directories with sandboxed
 Python virtualenvs (`src/skills.rs`), discovered from the app-managed root, then

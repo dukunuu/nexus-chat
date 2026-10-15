@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use super::{App, ContextBreakdown};
 use crate::db::Message;
+use crate::prompts;
 use crate::provider::{ChatMessage, ChatParams};
 
 impl App {
@@ -171,13 +172,7 @@ impl App {
             }
             prompt.push_str("New messages since that summary:\n");
             prompt.push_str(&tail);
-            prompt.push_str(
-                "\n\nCompress ALL of the above into one ultra-dense technical digest: cut \
-                 every pleasantry, filler word, and repeated explanation, but keep every \
-                 decision, fact, file/function name, code snippet, number, and open thread — \
-                 nothing substantive may be lost. Terse fragments are fine. No headers, no \
-                 meta-commentary about summarizing. Reply with ONLY the digest.",
-            );
+            prompt.push_str(&prompts::render(prompts::COMPACTION, &[]));
             let msgs = vec![ChatMessage::text("user", prompt)];
             let params = ChatParams {
                 prompt_cache_key: Some(prompt_cache_key),

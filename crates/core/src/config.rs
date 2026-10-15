@@ -20,7 +20,7 @@ pub const SECRET_ENV_VARS: &[&str] = &[
 ];
 
 /// Bundled base instructions, always used directly from the binary.
-pub const BASE_SYSTEM_PROMPT: &str = include_str!("../assets/system-prompt-base.md");
+pub const BASE_SYSTEM_PROMPT: &str = include_str!("../assets/prompts/base.md");
 
 // SHA-256 of every base prompt nexus ever copied into system_prompt.md.
 // This list is frozen because nexus no longer copies it.

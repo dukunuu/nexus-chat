@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 use tokio::sync::mpsc;
 
 use crate::db::Message;
+use crate::prompts;
 use crate::provider::{ChatMessage, ChatParams, StreamEvent, ToolCall, Usage};
 
 use super::{App, SPINNER_COLORS, SpinnerColor, THINKING, parse_topic, verbosity_clause};
@@ -883,10 +884,7 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel();
         self.title_rx = Some(rx);
         tokio::spawn(async move {
-            let prompt = format!(
-                "Summarise this conversation as a session name. Reply with ONLY a JSON object, \
-                 no markdown, of the form {{\"topic\": \"<3-5 word title>\", \"id\": \"<short-kebab-slug>\"}}.\n\n{convo}"
-            );
+            let prompt = prompts::render(prompts::TITLE, &[("conversation", &convo)]);
             let msgs = vec![ChatMessage::text("user", prompt)];
             if let Ok(text) = provider.complete(&raw_model, msgs).await
                 && let Some((topic, slug)) = parse_topic(&text)

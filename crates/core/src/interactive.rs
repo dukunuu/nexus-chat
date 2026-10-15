@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 /// Model instructions advertised only by clients with an interactive renderer.
-pub const INSTRUCTIONS: &str = include_str!("../assets/interactive-ui.md");
+pub const INSTRUCTIONS: &str = include_str!("../assets/prompts/interactive-ui.md");
 
 /// Maximum serialized UI document size.
 pub const MAX_SOURCE: usize = 16 * 1024;

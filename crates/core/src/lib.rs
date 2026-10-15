@@ -22,6 +22,7 @@ pub mod extract;
 pub mod host;
 pub mod interactive;
 pub mod markdown;
+pub mod prompts;
 pub mod provider;
 pub mod skills;
 pub mod space;

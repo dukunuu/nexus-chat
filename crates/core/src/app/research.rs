@@ -14,6 +14,7 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
+use crate::prompts;
 use crate::provider::ChatMessage;
 use std::fmt::Write as _;
 
@@ -151,32 +152,27 @@ pub enum Approval {
     Malformed,
 }
 
-const PLANNER_PROMPT: &str = "You are the planning stage of an automated research pipeline. Given a research topic, decompose it into 3 to 6 focused sub-questions that together cover the topic thoroughly (different angles: definitions, current state, evidence/data, controversies, practical implications — whichever apply). For each sub-question include: 'question' (the sub-question itself), 'why' (one short sentence on the angle it covers), 'angles' (2-5 specific facets to investigate), and 'sources' (1-4 source types or leads likely to answer it). Respond with ONLY a JSON array of objects, no prose, no markdown fences. Example: [{\"question\": \"...\", \"why\": \"...\", \"angles\": [\"...\", \"...\"], \"sources\": [\"...\", \"...\"]}]. Note: searcher agents handling scholarly sub-questions can call search(mode=academic) in addition to search(mode=web), so peer-reviewed angles are fair game.";
+#[cfg(test)]
+const PLANNER_PROMPT: &str = prompts::RESEARCH_PLANNER.trim_ascii_end();
 
-const SURVEY_AGENT_PROMPT: &str = "You are the scoping stage of a research pipeline. You'll be given a research topic and, on later rounds, the user's answers so far. Ask 1 to 4 focused clarifying questions that would meaningfully change the research plan — scope, depth, angles, constraints — and skip anything you can infer. When you have enough to plan, reply with exactly the single word COMPLETE. Otherwise reply with your numbered questions only, one per line, no preamble, no markdown.";
-
-const PLAN_APPROVAL_PROMPT: &str = "You are the approval stage of a research pipeline. The user was shown a plan of sub-questions (each with why/angles/sources). If the user's reply approves it — phrases like 'approve', 'looks good', 'go', 'ok', 'yes', or a bare affirmation — reply with exactly the single word APPROVED. Otherwise fold their feedback into the plan: apply the requested changes (drop questions, add angles, reword, add new questions up to 6 total) and reply with ONLY the revised JSON array of plan objects, no prose, no markdown fences. Example: [{\"question\": \"...\", \"why\": \"...\", \"angles\": [\"...\", \"...\"], \"sources\": [\"...\", \"...\"]}]";
-
-pub const SEARCHER_PROMPT: &str = "You are a research searcher agent. You will be given one focused sub-question. Use search(mode=web) and fetch_url to investigate it thoroughly: search, then fetch and read the most promising pages, and search again with new terms you learn from them if needed. When you have enough to answer well, write a concise findings summary (a few paragraphs, prose, no headers) that directly answers the sub-question, citing sources inline as [n]. End your answer with a line starting exactly with 'Sources:' followed by the numbered list of URLs you used, one per line, matching your [n] citations. Prefer sources from domains you have not already cited — diverse sources make a stronger report.";
+pub const SEARCHER_PROMPT: &str = prompts::RESEARCH_SEARCHER.trim_ascii_end();
 
 /// Fixed protocol text placed before every research-stage instruction. Keeping
 /// this prefix byte-identical gives independent stages and agent branches a
 /// common provider-cache anchor; stage-specific instructions follow it.
-const RESEARCH_CACHE_PREFIX: &str = "You are operating inside Nexus's deterministic research workflow. Treat this request as one step in a structured pipeline: obey the stage instruction that follows, use only evidence supplied by the current messages or tools, preserve exact URLs and citation meaning, and never invent a source or claim. Earlier messages may be workflow context; do not repeat them unless the current stage asks for it. Keep output within the requested format because the next pipeline stage parses it mechanically. This protocol is fixed across research stages so the reusable input prefix remains stable.";
+#[cfg(test)]
+const RESEARCH_CACHE_PREFIX: &str = prompts::RESEARCH_CACHE_PREFIX.trim_ascii_end();
 
 fn research_stage_prompt(stage: &str) -> String {
-    format!("{RESEARCH_CACHE_PREFIX}\n\n{stage}")
+    let prefix = prompts::render(prompts::RESEARCH_CACHE_PREFIX, &[]);
+    format!("{prefix}\n\n{stage}")
 }
 
-const SYNTHESIZER_PROMPT: &str = "You are the synthesis stage of a research pipeline. You'll be given the original topic and findings from several searcher agents, each already citing their own sources. Combine them into a single coherent draft report on the topic: organize by theme (not by sub-question), resolve obvious overlaps, keep every citation but you may renumber them consistently as you merge. Do not invent facts not present in the findings. Output the draft report in markdown, no preamble.";
+#[cfg(test)]
+const VERIFIER_PROMPT: &str = prompts::RESEARCH_VERIFIER.trim_ascii_end();
 
-const CRITIC_PROMPT: &str = "You are the critic stage of a research pipeline. Given the original topic and a draft report, decide if it's ready. Respond in exactly one of these forms:\n- the single word SATISFIED, if the draft thoroughly covers the topic with no notable gaps or contradictions.\n- GAPS: followed by a newline-separated bullet list (each line starting with '- ') of specific missing sub-topics or unanswered angles, each phrased as a searchable question.\n- CONTRADICTION: followed by one line describing a specific factual contradiction between sources in the draft that isn't resolved.\nUse CONTRADICTION only for an actual conflict between sources, not a missing angle — missing angles are always GAPS. Respond with nothing else.";
-
-const RESOLVER_PROMPT: &str = "You are resolving a contradiction found in a research draft. You are given the topic, the draft, the full set of source findings gathered so far, and a description of the contradiction. Determine which claim the evidence better supports (or that both apply in different contexts) and write one paragraph resolving it, citing the [n] sources involved. Output only that paragraph.";
-
-const VERIFIER_PROMPT: &str = "You are the verifier stage. Given the topic, the gathered source findings (with their citations), and a draft report, check every factual claim in the draft against the source findings. Rewrite the draft unchanged except: (1) remove or mark with '⚠ unverifiable:' any claim not actually supported by the gathered findings; (2) immediately after a claim's citations, judge its confidence from citation count and cross-source agreement and, only for low or medium confidence, append the tag ‹low› or ‹med› right after the citation (high confidence is the default and stays untagged — do not tag it). Output the corrected draft in markdown, nothing else. You have a fetch_url tool restricted to already-cached pages: use it to check any direct quote in the draft against the cached source text, and mark a quote that doesn't actually match with '‹unverified quote›' immediately after it.";
-
-const WRITER_PROMPT: &str = "You are the final writer stage. Given the topic and a verified draft report (with inline [n] citations and prose from earlier stages, possibly including a contradiction-resolution paragraph to fold in), produce the final report: clean markdown, a short introductory paragraph, organized sections with headers, inline [n] citations preserved/renumbered consistently, and a trailing '## Sources' section listing every cited URL as 'n. url'. Output only the final report markdown, nothing else — it will be saved and shown to the user as-is.";
+#[cfg(test)]
+const WRITER_PROMPT: &str = prompts::RESEARCH_WRITER.trim_ascii_end();
 
 /// The Critic stage's structured decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -443,7 +439,10 @@ fn planner_messages_with_context(
         );
     }
     vec![
-        ChatMessage::text("system", research_stage_prompt(PLANNER_PROMPT)),
+        ChatMessage::text(
+            "system",
+            research_stage_prompt(&prompts::render(prompts::RESEARCH_PLANNER, &[])),
+        ),
         ChatMessage::text("user", user),
     ]
 }
@@ -465,7 +464,10 @@ fn survey_messages(topic: &str, rounds: &[(String, String)]) -> Vec<ChatMessage>
         }
     }
     vec![
-        ChatMessage::text("system", research_stage_prompt(SURVEY_AGENT_PROMPT)),
+        ChatMessage::text(
+            "system",
+            research_stage_prompt(&prompts::render(prompts::RESEARCH_SURVEY, &[])),
+        ),
         ChatMessage::text("user", user),
     ]
 }
@@ -479,7 +481,10 @@ fn plan_approval_messages(
     user_reply: &str,
 ) -> Vec<ChatMessage> {
     vec![
-        ChatMessage::text("system", research_stage_prompt(PLAN_APPROVAL_PROMPT)),
+        ChatMessage::text(
+            "system",
+            research_stage_prompt(&prompts::render(prompts::RESEARCH_PLAN_APPROVAL, &[])),
+        ),
         ChatMessage::text(
             "user",
             format!(
@@ -507,14 +512,20 @@ fn synthesizer_messages(topic: &str, findings: &[String], pinned: &[String]) -> 
     }
     user.push_str(&body);
     vec![
-        ChatMessage::text("system", research_stage_prompt(SYNTHESIZER_PROMPT)),
+        ChatMessage::text(
+            "system",
+            research_stage_prompt(&prompts::render(prompts::RESEARCH_SYNTHESIZER, &[])),
+        ),
         ChatMessage::text("user", user),
     ]
 }
 
 fn critic_messages(topic: &str, draft: &str) -> Vec<ChatMessage> {
     vec![
-        ChatMessage::text("system", research_stage_prompt(CRITIC_PROMPT)),
+        ChatMessage::text(
+            "system",
+            research_stage_prompt(&prompts::render(prompts::RESEARCH_CRITIC, &[])),
+        ),
         ChatMessage::text("user", format!("Topic: {topic}\n\nDraft:\n{draft}")),
     ]
 }
@@ -527,7 +538,10 @@ fn resolver_messages(
 ) -> Vec<ChatMessage> {
     let body = findings.join("\n\n");
     vec![
-        ChatMessage::text("system", research_stage_prompt(RESOLVER_PROMPT)),
+        ChatMessage::text(
+            "system",
+            research_stage_prompt(&prompts::render(prompts::RESEARCH_RESOLVER, &[])),
+        ),
         ChatMessage::text(
             "user",
             format!(
@@ -540,7 +554,10 @@ fn resolver_messages(
 fn verifier_messages(topic: &str, draft: &str, findings: &[String]) -> Vec<ChatMessage> {
     let body = findings.join("\n\n");
     vec![
-        ChatMessage::text("system", research_stage_prompt(VERIFIER_PROMPT)),
+        ChatMessage::text(
+            "system",
+            research_stage_prompt(&prompts::render(prompts::RESEARCH_VERIFIER, &[])),
+        ),
         ChatMessage::text(
             "user",
             format!("Topic: {topic}\n\nSource findings:\n{body}\n\nDraft:\n{draft}"),
@@ -559,7 +576,10 @@ fn writer_messages(topic: &str, verified_draft: &str, pinned: &[String]) -> Vec<
     }
     let _ = write!(user, "Verified draft:\n{verified_draft}");
     vec![
-        ChatMessage::text("system", research_stage_prompt(WRITER_PROMPT)),
+        ChatMessage::text(
+            "system",
+            research_stage_prompt(&prompts::render(prompts::RESEARCH_WRITER, &[])),
+        ),
         ChatMessage::text("user", user),
     ]
 }
@@ -775,7 +795,10 @@ async fn run_searcher(
         format!("working — investigating \"{display}\""),
     );
     let messages = vec![
-        ChatMessage::text("system", research_stage_prompt(SEARCHER_PROMPT)),
+        ChatMessage::text(
+            "system",
+            research_stage_prompt(&prompts::render(SEARCHER_PROMPT, &[])),
+        ),
         ChatMessage::text("user", prompt),
     ];
     let tools = ctx.toolbox.defs();
@@ -1836,10 +1859,9 @@ impl super::App {
         self.research_topic_rx = Some(rx);
         self.push_status("scoping a research topic from this chat…".to_string());
         tokio::spawn(async move {
-            let prompt = format!(
-                "Based on this conversation, reply with ONLY a single-line research topic \
-                 or question suitable for a multi-source research task. No preamble, no \
-                 quotes, no markdown.\n\n{convo}"
+            let prompt = prompts::render(
+                prompts::RESEARCH_TOPIC_FROM_CHAT,
+                &[("conversation", &convo)],
             );
             let msgs = vec![ChatMessage::text("user", prompt)];
             let result = provider

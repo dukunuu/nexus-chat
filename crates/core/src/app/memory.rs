@@ -9,6 +9,7 @@
 )]
 use super::{App, MemoryOp};
 use crate::db::Message;
+use crate::prompts;
 use crate::provider::{ChatMessage, ChatParams};
 use std::fmt::Write as _;
 use tokio::sync::mpsc;
@@ -84,20 +85,13 @@ impl App {
         self.memory_rx = Some(rx);
         tokio::spawn(async move {
             let truncate = |s: &str| s.chars().take(2000).collect::<String>();
-            let prompt = format!(
-                "Stored facts (numbered, may be empty):\n{facts}\n\n\
-                 Latest exchange:\nuser: {}\nassistant: {}\n\n\
-                 Reply with ONLY a JSON array of memory ops, no markdown, no prose. \
-                 Each op is one of:\n\
-                 {{\"op\":\"add\",\"text\":\"<durable single-line fact>\"}}\n\
-                 {{\"op\":\"update\",\"id\":<N>,\"text\":\"<replacement>\"}}\n\
-                 {{\"op\":\"delete\",\"id\":<N>}}\n\
-                 Empty array [] if nothing memory-worthy. Facts must be durable and \
-                 user/project-relevant (preferences, identity, ongoing goals) — never a \
-                 summary of what was just said. Merge/update instead of duplicating. \
-                 Keep the total under 500 facts.",
-                truncate(&user_msg.content),
-                truncate(&assistant_msg.content),
+            let prompt = prompts::render(
+                prompts::MEMORY,
+                &[
+                    ("facts", &facts),
+                    ("user", &truncate(&user_msg.content)),
+                    ("assistant", &truncate(&assistant_msg.content)),
+                ],
             );
             let msgs = vec![ChatMessage::text("user", prompt)];
             let params = ChatParams {
