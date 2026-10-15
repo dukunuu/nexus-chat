@@ -27,9 +27,13 @@ clap = { workspace = true }
 crossterm = { workspace = true }
 futures-util = { workspace = true }
 image = { workspace = true }
+mermaid-rs-renderer = { workspace = true }
 open = { workspace = true }
+pulldown-cmark = { workspace = true }
 qrcode = { workspace = true }
 ratatui = { workspace = true }
+ratatui-image = { workspace = true }
+resvg = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

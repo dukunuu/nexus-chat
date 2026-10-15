@@ -4,6 +4,7 @@
 //! leaves block markers as literal text (`# `, `- `, ```` ``` ````); we strip
 //! those so the display — and anything copied from it — is clean text.
 
+use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use tui_markdown::{DefaultStyleSheet, Options, StyleSheet};
@@ -67,6 +68,10 @@ pub struct Rendered {
     pub lines: Vec<Line<'static>>,
     pub code: Vec<Option<usize>>,
     pub blocks: Vec<String>,
+    /// Fixed-height Mermaid regions, painted by the history view after text.
+    pub diagrams: Vec<crate::diagrams::Placement>,
+    /// Model-authored UI regions, rendered and hit-tested separately from text.
+    pub widgets: Vec<crate::interactive::Placement>,
 }
 
 impl Rendered {
@@ -115,17 +120,150 @@ impl Default for MdColors {
 }
 
 pub fn render(content: &str, width: usize, colors: MdColors) -> Rendered {
-    let content = terminal_safe(content);
     let mut r = Rendered::default();
-    for seg in nexus_core::markdown::split_tables(&content) {
-        match seg {
-            TableSegment::Table(rows, aligns) => {
-                render_table(&mut r, &rows, &aligns, width, colors);
+    let mut cursor = 0;
+    let mut diagram: Option<(std::ops::Range<usize>, String, bool)> = None;
+    for (event, range) in Parser::new(content).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info)))
+                if info.split_whitespace().next().is_some_and(|lang| {
+                    lang.eq_ignore_ascii_case("mermaid") || lang.eq_ignore_ascii_case("nexus-ui")
+                }) =>
+            {
+                let ui = info
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|lang| lang.eq_ignore_ascii_case("nexus-ui"));
+                diagram = Some((range, String::new(), ui));
             }
-            TableSegment::Text(text) => render_text(&mut r, &text, width, colors),
+            Event::Text(text) => {
+                if let Some((_, source, _)) = &mut diagram {
+                    source.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some((range, source, ui)) = diagram.take() {
+                    render_normal(&mut r, &content[cursor..range.start], width, colors);
+                    let raw = &content[range.clone()];
+                    let fence = raw.chars().next().unwrap_or('`');
+                    let length = raw.chars().take_while(|&ch| ch == fence).count();
+                    let closed = raw.lines().last().is_some_and(|line| {
+                        let line = line.trim_start_matches([' ', '\t', '>']);
+                        let count = line.chars().take_while(|&ch| ch == fence).count();
+                        count >= length && line[count..].trim().is_empty()
+                    });
+                    let source = source.strip_suffix('\n').unwrap_or(&source);
+                    if ui {
+                        render_ui(&mut r, source, closed, width, colors);
+                    } else {
+                        render_diagram(&mut r, source, closed, width, colors);
+                    }
+                    cursor = range.end;
+                }
+            }
+            _ => {}
         }
     }
+    render_normal(&mut r, &content[cursor..], width, colors);
     r
+}
+
+fn render_normal(r: &mut Rendered, content: &str, width: usize, colors: MdColors) {
+    let content = terminal_safe(content);
+    for segment in nexus_core::markdown::split_tables(&content) {
+        match segment {
+            TableSegment::Table(rows, aligns) => render_table(r, &rows, &aligns, width, colors),
+            TableSegment::Text(text) => render_text(r, &text, width, colors),
+        }
+    }
+}
+
+#[cfg(test)]
+mod interactive_tests;
+
+fn render_ui(r: &mut Rendered, source: &str, complete: bool, width: usize, colors: MdColors) {
+    push_code_border(r, width, Some("interactive UI"), colors.rule);
+    let document = nexus_core::interactive::Document::parse(source);
+    let height = document
+        .as_ref()
+        .map_or(6, nexus_core::interactive::Document::rows);
+    if width >= 8 {
+        r.widgets.push(crate::interactive::Placement {
+            row: r.lines.len(),
+            width: u16::try_from(width.saturating_sub(4)).unwrap_or(u16::MAX),
+            owner: 0,
+            ordinal: r.widgets.len(),
+            height,
+            source: source.into(),
+            complete,
+        });
+        for row in 0..height {
+            let text = if row == 0 {
+                if complete {
+                    "interactive output…"
+                } else {
+                    "generating UI…"
+                }
+            } else {
+                ""
+            };
+            let text: String = text.chars().take(width.saturating_sub(4)).collect();
+            push_code_content(r, &Line::from(text), width, colors.rule);
+        }
+    }
+    if width < 8 || (complete && document.is_err()) {
+        for line in source.lines() {
+            let safe: String = line.chars().flat_map(char::escape_default).collect();
+            push_code_content(r, &Line::from(safe), width, colors.rule);
+        }
+    }
+    push_code_border(r, width, None, colors.rule);
+    r.blocks.push(source.into());
+}
+
+fn render_diagram(r: &mut Rendered, source: &str, complete: bool, width: usize, colors: MdColors) {
+    push_code_border(r, width, Some("mermaid"), colors.rule);
+    if width >= 8 {
+        let interior = width.saturating_sub(4);
+        r.diagrams.push(crate::diagrams::Placement {
+            row: r.lines.len(),
+            width: u16::try_from(interior).unwrap_or(u16::MAX),
+            source: source.to_string(),
+            complete,
+        });
+        let label = if complete {
+            "rendering diagram…"
+        } else {
+            "streaming diagram…"
+        };
+        let label: String = label.chars().take(interior).collect();
+        for row in 0..crate::diagrams::PREVIEW_ROWS {
+            let line = Line::from(if row == 0 {
+                label.clone()
+            } else {
+                String::new()
+            });
+            push_code_content(r, &line, width, colors.rule);
+        }
+    }
+    // Keep the raw source visible and copyable even after successful rendering.
+    for line in source.split('\n') {
+        let visible: String = terminal_safe(line)
+            .chars()
+            .map(|ch| {
+                if ch == '\t' {
+                    "    ".to_string()
+                } else if ch.is_control() {
+                    ch.escape_default().to_string()
+                } else {
+                    ch.to_string()
+                }
+            })
+            .collect();
+        push_code_content(r, &Line::from(visible), width, colors.rule);
+    }
+    push_code_border(r, width, None, colors.rule);
+    r.blocks.push(source.to_string());
 }
 
 fn render_text(r: &mut Rendered, content: &str, width: usize, colors: MdColors) {
@@ -533,6 +671,99 @@ fn row_to_line(row: Vec<(char, Style)>) -> Line<'static> {
         spans.push(Span::styled(buf, s));
     }
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod diagram_tests {
+    use super::*;
+
+    #[test]
+    fn diagrams_keep_prose_order_and_raw_source_copy_metadata() {
+        let source = "flowchart LR\n    A[⚠\u{FE0F}] -->|next| B";
+        let r = render(
+            &format!("Before\n\n```mermaid\n{source}\n```\n\nAfter"),
+            60,
+            MdColors::default(),
+        );
+        assert_eq!(r.diagrams.len(), 1);
+        assert!(r.diagrams[0].complete);
+        assert_eq!(r.diagrams[0].source, source);
+        assert_eq!(r.blocks, [source]);
+        assert_eq!(r.code.len(), r.lines.len());
+        let placement = &r.diagrams[0];
+        assert!(
+            r.code[placement.row..placement.row + usize::from(crate::diagrams::PREVIEW_ROWS)]
+                .iter()
+                .all(|id| *id == Some(0))
+        );
+        assert!(line_text(&r.lines[0]).contains("Before"));
+        assert!(line_text(r.lines.last().expect("after")).contains("After"));
+    }
+
+    #[test]
+    fn incomplete_diagrams_reserve_the_same_geometry_without_rendering() {
+        let partial = "```mermaid\nflowchart LR\nA-->B";
+        let pending = render(partial, 60, MdColors::default());
+        let complete = render(&format!("{partial}\n```"), 60, MdColors::default());
+        assert!(!pending.diagrams[0].complete);
+        assert!(complete.diagrams[0].complete);
+        assert_eq!(pending.lines.len(), complete.lines.len());
+        assert_eq!(pending.blocks, complete.blocks);
+    }
+
+    #[test]
+    fn diagram_source_cannot_emit_terminal_control_sequences() {
+        let source = "flowchart LR\nA[\u{1b}[31m] --> B\n\tB --> C";
+        let r = render(
+            &format!("```mermaid\n{source}\n```"),
+            60,
+            MdColors::default(),
+        );
+        let displayed = r.lines.iter().map(line_text).collect::<String>();
+        assert!(!displayed.contains('\u{1b}'));
+        assert!(!displayed.contains('\t'));
+        assert_eq!(r.blocks, [source]);
+    }
+
+    #[test]
+    fn tilde_fences_and_pipe_labels_do_not_become_tables() {
+        for source in [
+            "~~~MERMAID\nflowchart LR\nA -->|label| B\n~~~",
+            "  ```mermaid\n  flowchart LR\n  A -->|label| B\n  ```",
+            "> ```mermaid\n> flowchart LR\n> A -->|label| B\n> ```",
+            "1. Diagram:\n\n   ```mermaid\n   flowchart LR\n   A -->|label| B\n   ```",
+        ] {
+            let r = render(source, 60, MdColors::default());
+            assert_eq!(r.diagrams.len(), 1);
+            assert!(r.diagrams[0].complete, "{source}");
+            assert_eq!(r.blocks, ["flowchart LR\nA -->|label| B"]);
+        }
+    }
+
+    #[test]
+    fn literal_nested_fences_and_inline_mentions_do_not_render() {
+        for content in [
+            "````markdown\n```mermaid\nflowchart LR\nA-->B\n```\n````",
+            "Use `mermaid` or ` ```mermaid ` here.",
+            "```rust\n// mermaid\n```",
+        ] {
+            assert!(render(content, 60, MdColors::default()).diagrams.is_empty());
+        }
+    }
+
+    #[test]
+    fn narrow_views_keep_source_without_an_image_slot() {
+        for width in 0..8 {
+            let r = render(
+                "```mermaid\nflowchart LR\nA-->B\n```",
+                width,
+                MdColors::default(),
+            );
+            assert!(r.diagrams.is_empty());
+            assert_eq!(r.blocks, ["flowchart LR\nA-->B"]);
+            assert_eq!(r.code.len(), r.lines.len());
+        }
+    }
 }
 
 #[cfg(test)]

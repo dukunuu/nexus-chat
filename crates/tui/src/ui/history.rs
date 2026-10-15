@@ -60,8 +60,20 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
     let mut tail: Vec<Line<'static>> = Vec::new();
     let mut tail_code: Vec<Option<usize>> = Vec::new();
     let mut tail_blocks: Vec<String> = Vec::new();
+    let mut tail_diagrams = Vec::new();
+    let mut tail_widgets = Vec::new();
     if app.viewing_stream() {
-        push_assistant_streaming(&mut tail, app, width, &mut tail_code, &mut tail_blocks);
+        push_assistant_streaming(
+            &mut tail,
+            app,
+            width,
+            &mut tail_code,
+            &mut tail_blocks,
+            super::cards::Regions {
+                diagrams: &mut tail_diagrams,
+                widgets: &mut tail_widgets,
+            },
+        );
     }
     if app.is_compacting_current_session() {
         push_compaction_pending(&mut tail, width, &app.theme);
@@ -280,6 +292,32 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
         .collect();
 
     f.render_widget(Paragraph::new(visible), inner);
+    if app.popup == nexus_core::app::Popup::None {
+        let mut placements = app.history_cache.diagrams.clone();
+        placements.extend(tail_diagrams.into_iter().map(|mut placement| {
+            placement.row += cached_lines;
+            placement
+        }));
+        app.diagrams.paint(f, inner, top, &placements, app.theme.bg);
+    }
+
+    let mut widgets = app.history_cache.widgets.clone();
+    widgets.extend(tail_widgets.into_iter().map(|mut placement| {
+        placement.row += cached_lines;
+        placement.owner = app.messages.len();
+        // Bind mutable state only to stored replies, never to a live task's
+        // shifting message index (parallel tasks/tool rows may share it).
+        placement.complete = false;
+        placement
+    }));
+    app.interactive.paint(
+        f,
+        inner,
+        top,
+        &widgets,
+        &app.theme,
+        app.popup == nexus_core::app::Popup::None,
+    );
 
     // Scrollbar in the gutter, only when the conversation overflows. Hand-
     // drawn: ratatui's `Scrollbar` thumb jumps on every streamed line and
@@ -417,6 +455,7 @@ fn sync_cache(app: &mut AppView, width: usize) {
     let theme = app.theme;
     for (i, m) in app.messages.iter().enumerate().skip(c.msg_count) {
         let start = c.lines.len();
+        let widget_start = c.widgets.len();
         // Day divider when the conversation crosses a midnight boundary.
         if let Some(day) = m.created_at.as_deref().map(day_of)
             && c.last_day.as_deref() != Some(day)
@@ -472,7 +511,14 @@ fn sync_cache(app: &mut AppView, width: usize) {
                 &theme,
                 &app.space.files_dir(&app.active_space.name),
                 &mut c.image_cache,
+                super::cards::Regions {
+                    diagrams: &mut c.diagrams,
+                    widgets: &mut c.widgets,
+                },
             );
+        }
+        for widget in &mut c.widgets[widget_start..] {
+            widget.owner = i;
         }
         c.owner.resize(c.lines.len(), Some(i));
         c.code.resize(c.lines.len(), None);
@@ -618,6 +664,105 @@ mod tests {
             out.push('|');
         }
         out
+    }
+
+    #[tokio::test]
+    async fn diagram_preview_renders_in_place_and_preserves_copy_metadata() {
+        let mut a = test_app();
+        let source = "flowchart LR\nA[Start] --> B[End]";
+        a.messages.push(msg(
+            "assistant",
+            &format!("Before\n\n```mermaid\n{source}\n```\n\nAfter"),
+        ));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 40)).unwrap();
+        terminal
+            .draw(|f| render_history(f, &mut a, f.area()))
+            .unwrap();
+        let rows = a.history_cache.lines.len();
+        let preview = a.history_cache.diagrams[0].clone();
+        let block = a.history_cache.code[preview.row].expect("copyable preview");
+        assert_eq!(a.history_cache.blocks[block], source);
+        let completion = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            a.diagrams.next_completion(),
+        )
+        .await
+        .expect("renderer completed")
+        .expect("completion");
+        a.diagrams.complete(completion);
+        terminal
+            .draw(|f| render_history(f, &mut a, f.area()))
+            .unwrap();
+        assert_eq!(a.history_cache.lines.len(), rows);
+        assert_eq!(a.history_cache.blocks[block], source);
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .any(|cell| cell.symbol() == "▀")
+        );
+    }
+
+    #[tokio::test]
+    async fn late_diagram_completion_above_the_viewport_does_not_jump() {
+        let mut a = test_app();
+        let later = (0..40)
+            .map(|i| format!("Later paragraph number {i} remains in the reading viewport.\n\n"))
+            .collect::<String>();
+        a.messages.push(msg(
+            "assistant",
+            &format!("```mermaid\nflowchart LR\nA-->B\n```\n\n{later}"),
+        ));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        a.scroll = usize::MAX;
+        terminal
+            .draw(|f| render_history(f, &mut a, f.area()))
+            .unwrap();
+        a.scroll = 5;
+        terminal
+            .draw(|f| render_history(f, &mut a, f.area()))
+            .unwrap();
+        let before = visible_snapshot(&terminal);
+        assert!(before.contains("Later paragraph"), "{before}");
+        let completion = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            a.diagrams.next_completion(),
+        )
+        .await
+        .expect("renderer completed")
+        .expect("completion");
+        a.diagrams.complete(completion);
+        terminal
+            .draw(|f| render_history(f, &mut a, f.area()))
+            .unwrap();
+        assert_eq!(visible_snapshot(&terminal), before);
+    }
+
+    #[tokio::test]
+    async fn closing_a_streamed_diagram_keeps_source_and_viewport_stable() {
+        let partial = "```mermaid\nflowchart LR\nA[Start] --> B[End]";
+        let mut a = streaming_app("", partial);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_history(f, &mut a, f.area()))
+            .unwrap();
+        a.scroll = 2;
+        terminal
+            .draw(|f| render_history(f, &mut a, f.area()))
+            .unwrap();
+        let before = visible_snapshot(&terminal);
+        let total = a.prev_total;
+        a.chat_tasks.get_mut(&1).unwrap().buffer.push_str("\n```");
+        terminal
+            .draw(|f| render_history(f, &mut a, f.area()))
+            .unwrap();
+        assert_eq!(a.prev_total, total);
+        assert_eq!(visible_snapshot(&terminal), before);
     }
 
     #[test]

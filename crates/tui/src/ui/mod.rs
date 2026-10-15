@@ -35,6 +35,11 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     // Popups re-record their list geometry as they draw; a frame without a
     // list must not leave a stale hit area behind.
     app.list_hit.set(None);
+    let send_ready = crate::interactive::can_send(app);
+    app.interactive.begin_frame(send_ready);
+    if app.popup != Popup::InteractiveUi {
+        app.interactive.unfocus();
+    }
     // Paint the base first so widgets that only set foreground colors inherit
     // the configured opaque or terminal-transparent surface.
     f.render_widget(
@@ -97,6 +102,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         Popup::Skills => popups::skills::render(f, app),
         Popup::Files => popups::files::render(f, app),
         Popup::Apps => popups::apps::render(f, app),
+        Popup::InteractiveUi => crate::interactive::render_popup(f, app),
         Popup::Watch => popups::watches::render(f, app),
         Popup::ResearchLive => popups::research_live::render(f, app),
         Popup::Swarm => popups::swarm::render(f, app),
@@ -186,7 +192,8 @@ pub(super) fn fmt_created(rfc3339: &str) -> String {
 }
 
 /// A rect `pct_w` × `pct_h` percent of `area`, centered.
-fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
+#[must_use]
+pub(crate) fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
     let v = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

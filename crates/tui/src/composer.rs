@@ -154,6 +154,7 @@ impl AppView {
                 }
                 self.input.insert_str(text);
             }
+            Popup::InteractiveUi => self.interactive.paste(text),
             Popup::Key => self.key_input.push_str(text),
             Popup::Session if self.session_mode == SessionMode::Rename => {
                 self.session_edit.push_str(text);

@@ -887,6 +887,9 @@ impl App {
     /// speaking, not per-space configuration.
     pub fn system_prompt(&self) -> String {
         let mut parts: Vec<String> = vec![self.resolved_base_system_prompt()];
+        if self.interactive_ui {
+            parts.push(crate::interactive::INSTRUCTIONS.to_string());
+        }
         if !self.incognito {
             let instructions =
                 std::fs::read_to_string(self.space.instructions_path(&self.active_space.name))

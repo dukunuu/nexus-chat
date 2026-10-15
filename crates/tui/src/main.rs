@@ -1,10 +1,12 @@
 mod app_view;
 mod cli;
 mod composer;
+mod diagrams;
 mod events;
 mod filter_input;
 mod flows;
 mod history_cache;
+mod interactive;
 mod selection;
 mod theme;
 mod ui;
@@ -42,6 +44,13 @@ async fn main() -> Result<()> {
     let (selection_server, selection_requests) = cli::start_selection_server()?;
 
     let mut terminal = ratatui::init();
+    diagrams::protect_terminal_from_renderer_panics();
+    // Probe graphics once, before EventStream owns terminal input. Unknown
+    // terminals retain portable half-block previews.
+    app.diagrams.set_picker(
+        ratatui_image::picker::Picker::from_query_stdio()
+            .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks()),
+    );
     // Capture mouse so popups are clickable/scrollable and the terminal doesn't
     // do its own screen-wide text selection. Bracketed paste delivers a native
     // paste as one event.

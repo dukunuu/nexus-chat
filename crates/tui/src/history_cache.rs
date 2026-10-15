@@ -14,6 +14,10 @@ pub struct HistoryCache {
     pub owner: Vec<Option<usize>>,
     pub code: Vec<Option<usize>>,
     pub blocks: Vec<String>,
+    /// Fixed-height diagram regions alongside the text/copy metadata.
+    pub diagrams: Vec<crate::diagrams::Placement>,
+    /// Model-authored interactive output regions.
+    pub widgets: Vec<crate::interactive::Placement>,
     pub plain: Vec<String>,
     /// Maps rendered line index -> image path for click-to-open.
     pub image_at_line: Vec<Option<String>>,

@@ -15,7 +15,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Widget, Wrap,
 };
 
 use crate::app_view::AppView;
@@ -127,6 +127,120 @@ pub fn render_hinted<'a>(
     let inner = block.inner(area);
     f.render_widget(block, area);
     inner
+}
+
+/// One keyboard-labelled action card. Its hit area exists only while enabled.
+pub struct Button<'a, A> {
+    /// Opaque caller-owned action returned by hit-testing.
+    pub action: A,
+    /// Visible label, including the keyboard shortcut.
+    pub label: &'a str,
+    /// Optional artwork; its last line is the compact description.
+    pub body: &'a [&'a str],
+    /// Whether this card holds keyboard focus.
+    pub selected: bool,
+    /// Whether activation is currently permitted.
+    pub enabled: bool,
+}
+
+/// Render action cards with shared colors and rounded chrome. Small areas
+/// fall back to compact labels; narrow areas stack the cards. The returned
+/// hit areas correspond exactly to this frame, not guessed row positions.
+pub fn render_buttons<A: Copy>(
+    buffer: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    buttons: &[Button<'_, A>],
+    theme: &Theme,
+) -> Vec<(Rect, A)> {
+    if buttons.is_empty() || area.is_empty() {
+        return Vec::new();
+    }
+    let columns = usize::from((area.width / 16).max(1)).min(buttons.len());
+    let row_count = buttons.len().div_ceil(columns);
+    let rows = Layout::vertical(vec![
+        Constraint::Ratio(
+            1,
+            u32::try_from(row_count).unwrap_or(u32::MAX)
+        );
+        row_count
+    ])
+    .split(area);
+    let areas: Vec<_> = rows
+        .iter()
+        .zip(buttons.chunks(columns))
+        .flat_map(|(row, items)| {
+            let count = u32::try_from(items.len()).unwrap_or(u32::MAX);
+            Layout::horizontal(vec![Constraint::Ratio(1, count); items.len()])
+                .spacing(1)
+                .split(*row)
+                .to_vec()
+        })
+        .collect();
+    let mut hits = Vec::new();
+    for (button, rect) in buttons.iter().zip(areas.iter().copied()) {
+        if rect.is_empty() {
+            continue;
+        }
+        let fg = if button.selected {
+            theme.accent
+        } else if button.enabled {
+            theme.fg
+        } else {
+            theme.fg_dim
+        };
+        let style = Style::default().fg(fg).bg(if button.selected {
+            theme.raised
+        } else {
+            theme.surface
+        });
+        let label = Line::from(Span::styled(
+            format!(
+                "{}{}",
+                if button.selected {
+                    format!("{} ", crate::ui::style::glyph::SELECTED)
+                } else {
+                    String::new()
+                },
+                button.label
+            ),
+            style.add_modifier(Modifier::BOLD),
+        ));
+        if rect.height < 3 || rect.width < 16 {
+            Paragraph::new(fit_line(label, usize::from(rect.width)))
+                .centered()
+                .style(style)
+                .render(rect, buffer);
+        } else {
+            let block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(if button.selected {
+                    theme.accent
+                } else {
+                    theme.border_dim
+                }))
+                .style(style)
+                .title(label.centered());
+            let inner = block.inner(rect);
+            block.render(rect, buffer);
+            let body = if usize::from(inner.height) < button.body.len() {
+                button
+                    .body
+                    .last()
+                    .map(|line| vec![Line::from(*line)])
+                    .unwrap_or_default()
+            } else {
+                button.body.iter().map(|line| Line::from(*line)).collect()
+            };
+            Paragraph::new(fit_lines(body, inner.width))
+                .centered()
+                .style(style)
+                .render(inner, buffer);
+        }
+        if button.enabled {
+            hits.push((rect, button.action));
+        }
+    }
+    hits
 }
 
 /// Standard popup list selection: accent `▸ ` marker, bold text, and the

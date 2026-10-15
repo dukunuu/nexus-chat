@@ -30,6 +30,61 @@ fn render_to_string(width: u16, height: u16, render: impl FnOnce(&mut ratatui::F
 }
 
 #[test]
+fn model_authored_ui_is_inline_and_focusable_without_game_commands() {
+    let mut app = test_app();
+    app.incognito = true;
+    app.set_input("keep my draft");
+    let source = include_str!("../../../../core/tests/fixtures/interactive/counter.json").trim();
+    app.messages.push(nexus_core::db::Message {
+        role: "assistant".into(),
+        content: format!("Before\n\n```nexus-ui\n{source}\n```\n\nAfter"),
+        model: None,
+        reasoning: None,
+        tokens: None,
+        secs: None,
+        cost: None,
+        phrase: None,
+        persona: None,
+        created_at: None,
+    });
+    let screen = render_to_string(100, 40, |f| crate::ui::render(f, &mut app));
+    for label in [
+        "Before",
+        "Counter",
+        "Count: 0",
+        "Add one",
+        "Name",
+        "Submit result [review]",
+        "After",
+    ] {
+        assert!(screen.contains(label), "{screen}");
+    }
+    assert!(
+        !screen.contains("\"version\""),
+        "valid UI should not dump JSON"
+    );
+    let block = app.history_cache.code[app.history_cache.widgets[0].row].unwrap();
+    assert_eq!(app.history_cache.blocks[block], source);
+    crate::interactive::focus(&mut app);
+    assert_eq!(app.popup, nexus_core::app::Popup::InteractiveUi);
+    crate::interactive::key(&mut app, crossterm::event::KeyCode::Enter.into());
+    let screen = render_to_string(100, 40, |f| crate::ui::render(f, &mut app));
+    assert!(screen.contains("Count: 1"), "{screen}");
+    assert_eq!(app.input_text(), "keep my draft");
+    assert_eq!(app.messages.len(), 1);
+    crate::interactive::key(&mut app, crossterm::event::KeyCode::Esc.into());
+    assert_eq!(app.popup, nexus_core::app::Popup::None);
+    let screen = render_to_string(100, 40, |f| crate::ui::render(f, &mut app));
+    assert!(
+        screen.contains("Count: 1"),
+        "focus should share inline state: {screen}"
+    );
+    app.apply_event(&nexus_core::app::AppEvent::ViewportReset);
+    let screen = render_to_string(100, 40, |f| crate::ui::render(f, &mut app));
+    assert!(screen.contains("Count: 0"), "{screen}");
+}
+
+#[test]
 fn local_popup_lists_runtimes_with_discovery_and_endpoint() {
     let mut app = test_app();
     app.core.saved.local = Some(nexus_core::provider::local::LocalConfig {

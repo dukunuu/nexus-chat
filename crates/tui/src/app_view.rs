@@ -72,6 +72,8 @@ pub struct AppView {
     // ── Popup chrome ──────────────────────────────────────────────────────
     /// Which modal popover, if any, is open.
     pub popup: Popup,
+    /// Model-authored UI state, isolated by message and source revision.
+    pub interactive: crate::interactive::Widgets,
     pub spaces_cache: Vec<SpaceRow>,
     pub space_selected: usize,
     pub space_filter: FilterInput,
@@ -174,6 +176,8 @@ pub struct AppView {
     /// Wrapped-line cache for the transcript, so redraws don't re-render
     /// markdown for the whole conversation every frame.
     pub history_cache: HistoryCache,
+    /// Disposable, background-rendered TUI diagram previews.
+    pub diagrams: crate::diagrams::DiagramCache,
     /// Per-session history caches preserved across session switches so
     /// switching back doesn't re-wrap every message from scratch.
     pub session_caches: HashMap<String, HistoryCache>,
@@ -243,6 +247,7 @@ impl AppView {
     // Long by design (one initializer per view-state field).
     #[allow(clippy::too_many_lines)]
     pub fn new(mut core: App) -> Self {
+        core.interactive_ui = true;
         // `App::new` queues the launch status line as an event; seed the
         // view's status field from it so the first frame reads correctly.
         let status = core
@@ -268,6 +273,7 @@ impl AppView {
             recall_draft: String::new(),
             at_state: None,
             popup: Popup::None,
+            interactive: crate::interactive::Widgets::default(),
             spaces_cache: Vec::new(),
             space_selected: 0,
             space_filter: FilterInput::default(),
@@ -331,6 +337,7 @@ impl AppView {
             sel: HistorySel::default(),
             mouse_target: MouseTarget::None,
             history_cache: HistoryCache::default(),
+            diagrams: crate::diagrams::DiagramCache::default(),
             session_caches: HashMap::new(),
             show_tool_detail: false,
             notification_areas: Vec::new(),
@@ -367,6 +374,11 @@ impl AppView {
                 self.max_scroll = 0;
                 self.prev_total = 0;
                 self.prev_tail.clear();
+                self.diagrams.clear();
+                self.interactive.clear();
+                if self.popup == Popup::InteractiveUi {
+                    self.popup = Popup::None;
+                }
                 self.sel.clear();
             }
             AppEvent::HistoryInvalidated => self.invalidate_history_cache(),

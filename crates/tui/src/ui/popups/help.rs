@@ -54,6 +54,16 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "interactive model outputs",
+        &[
+            ("click controls", "interact directly in the reply"),
+            ("F2", "focus the newest visible UI"),
+            ("Tab/arrows · Enter", "select a control · activate"),
+            ("type · Backspace · Ctrl+V", "edit a focused input"),
+            ("Esc", "return to chat; keep local UI state"),
+        ],
+    ),
+    (
         "popups",
         &[
             ("↑/↓ · Enter", "move · pick"),

@@ -11,6 +11,7 @@
     clippy::cast_sign_loss
 )]
 use image::GenericImageView;
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::HashMap;
@@ -20,32 +21,50 @@ use super::{dim, fmt_cost, to_color};
 use crate::app_view::AppView;
 use nexus_core::db::Message;
 
+/// Non-text regions travel together through the card renderer.
+pub(super) struct Regions<'a> {
+    pub diagrams: &'a mut Vec<crate::diagrams::Placement>,
+    pub widgets: &'a mut Vec<crate::interactive::Placement>,
+}
+
 /// Remove `![alt](file)` image references from text — the images themselves
 /// are rendered inline by `render_markdown_images`, so the raw refs must not
 /// also wrap into the body text. Unterminated refs (mid-stream) are kept
 /// verbatim.
 pub(super) fn strip_markdown_images(content: &str) -> String {
-    let mut rest = content;
     let mut out = String::with_capacity(content.len());
-    loop {
-        let Some(start) = rest.find("![") else {
-            out.push_str(rest);
-            break;
-        };
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        match after.find(')') {
-            Some(end) if after[..end].contains("](") => {
-                rest = &after[end + 1..];
+    let mut cursor = 0;
+    for (range, _, _) in markdown_images(content) {
+        out.push_str(&content[cursor..range.start]);
+        cursor = range.end;
+    }
+    out.push_str(&content[cursor..]);
+    out
+}
+
+/// Actual Markdown images only, never image-looking text inside a code fence.
+fn markdown_images(content: &str) -> Vec<(std::ops::Range<usize>, String, String)> {
+    let mut images = Vec::new();
+    let mut current = None;
+    for (event, range) in Parser::new(content).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                current = Some((range, dest_url.into_string(), String::new()));
             }
-            _ => {
-                out.push_str("![");
-                out.push_str(after);
-                break;
+            Event::Text(text) | Event::Code(text) => {
+                if let Some((_, _, alt)) = &mut current {
+                    alt.push_str(&text);
+                }
             }
+            Event::End(TagEnd::Image) => {
+                if let Some(image) = current.take() {
+                    images.push(image);
+                }
+            }
+            _ => {}
         }
     }
-    out
+    images
 }
 
 /// A user message card: a right-aligned bubble capped at ~60% of the pane.
@@ -336,6 +355,7 @@ pub(super) fn push_assistant_stored(
     theme: &crate::theme::Theme,
     images_dir: &std::path::Path,
     image_cache: &mut HashMap<(String, usize), Vec<Line<'static>>>,
+    regions: Regions<'_>,
 ) {
     // Header: the assistant glyph + who answered (persona overrides the
     // model name; personas are agents, so they take the agent color).
@@ -443,7 +463,7 @@ pub(super) fn push_assistant_stored(
     );
     rendered.lines = crate::ui::citations_style::style_citations(rendered.lines, theme.accent);
     rendered.lines = crate::ui::citations_style::style_confidence_tags(rendered.lines);
-    push_rendered(out, code, blocks, rendered, Some(rail));
+    push_rendered(out, code, blocks, rendered, Some(rail), regions);
 
     // Footer below the response: the phrase, then stats, one separator style.
     let mut stats: Vec<String> = Vec::new();
@@ -513,6 +533,7 @@ pub(super) fn push_assistant_streaming(
     width: usize,
     code: &mut Vec<Option<usize>>,
     blocks: &mut Vec<String>,
+    regions: Regions<'_>,
 ) {
     let color = to_color(app.spinner_color());
     let name = app.active_chat_task().map_or_else(
@@ -555,7 +576,7 @@ pub(super) fn push_assistant_streaming(
     );
     rendered.lines = crate::ui::citations_style::style_citations(rendered.lines, app.theme.accent);
     rendered.lines = crate::ui::citations_style::style_confidence_tags(rendered.lines);
-    push_rendered(out, code, blocks, rendered, Some(rail));
+    push_rendered(out, code, blocks, rendered, Some(rail), regions);
     out.push(Line::from(""));
 }
 
@@ -568,7 +589,17 @@ pub(super) fn push_rendered(
     blocks: &mut Vec<String>,
     r: crate::ui::markdown::Rendered,
     rail: Option<Span<'static>>,
+    regions: Regions<'_>,
 ) {
+    let Regions { diagrams, widgets } = regions;
+    widgets.extend(r.widgets.into_iter().map(|mut placement| {
+        placement.row += out.len();
+        placement
+    }));
+    diagrams.extend(r.diagrams.into_iter().map(|mut placement| {
+        placement.row += out.len();
+        placement
+    }));
     code.resize(out.len(), None); // align past any dot/reasoning lines
     let base = blocks.len();
     code.extend(r.code.iter().map(|c| c.map(|id| id + base)));
@@ -601,54 +632,46 @@ pub(super) fn render_markdown_images(
     image_cache: &mut HashMap<(String, usize), Vec<Line<'static>>>,
     prefix: Option<&Span<'static>>,
 ) {
-    let mut rest = content;
-    while let Some(start) = rest.find("![") {
-        if let Some(end) = rest[start..].find(')') {
-            let inner = &rest[start + 2..start + end];
-            if let Some((alt, file)) = inner.split_once("](") {
-                let path = images_dir.join(file);
-                let path_str = path.to_string_lossy().to_string();
-                let key = (path_str.clone(), width);
-                let half = image_cache
-                    .entry(key)
-                    .or_insert_with(|| image_to_halfblock_lines(&path_str, width));
-                if half.len() <= 1
-                    && half
-                        .first()
-                        .map(std::string::ToString::to_string)
-                        .unwrap_or_default()
-                        .contains("[image]")
-                {
-                    let mut line = Line::from(dim(format!("{} {alt}", glyph::MEDIA), theme));
-                    if let Some(p) = prefix {
-                        line.spans.insert(0, p.clone());
-                    }
-                    out.push(line);
-                    image_at_line.push(Some(path_str));
-                } else {
-                    let img_start = out.len();
-                    for l in half.clone() {
-                        let mut l = l;
-                        if let Some(p) = prefix {
-                            l.spans.insert(0, p.clone());
-                        }
-                        out.push(l);
-                    }
-                    let img_end = out.len();
-                    let mut blank = Line::from("");
-                    if let Some(p) = prefix {
-                        blank.spans.insert(0, p.clone());
-                    }
-                    out.push(blank);
-                    for _ in img_start..img_end {
-                        image_at_line.push(Some(path_str.clone()));
-                    }
-                    image_at_line.push(None);
-                }
+    image_at_line.resize(out.len(), None);
+    for (_, file, alt) in markdown_images(content) {
+        let path = images_dir.join(file);
+        let path_str = path.to_string_lossy().to_string();
+        let key = (path_str.clone(), width);
+        let half = image_cache
+            .entry(key)
+            .or_insert_with(|| image_to_halfblock_lines(&path_str, width));
+        if half.len() <= 1
+            && half
+                .first()
+                .map(std::string::ToString::to_string)
+                .unwrap_or_default()
+                .contains("[image]")
+        {
+            let mut line = Line::from(dim(format!("{} {alt}", glyph::MEDIA), theme));
+            if let Some(p) = prefix {
+                line.spans.insert(0, p.clone());
             }
-            rest = &rest[start + end + 1..];
+            out.push(line);
+            image_at_line.push(Some(path_str));
         } else {
-            break;
+            let img_start = out.len();
+            for l in half.clone() {
+                let mut l = l;
+                if let Some(p) = prefix {
+                    l.spans.insert(0, p.clone());
+                }
+                out.push(l);
+            }
+            let img_end = out.len();
+            let mut blank = Line::from("");
+            if let Some(p) = prefix {
+                blank.spans.insert(0, p.clone());
+            }
+            out.push(blank);
+            for _ in img_start..img_end {
+                image_at_line.push(Some(path_str.clone()));
+            }
+            image_at_line.push(None);
         }
     }
 }
@@ -753,5 +776,28 @@ fn md_colors(theme: &crate::theme::Theme) -> crate::ui::markdown::MdColors {
         heading: theme.accent,
         rule: theme.border_dim,
         code: theme.warning,
+    }
+}
+
+#[cfg(test)]
+mod image_reference_tests {
+    use super::*;
+
+    #[test]
+    fn image_looking_code_is_not_removed_or_loaded() {
+        let source = "```mermaid\nflowchart LR\nA[\"![label](private.png)\"] --> B\n```";
+        assert_eq!(strip_markdown_images(source), source);
+        assert!(markdown_images(source).is_empty());
+        assert!(markdown_images("`![literal](private.png)`").is_empty());
+    }
+
+    #[test]
+    fn real_images_are_removed_without_losing_surrounding_text() {
+        let source = "Before ![plot](plot.png) after";
+        assert_eq!(strip_markdown_images(source), "Before  after");
+        let refs = markdown_images(source);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].1, "plot.png");
+        assert_eq!(refs[0].2, "plot");
     }
 }

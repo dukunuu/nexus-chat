@@ -104,6 +104,8 @@ pub enum Popup {
     Skills,
     Files,
     Apps,
+    /// Focused model-authored interactive output (opened from the transcript).
+    InteractiveUi,
     Watch,
     ResearchLive,
     Swarm,
@@ -836,6 +838,8 @@ pub struct App {
     /// Raw contents of `system_prompt.md` (with an unresolved `{{verbosity}}`
     /// placeholder) — the app's own base system prompt, `$EDITOR`-editable.
     pub base_system_prompt: String,
+    /// Client capability advertised to the model, not persistent view state.
+    pub interactive_ui: bool,
     /// Answer-length preference woven into the system prompt: "normal",
     /// "concise" (default), or "caveman".
     pub verbosity: String,
@@ -1157,6 +1161,7 @@ impl App {
             image_gen_model,
             video_gen_model,
             base_system_prompt: config::load_system_prompt().unwrap_or_default(),
+            interactive_ui: false,
             verbosity: "concise".to_string(),
             memory_rx: None,
             compact_rx: None,

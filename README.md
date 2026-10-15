@@ -297,6 +297,45 @@ model name.
   autocomplete, mouse selection → copy, context breakdown, compaction,
   incognito mode, per-session history
 
+### Diagrams in the terminal
+
+Assistant replies with a `mermaid` fence get an inline preview for flowcharts,
+sequence diagrams and state diagrams. For example, ask for a diagram using
+`flowchart LR; Input --> Process --> Output`. Rendering happens locally without
+Node or a browser. Supported terminals use Kitty/iTerm2/Sixel graphics; other
+terminals fall back to colored half-blocks.
+
+The source stays visible below the preview; long-press anywhere in the block to
+copy it. Incomplete, unsupported or oversized diagrams keep their source, with
+a preview error when appropriate. Previews use fixed-height slots so finishing
+one does not move the conversation. Script-output publishing and interactive
+web-app previews are not part of this first TUI-only slice.
+
+### Interactive replies
+
+Ask the model naturally—for example, “Let's play rock-paper-scissors with a
+terminal UI,” “Quiz me,” or “Give me an interactive calculator.” The TUI advertises
+its capabilities and asks models to prefer interactive output when useful and
+representable. There are no game-specific commands or built-in game rules.
+
+A model-authored `nexus-ui` JSON fence becomes an inline panel with themed text,
+buttons, optional ASCII artwork, editable string fields and local state/actions.
+Click controls directly, or press `F2` to focus the newest visible panel and use
+Tab/arrows + Enter. `Esc`/`Ctrl+C` returns to chat without changing your draft.
+New panels activate when the reply finishes; local changes never resize a panel.
+
+Local actions make no model calls. Buttons that propose a response are marked
+`[review]`: they prepare text in an empty composer for you to inspect/edit and
+press Enter to send. They never overwrite a draft or run slash commands unseen.
+State is temporary and resets on session/space changes or restarting Nexus,
+including in incognito. Original source remains copyable by long-pressing
+non-control text/borders; invalid or unsupported definitions retain a source fallback.
+
+This is a bounded declarative renderer, not an HTML/JavaScript/script runtime.
+See the [model-facing schema](crates/core/assets/interactive-ui.md) for supported
+controls and expressions. Complex applications may still need scripts or `/apps`;
+the web client and inline web-app previews remain unchanged.
+
 ## Commands
 
 Type `/` in the composer for autocomplete. Aliases in parentheses.

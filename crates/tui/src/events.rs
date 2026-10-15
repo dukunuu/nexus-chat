@@ -141,7 +141,12 @@ async fn run_loop(
                     selection_requests = None;
                 }
             }
-            event = app.next_event() => {
+            completion = app.diagrams.next_completion() => {
+                if let Some(completion) = completion {
+                    app.diagrams.complete(completion);
+                }
+            }
+            event = app.core.next_event() => {
                 // View-side events (status line, composer restore, viewport
                 // reset) apply to the view layer; domain events go to their
                 // handlers, which may push more pending events in turn.
@@ -325,6 +330,7 @@ fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
         Popup::Skills => crate::ui::popups::skills::handle_key(app, key),
         Popup::Files => ui::popups::files::handle_key(app, key)?,
         Popup::Apps => ui::popups::apps::handle_key(app, key)?,
+        Popup::InteractiveUi => crate::interactive::key(app, key),
         Popup::Watch => ui::popups::watches::handle_key(app, key)?,
         Popup::ResearchLive => {
             ui::popups::research_live::handle_key(app, key);
@@ -351,6 +357,9 @@ const QUIT_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_milli
 
 fn ctrl_c(app: &mut AppView) -> Result<()> {
     if app.popup != Popup::None {
+        if app.popup == Popup::InteractiveUi {
+            app.interactive.unfocus();
+        }
         app.popup = Popup::None;
     } else if app.viewing_stream() {
         app.stop_stream()?;
@@ -519,6 +528,7 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
         // Kitty keyboard protocol, so it'd be unreachable on many of them.)
         KeyCode::Char('g') if ctrl => app.popup = Popup::Context,
         KeyCode::F(1) => app.open_help(),
+        KeyCode::F(2) => crate::interactive::focus(app),
         // Alt+1…4 reopen the welcome screen's recent sessions.
         KeyCode::Char(c @ '1'..='4')
             if key.modifiers.contains(KeyModifiers::ALT) && !app.welcome_targets.is_empty() =>
@@ -691,7 +701,7 @@ fn composer_jump(app: &mut AppView, m: MouseEvent) {
     app.input.move_cursor(CursorMove::Jump(row, col));
 }
 
-/// Mouse over any popup but the model picker (which has its own dual-panel
+/// Mouse over list/text popups (model and interactive outputs have their own
 /// hit-testing): the wheel sends Up/Down to the popup's own key handler, so
 /// lists move their selection and text popups scroll; a click on a list row
 /// selects it, and a click on the already-selected row activates it (Enter).
@@ -749,7 +759,14 @@ fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
                 return app.open_welcome_session(n);
             }
         }
+        if crate::interactive::mouse(app, m, screen) {
+            return Ok(());
+        }
         handle_input_mouse(app, m);
+        return Ok(());
+    }
+    if app.popup == Popup::InteractiveUi {
+        crate::interactive::mouse(app, m, screen);
         return Ok(());
     }
     if app.popup != Popup::Model {
@@ -811,6 +828,60 @@ mod tests {
 
     fn ctrl(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn model_ui_events_are_not_composer_or_slash_commands() {
+        let mut app = test_app();
+        app.set_input("keep this draft");
+        let source = include_str!("../../core/tests/fixtures/interactive/counter.json");
+        app.messages.push(nexus_core::db::Message {
+            role: "assistant".into(),
+            content: format!("```nexus-ui\n{source}\n```"),
+            model: None,
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            cost: None,
+            phrase: None,
+            persona: None,
+            created_at: None,
+        });
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|f| ui::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let point = (0..40)
+            .find_map(|y| {
+                let line = (0..100)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                line.find("Add one").map(|index| {
+                    Position::new(u16::try_from(line[..index].chars().count()).unwrap(), y)
+                })
+            })
+            .unwrap();
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: point.x,
+                row: point.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            Rect::new(0, 0, 100, 40),
+        )
+        .unwrap();
+        assert_eq!(app.popup, Popup::None);
+        handle_key(&mut app, KeyCode::F(2).into()).unwrap();
+        assert_eq!(app.popup, Popup::InteractiveUi);
+        handle_key(&mut app, KeyCode::Enter.into()).unwrap();
+        assert_eq!(app.input_text(), "keep this draft");
+        assert_eq!(app.messages.len(), 1);
+        handle_key(&mut app, ctrl('c')).unwrap();
+        assert_eq!(app.popup, Popup::None);
+        assert!(!app.should_quit);
+        assert_eq!(app.input_text(), "keep this draft");
     }
 
     #[test]

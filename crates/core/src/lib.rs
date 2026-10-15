@@ -20,6 +20,7 @@ pub mod config;
 pub mod db;
 pub mod extract;
 pub mod host;
+pub mod interactive;
 pub mod markdown;
 pub mod provider;
 pub mod skills;

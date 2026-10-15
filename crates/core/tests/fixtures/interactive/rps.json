@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "title": "Rock · Paper · Scissors",
+  "state": {"player": 0, "opponent": {"random": [0,1,2]}, "delta": 0, "you": "Pick a move", "computer": "?", "result": "Ready", "wins": 0, "losses": 0, "draws": 0},
+  "view": [
+    {"type": "text", "text": "You: {{you}} · Computer: {{computer}}", "tone": "accent"},
+    {"type": "text", "text": "{{result}}", "tone": "accent"},
+    {"type": "text", "text": "Wins {{wins}} · Losses {{losses}} · Draws {{draws}}", "tone": "muted"},
+    {"type": "buttons", "rows": 8, "items": [
+      {"label": "Rock", "action": "rock", "body": ["   _______", "--'   ____)", "     (_____)", "     (____)", "--.__(___)", "beats scissors"]},
+      {"label": "Paper", "action": "paper", "body": ["   _______", "--'   ____)____", "         ______)", "        _______)", "--.__________)", "beats rock"]},
+      {"label": "Scissors", "action": "scissors", "body": ["   _______", "--'   ____)____", "      _________)", "     (____)", "--.__(___)", "beats paper"]}
+    ]},
+    {"type": "buttons", "items": [{"label": "Reset score", "action": "reset"}]}
+  ],
+  "actions": {
+    "rock": [{"op":"set","key":"player","value":0},{"op":"call","action":"reveal"}],
+    "paper": [{"op":"set","key":"player","value":1},{"op":"call","action":"reveal"}],
+    "scissors": [{"op":"set","key":"player","value":2},{"op":"call","action":"reveal"}],
+    "reveal": [
+      {"op":"set","key":"you","value":{"if":[{"eq":[{"get":"player"},0]},"Rock",{"if":[{"eq":[{"get":"player"},1]},"Paper","Scissors"]}]}},
+      {"op":"set","key":"computer","value":{"if":[{"eq":[{"get":"opponent"},0]},"Rock",{"if":[{"eq":[{"get":"opponent"},1]},"Paper","Scissors"]}]}},
+      {"op":"set","key":"delta","value":{"mod":[{"add":[{"sub":[{"get":"player"},{"get":"opponent"}]},3]},3]}},
+      {"op":"set","key":"result","value":{"if":[{"eq":[{"get":"delta"},0]},"Draw",{"if":[{"eq":[{"get":"delta"},1]},"You win","Computer wins"]}]}},
+      {"op":"set","key":"wins","value":{"add":[{"get":"wins"},{"if":[{"eq":[{"get":"delta"},1]},1,0]}]}},
+      {"op":"set","key":"losses","value":{"add":[{"get":"losses"},{"if":[{"eq":[{"get":"delta"},2]},1,0]}]}},
+      {"op":"set","key":"draws","value":{"add":[{"get":"draws"},{"if":[{"eq":[{"get":"delta"},0]},1,0]}]}},
+      {"op":"set","key":"opponent","value":{"random":[0,1,2]}}
+    ],
+    "reset": [{"op":"set","key":"wins","value":0},{"op":"set","key":"losses","value":0},{"op":"set","key":"draws","value":0},{"op":"set","key":"result","value":"Ready"},{"op":"set","key":"you","value":"Pick a move"},{"op":"set","key":"computer","value":"?"}]
+  }
+}

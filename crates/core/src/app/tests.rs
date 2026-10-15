@@ -2013,6 +2013,20 @@ fn every_catalog_command_parses() {
 }
 
 #[test]
+fn interactive_ui_is_advertised_only_by_capable_clients() {
+    let mut a = app_with_key();
+    a.base_system_prompt = "test baseline".into();
+    assert!(!a.system_prompt().contains("nexus-ui"));
+    let before = a.context_breakdown().system_tokens;
+    a.interactive_ui = true;
+    let extra = u64::try_from(crate::interactive::INSTRUCTIONS.chars().count() / 4).unwrap();
+    assert!(a.context_breakdown().system_tokens >= before + extra.saturating_sub(1));
+    assert!(a.system_prompt().contains("nexus-ui"));
+    assert!(a.system_prompt().contains("Prefer interactive UI"));
+    assert!(a.parse_command("play rps").is_err());
+}
+
+#[test]
 fn parse_command_maps_the_slash_catalog_into_the_seam() {
     let a = app_with_key();
     assert_eq!(a.parse_command("new").unwrap(), AppCommand::NewSession);
