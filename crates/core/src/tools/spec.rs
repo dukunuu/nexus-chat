@@ -1,0 +1,1232 @@
+//! Shared definitions, validation, routing and read-only classes for table tools.
+
+use std::fmt::Write as _;
+
+use serde_json::{Value, json};
+
+use crate::provider::ToolDef;
+
+pub(super) enum Kind {
+    Str,
+    // Script writes require a string, but deliberately allow empty content.
+    StrOrEmpty,
+    Int,
+    Num,
+    Bool,
+    StrList,
+    Edits,
+    Enum(&'static [&'static str]),
+}
+
+pub(super) struct Param {
+    name: &'static str,
+    kind: Kind,
+    doc: &'static str,
+}
+
+pub(super) struct ActionSpec {
+    name: &'static str,
+    summary: &'static str,
+    required: &'static [&'static str],
+    optional: &'static [&'static str],
+    read_only: bool,
+    internal: &'static str,
+}
+
+pub(super) struct ToolSpec {
+    name: &'static str,
+    purpose: &'static str,
+    selector: Option<&'static str>,
+    params: &'static [Param],
+    actions: &'static [ActionSpec],
+}
+
+impl Param {
+    fn schema(&self) -> Value {
+        let mut schema = match self.kind {
+            Kind::Str | Kind::StrOrEmpty => json!({ "type": "string" }),
+            Kind::Int => json!({ "type": "integer" }),
+            Kind::Num => json!({ "type": "number" }),
+            Kind::Bool => json!({ "type": "boolean" }),
+            Kind::StrList => json!({ "type": "array", "items": { "type": "string" } }),
+            Kind::Edits => json!({
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "hash": { "type": "string", "description": "hash from the latest read" },
+                        "line": { "type": "integer", "description": "optional 1-based line number to disambiguate repeated lines" },
+                        "new": { "type": ["string", "null"] }
+                    },
+                    "required": ["hash"]
+                }
+            }),
+            Kind::Enum(values) => json!({ "type": "string", "enum": values }),
+        };
+        schema["description"] = json!(self.doc);
+        schema
+    }
+
+    fn is_present(&self, value: &Value) -> bool {
+        let Some(value) = value.get(self.name) else {
+            return false;
+        };
+        match self.kind {
+            Kind::Str | Kind::Enum(_) => value.as_str().is_some_and(|s| !s.trim().is_empty()),
+            Kind::StrOrEmpty => value.is_string(),
+            // Preserve files.pdf_page's as_u64 check, including acceptance of zero.
+            Kind::Int => value.as_u64().is_some(),
+            Kind::Num => value.is_number(),
+            Kind::Bool => value.is_boolean(),
+            Kind::StrList | Kind::Edits => value.as_array().is_some_and(|a| !a.is_empty()),
+        }
+    }
+}
+
+impl ToolSpec {
+    pub(super) fn def(&self, live: &[&str]) -> ToolDef {
+        let actions: Vec<_> = self
+            .actions
+            .iter()
+            .filter(|action| live.contains(&action.name))
+            .collect();
+        let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
+        if let Some(selector) = self.selector {
+            let names: Vec<_> = actions.iter().map(|action| action.name).collect();
+            properties.insert(
+                selector.to_string(),
+                json!({ "type": "string", "enum": names }),
+            );
+            required.push(selector);
+        }
+        for param in self.params {
+            if actions.iter().any(|action| {
+                action.required.contains(&param.name) || action.optional.contains(&param.name)
+            }) {
+                properties.insert(param.name.to_string(), param.schema());
+            }
+            if (self.selector.is_none() || self.name == "search")
+                && !actions.is_empty()
+                && actions
+                    .iter()
+                    .all(|action| action.required.contains(&param.name))
+            {
+                required.push(param.name);
+            }
+        }
+        let mut description = self.purpose.to_string();
+        for action in actions {
+            description.push_str("\n- ");
+            if let Some(selector) = self.selector {
+                let _ = write!(description, "{selector}=");
+            }
+            let _ = write!(description, "{}: {}.", action.name, action.summary);
+            if !action.required.is_empty() {
+                let _ = write!(description, " Needs {}", action.required.join(", "));
+            }
+            if !action.optional.is_empty() {
+                description.push_str(if action.required.is_empty() {
+                    " "
+                } else {
+                    "; "
+                });
+                let _ = write!(description, "optional {}", action.optional.join(", "));
+            }
+            if !action.required.is_empty() || !action.optional.is_empty() {
+                description.push('.');
+            }
+        }
+        super::tool_def(
+            self.name,
+            &description,
+            json!({ "type": "object", "properties": properties, "required": required }),
+        )
+    }
+
+    fn selected_action(&self, value: &Value) -> Option<&ActionSpec> {
+        match self.selector {
+            Some(selector) => {
+                let name = value.get(selector)?.as_str()?;
+                self.actions.iter().find(|action| action.name == name)
+            }
+            None => self.actions.first(),
+        }
+    }
+
+    pub(super) fn validate(&self, value: &Value) -> Result<&'static str, String> {
+        let valid = || {
+            self.actions
+                .iter()
+                .map(|action| action.name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if let Some(selector) = self.selector {
+            let given = value
+                .get(selector)
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "missing required field: {selector} · {} needs one of: {}",
+                        self.name,
+                        valid()
+                    )
+                })?;
+            if self.selected_action(value).is_none() {
+                return Err(format!(
+                    "invalid {selector} for {}: {given:?} · valid: {}",
+                    self.name,
+                    valid()
+                ));
+            }
+        }
+        let action = self.selected_action(value).expect("validated action");
+        for name in action.required {
+            let param = self
+                .params
+                .iter()
+                .find(|param| param.name == *name)
+                .expect("declared param");
+            if !param.is_present(value) {
+                return Err(format!(
+                    "missing required field: {name} · {}.{} needs it ({})",
+                    self.name, action.name, param.doc
+                ));
+            }
+        }
+        Ok(action.internal)
+    }
+}
+
+pub(super) fn find(name: &str) -> Option<&'static ToolSpec> {
+    TOOLS.iter().copied().find(|tool| tool.name == name)
+}
+
+pub(super) fn read_only(name: &str, args: &str) -> Option<bool> {
+    if let Some(tool) = find(name) {
+        let value = serde_json::from_str::<Value>(args).unwrap_or_default();
+        return Some(
+            tool.selected_action(&value)
+                .is_some_and(|action| action.read_only),
+        );
+    }
+    TOOLS
+        .iter()
+        .flat_map(|tool| tool.actions)
+        .find(|action| action.internal == name)
+        .map(|action| action.read_only)
+}
+
+pub(super) static SKILLS: ToolSpec = ToolSpec {
+    name: "skills",
+    purpose: "Manage Agent Skills from app, project, and user/global roots; create and install write only to the app-managed root.",
+    selector: Some("action"),
+    params: &[
+        Param {
+            name: "name",
+            kind: Kind::Str,
+            doc: "skill name for load/create",
+        },
+        Param {
+            name: "file",
+            kind: Kind::Str,
+            doc: "optional path within the skill for load; defaults to SKILL.md",
+        },
+        Param {
+            name: "description",
+            kind: Kind::Str,
+            doc: "short description for create",
+        },
+        Param {
+            name: "body",
+            kind: Kind::Str,
+            doc: "skill instructions for create",
+        },
+        Param {
+            name: "overwrite",
+            kind: Kind::Bool,
+            doc: "replace an existing skill (default false)",
+        },
+        Param {
+            name: "source",
+            kind: Kind::Str,
+            doc: "GitHub owner/repo/path for install",
+        },
+    ],
+    actions: &[
+        ActionSpec {
+            name: "load",
+            summary: "Read full skill instructions or a relative file",
+            required: &["name"],
+            optional: &["file"],
+            read_only: true,
+            internal: "skill",
+        },
+        ActionSpec {
+            name: "create",
+            summary: "Create a skill",
+            required: &["name", "description"],
+            optional: &["body", "overwrite"],
+            read_only: false,
+            internal: "create_skill",
+        },
+        ActionSpec {
+            name: "install",
+            summary: "Install a skill from GitHub",
+            required: &["source"],
+            optional: &[],
+            read_only: false,
+            internal: "install_skill",
+        },
+    ],
+};
+
+pub(super) static SCRIPTS: ToolSpec = ToolSpec {
+    name: "scripts",
+    purpose: "Manage confined space scripts, run skill or space scripts, and install packages.",
+    selector: Some("action"),
+    params: &[
+        Param {
+            name: "path",
+            kind: Kind::Str,
+            doc: "script path relative to the scripts dir",
+        },
+        Param {
+            name: "content",
+            kind: Kind::StrOrEmpty,
+            doc: "complete script content for write",
+        },
+        Param {
+            name: "offset",
+            kind: Kind::Int,
+            doc: "1-based starting line (default 1)",
+        },
+        Param {
+            name: "limit",
+            kind: Kind::Int,
+            doc: "maximum 200 lines",
+        },
+        Param {
+            name: "edits",
+            kind: Kind::Edits,
+            doc: "hash-line edits from the latest read",
+        },
+        Param {
+            name: "code",
+            kind: Kind::Str,
+            doc: "Python source for python",
+        },
+        Param {
+            name: "name",
+            kind: Kind::Str,
+            doc: "confined .py filename for python",
+        },
+        Param {
+            name: "temporary",
+            kind: Kind::Bool,
+            doc: "delete the script after python runs (default false)",
+        },
+        Param {
+            name: "skill",
+            kind: Kind::Str,
+            doc: "skill name for run (unless space=true), or pip target for install",
+        },
+        Param {
+            name: "space",
+            kind: Kind::Bool,
+            doc: "run from the space scripts directory",
+        },
+        Param {
+            name: "args",
+            kind: Kind::StrList,
+            doc: "command-line arguments for run/python",
+        },
+        Param {
+            name: "packages",
+            kind: Kind::StrList,
+            doc: "packages for install",
+        },
+        Param {
+            name: "app",
+            kind: Kind::Str,
+            doc: "app npm target for install",
+        },
+    ],
+    actions: &[
+        ActionSpec {
+            name: "list",
+            summary: "List space script files",
+            required: &[],
+            optional: &[],
+            read_only: true,
+            internal: "list_scripts",
+        },
+        ActionSpec {
+            name: "read",
+            summary: "Read a script with stable hash-lines",
+            required: &["path"],
+            optional: &["offset", "limit"],
+            read_only: true,
+            internal: "read_script",
+        },
+        ActionSpec {
+            name: "write",
+            summary: "Replace a script's complete content",
+            required: &["path", "content"],
+            optional: &[],
+            read_only: false,
+            internal: "write_script",
+        },
+        ActionSpec {
+            name: "edit",
+            summary: "Apply hash-line edits to a script",
+            required: &["path", "edits"],
+            optional: &[],
+            read_only: false,
+            internal: "edit_script",
+        },
+        ActionSpec {
+            name: "run",
+            summary: "Run an existing skill or space script",
+            required: &["path"],
+            optional: &["skill", "space", "args"],
+            read_only: false,
+            internal: "run_script",
+        },
+        ActionSpec {
+            name: "python",
+            summary: "Write and run Python in the space environment, persisting unless temporary=true",
+            required: &["code", "name"],
+            optional: &["temporary", "args"],
+            read_only: false,
+            internal: "run_python",
+        },
+        ActionSpec {
+            name: "install",
+            summary: "Install packages into at most one skill or app target, defaulting to the space Python environment",
+            required: &["packages"],
+            optional: &["skill", "app"],
+            read_only: false,
+            internal: "install_packages",
+        },
+    ],
+};
+
+pub(super) static SEARCH: ToolSpec = ToolSpec {
+    name: "search",
+    purpose: "Search the web, scholarly literature, or HN/Reddit discussions.",
+    selector: Some("mode"),
+    params: &[
+        Param {
+            name: "query",
+            kind: Kind::Str,
+            doc: "search query",
+        },
+        Param {
+            name: "recency",
+            kind: Kind::Enum(&["day", "week", "month", "year"]),
+            doc: "web result recency filter",
+        },
+        Param {
+            name: "include_domains",
+            kind: Kind::StrList,
+            doc: "restrict web results to these domains",
+        },
+        Param {
+            name: "exclude_domains",
+            kind: Kind::StrList,
+            doc: "exclude these domains from web results",
+        },
+        Param {
+            name: "limit",
+            kind: Kind::Int,
+            doc: "maximum academic results (default 10, max 20)",
+        },
+    ],
+    actions: &[
+        ActionSpec {
+            name: "web",
+            summary: "Search using the configured web backend",
+            required: &["query"],
+            optional: &["recency", "include_domains", "exclude_domains"],
+            read_only: true,
+            internal: "web_search",
+        },
+        ActionSpec {
+            name: "academic",
+            summary: "Search Semantic Scholar, preserving scholarly metadata",
+            required: &["query"],
+            optional: &["limit"],
+            read_only: true,
+            internal: "academic_search",
+        },
+        ActionSpec {
+            name: "discussion",
+            summary: "Search HN and Reddit, preserving engagement metadata",
+            required: &["query"],
+            optional: &[],
+            read_only: true,
+            internal: "discussion_search",
+        },
+    ],
+};
+
+pub(super) static FETCH_URL: ToolSpec = ToolSpec {
+    name: "fetch_url",
+    purpose: "Fetch readable, paged text from URLs, PDFs, or YouTube transcripts, using the 24-hour cache and respecting verifier cache-only mode.",
+    selector: None,
+    params: &[
+        Param {
+            name: "url",
+            kind: Kind::Str,
+            doc: "URL to fetch",
+        },
+        Param {
+            name: "offset",
+            kind: Kind::Int,
+            doc: "1-based starting line (default 1)",
+        },
+        Param {
+            name: "limit",
+            kind: Kind::Int,
+            doc: "maximum 200 lines",
+        },
+        Param {
+            name: "fresh",
+            kind: Kind::Bool,
+            doc: "bypass the cache (default false)",
+        },
+    ],
+    actions: &[ActionSpec {
+        name: "fetch_url",
+        summary: "Fetch a page of text",
+        required: &["url"],
+        optional: &["offset", "limit", "fresh"],
+        read_only: true,
+        internal: "fetch_url",
+    }],
+};
+
+pub(super) static RESEARCH_LOOKUP: ToolSpec = ToolSpec {
+    name: "research_lookup",
+    purpose: "Look up previously gathered research material.",
+    selector: Some("scope"),
+    params: &[Param {
+        name: "query",
+        kind: Kind::Str,
+        doc: "keywords; optional for citations, required for session_sources",
+    }],
+    actions: &[
+        ActionSpec {
+            name: "session_sources",
+            summary: "Search this research session's source bundle",
+            required: &["query"],
+            optional: &[],
+            read_only: true,
+            internal: "search_sources",
+        },
+        ActionSpec {
+            name: "citations",
+            summary: "Search citations saved across this space",
+            required: &[],
+            optional: &["query"],
+            read_only: true,
+            internal: "list_citations",
+        },
+    ],
+};
+
+pub(super) static FILES: ToolSpec = ToolSpec {
+    name: "files",
+    purpose: "Work with imported space files.",
+    selector: Some("action"),
+    params: &[
+        Param {
+            name: "query",
+            kind: Kind::Str,
+            doc: "search query",
+        },
+        Param {
+            name: "name",
+            kind: Kind::Str,
+            doc: "imported file name",
+        },
+        Param {
+            name: "offset",
+            kind: Kind::Int,
+            doc: "1-based starting line (default 1)",
+        },
+        Param {
+            name: "limit",
+            kind: Kind::Int,
+            doc: "maximum 200 lines",
+        },
+        Param {
+            name: "page",
+            kind: Kind::Int,
+            doc: "1-based PDF page",
+        },
+    ],
+    actions: &[
+        ActionSpec {
+            name: "search",
+            summary: "Search imported files by semantic similarity or keywords",
+            required: &["query"],
+            optional: &[],
+            read_only: true,
+            internal: "search_files",
+        },
+        ActionSpec {
+            name: "read",
+            summary: "Read a page of extracted text",
+            required: &["name"],
+            optional: &["offset", "limit"],
+            read_only: true,
+            internal: "read_file",
+        },
+        ActionSpec {
+            name: "pdf_page",
+            summary: "Return an imported PDF page image when available",
+            required: &["name", "page"],
+            optional: &[],
+            read_only: true,
+            internal: "read_pdf_page",
+        },
+    ],
+};
+
+pub(super) static MEDIA: ToolSpec = ToolSpec {
+    name: "media",
+    purpose: "Generate and transform media, and manage named video image references.",
+    selector: Some("action"),
+    params: &[
+        Param {
+            name: "prompt",
+            kind: Kind::Str,
+            doc: "generation prompt",
+        },
+        Param {
+            name: "image_id",
+            kind: Kind::Str,
+            doc: "reference image for generate_image, or image being saved for save_reference",
+        },
+        Param {
+            name: "size",
+            kind: Kind::Str,
+            doc: "image size (default 1024x1024)",
+        },
+        Param {
+            name: "duration",
+            kind: Kind::Int,
+            doc: "video duration in seconds (default 6, normalized per model)",
+        },
+        Param {
+            name: "resolution",
+            kind: Kind::Str,
+            doc: "video resolution (default 720p, normalized per model)",
+        },
+        Param {
+            name: "aspect_ratio",
+            kind: Kind::Str,
+            doc: "video aspect ratio (default 16:9, normalized per model)",
+        },
+        Param {
+            name: "generate_audio",
+            kind: Kind::Bool,
+            doc: "generate video audio (default false)",
+        },
+        Param {
+            name: "first_frame_id",
+            kind: Kind::Str,
+            doc: "image ID for the first video frame",
+        },
+        Param {
+            name: "last_frame_id",
+            kind: Kind::Str,
+            doc: "image ID for the last video frame",
+        },
+        Param {
+            name: "ref_image_id",
+            kind: Kind::Str,
+            doc: "video reference image ID",
+        },
+        Param {
+            name: "character_refs",
+            kind: Kind::StrList,
+            doc: "saved character reference names",
+        },
+        Param {
+            name: "location_refs",
+            kind: Kind::StrList,
+            doc: "saved location reference names",
+        },
+        Param {
+            name: "seed",
+            kind: Kind::Int,
+            doc: "video generation seed",
+        },
+        Param {
+            name: "source_video_id",
+            kind: Kind::Str,
+            doc: "source video ID for provider video continuation",
+        },
+        Param {
+            name: "video_id",
+            kind: Kind::Str,
+            doc: "local video ID without .mp4",
+        },
+        Param {
+            name: "video_ids",
+            kind: Kind::StrList,
+            doc: "ordered video IDs to concatenate",
+        },
+        Param {
+            name: "lighting",
+            kind: Kind::Enum(&["noir", "warm", "cold", "vintage", "vivid", "bleach_bypass"]),
+            doc: "lighting preset for edit",
+        },
+        Param {
+            name: "camera_move",
+            kind: Kind::Enum(&[
+                "dolly_in",
+                "dolly_out",
+                "pan_left",
+                "pan_right",
+                "tilt_up",
+                "tilt_down",
+            ]),
+            doc: "camera movement for edit",
+        },
+        Param {
+            name: "intensity",
+            kind: Kind::Num,
+            doc: "effect intensity, clamped to 0–1 (default 0.5)",
+        },
+        Param {
+            name: "speed",
+            kind: Kind::Num,
+            doc: "positive playback speed factor",
+        },
+        Param {
+            name: "trim_start",
+            kind: Kind::Num,
+            doc: "non-negative trim start in seconds",
+        },
+        Param {
+            name: "trim_end",
+            kind: Kind::Num,
+            doc: "non-negative trim end in seconds",
+        },
+        Param {
+            name: "remove_audio",
+            kind: Kind::Bool,
+            doc: "remove video audio (default false)",
+        },
+        Param {
+            name: "time_sec",
+            kind: Kind::Num,
+            doc: "frame timestamp in seconds (default 0)",
+        },
+        Param {
+            name: "format",
+            kind: Kind::Enum(&["png", "jpg"]),
+            doc: "extracted image format (default png)",
+        },
+        Param {
+            name: "name",
+            kind: Kind::Str,
+            doc: "reference name for save_reference/delete_reference",
+        },
+        Param {
+            name: "description",
+            kind: Kind::Str,
+            doc: "reference description for save_reference",
+        },
+        Param {
+            name: "type",
+            kind: Kind::Str,
+            doc: "reference type (default character)",
+        },
+    ],
+    actions: &[
+        ActionSpec {
+            name: "generate_image",
+            summary: "Generate an image, optionally using a pasted image reference",
+            required: &["prompt"],
+            optional: &["image_id", "size"],
+            read_only: false,
+            internal: "generate_image",
+        },
+        ActionSpec {
+            name: "generate_video",
+            summary: "Generate a video from text and optional frame or reference images",
+            required: &["prompt"],
+            optional: &[
+                "duration",
+                "resolution",
+                "aspect_ratio",
+                "generate_audio",
+                "first_frame_id",
+                "last_frame_id",
+                "ref_image_id",
+                "character_refs",
+                "location_refs",
+                "seed",
+                "source_video_id",
+            ],
+            read_only: false,
+            internal: "generate_video",
+        },
+        ActionSpec {
+            name: "edit",
+            summary: "Transform a video locally with ffmpeg",
+            required: &["video_id"],
+            optional: &[
+                "lighting",
+                "camera_move",
+                "intensity",
+                "speed",
+                "trim_start",
+                "trim_end",
+                "remove_audio",
+            ],
+            read_only: false,
+            internal: "edit_video",
+        },
+        ActionSpec {
+            name: "extract_frame",
+            summary: "Extract a video frame locally with ffmpeg",
+            required: &["video_id"],
+            optional: &["time_sec", "format"],
+            read_only: false,
+            internal: "extract_frame",
+        },
+        ActionSpec {
+            name: "stitch",
+            summary: "Concatenate video clips locally with ffmpeg",
+            required: &["video_ids"],
+            optional: &[],
+            read_only: false,
+            internal: "stitch_videos",
+        },
+        ActionSpec {
+            name: "save_reference",
+            summary: "Save a named image reference for video consistency",
+            required: &["name", "image_id", "description"],
+            optional: &["type"],
+            read_only: false,
+            internal: "save_reference",
+        },
+        ActionSpec {
+            name: "list_references",
+            summary: "List saved image references",
+            required: &[],
+            optional: &[],
+            read_only: true,
+            internal: "list_references",
+        },
+        ActionSpec {
+            name: "delete_reference",
+            summary: "Delete a named image reference",
+            required: &["name"],
+            optional: &[],
+            read_only: false,
+            internal: "delete_reference",
+        },
+    ],
+};
+
+const TOOLS: &[&ToolSpec] = &[
+    &SKILLS,
+    &SCRIPTS,
+    &SEARCH,
+    &FETCH_URL,
+    &RESEARCH_LOOKUP,
+    &FILES,
+    &MEDIA,
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::{ToolBox, is_read_only_tool, public_call};
+
+    // Explicit legacy routing expectations, with each action's required arguments.
+    const ROUTES: &[(&str, &str, &str)] = &[
+        ("skills", r#"{"action":"load","name":"x"}"#, "skill"),
+        (
+            "skills",
+            r#"{"action":"create","name":"x","description":"d"}"#,
+            "create_skill",
+        ),
+        (
+            "skills",
+            r#"{"action":"install","source":"a/b/c"}"#,
+            "install_skill",
+        ),
+        ("scripts", r#"{"action":"list"}"#, "list_scripts"),
+        ("scripts", r#"{"action":"read","path":"x"}"#, "read_script"),
+        (
+            "scripts",
+            r#"{"action":"write","path":"x","content":"x"}"#,
+            "write_script",
+        ),
+        (
+            "scripts",
+            r#"{"action":"edit","path":"x","edits":[{"hash":"h"}]}"#,
+            "edit_script",
+        ),
+        ("scripts", r#"{"action":"run","path":"x"}"#, "run_script"),
+        (
+            "scripts",
+            r#"{"action":"python","code":"x","name":"x.py"}"#,
+            "run_python",
+        ),
+        (
+            "scripts",
+            r#"{"action":"install","packages":["x"]}"#,
+            "install_packages",
+        ),
+        ("search", r#"{"mode":"web","query":"x"}"#, "web_search"),
+        (
+            "search",
+            r#"{"mode":"academic","query":"x"}"#,
+            "academic_search",
+        ),
+        (
+            "search",
+            r#"{"mode":"discussion","query":"x"}"#,
+            "discussion_search",
+        ),
+        (
+            "fetch_url",
+            r#"{"url":"https://example.test"}"#,
+            "fetch_url",
+        ),
+        (
+            "research_lookup",
+            r#"{"scope":"session_sources","query":"x"}"#,
+            "search_sources",
+        ),
+        (
+            "research_lookup",
+            r#"{"scope":"citations"}"#,
+            "list_citations",
+        ),
+        (
+            "files",
+            r#"{"action":"search","query":"x"}"#,
+            "search_files",
+        ),
+        ("files", r#"{"action":"read","name":"x"}"#, "read_file"),
+        (
+            "files",
+            r#"{"action":"pdf_page","name":"x","page":1}"#,
+            "read_pdf_page",
+        ),
+        (
+            "media",
+            r#"{"action":"generate_image","prompt":"x"}"#,
+            "generate_image",
+        ),
+        (
+            "media",
+            r#"{"action":"generate_video","prompt":"x"}"#,
+            "generate_video",
+        ),
+        ("media", r#"{"action":"edit","video_id":"x"}"#, "edit_video"),
+        (
+            "media",
+            r#"{"action":"extract_frame","video_id":"x"}"#,
+            "extract_frame",
+        ),
+        (
+            "media",
+            r#"{"action":"stitch","video_ids":["x"]}"#,
+            "stitch_videos",
+        ),
+        (
+            "media",
+            r#"{"action":"save_reference","name":"x","image_id":"i","description":"d"}"#,
+            "save_reference",
+        ),
+        (
+            "media",
+            r#"{"action":"list_references"}"#,
+            "list_references",
+        ),
+        (
+            "media",
+            r#"{"action":"delete_reference","name":"x"}"#,
+            "delete_reference",
+        ),
+    ];
+
+    #[test]
+    fn every_action_param_is_declared() {
+        for tool in TOOLS {
+            for action in tool.actions {
+                for name in action.required.iter().chain(action.optional) {
+                    assert!(
+                        tool.params.iter().any(|param| param.name == *name),
+                        "{}.{} uses undeclared {name}",
+                        tool.name,
+                        action.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn routing_is_unchanged() {
+        assert_eq!(
+            ROUTES.len(),
+            TOOLS.iter().map(|tool| tool.actions.len()).sum::<usize>()
+        );
+        for &(tool, args, internal) in ROUTES {
+            assert_eq!(
+                public_call(tool, args),
+                Ok((internal.to_string(), args.to_string()))
+            );
+        }
+        for (args, internal) in [
+            (r#"{"action":"read","app":"a","path":"x"}"#, "read_app_file"),
+            (r#"{"action":"search","app":"a","pattern":"x"}"#, "grep_app"),
+            (
+                r#"{"action":"write","app":"a","path":"x","content":"x"}"#,
+                "write_file",
+            ),
+            (
+                r#"{"action":"patch","app":"a","path":"x","edits":[{"hash":"h"}]}"#,
+                "edit_file",
+            ),
+            (
+                r#"{"action":"diff","app":"a","path":"x","content":"x"}"#,
+                "diff_app",
+            ),
+            (r#"{"action":"list"}"#, "list_images"),
+            (
+                r#"{"action":"copy_file","app":"a","file_name":"x"}"#,
+                "copy_file_to_app",
+            ),
+            (
+                r#"{"action":"copy_images","app":"a","image_ids":["x"]}"#,
+                "copy_images_to_app",
+            ),
+            (r#"{"action":"init","app":"a"}"#, "init_app"),
+            (r#"{"action":"build","app":"a"}"#, "build_app"),
+        ] {
+            assert_eq!(
+                public_call("app", args),
+                Ok((internal.to_string(), args.to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_classification_is_unchanged() {
+        let read_only = [
+            "skill",
+            "web_search",
+            "academic_search",
+            "discussion_search",
+            "fetch_url",
+            "search_sources",
+            "list_citations",
+            "search_files",
+            "read_file",
+            "read_pdf_page",
+            "read_script",
+            "list_scripts",
+            "list_references",
+        ];
+        for &(tool, args, internal) in ROUTES {
+            let expected = read_only.contains(&internal);
+            assert_eq!(is_read_only_tool(tool, args), expected, "{tool} {args}");
+            assert_eq!(is_read_only_tool(internal, args), expected, "{internal}");
+        }
+        for action in [
+            "read",
+            "search",
+            "diff",
+            "list",
+            "write",
+            "patch",
+            "copy_file",
+            "copy_images",
+            "init",
+            "build",
+        ] {
+            assert_eq!(
+                is_read_only_tool("app", &json!({ "action": action }).to_string()),
+                ["read", "search", "diff", "list"].contains(&action),
+                "app.{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn defs_list_only_params_of_live_actions() {
+        let mut toolbox = ToolBox::new(
+            std::path::PathBuf::new(),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        toolbox.image_gen_backend = Some((
+            crate::provider::openrouter::OpenRouter::openai(String::new()),
+            "test-image-model".to_string(),
+        ));
+        let media = toolbox
+            .defs()
+            .into_iter()
+            .find(|def| def.name == "media")
+            .unwrap();
+        assert_eq!(
+            media.parameters["properties"]["action"]["enum"],
+            json!(["generate_image"])
+        );
+        let properties = media.parameters["properties"].as_object().unwrap();
+        assert_eq!(properties.len(), 4);
+        for name in ["action", "prompt", "image_id", "size"] {
+            assert!(properties.contains_key(name), "missing {name}");
+        }
+        assert!(!media.description.contains("action=generate_video"));
+        assert!(!media.description.contains("video_id"));
+    }
+
+    #[test]
+    fn missing_field_errors_say_which_action_needs_it() {
+        let error = public_call("scripts", r#"{"action":"python","code":"x"}"#).unwrap_err();
+        assert!(error.contains("missing required field: name"), "{error}");
+        assert!(error.contains("scripts.python needs it"), "{error}");
+        assert!(error.contains("confined .py filename"), "{error}");
+        for args in ["{}", r#"{"action":" "}"#] {
+            let error = public_call("scripts", args).unwrap_err();
+            assert_eq!(
+                error,
+                "missing required field: action · scripts needs one of: list, read, write, edit, run, python, install"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_action_lists_the_valid_ones() {
+        for (tool, args, expected) in [
+            (
+                "skills",
+                r#"{"action":"nope"}"#,
+                "invalid action for skills: \"nope\" · valid: load, create, install",
+            ),
+            (
+                "search",
+                r#"{"mode":"nope"}"#,
+                "invalid mode for search: \"nope\" · valid: web, academic, discussion",
+            ),
+            (
+                "research_lookup",
+                r#"{"scope":"nope"}"#,
+                "invalid scope for research_lookup: \"nope\" · valid: session_sources, citations",
+            ),
+        ] {
+            assert_eq!(public_call(tool, args).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    fn scripts_write_accepts_empty_content() {
+        for content in ["", " "] {
+            let args = json!({ "action": "write", "path": "x.py", "content": content }).to_string();
+            assert_eq!(
+                public_call("scripts", &args),
+                Ok(("write_script".to_string(), args))
+            );
+        }
+        for args in [
+            r#"{"action":"write","path":"x"}"#,
+            r#"{"action":"write","path":"x","content":null}"#,
+        ] {
+            assert!(
+                public_call("scripts", args)
+                    .unwrap_err()
+                    .contains("missing required field: content")
+            );
+        }
+    }
+
+    #[test]
+    fn required_fields_preserve_string_array_and_unsigned_integer_checks() {
+        for (tool, args, field) in [
+            ("scripts", r#"{"action":"read","path":" "}"#, "path"),
+            (
+                "scripts",
+                r#"{"action":"install","packages":[]}"#,
+                "packages",
+            ),
+            (
+                "scripts",
+                r#"{"action":"edit","path":"x","edits":[]}"#,
+                "edits",
+            ),
+            (
+                "files",
+                r#"{"action":"pdf_page","name":"x","page":-1}"#,
+                "page",
+            ),
+            (
+                "files",
+                r#"{"action":"pdf_page","name":"x","page":1.5}"#,
+                "page",
+            ),
+            (
+                "files",
+                r#"{"action":"pdf_page","name":"x","page":"1"}"#,
+                "page",
+            ),
+            ("fetch_url", r#"{"url":" "}"#, "url"),
+        ] {
+            assert!(
+                public_call(tool, args)
+                    .unwrap_err()
+                    .contains(&format!("missing required field: {field}"))
+            );
+        }
+        assert!(public_call("files", r#"{"action":"pdf_page","name":"x","page":0}"#).is_ok());
+        // Validation has always checked only array presence, not item types.
+        assert!(public_call("scripts", r#"{"action":"install","packages":[null]}"#).is_ok());
+    }
+
+    #[test]
+    fn definitions_keep_required_arrays_and_hash_line_items() {
+        for tool in TOOLS {
+            let live: Vec<_> = tool.actions.iter().map(|action| action.name).collect();
+            let def = tool.def(&live);
+            let expected = match tool.name {
+                "search" => json!(["mode", "query"]),
+                "fetch_url" => json!(["url"]),
+                "research_lookup" => json!(["scope"]),
+                _ => json!(["action"]),
+            };
+            assert_eq!(def.parameters["required"], expected, "{}", tool.name);
+        }
+        assert_eq!(
+            SCRIPTS.def(&["edit"]).parameters["properties"]["edits"]["items"],
+            json!({
+                "type": "object",
+                "properties": {
+                    "hash": { "type": "string", "description": "hash from the latest read" },
+                    "line": { "type": "integer", "description": "optional 1-based line number to disambiguate repeated lines" },
+                    "new": { "type": ["string", "null"] }
+                },
+                "required": ["hash"]
+            })
+        );
+    }
+}

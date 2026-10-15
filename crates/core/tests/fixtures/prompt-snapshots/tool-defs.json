@@ -1,7 +1,7 @@
 [
   {
     "name": "batch",
-    "description": "Run several independent tool operations in ONE call — multiple searches, multiple filesearches/reads, or multiple app/script writes. Every result comes back in a singleround-trip, each labeled [n/N]. Prefer this over calling tools one by one whenever youneed several operations at once. Sub-calls use the same public tool names andparameters as normal calls. Never nest batch inside batch; keep dependent steps (e.g.write then edit the same file) as separate calls.",
+    "description": "Run several independent tool operations in ONE call — multiple searches, multiple file searches/reads, or multiple app/script writes. Every result comes back in a single round-trip, each labeled [n/N]. Prefer this over calling tools one by one whenever you need several operations at once. Sub-calls use the same public tool names and parameters as normal calls. Never nest batch inside batch; keep dependent steps (e.g. write then edit the same file) as separate calls.",
     "parameters": {
       "properties": {
         "calls": {
@@ -33,7 +33,7 @@
   },
   {
     "name": "skills",
-    "description": "Manage Agent Skills discovered from app, project, and user/global roots. action=load returns a skill's full instructions (SKILL.md by default, or a specific relative file); action=create and action=install write only to the app-managed root.",
+    "description": "Manage Agent Skills from app, project, and user/global roots; create and install write only to the app-managed root.\n- action=load: Read full skill instructions or a relative file. Needs name; optional file.\n- action=create: Create a skill. Needs name, description; optional body, overwrite.\n- action=install: Install a skill from GitHub. Needs source.",
     "parameters": {
       "properties": {
         "action": {
@@ -77,7 +77,7 @@
   },
   {
     "name": "scripts",
-    "description": "Everything script-related in one tool. action=list/read/write/edit manage files inside the space scripts directory (confined paths, hash-line editing); action=run executes an existing skill or space script; action=python writes and runs inline Python in the space scripts environment (persists unless temporary=true); action=install adds packages to a skill virtualenv, an app's npm dependencies, or the shared space-script Python virtualenv (at most one target).",
+    "description": "Manage confined space scripts, run skill or space scripts, and install packages.\n- action=list: List space script files.\n- action=read: Read a script with stable hash-lines. Needs path; optional offset, limit.\n- action=write: Replace a script's complete content. Needs path, content.\n- action=edit: Apply hash-line edits to a script. Needs path, edits.\n- action=run: Run an existing skill or space script. Needs path; optional skill, space, args.\n- action=python: Write and run Python in the space environment, persisting unless temporary=true. Needs code, name; optional temporary, args.\n- action=install: Install packages into at most one skill or app target, defaulting to the space Python environment. Needs packages; optional skill, app.",
     "parameters": {
       "properties": {
         "action": {
@@ -112,6 +112,7 @@
           "type": "string"
         },
         "edits": {
+          "description": "hash-line edits from the latest read",
           "items": {
             "properties": {
               "hash": {
@@ -145,6 +146,7 @@
           "type": "string"
         },
         "offset": {
+          "description": "1-based starting line (default 1)",
           "type": "integer"
         },
         "packages": {
@@ -179,16 +181,18 @@
   },
   {
     "name": "search",
-    "description": "Search the web, scholarly literature, or HN/Reddit discussions. mode=web uses the configured web backend; academic preserves Semantic Scholar metadata; discussion preserves HN and Reddit engagement metadata.",
+    "description": "Search the web, scholarly literature, or HN/Reddit discussions.\n- mode=web: Search using the configured web backend. Needs query; optional recency, include_domains, exclude_domains.\n- mode=academic: Search Semantic Scholar, preserving scholarly metadata. Needs query; optional limit.\n- mode=discussion: Search HN and Reddit, preserving engagement metadata. Needs query.",
     "parameters": {
       "properties": {
         "exclude_domains": {
+          "description": "exclude these domains from web results",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
         "include_domains": {
+          "description": "restrict web results to these domains",
           "items": {
             "type": "string"
           },
@@ -207,9 +211,11 @@
           "type": "string"
         },
         "query": {
+          "description": "search query",
           "type": "string"
         },
         "recency": {
+          "description": "web result recency filter",
           "enum": [
             "day",
             "week",
@@ -228,10 +234,11 @@
   },
   {
     "name": "fetch_url",
-    "description": "Fetch an arbitrary URL as readable, paged text. Uses the 24-hour cache unless fresh=true; supports PDFs, YouTube transcripts, and research verifier cache-only mode.",
+    "description": "Fetch readable, paged text from URLs, PDFs, or YouTube transcripts, using the 24-hour cache and respecting verifier cache-only mode.\n- fetch_url: Fetch a page of text. Needs url; optional offset, limit, fresh.",
     "parameters": {
       "properties": {
         "fresh": {
+          "description": "bypass the cache (default false)",
           "type": "boolean"
         },
         "limit": {
@@ -239,9 +246,11 @@
           "type": "integer"
         },
         "offset": {
+          "description": "1-based starting line (default 1)",
           "type": "integer"
         },
         "url": {
+          "description": "URL to fetch",
           "type": "string"
         }
       },
@@ -253,7 +262,7 @@
   },
   {
     "name": "media",
-    "description": "Generate and transform media. action=generate_image makes an image from a prompt, optionally using a pasted image ID as a reference; action=generate_video makes a video from text and optional frame/reference images; action=edit/extract_frame/stitch transform videos locally with ffmpeg (effects, frame extraction, clip concatenation); action=save_reference/list_references/delete_reference manage named image references used for video consistency.",
+    "description": "Generate and transform media, and manage named video image references.\n- action=generate_image: Generate an image, optionally using a pasted image reference. Needs prompt; optional image_id, size.\n- action=generate_video: Generate a video from text and optional frame or reference images. Needs prompt; optional duration, resolution, aspect_ratio, generate_audio, first_frame_id, last_frame_id, ref_image_id, character_refs, location_refs, seed, source_video_id.\n- action=edit: Transform a video locally with ffmpeg. Needs video_id; optional lighting, camera_move, intensity, speed, trim_start, trim_end, remove_audio.\n- action=extract_frame: Extract a video frame locally with ffmpeg. Needs video_id; optional time_sec, format.\n- action=stitch: Concatenate video clips locally with ffmpeg. Needs video_ids.\n- action=save_reference: Save a named image reference for video consistency. Needs name, image_id, description; optional type.\n- action=list_references: List saved image references.\n- action=delete_reference: Delete a named image reference. Needs name.",
     "parameters": {
       "properties": {
         "action": {
@@ -270,9 +279,11 @@
           "type": "string"
         },
         "aspect_ratio": {
+          "description": "video aspect ratio (default 16:9, normalized per model)",
           "type": "string"
         },
         "camera_move": {
+          "description": "camera movement for edit",
           "enum": [
             "dolly_in",
             "dolly_out",
@@ -284,6 +295,7 @@
           "type": "string"
         },
         "character_refs": {
+          "description": "saved character reference names",
           "items": {
             "type": "string"
           },
@@ -294,12 +306,15 @@
           "type": "string"
         },
         "duration": {
+          "description": "video duration in seconds (default 6, normalized per model)",
           "type": "integer"
         },
         "first_frame_id": {
+          "description": "image ID for the first video frame",
           "type": "string"
         },
         "format": {
+          "description": "extracted image format (default png)",
           "enum": [
             "png",
             "jpg"
@@ -307,6 +322,7 @@
           "type": "string"
         },
         "generate_audio": {
+          "description": "generate video audio (default false)",
           "type": "boolean"
         },
         "image_id": {
@@ -314,12 +330,15 @@
           "type": "string"
         },
         "intensity": {
+          "description": "effect intensity, clamped to 0–1 (default 0.5)",
           "type": "number"
         },
         "last_frame_id": {
+          "description": "image ID for the last video frame",
           "type": "string"
         },
         "lighting": {
+          "description": "lighting preset for edit",
           "enum": [
             "noir",
             "warm",
@@ -331,6 +350,7 @@
           "type": "string"
         },
         "location_refs": {
+          "description": "saved location reference names",
           "items": {
             "type": "string"
           },
@@ -341,43 +361,59 @@
           "type": "string"
         },
         "prompt": {
+          "description": "generation prompt",
           "type": "string"
         },
         "ref_image_id": {
+          "description": "video reference image ID",
           "type": "string"
         },
         "remove_audio": {
+          "description": "remove video audio (default false)",
           "type": "boolean"
         },
         "resolution": {
+          "description": "video resolution (default 720p, normalized per model)",
           "type": "string"
         },
         "seed": {
+          "description": "video generation seed",
           "type": "integer"
         },
         "size": {
-          "default": "1024x1024",
+          "description": "image size (default 1024x1024)",
           "type": "string"
         },
         "source_video_id": {
+          "description": "source video ID for provider video continuation",
           "type": "string"
         },
         "speed": {
+          "description": "positive playback speed factor",
           "type": "number"
         },
         "time_sec": {
+          "description": "frame timestamp in seconds (default 0)",
           "type": "number"
         },
         "trim_end": {
+          "description": "non-negative trim end in seconds",
           "type": "number"
         },
         "trim_start": {
+          "description": "non-negative trim start in seconds",
           "type": "number"
         },
+        "type": {
+          "description": "reference type (default character)",
+          "type": "string"
+        },
         "video_id": {
+          "description": "local video ID without .mp4",
           "type": "string"
         },
         "video_ids": {
+          "description": "ordered video IDs to concatenate",
           "items": {
             "type": "string"
           },

@@ -3,6 +3,8 @@
 //! `research_lookup`, `files`, `app`, `media`) that dispatch onto a larger
 //! set of specialized implementations below, behind the `ToolExecutor` seam.
 
+mod spec;
+
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -132,15 +134,14 @@ fn required_array(v: &serde_json::Value, key: &str) -> Result<(), String> {
 /// The retired names (`skill_admin`, `app_inspect`, `run_python`, …) are intentionally
 /// still accepted by `run()` for persisted/replayed calls, but never returned by `defs()`.
 fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
+    if let Some(tool) = spec::find(name) {
+        let value: serde_json::Value =
+            serde_json::from_str(args).map_err(|e| format!("invalid tool arguments: {e}"))?;
+        return Ok((tool.validate(&value)?.to_string(), args.to_string()));
+    }
     let public = matches!(
         name,
-        "skills"
-            | "scripts"
-            | "search"
-            | "research_lookup"
-            | "files"
-            | "app"
-            | "media"
+        "app"
             | "skill_admin"
             | "app_inspect"
             | "app_modify"
@@ -162,55 +163,6 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
             .ok_or_else(|| format!("missing required field: {key}"))
     };
     let mapped = match name {
-        "skills" => match action("action")? {
-            "load" => {
-                required_arg(&value, "name")?;
-                "skill"
-            }
-            "create" => {
-                required_arg(&value, "name")?;
-                required_arg(&value, "description")?;
-                "create_skill"
-            }
-            "install" => {
-                required_arg(&value, "source")?;
-                "install_skill"
-            }
-            other => return Err(format!("invalid action for skills: {other}")),
-        },
-        "scripts" => match action("action")? {
-            "list" => "list_scripts",
-            "read" => {
-                required_arg(&value, "path")?;
-                "read_script"
-            }
-            "write" => {
-                required_arg(&value, "path")?;
-                if value.get("content").and_then(|v| v.as_str()).is_none() {
-                    return Err("missing required field: content".to_string());
-                }
-                "write_script"
-            }
-            "edit" => {
-                required_arg(&value, "path")?;
-                required_array(&value, "edits")?;
-                "edit_script"
-            }
-            "run" => {
-                required_arg(&value, "path")?;
-                "run_script"
-            }
-            "python" => {
-                required_arg(&value, "code")?;
-                required_arg(&value, "name")?;
-                "run_python"
-            }
-            "install" => {
-                required_array(&value, "packages")?;
-                "install_packages"
-            }
-            other => return Err(format!("invalid action for scripts: {other}")),
-        },
         "skill_admin" => match action("action")? {
             "create" => {
                 required_arg(&value, "name")?;
@@ -222,51 +174,6 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
                 "install_skill"
             }
             other => return Err(format!("invalid action for skill_admin: {other}")),
-        },
-        "search" => match action("mode")? {
-            "web" => {
-                required_arg(&value, "query")?;
-                "web_search"
-            }
-            "academic" => {
-                required_arg(&value, "query")?;
-                "academic_search"
-            }
-            "discussion" => {
-                required_arg(&value, "query")?;
-                "discussion_search"
-            }
-            other => return Err(format!("invalid mode for search: {other}")),
-        },
-        "research_lookup" => match action("scope")? {
-            "session_sources" => {
-                required_arg(&value, "query")?;
-                "search_sources"
-            }
-            "citations" => "list_citations",
-            other => return Err(format!("invalid scope for research_lookup: {other}")),
-        },
-        "files" => match action("action")? {
-            "search" => {
-                required_arg(&value, "query")?;
-                "search_files"
-            }
-            "read" => {
-                required_arg(&value, "name")?;
-                "read_file"
-            }
-            "pdf_page" => {
-                required_arg(&value, "name")?;
-                if value
-                    .get("page")
-                    .and_then(serde_json::Value::as_u64)
-                    .is_none()
-                {
-                    return Err("missing required field: page".to_string());
-                }
-                "read_pdf_page"
-            }
-            other => return Err(format!("invalid action for files: {other}")),
         },
         "app" => match action("action")? {
             "read" => {
@@ -389,40 +296,6 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
                 "edit_script"
             }
             other => return Err(format!("invalid action for script_files: {other}")),
-        },
-        "media" => match action("action")? {
-            "generate_image" => {
-                required_arg(&value, "prompt")?;
-                "generate_image"
-            }
-            "generate_video" => {
-                required_arg(&value, "prompt")?;
-                "generate_video"
-            }
-            "edit" => {
-                required_arg(&value, "video_id")?;
-                "edit_video"
-            }
-            "extract_frame" => {
-                required_arg(&value, "video_id")?;
-                "extract_frame"
-            }
-            "stitch" => {
-                required_array(&value, "video_ids")?;
-                "stitch_videos"
-            }
-            "save_reference" => {
-                required_arg(&value, "name")?;
-                required_arg(&value, "image_id")?;
-                required_arg(&value, "description")?;
-                "save_reference"
-            }
-            "list_references" => "list_references",
-            "delete_reference" => {
-                required_arg(&value, "name")?;
-                "delete_reference"
-            }
-            other => return Err(format!("invalid action for media: {other}")),
         },
         "video_transform" => match action("action")? {
             "edit" => {
@@ -743,11 +616,11 @@ impl ToolBox {
         let mut defs = Vec::new();
         defs.push(tool_def(
             "batch",
-            "Run several independent tool operations in ONE call — multiple searches, multiple file\
-             searches/reads, or multiple app/script writes. Every result comes back in a single\
-             round-trip, each labeled [n/N]. Prefer this over calling tools one by one whenever you\
-             need several operations at once. Sub-calls use the same public tool names and\
-             parameters as normal calls. Never nest batch inside batch; keep dependent steps (e.g.\
+            "Run several independent tool operations in ONE call — multiple searches, multiple file \
+             searches/reads, or multiple app/script writes. Every result comes back in a single \
+             round-trip, each labeled [n/N]. Prefer this over calling tools one by one whenever you \
+             need several operations at once. Sub-calls use the same public tool names and \
+             parameters as normal calls. Never nest batch inside batch; keep dependent steps (e.g. \
              write then edit the same file) as separate calls.",
             serde_json::json!({
                 "type": "object",
@@ -773,77 +646,12 @@ impl ToolBox {
         if has_skills {
             skills_actions.insert(0, "load");
         }
-        defs.push(tool_def(
-            "skills",
-            "Manage Agent Skills discovered from app, project, and user/global roots. action=load returns a skill's full instructions (SKILL.md by default, or a specific relative file); action=create and action=install write only to the app-managed root.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "enum": skills_actions },
-                    "name": { "type": "string", "description": "skill name for load/create" },
-                    "file": { "type": "string", "description": "optional path within the skill for load; defaults to SKILL.md" },
-                    "description": { "type": "string", "description": "short description for create" },
-                    "body": { "type": "string", "description": "skill instructions for create" },
-                    "overwrite": { "type": "boolean", "description": "replace an existing skill (default false)" },
-                    "source": { "type": "string", "description": "GitHub owner/repo/path for install" }
-                },
-                "required": ["action"]
-            }),
-        ));
-        defs.push(tool_def(
-            "scripts",
-            "Everything script-related in one tool. action=list/read/write/edit manage files inside the space scripts directory (confined paths, hash-line editing); action=run executes an existing skill or space script; action=python writes and runs inline Python in the space scripts environment (persists unless temporary=true); action=install adds packages to a skill virtualenv, an app's npm dependencies, or the shared space-script Python virtualenv (at most one target).",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "enum": ["list", "read", "write", "edit", "run", "python", "install"] },
-                    "path": { "type": "string", "description": "script path relative to the scripts dir" },
-                    "content": { "type": "string", "description": "complete script content for write" },
-                    "offset": { "type": "integer" },
-                    "limit": { "type": "integer", "description": "maximum 200 lines" },
-                    "edits": { "type": "array", "items": { "type": "object", "properties": { "hash": { "type": "string", "description": "hash from the latest read" }, "line": { "type": "integer", "description": "optional 1-based line number to disambiguate repeated lines" }, "new": { "type": ["string", "null"] } }, "required": ["hash"] } },
-                    "code": { "type": "string", "description": "Python source for python" },
-                    "name": { "type": "string", "description": "confined .py filename for python" },
-                    "temporary": { "type": "boolean", "description": "delete the script after python runs (default false)" },
-                    "skill": { "type": "string", "description": "skill name for run (unless space=true), or pip target for install" },
-                    "space": { "type": "boolean", "description": "run from the space scripts directory" },
-                    "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments for run/python" },
-                    "packages": { "type": "array", "items": { "type": "string" }, "description": "packages for install" },
-                    "app": { "type": "string", "description": "app npm target for install" }
-                },
-                "required": ["action"]
-            }),
-        ));
-        defs.push(tool_def(
-            "search",
-            "Search the web, scholarly literature, or HN/Reddit discussions. mode=web uses the configured web backend; academic preserves Semantic Scholar metadata; discussion preserves HN and Reddit engagement metadata.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "mode": { "type": "string", "enum": ["web", "academic", "discussion"] },
-                    "query": { "type": "string" },
-                    "recency": { "type": "string", "enum": ["day", "week", "month", "year"] },
-                    "include_domains": { "type": "array", "items": { "type": "string" } },
-                    "exclude_domains": { "type": "array", "items": { "type": "string" } },
-                    "limit": { "type": "integer", "description": "maximum academic results (default 10, max 20)" }
-                },
-                "required": ["mode", "query"]
-            }),
-        ));
-        defs.push(tool_def(
-            "fetch_url",
-            "Fetch an arbitrary URL as readable, paged text. Uses the 24-hour cache unless fresh=true; supports PDFs, YouTube transcripts, and research verifier cache-only mode.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "url": { "type": "string" },
-                    "offset": { "type": "integer" },
-                    "limit": { "type": "integer", "description": "maximum 200 lines" },
-                    "fresh": { "type": "boolean" }
-                },
-                "required": ["url"]
-            }),
-        ));
+        defs.push(spec::SKILLS.def(&skills_actions));
+        defs.push(
+            spec::SCRIPTS.def(&["list", "read", "write", "edit", "run", "python", "install"]),
+        );
+        defs.push(spec::SEARCH.def(&["web", "academic", "discussion"]));
+        defs.push(spec::FETCH_URL.def(&["fetch_url"]));
         let has_session_sources = self.research_session_id.is_some();
         let has_citations = self.citation_count() > 0;
         if has_session_sources || has_citations {
@@ -854,36 +662,10 @@ impl ToolBox {
             if has_citations {
                 scopes.push("citations");
             }
-            defs.push(tool_def(
-                "research_lookup",
-                "Look up previously gathered research material. scope=session_sources searches this research session's source bundle; scope=citations searches citations saved across this space.",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "scope": { "type": "string", "enum": scopes },
-                        "query": { "type": "string", "description": "keywords; optional for citations, required for session_sources" }
-                    },
-                    "required": ["scope"]
-                }),
-            ));
+            defs.push(spec::RESEARCH_LOOKUP.def(&scopes));
         }
         if self.files_count() > 0 {
-            defs.push(tool_def(
-                "files",
-                "Work with imported space files. action=search performs semantic/keyword search, read pages extracted text, and pdf_page returns an imported PDF page image when available.",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["search", "read", "pdf_page"] },
-                        "query": { "type": "string", "description": "search query" },
-                        "name": { "type": "string", "description": "imported file name" },
-                        "offset": { "type": "integer" },
-                        "limit": { "type": "integer", "description": "maximum 200 lines" },
-                        "page": { "type": "integer", "description": "1-based PDF page" }
-                    },
-                    "required": ["action"]
-                }),
-            ));
+            defs.push(spec::FILES.def(&["search", "read", "pdf_page"]));
         }
         if self.apps.is_some() {
             defs.push(tool_def(
@@ -925,44 +707,7 @@ impl ToolBox {
             ]);
         }
         if !media_actions.is_empty() {
-            defs.push(tool_def(
-                "media",
-                "Generate and transform media. action=generate_image makes an image from a prompt, optionally using a pasted image ID as a reference; action=generate_video makes a video from text and optional frame/reference images; action=edit/extract_frame/stitch transform videos locally with ffmpeg (effects, frame extraction, clip concatenation); action=save_reference/list_references/delete_reference manage named image references used for video consistency.",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": media_actions },
-                        "prompt": { "type": "string" },
-                        "image_id": { "type": "string", "description": "reference image for generate_image, or image being saved for save_reference" },
-                        "size": { "type": "string", "default": "1024x1024" },
-                        "duration": { "type": "integer" },
-                        "resolution": { "type": "string" },
-                        "aspect_ratio": { "type": "string" },
-                        "generate_audio": { "type": "boolean" },
-                        "first_frame_id": { "type": "string" },
-                        "last_frame_id": { "type": "string" },
-                        "ref_image_id": { "type": "string" },
-                        "character_refs": { "type": "array", "items": { "type": "string" } },
-                        "location_refs": { "type": "array", "items": { "type": "string" } },
-                        "seed": { "type": "integer" },
-                        "source_video_id": { "type": "string" },
-                        "video_id": { "type": "string" },
-                        "video_ids": { "type": "array", "items": { "type": "string" } },
-                        "lighting": { "type": "string", "enum": ["noir", "warm", "cold", "vintage", "vivid", "bleach_bypass"] },
-                        "camera_move": { "type": "string", "enum": ["dolly_in", "dolly_out", "pan_left", "pan_right", "tilt_up", "tilt_down"] },
-                        "intensity": { "type": "number" },
-                        "speed": { "type": "number" },
-                        "trim_start": { "type": "number" },
-                        "trim_end": { "type": "number" },
-                        "remove_audio": { "type": "boolean" },
-                        "time_sec": { "type": "number" },
-                        "format": { "type": "string", "enum": ["png", "jpg"] },
-                        "name": { "type": "string", "description": "reference name for save_reference/delete_reference" },
-                        "description": { "type": "string", "description": "reference description for save_reference" }
-                    },
-                    "required": ["action"]
-                }),
-            ));
+            defs.push(spec::MEDIA.def(&media_actions));
         }
         if self.research_only {
             defs.retain(|d| matches!(d.name.as_str(), "search" | "fetch_url"));
@@ -3274,6 +3019,9 @@ must land in dist/ for the app server to serve it"
 /// the `action` argument decides. Legacy names (`skill`, `web_search`, …)
 /// are still classified; mutating consolidations (`batch`) are never read-only.
 pub fn is_read_only_tool(name: &str, args: &str) -> bool {
+    if let Some(read_only) = spec::read_only(name, args) {
+        return read_only;
+    }
     let action_is = |actions: &[&str]| {
         serde_json::from_str::<serde_json::Value>(args)
             .ok()
@@ -3281,33 +3029,10 @@ pub fn is_read_only_tool(name: &str, args: &str) -> bool {
             .is_some_and(|a| actions.contains(&a.as_str()))
     };
     match name {
-        "skills" => action_is(&["load"]),
-        "scripts" => action_is(&["list", "read"]),
         "app" => action_is(&["read", "search", "diff", "list"]),
-        "media" => action_is(&["list_references"]),
         _ => matches!(
             name,
-            "skill"
-                | "search"
-                | "web_search"
-                | "academic_search"
-                | "discussion_search"
-                | "fetch_url"
-                | "research_lookup"
-                | "search_sources"
-                | "list_citations"
-                | "files"
-                | "search_files"
-                | "read_file"
-                | "read_pdf_page"
-                | "app_inspect"
-                | "read_app_file"
-                | "grep_app"
-                | "diff_app"
-                | "list_images"
-                | "read_script"
-                | "list_scripts"
-                | "list_references"
+            "app_inspect" | "read_app_file" | "grep_app" | "diff_app" | "list_images"
         ),
     }
 }
