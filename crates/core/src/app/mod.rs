@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use crate::config;
 use crate::db::{DEFAULT_SPACE, Db, Message, Session, Space as SpaceRow};
+pub use crate::provider::model_needs_cache_breakpoints;
 use crate::provider::openrouter::OpenRouter;
 use crate::provider::{BackendTag, Model, StreamEvent, Usage};
 use crate::space::Space;
@@ -240,25 +241,6 @@ pub enum MouseTarget {
 pub enum ModelPanel {
     Favorites,
     Available,
-}
-
-/// Whether a model id belongs to a family that caches only when the request
-/// marks an explicit breakpoint.
-///
-/// Matched on the id rather than the backend: every backend here routes to
-/// several vendors, and it is the vendor behind the id that decides. Ids
-/// arrive bare (`anthropic/claude-…`) or wire-prefixed
-/// (`openrouter:anthropic/claude-…`), so the vendor segment is matched
-/// wherever it sits.
-#[must_use]
-pub fn model_needs_cache_breakpoints(model: &str) -> bool {
-    let id = model
-        .rsplit(':')
-        .next()
-        .unwrap_or(model)
-        .to_ascii_lowercase();
-    // Anthropic is the family in every current catalog that requires this.
-    id.starts_with("anthropic/") || id.contains("/claude-") || id.starts_with("claude-")
 }
 
 /// Cache accounting summed over one user turn.

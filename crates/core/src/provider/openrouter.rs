@@ -334,14 +334,32 @@ impl ProviderFlavor {
 
     /// Add the cache-lane key for backends that route on it.
     ///
-    /// `OpenAI` and `OpenCode` Zen/Go both accept `prompt_cache_key` and use
-    /// it to keep one conversation's requests on a single cache lane — which
-    /// raises the hit rate on shared infrastructure. `OpenRouter` normalizes
-    /// away unknown top-level fields per upstream provider, and the Codex
-    /// Responses body has no equivalent, so neither is sent one.
+    /// `OpenAI` and `OpenCode` Zen/Go accept `prompt_cache_key` to keep one
+    /// conversation's requests on a single cache lane. `OpenRouter` uses
+    /// `session_id` for sticky upstream routing with a 10-minute inactivity
+    /// window. The Codex Responses body has no equivalent, so gets neither.
     fn add_prompt_cache_key(self, obj: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
-        if matches!(self, Self::OpencodeGo | Self::OpenAi) {
-            obj.insert("prompt_cache_key".into(), serde_json::json!(key));
+        match self {
+            Self::OpenRouter => {
+                obj.insert("session_id".into(), serde_json::json!(key));
+            }
+            Self::OpenAi | Self::OpencodeGo => {
+                obj.insert("prompt_cache_key".into(), serde_json::json!(key));
+            }
+            Self::OpenAiCodex => {}
+        }
+    }
+
+    fn add_auto_cache_control(
+        self,
+        obj: &mut serde_json::Map<String, serde_json::Value>,
+        model: &str,
+    ) {
+        if self == Self::OpenRouter && crate::provider::model_needs_cache_breakpoints(model) {
+            obj.insert(
+                "cache_control".into(),
+                serde_json::json!({ "type": "ephemeral" }),
+            );
         }
     }
 
@@ -1637,6 +1655,9 @@ impl OpenRouter {
         if let Some(key) = &params.prompt_cache_key {
             self.flavor.add_prompt_cache_key(obj, key);
         }
+        // mark_cache_breakpoints marks the system block and pre-tail; this
+        // automatic marker makes 3 total, below Anthropic's limit of 4.
+        self.flavor.add_auto_cache_control(obj, &model);
         if let Some(effort) = &params.reasoning_effort {
             self.flavor.add_reasoning_effort(obj, effort);
         }
@@ -4119,13 +4140,81 @@ mod tests {
                 "{flavor:?} should carry the cache lane key"
             );
         }
-        // OpenRouter normalizes unknown top-level fields per upstream
-        // provider; the Codex Responses body has no equivalent field.
-        for flavor in [ProviderFlavor::OpenRouter, ProviderFlavor::OpenAiCodex] {
+        let mut body = serde_json::Map::new();
+        ProviderFlavor::OpenRouter.add_prompt_cache_key(&mut body, "session-1");
+        assert!(!body.contains_key("prompt_cache_key"));
+        assert_eq!(
+            serde_json::Value::Object(body),
+            serde_json::json!({ "session_id": "session-1" })
+        );
+        // The Codex Responses body has no equivalent field.
+        let mut body = serde_json::Map::new();
+        ProviderFlavor::OpenAiCodex.add_prompt_cache_key(&mut body, "session-1");
+        assert!(body.is_empty(), "Codex should not carry it");
+    }
+
+    #[test]
+    fn auto_cache_control_goes_only_to_openrouter_anthropic() {
+        for model in [
+            "anthropic/claude-sonnet-4",
+            "anthropic/claude-3.7-sonnet:thinking",
+        ] {
             let mut body = serde_json::Map::new();
-            flavor.add_prompt_cache_key(&mut body, "session-1");
+            ProviderFlavor::OpenRouter.add_auto_cache_control(&mut body, model);
+            assert_eq!(
+                body.get("cache_control"),
+                Some(&serde_json::json!({ "type": "ephemeral" })),
+                "{model} should carry the automatic breakpoint"
+            );
+        }
+        let mut body = serde_json::Map::new();
+        ProviderFlavor::OpenRouter.add_auto_cache_control(&mut body, "openai/gpt-5");
+        assert!(body.is_empty());
+        for flavor in [
+            ProviderFlavor::OpenAi,
+            ProviderFlavor::OpencodeGo,
+            ProviderFlavor::OpenAiCodex,
+        ] {
+            let mut body = serde_json::Map::new();
+            flavor.add_auto_cache_control(&mut body, "claude-sonnet-4");
             assert!(body.is_empty(), "{flavor:?} should not carry it");
         }
+    }
+
+    #[test]
+    fn empty_breakpoint_message_serializes_as_plain_string() {
+        let mut message = ChatMessage {
+            role: "assistant".into(),
+            cache_breakpoint: true,
+            tool_calls: Some(vec![ToolCall {
+                id: "call-1".into(),
+                name: "lookup".into(),
+                arguments: "{}".into(),
+            }]),
+            ..Default::default()
+        };
+        let empty_wire = serde_json::to_value(&message).expect("serializes");
+        assert_eq!(empty_wire["content"], serde_json::json!(""));
+        assert_eq!(
+            empty_wire["tool_calls"],
+            serde_json::json!([{
+                "id": "call-1",
+                "type": "function",
+                "function": { "name": "lookup", "arguments": "{}" },
+            }])
+        );
+
+        message.content = "hi".into();
+        let wire = serde_json::to_value(&message).expect("serializes");
+        assert_eq!(
+            wire["content"],
+            serde_json::json!([{
+                "type": "text",
+                "text": "hi",
+                "cache_control": { "type": "ephemeral" },
+            }])
+        );
+        assert_eq!(wire["tool_calls"], empty_wire["tool_calls"]);
     }
 
     #[test]

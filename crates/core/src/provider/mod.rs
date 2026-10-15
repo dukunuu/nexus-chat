@@ -5,6 +5,23 @@ pub mod serve;
 
 use serde::{Deserialize, Serialize};
 
+/// Whether a model id belongs to a family that caches only when the request
+/// marks an explicit breakpoint.
+///
+/// Matched on the id rather than the backend: every backend here routes to
+/// several vendors, and it is the vendor behind the id that decides. Ids
+/// arrive bare (`anthropic/claude-…`) or wire-prefixed
+/// (`openrouter:anthropic/claude-…`), so the vendor segment is matched
+/// wherever it sits.
+#[must_use]
+pub fn model_needs_cache_breakpoints(model: &str) -> bool {
+    model.split(':').any(|segment| {
+        let id = segment.to_ascii_lowercase();
+        // Anthropic is the family in every current catalog that requires this.
+        id.starts_with("anthropic/") || id.contains("/claude-") || id.starts_with("claude-")
+    })
+}
+
 /// A tool the model may call, in `OpenAI` function-calling shape. Serde
 /// derives so a remote `ToolExecutor` can ship the same wire
 /// shape without churning this type.
@@ -259,7 +276,7 @@ impl Serialize for ChatMessage {
         use serde::ser::SerializeMap;
         let mut map = s.serialize_map(None)?;
         map.serialize_entry("role", &self.role)?;
-        if self.images.is_empty() && !self.cache_breakpoint {
+        if self.images.is_empty() && (!self.cache_breakpoint || self.content.is_empty()) {
             map.serialize_entry("content", &self.content)?;
         } else {
             // OpenAI vision shape: text part (if any) + one image_url part per image.
