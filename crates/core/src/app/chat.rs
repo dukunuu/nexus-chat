@@ -17,6 +17,14 @@ use crate::provider::{ChatMessage, ChatParams, StreamEvent, ToolCall, Usage};
 
 use super::{App, SPINNER_COLORS, SpinnerColor, THINKING, parse_topic, verbosity_clause};
 
+/// The Mermaid kinds the prompt advertises; the TUI tests that each one renders
+/// so the prompt and renderer cannot drift.
+pub const MERMAID_PREVIEW_EXAMPLES: &[&str] = &[
+    "flowchart LR\nA-->B",
+    "sequenceDiagram\nAlice->>Bob: Hello",
+    "stateDiagram-v2\n[*] --> Idle",
+];
+
 impl App {
     /// Send one chat message: validation, session auto-creation, persistence.
     #[allow(clippy::too_many_lines)] // validation, session creation, ordered skill/user persistence
@@ -906,29 +914,21 @@ impl App {
     }
 
     /// Instructions + the active session's memory snapshot, combined into one
-    /// system message. The full system prompt puts the app's bundled base
-    /// prompt first, then interactive-UI instructions and user additions,
-    /// with space instructions, skills, and the frozen memory snapshot layered
-    /// on top. The base prompt is never empty — it's the app speaking, not
-    /// per-space configuration.
+    /// system message. Stable base, rendering and environment instructions
+    /// precede space context, user additions, skills and the frozen memory
+    /// snapshot. Volatile date and session-mode instructions come last.
     pub fn system_prompt(&self) -> String {
-        let mut parts: Vec<String> = vec![self.resolved_base_system_prompt()];
+        let mut parts: Vec<String> = Vec::new();
+        let base = self.resolved_base_system_prompt();
+        if !base.is_empty() {
+            parts.push(base);
+        }
         if self.interactive_ui {
+            parts.push(Self::rendering_section());
             parts.push(crate::interactive::INSTRUCTIONS.to_string());
         }
-        let overlay = self.resolved_system_prompt_overlay();
-        if !overlay.is_empty() {
-            parts.push(overlay);
-        }
+        parts.push(self.environment_section());
         if !self.incognito {
-            let instructions =
-                std::fs::read_to_string(self.space.instructions_path(&self.active_space.name))
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
-            if let Some(i) = instructions {
-                parts.push(i);
-            }
             if let Some(files) = self.files_section() {
                 parts.push(files);
             }
@@ -938,14 +938,29 @@ impl App {
             if let Some(scripts) = self.scripts_section() {
                 parts.push(scripts);
             }
+            let instructions =
+                std::fs::read_to_string(self.space.instructions_path(&self.active_space.name))
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+            if let Some(i) = instructions {
+                parts.push(i);
+            }
+        }
+        let overlay = self.resolved_system_prompt_overlay();
+        if !overlay.is_empty() {
+            parts.push(overlay);
+        }
+        if let Some(skills) = self.skills_section() {
+            parts.push(skills);
+        }
+        if !self.incognito {
             let memory = self.memory_snapshot();
             if !memory.trim().is_empty() {
                 parts.push(format!("## Memory\n{memory}"));
             }
         }
-        if let Some(skills) = self.skills_section() {
-            parts.push(skills);
-        }
+        parts.push(self.now_section());
         if self.web_mode {
             let today = self
                 .prompt_datetime
@@ -962,6 +977,48 @@ impl App {
             );
         }
         parts.join("\n\n")
+    }
+
+    pub(super) fn environment_section(&self) -> String {
+        let mut section = "## Environment\n".to_string();
+        if let Some((provider, raw_model)) = self
+            .current_model
+            .as_deref()
+            .and_then(|model| self.resolve_model_backend(model))
+        {
+            let _ = writeln!(
+                section,
+                "- Backend: {} · model {raw_model}",
+                provider.backend_tag().name()
+            );
+        }
+        let _ = write!(
+            section,
+            "- OS: {} ({})",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        section
+    }
+
+    pub(super) fn rendering_section() -> String {
+        "## Rendering\nFenced ```mermaid blocks render as inline diagrams for flowchart, sequenceDiagram and stateDiagram-v2 sources. Other Mermaid diagram types are shown as source text, so prefer the supported kinds or a plain list."
+            .to_string()
+    }
+
+    pub(super) fn now_section(&self) -> String {
+        let mut section = format!(
+            "## Now\nCurrent date/time: {}. Your training data has a cutoff well before this — trust this timestamp over any date assumption from training",
+            self.prompt_datetime
+        );
+        if self.toolbox.defs().iter().any(|tool| tool.name == "search") {
+            section.push_str(
+                ", and use `search` with mode=web for anything that may have changed since training (news, releases, prices, \"latest\" anything).",
+            );
+        } else {
+            section.push('.');
+        }
+        section
     }
 
     /// Ctrl+O: navigate to the session linked in a `session_link` message

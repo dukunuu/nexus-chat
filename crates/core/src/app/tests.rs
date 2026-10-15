@@ -814,6 +814,126 @@ fn base_system_prompt_is_always_present_and_resolves_verbosity() {
 }
 
 #[test]
+fn base_prompt_has_no_volatile_or_stale_text() {
+    for text in ["{{datetime}}", "OpenRouter", "web-search"] {
+        assert!(!config::BASE_SYSTEM_PROMPT.contains(text), "{text}");
+    }
+    assert!(config::BASE_SYSTEM_PROMPT.contains("{{verbosity}}"));
+}
+
+#[test]
+fn system_prompt_is_static_first() {
+    let mut a = app_with_key();
+    let instructions = "Space instructions: prefer concrete examples.";
+    std::fs::write(
+        a.space.instructions_path(&a.active_space.name),
+        instructions,
+    )
+    .unwrap();
+    let overlay = "User additions: answer in French.";
+    a.system_prompt_overlay = overlay.into();
+    install_test_skill(
+        &mut a,
+        "prompt-order",
+        "Check prompt order",
+        "Use examples.",
+    );
+    a.memory_snapshot = "The user prefers Rust.".into();
+    a.web_mode = true;
+    a.interactive_ui = true;
+
+    let prompt = a.system_prompt();
+    let positions = [
+        config::BASE_SYSTEM_PROMPT.lines().next().unwrap(),
+        "## Rendering",
+        crate::interactive::INSTRUCTIONS,
+        "## Environment",
+        instructions,
+        overlay,
+        "## Skills",
+        "## Memory",
+        "## Now",
+        "Web answer mode is ON",
+    ]
+    .map(|text| prompt.find(text).unwrap());
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
+fn two_epochs_share_the_whole_prefix_before_now() {
+    let mut a = app_with_key();
+    a.interactive_ui = true;
+    a.web_mode = true;
+    a.prompt_datetime = "2026-07-06 12:00 UTC".into();
+    let first = a.system_prompt();
+    a.prompt_datetime = "2026-07-07 13:00 UTC".into();
+    let second = a.system_prompt();
+
+    let (first_prefix, first_tail) = first.split_once("## Now").unwrap();
+    let (second_prefix, second_tail) = second.split_once("## Now").unwrap();
+    assert_eq!(first_prefix, second_prefix);
+    assert_ne!(first_tail, second_tail);
+    assert!(first_tail.contains("2026-07-06 12:00 UTC"));
+    assert!(second_tail.contains("2026-07-07 13:00 UTC"));
+}
+
+#[test]
+fn environment_names_backend_model_and_os() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    let section = a.environment_section();
+    assert!(section.contains("Backend: OpenRouter · model a/one"));
+    assert!(section.contains(&format!(
+        "- OS: {} ({})",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )));
+
+    a.current_model = None;
+    let section = a.environment_section();
+    assert!(!section.contains("Backend:"));
+    assert!(section.contains(std::env::consts::OS));
+
+    a.current_model = Some("openai:unconfigured".into());
+    let section = a.environment_section();
+    assert!(!section.contains("Backend:"));
+    assert!(section.contains(std::env::consts::OS));
+}
+
+#[test]
+fn prompt_mentions_only_tools_that_exist() {
+    let a = app_with_key();
+    let defs = a.toolbox.defs();
+    let now = a.now_section();
+    for text in [config::BASE_SYSTEM_PROMPT, now.as_str()] {
+        for token in text.split('`').skip(1).step_by(2).filter(|token| {
+            !token.is_empty()
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        }) {
+            assert!(
+                defs.iter().any(|tool| tool.name == token),
+                "prompt advertises unavailable tool `{token}`"
+            );
+        }
+    }
+    assert!(now.contains("use `search` with mode=web"));
+}
+
+#[test]
+fn rendering_section_only_for_capable_clients() {
+    let mut a = app_with_key();
+    assert!(!a.system_prompt().contains("## Rendering"));
+    a.interactive_ui = true;
+    let prompt = a.system_prompt();
+    assert!(prompt.contains("## Rendering"));
+    for kind in ["flowchart", "sequenceDiagram", "stateDiagram-v2"] {
+        assert!(prompt.contains(kind), "{kind}");
+    }
+}
+
+#[test]
 fn system_prompt_appends_overlay_after_base() {
     let mut a = app_with_key();
     a.system_prompt_overlay = "Always answer in French. Today is {{datetime}}.".into();
@@ -853,6 +973,7 @@ fn context_used_and_limit() {
     a.models[0].context_length = Some(1000);
     a.current_model = Some("a/one".into());
     assert_eq!(a.context_limit(), Some(1000));
+    let prompt_only = a.context_used();
     a.messages.push(Message {
         role: "user".into(),
         content: "x".repeat(40), // ~10 tokens
@@ -865,7 +986,7 @@ fn context_used_and_limit() {
         persona: None,
         created_at: None,
     });
-    assert_eq!(a.context_used(), 10);
+    assert_eq!(a.context_used(), prompt_only + 10);
 }
 
 #[tokio::test]
@@ -910,6 +1031,7 @@ fn compaction_narrows_effective_messages_and_context_used() {
     a.base_system_prompt = String::new(); // isolate from the base system prompt
     a.models[0].context_length = Some(1000);
     a.current_model = Some("a/one".into());
+    let prompt_only = a.context_used();
     let space = a.active_space.id.clone();
     let mut s = a.db.create_session("t", "a/one", &space, "chat").unwrap();
     for i in 0..4 {
@@ -931,9 +1053,9 @@ fn compaction_narrows_effective_messages_and_context_used() {
     a.session = Some(s);
 
     assert_eq!(a.effective_messages().len(), 2);
-    // 20 (summary) + 2*10 (tail) = 40 tokens; the two compacted-away
-    // messages must NOT be counted.
-    assert_eq!(a.context_used(), 40);
+    // 20 (summary) + 2*10 (tail) = 40 tokens on top of the system prompt's
+    // own cost; the two compacted-away messages must NOT be counted.
+    assert_eq!(a.context_used(), prompt_only + 40);
 }
 
 #[test]

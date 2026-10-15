@@ -402,6 +402,16 @@ mod tests {
     }
 
     #[test]
+    fn prompt_advertised_mermaid_examples_render() {
+        let picker = Picker::halfblocks();
+        for source in nexus_core::app::MERMAID_PREVIEW_EXAMPLES {
+            let image = rasterize(source, 60, true, &picker).expect(source);
+            assert_eq!(image.width(), 600);
+            assert_eq!(image.height(), 240);
+        }
+    }
+
+    #[test]
     fn renderer_panics_are_marked_for_the_terminal_hook_and_become_errors() {
         assert!(!IN_RENDER_JOB.get());
         let result: Result<(), String> = render_safely(|| {

@@ -45,7 +45,7 @@ mod transcribe;
 pub mod usage;
 mod watches;
 pub use backends::{Backends, composite_id};
-pub use chat::{code_blocks, human_size, pick_greeting};
+pub use chat::{MERMAID_PREVIEW_EXAMPLES, code_blocks, human_size, pick_greeting};
 pub use commands::{AppCommand, COMMANDS, Command, Match, command_score, fuzzy_score};
 pub use files::OcrUpdate;
 pub use research::{PlanQuestion, ResearchUpdate};

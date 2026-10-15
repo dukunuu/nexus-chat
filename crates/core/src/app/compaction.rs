@@ -347,9 +347,12 @@ impl App {
     /// `context_used` falls back to, so the parts add up to (roughly) the whole.
     pub fn context_breakdown(&self) -> ContextBreakdown {
         let mut instructions_chars = self.resolved_base_system_prompt().chars().count()
-            + self.resolved_system_prompt_overlay().chars().count();
+            + self.resolved_system_prompt_overlay().chars().count()
+            + self.environment_section().chars().count()
+            + self.now_section().chars().count();
         if self.interactive_ui {
-            instructions_chars += crate::interactive::INSTRUCTIONS.chars().count();
+            instructions_chars += Self::rendering_section().chars().count()
+                + crate::interactive::INSTRUCTIONS.chars().count();
         }
         instructions_chars +=
             std::fs::read_to_string(self.space.instructions_path(&self.active_space.name))
