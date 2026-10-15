@@ -7,6 +7,151 @@ fn test_space() -> Space {
     }
 }
 
+#[test]
+fn training_is_off_by_default_and_never_in_incognito() {
+    let mut app = App::new(Db::open_in_memory().unwrap(), None, test_space());
+    let root = app.space.root.clone();
+    let key = format!("training:{}", app.active_space.id);
+    assert!(!app.training_enabled());
+    app.db.set_setting(&key, "on").unwrap();
+    assert!(app.training_enabled());
+    app.incognito = true;
+    assert!(!app.training_enabled());
+    app.run_command("training off").unwrap();
+    assert!(app.last_status().contains("incognito"));
+    assert!(
+        app.db
+            .load_settings()
+            .unwrap()
+            .contains(&(key, "on".into()))
+    );
+    app.incognito = false;
+    assert!(app.training_enabled());
+    app.active_space = app.db.create_space("other").unwrap();
+    assert!(!app.training_enabled());
+    assert!(!app.space.traces_dir().exists());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn training_command_toggles_and_persists_locally() {
+    let space = test_space();
+    std::fs::create_dir_all(&space.root).unwrap();
+    let root = space.root.clone();
+    let db_path = space.db_path();
+    let mut app = App::new(Db::open(&db_path).unwrap(), None, space);
+    assert_eq!(
+        app.parse_command("training").unwrap(),
+        AppCommand::SetTraining { on: None }
+    );
+    assert_eq!(
+        app.parse_command("training on").unwrap(),
+        AppCommand::SetTraining { on: Some(true) }
+    );
+    assert_eq!(
+        app.parse_command("training off").unwrap(),
+        AppCommand::SetTraining { on: Some(false) }
+    );
+    assert!(app.parse_command("training invalid").is_err());
+    app.run_command("training").unwrap();
+    assert!(app.training_enabled());
+    let status = app.last_status();
+    assert!(status.contains(&app.space.traces_dir().display().to_string()));
+    assert!(status.contains("secrets are scrubbed"));
+    let key = format!("training:{}", app.active_space.id);
+    assert!(Db::setting_is_local(&key));
+    let scope: String = app
+        .db
+        .conn_for_test()
+        .query_row(
+            "SELECT scope FROM app_settings WHERE key = ?1",
+            [&key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(scope, "local");
+    assert!(!app.space.traces_dir().exists());
+    drop(app);
+    let mut app = App::new(
+        Db::open(&db_path).unwrap(),
+        None,
+        Space { root: root.clone() },
+    );
+    assert!(app.training_enabled());
+    app.run_command("training").unwrap();
+    assert!(!app.training_enabled());
+    assert!(
+        app.db
+            .load_settings()
+            .unwrap()
+            .contains(&(key, "off".into()))
+    );
+    app.run_command("training on").unwrap();
+    assert!(app.training_enabled());
+    app.run_command("training off").unwrap();
+    assert!(!app.training_enabled());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn start_stream_sets_trace_context_only_when_training_is_on() {
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    let session = app
+        .db
+        .create_session("chat", "a/one", &app.active_space.id, "chat")
+        .unwrap();
+    app.session = Some(session.clone());
+    app.settings.temperature = Some(0.5);
+    let params = app.chat_params(Some("low".into()), BackendTag::OpenRouter);
+    assert!(params.trace.is_none());
+    assert!(app.trace_store.is_none());
+    assert!(app.last_turn.is_none());
+    app.run_command("training on").unwrap();
+    let params = app.chat_params(Some("low".into()), BackendTag::OpenRouter);
+    assert_eq!(params.temperature, Some(0.5));
+    assert_eq!(params.reasoning_effort.as_deref(), Some("low"));
+    assert!(params.prompt_cache_key.is_some());
+    let context = params.trace.unwrap();
+    assert_eq!(context.session_id, session.id);
+    assert_eq!(context.space_id, app.active_space.id);
+    assert_eq!(context.backend, "OpenRouter");
+    assert_eq!(
+        uuid::Uuid::parse_str(&context.turn_id)
+            .unwrap()
+            .get_version_num(),
+        4
+    );
+    assert_eq!(app.last_turn, Some((session.id, context.turn_id.clone())));
+    assert!(std::sync::Arc::ptr_eq(
+        &context.store,
+        app.trace_store.as_ref().unwrap()
+    ));
+    let next = app.chat_params(None, BackendTag::Local).trace.unwrap();
+    assert_ne!(context.turn_id, next.turn_id);
+    assert_eq!(next.backend, "Local");
+    assert!(std::sync::Arc::ptr_eq(&context.store, &next.store));
+    app.incognito = true;
+    assert!(
+        app.chat_params(None, BackendTag::OpenRouter)
+            .trace
+            .is_none()
+    );
+    app.incognito = false;
+    app.run_command("training off").unwrap();
+    assert!(
+        app.chat_params(None, BackendTag::OpenRouter)
+            .trace
+            .is_none()
+    );
+    drop(next);
+    drop(context);
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn local_backend_discovers_models_and_uses_local_utility_fallback() {

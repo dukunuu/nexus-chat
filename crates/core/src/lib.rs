@@ -42,6 +42,18 @@ pub async fn boot(saved: config::SavedCreds) -> Result<app::App> {
     let key = config::first_configured(&saved).map(|(_, k)| k);
     let space = space::Space::open()?;
     let db = db::Db::open(&space.db_path())?;
+    if space.traces_dir().join("index.db").exists() {
+        let _ = (|| -> Result<()> {
+            let mut statement = db.conn().prepare("SELECT id FROM sessions")?;
+            let existing = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+            let store =
+                trace::TraceStore::open(&space.traces_dir(), trace::Scrubber::new(Vec::new()))?;
+            store.prune_missing_sessions(&existing)?;
+            Ok(())
+        })();
+    }
     let prompt_note = config::migrate_system_prompt_overlay();
     let mut app = app::App::new(db, key.as_deref(), space);
     app.system_prompt_overlay = config::load_system_prompt_overlay();

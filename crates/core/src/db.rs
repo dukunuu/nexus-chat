@@ -864,12 +864,13 @@ impl Db {
     /// classified here — the default is sync, so a forgotten local key would
     /// silently sync to other devices.
     pub fn setting_is_local(key: &str) -> bool {
-        matches!(
-            key,
-            // Device capabilities / local services: a phone has no
-            // localhost SearXNG, no ollama, no tesseract, and its API keys
-            // are its own.
-            "searxng_url"
+        key.starts_with("training:")
+            || matches!(
+                key,
+                // Device capabilities / local services: a phone has no
+                // localhost SearXNG, no ollama, no tesseract, and its API keys
+                // are its own.
+                "searxng_url"
                 | "langsearch_key"
                 | "search_provider"
                 | "ocr_engine"
@@ -882,7 +883,18 @@ impl Db {
                 // Which remote device the ssh transport last synced with —
                 // per-peer export cursors are device-local bookkeeping.
                 | "sync_ssh_peer"
-        )
+            )
+    }
+
+    /// Read one setting, returning `None` if it is missing or cannot be read.
+    pub fn setting(&self, key: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .ok()
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
@@ -3813,6 +3825,16 @@ mod tests {
         assert!(!p.favorite);
         assert!(p.last_used.is_some());
         assert_eq!(p.reasoning.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn setting_returns_a_single_value() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.setting("training:space"), None);
+        db.set_setting("training:other", "off").unwrap();
+        db.set_setting("training:space", "on").unwrap();
+        assert_eq!(db.setting("training:space"), Some("on".to_string()));
+        assert_eq!(db.setting("training:other"), Some("off".to_string()));
     }
 
     #[test]

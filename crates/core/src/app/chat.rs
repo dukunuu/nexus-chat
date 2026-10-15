@@ -327,16 +327,8 @@ impl App {
             }
             None => (None, None),
         };
-        let params = ChatParams {
-            reasoning_effort,
-            prompt_cache_key: self
-                .session
-                .as_ref()
-                .map(|session| self.prompt_cache_key_for(&session.id)),
-            temperature: self.settings.temperature,
-            top_p: self.settings.top_p,
-            max_tokens: self.settings.max_tokens,
-        };
+        self.push_status(reasoning_warning.unwrap_or_default());
+        let params = self.chat_params(reasoning_effort, provider.backend_tag());
         let tools = self.toolbox.defs();
         let (rx, abort) = provider.stream_chat(
             raw_model.clone(),
@@ -391,11 +383,44 @@ impl App {
         self.spinner_frame = 0;
         self.thinking_idx = thinking_idx;
         self.spinner_color = spinner_color;
-        self.push_status(reasoning_warning.unwrap_or_default());
         // New content is about to arrive below the conversation: the view
         // resets its scroll/pinning baseline (AppEvent::ViewportReset).
         self.push_viewport_reset();
         Ok(())
+    }
+
+    /// Build the main chat's parameters without starting a provider request.
+    pub(super) fn chat_params(
+        &mut self,
+        reasoning_effort: Option<String>,
+        backend: crate::provider::BackendTag,
+    ) -> ChatParams {
+        let mut params = ChatParams {
+            reasoning_effort,
+            prompt_cache_key: self
+                .session
+                .as_ref()
+                .map(|session| self.prompt_cache_key_for(&session.id)),
+            temperature: self.settings.temperature,
+            top_p: self.settings.top_p,
+            max_tokens: self.settings.max_tokens,
+            ..ChatParams::default()
+        };
+        if self.training_enabled()
+            && let Some(session_id) = self.session.as_ref().map(|session| session.id.clone())
+            && let Some(store) = self.open_trace_store()
+        {
+            let turn_id = uuid::Uuid::new_v4().to_string();
+            self.last_turn = Some((session_id.clone(), turn_id.clone()));
+            params.trace = Some(crate::trace::TraceContext {
+                store,
+                session_id,
+                space_id: self.active_space.id.clone(),
+                turn_id,
+                backend: backend.name().to_string(),
+            });
+        }
+        params
     }
 
     /// Compatibility entry point for tests and synchronous callers. Runtime

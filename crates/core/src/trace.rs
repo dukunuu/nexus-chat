@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
@@ -19,6 +19,27 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::provider::{ChatMessage, ToolCall, ToolDef, Usage};
+
+/// Recording destination and identity captured at the start of a chat turn.
+#[derive(Clone)]
+pub struct TraceContext {
+    pub store: Arc<TraceStore>,
+    pub session_id: String,
+    pub space_id: String,
+    pub turn_id: String,
+    pub backend: String,
+}
+
+impl std::fmt::Debug for TraceContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TraceContext")
+            .field("session_id", &self.session_id)
+            .field("space_id", &self.space_id)
+            .field("turn_id", &self.turn_id)
+            .field("backend", &self.backend)
+            .finish_non_exhaustive()
+    }
+}
 
 /// One model call, including its exact request and subsequent tool results.
 pub struct TraceStep {
@@ -277,6 +298,40 @@ impl TraceStore {
         transaction.execute("DELETE FROM steps WHERE session_id = ?1", [&session_id])?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Delete steps for missing sessions and collect their unreferenced blobs.
+    /// Returns the number of steps deleted.
+    pub fn prune_missing_sessions(&self, existing: &HashSet<String>) -> Result<usize> {
+        let existing: HashSet<_> = existing.iter().map(|id| self.scrubber.scrub(id)).collect();
+        let removed = {
+            let mut connection = self.connection()?;
+            let transaction = connection.transaction()?;
+            let sessions = {
+                let mut statement = transaction.prepare("SELECT DISTINCT session_id FROM steps")?;
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let mut removed = 0;
+            for session in sessions.iter().filter(|id| !existing.contains(*id)) {
+                for table in ["tool_results", "labels"] {
+                    transaction.execute(
+                        &format!(
+                            "DELETE FROM {table} WHERE step_id IN
+                             (SELECT id FROM steps WHERE session_id = ?1)"
+                        ),
+                        [session],
+                    )?;
+                }
+                removed +=
+                    transaction.execute("DELETE FROM steps WHERE session_id = ?1", [session])?;
+            }
+            transaction.commit()?;
+            removed
+        };
+        self.gc()?;
+        Ok(removed)
     }
 
     /// Remove unreferenced blobs, including those left by failed transactions.
@@ -552,6 +607,46 @@ mod tests {
         assert_eq!(at.offset().local_minus_utc(), 0);
         assert_eq!(store.steps_for_session("session-1").unwrap(), vec![id]);
         assert_eq!(store.gc().unwrap(), 0);
+    }
+
+    #[test]
+    fn prune_missing_sessions_drops_orphans_only() {
+        let dir = TempDir::new();
+        let store = dir.open();
+        let kept = store.record_step(&step("kept")).unwrap();
+        let mut orphan = step("missing");
+        orphan.system = "Orphan-only system".into();
+        orphan.tool_results[0].full = "Orphan-only result".into();
+        let removed = store.record_step(&orphan).unwrap();
+        store.record_step(&orphan).unwrap();
+        store.add_label(&kept, "quality", "good").unwrap();
+        store.add_label(&removed, "quality", "bad").unwrap();
+        let before = files(&dir.0.join("blobs")).len();
+        let existing = HashSet::from(["kept".into(), "never-recorded".into()]);
+        assert_eq!(store.prune_missing_sessions(&existing).unwrap(), 2);
+        assert_eq!(store.steps_for_session("kept").unwrap(), vec![kept.clone()]);
+        assert!(store.steps_for_session("missing").unwrap().is_empty());
+        assert!(store.load_step(&removed).is_err());
+        let loaded = store.load_step(&kept).unwrap();
+        assert_eq!(loaded["labels"][0]["value"], "good");
+        assert_eq!(
+            loaded["tool_results"][0]["full"],
+            "Full notes: one two three"
+        );
+        let connection = store.connection().unwrap();
+        for table in ["tool_results", "labels"] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1);
+        }
+        drop(connection);
+        assert_eq!(files(&dir.0.join("blobs")).len(), before - 2);
+        assert_eq!(store.gc().unwrap(), 0);
+        assert_eq!(store.prune_missing_sessions(&HashSet::new()).unwrap(), 1);
+        assert!(files(&dir.0.join("blobs")).is_empty());
     }
 
     #[test]

@@ -160,6 +160,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["private", "anon"],
     },
     Command {
+        name: "training",
+        desc: "record training data for this space (local, scrubbed)",
+        aliases: &[],
+    },
+    Command {
         name: "copy",
         desc: "copy last reply",
         aliases: &["yank", "clip"],
@@ -287,6 +292,8 @@ pub enum AppCommand {
     ToggleWeb,
     /// `/incognito` — toggle (`on` is absolute for the host).
     Incognito { on: bool },
+    /// `/training [on|off]` — set or toggle device-local recording consent.
+    SetTraining { on: Option<bool> },
     /// `/watch [topic]` — open the watch picker, or create a watch.
     Watch { topic: Option<String> },
     /// `/usage` — the analytics popup.
@@ -367,6 +374,14 @@ impl App {
             "incognito" => Ok(AppCommand::Incognito {
                 on: !self.incognito,
             }),
+            "training" => Ok(AppCommand::SetTraining {
+                on: match rest(cmd, token).as_str() {
+                    "" => None,
+                    "on" => Some(true),
+                    "off" => Some(false),
+                    _ => return Err("usage: /training [on|off]".to_string()),
+                },
+            }),
             "watch" => {
                 let arg = rest(cmd, token);
                 Ok(AppCommand::Watch {
@@ -441,6 +456,25 @@ impl App {
             AppCommand::Incognito { on } => {
                 if on != self.incognito {
                     self.toggle_incognito()?;
+                }
+            }
+            AppCommand::SetTraining { on } => {
+                if self.incognito {
+                    self.push_status("training is not available in incognito mode");
+                } else {
+                    let on = on.unwrap_or_else(|| !self.training_enabled());
+                    self.db.set_setting(
+                        &format!("training:{}", self.active_space.id),
+                        if on { "on" } else { "off" },
+                    )?;
+                    if on {
+                        self.push_status(format!(
+                            "training on — local data in {}; secrets are scrubbed",
+                            self.space.traces_dir().display()
+                        ));
+                    } else {
+                        self.push_status("training off for this space");
+                    }
                 }
             }
             AppCommand::ArmSkill { name, rest } => {

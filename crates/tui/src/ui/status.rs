@@ -53,6 +53,9 @@ pub(super) fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
     if app.incognito {
         tags.push(format!("{} incognito", glyph::INCOGNITO));
     }
+    if app.training_enabled() {
+        tags.push(format!("{} training", glyph::DOT));
+    }
     let badge_max = (area.width as usize * 2 / 5).max(12);
     let tag_w: usize = tags.iter().map(|t| t.chars().count() + 3).sum();
     let model = fit_badge("", &model, badge_max.saturating_sub(tag_w + 2).max(8));

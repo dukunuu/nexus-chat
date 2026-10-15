@@ -24,6 +24,7 @@ use super::{
 };
 use crate::prompts;
 use crate::tools::ToolExecutor;
+use crate::trace::{TraceResponse, TraceStep, TraceToolResult};
 
 const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
@@ -1475,7 +1476,7 @@ impl OpenRouter {
     /// One chat round-trip plus tool iterations. Args mix request data
     /// (model/messages/params/tools) with execution plumbing (toolbox,
     /// budget, event sink) — a struct would group unrelated concerns.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn run_chat_loop(
         &self,
         model: String,
@@ -1499,7 +1500,9 @@ impl OpenRouter {
             // request, disable selection without removing the schemas or
             // appending a transient budget prompt; the next turn can still
             // reconstruct the same message prefix.
-            match self
+            let request_len = messages.len();
+            let started = std::time::Instant::now();
+            let finish = self
                 .run_stream(
                     &model,
                     &messages,
@@ -1508,14 +1511,15 @@ impl OpenRouter {
                     iter == max_tool_iters,
                     tx,
                 )
-                .await?
-            {
+                .await?;
+            let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let (output, calls, tool_results) = match finish {
                 Finish::Errored => return Ok(()),
-                Finish::Done => {
-                    let _ = tx.send(StreamEvent::Done);
-                    return Ok(());
-                }
-                Finish::ToolCalls(calls, content, reasoning) => {
+                Finish::Done(output) => (output, Vec::new(), Vec::new()),
+                Finish::ToolCalls(calls, output) => {
+                    let content = &output.content;
+                    let reasoning = &output.reasoning;
+                    let mut tool_results = Vec::new();
                     messages.push(ChatMessage {
                         role: "assistant".to_string(),
                         content: content.clone(),
@@ -1578,6 +1582,14 @@ impl OpenRouter {
                                 result.clone()
                             }
                         };
+                        if params.trace.is_some() {
+                            tool_results.push(TraceToolResult {
+                                call_id: call.id.clone(),
+                                name: call.name.clone(),
+                                full: result.clone(),
+                                seen: content.clone(),
+                            });
+                        }
                         messages.push(ChatMessage {
                             role: "tool".to_string(),
                             content,
@@ -1600,7 +1612,60 @@ impl OpenRouter {
                             });
                         }
                     }
+                    (output, calls, tool_results)
                 }
+            };
+            let done = calls.is_empty();
+            if let Some(context) = &params.trace {
+                let request = &messages[..request_len];
+                let repaired = self
+                    .is_local()
+                    .then(|| harmony::sanitize_history(request))
+                    .flatten();
+                let request = repaired.as_deref().unwrap_or(request);
+                let (system, request) = match request.split_first() {
+                    Some((first, rest)) if first.role == "system" => (first.content.clone(), rest),
+                    _ => (String::new(), request),
+                };
+                let mut sampling = serde_json::json!({
+                    "reasoning_effort": params.reasoning_effort,
+                    "temperature": params.temperature,
+                    "top_p": params.top_p,
+                    "max_tokens": params.max_tokens,
+                });
+                sampling
+                    .as_object_mut()
+                    .unwrap()
+                    .retain(|_, value| !value.is_null());
+                let step = TraceStep {
+                    session_id: context.session_id.clone(),
+                    space_id: context.space_id.clone(),
+                    turn_id: context.turn_id.clone(),
+                    round: u32::try_from(iter).unwrap_or(u32::MAX),
+                    model: self.opencode_route(&model).1,
+                    backend: context.backend.clone(),
+                    system,
+                    tools: tools.clone(),
+                    messages: request.to_vec(),
+                    params: sampling,
+                    response: TraceResponse {
+                        content: output.content,
+                        reasoning: output.reasoning,
+                        tool_calls: calls,
+                        finish: if done { "stop" } else { "tool_calls" }.to_string(),
+                    },
+                    usage: output.usage,
+                    latency_ms,
+                    tool_results,
+                };
+                let store = context.store.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _ = store.record_step(&step);
+                });
+            }
+            if done {
+                let _ = tx.send(StreamEvent::Done);
+                return Ok(());
             }
         }
         let _ = tx.send(StreamEvent::Done);
@@ -1822,13 +1887,17 @@ impl OpenRouter {
         // Trust accumulated tool calls, not finish_reason: some providers
         // stream tool_calls but finish with "stop" (or no finish chunk at
         // all); dropping the calls there kills the turn silently.
+        let output = RoundOutput {
+            content: content_acc,
+            reasoning: (!reasoning_acc.is_empty()).then_some(reasoning_acc),
+            usage,
+        };
         if tool_calls.is_empty() {
-            Ok(Finish::Done)
+            Ok(Finish::Done(output))
         } else {
             Ok(Finish::ToolCalls(
                 tool_calls.into_values().collect(),
-                content_acc,
-                (!reasoning_acc.is_empty()).then_some(reasoning_acc),
+                output,
             ))
         }
     }
@@ -2004,13 +2073,17 @@ impl OpenRouter {
         if let Some(usage) = usage {
             let _ = tx.send(StreamEvent::Usage(usage));
         }
+        let output = RoundOutput {
+            content: content_acc,
+            reasoning: None,
+            usage,
+        };
         if tool_calls.is_empty() {
-            Ok(Finish::Done)
+            Ok(Finish::Done(output))
         } else {
             Ok(Finish::ToolCalls(
                 tool_calls.into_values().collect(),
-                content_acc,
-                None,
+                output,
             ))
         }
     }
@@ -2390,9 +2463,15 @@ fn chat_sse_frame(value: &serde_json::Value) -> Vec<u8> {
     format!("data: {value}\n\n").into_bytes()
 }
 
+struct RoundOutput {
+    content: String,
+    reasoning: Option<String>,
+    usage: Option<Usage>,
+}
+
 enum Finish {
-    Done,
-    ToolCalls(Vec<ToolCall>, String, Option<String>),
+    Done(RoundOutput),
+    ToolCalls(Vec<ToolCall>, RoundOutput),
     Errored,
 }
 
@@ -3492,6 +3571,224 @@ fn codex_fallback_models() -> Vec<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn fake_chat_server(
+        responses: Vec<Vec<u8>>,
+    ) -> (OpenRouter, tokio::task::JoinHandle<Vec<serde_json::Value>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in responses {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(stream.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).await.unwrap();
+                requests.push(serde_json::from_slice(&body).unwrap());
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.len()
+                );
+                stream
+                    .get_mut()
+                    .write_all(headers.as_bytes())
+                    .await
+                    .unwrap();
+                stream.get_mut().write_all(&response).await.unwrap();
+                stream.get_mut().shutdown().await.unwrap();
+            }
+            requests
+        });
+        (OpenRouter::local(&endpoint).unwrap(), server)
+    }
+
+    fn fake_chat_frames(chunks: &[serde_json::Value]) -> Vec<u8> {
+        let mut frames: Vec<_> = chunks.iter().flat_map(chat_sse_frame).collect();
+        frames.extend_from_slice(b"data: [DONE]\n\n");
+        frames
+    }
+
+    #[tokio::test]
+    async fn done_round_returns_accumulated_content_and_usage() {
+        let response = fake_chat_frames(&[
+            serde_json::json!({"choices": [{"delta": {"reasoning_content": "Think."}}]}),
+            serde_json::json!({"choices": [{"delta": {"content": "Hello "}}]}),
+            serde_json::json!({"choices": [{"delta": {"content": "world"}}]}),
+            serde_json::json!({"choices": [], "usage": {
+                "prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12
+            }}),
+        ]);
+        let (provider, server) = fake_chat_server(vec![response]).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let finish = provider
+            .run_stream(
+                "test-model",
+                &[ChatMessage::text("user", "Hi")],
+                &ChatParams::default(),
+                &[],
+                false,
+                &tx,
+            )
+            .await
+            .unwrap();
+        let Finish::Done(output) = finish else {
+            panic!("expected a completed round");
+        };
+        assert_eq!(output.content, "Hello world");
+        assert_eq!(output.reasoning.as_deref(), Some("Think."));
+        let usage = output.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 2);
+        assert_eq!(usage.total_tokens, 12);
+        assert!(matches!(rx.try_recv().unwrap(), StreamEvent::Reasoning(text) if text == "Think."));
+        assert!(matches!(rx.try_recv().unwrap(), StreamEvent::Token(text) if text == "Hello "));
+        assert!(matches!(rx.try_recv().unwrap(), StreamEvent::Token(text) if text == "world"));
+        assert!(
+            matches!(rx.try_recv().unwrap(), StreamEvent::Usage(u) if u.total_tokens == usage.total_tokens)
+        );
+        assert!(rx.try_recv().is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // End-to-end request, tool and trace assertions.
+    async fn tool_loop_records_one_step_per_round() {
+        use crate::trace::{Scrubber, TraceContext, TraceStore};
+
+        let first = fake_chat_frames(&[serde_json::json!({"choices": [{"delta": {
+            "tool_calls": [{"index": 0, "id": "call-1", "type": "function", "function": {
+                "name": "scripts", "arguments": "{\"action\":\"list\"}"
+            }}]
+        }}]})]);
+        let second = fake_chat_frames(&[serde_json::json!({"choices": [{"delta": {
+            "content": "No scripts found."
+        }, "finish_reason": "stop"}]})]);
+        let (provider, server) = fake_chat_server(vec![first, second]).await;
+        let dir = std::env::temp_dir().join(format!("nexus-chat-trace-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        let store =
+            Arc::new(TraceStore::open(&dir.join("traces"), Scrubber::new(Vec::new())).unwrap());
+        let mut toolbox = crate::tools::ToolBox::new(
+            dir.join("skills"),
+            None,
+            None,
+            "auto".into(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        toolbox.space_scripts_dir = dir.join("scripts");
+        let tools: Vec<_> = toolbox
+            .defs()
+            .into_iter()
+            .filter(|tool| tool.name == "scripts")
+            .collect();
+        let params = ChatParams {
+            reasoning_effort: Some("low".into()),
+            temperature: Some(0.5),
+            max_tokens: Some(100),
+            trace: Some(TraceContext {
+                store: store.clone(),
+                session_id: "session".into(),
+                space_id: "space".into(),
+                turn_id: "turn".into(),
+                backend: "Local".into(),
+            }),
+            ..ChatParams::default()
+        };
+        let (mut rx, _) = provider.stream_chat(
+            "test-model".into(),
+            vec![
+                ChatMessage::text("system", "Be helpful."),
+                ChatMessage::text("user", "List scripts"),
+            ],
+            params,
+            tools.clone(),
+            Arc::new(toolbox),
+            3,
+        );
+        let mut tool_output = None;
+        let mut done = 0;
+        while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+        {
+            match event {
+                StreamEvent::Error(error) => panic!("stream failed: {error}"),
+                StreamEvent::ToolCall { result, .. } => tool_output = Some(result),
+                StreamEvent::Done => done += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(done, 1);
+        let requests = server.await.unwrap();
+        let mut steps = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let steps = store.steps_for_session("session").unwrap();
+                if steps.len() == 2 {
+                    break steps
+                        .into_iter()
+                        .map(|id| store.load_step(&id).unwrap())
+                        .collect::<Vec<_>>();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        steps.sort_by_key(|step| step["round"].as_u64().unwrap());
+        assert_eq!(steps[0]["round"], 0);
+        assert_eq!(steps[1]["round"], 1);
+        assert_eq!(steps[0]["response"]["finish"], "tool_calls");
+        assert_eq!(steps[0]["response"]["tool_calls"][0]["name"], "scripts");
+        assert_eq!(steps[0]["tool_results"].as_array().unwrap().len(), 1);
+        let tool_message = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .unwrap();
+        assert_eq!(tool_message["content"], "[]");
+        assert_eq!(steps[0]["tool_results"][0]["seen"], tool_message["content"]);
+        assert_eq!(steps[0]["tool_results"][0]["full"], tool_output.unwrap());
+        assert_eq!(steps[1]["response"]["finish"], "stop");
+        assert_eq!(steps[1]["response"]["content"], "No scripts found.");
+        assert!(steps[1]["tool_results"].as_array().unwrap().is_empty());
+        for (step, request) in steps.iter().zip(&requests) {
+            assert_eq!(step["system"], "Be helpful.");
+            assert_eq!(
+                step["messages"],
+                serde_json::json!(&request["messages"].as_array().unwrap()[1..])
+            );
+            assert_eq!(step["tools"], serde_json::to_value(&tools).unwrap());
+            assert_eq!(
+                step["params"],
+                serde_json::json!({"reasoning_effort": "low", "temperature": 0.5, "max_tokens": 100})
+            );
+            assert_eq!(step["model"], "test-model");
+            assert_eq!(step["turn_id"], "turn");
+        }
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn codex_adapter_survives_multibyte_split_across_chunks() {

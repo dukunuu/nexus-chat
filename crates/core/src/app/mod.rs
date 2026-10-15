@@ -781,6 +781,10 @@ pub struct App {
     pub backends: Backends,
     /// Every credential configured on disk, kept in sync with `backends`.
     pub saved: crate::config::SavedCreds,
+    /// Device-local trace store, opened only when a chat turn needs recording.
+    pub trace_store: Option<std::sync::Arc<crate::trace::TraceStore>>,
+    /// Most recently recorded chat turn's session and turn IDs.
+    pub last_turn: Option<(String, String)>,
 
     /// The space the current/next session belongs to.
     pub active_space: SpaceRow,
@@ -1092,6 +1096,8 @@ impl App {
             space,
             backends,
             saved,
+            trace_store: None,
+            last_turn: None,
             skills,
             searxng_url: String::new(),
             langsearch_key: String::new(),
@@ -1186,6 +1192,52 @@ impl App {
         app.load_prefs();
         app.load_settings();
         app
+    }
+
+    /// Whether the active space has consented to device-local chat recording.
+    pub fn training_enabled(&self) -> bool {
+        !self.incognito
+            && self
+                .db
+                .setting(&format!("training:{}", self.active_space.id))
+                .as_deref()
+                == Some("on")
+    }
+
+    fn open_trace_store(&mut self) -> Option<std::sync::Arc<crate::trace::TraceStore>> {
+        if let Some(store) = &self.trace_store {
+            return Some(store.clone());
+        }
+        let secrets = [
+            self.saved.openrouter_key.as_deref(),
+            self.saved.openai_key.as_deref(),
+            self.saved.opencode_key.as_deref(),
+            self.saved.codex.as_ref().map(|creds| creds.access.as_str()),
+            self.saved
+                .codex
+                .as_ref()
+                .map(|creds| creds.refresh.as_str()),
+            self.saved.host_token.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|secret| !secret.is_empty())
+        .map(str::to_string)
+        .collect();
+        match crate::trace::TraceStore::open(
+            &self.space.traces_dir(),
+            crate::trace::Scrubber::new(secrets),
+        ) {
+            Ok(store) => {
+                let store = std::sync::Arc::new(store);
+                self.trace_store = Some(store.clone());
+                Some(store)
+            }
+            Err(error) => {
+                self.push_status(format!("training trace store unavailable: {error}"));
+                None
+            }
+        }
     }
 
     /// Load favorites + last-used timestamps from the db (best effort), and

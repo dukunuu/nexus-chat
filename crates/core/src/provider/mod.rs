@@ -220,6 +220,8 @@ pub struct ChatParams {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// Device-local recording context; absent unless chat training is enabled.
+    pub trace: Option<crate::trace::TraceContext>,
 }
 
 /// A message sent to the completions API. `tool_calls` (assistant requesting
