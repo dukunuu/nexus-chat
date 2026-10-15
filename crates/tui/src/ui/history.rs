@@ -15,8 +15,8 @@ use ratatui::widgets::Paragraph;
 
 use super::cards::{
     push_assistant_stored, push_assistant_streaming, push_compaction, push_compaction_pending,
-    push_error, push_research_plan, push_research_stage, push_session_link, push_survey_section,
-    push_tool_call, push_user_card,
+    push_error, push_research_plan, push_research_stage, push_session_link, push_skill,
+    push_survey_section, push_tool_call, push_user_card,
 };
 use super::welcome::render_welcome;
 use crate::app_view::AppView;
@@ -477,6 +477,8 @@ fn sync_cache(app: &mut AppView, width: usize) {
                 &images_dir,
                 &mut c.image_cache,
             );
+        } else if m.role == "skill" {
+            push_skill(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "compaction" {
             push_compaction(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_stage" {
@@ -861,6 +863,23 @@ mod tests {
                 .any(|l| l.contains("digest line one")),
             "{text}"
         );
+    }
+
+    #[test]
+    fn skill_row_renders_name_not_body() {
+        let mut a = test_app();
+        a.messages.push(msg("skill", "web-search\nSECRET BODY"));
+        sync_cache(&mut a, 80);
+        let text = a
+            .history_cache
+            .lines
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("skill web-search"), "{text}");
+        assert!(text.contains("active for this session"), "{text}");
+        assert!(!text.contains("SECRET BODY"), "{text}");
     }
 
     #[test]

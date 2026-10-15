@@ -19,6 +19,7 @@ use super::{App, SPINNER_COLORS, SpinnerColor, THINKING, parse_topic, verbosity_
 
 impl App {
     /// Send one chat message: validation, session auto-creation, persistence.
+    #[allow(clippy::too_many_lines)] // validation, session creation, ordered skill/user persistence
     pub fn send_message(&mut self, text: String) -> Result<()> {
         if let Some(session) = self.session.as_ref()
             && let Some(task) = self.chat_task_for_session(&session.id)
@@ -88,6 +89,29 @@ impl App {
             return Ok(());
         };
 
+        if let Some(name) = self.forced_skill.take()
+            && let Some(skill) = self.skills.iter().find(|s| s.name == name)
+        {
+            let body = std::fs::read_to_string(skill.dir.join("SKILL.md"))
+                .map(|md| crate::skills::skill_body(&md).to_string())
+                .unwrap_or_default();
+            let content = format!("{name}\n{body}");
+            if !self.incognito {
+                self.db.add_skill_message(&session_id, &content)?;
+            }
+            self.messages.push(Message {
+                role: "skill".to_string(),
+                content,
+                model: None,
+                reasoning: None,
+                tokens: None,
+                secs: None,
+                cost: None,
+                phrase: None,
+                persona: None,
+                created_at: None,
+            });
+        }
         if !self.incognito {
             self.db.add_user_message(&session_id, &text)?;
         }
@@ -112,7 +136,7 @@ impl App {
     }
 
     /// The exact message list a completion request will carry: system prompt,
-    /// compaction digest, forced skill, then the effective conversation tail.
+    /// compaction digest, then the effective conversation tail.
     /// User messages with images become multimodal parts for vision models, or
     /// get their stored descriptions appended as text for everything else.
     pub fn build_history(&mut self) -> Vec<ChatMessage> {
@@ -134,17 +158,6 @@ impl App {
             history.push(ChatMessage::text(
                 "system",
                 format!("Summary of earlier conversation (auto-compacted for length):\n{summary}"),
-            ));
-        }
-        if let Some(name) = self.forced_skill.take()
-            && let Some(skill) = self.skills.iter().find(|s| s.name == name)
-        {
-            let body = std::fs::read_to_string(skill.dir.join("SKILL.md"))
-                .map(|md| crate::skills::skill_body(&md).to_string())
-                .unwrap_or_default();
-            history.push(ChatMessage::text(
-                "system",
-                format!("The user invoked the skill '{name}'. Follow these instructions:\n{body}"),
             ));
         }
         let vision = self.current_model_supports_images();
@@ -190,7 +203,20 @@ impl App {
                 );
                 continue;
             }
-            let mut cm = ChatMessage::text(m.role.clone(), m.content.clone());
+            let mut cm = if m.role == "skill" {
+                let (name, body) = m
+                    .content
+                    .split_once('\n')
+                    .unwrap_or((m.content.as_str(), ""));
+                ChatMessage::text(
+                    "user",
+                    format!(
+                        "The user invoked the skill '{name}'. Follow these instructions for the rest of this conversation:\n{body}"
+                    ),
+                )
+            } else {
+                ChatMessage::text(m.role.clone(), m.content.clone())
+            };
             if m.role == "user" && vision {
                 let images_dir = self.space.files_dir(&self.active_space.name);
                 let mut images = Vec::new();

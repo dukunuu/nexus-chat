@@ -1301,6 +1301,14 @@ impl Db {
         )
     }
 
+    /// Insert a skill invocation, replayed to the model as a user-role
+    /// instruction at its position in the transcript. Returns its id.
+    pub fn add_skill_message(&self, session_id: &str, content: &str) -> Result<String> {
+        self.insert_message(
+            session_id, "skill", content, None, None, None, None, None, None,
+        )
+    }
+
     /// Insert a background-research stage/progress line: plain text, shown in
     /// the transcript but never sent back to the model (unlike `tool_call`
     /// rows, never replayed into `build_history` either — this is the job's

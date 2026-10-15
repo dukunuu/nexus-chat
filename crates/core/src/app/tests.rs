@@ -1500,6 +1500,139 @@ fn forced_skill_without_text_arms_for_next_message() {
     assert!(status.contains("armed"));
 }
 
+#[tokio::test]
+async fn forced_skill_persists_as_a_row_before_the_user_message() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    install_test_skill(
+        &mut a,
+        "web-search",
+        "Search the web",
+        "search instructions",
+    );
+    a.run_command("web-search rust news").unwrap();
+
+    let tail = &a.messages[a.messages.len() - 2..];
+    assert_eq!(tail[0].role, "skill");
+    assert!(tail[0].content.starts_with("web-search\n"));
+    assert!(tail[0].content.contains("search instructions"));
+    assert_eq!(tail[1].role, "user");
+    assert_eq!(tail[1].content, "rust news");
+
+    let persisted = a.db.load_messages(&a.session.as_ref().unwrap().id).unwrap();
+    assert_eq!(persisted.len(), a.messages.len());
+    let persisted_tail = &persisted[persisted.len() - 2..];
+    for (stored, message) in persisted_tail.iter().zip(tail) {
+        assert_eq!(stored.role, message.role);
+        assert_eq!(stored.content, message.content);
+    }
+}
+
+#[tokio::test]
+async fn skill_row_replays_as_a_user_message_every_later_turn() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    install_test_skill(
+        &mut a,
+        "web-search",
+        "Search the web",
+        "search instructions",
+    );
+    a.run_command("web-search rust news").unwrap();
+    let first_history = a.build_history();
+
+    // Reload the snapshot, then change the source file before a later turn.
+    a.messages = a.db.load_messages(&a.session.as_ref().unwrap().id).unwrap();
+    std::fs::write(
+        a.skills.last().unwrap().dir.join("SKILL.md"),
+        "changed instructions",
+    )
+    .unwrap();
+    for (role, content) in [("assistant", "Here is the news"), ("user", "Tell me more")] {
+        a.messages.push(Message {
+            role: role.into(),
+            content: content.into(),
+            model: None,
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            cost: None,
+            phrase: None,
+            persona: None,
+            created_at: None,
+        });
+    }
+
+    let history = a.build_history();
+    let skill_messages: Vec<_> = history
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| {
+            m.content
+                .contains("Follow these instructions for the rest of this conversation")
+        })
+        .collect();
+    assert_eq!(skill_messages.len(), 1);
+    let (skill_index, skill) = skill_messages[0];
+    assert_eq!(skill.role, "user");
+    assert_eq!(
+        skill.content,
+        "The user invoked the skill 'web-search'. Follow these instructions for the rest of this conversation:\nsearch instructions"
+    );
+    let user_index = history
+        .iter()
+        .position(|m| m.content == "rust news")
+        .unwrap();
+    assert!(skill_index < user_index);
+    assert!(
+        !history
+            .iter()
+            .any(|m| m.role == "system" && m.content.contains("search instructions"))
+    );
+
+    let prefix = serde_json::to_value(&history[..=skill_index]).unwrap();
+    assert_eq!(
+        prefix,
+        serde_json::to_value(&first_history[..=skill_index]).unwrap()
+    );
+    assert_eq!(
+        prefix,
+        serde_json::to_value(&a.build_history()[..=skill_index]).unwrap()
+    );
+}
+
+#[test]
+fn build_history_leaves_an_armed_skill_armed() {
+    let mut a = app_with_key();
+    install_test_skill(
+        &mut a,
+        "web-search",
+        "Search the web",
+        "search instructions",
+    );
+    a.run_command("web-search").unwrap();
+    a.build_history();
+    assert_eq!(a.forced_skill.as_deref(), Some("web-search"));
+}
+
+#[tokio::test]
+async fn incognito_skill_row_stays_out_of_the_db() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.incognito = true;
+    install_test_skill(
+        &mut a,
+        "web-search",
+        "Search the web",
+        "search instructions",
+    );
+    a.run_command("web-search").unwrap();
+    a.send_message("rust news".into()).unwrap();
+    assert!(a.messages.iter().any(|m| m.role == "skill"));
+    let persisted = a.db.load_messages(&a.session.as_ref().unwrap().id).unwrap();
+    assert!(!persisted.iter().any(|m| m.role == "skill"));
+}
+
 #[test]
 fn split_inline_reasoning_strips_think_tags() {
     let (content, reasoning) = split_inline_reasoning("plain answer, no tags");

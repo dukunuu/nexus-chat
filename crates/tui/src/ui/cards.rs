@@ -220,6 +220,20 @@ pub(super) fn push_compaction(
     out.push(Line::from(""));
 }
 
+/// A user-invoked skill: show its name and scope, never its instruction body.
+pub(super) fn push_skill(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    _width: usize,
+    theme: &crate::theme::Theme,
+) {
+    let name = content.lines().next().unwrap_or_default();
+    let you = Style::default().fg(theme.accent);
+    let label = format!("skill {name}{}active for this session", style::SEP);
+    out.push(style::event_head(glyph::TOOL, you, label, you));
+    out.push(Line::from(""));
+}
+
 /// A transient row while a compaction request runs. Deliberately not a
 /// `Message`: failed or cancelled jobs must vanish without leaving a fake
 /// conversation turn in the database.
