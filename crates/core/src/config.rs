@@ -10,7 +10,22 @@ pub const OPENROUTER_ENV_KEY: &str = "OPENROUTER_API_KEY";
 pub const OPENAI_ENV_KEY: &str = "OPENAI_API_KEY";
 pub const OPENCODE_ENV_KEY: &str = "OPENCODE_API_KEY";
 
+/// Credential environment variables never passed to children that run model-authored code.
+pub const SECRET_ENV_VARS: &[&str] = &[
+    OPENROUTER_ENV_KEY,
+    OPENAI_ENV_KEY,
+    OPENCODE_ENV_KEY,
+    "CF_API_TOKEN",
+];
+
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../assets/system-prompt-base.md");
+
+/// Remove credential environment variables from children that run model-authored code.
+pub fn scrub_secret_env(cmd: &mut std::process::Command) {
+    for key in SECRET_ENV_VARS {
+        cmd.env_remove(key);
+    }
+}
 
 #[derive(Debug, Default, Deserialize)]
 struct Config {
@@ -661,6 +676,18 @@ fn write_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrub_secret_env_removes_every_secret() {
+        let mut cmd = std::process::Command::new("env");
+        scrub_secret_env(&mut cmd);
+        for key in SECRET_ENV_VARS {
+            assert!(
+                cmd.get_envs()
+                    .any(|entry| entry == (std::ffi::OsStr::new(key), None))
+            );
+        }
+    }
 
     #[test]
     fn local_runtime_config_round_trips_alongside_cloud_credentials() {

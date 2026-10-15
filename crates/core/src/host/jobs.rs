@@ -27,15 +27,16 @@ pub(super) async fn run(job: super::media::ScriptJob) -> Result<Value> {
 }
 
 async fn run_with_timeout(job: super::media::ScriptJob, timeout: Duration) -> Result<Value> {
-    let mut child = tokio::process::Command::new(&job.program)
-        .args(&job.args)
+    let mut cmd = tokio::process::Command::new(&job.program);
+    cmd.args(&job.args)
         .current_dir(&job.cwd)
         .env("NEXUS_SPACE_ID", &job.space_id)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    crate::config::scrub_secret_env(cmd.as_std_mut());
+    let mut child = cmd.spawn()?;
     let stdout = child
         .stdout
         .take()

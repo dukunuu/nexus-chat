@@ -3836,6 +3836,7 @@ async fn run_cmd_env(
     for (k, v) in envs {
         cmd.env(k, v);
     }
+    crate::config::scrub_secret_env(cmd.as_std_mut());
     let fut = cmd.output();
     match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
         Err(_) => Err(format!(
@@ -5113,6 +5114,23 @@ fn build_lighting_filter(preset: &str, intensity: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn run_cmd_env_never_passes_secrets() {
+        let out = run_cmd_env(
+            "env".as_ref(),
+            &[],
+            &std::env::temp_dir(),
+            10,
+            &[("OPENROUTER_API_KEY", "leak"), ("NEXUS_KEEP", "1")],
+        )
+        .await
+        .unwrap();
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("NEXUS_KEEP=1"));
+        assert!(!stdout.contains("OPENROUTER_API_KEY"));
+    }
 
     #[tokio::test]
     async fn search_sources_tool_only_appears_and_works_for_a_research_session_toolbox() {
