@@ -111,6 +111,7 @@ is the skill-discovery pack. Skills are `SKILL.md` directories with sandboxed
 Python virtualenvs (`src/skills.rs`), discovered from the app-managed root, then
 project `.agents/skills` (plus Claude/Codex/pi/OpenCode adapter roots), then user
 roots; earlier, more-specific roots win duplicate names.
+Assembled prompts and tool definitions are snapshotted in crates/core/tests/fixtures/prompt-snapshots/; after an intended change, regenerate with NEXUS_UPDATE_SNAPSHOTS=1 cargo test -p nexus-chat-core prompt_snapshots and review the diff.
 
 ## Secrets and agent tooling
 

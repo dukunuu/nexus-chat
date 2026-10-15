@@ -31,6 +31,8 @@ pub mod headless;
 mod images;
 mod memory;
 mod models;
+#[cfg(test)]
+mod prompt_snapshots;
 mod research;
 mod scripts;
 mod sessions;

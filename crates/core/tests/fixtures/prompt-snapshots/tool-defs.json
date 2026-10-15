@@ -1,0 +1,393 @@
+[
+  {
+    "name": "batch",
+    "description": "Run several independent tool operations in ONE call — multiple searches, multiple filesearches/reads, or multiple app/script writes. Every result comes back in a singleround-trip, each labeled [n/N]. Prefer this over calling tools one by one whenever youneed several operations at once. Sub-calls use the same public tool names andparameters as normal calls. Never nest batch inside batch; keep dependent steps (e.g.write then edit the same file) as separate calls.",
+    "parameters": {
+      "properties": {
+        "calls": {
+          "description": "up to 8 operations, run in order",
+          "items": {
+            "properties": {
+              "arguments": {
+                "description": "that tool's parameters, same shape as a normal call",
+                "type": "object"
+              },
+              "tool": {
+                "description": "public tool name, e.g. search, fetch_url, files, app, scripts, research_lookup, skills",
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "calls"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "skills",
+    "description": "Manage Agent Skills discovered from app, project, and user/global roots. action=load returns a skill's full instructions (SKILL.md by default, or a specific relative file); action=create and action=install write only to the app-managed root.",
+    "parameters": {
+      "properties": {
+        "action": {
+          "enum": [
+            "load",
+            "create",
+            "install"
+          ],
+          "type": "string"
+        },
+        "body": {
+          "description": "skill instructions for create",
+          "type": "string"
+        },
+        "description": {
+          "description": "short description for create",
+          "type": "string"
+        },
+        "file": {
+          "description": "optional path within the skill for load; defaults to SKILL.md",
+          "type": "string"
+        },
+        "name": {
+          "description": "skill name for load/create",
+          "type": "string"
+        },
+        "overwrite": {
+          "description": "replace an existing skill (default false)",
+          "type": "boolean"
+        },
+        "source": {
+          "description": "GitHub owner/repo/path for install",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "scripts",
+    "description": "Everything script-related in one tool. action=list/read/write/edit manage files inside the space scripts directory (confined paths, hash-line editing); action=run executes an existing skill or space script; action=python writes and runs inline Python in the space scripts environment (persists unless temporary=true); action=install adds packages to a skill virtualenv, an app's npm dependencies, or the shared space-script Python virtualenv (at most one target).",
+    "parameters": {
+      "properties": {
+        "action": {
+          "enum": [
+            "list",
+            "read",
+            "write",
+            "edit",
+            "run",
+            "python",
+            "install"
+          ],
+          "type": "string"
+        },
+        "app": {
+          "description": "app npm target for install",
+          "type": "string"
+        },
+        "args": {
+          "description": "command-line arguments for run/python",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "code": {
+          "description": "Python source for python",
+          "type": "string"
+        },
+        "content": {
+          "description": "complete script content for write",
+          "type": "string"
+        },
+        "edits": {
+          "items": {
+            "properties": {
+              "hash": {
+                "description": "hash from the latest read",
+                "type": "string"
+              },
+              "line": {
+                "description": "optional 1-based line number to disambiguate repeated lines",
+                "type": "integer"
+              },
+              "new": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "hash"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "description": "maximum 200 lines",
+          "type": "integer"
+        },
+        "name": {
+          "description": "confined .py filename for python",
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "packages": {
+          "description": "packages for install",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "path": {
+          "description": "script path relative to the scripts dir",
+          "type": "string"
+        },
+        "skill": {
+          "description": "skill name for run (unless space=true), or pip target for install",
+          "type": "string"
+        },
+        "space": {
+          "description": "run from the space scripts directory",
+          "type": "boolean"
+        },
+        "temporary": {
+          "description": "delete the script after python runs (default false)",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "search",
+    "description": "Search the web, scholarly literature, or HN/Reddit discussions. mode=web uses the configured web backend; academic preserves Semantic Scholar metadata; discussion preserves HN and Reddit engagement metadata.",
+    "parameters": {
+      "properties": {
+        "exclude_domains": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "include_domains": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "description": "maximum academic results (default 10, max 20)",
+          "type": "integer"
+        },
+        "mode": {
+          "enum": [
+            "web",
+            "academic",
+            "discussion"
+          ],
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "recency": {
+          "enum": [
+            "day",
+            "week",
+            "month",
+            "year"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "query"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "fetch_url",
+    "description": "Fetch an arbitrary URL as readable, paged text. Uses the 24-hour cache unless fresh=true; supports PDFs, YouTube transcripts, and research verifier cache-only mode.",
+    "parameters": {
+      "properties": {
+        "fresh": {
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "maximum 200 lines",
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "media",
+    "description": "Generate and transform media. action=generate_image makes an image from a prompt, optionally using a pasted image ID as a reference; action=generate_video makes a video from text and optional frame/reference images; action=edit/extract_frame/stitch transform videos locally with ffmpeg (effects, frame extraction, clip concatenation); action=save_reference/list_references/delete_reference manage named image references used for video consistency.",
+    "parameters": {
+      "properties": {
+        "action": {
+          "enum": [
+            "generate_image",
+            "generate_video",
+            "edit",
+            "extract_frame",
+            "stitch",
+            "save_reference",
+            "list_references",
+            "delete_reference"
+          ],
+          "type": "string"
+        },
+        "aspect_ratio": {
+          "type": "string"
+        },
+        "camera_move": {
+          "enum": [
+            "dolly_in",
+            "dolly_out",
+            "pan_left",
+            "pan_right",
+            "tilt_up",
+            "tilt_down"
+          ],
+          "type": "string"
+        },
+        "character_refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "description": "reference description for save_reference",
+          "type": "string"
+        },
+        "duration": {
+          "type": "integer"
+        },
+        "first_frame_id": {
+          "type": "string"
+        },
+        "format": {
+          "enum": [
+            "png",
+            "jpg"
+          ],
+          "type": "string"
+        },
+        "generate_audio": {
+          "type": "boolean"
+        },
+        "image_id": {
+          "description": "reference image for generate_image, or image being saved for save_reference",
+          "type": "string"
+        },
+        "intensity": {
+          "type": "number"
+        },
+        "last_frame_id": {
+          "type": "string"
+        },
+        "lighting": {
+          "enum": [
+            "noir",
+            "warm",
+            "cold",
+            "vintage",
+            "vivid",
+            "bleach_bypass"
+          ],
+          "type": "string"
+        },
+        "location_refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "reference name for save_reference/delete_reference",
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "ref_image_id": {
+          "type": "string"
+        },
+        "remove_audio": {
+          "type": "boolean"
+        },
+        "resolution": {
+          "type": "string"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "size": {
+          "default": "1024x1024",
+          "type": "string"
+        },
+        "source_video_id": {
+          "type": "string"
+        },
+        "speed": {
+          "type": "number"
+        },
+        "time_sec": {
+          "type": "number"
+        },
+        "trim_end": {
+          "type": "number"
+        },
+        "trim_start": {
+          "type": "number"
+        },
+        "video_id": {
+          "type": "string"
+        },
+        "video_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  }
+]
