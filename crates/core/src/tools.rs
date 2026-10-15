@@ -3151,9 +3151,9 @@ must land in dist/ for the app server to serve it"
                     .unwrap_or_default()
                     .to_string();
                 let status = format!("Writing {path}…");
-                let result = {
-                    let file = self.space_scripts_dir.join(&path);
-                    if valid_relative_path(&path) {
+                let result = match confined_join(&self.space_scripts_dir, &path) {
+                    Err(e) => e,
+                    Ok(file) => {
                         let write = file
                             .parent()
                             .map_or(Ok(()), std::fs::create_dir_all)
@@ -3162,8 +3162,6 @@ must land in dist/ for the app server to serve it"
                             Ok(()) => format!("wrote {path} ({} bytes)", content.len()),
                             Err(e) => format!("write failed: {e}"),
                         }
-                    } else {
-                        format!("invalid path: {path:?}")
                     }
                 };
                 (result, status)
@@ -3188,33 +3186,27 @@ must land in dist/ for the app server to serve it"
                     .unwrap_or(200)
                     .clamp(1, 200) as usize;
                 let status = format!("Reading {path}…");
-                let result = {
-                    let file = self.space_scripts_dir.join(&path);
-                    if valid_relative_path(&path) {
-                        match std::fs::read_to_string(&file) {
-                            Err(e) => format!("cannot read {path}: {e}"),
-                            Ok(text) => {
-                                let lines: Vec<&str> = text.lines().collect();
-                                let total = lines.len();
-                                let start = (offset - 1).min(total);
-                                let slice = &lines[start..(start + limit).min(total)];
-                                if slice.is_empty() {
-                                    format!(
-                                        "{path}: offset {offset} is past the end ({total} lines)"
-                                    )
-                                } else {
-                                    format!(
-                                        "{path} (lines {}-{} of {total}):\n{}",
-                                        start + 1,
-                                        start + slice.len(),
-                                        number_lines_with_hash(slice, start),
-                                    )
-                                }
+                let result = match confined_join(&self.space_scripts_dir, &path) {
+                    Err(e) => e,
+                    Ok(file) => match std::fs::read_to_string(&file) {
+                        Err(e) => format!("cannot read {path}: {e}"),
+                        Ok(text) => {
+                            let lines: Vec<&str> = text.lines().collect();
+                            let total = lines.len();
+                            let start = (offset - 1).min(total);
+                            let slice = &lines[start..(start + limit).min(total)];
+                            if slice.is_empty() {
+                                format!("{path}: offset {offset} is past the end ({total} lines)")
+                            } else {
+                                format!(
+                                    "{path} (lines {}-{} of {total}):\n{}",
+                                    start + 1,
+                                    start + slice.len(),
+                                    number_lines_with_hash(slice, start),
+                                )
                             }
                         }
-                    } else {
-                        format!("invalid path: {path:?}")
-                    }
+                    },
                 };
                 (result, status)
             }
@@ -3243,22 +3235,18 @@ must land in dist/ for the app server to serve it"
                     })
                     .unwrap_or_default();
                 let status = format!("Editing {path}…");
-                let result = {
-                    let file = self.space_scripts_dir.join(&path);
-                    if valid_relative_path(&path) {
-                        match std::fs::read_to_string(&file) {
-                            Err(e) => format!("cannot read {path}: {e}"),
-                            Ok(text) => match apply_hashline_edits(&text, &edits) {
-                                Err(e) => e,
-                                Ok((new_text, diff)) => match std::fs::write(&file, new_text) {
-                                    Ok(()) => format!("edited {path} — {diff}"),
-                                    Err(e) => format!("write failed: {e}"),
-                                },
+                let result = match confined_join(&self.space_scripts_dir, &path) {
+                    Err(e) => e,
+                    Ok(file) => match std::fs::read_to_string(&file) {
+                        Err(e) => format!("cannot read {path}: {e}"),
+                        Ok(text) => match apply_hashline_edits(&text, &edits) {
+                            Err(e) => e,
+                            Ok((new_text, diff)) => match std::fs::write(&file, new_text) {
+                                Ok(()) => format!("edited {path} — {diff}"),
+                                Err(e) => format!("write failed: {e}"),
                             },
-                        }
-                    } else {
-                        format!("invalid path: {path:?}")
-                    }
+                        },
+                    },
                 };
                 (result, status)
             }
@@ -3456,6 +3444,30 @@ fn valid_relative_path(path: &str) -> bool {
         && std::path::Path::new(path)
             .components()
             .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+fn confined_join(root: &std::path::Path, rel: &str) -> Result<std::path::PathBuf, String> {
+    if !valid_relative_path(rel) {
+        return Err(format!("invalid path: {rel:?}"));
+    }
+    let root_ancestor = root
+        .ancestors()
+        .find(|ancestor| std::fs::symlink_metadata(ancestor).is_ok())
+        .unwrap_or(root);
+    let canonical_root = std::fs::canonicalize(root_ancestor)
+        .map_err(|e| format!("cannot resolve scripts directory: {e}"))?;
+    let path = root.join(rel);
+    // This includes the file itself when it exists, or its nearest existing parent otherwise.
+    let ancestor = path
+        .ancestors()
+        .find(|ancestor| std::fs::symlink_metadata(ancestor).is_ok())
+        .unwrap_or(&path);
+    let canonical_path = std::fs::canonicalize(ancestor)
+        .map_err(|_| format!("path escapes the scripts directory: {rel:?}"))?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(format!("path escapes the scripts directory: {rel:?}"));
+    }
+    Ok(path)
 }
 
 /// Search imported files: embed the query and rank chunks by cosine when an
@@ -5837,6 +5849,129 @@ mod tests {
             .run("install_packages", r#"{"packages":["x"],"skill":"ghost"}"#)
             .await;
         assert!(result.contains("unknown skill"), "{result}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_script_refuses_symlinked_dir_escape() {
+        let (mut tb, dir) = skills_toolbox();
+        let scripts = dir.join("scripts");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, scripts.join("out")).unwrap();
+        tb.space_scripts_dir = scripts;
+
+        let (result, _) = tb
+            .run(
+                "write_script",
+                r#"{"path":"out/x.py","content":"print(1)"}"#,
+            )
+            .await;
+        assert!(result.contains("escapes"), "{result}");
+        assert!(!outside.join("x.py").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_script_refuses_dangling_symlink_escape() {
+        let (mut tb, dir) = skills_toolbox();
+        let scripts = dir.join("scripts");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(outside.join("new.py"), scripts.join("new.py")).unwrap();
+        tb.space_scripts_dir = scripts;
+        assert!(!outside.join("new.py").exists());
+
+        let (result, _) = tb
+            .run("write_script", r#"{"path":"new.py","content":"x"}"#)
+            .await;
+        assert!(result.contains("escapes"), "{result}");
+        assert!(!outside.join("new.py").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_script_refuses_symlinked_file_escape() {
+        let (mut tb, dir) = skills_toolbox();
+        let scripts = dir.join("scripts");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "TOPSECRET").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), scripts.join("secret.py")).unwrap();
+        tb.space_scripts_dir = scripts;
+
+        let (result, _) = tb.run("read_script", r#"{"path":"secret.py"}"#).await;
+        assert!(result.contains("escapes"), "{result}");
+        assert!(!result.contains("TOPSECRET"), "{result}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_script_refuses_symlinked_file_escape() {
+        let (mut tb, dir) = skills_toolbox();
+        let scripts = dir.join("scripts");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "TOPSECRET").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), scripts.join("secret.py")).unwrap();
+        tb.space_scripts_dir = scripts;
+
+        let hash = line_hash("TOPSECRET");
+        let (result, _) = tb
+            .run(
+                "edit_script",
+                &format!(r#"{{"path":"secret.py","edits":[{{"hash":"{hash}","new":"changed"}}]}}"#),
+            )
+            .await;
+        assert!(result.contains("escapes"), "{result}");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("secret.txt")).unwrap(),
+            "TOPSECRET"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_script_allows_new_nested_path_and_inner_symlink() {
+        let (mut tb, dir) = skills_toolbox();
+        let scripts = dir.join("scripts");
+        tb.space_scripts_dir = scripts.clone();
+        assert!(!scripts.exists());
+
+        let (result, _) = tb
+            .run(
+                "write_script",
+                r#"{"path":"a/b/c.py","content":"print(1)"}"#,
+            )
+            .await;
+        assert!(result.contains("wrote a/b/c.py"), "{result}");
+        assert_eq!(
+            std::fs::read_to_string(scripts.join("a/b/c.py")).unwrap(),
+            "print(1)"
+        );
+
+        std::fs::create_dir_all(scripts.join("real")).unwrap();
+        std::os::unix::fs::symlink(scripts.join("real"), scripts.join("alias")).unwrap();
+        let (result, _) = tb
+            .run(
+                "write_script",
+                r#"{"path":"alias/y.py","content":"print(2)"}"#,
+            )
+            .await;
+        assert!(result.contains("wrote alias/y.py"), "{result}");
+        assert_eq!(
+            std::fs::read_to_string(scripts.join("real/y.py")).unwrap(),
+            "print(2)"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
