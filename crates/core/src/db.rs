@@ -1248,6 +1248,21 @@ impl Db {
         Ok(())
     }
 
+    /// IDs after the last user message, in load order; empty without a user or reply.
+    pub fn reply_ids_after_last_user(&self, session_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM messages
+             WHERE session_id = ?1 AND (created_at, rowid) > (
+                 SELECT created_at, rowid FROM messages
+                 WHERE session_id = ?1 AND role = 'user'
+                 ORDER BY created_at DESC, rowid DESC LIMIT 1
+             ) ORDER BY created_at ASC, rowid ASC",
+        )?;
+        Ok(stmt
+            .query_map([session_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn load_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
             "SELECT role, content, model, reasoning, tokens, secs, cost, phrase, persona, created_at
@@ -3723,6 +3738,120 @@ mod tests {
         assert_eq!(searching.len(), 1, "expected one row, updated in place");
         assert!(searching[0].content.contains("2/3"));
         assert_eq!(msgs.iter().filter(|m| m.content == "planning").count(), 1);
+    }
+
+    #[test]
+    fn reply_ids_after_last_user_returns_only_the_last_reply() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let session = db.create_session("chat", "a/one", &space, "chat").unwrap();
+        db.add_user_message(&session.id, "first question").unwrap();
+        db.add_assistant_message(
+            &session.id,
+            "first reply",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        db.add_user_message(&session.id, "second question").unwrap();
+        let tool = db.add_tool_call_message(&session.id, "{}").unwrap();
+        let reply = db
+            .add_assistant_message(
+                &session.id,
+                "second reply",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let other = db.create_session("other", "a/one", &space, "chat").unwrap();
+        db.add_user_message(&other.id, "unrelated").unwrap();
+        db.add_error_message(&other.id, "unrelated failure")
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE messages SET created_at = '2026-01-01T00:00:00Z'",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(
+            db.reply_ids_after_last_user(&session.id).unwrap(),
+            vec![tool, reply]
+        );
+    }
+
+    #[test]
+    fn reply_ids_after_last_user_uses_timestamps_before_insertion_order() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let session = db.create_session("chat", "a/one", &space, "chat").unwrap();
+        let reply = db
+            .add_assistant_message(
+                &session.id,
+                "last reply",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let user = db.add_user_message(&session.id, "last question").unwrap();
+        let previous = db
+            .add_error_message(&session.id, "earlier failure")
+            .unwrap();
+        let first_user = db.add_user_message(&session.id, "first question").unwrap();
+        for (id, at) in [
+            (&reply, "2026-01-04T00:00:00Z"),
+            (&user, "2026-01-03T00:00:00Z"),
+            (&previous, "2026-01-02T00:00:00Z"),
+            (&first_user, "2026-01-01T00:00:00Z"),
+        ] {
+            db.conn
+                .execute(
+                    "UPDATE messages SET created_at = ?2 WHERE id = ?1",
+                    (id, at),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            db.reply_ids_after_last_user(&session.id).unwrap(),
+            vec![reply]
+        );
+    }
+
+    #[test]
+    fn reply_ids_after_last_user_is_empty_without_a_user_or_reply() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let session = db.create_session("chat", "a/one", &space, "chat").unwrap();
+        assert!(
+            db.reply_ids_after_last_user(&session.id)
+                .unwrap()
+                .is_empty()
+        );
+        db.add_error_message(&session.id, "no user yet").unwrap();
+        assert!(
+            db.reply_ids_after_last_user(&session.id)
+                .unwrap()
+                .is_empty()
+        );
+        db.add_user_message(&session.id, "no reply yet").unwrap();
+        assert!(
+            db.reply_ids_after_last_user(&session.id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

@@ -281,6 +281,16 @@ impl TraceStore {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Return a turn's step IDs oldest first, preserving insertion order for timestamp ties.
+    pub fn steps_for_turn(&self, turn_id: &str) -> Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut statement =
+            connection.prepare("SELECT id FROM steps WHERE turn_id = ?1 ORDER BY at, rowid")?;
+        Ok(statement
+            .query_map([self.scrubber.scrub(turn_id)], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Atomically delete a session's steps, tool results and labels, not blobs.
     pub fn delete_session(&self, session_id: &str) -> Result<()> {
         let mut connection = self.connection()?;
@@ -689,6 +699,28 @@ mod tests {
             }
             assert_eq!(path, store.blob_path(&hash));
         }
+    }
+
+    #[test]
+    fn steps_for_turn_returns_only_that_turn_in_order() {
+        let dir = TempDir::new();
+        let store = dir.open();
+        let mut step = step("session-1");
+        let first = store.record_step(&step).unwrap();
+        step.turn_id = "turn-2".into();
+        let other = store.record_step(&step).unwrap();
+        step.turn_id = "turn-1".into();
+        step.round = 1;
+        let second = store.record_step(&step).unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute("UPDATE steps SET at = '2026-01-01T00:00:00Z'", [])
+            .unwrap();
+
+        assert_eq!(store.steps_for_turn("turn-1").unwrap(), vec![first, second]);
+        assert_eq!(store.steps_for_turn("turn-2").unwrap(), vec![other]);
+        assert!(store.steps_for_turn("missing").unwrap().is_empty());
     }
 
     #[test]

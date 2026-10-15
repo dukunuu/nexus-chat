@@ -165,6 +165,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &[],
     },
     Command {
+        name: "retry",
+        desc: "regenerate the last reply",
+        aliases: &["regen"],
+    },
+    Command {
         name: "copy",
         desc: "copy last reply",
         aliases: &["yank", "clip"],
@@ -275,6 +280,8 @@ pub enum AppCommand {
     OpenSettings,
     /// `/theme [opaque|transparent]` — configure the TUI background.
     SetTheme { mode: String },
+    /// `/retry` — regenerate the last reply.
+    Retry,
     /// `/copy` — the copy menu.
     OpenCopyMenu,
     /// `/skills` — the skills popup.
@@ -353,6 +360,7 @@ impl App {
             "theme" => Ok(AppCommand::SetTheme {
                 mode: rest(cmd, token),
             }),
+            "retry" => Ok(AppCommand::Retry),
             "copy" => Ok(AppCommand::OpenCopyMenu),
             "skills" => Ok(AppCommand::OpenSkills),
             "files" => Ok(AppCommand::OpenFiles {
@@ -432,6 +440,7 @@ impl App {
             AppCommand::ConfigureLocal { spec } => self.configure_local(&spec),
             AppCommand::LocalServer { verb, runtime } => self.manage_local_server(&verb, &runtime),
             AppCommand::Send { text } => self.send_message(text)?,
+            AppCommand::Retry => self.retry_last_reply()?,
             AppCommand::Cancel { task } => match task {
                 Some(id) => self.cancel_chat_task(id)?,
                 None => self.stop_stream()?,

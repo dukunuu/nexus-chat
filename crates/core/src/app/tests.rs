@@ -433,6 +433,258 @@ async fn message_with_model_creates_session_and_streams() {
     assert_eq!(a.messages[0].role, "user");
 }
 
+fn app_with_reply() -> App {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    let session =
+        a.db.create_session("chat", "a/one", &a.active_space.id, "chat")
+            .unwrap();
+    a.db.add_user_message(&session.id, "hello").unwrap();
+    a.db.add_assistant_message(&session.id, "old reply", None, None, None, None, None, None)
+        .unwrap();
+    a.messages = a.db.load_messages(&session.id).unwrap();
+    a.session = Some(session);
+    a
+}
+
+#[test]
+fn retry_and_regen_parse_to_the_retry_command() {
+    let a = app_with_key();
+    assert_eq!(a.parse_command("retry").unwrap(), AppCommand::Retry);
+    assert_eq!(a.parse_command("regen").unwrap(), AppCommand::Retry);
+}
+
+#[tokio::test]
+async fn retry_removes_the_last_reply_and_keeps_the_user_message() {
+    let mut a = app_with_reply();
+    let sid = a.session.as_ref().unwrap().id.clone();
+    let replaced = a.db.reply_ids_after_last_user(&sid).unwrap();
+    a.run_command("retry").unwrap();
+
+    assert_eq!(a.messages.len(), 1);
+    assert_eq!(a.messages[0].role, "user");
+    assert_eq!(a.messages[0].content, "hello");
+    let stored = a.db.load_messages(&sid).unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].role, "user");
+    assert_eq!(stored[0].content, "hello");
+    let mut stmt =
+        a.db.conn_for_test()
+            .prepare("SELECT row_id FROM sync_tombstones WHERE table_name = 'messages'")
+            .unwrap();
+    let tombstones = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(tombstones, replaced);
+    drop(stmt);
+    assert!(a.is_streaming());
+    assert!(
+        a.pending_events
+            .iter()
+            .any(|event| matches!(event, AppEvent::HistoryInvalidated))
+    );
+    assert_eq!(a.build_history().last().unwrap().content, "hello");
+    a.stop_stream().unwrap();
+}
+
+#[tokio::test]
+async fn retry_keeps_a_skill_row() {
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    let session =
+        a.db.create_session("chat", "a/one", &a.active_space.id, "chat")
+            .unwrap();
+    a.db.add_skill_message(&session.id, "web-search\nsearch instructions")
+        .unwrap();
+    a.db.add_user_message(&session.id, "rust news").unwrap();
+    a.db.add_assistant_message(&session.id, "old news", None, None, None, None, None, None)
+        .unwrap();
+    a.messages = a.db.load_messages(&session.id).unwrap();
+    a.session = Some(session.clone());
+    a.run_command("regen").unwrap();
+
+    let stored = a.db.load_messages(&session.id).unwrap();
+    for messages in [&a.messages, &stored] {
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "skill");
+        assert_eq!(messages[0].content, "web-search\nsearch instructions");
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(messages[1].content, "rust news");
+    }
+    let history = a.build_history();
+    assert_eq!(
+        history[history.len() - 2].content,
+        "The user invoked the skill 'web-search'. Follow these instructions for the rest of this conversation:\nsearch instructions"
+    );
+    assert_eq!(history.last().unwrap().content, "rust news");
+    assert!(a.is_streaming());
+    a.stop_stream().unwrap();
+}
+
+#[test]
+fn retry_refuses_when_nothing_to_retry() {
+    let mut a = app_with_key();
+    a.run_command("retry").unwrap();
+    assert!(a.last_status().contains("no active session"));
+    assert!(a.session.is_none());
+    assert!(a.messages.is_empty());
+    let session =
+        a.db.create_session("chat", "a/one", &a.active_space.id, "chat")
+            .unwrap();
+    a.session = Some(session.clone());
+    for content in [None, Some("no user yet"), Some("no reply yet")] {
+        match content {
+            Some("no user yet") => {
+                a.db.add_error_message(&session.id, "no user yet").unwrap();
+            }
+            Some(text) => {
+                a.db.add_user_message(&session.id, text).unwrap();
+            }
+            None => {}
+        }
+        a.messages = a.db.load_messages(&session.id).unwrap();
+        let changes = a.db.conn_for_test().total_changes();
+        let count = a.messages.len();
+        a.run_command("retry").unwrap();
+        assert_eq!(a.messages.len(), count);
+        assert_eq!(a.db.conn_for_test().total_changes(), changes);
+        assert!(!a.is_streaming());
+        assert!(
+            a.pending_events
+                .iter()
+                .all(|event| matches!(event, AppEvent::Status(_)))
+        );
+        assert!(a.last_status().contains("nothing to retry"));
+    }
+}
+
+#[tokio::test]
+async fn retry_refuses_while_streaming() {
+    let mut a = app_with_reply();
+    a.start_stream().unwrap();
+    let task = a.active_chat_task().unwrap().id;
+    let changes = a.db.conn_for_test().total_changes();
+    a.run_command("retry").unwrap();
+
+    assert!(a.last_status().contains("still streaming"));
+    assert_eq!(a.chat_task_count(), 1);
+    assert_eq!(a.active_chat_task().unwrap().id, task);
+    assert_eq!(a.messages.len(), 2);
+    assert_eq!(a.messages.last().unwrap().content, "old reply");
+    assert_eq!(a.db.conn_for_test().total_changes(), changes);
+    a.stop_stream().unwrap();
+}
+
+#[test]
+fn retry_refuses_swarm_and_research_sessions() {
+    for (swarm_mode, kind) in [(true, "chat"), (false, "research")] {
+        let mut a = app_with_reply();
+        let session = a.session.as_mut().unwrap();
+        session.swarm_mode = swarm_mode;
+        session.kind = kind.into();
+        let changes = a.db.conn_for_test().total_changes();
+        a.run_command("retry").unwrap();
+
+        assert!(a.last_status().contains("swarm or research"));
+        assert!(!a.is_streaming());
+        assert_eq!(a.messages.len(), 2);
+        assert_eq!(a.messages.last().unwrap().content, "old reply");
+        assert_eq!(a.db.conn_for_test().total_changes(), changes);
+    }
+}
+
+#[tokio::test]
+async fn retry_labels_the_replaced_turn_rejected() {
+    let mut a = app_with_reply();
+    let root = a.space.root.clone();
+    a.run_command("training on").unwrap();
+    let sid = a.session.as_ref().unwrap().id.clone();
+    let store = std::sync::Arc::new(
+        crate::trace::TraceStore::open(
+            &a.space.traces_dir(),
+            crate::trace::Scrubber::new(Vec::new()),
+        )
+        .unwrap(),
+    );
+    let mut step = crate::trace::TraceStep {
+        session_id: sid.clone(),
+        space_id: a.active_space.id.clone(),
+        turn_id: "t1".into(),
+        round: 0,
+        model: "a/one".into(),
+        backend: "OpenRouter".into(),
+        system: "Be helpful.".into(),
+        tools: Vec::new(),
+        messages: vec![crate::provider::ChatMessage::text("user", "hello")],
+        params: serde_json::json!({}),
+        response: crate::trace::TraceResponse {
+            content: "old reply".into(),
+            reasoning: None,
+            tool_calls: Vec::new(),
+            finish: "stop".into(),
+        },
+        usage: None,
+        latency_ms: 1,
+        tool_results: Vec::new(),
+    };
+    let first = store.record_step(&step).unwrap();
+    step.turn_id = "t2".into();
+    let other = store.record_step(&step).unwrap();
+    step.turn_id = "t1".into();
+    step.round = 1;
+    let second = store.record_step(&step).unwrap();
+    a.trace_store = Some(store.clone());
+    a.last_turn = Some((sid.clone(), "t1".into()));
+    a.run_command("retry").unwrap();
+
+    assert_eq!(
+        store.steps_for_turn("t1").unwrap(),
+        vec![first.clone(), second.clone()]
+    );
+    for id in [first, second] {
+        let loaded = store.load_step(&id).unwrap();
+        assert_eq!(loaded["response"]["content"], "old reply");
+        assert_eq!(loaded["labels"].as_array().unwrap().len(), 1);
+        assert_eq!(loaded["labels"][0]["kind"], "rejected");
+        assert_eq!(loaded["labels"][0]["value"], "retry");
+    }
+    assert_eq!(
+        store.load_step(&other).unwrap()["labels"],
+        serde_json::json!([])
+    );
+    let (session, turn) = a.last_turn.as_ref().unwrap();
+    assert_eq!(session, &sid);
+    assert_ne!(turn, "t1");
+    assert!(a.is_streaming());
+    a.stop_stream().unwrap();
+    drop(a);
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn retry_in_incognito_touches_no_rows() {
+    let mut a = app_with_reply();
+    let sid = a.session.as_ref().unwrap().id.clone();
+    a.incognito = true;
+    a.messages.last_mut().unwrap().content = "private reply".into();
+    let changes = a.db.conn_for_test().total_changes();
+    a.run_command("retry").unwrap();
+
+    assert_eq!(a.db.conn_for_test().total_changes(), changes);
+    let stored = a.db.load_messages(&sid).unwrap();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored.last().unwrap().content, "old reply");
+    assert_eq!(a.messages.len(), 1);
+    assert_eq!(a.messages[0].role, "user");
+    assert_eq!(a.messages[0].content, "hello");
+    assert!(a.is_streaming());
+    assert!(a.active_chat_task().unwrap().incognito);
+    a.stop_stream().unwrap();
+}
+
 #[test]
 fn ocr_settings_defaults_gate_and_cycle() {
     let db = Db::open_in_memory().unwrap();

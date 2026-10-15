@@ -144,6 +144,52 @@ impl App {
         self.start_stream()
     }
 
+    /// Regenerate the last reply, retaining its user message and rejecting its trace steps.
+    pub fn retry_last_reply(&mut self) -> Result<()> {
+        let Some(session) = self.session.as_ref() else {
+            self.push_status("nothing to retry — no active session");
+            return Ok(());
+        };
+        if self.is_streaming() {
+            self.push_status("wait — response still streaming");
+            return Ok(());
+        }
+        if session.swarm_mode || session.kind == "research" {
+            self.push_status("/retry is not available in swarm or research sessions");
+            return Ok(());
+        }
+        let Some(user_index) = self
+            .messages
+            .iter()
+            .rposition(|message| message.role == "user")
+        else {
+            self.push_status("nothing to retry — no user message");
+            return Ok(());
+        };
+        if user_index + 1 == self.messages.len() {
+            self.push_status("nothing to retry — no reply after the last user message");
+            return Ok(());
+        }
+        let session_id = session.id.clone();
+        if !self.incognito {
+            for id in self.db.reply_ids_after_last_user(&session_id)? {
+                self.db.delete_message(&id)?;
+            }
+        }
+        self.messages.truncate(user_index + 1);
+        self.push_history_invalidated();
+        if let Some((turn_session, turn_id)) = &self.last_turn
+            && turn_session == &session_id
+            && let Some(store) = &self.trace_store
+            && let Ok(steps) = store.steps_for_turn(turn_id)
+        {
+            for step in steps {
+                let _ = store.add_label(&step, "rejected", "retry");
+            }
+        }
+        self.start_stream()
+    }
+
     /// The exact message list a completion request will carry: system prompt,
     /// compaction digest, then the effective conversation tail.
     /// User messages with images become multimodal parts for vision models, or
