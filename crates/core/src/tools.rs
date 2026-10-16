@@ -6,7 +6,9 @@
 mod spec;
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -16,6 +18,7 @@ use sha2::{Digest, Sha256};
 use crate::provider::ToolDef;
 use crate::provider::openrouter::{OpenRouter, normalize_video_params};
 use crate::skills::{load_skills_from_dirs, resolve_skill_dir, resolve_skill_file, skill_body};
+use crate::workspace::{Access, PathError, Workspace};
 
 const MAX_TOOL_RESULT_CHARS: usize = 8_000;
 /// Maximum sub-operations in one `batch` call — bounds execution time and
@@ -86,6 +89,8 @@ pub fn classify_tool_result(result: &str, status: &str) -> Option<&'static str> 
 // Independent capability and privacy switches, not mutually exclusive states.
 #[allow(clippy::struct_excessive_bools)]
 pub struct ToolBox {
+    /// Confined agent filesystem access; absent outside agent mode.
+    pub workspace: Option<Arc<Workspace>>,
     /// App-managed destination for newly created or downloaded skills.
     pub skills_dir: PathBuf,
     /// Skill roots in precedence order. These include the app-managed root and
@@ -473,6 +478,7 @@ impl ToolBox {
         apps: Option<AppsCtx>,
     ) -> Self {
         Self {
+            workspace: None,
             skill_dirs: vec![skills_dir.clone()],
             skills_dir,
             searxng_url,
@@ -740,6 +746,9 @@ impl ToolBox {
         ));
         defs.push(def(&spec::SEARCH, &["web", "academic", "discussion"]));
         defs.push(def(&spec::FETCH_URL, &["fetch_url"]));
+        if self.workspace.is_some() {
+            defs.push(def(&spec::FS, &["list", "glob", "grep", "read"]));
+        }
         let has_session_sources = self.research_session_id.is_some();
         let has_citations = self.citation_count() > 0;
         if has_session_sources || has_citations {
@@ -946,6 +955,25 @@ impl ToolBox {
         let name = dispatch_name.as_str();
         let args = dispatch_args.as_str();
         let (result, status) = match name {
+            "fs_list" | "fs_glob" | "fs_grep" | "fs_read" => match &self.workspace {
+                None => (
+                    "fs needs an agent workspace · switch with /agent <path>".to_string(),
+                    "blocked".to_string(),
+                ),
+                Some(workspace) => {
+                    let workspace = Arc::clone(workspace);
+                    let action = name.to_string();
+                    let args = args.to_string();
+                    let result =
+                        tokio::task::spawn_blocking(move || fs_action(&workspace, &action, &args))
+                            .await
+                            .unwrap_or_else(|error| Err(PathError::Io(error.to_string())));
+                    match result {
+                        Ok(result) => (result, format!("Running {name}…")),
+                        Err(error) => (error.to_string(), "blocked".to_string()),
+                    }
+                }
+            },
             "skill" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
                 let skill_name = v
@@ -3352,6 +3380,256 @@ fn looks_like_uuid(s: &str) -> bool {
     s.len() == 36 && s.chars().filter(|c| *c == '-').count() == 4
 }
 
+fn fs_action(workspace: &Arc<Workspace>, name: &str, args: &str) -> Result<String, PathError> {
+    let args: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
+    let rel = args
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(if name == "fs_read" { "" } else { "." });
+    let path = workspace.resolve(rel, Access::Read)?;
+    let number = |key: &str, default: usize, max: usize| {
+        usize::try_from(
+            args.get(key)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(default as u64),
+        )
+        .unwrap_or(max)
+        .min(max)
+    };
+    let pattern = args
+        .get("pattern")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    match name {
+        "fs_list" => {
+            let mut entries = Vec::new();
+            fs_list_dir(workspace, &path, number("depth", 2, 6), &mut entries)?;
+            Ok(fs_capped_entries(entries, 400))
+        }
+        "fs_glob" => {
+            let base = if path.is_dir() {
+                &path
+            } else {
+                path.parent().unwrap_or(&path)
+            };
+            let mut builder = ignore::overrides::OverrideBuilder::new(base);
+            builder
+                .add(pattern)
+                .map_err(|error| PathError::Invalid(error.to_string()))?;
+            let matcher = builder
+                .build()
+                .map_err(|error| PathError::Invalid(error.to_string()))?;
+            let mut entries = Vec::new();
+            for entry in fs_walk(workspace, &path, None) {
+                let entry = entry.map_err(|error| PathError::Io(error.to_string()))?;
+                if matcher
+                    .matched(
+                        entry.path(),
+                        entry.file_type().is_some_and(|kind| kind.is_dir()),
+                    )
+                    .is_whitelist()
+                {
+                    entries.push(fs_relative(workspace, entry.path()));
+                }
+            }
+            entries.sort();
+            Ok(fs_capped_entries(entries, 400))
+        }
+        "fs_grep" => fs_grep(workspace, &path, pattern, number("context", 0, 5)),
+        "fs_read" => fs_read(
+            workspace,
+            &path,
+            number("offset", 1, usize::MAX).max(1),
+            number("limit", 400, 2000).max(1),
+        ),
+        _ => unreachable!("fs action dispatch"),
+    }
+}
+
+// Never follow directory symlinks, and apply the workspace's hard exclusions
+// before entering directories or reading files.
+fn fs_walk(workspace: &Arc<Workspace>, path: &Path, depth: Option<usize>) -> ignore::Walk {
+    let workspace = Arc::clone(workspace);
+    ignore::WalkBuilder::new(path)
+        .hidden(false)
+        .require_git(false)
+        .git_global(false)
+        .follow_links(false)
+        .max_depth(depth)
+        .sort_by_file_name(std::ffi::OsStr::cmp)
+        .filter_entry(move |entry| {
+            entry.file_name() != ".git"
+                && workspace
+                    .resolve(&entry.path().to_string_lossy(), Access::Read)
+                    .is_ok()
+        })
+        .build()
+}
+
+fn fs_relative(workspace: &Workspace, path: &Path) -> String {
+    let rel = path
+        .strip_prefix(workspace.root())
+        .expect("confined workspace path");
+    if rel.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        rel.to_string_lossy().into_owned()
+    }
+}
+
+fn fs_capped_entries(mut entries: Vec<String>, max: usize) -> String {
+    let more = entries.len().saturating_sub(max);
+    entries.truncate(max);
+    if more > 0 {
+        entries.push(format!("… {more} more"));
+    }
+    entries.join("\n")
+}
+
+fn fs_list_dir(
+    workspace: &Arc<Workspace>,
+    path: &Path,
+    depth: usize,
+    out: &mut Vec<String>,
+) -> Result<(), PathError> {
+    let label = fs_relative(workspace, path);
+    if !path.is_dir() {
+        std::fs::metadata(path)?;
+        out.push(label);
+        return Ok(());
+    }
+    let mut entries = Vec::new();
+    if depth > 0 {
+        for entry in fs_walk(workspace, path, Some(1)).skip(1) {
+            entries.push(entry.map_err(|error| PathError::Io(error.to_string()))?);
+        }
+    }
+    if entries.len() > 100 {
+        out.push(format!("{label}/ ({} entries)", entries.len()));
+    } else {
+        out.push(format!("{label}/"));
+        for entry in entries {
+            if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+                fs_list_dir(workspace, entry.path(), depth - 1, out)?;
+            } else {
+                out.push(fs_relative(workspace, entry.path()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fs_read(
+    workspace: &Workspace,
+    path: &Path,
+    offset: usize,
+    limit: usize,
+) -> Result<String, PathError> {
+    let mut file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.len() > 16 * 1024 * 1024 {
+        return Ok(format!(
+            "file too large ({} bytes) · use fs grep or shell (sed -n, head) for a slice",
+            metadata.len()
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let mut result = if bytes.contains(&0) {
+        format!("binary file ({} bytes) · not shown", bytes.len())
+    } else if let Ok(text) = std::str::from_utf8(&bytes) {
+        let lines: Vec<_> = text.lines().collect();
+        let start = offset.saturating_sub(1).min(lines.len());
+        let end = start.saturating_add(limit).min(lines.len());
+        let (first, last) = if start == end {
+            (0, 0)
+        } else {
+            (start + 1, end)
+        };
+        let mut result = format!(
+            "{} (lines {first}-{last} of {}):\n{}",
+            fs_relative(workspace, path),
+            lines.len(),
+            number_lines_with_hash(&lines[start..end], start)
+        );
+        if end < lines.len() {
+            let _ = write!(result, "\n… continue with offset={}", end + 1);
+        }
+        result
+    } else {
+        format!("binary file ({} bytes) · not shown", bytes.len())
+    };
+    workspace.record_read(path, Workspace::stamp_bytes(&bytes, &metadata)?);
+    // Empty files still have a header, but no empty hash-line.
+    if result.ends_with('\n') {
+        result.pop();
+    }
+    Ok(result)
+}
+
+fn fs_grep(
+    workspace: &Arc<Workspace>,
+    path: &Path,
+    pattern: &str,
+    context: usize,
+) -> Result<String, PathError> {
+    let mut result = String::new();
+    let mut total = 0;
+    let mut shown = 0;
+    let mut skipped = 0;
+    for entry in fs_walk(workspace, path, None) {
+        let entry = entry.map_err(|error| PathError::Io(error.to_string()))?;
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let file = workspace.resolve(&entry.path().to_string_lossy(), Access::Read)?;
+        if std::fs::metadata(&file)?.len() > 4 * 1024 * 1024 {
+            skipped += 1;
+            continue;
+        }
+        let bytes = std::fs::read(&file)?;
+        if bytes.iter().take(8192).any(|byte| *byte == 0) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        let lines: Vec<_> = text.lines().collect();
+        let matches: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| line.contains(pattern).then_some(index))
+            .collect();
+        total += matches.len();
+        let keep = matches.len().min(200 - shown);
+        if keep == 0 {
+            continue;
+        }
+        let _ = writeln!(result, "{}:", fs_relative(workspace, &file));
+        let mut selected = std::collections::BTreeSet::new();
+        let end = matches.get(keep).copied().unwrap_or(lines.len());
+        for index in &matches[..keep] {
+            selected
+                .extend(index.saturating_sub(context)..index.saturating_add(context + 1).min(end));
+        }
+        for index in selected {
+            let _ = writeln!(result, "  {}: {}", index + 1, lines[index]);
+        }
+        shown += keep;
+    }
+    if total > shown {
+        let _ = writeln!(result, "… {} more", total - shown);
+    }
+    if result.is_empty() {
+        result.push_str("no matches\n");
+    }
+    if skipped > 0 {
+        let _ = writeln!(
+            result,
+            "… skipped {skipped} files over 4 MiB · use shell for those"
+        );
+    }
+    Ok(result.trim_end().to_string())
+}
+
 fn valid_relative_path(path: &str) -> bool {
     !path.is_empty()
         && !path.contains('\\')
@@ -5040,6 +5318,332 @@ fn build_lighting_filter(preset: &str, intensity: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn fs_toolbox() -> (ToolBox, PathBuf) {
+        let (mut toolbox, dir) = skills_toolbox();
+        let root = dir.join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        toolbox.workspace = Some(Arc::new(Workspace::open(&root, Vec::new()).unwrap()));
+        (toolbox, dir)
+    }
+
+    #[test]
+    fn fs_definitions_require_a_workspace() {
+        let (mut toolbox, dir) = skills_toolbox();
+        for defs in [toolbox.defs(), toolbox.defs_compact()] {
+            assert!(!defs.iter().any(|def| def.name == "fs"));
+        }
+        toolbox.workspace = Some(Arc::new(Workspace::open(&dir, Vec::new()).unwrap()));
+        for defs in [toolbox.defs(), toolbox.defs_compact()] {
+            let index = defs.iter().position(|def| def.name == "fetch_url").unwrap();
+            assert_eq!(defs[index + 1].name, "fs");
+            assert_eq!(
+                defs[index + 1].parameters["properties"]["action"]["enum"],
+                json!(["list", "glob", "grep", "read"])
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_actions_require_a_workspace_and_refuse_escaping_paths() {
+        let (mut toolbox, dir) = skills_toolbox();
+        for action in ["list", "glob", "grep", "read"] {
+            let args = json!({ "action": action, "path": "../escape", "pattern": "x" }).to_string();
+            let (result, _) = toolbox.run("fs", &args).await;
+            assert_eq!(
+                result,
+                "fs needs an agent workspace · switch with /agent <path>"
+            );
+            let (result, _) = toolbox.run(&format!("fs_{action}"), &args).await;
+            assert_eq!(
+                result,
+                "fs needs an agent workspace · switch with /agent <path>"
+            );
+        }
+        toolbox.workspace = Some(Arc::new(Workspace::open(&dir, Vec::new()).unwrap()));
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        let outside = dir.parent().unwrap().join("outside");
+        for action in ["list", "glob", "grep", "read"] {
+            for path in [
+                "../escape",
+                outside.to_str().unwrap(),
+                ".git/config",
+                "sub/.git/config",
+            ] {
+                let args = json!({ "action": action, "path": path, "pattern": "x" }).to_string();
+                let (result, _) = toolbox.run("fs", &args).await;
+                assert_eq!(
+                    result,
+                    workspace
+                        .resolve(path, Access::Read)
+                        .unwrap_err()
+                        .to_string()
+                );
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_read_pages_hash_lines_and_records_stamps() {
+        let (toolbox, dir) = fs_toolbox();
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        let path = workspace.root().join("notes.txt");
+        let content = "one\ntwo\nthree\nfour\n";
+        std::fs::write(&path, content).unwrap();
+        let (result, _) = toolbox
+            .run(
+                "fs",
+                r#"{"action":"read","path":"notes.txt","offset":2,"limit":2}"#,
+            )
+            .await;
+        assert_eq!(
+            result,
+            format!(
+                "notes.txt (lines 2-3 of 4):\n{}\n… continue with offset=4",
+                number_lines_with_hash(&["two", "three"], 1)
+            )
+        );
+        assert_eq!(
+            workspace.last_read(&path),
+            Some(workspace.stamp(&path).unwrap())
+        );
+        let stamp = workspace.last_read(&path).unwrap();
+        assert_eq!(stamp.len, content.len() as u64);
+        assert_eq!(stamp.sha256.as_slice(), Sha256::digest(content).as_slice());
+        let (result, _) = toolbox
+            .run("fs_read", r#"{"path":"notes.txt","offset":4}"#)
+            .await;
+        assert_eq!(
+            result,
+            format!(
+                "notes.txt (lines 4-4 of 4):\n{}",
+                number_lines_with_hash(&["four"], 3)
+            )
+        );
+        std::fs::write(&path, "changed\n").unwrap();
+        assert_ne!(
+            workspace.last_read(&path),
+            Some(workspace.stamp(&path).unwrap())
+        );
+        toolbox.run("fs_read", r#"{"path":"notes.txt"}"#).await;
+        assert_eq!(
+            workspace.last_read(&path),
+            Some(workspace.stamp(&path).unwrap())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_read_handles_binary_empty_and_line_limits() {
+        let (toolbox, dir) = fs_toolbox();
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        let path = workspace.root().join("file");
+        std::fs::write(&path, b"a\0b").unwrap();
+        let (result, _) = toolbox.run("fs_read", r#"{"path":"file"}"#).await;
+        assert_eq!(result, "binary file (3 bytes) · not shown");
+        assert_eq!(
+            workspace.last_read(&path),
+            Some(workspace.stamp(&path).unwrap())
+        );
+        std::fs::write(&path, "").unwrap();
+        let (result, _) = toolbox.run("fs_read", r#"{"path":"file"}"#).await;
+        assert_eq!(result, "file (lines 0-0 of 0):");
+        std::fs::write(&path, "x\n".repeat(2005)).unwrap();
+        let result = fs_action(workspace, "fs_read", r#"{"path":"file","limit":9999}"#).unwrap();
+        assert!(result.starts_with("file (lines 1-2000 of 2005):"));
+        assert!(result.ends_with("… continue with offset=2001"));
+        let (result, _) = toolbox
+            .run("fs_read", r#"{"path":"file","offset":9999}"#)
+            .await;
+        assert_eq!(result, "file (lines 0-0 of 2005):");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_read_refuses_files_over_sixteen_mib_without_recording_a_stamp() {
+        let (toolbox, dir) = fs_toolbox();
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        let path = workspace.root().join("large");
+        let file = std::fs::File::create(&path).unwrap();
+        let limit = 16 * 1024 * 1024;
+        file.set_len(limit + 1).unwrap();
+        let expected = format!(
+            "file too large ({} bytes) · use fs grep or shell (sed -n, head) for a slice",
+            limit + 1
+        );
+        let (result, _) = toolbox.run("fs_read", r#"{"path":"large"}"#).await;
+        assert_eq!(result, expected);
+        assert!(workspace.last_read(&path).is_none());
+        file.set_len(limit).unwrap();
+        let (result, _) = toolbox.run("fs_read", r#"{"path":"large"}"#).await;
+        assert_eq!(result, format!("binary file ({limit} bytes) · not shown"));
+        let stamp = workspace.last_read(&path).unwrap();
+        assert_eq!(stamp.len, limit);
+        file.set_len(limit + 1).unwrap();
+        let (result, _) = toolbox.run("fs_read", r#"{"path":"large"}"#).await;
+        assert_eq!(result, expected);
+        assert_eq!(workspace.last_read(&path), Some(stamp));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_list_respects_gitignore_hidden_files_and_depth() {
+        let (toolbox, dir) = fs_toolbox();
+        let root = toolbox.workspace.as_ref().unwrap().root();
+        std::fs::create_dir_all(root.join("src/nested/deep")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/config"), "hidden").unwrap();
+        std::fs::write(root.join(".gitignore"), "ignored\n").unwrap();
+        std::fs::write(root.join("ignored"), "hidden").unwrap();
+        std::fs::write(root.join(".visible"), "shown").unwrap();
+        std::fs::write(root.join("src/code.rs"), "code").unwrap();
+        let (result, _) = toolbox.run("fs_list", "{}").await;
+        assert_eq!(
+            result,
+            "./\n.gitignore\n.visible\nsrc/\nsrc/code.rs\nsrc/nested/"
+        );
+        let (result, _) = toolbox.run("fs_list", r#"{"depth":1}"#).await;
+        assert!(!result.contains("src/code.rs"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_list_summarizes_large_directories() {
+        let (toolbox, dir) = fs_toolbox();
+        let root = toolbox.workspace.as_ref().unwrap().root();
+        std::fs::create_dir_all(root.join("many")).unwrap();
+        for index in 0..101 {
+            std::fs::write(root.join(format!("many/{index}")), "").unwrap();
+        }
+        let (result, _) = toolbox.run("fs_list", "{}").await;
+        assert_eq!(result, "./\nmany/ (101 entries)");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_glob_matches_sorted_relative_paths_and_caps_entries() {
+        let (toolbox, dir) = fs_toolbox();
+        let root = toolbox.workspace.as_ref().unwrap().root();
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        std::fs::write(root.join(".gitignore"), "ignored.rs\n").unwrap();
+        for path in [
+            "src/z.rs",
+            "src/nested/a.rs",
+            "src/nested/ignored.rs",
+            "src/plain.txt",
+            "other.rs",
+        ] {
+            std::fs::write(root.join(path), "").unwrap();
+        }
+        let (result, _) = toolbox
+            .run("fs", r#"{"action":"glob","pattern":"src/**/*.rs"}"#)
+            .await;
+        assert_eq!(result, "src/nested/a.rs\nsrc/z.rs");
+        for index in 0..405 {
+            std::fs::write(root.join(format!("src/{index:03}.rs")), "").unwrap();
+        }
+        let (result, _) = toolbox.run("fs_glob", r#"{"pattern":"src/**/*.rs"}"#).await;
+        assert_eq!(result.lines().count(), 401);
+        assert!(result.ends_with("… 7 more"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fs_grep_builtin_groups_literal_case_sensitive_matches_and_context() {
+        let (toolbox, dir) = fs_toolbox();
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        let root = workspace.root();
+        std::fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(root.join("a.txt"), "before\na.b\na.b again\naXb\nA.B\n").unwrap();
+        std::fs::write(root.join("b.txt"), "a.b\n").unwrap();
+        std::fs::write(root.join("binary"), b"\0a.b\n").unwrap();
+        std::fs::write(root.join("ignored.txt"), "a.b\n").unwrap();
+        let result = fs_grep(workspace, root, "a.b", 0).unwrap();
+        assert_eq!(result, "a.txt:\n  2: a.b\n  3: a.b again\nb.txt:\n  1: a.b");
+        let result = fs_grep(workspace, &root.join("a.txt"), "a.b", 1).unwrap();
+        assert_eq!(
+            result,
+            "a.txt:\n  1: before\n  2: a.b\n  3: a.b again\n  4: aXb"
+        );
+        std::fs::write(root.join("a.txt"), "a.b\n".repeat(202)).unwrap();
+        let result = fs_grep(workspace, root, "a.b", 0).unwrap();
+        assert_eq!(
+            result.lines().filter(|line| line.starts_with("  ")).count(),
+            200
+        );
+        assert!(result.ends_with("… 3 more"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_grep_skips_files_over_four_mib_and_reports_the_count() {
+        let (toolbox, dir) = fs_toolbox();
+        let root = toolbox.workspace.as_ref().unwrap().root();
+        let mut boundary = vec![b'x'; 4 * 1024 * 1024];
+        boundary[..7].copy_from_slice(b"needle\n");
+        std::fs::write(root.join("boundary.txt"), boundary).unwrap();
+        for name in ["large.txt", "large.bin"] {
+            std::fs::File::create(root.join(name))
+                .unwrap()
+                .set_len(4 * 1024 * 1024 + 1)
+                .unwrap();
+        }
+        let (result, _) = toolbox.run("fs_grep", r#"{"pattern":"needle"}"#).await;
+        assert_eq!(
+            result,
+            "boundary.txt:\n  1: needle\n… skipped 2 files over 4 MiB · use shell for those"
+        );
+        let (result, _) = toolbox.run("fs_grep", r#"{"pattern":"missing"}"#).await;
+        assert_eq!(
+            result,
+            "no matches\n… skipped 2 files over 4 MiB · use shell for those"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_walks_never_expose_symlink_escapes_or_denied_directories() {
+        let (mut toolbox, dir) = fs_toolbox();
+        let root = toolbox.workspace.as_ref().unwrap().root().to_path_buf();
+        let denied = root.join("nexus");
+        std::fs::create_dir_all(&denied).unwrap();
+        std::fs::write(denied.join("secret.txt"), "needle").unwrap();
+        std::fs::write(dir.join("outside.txt"), "needle").unwrap();
+        std::os::unix::fs::symlink(dir.join("outside.txt"), root.join("link.txt")).unwrap();
+        toolbox.workspace = Some(Arc::new(Workspace::open(&root, vec![denied]).unwrap()));
+        for action in ["list", "glob", "grep", "read"] {
+            let (result, _) = toolbox
+                .run(
+                    "fs",
+                    &json!({"action": action, "path": "link.txt", "pattern": "needle"}).to_string(),
+                )
+                .await;
+            assert!(
+                result.starts_with("path escapes the workspace:"),
+                "{result}"
+            );
+        }
+        for (action, pattern) in [("list", "*"), ("glob", "**/*.txt")] {
+            let (result, _) = toolbox
+                .run(
+                    "fs",
+                    &json!({"action": action, "pattern": pattern}).to_string(),
+                )
+                .await;
+            assert!(!result.contains("nexus"), "{result}");
+            assert!(!result.contains("link.txt"), "{result}");
+        }
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        assert_eq!(
+            fs_grep(workspace, &root, "needle", 0).unwrap(),
+            "no matches"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn head_tail_cap_keeps_both_ends_and_counts_omitted_characters() {

@@ -31,6 +31,7 @@ pub mod sync;
 pub mod tools;
 pub mod trace;
 pub mod update;
+pub mod workspace;
 
 use anyhow::Result;
 

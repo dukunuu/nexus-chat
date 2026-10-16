@@ -531,6 +531,78 @@ pub(super) static FETCH_URL: ToolSpec = ToolSpec {
     }],
 };
 
+pub(super) static FS: ToolSpec = ToolSpec {
+    name: "fs",
+    purpose: "Explore and read files confined to the agent workspace, respecting gitignore rules.",
+    selector: Some("action"),
+    params: &[
+        Param {
+            name: "path",
+            kind: Kind::Str,
+            doc: "workspace path (default . except for read)",
+        },
+        Param {
+            name: "depth",
+            kind: Kind::Int,
+            doc: "list depth (default 2, maximum 6)",
+        },
+        Param {
+            name: "pattern",
+            kind: Kind::Str,
+            doc: "relative glob for glob, literal case-sensitive substring for grep",
+        },
+        Param {
+            name: "offset",
+            kind: Kind::Int,
+            doc: "1-based starting line (default 1)",
+        },
+        Param {
+            name: "limit",
+            kind: Kind::Int,
+            doc: "read line count (default 400, maximum 2000)",
+        },
+        Param {
+            name: "context",
+            kind: Kind::Int,
+            doc: "grep context lines (default 0, maximum 5)",
+        },
+    ],
+    actions: &[
+        ActionSpec {
+            name: "list",
+            summary: "List a gitignore-aware tree, capped at 400 entries",
+            required: &[],
+            optional: &["path", "depth"],
+            read_only: true,
+            internal: "fs_list",
+        },
+        ActionSpec {
+            name: "glob",
+            summary: "Find sorted relative paths, capped at 400 entries",
+            required: &["pattern"],
+            optional: &["path"],
+            read_only: true,
+            internal: "fs_glob",
+        },
+        ActionSpec {
+            name: "grep",
+            summary: "Search non-binary files, grouped by file and capped at 200 matches",
+            required: &["pattern"],
+            optional: &["path", "context"],
+            read_only: true,
+            internal: "fs_grep",
+        },
+        ActionSpec {
+            name: "read",
+            summary: "Read paged hash-lines and record a file stamp",
+            required: &["path"],
+            optional: &["offset", "limit"],
+            read_only: true,
+            internal: "fs_read",
+        },
+    ],
+};
+
 pub(super) static RESEARCH_LOOKUP: ToolSpec = ToolSpec {
     name: "research_lookup",
     purpose: "Look up previously gathered research material.",
@@ -865,6 +937,7 @@ const TOOLS: &[&ToolSpec] = &[
     &SCRIPTS,
     &SEARCH,
     &FETCH_URL,
+    &FS,
     &RESEARCH_LOOKUP,
     &FILES,
     &MEDIA,
@@ -982,6 +1055,10 @@ mod tests {
             r#"{"url":"https://example.test"}"#,
             "fetch_url",
         ),
+        ("fs", r#"{"action":"list"}"#, "fs_list"),
+        ("fs", r#"{"action":"glob","pattern":"*.rs"}"#, "fs_glob"),
+        ("fs", r#"{"action":"grep","pattern":"x"}"#, "fs_grep"),
+        ("fs", r#"{"action":"read","path":"x"}"#, "fs_read"),
         (
             "research_lookup",
             r#"{"scope":"session_sources","query":"x"}"#,
@@ -1119,6 +1196,10 @@ mod tests {
             "read_script",
             "list_scripts",
             "list_references",
+            "fs_list",
+            "fs_glob",
+            "fs_grep",
+            "fs_read",
         ];
         for &(tool, args, internal) in ROUTES {
             let expected = read_only.contains(&internal);

@@ -34,6 +34,7 @@ chrono = { workspace = true }
 directories = { workspace = true }
 futures-util = { workspace = true }
 image = { workspace = true }
+ignore = { workspace = true }
 open = { workspace = true }
 pdf-extract = { workspace = true }
 png = { workspace = true }
