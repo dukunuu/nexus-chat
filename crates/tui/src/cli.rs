@@ -20,6 +20,7 @@ use clap::{Parser, Subcommand};
 use nexus_core::app;
 use nexus_core::config;
 use nexus_core::db;
+use nexus_core::eval;
 use nexus_core::host::{HostConfig, HostServer};
 use nexus_core::provider::Model;
 use nexus_core::provider::openrouter::OpenRouter;
@@ -69,6 +70,21 @@ pub enum Command {
         /// Suppress stderr chatter (tool status, token summary).
         #[arg(long)]
         quiet: bool,
+    },
+    /// Run golden tasks against a real backend in incognito (costs real tokens).
+    Eval {
+        /// Directory containing one golden task per TOML file.
+        #[arg(default_value = "./evals")]
+        dir: PathBuf,
+        /// Model id (defaults to your most recently used model).
+        #[arg(long)]
+        model: Option<String>,
+        /// Only tasks whose names contain this substring.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Emit task results and totals as a JSON object.
+        #[arg(long)]
+        json: bool,
     },
     /// Analyze text from the OS clipboard with one headless turn. The
     /// optional instruction is applied to the copied text; when omitted,
@@ -384,6 +400,7 @@ pub fn parse() -> (bool, bool, bool, Option<Command>) {
 }
 
 /// Run a parsed subcommand.
+#[allow(clippy::too_many_lines)] // one dispatch arm per CLI subcommand
 pub async fn run(cmd: Command) -> Result<()> {
     match cmd {
         Command::Ask {
@@ -394,6 +411,12 @@ pub async fn run(cmd: Command) -> Result<()> {
             json,
             quiet,
         } => ask(prompt, model, space, web, json, quiet).await,
+        Command::Eval {
+            dir,
+            model,
+            filter,
+            json,
+        } => eval(&dir, model.as_deref(), filter.as_deref(), json).await,
         Command::Clip {
             instruction,
             instruction_option,
@@ -615,6 +638,166 @@ fn print_ask_outcome(outcome: &app::headless::AskOutcome, json: bool, quiet: boo
             outcome.session_title,
             short_id(&outcome.session_id)
         );
+    }
+    Ok(())
+}
+
+#[derive(Default, serde::Serialize)]
+struct EvalTaskResult {
+    name: String,
+    passed: bool,
+    failures: Vec<String>,
+    tool_calls: usize,
+    invalid_tool_calls: usize,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cost: Option<f64>,
+}
+
+async fn run_eval_task(task: &eval::EvalTask, model: Option<&str>) -> EvalTaskResult {
+    let mut result = EvalTaskResult {
+        name: task.name.clone(),
+        ..Default::default()
+    };
+    let mut app = match build_app(model, None).await {
+        Ok(app) => app,
+        Err(error) => {
+            result.failures.push(format!("{error:#}"));
+            return result;
+        }
+    };
+    let outcome = async {
+        app.execute(app::AppCommand::Incognito { on: true })?;
+        if task.web {
+            app.execute(app::AppCommand::ToggleWeb)?;
+        }
+        app.ask_headless(
+            task.prompt.clone(),
+            app::headless::TurnOpts {
+                stream: false,
+                quiet: true,
+            },
+        )
+        .await
+    }
+    .await;
+    let start = app
+        .messages
+        .iter()
+        .rposition(|message| message.role == "user")
+        .map_or(app.messages.len(), |index| index + 1);
+    let turn = &app.messages[start..];
+    let observed = eval::observed_from_messages(
+        outcome
+            .as_ref()
+            .map_or("", |outcome| outcome.answer.as_str()),
+        turn,
+    );
+    let usage = outcome
+        .as_ref()
+        .ok()
+        .and_then(|outcome| outcome.usage)
+        .unwrap_or_default();
+    result.tool_calls = observed.calls.len();
+    result.invalid_tool_calls = observed
+        .calls
+        .iter()
+        .filter(|call| {
+            matches!(
+                nexus_core::tools::classify_tool_result(&call.result, ""),
+                Some("invalid_args" | "unknown_tool")
+            )
+        })
+        .count();
+    result.prompt_tokens = usage.prompt_tokens;
+    result.completion_tokens = usage.completion_tokens;
+    result.cost = usage.cost.or_else(|| {
+        turn.iter()
+            .rev()
+            .find(|message| message.role == "assistant")
+            .and_then(|message| message.cost)
+    });
+    result.failures = match outcome {
+        Ok(_) => eval::check(task, &observed),
+        Err(error) => vec![format!("{error:#}")],
+    };
+    result.passed = result.failures.is_empty();
+    result
+}
+
+fn eval_cost(cost: Option<f64>) -> String {
+    cost.map_or_else(|| "$unknown".to_string(), |cost| format!("${cost:.6}"))
+}
+
+fn print_eval_task(result: &EvalTaskResult) {
+    out(format!(
+        "{} {} · calls {} · invalid {} · tokens {}/{} · {}",
+        if result.passed { "PASS" } else { "FAIL" },
+        result.name,
+        result.tool_calls,
+        result.invalid_tool_calls,
+        result.prompt_tokens,
+        result.completion_tokens,
+        eval_cost(result.cost),
+    ));
+    for failure in &result.failures {
+        for line in failure.lines() {
+            out(format!("  {line}"));
+        }
+    }
+}
+
+async fn eval(dir: &Path, model: Option<&str>, filter: Option<&str>, json: bool) -> Result<()> {
+    let mut tasks = eval::load_tasks(dir)?;
+    if let Some(filter) = filter {
+        tasks.retain(|task| task.name.contains(filter));
+    }
+    if tasks.is_empty() {
+        bail!("no eval tasks matched in {}", dir.display());
+    }
+    let mut results = Vec::new();
+    for task in &tasks {
+        let result = run_eval_task(task, model).await;
+        if !json {
+            print_eval_task(&result);
+        }
+        results.push(result);
+    }
+    let passed = results.iter().filter(|result| result.passed).count();
+    let total = results.len();
+    let tool_calls: usize = results.iter().map(|result| result.tool_calls).sum();
+    let invalid_tool_calls: usize = results.iter().map(|result| result.invalid_tool_calls).sum();
+    let invalid_call_rate = if tool_calls == 0 {
+        0.0
+    } else {
+        invalid_tool_calls as f64 / tool_calls as f64
+    };
+    let prompt_tokens: u64 = results.iter().map(|result| result.prompt_tokens).sum();
+    let completion_tokens: u64 = results.iter().map(|result| result.completion_tokens).sum();
+    let cost: Option<f64> = results.iter().map(|result| result.cost).sum();
+    if json {
+        out(serde_json::to_string_pretty(&serde_json::json!({
+            "tasks": results,
+            "totals": {
+                "passed": passed,
+                "total": total,
+                "tool_calls": tool_calls,
+                "invalid_tool_calls": invalid_tool_calls,
+                "invalid_call_rate": invalid_call_rate,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cost": cost,
+            },
+        }))?);
+    } else {
+        out(format!(
+            "passed {passed}/{total} · calls {tool_calls} · invalid-call rate {:.2}% ({invalid_tool_calls}/{tool_calls}) · tokens {prompt_tokens}/{completion_tokens} · {}",
+            invalid_call_rate * 100.0,
+            eval_cost(cost),
+        ));
+    }
+    if passed != total {
+        bail!("{} eval task(s) failed", total - passed);
     }
     Ok(())
 }

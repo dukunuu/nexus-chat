@@ -90,6 +90,15 @@ otherwise (`--approve` runs unattended, like `/research!`). The read-only
 commands (`usage`, `sessions`, `spaces`, `export`, `status`, `doctor`,
 `backup`, `memory`, …) never touch the network.
 
+### Golden-task evals
+
+`nexus eval [DIR] [--model MODEL] [--filter SUBSTR] [--json]` runs the golden
+TOML tasks in `./evals` against a real backend in incognito (no saved sessions).
+It reports checks, tool calls, invalid-call rate, tokens and cost; exit status is
+0 only when all selected tasks pass. This manual command requires keys/network
+and costs real tokens; it is not part of CI. See [evals/README.md](evals/README.md)
+for the task format and held-out-task policy.
+
 ### Hosting
 
 `nexus host` runs the same core on a loopback HTTP/SSE daemon. It exposes

@@ -1,0 +1,5 @@
+# Guards against unnecessary tool calls for small talk.
+prompt = "Say hello in exactly one word."
+
+[check]
+max_tool_calls = 0

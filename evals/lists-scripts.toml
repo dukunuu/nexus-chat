@@ -1,0 +1,7 @@
+# Guards scripts-tool discovery and valid list arguments.
+prompt = "Which scripts do I have in this space? Use your tools to check."
+
+[check]
+tool_called = ["scripts"]
+tool_args_contains = ["\"list\""]
+no_invalid_tool_calls = true

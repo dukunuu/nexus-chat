@@ -1,0 +1,6 @@
+# Guards date awareness without tools or a hardcoded current year.
+prompt = "What year is it? Reply with only the year."
+
+[check]
+max_tool_calls = 0
+answer_not_contains = ["2023", "2024"]

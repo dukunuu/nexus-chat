@@ -52,7 +52,7 @@ pub(crate) struct ToolOutcome {
     result_chars: usize,
 }
 
-fn classify_tool_result(result: &str, status: &str) -> Option<&'static str> {
+pub fn classify_tool_result(result: &str, status: &str) -> Option<&'static str> {
     let line = result.lines().next().unwrap_or_default().trim();
     let prefix_kind = TOOL_ERROR_PREFIXES
         .iter()

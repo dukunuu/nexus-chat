@@ -1,0 +1,7 @@
+# Guards web search for facts that need fresh evidence.
+prompt = "What is the latest stable Rust release? Check the web."
+web = true
+
+[check]
+tool_called = ["search"]
+no_invalid_tool_calls = true
