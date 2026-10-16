@@ -6,7 +6,7 @@
 mod spec;
 
 use std::fmt::Write as _;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -46,6 +46,8 @@ const TOOL_ERROR_PREFIXES: &[(&str, &str)] = &[
     ("write failed:", "io"),
     ("db error:", "io"),
     ("store error:", "io"),
+    ("fs.", "stale_edit"),
+    ("changed since your last read", "stale_edit"),
 ];
 
 pub(crate) struct ToolOutcome {
@@ -57,9 +59,14 @@ pub(crate) struct ToolOutcome {
 
 pub fn classify_tool_result(result: &str, status: &str) -> Option<&'static str> {
     let line = result.lines().next().unwrap_or_default().trim();
-    let prefix_kind = TOOL_ERROR_PREFIXES
-        .iter()
-        .find_map(|(prefix, kind)| line.starts_with(prefix).then_some(*kind));
+    let prefix_kind = TOOL_ERROR_PREFIXES.iter().find_map(|(prefix, kind)| {
+        let matches = match *prefix {
+            "fs." => line.starts_with(prefix) && line.contains("needs a fresh read"),
+            "changed since your last read" => line.contains(prefix),
+            _ => line.starts_with(prefix),
+        };
+        matches.then_some(*kind)
+    });
     if status == "invalid arguments" || prefix_kind == Some("invalid_args") {
         return Some("invalid_args");
     }
@@ -747,7 +754,12 @@ impl ToolBox {
         defs.push(def(&spec::SEARCH, &["web", "academic", "discussion"]));
         defs.push(def(&spec::FETCH_URL, &["fetch_url"]));
         if self.workspace.is_some() {
-            defs.push(def(&spec::FS, &["list", "glob", "grep", "read"]));
+            defs.push(def(
+                &spec::FS,
+                &[
+                    "list", "glob", "grep", "read", "edit", "write", "move", "delete",
+                ],
+            ));
         }
         let has_session_sources = self.research_session_id.is_some();
         let has_citations = self.citation_count() > 0;
@@ -955,7 +967,8 @@ impl ToolBox {
         let name = dispatch_name.as_str();
         let args = dispatch_args.as_str();
         let (result, status) = match name {
-            "fs_list" | "fs_glob" | "fs_grep" | "fs_read" => match &self.workspace {
+            "fs_list" | "fs_glob" | "fs_grep" | "fs_read" | "fs_edit" | "fs_write" | "fs_move"
+            | "fs_delete" => match &self.workspace {
                 None => (
                     "fs needs an agent workspace · switch with /agent <path>".to_string(),
                     "blocked".to_string(),
@@ -3385,8 +3398,20 @@ fn fs_action(workspace: &Arc<Workspace>, name: &str, args: &str) -> Result<Strin
     let rel = args
         .get("path")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or(if name == "fs_read" { "" } else { "." });
-    let path = workspace.resolve(rel, Access::Read)?;
+        .unwrap_or(if matches!(name, "fs_list" | "fs_glob" | "fs_grep") {
+            "."
+        } else {
+            ""
+        });
+    let access = if matches!(name, "fs_edit" | "fs_write" | "fs_move" | "fs_delete") {
+        Access::Write
+    } else {
+        Access::Read
+    };
+    let path = workspace.resolve(rel, access)?;
+    if access == Access::Write {
+        return fs_mutate(workspace, &path, name, &args);
+    }
     let number = |key: &str, default: usize, max: usize| {
         usize::try_from(
             args.get(key)
@@ -3444,6 +3469,188 @@ fn fs_action(workspace: &Arc<Workspace>, name: &str, args: &str) -> Result<Strin
         ),
         _ => unreachable!("fs action dispatch"),
     }
+}
+
+fn fs_mutate(
+    workspace: &Workspace,
+    path: &Path,
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<String, PathError> {
+    let rel = fs_relative(workspace, path);
+    if name == "fs_write" && !path.try_exists()? {
+        return fs_replace(workspace, path, name, args, "", None);
+    }
+    let Some(previous) = workspace.last_read(path) else {
+        return Ok(format!(
+            "fs.{} needs a fresh read · call fs with action=read on {rel} first",
+            name.trim_start_matches("fs_")
+        ));
+    };
+    let mut file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(PathError::Invalid(format!("{rel} is not a file")));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let current_stamp = Workspace::stamp_bytes(&bytes, &metadata)?;
+    let current = String::from_utf8_lossy(&bytes);
+    if previous.len != current_stamp.len || previous.sha256 != current_stamp.sha256 {
+        let mut result = format!("{rel} changed since your last read · re-read it and re-apply");
+        if let Some(text) = previous.text {
+            let _ = write!(result, "\n{}", fs_diff(&rel, &text, &current, 60).0);
+        }
+        return Ok(result);
+    }
+    if name == "fs_edit" && (bytes.contains(&0) || std::str::from_utf8(&bytes).is_err()) {
+        return Ok(format!(
+            "fs.edit needs a UTF-8 text file · {rel} is binary or not UTF-8; use write to replace it whole"
+        ));
+    }
+    match name {
+        "fs_edit" | "fs_write" => fs_replace(
+            workspace,
+            path,
+            name,
+            args,
+            &current,
+            Some(metadata.permissions()),
+        ),
+        "fs_move" => {
+            let to = args
+                .get("to")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let target = workspace.resolve(to, Access::Write)?;
+            if target.try_exists()? {
+                return Ok(format!("fs.move target exists: {to} · choose a new path"));
+            }
+            std::fs::create_dir_all(target.parent().expect("workspace file parent"))?;
+            // A hard link refuses a target created after the existence check.
+            #[cfg(unix)]
+            match std::fs::hard_link(path, &target) {
+                Ok(()) => std::fs::remove_file(path)?,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Ok(format!("fs.move target exists: {to} · choose a new path"));
+                }
+                Err(_) => std::fs::rename(path, &target)?,
+            }
+            #[cfg(not(unix))]
+            std::fs::rename(path, &target)?;
+            workspace.forget_read(path);
+            workspace.record_read(&target, current_stamp);
+            Ok(format!(
+                "moved {rel} -> {}",
+                fs_relative(workspace, &target)
+            ))
+        }
+        "fs_delete" => {
+            let (diff, _, _) = fs_diff(&rel, &current, "", 200);
+            std::fs::remove_file(path)?;
+            workspace.forget_read(path);
+            Ok(format!(
+                "deleted {rel} (+0 −{})\n{diff}",
+                current.lines().count()
+            ))
+        }
+        _ => unreachable!("fs mutation dispatch"),
+    }
+}
+
+fn fs_replace(
+    workspace: &Workspace,
+    path: &Path,
+    name: &str,
+    args: &serde_json::Value,
+    current: &str,
+    permissions: Option<std::fs::Permissions>,
+) -> Result<String, PathError> {
+    let mut content = if name == "fs_edit" {
+        let edits: Vec<_> = args
+            .get("edits")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|edit| {
+                Some((
+                    edit.get("hash")?.as_str()?.to_string(),
+                    edit.get("line")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|line| usize::try_from(line).ok()),
+                    edit.get("new")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                ))
+            })
+            .collect();
+        match apply_hashline_edits(current, &edits) {
+            Ok((content, _)) => content,
+            Err(error) => return Ok(error),
+        }
+    } else {
+        args.get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    if current.contains("\r\n") && !content.contains("\r\n") {
+        content = content.replace('\n', "\r\n");
+    }
+    let rel = fs_relative(workspace, path);
+    let (diff, added, deleted) = fs_diff(&rel, current, &content, 200);
+    let stamp = fs_atomic_write(path, &content, permissions)?;
+    workspace.record_read(path, stamp);
+    let verb = if name == "fs_edit" { "edited" } else { "wrote" };
+    Ok(format!("{verb} {rel} (+{added} −{deleted})\n{diff}"))
+}
+
+fn fs_atomic_write(
+    path: &Path,
+    content: &str,
+    permissions: Option<std::fs::Permissions>,
+) -> Result<crate::workspace::FileStamp, PathError> {
+    let parent = path.parent().expect("workspace file parent");
+    std::fs::create_dir_all(parent)?;
+    let temp = parent.join(format!(".nexus-{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    let result = (|| {
+        file.write_all(content.as_bytes())?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.sync_all()?;
+        let stamp = Workspace::stamp_bytes(content.as_bytes(), &file.metadata()?)?;
+        std::fs::rename(&temp, path)?;
+        Ok(stamp)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+fn fs_diff(path: &str, current: &str, candidate: &str, limit: usize) -> (String, usize, usize) {
+    let diff = unified_diff("workspace", path, current, candidate);
+    let added = diff
+        .lines()
+        .skip_while(|line| !line.starts_with("@@"))
+        .filter(|line| line.starts_with('+'))
+        .count();
+    let deleted = diff
+        .lines()
+        .skip_while(|line| !line.starts_with("@@"))
+        .filter(|line| line.starts_with('-'))
+        .count();
+    let mut capped = diff.lines().take(limit).collect::<Vec<_>>().join("\n");
+    let more = diff.lines().count().saturating_sub(limit);
+    if more > 0 {
+        let _ = write!(capped, "\n… {more} more lines");
+    }
+    (capped, added, deleted)
 }
 
 // Never follow directory symlinks, and apply the workspace's hard exclusions
@@ -5328,6 +5535,485 @@ mod tests {
         (toolbox, dir)
     }
 
+    async fn run_fs(toolbox: &ToolBox, args: serde_json::Value) -> String {
+        toolbox.run("fs", &args.to_string()).await.0
+    }
+
+    #[tokio::test]
+    async fn fs_write_creates_new_file_without_a_read() {
+        let (toolbox, dir) = fs_toolbox();
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        let path = workspace.root().join("new.txt");
+        let result = run_fs(
+            &toolbox,
+            json!({"action": "write", "path": "new.txt", "content": "one\ntwo\n"}),
+        )
+        .await;
+        assert!(result.starts_with("wrote new.txt (+2 −0)\n"), "{result}");
+        assert!(result.contains("\n+one\n+two"), "{result}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\n");
+        assert_eq!(
+            workspace.last_read(&path),
+            Some(workspace.stamp(&path).unwrap())
+        );
+        let result = run_fs(
+            &toolbox,
+            json!({"action": "write", "path": "empty", "content": ""}),
+        )
+        .await;
+        assert!(result.starts_with("wrote empty (+0 −0)"), "{result}");
+        assert_eq!(std::fs::read(workspace.root().join("empty")).unwrap(), b"");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_write_creates_missing_parent_directories() {
+        let (toolbox, dir) = fs_toolbox();
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        let path = workspace.root().join("new/dir/file.rs");
+        let result = run_fs(
+            &toolbox,
+            json!({"action": "write", "path": "new/dir/file.rs", "content": "fn main() {}\n"}),
+        )
+        .await;
+        assert!(
+            result.starts_with("wrote new/dir/file.rs (+1 −0)\n"),
+            "{result}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn main() {}\n");
+        assert_eq!(
+            workspace.last_read(&path),
+            Some(workspace.stamp(&path).unwrap())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_write_refuses_existing_file_without_a_read() {
+        let (toolbox, dir) = fs_toolbox();
+        let path = toolbox.workspace.as_ref().unwrap().root().join("file");
+        std::fs::write(&path, "original\n").unwrap();
+        let result = run_fs(
+            &toolbox,
+            json!({"action": "write", "path": "file", "content": "replacement\n"}),
+        )
+        .await;
+        assert_eq!(
+            result,
+            "fs.write needs a fresh read · call fs with action=read on file first"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_edit_applies_hashline_edits_after_read_and_returns_diff() {
+        let (toolbox, dir) = fs_toolbox();
+        let path = toolbox.workspace.as_ref().unwrap().root().join("file");
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        let args = json!({
+            "action": "edit", "path": "file",
+            "edits": [{"hash": line_hash("two"), "new": "three"}]
+        });
+        let result = run_fs(&toolbox, args.clone()).await;
+        assert!(result.starts_with("fs.edit needs a fresh read"), "{result}");
+        run_fs(&toolbox, json!({"action": "read", "path": "file"})).await;
+        let result = run_fs(&toolbox, args).await;
+        assert!(result.starts_with("edited file (+1 −1)\n"), "{result}");
+        assert!(result.contains("\n@@"), "{result}");
+        assert!(result.contains("\n-two\n+three"), "{result}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\nthree\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_edit_refuses_binary_and_non_utf8_without_corrupting_file() {
+        let (toolbox, dir) = fs_toolbox();
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        let path = workspace.root().join("file");
+        for content in [
+            b"keep\nlatin-\xe9\n".as_slice(),
+            b"keep\nnul\0\n".as_slice(),
+            b"keep\nnul\0and\xff\n".as_slice(),
+        ] {
+            std::fs::write(&path, content).unwrap();
+            run_fs(&toolbox, json!({"action": "read", "path": "file"})).await;
+            let stamp = workspace.last_read(&path).unwrap();
+            let result = run_fs(
+                &toolbox,
+                json!({"action": "edit", "path": "file", "edits": [{"hash": line_hash("keep"), "new": "changed"}]}),
+            )
+            .await;
+            assert_eq!(
+                result,
+                "fs.edit needs a UTF-8 text file · file is binary or not UTF-8; use write to replace it whole"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), content);
+            assert_eq!(workspace.last_read(&path), Some(stamp));
+            let result = run_fs(
+                &toolbox,
+                json!({"action": "write", "path": "file", "content": "replacement\n"}),
+            )
+            .await;
+            assert!(result.starts_with("wrote file"), "{result}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement\n");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_edit_refuses_after_external_change() {
+        let (toolbox, dir) = fs_toolbox();
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        let path = workspace.root().join("file");
+        std::fs::write(&path, "old\n").unwrap();
+        run_fs(&toolbox, json!({"action": "read", "path": "file"})).await;
+        let stamp = workspace.last_read(&path).unwrap();
+        std::fs::write(&path, "new\n").unwrap();
+        for action in ["edit", "write", "move", "delete"] {
+            let result = run_fs(
+                &toolbox,
+                json!({
+                    "action": action, "path": "file", "to": "moved", "content": "model\n",
+                    "edits": [{"hash": line_hash("old"), "new": "model"}]
+                }),
+            )
+            .await;
+            assert!(result.contains("changed since your last read"), "{result}");
+            assert!(result.contains("\n-old\n+new"), "{result}");
+            assert_eq!(classify_tool_result(&result, ""), Some("stale_edit"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+            assert_eq!(workspace.last_read(&path), Some(stamp.clone()));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn consecutive_edits_need_no_reread() {
+        let (toolbox, dir) = fs_toolbox();
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        run_fs(
+            &toolbox,
+            json!({"action": "write", "path": "file", "content": "one\n"}),
+        )
+        .await;
+        for (old, new) in [("one", "two"), ("two", "three")] {
+            let result = run_fs(
+                &toolbox,
+                json!({"action": "edit", "path": "file", "edits": [{"hash": line_hash(old), "new": new}]}),
+            )
+            .await;
+            assert!(result.starts_with("edited file (+1 −1)"), "{result}");
+            let path = workspace.root().join("file");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{new}\n"));
+            assert_eq!(
+                workspace.last_read(&path),
+                Some(workspace.stamp(&path).unwrap())
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_write_preserves_crlf_and_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (toolbox, dir) = fs_toolbox();
+        let path = toolbox.workspace.as_ref().unwrap().root().join("file");
+        std::fs::write(&path, "one\r\ntwo\r\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o751)).unwrap();
+        run_fs(&toolbox, json!({"action": "read", "path": "file"})).await;
+        for (content, expected) in [
+            ("three\nfour\n", "three\r\nfour\r\n"),
+            ("five\r\nsix", "five\r\nsix"),
+            ("seven\neight", "seven\r\neight"),
+        ] {
+            let result = run_fs(
+                &toolbox,
+                json!({"action": "write", "path": "file", "content": content}),
+            )
+            .await;
+            assert!(result.starts_with("wrote file"), "{result}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+                0o751
+            );
+        }
+        let result = run_fs(
+            &toolbox,
+            json!({"action": "edit", "path": "file", "edits": [{"hash": line_hash("eight"), "new": "nine"}]}),
+        )
+        .await;
+        assert!(result.starts_with("edited file"), "{result}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "seven\r\nnine");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0o751
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_move_and_delete_need_a_read_and_stay_inside() {
+        let (toolbox, dir) = fs_toolbox();
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        let path = workspace.root().join("file");
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        for action in ["move", "delete"] {
+            let result = run_fs(
+                &toolbox,
+                json!({"action": action, "path": "file", "to": "moved"}),
+            )
+            .await;
+            assert!(
+                result.starts_with(&format!("fs.{action} needs a fresh read")),
+                "{result}"
+            );
+            let result = run_fs(
+                &toolbox,
+                json!({"action": action, "path": "../escape", "to": "moved"}),
+            )
+            .await;
+            assert!(result.starts_with("path escapes"), "{result}");
+        }
+        run_fs(&toolbox, json!({"action": "read", "path": "file"})).await;
+        let result = run_fs(
+            &toolbox,
+            json!({"action": "move", "path": "file", "to": "../escape"}),
+        )
+        .await;
+        assert!(result.starts_with("path escapes"), "{result}");
+        let result = run_fs(
+            &toolbox,
+            json!({"action": "move", "path": "file", "to": "moved"}),
+        )
+        .await;
+        assert_eq!(result, "moved file -> moved");
+        assert!(!path.exists());
+        let moved = workspace.root().join("moved");
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "one\ntwo\n");
+        assert!(workspace.last_read(&path).is_none());
+        assert_eq!(
+            workspace.last_read(&moved),
+            Some(workspace.stamp(&moved).unwrap())
+        );
+        let result = run_fs(&toolbox, json!({"action": "delete", "path": "moved"})).await;
+        assert!(result.starts_with("deleted moved (+0 −2)\n"), "{result}");
+        assert!(result.contains("\n-one\n-two"), "{result}");
+        assert!(!moved.exists());
+        assert!(workspace.last_read(&moved).is_none());
+        std::fs::write(&moved, "external recreation").unwrap();
+        let result = run_fs(&toolbox, json!({"action": "delete", "path": "moved"})).await;
+        assert!(
+            result.starts_with("fs.delete needs a fresh read"),
+            "{result}"
+        );
+        std::fs::create_dir(workspace.root().join("directory")).unwrap();
+        run_fs(&toolbox, json!({"action": "delete", "path": "directory"})).await;
+        assert!(workspace.root().join("directory").is_dir());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_move_creates_missing_parent_directories() {
+        let (toolbox, dir) = fs_toolbox();
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        let source = workspace.root().join("file.rs");
+        let target = workspace.root().join("new/dir/file.rs");
+        std::fs::write(&source, "fn main() {}\n").unwrap();
+        run_fs(&toolbox, json!({"action": "read", "path": "file.rs"})).await;
+        let result = run_fs(
+            &toolbox,
+            json!({"action": "move", "path": "file.rs", "to": "new/dir/file.rs"}),
+        )
+        .await;
+        assert_eq!(result, "moved file.rs -> new/dir/file.rs");
+        assert!(!source.exists());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "fn main() {}\n");
+        assert!(workspace.last_read(&source).is_none());
+        assert_eq!(
+            workspace.last_read(&target),
+            Some(workspace.stamp(&target).unwrap())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_move_refuses_existing_target() {
+        let (toolbox, dir) = fs_toolbox();
+        let root = toolbox.workspace.as_ref().unwrap().root();
+        std::fs::write(root.join("from"), "source").unwrap();
+        std::fs::write(root.join("to"), "target").unwrap();
+        run_fs(&toolbox, json!({"action": "read", "path": "from"})).await;
+        let result = run_fs(
+            &toolbox,
+            json!({"action": "move", "path": "from", "to": "to"}),
+        )
+        .await;
+        assert!(result.starts_with("fs.move target exists:"), "{result}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("from")).unwrap(),
+            "source"
+        );
+        assert_eq!(std::fs::read_to_string(root.join("to")).unwrap(), "target");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_write_refuses_secrets_files_and_git_internals() {
+        let (toolbox, dir) = fs_toolbox();
+        let root = toolbox.workspace.as_ref().unwrap().root();
+        for path in [
+            ".env",
+            ".env.local",
+            "server.pem",
+            "private.key",
+            "id_rsa",
+            "id_ed25519",
+            ".git/config",
+            "sub/.git/config",
+        ] {
+            let result = run_fs(
+                &toolbox,
+                json!({"action": "write", "path": path, "content": "secret"}),
+            )
+            .await;
+            assert!(result.starts_with("path denied:"), "{result}");
+            assert!(!root.join(path).exists());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_write_updates_resolved_symlinks_atomically_and_refuses_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let (toolbox, dir) = fs_toolbox();
+        let root = toolbox.workspace.as_ref().unwrap().root();
+        std::fs::write(root.join("file"), "before\n").unwrap();
+        symlink(root.join("file"), root.join("alias")).unwrap();
+        std::fs::hard_link(root.join("file"), root.join("original-inode")).unwrap();
+        run_fs(&toolbox, json!({"action": "read", "path": "alias"})).await;
+        let result = run_fs(
+            &toolbox,
+            json!({"action": "write", "path": "alias", "content": "after\n"}),
+        )
+        .await;
+        assert!(result.starts_with("wrote file"), "{result}");
+        assert!(
+            std::fs::symlink_metadata(root.join("alias"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("alias")).unwrap(),
+            "after\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("original-inode")).unwrap(),
+            "before\n"
+        );
+        assert_eq!(std::fs::read_dir(root).unwrap().count(), 3);
+        symlink(&dir, root.join("outside")).unwrap();
+        std::fs::write(root.join(".env"), "secret").unwrap();
+        symlink(root.join(".env"), root.join("secret-alias")).unwrap();
+        for (path, prefix) in [
+            ("outside/new", "path escapes"),
+            ("secret-alias", "path denied"),
+        ] {
+            let result = run_fs(
+                &toolbox,
+                json!({"action": "write", "path": path, "content": "unsafe"}),
+            )
+            .await;
+            assert!(result.starts_with(prefix), "{result}");
+        }
+        assert!(!dir.join("new").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join(".env")).unwrap(),
+            "secret"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_write_ignores_mtime_only_changes() {
+        let (toolbox, dir) = fs_toolbox();
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        let path = workspace.root().join("file");
+        std::fs::write(&path, "old\n").unwrap();
+        run_fs(&toolbox, json!({"action": "read", "path": "file"})).await;
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        let changed = workspace.last_read(&path).unwrap().mtime + Duration::from_secs(60);
+        file.set_times(std::fs::FileTimes::new().set_modified(changed))
+            .unwrap();
+        assert_ne!(
+            workspace.last_read(&path).unwrap().mtime,
+            workspace.stamp(&path).unwrap().mtime
+        );
+        let result = run_fs(
+            &toolbox,
+            json!({"action": "write", "path": "file", "content": "new\n"}),
+        )
+        .await;
+        assert!(result.starts_with("wrote file"), "{result}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fs_mutation_and_stale_diffs_are_capped() {
+        let (toolbox, dir) = fs_toolbox();
+        let root = toolbox.workspace.as_ref().unwrap().root();
+        let before = (0..250).map(|n| format!("old {n}\n")).collect::<String>();
+        let after = (0..250).map(|n| format!("new {n}\n")).collect::<String>();
+        run_fs(
+            &toolbox,
+            json!({"action": "write", "path": "file", "content": before}),
+        )
+        .await;
+        let result = run_fs(
+            &toolbox,
+            json!({"action": "write", "path": "file", "content": after}),
+        )
+        .await;
+        assert!(result.starts_with("wrote file (+250 −250)"), "{result}");
+        assert_eq!(result.lines().count(), 202);
+        assert!(result.lines().last().unwrap().ends_with("more lines"));
+        std::fs::write(root.join("file"), before).unwrap();
+        let result = run_fs(
+            &toolbox,
+            json!({"action": "write", "path": "file", "content": "refused"}),
+        )
+        .await;
+        assert!(result.contains("changed since your last read"), "{result}");
+        assert_eq!(result.lines().count(), 62);
+        assert!(result.lines().last().unwrap().ends_with("more lines"));
+        assert_eq!(fs_diff("file", "--old\n", "++new\n", 200).1, 1);
+        assert_eq!(fs_diff("file", "--old\n", "++new\n", 200).2, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn classify_fs_write_refusals_as_stale_edits() {
+        for result in [
+            "fs.write needs a fresh read · call fs with action=read on file first",
+            "file changed since your last read · re-read it and re-apply\n-old\n+new",
+        ] {
+            assert_eq!(
+                classify_tool_result(result, "Running fs_write…"),
+                Some("stale_edit")
+            );
+        }
+        assert_eq!(
+            classify_tool_result("fs.move target exists: file", ""),
+            None
+        );
+    }
+
     #[test]
     fn fs_definitions_require_a_workspace() {
         let (mut toolbox, dir) = skills_toolbox();
@@ -5340,7 +6026,9 @@ mod tests {
             assert_eq!(defs[index + 1].name, "fs");
             assert_eq!(
                 defs[index + 1].parameters["properties"]["action"]["enum"],
-                json!(["list", "glob", "grep", "read"])
+                json!([
+                    "list", "glob", "grep", "read", "edit", "write", "move", "delete"
+                ])
             );
         }
         std::fs::remove_dir_all(dir).unwrap();

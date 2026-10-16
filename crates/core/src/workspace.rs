@@ -22,6 +22,7 @@ pub struct FileStamp {
     pub len: u64,
     pub mtime: SystemTime,
     pub sha256: [u8; 32],
+    pub(crate) text: Option<String>,
 }
 
 /// Whether a resolved path will be read or changed.
@@ -207,18 +208,29 @@ impl Workspace {
     /// Stamp bytes already read using metadata from the same open file handle.
     pub fn stamp_bytes(bytes: &[u8], metadata: &std::fs::Metadata) -> Result<FileStamp, PathError> {
         Ok(FileStamp {
-            len: metadata.len(),
+            len: u64::try_from(bytes.len()).expect("file length fits u64"),
             mtime: metadata.modified()?,
             sha256: Sha256::digest(bytes).into(),
+            text: (bytes.len() <= 512 * 1024)
+                .then(|| std::str::from_utf8(bytes).ok().map(str::to_owned))
+                .flatten(),
         })
     }
 
-    /// Remember the stamp returned by a successful read.
+    /// Remember the stamp and bounded text snapshot returned by a successful read.
     pub fn record_read(&self, path: &Path, stamp: FileStamp) {
         self.stamps
             .lock()
             .expect("workspace stamps lock")
             .insert(path.to_path_buf(), stamp);
+    }
+
+    /// Forget a file that was moved or deleted.
+    pub(crate) fn forget_read(&self, path: &Path) {
+        self.stamps
+            .lock()
+            .expect("workspace stamps lock")
+            .remove(path);
     }
 
     /// The stamp of the last successful read, if any.
@@ -404,6 +416,37 @@ mod tests {
         assert_eq!(stamp.mtime, metadata.modified().unwrap());
         assert_eq!(stamp.sha256.as_slice(), Sha256::digest(b"shown").as_slice());
         assert_ne!(stamp, workspace.stamp(&path).unwrap());
+    }
+
+    #[test]
+    fn read_stamps_keep_bounded_text_from_the_stamped_bytes() {
+        let dir = TempWorkspace::new();
+        let workspace = dir.open();
+        let path = dir.0.join("file");
+        std::fs::write(&path, "shown").unwrap();
+        let mut file = std::fs::File::open(&path).unwrap();
+        let metadata = file.metadata().unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        std::fs::write(&path, "changed externally").unwrap();
+        workspace.record_read(&path, Workspace::stamp_bytes(&bytes, &metadata).unwrap());
+        assert_eq!(
+            workspace.last_read(&path).unwrap().text.as_deref(),
+            Some("shown")
+        );
+        for (len, retained) in [(512 * 1024, true), (512 * 1024 + 1, false)] {
+            let content = "x".repeat(len);
+            std::fs::write(&path, &content).unwrap();
+            workspace.record_read(&path, workspace.stamp(&path).unwrap());
+            let stamp = workspace.last_read(&path).unwrap();
+            assert_eq!(stamp.len, len as u64);
+            assert_eq!(stamp.text.is_some(), retained);
+            if retained {
+                assert_eq!(stamp.text.as_deref(), Some(content.as_str()));
+            }
+        }
+        workspace.forget_read(&path);
+        assert!(workspace.last_read(&path).is_none());
     }
 
     #[test]

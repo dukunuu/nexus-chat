@@ -533,13 +533,13 @@ pub(super) static FETCH_URL: ToolSpec = ToolSpec {
 
 pub(super) static FS: ToolSpec = ToolSpec {
     name: "fs",
-    purpose: "Explore and read files confined to the agent workspace, respecting gitignore rules.",
+    purpose: "Explore, read and safely change files confined to the agent workspace, respecting gitignore rules. Read existing files before changing them; stale changes are refused.",
     selector: Some("action"),
     params: &[
         Param {
             name: "path",
             kind: Kind::Str,
-            doc: "workspace path (default . except for read)",
+            doc: "workspace path (default . for list, glob and grep)",
         },
         Param {
             name: "depth",
@@ -565,6 +565,21 @@ pub(super) static FS: ToolSpec = ToolSpec {
             name: "context",
             kind: Kind::Int,
             doc: "grep context lines (default 0, maximum 5)",
+        },
+        Param {
+            name: "edits",
+            kind: Kind::Edits,
+            doc: "hash-line edits from the latest read; null or omitted new deletes the line",
+        },
+        Param {
+            name: "content",
+            kind: Kind::StrOrEmpty,
+            doc: "complete file content (may be empty)",
+        },
+        Param {
+            name: "to",
+            kind: Kind::Str,
+            doc: "new workspace path; must not exist",
         },
     ],
     actions: &[
@@ -599,6 +614,38 @@ pub(super) static FS: ToolSpec = ToolSpec {
             optional: &["offset", "limit"],
             read_only: true,
             internal: "fs_read",
+        },
+        ActionSpec {
+            name: "edit",
+            summary: "Apply hash-line edits after a fresh read, returning a unified diff",
+            required: &["path", "edits"],
+            optional: &[],
+            read_only: false,
+            internal: "fs_edit",
+        },
+        ActionSpec {
+            name: "write",
+            summary: "Atomically create or replace a file, returning a unified diff",
+            required: &["path", "content"],
+            optional: &[],
+            read_only: false,
+            internal: "fs_write",
+        },
+        ActionSpec {
+            name: "move",
+            summary: "Move a freshly read file to a new workspace path",
+            required: &["path", "to"],
+            optional: &[],
+            read_only: false,
+            internal: "fs_move",
+        },
+        ActionSpec {
+            name: "delete",
+            summary: "Delete a freshly read file, returning its removed line count and diff",
+            required: &["path"],
+            optional: &[],
+            read_only: false,
+            internal: "fs_delete",
         },
     ],
 };
@@ -1059,6 +1106,18 @@ mod tests {
         ("fs", r#"{"action":"glob","pattern":"*.rs"}"#, "fs_glob"),
         ("fs", r#"{"action":"grep","pattern":"x"}"#, "fs_grep"),
         ("fs", r#"{"action":"read","path":"x"}"#, "fs_read"),
+        (
+            "fs",
+            r#"{"action":"edit","path":"x","edits":[{"hash":"h"}]}"#,
+            "fs_edit",
+        ),
+        (
+            "fs",
+            r#"{"action":"write","path":"x","content":""}"#,
+            "fs_write",
+        ),
+        ("fs", r#"{"action":"move","path":"x","to":"y"}"#, "fs_move"),
+        ("fs", r#"{"action":"delete","path":"x"}"#, "fs_delete"),
         (
             "research_lookup",
             r#"{"scope":"session_sources","query":"x"}"#,
