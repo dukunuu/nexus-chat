@@ -55,6 +55,22 @@ fn note(quiet: bool, line: impl std::fmt::Display) {
     }
 }
 
+fn add_usage(total: Option<Usage>, next: Usage) -> Usage {
+    let total = total.unwrap_or_default();
+    Usage {
+        prompt_tokens: total.prompt_tokens + next.prompt_tokens,
+        completion_tokens: total.completion_tokens + next.completion_tokens,
+        total_tokens: total.total_tokens + next.total_tokens,
+        cache_read_tokens: total.cache_read_tokens + next.cache_read_tokens,
+        cache_creation_tokens: total.cache_creation_tokens + next.cache_creation_tokens,
+        prompt_convention: next.prompt_convention,
+        cost: match (total.cost, next.cost) {
+            (Some(a), Some(b)) => Some(a + b),
+            (a, b) => a.or(b),
+        },
+    }
+}
+
 impl App {
     /// Switch the active space by name (`--space`). Bails on an unknown
     /// name; no-op when it's already the active space.
@@ -102,6 +118,7 @@ impl App {
             match self.next_event().await {
                 AppEvent::Stream(Some((task_id, ev))) => {
                     match &ev {
+                        StreamEvent::Usage(u) => usage = Some(add_usage(usage, *u)),
                         StreamEvent::Token(t) => {
                             streamed_any = true;
                             if opts.stream {
@@ -121,9 +138,6 @@ impl App {
                     self.on_chat_event(task_id, ev)?;
                     if self.chat_tasks.is_empty() {
                         break;
-                    }
-                    if let Some(u) = self.chat_tasks.get(&task_id).and_then(|t| t.usage) {
-                        usage = Some(u);
                     }
                 }
                 // The event channel closed without a Done — nothing more is
@@ -436,6 +450,59 @@ mod tests {
     fn test_app() -> App {
         let root = std::env::temp_dir().join(format!("nexus-cli-{}", uuid::Uuid::new_v4()));
         App::new(Db::open_in_memory().unwrap(), Some("k"), Space { root })
+    }
+
+    #[test]
+    fn add_usage_sums_requests() {
+        use crate::provider::PromptConvention;
+
+        let first = Usage {
+            prompt_tokens: 10,
+            completion_tokens: 2,
+            total_tokens: 12,
+            cache_read_tokens: 3,
+            cache_creation_tokens: 1,
+            prompt_convention: PromptConvention::Inclusive,
+            cost: Some(0.01),
+        };
+        let second = Usage {
+            prompt_tokens: 30,
+            completion_tokens: 5,
+            total_tokens: 35,
+            cache_read_tokens: 11,
+            cache_creation_tokens: 4,
+            prompt_convention: PromptConvention::NormalizedFromExclusive,
+            cost: None,
+        };
+        let total = add_usage(Some(add_usage(None, first)), second);
+        assert_eq!(total.prompt_tokens, 40);
+        assert_eq!(total.completion_tokens, 7);
+        assert_eq!(total.total_tokens, 47);
+        assert_eq!(total.cache_read_tokens, 14);
+        assert_eq!(total.cache_creation_tokens, 5);
+        assert_eq!(
+            total.prompt_convention,
+            PromptConvention::NormalizedFromExclusive
+        );
+        assert_eq!(total.cost, Some(0.01));
+
+        let unpriced = Usage {
+            cost: None,
+            ..first
+        };
+        assert_eq!(add_usage(Some(unpriced), second).cost, None);
+    }
+
+    #[test]
+    fn add_usage_sums_known_costs_after_unknown_cost() {
+        let priced = Usage {
+            cost: Some(0.01),
+            ..Usage::default()
+        };
+        let total = add_usage(Some(add_usage(None, Usage::default())), priced);
+        assert_eq!(total.cost, Some(0.01));
+        let total = add_usage(Some(total), priced);
+        assert!((total.cost.unwrap() - 0.02).abs() < f64::EPSILON);
     }
 
     #[test]
