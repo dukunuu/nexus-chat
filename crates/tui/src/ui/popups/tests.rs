@@ -30,6 +30,49 @@ fn render_to_string(width: u16, height: u16, render: impl FnOnce(&mut ratatui::F
 }
 
 #[test]
+fn agent_status_tag_is_mode_specific_and_left_truncates_long_roots() {
+    let mut app = test_app();
+    let root = std::env::temp_dir()
+        .join(format!("nexus-status-{}", uuid::Uuid::new_v4()))
+        .join("a-long-parent-directory/deep-project");
+    std::fs::create_dir_all(&root).unwrap();
+    let chat = render_to_string(96, 1, |f| {
+        crate::ui::status::render_status(f, &app, f.area());
+    });
+    assert!(!chat.contains("agent ·"));
+    app.run_command(&format!("agent {}", root.display()))
+        .unwrap();
+    let agent = render_to_string(96, 1, |f| {
+        crate::ui::status::render_status(f, &app, f.area());
+    });
+    assert!(agent.contains("agent · …"), "{agent}");
+    assert!(agent.contains("deep-project"), "{agent}");
+    assert!(agent.contains(crate::ui::style::glyph::TOOL), "{agent}");
+    app.run_command("chat").unwrap();
+    let chat = render_to_string(96, 1, |f| {
+        crate::ui::status::render_status(f, &app, f.area());
+    });
+    assert!(!chat.contains("agent ·"));
+    std::fs::remove_dir_all(root.parent().unwrap().parent().unwrap()).unwrap();
+}
+
+#[test]
+fn agent_status_abbreviates_the_home_directory() {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let mut app = test_app();
+    app.workspace = Some(std::sync::Arc::new(
+        nexus_core::workspace::Workspace::open(std::path::Path::new(&home), Vec::new()).unwrap(),
+    ));
+    app.work_mode = nexus_core::app::WorkMode::Agent;
+    let status = render_to_string(96, 1, |f| {
+        crate::ui::status::render_status(f, &app, f.area());
+    });
+    assert!(status.contains("agent · ~"), "{status}");
+}
+
+#[test]
 fn model_authored_ui_is_inline_and_focusable_without_game_commands() {
     let mut app = test_app();
     app.incognito = true;

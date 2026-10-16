@@ -11,7 +11,7 @@ use tui_textarea::CursorMove;
 
 use crate::app_view::AppView;
 use crate::ui;
-use nexus_core::app::{AppEvent, ModelPanel, MouseTarget, Popup};
+use nexus_core::app::{AppCommand, AppEvent, ModelPanel, MouseTarget, Popup, WorkMode};
 
 /// Ctrl+E/Ctrl+K in the space picker edit that space's instructions/memory
 /// file. Returns the path to open, if the key matches and one resolves.
@@ -486,6 +486,18 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
     }
 
     match key.code {
+        KeyCode::BackTab => {
+            let mode = if app.work_mode == WorkMode::Chat {
+                WorkMode::Agent
+            } else {
+                WorkMode::Chat
+            };
+            let root = app
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.root().to_string_lossy().into_owned());
+            app.execute(AppCommand::SetWorkMode { mode, root })?;
+        }
         KeyCode::Enter if shift || ctrl => app.input.insert_newline(),
         // A parked survey gate (survey answer or plan approval) intercepts
         // Enter — but only while the *viewed* session is the gated one, so a
@@ -828,6 +840,37 @@ mod tests {
 
     fn ctrl(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn shift_tab_toggles_work_mode_reusing_the_root_without_changing_the_draft() {
+        let mut app = test_app();
+        let root = std::env::temp_dir().join(format!("nexus-toggle-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        app.execute(AppCommand::SetWorkMode {
+            mode: WorkMode::Agent,
+            root: Some(root.display().to_string()),
+        })
+        .unwrap();
+        app.set_input("keep this draft");
+        handle_key(&mut app, KeyCode::BackTab.into()).unwrap();
+        assert_eq!(app.work_mode, WorkMode::Chat);
+        assert_eq!(app.input_text(), "keep this draft");
+        handle_key(&mut app, KeyCode::BackTab.into()).unwrap();
+        assert_eq!(app.work_mode, WorkMode::Agent);
+        assert_eq!(
+            app.workspace.as_ref().unwrap().root(),
+            root.canonicalize().unwrap()
+        );
+        assert_eq!(app.input_text(), "keep this draft");
+        app.new_session();
+        handle_key(&mut app, KeyCode::BackTab.into()).unwrap();
+        assert_eq!(app.work_mode, WorkMode::Agent);
+        assert_eq!(
+            app.workspace.as_ref().unwrap().root(),
+            std::env::current_dir().unwrap().canonicalize().unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

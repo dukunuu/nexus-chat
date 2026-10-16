@@ -32,6 +32,7 @@ fn gradient(t: f64) -> Color {
     Color::Rgb(r, g, 40)
 }
 
+#[allow(clippy::too_many_lines)] // status badges, layout, and context meter
 pub(super) fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
     use nexus_core::db::DEFAULT_SPACE;
     let theme = &app.theme;
@@ -46,6 +47,31 @@ pub(super) fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
     let mut tags: Vec<String> = Vec::new();
     if app.active_space.name != DEFAULT_SPACE {
         tags.push(format!("{} {}", glyph::SPACE, app.active_space.name));
+    }
+    if app.work_mode == nexus_core::app::WorkMode::Agent
+        && let Some(workspace) = &app.workspace
+    {
+        let mut root = workspace.root().display().to_string();
+        if let Some(home) = std::env::var_os("HOME")
+            && let Ok(relative) = workspace
+                .root()
+                .strip_prefix(std::path::PathBuf::from(home))
+        {
+            root = if relative.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", relative.display())
+            };
+        }
+        let max_root = (area.width as usize / 3).max(8);
+        let len = root.chars().count();
+        if len > max_root {
+            root = format!(
+                "…{}",
+                root.chars().skip(len - max_root + 1).collect::<String>()
+            );
+        }
+        tags.push(format!("{} agent · {root}", glyph::TOOL));
     }
     if app.web_mode {
         tags.push(format!("{} web", glyph::WEB));

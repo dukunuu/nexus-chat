@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use super::App;
+use super::{App, WorkMode};
 use crate::db::Session;
 
 impl App {
@@ -19,6 +19,8 @@ impl App {
     /// doesn't leave an empty "new chat" behind in the session list.
     pub fn new_session(&mut self) {
         self.session = None;
+        self.reset_work_mode();
+        self.refresh_toolbox();
         self.messages.clear();
         self.refresh_memory_snapshot();
         // A selection points into the old session's wrapped lines — a stale
@@ -28,6 +30,37 @@ impl App {
         self.push_viewport_reset();
         self.cleanup_incognito_images();
         self.push_status("new chat — send a message to start it".to_string());
+    }
+
+    /// Back to chat with no workspace: a new or different conversation never
+    /// inherits the previous one's directory.
+    pub(super) fn reset_work_mode(&mut self) {
+        self.work_mode = WorkMode::Chat;
+        self.workspace = None;
+    }
+
+    fn restore_work_mode(&mut self) {
+        self.reset_work_mode();
+        if self.incognito {
+            return;
+        }
+        let Some(root) = self
+            .session
+            .as_ref()
+            .and_then(|session| self.db.session_workspace(&session.id))
+        else {
+            return;
+        };
+        match self.open_workspace(Some(&root.to_string_lossy())) {
+            Ok(workspace) => {
+                self.work_mode = WorkMode::Agent;
+                self.workspace = Some(workspace);
+            }
+            Err(_) => self.push_status(format!(
+                "workspace {} is not available on this device · /agent <path> to bind another",
+                root.display()
+            )),
+        }
     }
 
     /// Switch to a session by its id. Used by session-link navigation (Ctrl+O),
@@ -49,6 +82,7 @@ impl App {
         self.current_model = Some(s.model.clone());
         self.web_mode = s.web_mode;
         self.session = Some(s);
+        self.restore_work_mode();
         self.refresh_memory_snapshot();
         self.backfill_compaction_row();
         self.restore_survey_gate_prompt();

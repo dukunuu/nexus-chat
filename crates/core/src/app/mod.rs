@@ -221,6 +221,13 @@ pub struct ContextBreakdown {
     pub compacted: bool,
 }
 
+/// Whether the active conversation has access to a local workspace.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub enum WorkMode {
+    Chat,
+    Agent,
+}
+
 /// What the session picker is doing: browsing, renaming the highlighted row, or
 /// confirming a delete.
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -849,6 +856,10 @@ pub struct App {
     pub forced_skill: Option<String>,
     /// `/web` answer mode for the active session (or the next one created).
     pub web_mode: bool,
+    /// Chat by default; agent mode exposes the bound workspace's tools.
+    pub work_mode: WorkMode,
+    /// Active workspace, retained in chat for Shift+Tab until the session changes.
+    pub workspace: Option<std::sync::Arc<crate::workspace::Workspace>>,
     pub incognito: bool,
     /// Temp directory for incognito image files, cleaned up on toggle.
     pub incognito_img_dir: Option<std::path::PathBuf>,
@@ -1106,6 +1117,8 @@ impl App {
             search_provider: "auto".to_string(),
             forced_skill: None,
             web_mode: false,
+            work_mode: WorkMode::Chat,
+            workspace: None,
             incognito: false,
             incognito_img_dir: None,
             survey_gate: None,
@@ -1195,6 +1208,84 @@ impl App {
         app.load_prefs();
         app.load_settings();
         app
+    }
+
+    fn open_workspace(
+        &self,
+        root: Option<&str>,
+    ) -> Result<std::sync::Arc<crate::workspace::Workspace>> {
+        let cwd = std::env::current_dir()?;
+        let root = match root {
+            Some(path) if path == "~" || path.starts_with("~/") => {
+                let home =
+                    std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+                std::path::PathBuf::from(home).join(path.strip_prefix("~/").unwrap_or(""))
+            }
+            Some(path) => cwd.join(path),
+            None => cwd,
+        }
+        .canonicalize()?;
+        let data = self.space.root.canonicalize()?;
+        if data.starts_with(&root) || root.starts_with(&data) {
+            anyhow::bail!(
+                "workspace {} is or contains nexus's data root, or is inside it · choose another directory",
+                root.display()
+            );
+        }
+        let mut deny = vec![data];
+        let config_dir = config::project_dirs()?.config_dir().to_path_buf();
+        if config_dir.exists() {
+            deny.push(config_dir.canonicalize()?);
+        }
+        let workspace = crate::workspace::Workspace::open(&root, deny)?;
+        workspace.resolve(".", crate::workspace::Access::Read)?;
+        Ok(std::sync::Arc::new(workspace))
+    }
+
+    fn set_work_mode(&mut self, mode: WorkMode, root: Option<&str>) -> Result<()> {
+        if mode == WorkMode::Agent && self.incognito {
+            self.push_status("agent mode is not available in incognito mode");
+            return Ok(());
+        }
+        let workspace = if mode == WorkMode::Agent {
+            match self.open_workspace(root) {
+                Ok(workspace) => Some(workspace),
+                Err(error) => {
+                    self.push_status(format!("workspace error: {error}"));
+                    return Ok(());
+                }
+            }
+        } else {
+            self.workspace.clone()
+        };
+        if !self.incognito
+            && let Some(session) = &self.session
+        {
+            self.db.set_session_workspace(
+                &session.id,
+                workspace
+                    .as_ref()
+                    .filter(|_| mode == WorkMode::Agent)
+                    .map(|workspace| workspace.root()),
+            )?;
+        }
+        self.work_mode = mode;
+        self.workspace = workspace;
+        self.refresh_toolbox();
+        self.bump_cache_epoch();
+        self.push_status(if mode == WorkMode::Agent {
+            format!(
+                "agent mode · workspace {}",
+                self.workspace
+                    .as_ref()
+                    .expect("opened workspace")
+                    .root()
+                    .display()
+            )
+        } else {
+            "chat mode — no workspace".to_string()
+        });
+        Ok(())
     }
 
     /// Whether the active space has consented to device-local chat recording.
@@ -1397,6 +1488,12 @@ impl App {
         toolbox.space_scripts_dir = self.space.scripts_dir(&self.active_space.name);
         toolbox.supports_images = self.current_model_supports_images();
         toolbox.record_events = !self.incognito;
+        toolbox.require_approval = self.work_mode == WorkMode::Agent;
+        toolbox.workspace = self
+            .workspace
+            .as_ref()
+            .filter(|_| self.work_mode == WorkMode::Agent)
+            .cloned();
         toolbox.session_id = self
             .session
             .as_ref()

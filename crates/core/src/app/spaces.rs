@@ -23,6 +23,7 @@ impl App {
     pub fn set_active_space(&mut self, row: SpaceRow) {
         self.active_space = row;
         self.session = None;
+        self.reset_work_mode();
         self.messages.clear();
         self.refresh_memory_snapshot();
         self.context_total = None;

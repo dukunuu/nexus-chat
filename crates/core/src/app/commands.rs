@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 
-use super::{App, FilesTab};
+use super::{App, FilesTab, WorkMode};
 
 /// A slash command: canonical `name`, a short `desc`, and alias
 /// keywords. Names, aliases, and the description are all fuzzy-searchable, so
@@ -45,7 +45,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "new",
         desc: "start new chat",
-        aliases: &["chat", "clear"],
+        aliases: &["clear"],
     },
     Command {
         name: "compact",
@@ -153,6 +153,16 @@ pub const COMMANDS: &[Command] = &[
         name: "web",
         desc: "toggle web answer mode (search-first, cited)",
         aliases: &["websearch"],
+    },
+    Command {
+        name: "agent",
+        desc: "work in a directory: read, edit, run — /agent [path]",
+        aliases: &[],
+    },
+    Command {
+        name: "chat",
+        desc: "back to plain chat (no workspace)",
+        aliases: &[],
     },
     Command {
         name: "incognito",
@@ -297,6 +307,11 @@ pub enum AppCommand {
     Export,
     /// `/web` — toggle web-answer mode.
     ToggleWeb,
+    /// `/agent [path]` or `/chat` — choose local workspace access.
+    SetWorkMode {
+        mode: WorkMode,
+        root: Option<String>,
+    },
     /// `/incognito` — toggle (`on` is absolute for the host).
     Incognito { on: bool },
     /// `/training [on|off]` — set or toggle device-local recording consent.
@@ -379,6 +394,17 @@ impl App {
             }),
             "export" => Ok(AppCommand::Export),
             "web" => Ok(AppCommand::ToggleWeb),
+            "agent" => {
+                let root = rest(cmd, token);
+                Ok(AppCommand::SetWorkMode {
+                    mode: WorkMode::Agent,
+                    root: (!root.is_empty()).then_some(root),
+                })
+            }
+            "chat" => Ok(AppCommand::SetWorkMode {
+                mode: WorkMode::Chat,
+                root: None,
+            }),
             "incognito" => Ok(AppCommand::Incognito {
                 on: !self.incognito,
             }),
@@ -462,6 +488,9 @@ impl App {
                 self.export_report()?;
             }
             AppCommand::ToggleWeb => self.toggle_web_mode(),
+            AppCommand::SetWorkMode { mode, root } => {
+                self.set_work_mode(mode, root.as_deref())?;
+            }
             AppCommand::Incognito { on } => {
                 if on != self.incognito {
                     self.toggle_incognito()?;

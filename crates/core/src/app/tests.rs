@@ -462,6 +462,270 @@ fn code_blocks_split_by_fence_with_lang() {
     assert_eq!(blocks[1].1, "plain\n");
 }
 
+#[test]
+fn work_mode_commands_parse_through_the_command_seam() {
+    let app = app_with_key();
+    for (text, mode, root) in [
+        ("agent", WorkMode::Agent, None),
+        ("agent ./sub", WorkMode::Agent, Some("./sub")),
+        ("agent /a directory", WorkMode::Agent, Some("/a directory")),
+        ("chat", WorkMode::Chat, None),
+    ] {
+        let command = AppCommand::SetWorkMode {
+            mode,
+            root: root.map(str::to_string),
+        };
+        assert_eq!(app.parse_command(text).unwrap(), command);
+        let wire = serde_json::to_string(&command).unwrap();
+        assert_eq!(serde_json::from_str::<AppCommand>(&wire).unwrap(), command);
+    }
+}
+
+#[test]
+fn agent_defaults_to_cwd_and_resolves_relative_and_home_roots() {
+    let mut app = app_with_key();
+    let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+    assert_eq!(app.work_mode, WorkMode::Chat);
+    assert!(app.workspace.is_none());
+    for command in ["agent", "agent ./"] {
+        app.run_command(command).unwrap();
+        assert_eq!(app.work_mode, WorkMode::Agent);
+        assert_eq!(app.workspace.as_ref().unwrap().root(), cwd);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        app.run_command("agent ~").unwrap();
+        assert_eq!(
+            app.workspace.as_ref().unwrap().root(),
+            std::path::PathBuf::from(home).canonicalize().unwrap()
+        );
+    }
+}
+
+#[test]
+fn invalid_agent_root_preserves_the_mode_binding_and_cache_epoch() {
+    let mut app = app_with_key();
+    app.run_command("agent .").unwrap();
+    let root = app.workspace.as_ref().unwrap().root().to_path_buf();
+    let epoch = app.cache_epoch;
+    let session = app
+        .db
+        .create_session("bound", "a/one", &app.active_space.id, "chat")
+        .unwrap();
+    app.switch_to_session_by_id(&session.id).unwrap();
+    app.run_command("agent .").unwrap();
+    let missing = app.space.root.join("missing");
+    let bound_epoch = app.cache_epoch;
+    app.run_command(&format!("agent {}", missing.display()))
+        .unwrap();
+    assert_eq!(app.work_mode, WorkMode::Agent);
+    assert_eq!(app.workspace.as_ref().unwrap().root(), root);
+    assert_eq!(app.db.session_workspace(&session.id), Some(root));
+    assert_eq!(app.cache_epoch, bound_epoch);
+    assert!(bound_epoch > epoch);
+    assert!(app.last_status().contains("workspace error"));
+    app.run_command("chat").unwrap();
+    app.run_command(&format!("agent {}", missing.display()))
+        .unwrap();
+    assert_eq!(app.work_mode, WorkMode::Chat);
+    assert!(app.last_status().contains("workspace error"));
+}
+
+#[test]
+fn switching_space_leaves_agent_mode() {
+    let mut app = app_with_key();
+    app.run_command("agent .").unwrap();
+    assert_eq!(app.work_mode, WorkMode::Agent);
+    let space = app.active_space.clone();
+    app.set_active_space(space);
+    assert_eq!(app.work_mode, WorkMode::Chat);
+    assert!(app.workspace.is_none());
+    assert!(!app.toolbox.defs().iter().any(|tool| tool.name == "fs"));
+}
+
+#[test]
+fn agent_refuses_data_roots_their_ancestors_and_their_contents() {
+    let mut app = app_with_key();
+    let data = app.space.root.clone();
+    for root in [
+        data.clone(),
+        data.parent().unwrap().to_path_buf(),
+        data.join("spaces"),
+    ] {
+        app.run_command(&format!("agent {}", root.display()))
+            .unwrap();
+        assert_eq!(app.work_mode, WorkMode::Chat);
+        assert!(app.workspace.is_none());
+        assert!(app.last_status().contains("data root"));
+    }
+}
+
+#[tokio::test]
+async fn pre_session_agent_mode_binds_on_send_and_new_sessions_start_in_chat() {
+    let mut app = app_with_key();
+    app.current_model = Some("a/one".into());
+    let epoch = app.cache_epoch;
+    app.run_command("agent .").unwrap();
+    assert!(app.session.is_none());
+    assert!(app.cache_epoch > epoch);
+    let root = app.workspace.as_ref().unwrap().root().to_path_buf();
+    app.send_message("hello".into()).unwrap();
+    let id = app.session.as_ref().unwrap().id.clone();
+    assert_eq!(app.db.session_workspace(&id), Some(root.clone()));
+    app.stop_stream().unwrap();
+    app.new_session();
+    assert_eq!(app.work_mode, WorkMode::Chat);
+    assert!(app.workspace.is_none());
+    assert!(!app.toolbox.defs().iter().any(|tool| tool.name == "fs"));
+    app.switch_to_session_by_id(&id).unwrap();
+    assert_eq!(app.work_mode, WorkMode::Agent);
+    assert_eq!(app.workspace.as_ref().unwrap().root(), root);
+    let epoch = app.cache_epoch;
+    app.run_command("chat").unwrap();
+    assert_eq!(app.work_mode, WorkMode::Chat);
+    assert_eq!(app.session.as_ref().unwrap().id, id);
+    assert!(!app.messages.is_empty());
+    assert_eq!(app.db.session_workspace(&id), None);
+    assert!(app.cache_epoch > epoch);
+    app.switch_to_session_by_id(&id).unwrap();
+    assert_eq!(app.work_mode, WorkMode::Chat);
+}
+
+#[test]
+fn session_workspace_restores_after_restart_and_reports_a_deleted_directory() {
+    let space = test_space();
+    std::fs::create_dir_all(&space.root).unwrap();
+    let data = space.root.clone();
+    let workspace = test_space().root;
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut app = App::new(Db::open(&space.db_path()).unwrap(), None, space);
+    let session = app
+        .db
+        .create_session("bound", "a/one", &app.active_space.id, "chat")
+        .unwrap();
+    app.switch_to_session_by_id(&session.id).unwrap();
+    app.run_command(&format!("agent {}", workspace.display()))
+        .unwrap();
+    assert_eq!(app.work_mode, WorkMode::Agent);
+    let canonical = workspace.canonicalize().unwrap();
+    assert_eq!(
+        app.db.session_workspace(&session.id),
+        Some(canonical.clone())
+    );
+    drop(app);
+
+    let space = Space { root: data.clone() };
+    let mut app = App::new(Db::open(&space.db_path()).unwrap(), None, space);
+    app.switch_to_session_by_id(&session.id).unwrap();
+    assert_eq!(app.work_mode, WorkMode::Agent);
+    assert_eq!(app.workspace.as_ref().unwrap().root(), canonical);
+    std::fs::remove_dir_all(&workspace).unwrap();
+    app.new_session();
+    app.switch_to_session_by_id(&session.id).unwrap();
+    assert_eq!(app.work_mode, WorkMode::Chat);
+    assert!(app.workspace.is_none());
+    assert_eq!(
+        app.last_status(),
+        format!(
+            "workspace {} is not available on this device · /agent <path> to bind another",
+            canonical.display()
+        )
+    );
+    assert!(!app.toolbox.defs().iter().any(|tool| tool.name == "fs"));
+    drop(app);
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+#[test]
+fn agent_is_refused_in_incognito_and_toggling_privacy_drops_workspace_tools() {
+    let mut app = app_with_key();
+    app.run_command("agent .").unwrap();
+    assert_eq!(app.work_mode, WorkMode::Agent);
+    app.toggle_incognito().unwrap();
+    assert!(app.incognito);
+    assert_eq!(app.work_mode, WorkMode::Chat);
+    assert!(app.workspace.is_none());
+    let epoch = app.cache_epoch;
+    app.run_command("agent .").unwrap();
+    assert_eq!(app.work_mode, WorkMode::Chat);
+    assert_eq!(app.cache_epoch, epoch);
+    assert!(app.last_status().contains("not available in incognito"));
+    for name in ["fs", "shell"] {
+        assert!(!app.toolbox.defs().iter().any(|tool| tool.name == name));
+    }
+}
+
+#[tokio::test]
+async fn agent_toolbox_reads_but_blocks_mutations_and_chat_hides_workspace_tools() {
+    let mut app = app_with_key();
+    let root = test_space().root;
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("file"), "original\n").unwrap();
+    for name in ["fs", "shell"] {
+        assert!(!app.toolbox.defs().iter().any(|tool| tool.name == name));
+    }
+    app.run_command(&format!("agent {}", root.display()))
+        .unwrap();
+    for name in ["fs", "shell"] {
+        assert!(app.toolbox.defs().iter().any(|tool| tool.name == name));
+    }
+    let (read, status) = app
+        .toolbox
+        .run("fs", r#"{"action":"read","path":"file"}"#)
+        .await;
+    assert!(read.contains("original"), "{read}");
+    assert_ne!(status, "blocked");
+    for (tool, args) in [
+        (
+            "fs",
+            r#"{"action":"write","path":"file","content":"changed"}"#,
+        ),
+        ("shell", r#"{"action":"run","cmd":"touch created"}"#),
+    ] {
+        let (result, status) = app.toolbox.run(tool, args).await;
+        assert_eq!(
+            result,
+            "needs approval · the approval prompt is not available yet; describe the change and let the user apply it"
+        );
+        assert_eq!(status, "blocked");
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("file")).unwrap(),
+        "original\n"
+    );
+    assert!(!root.join("created").exists());
+    app.run_command("chat").unwrap();
+    for name in ["fs", "shell"] {
+        assert!(!app.toolbox.defs().iter().any(|tool| tool.name == name));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn agent_prompt_is_after_environment_and_included_in_context_counts() {
+    let mut app = app_with_key();
+    app.system_prompt_overlay = "user additions".into();
+    let before = app.context_breakdown().system_tokens;
+    let environment_len = app.environment_section().chars().count();
+    app.run_command("agent .").unwrap();
+    let prompt = app.system_prompt();
+    let environment = prompt.find("## Environment").unwrap();
+    let agent = prompt.find("\n\n## Agent mode\n").unwrap();
+    let overlay = prompt.find("\n\nuser additions").unwrap();
+    assert!(environment < agent && agent < overlay);
+    assert!(prompt.contains("- Mode: agent · workspace "));
+    let extra_chars = app.environment_section().chars().count() - environment_len
+        + crate::prompts::render(crate::prompts::AGENT, &[])
+            .chars()
+            .count();
+    let delta = app.context_breakdown().system_tokens - before;
+    let expected = u64::try_from(extra_chars / 4).unwrap();
+    assert!((expected..=expected + 1).contains(&delta));
+    app.run_command("chat").unwrap();
+    assert!(!app.system_prompt().contains("## Agent mode"));
+    assert!(!app.system_prompt().contains("- Mode:"));
+    assert_eq!(app.context_breakdown().system_tokens, before);
+}
+
 pub fn app_with_key() -> App {
     let db = Db::open_in_memory().unwrap();
     let mut a = App::new(db, Some("sk-or-test-key"), test_space());

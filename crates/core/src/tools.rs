@@ -101,6 +101,8 @@ pub fn classify_tool_result(result: &str, status: &str) -> Option<&'static str> 
 pub struct ToolBox {
     /// Confined agent filesystem access; absent outside agent mode.
     pub workspace: Option<Arc<Workspace>>,
+    /// Refuse mutating workspace calls until the user can approve them.
+    pub require_approval: bool,
     /// App-managed destination for newly created or downloaded skills.
     pub skills_dir: PathBuf,
     /// Skill roots in precedence order. These include the app-managed root and
@@ -489,6 +491,7 @@ impl ToolBox {
     ) -> Self {
         Self {
             workspace: None,
+            require_approval: false,
             skill_dirs: vec![skills_dir.clone()],
             skills_dir,
             searxng_url,
@@ -970,6 +973,15 @@ impl ToolBox {
         };
         let name = dispatch_name.as_str();
         let args = dispatch_args.as_str();
+        if self.require_approval
+            && (name.starts_with("fs_") || name.starts_with("shell_"))
+            && !is_read_only_tool(name, args)
+        {
+            return (
+                "needs approval · the approval prompt is not available yet; describe the change and let the user apply it".to_string(),
+                "blocked".to_string(),
+            );
+        }
         let (result, status) = match name {
             "shell_run" | "shell_log" => match &self.workspace {
                 None => (
@@ -5548,6 +5560,111 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         toolbox.workspace = Some(Arc::new(Workspace::open(&root, Vec::new()).unwrap()));
         (toolbox, dir)
+    }
+
+    #[tokio::test]
+    async fn workspace_mutations_need_approval_and_leave_files_untouched() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        let root = toolbox.workspace.as_ref().unwrap().root();
+        let path = root.join("file");
+        std::fs::write(&path, "original\n").unwrap();
+        toolbox
+            .run("fs", r#"{"action":"read","path":"file"}"#)
+            .await;
+        for (action, fields) in [
+            ("write", json!({"content": "replacement\n"})),
+            (
+                "edit",
+                json!({"edits": [{"hash": line_hash("original"), "new": "replacement"}]}),
+            ),
+            ("move", json!({"to": "moved"})),
+            ("delete", json!({})),
+        ] {
+            let mut args = fields;
+            args["action"] = json!(action);
+            args["path"] = json!("file");
+            for name in ["fs".to_string(), format!("fs_{action}")] {
+                let (result, status) = toolbox.run(&name, &args.to_string()).await;
+                assert_eq!(
+                    result,
+                    "needs approval · the approval prompt is not available yet; describe the change and let the user apply it"
+                );
+                assert_eq!(status, "blocked");
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
+                assert!(!root.join("moved").exists());
+            }
+        }
+        for name in ["shell", "shell_run"] {
+            let (result, status) = toolbox
+                .run(name, r#"{"action":"run","cmd":"touch created"}"#)
+                .await;
+            assert!(result.starts_with("needs approval ·"), "{result}");
+            assert_eq!(status, "blocked");
+            assert!(!root.join("created").exists());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn workspace_writes_run_without_approval_by_default() {
+        let (toolbox, dir) = fs_toolbox();
+        assert!(!toolbox.require_approval);
+        let (result, status) = toolbox
+            .run(
+                "fs",
+                r#"{"action":"write","path":"new","content":"written"}"#,
+            )
+            .await;
+        assert!(result.starts_with("wrote new"), "{result}");
+        assert_ne!(status, "blocked");
+        assert_eq!(
+            std::fs::read_to_string(toolbox.workspace.as_ref().unwrap().root().join("new"))
+                .unwrap(),
+            "written"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn workspace_tools_are_conditional_and_reads_remain_available() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        std::fs::write(
+            toolbox.workspace.as_ref().unwrap().root().join("file"),
+            "readable\n",
+        )
+        .unwrap();
+        for name in ["fs", "shell"] {
+            assert!(toolbox.defs().iter().any(|tool| tool.name == name));
+        }
+        let (result, status) = toolbox
+            .run("fs", r#"{"action":"read","path":"file"}"#)
+            .await;
+        assert!(result.contains("readable"), "{result}");
+        assert_ne!(status, "blocked");
+        toolbox.workspace = None;
+        for name in ["fs", "shell"] {
+            assert!(!toolbox.defs().iter().any(|tool| tool.name == name));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_shell_log_remains_readable_without_approval() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        let runs = dir.join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        std::fs::write(runs.join("0123456789ab.log"), "saved output\n").unwrap();
+        toolbox.db_path = Some(dir.join("nexus.db"));
+        let (result, status) = toolbox
+            .run("shell", r#"{"action":"log","id":"0123456789ab"}"#)
+            .await;
+        assert!(result.contains("saved output"), "{result}");
+        assert_ne!(status, "blocked");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     async fn run_fs(toolbox: &ToolBox, args: serde_json::Value) -> String {

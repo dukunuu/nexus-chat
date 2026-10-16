@@ -17,7 +17,7 @@ use crate::prompts;
 use crate::provider::profile::{ModelProfile, profile_for};
 use crate::provider::{ChatMessage, ChatParams, StreamEvent, ToolCall, Usage};
 
-use super::{App, SPINNER_COLORS, SpinnerColor, THINKING, parse_topic, verbosity_clause};
+use super::{App, SPINNER_COLORS, SpinnerColor, THINKING, WorkMode, parse_topic, verbosity_clause};
 
 /// The Mermaid kinds the prompt advertises; the TUI tests that each one renders
 /// so the prompt and renderer cannot drift.
@@ -93,6 +93,12 @@ impl App {
                 }
                 s
             };
+            if !self.incognito && self.work_mode == WorkMode::Agent {
+                self.db.set_session_workspace(
+                    &s.id,
+                    self.workspace.as_ref().map(|workspace| workspace.root()),
+                )?;
+            }
             self.session = Some(s);
         }
         let Some(session_id) = self.session.as_ref().map(|s| s.id.clone()) else {
@@ -1030,6 +1036,9 @@ impl App {
             parts.push(crate::interactive::INSTRUCTIONS.to_string());
         }
         parts.push(self.environment_section());
+        if self.work_mode == WorkMode::Agent {
+            parts.push(prompts::render(prompts::AGENT, &[]));
+        }
         if !self.incognito {
             if let Some(files) = self.files_section() {
                 parts.push(files);
@@ -1100,6 +1109,15 @@ impl App {
             std::env::consts::OS,
             std::env::consts::ARCH
         );
+        if self.work_mode == WorkMode::Agent
+            && let Some(workspace) = &self.workspace
+        {
+            let _ = write!(
+                section,
+                "\n- Mode: agent · workspace {}",
+                workspace.root().display()
+            );
+        }
         section
     }
 
@@ -1228,6 +1246,9 @@ impl App {
         self.push_viewport_reset();
         self.cleanup_incognito_images();
         self.incognito = !self.incognito;
+        self.work_mode = WorkMode::Chat;
+        self.workspace = None;
+        self.refresh_toolbox();
         self.push_status(if self.incognito {
             "incognito mode — nothing persists, no apps".to_string()
         } else {

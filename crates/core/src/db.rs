@@ -388,6 +388,11 @@ pub fn migrate_cache(conn: &Connection, schema: &str) -> Result<()> {
             status TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS {schema}.session_workspaces (
+            session_id TEXT PRIMARY KEY,
+            root TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS {schema}.tool_events (
             id INTEGER PRIMARY KEY,
             at TEXT NOT NULL,
@@ -442,6 +447,39 @@ impl Db {
         let mut db = Db { conn };
         db.migrate()?;
         Ok(db)
+    }
+
+    /// Set or remove a session's device-local workspace binding.
+    pub fn set_session_workspace(&self, id: &str, root: Option<&std::path::Path>) -> Result<()> {
+        if let Some(root) = root {
+            self.conn.execute(
+                "INSERT INTO cache.session_workspaces (session_id, root, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                     root = excluded.root, updated_at = excluded.updated_at",
+                (id, root.to_string_lossy(), Utc::now().to_rfc3339()),
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM cache.session_workspaces WHERE session_id = ?1",
+                [id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Read a session's workspace binding on this device, if any.
+    pub fn session_workspace(&self, id: &str) -> Option<std::path::PathBuf> {
+        self.conn
+            .query_row(
+                "SELECT root FROM cache.session_workspaces WHERE session_id = ?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .map(std::path::PathBuf::from)
     }
 
     /// The underlying connection — crate-internal access for the sync
@@ -3152,6 +3190,62 @@ pub fn count_files(conn: &Connection, space_id: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_workspace_binding_is_cache_only_and_round_trips() {
+        let db = Db::open_in_memory().unwrap();
+        let root = std::env::temp_dir().join("workspace");
+        let replacement = std::env::temp_dir().join("another workspace");
+        assert_eq!(db.session_workspace("session"), None);
+        db.set_session_workspace("session", Some(&root)).unwrap();
+        assert_eq!(db.session_workspace("session"), Some(root));
+        assert_eq!(db.session_workspace("other"), None);
+        db.set_session_workspace("session", Some(&replacement))
+            .unwrap();
+        assert_eq!(db.session_workspace("session"), Some(replacement));
+        for (schema, expected) in [("main", 0), ("cache", 1)] {
+            let count: i64 = db
+                .conn()
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {schema}.sqlite_schema
+                         WHERE type = 'table' AND name = 'session_workspaces'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, expected);
+        }
+        let updated_at: String = db
+            .conn()
+            .query_row(
+                "SELECT updated_at FROM cache.session_workspaces WHERE session_id = 'session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(chrono::DateTime::parse_from_rfc3339(&updated_at).is_ok());
+        db.set_session_workspace("session", None).unwrap();
+        assert_eq!(db.session_workspace("session"), None);
+    }
+
+    #[test]
+    fn session_workspace_binding_survives_reopening_the_database() {
+        let dir = std::env::temp_dir().join(format!("nexus-workspace-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nexus.db");
+        let root = dir.join("workspace");
+        {
+            let db = Db::open(&path).unwrap();
+            db.set_session_workspace("session", Some(&root)).unwrap();
+        }
+        {
+            let db = Db::open(&path).unwrap();
+            assert_eq!(db.session_workspace("session"), Some(root));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn price(prompt: f64, completion: f64) -> ModelPricing {
         ModelPricing {

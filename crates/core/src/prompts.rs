@@ -1,6 +1,8 @@
 //! Model-facing prompt text bundled from `assets/prompts/`.
 //! Edits change model behavior.
 
+/// Workspace exploration and editing instructions for agent sessions.
+pub const AGENT: &str = include_str!("../assets/prompts/agent.md");
 /// Research planning instructions.
 pub const RESEARCH_PLANNER: &str = include_str!("../assets/prompts/research/planner.md");
 /// Research scoping instructions.
@@ -100,6 +102,16 @@ mod tests {
         (SWARM_MODERATOR, &["topic", "transcript"]),
         (SWARM_SYNTHESIS, &["topic", "transcript"]),
     ];
+
+    #[test]
+    fn agent_addendum_renders_without_placeholders() {
+        let rendered = render(AGENT, &[]);
+        assert!(rendered.starts_with("## Agent mode\n"));
+        assert!(rendered.contains("The user approves every change and command."));
+        assert!(AGENT.ends_with('\n'));
+        assert!(!AGENT.ends_with("\n\n"));
+        assert!(!rendered.contains("{{"));
+    }
 
     #[test]
     fn render_fills_placeholders_in_one_pass() {

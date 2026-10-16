@@ -53,6 +53,21 @@ fn chat_prompt_snapshot() {
 }
 
 #[test]
+fn agent_prompt_snapshot() {
+    let mut a = fixture_app();
+    let root = std::env::temp_dir().join(format!("nexus-agent-prompt-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    a.run_command(&format!("agent {}", root.display())).unwrap();
+    assert_eq!(a.work_mode, super::WorkMode::Agent);
+    a.skills.clear();
+    a.prompt_datetime = "2026-01-01 00:00 UTC, Thursday".into();
+    let workspace = a.workspace.as_ref().unwrap().root().display().to_string();
+    let actual = normalized_prompt(&a).replace(&workspace, "<workspace>");
+    assert_snapshot("agent.txt", &actual);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn tui_prompt_snapshot() {
     let mut a = fixture_app();
     a.interactive_ui = true;

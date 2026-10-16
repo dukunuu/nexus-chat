@@ -119,6 +119,8 @@ impl super::App {
         let restore_memory_snapshot = self.memory_snapshot.clone();
         let restore_cache_epoch = self.cache_epoch;
         let restore_messages = std::mem::take(&mut self.messages);
+        let restore_work_mode = self.work_mode;
+        let restore_workspace = self.workspace.clone();
         let mut started = false;
         if let Ok(Some(s)) = self.db.get_session(&w.session_id) {
             let prior_session_id = s.id.clone();
@@ -152,6 +154,8 @@ impl super::App {
         self.memory_snapshot = restore_memory_snapshot;
         self.cache_epoch = restore_cache_epoch;
         self.messages = restore_messages;
+        self.work_mode = restore_work_mode;
+        self.workspace = restore_workspace;
         self.refresh_toolbox();
         started
     }
