@@ -93,6 +93,12 @@ pub struct LocalConfig {
     /// Use Ollama's `q8_0` KV cache with flash attention.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub kv_cache_q8: bool,
+    /// Whether the local model can request parallel tool calls; defaults to false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+    /// Tool-definition detail; defaults to the compact small-model tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<super::profile::Tier>,
 }
 
 impl LocalConfig {
@@ -162,6 +168,8 @@ impl LocalConfig {
             memory_budget_mb: current.and_then(|config| config.memory_budget_mb),
             context_length: carried.and_then(|config| config.context_length),
             kv_cache_q8: carried.is_some_and(|config| config.kv_cache_q8),
+            parallel_tool_calls: carried.and_then(|config| config.parallel_tool_calls),
+            tier: carried.and_then(|config| config.tier),
         }
     }
 
@@ -513,6 +521,8 @@ mod tests {
             memory_budget_mb: Some(4096),
             context_length: None,
             kv_cache_q8: false,
+            parallel_tool_calls: None,
+            tier: None,
         };
         // Re-selecting a runtime keeps the settings written for it; an
         // explicit endpoint wins; switching runtimes drops both.
@@ -588,6 +598,8 @@ mod tests {
             memory_budget_mb: None,
             context_length: None,
             kv_cache_q8: false,
+            parallel_tool_calls: None,
+            tier: None,
         };
         let models = config.list_models().await.unwrap();
         assert_eq!(models.len(), 2);

@@ -1,0 +1,368 @@
+[
+  {
+    "name": "batch",
+    "description": "Run several independent tool operations in ONE call — multiple searches, multiple file searches/reads, or multiple app/script writes. ",
+    "parameters": {
+      "properties": {
+        "calls": {
+          "items": {
+            "properties": {
+              "arguments": {
+                "type": "object"
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "calls"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "skills",
+    "description": "Manage Agent Skills from app, project, and user/global roots; create and install write only to the app-managed root.\n- action=load (needs name)\n- action=create (needs name, description)\n- action=install (needs source)",
+    "parameters": {
+      "properties": {
+        "action": {
+          "enum": [
+            "load",
+            "create",
+            "install"
+          ],
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "overwrite": {
+          "type": "boolean"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "scripts",
+    "description": "Manage confined space scripts, run skill or space scripts, and install packages.\n- action=list\n- action=read (needs path)\n- action=write (needs path, content)\n- action=edit (needs path, edits)\n- action=run (needs path)\n- action=python (needs code, name)\n- action=install (needs packages)",
+    "parameters": {
+      "properties": {
+        "action": {
+          "enum": [
+            "list",
+            "read",
+            "write",
+            "edit",
+            "run",
+            "python",
+            "install"
+          ],
+          "type": "string"
+        },
+        "app": {
+          "type": "string"
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "code": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "edits": {
+          "items": {
+            "properties": {
+              "hash": {
+                "type": "string"
+              },
+              "line": {
+                "type": "integer"
+              },
+              "new": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "hash"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "packages": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "path": {
+          "type": "string"
+        },
+        "skill": {
+          "type": "string"
+        },
+        "space": {
+          "type": "boolean"
+        },
+        "temporary": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "search",
+    "description": "Search the web, scholarly literature, or HN/Reddit discussions.\n- mode=web (needs query)\n- mode=academic (needs query)\n- mode=discussion (needs query)",
+    "parameters": {
+      "properties": {
+        "exclude_domains": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "include_domains": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "mode": {
+          "enum": [
+            "web",
+            "academic",
+            "discussion"
+          ],
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "recency": {
+          "enum": [
+            "day",
+            "week",
+            "month",
+            "year"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "query"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "fetch_url",
+    "description": "Fetch readable, paged text from URLs, PDFs, or YouTube transcripts, using the 24-hour cache and respecting verifier cache-only mode.\n- fetch_url (needs url)",
+    "parameters": {
+      "properties": {
+        "fresh": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "media",
+    "description": "Generate and transform media, and manage named video image references.\n- action=generate_image (needs prompt)\n- action=generate_video (needs prompt)\n- action=edit (needs video_id)\n- action=extract_frame (needs video_id)\n- action=stitch (needs video_ids)\n- action=save_reference (needs name, image_id, description)\n- action=list_references\n- action=delete_reference (needs name)",
+    "parameters": {
+      "properties": {
+        "action": {
+          "enum": [
+            "generate_image",
+            "generate_video",
+            "edit",
+            "extract_frame",
+            "stitch",
+            "save_reference",
+            "list_references",
+            "delete_reference"
+          ],
+          "type": "string"
+        },
+        "aspect_ratio": {
+          "type": "string"
+        },
+        "camera_move": {
+          "enum": [
+            "dolly_in",
+            "dolly_out",
+            "pan_left",
+            "pan_right",
+            "tilt_up",
+            "tilt_down"
+          ],
+          "type": "string"
+        },
+        "character_refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "duration": {
+          "type": "integer"
+        },
+        "first_frame_id": {
+          "type": "string"
+        },
+        "format": {
+          "enum": [
+            "png",
+            "jpg"
+          ],
+          "type": "string"
+        },
+        "generate_audio": {
+          "type": "boolean"
+        },
+        "image_id": {
+          "type": "string"
+        },
+        "intensity": {
+          "type": "number"
+        },
+        "last_frame_id": {
+          "type": "string"
+        },
+        "lighting": {
+          "enum": [
+            "noir",
+            "warm",
+            "cold",
+            "vintage",
+            "vivid",
+            "bleach_bypass"
+          ],
+          "type": "string"
+        },
+        "location_refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "ref_image_id": {
+          "type": "string"
+        },
+        "remove_audio": {
+          "type": "boolean"
+        },
+        "resolution": {
+          "type": "string"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "size": {
+          "type": "string"
+        },
+        "source_video_id": {
+          "type": "string"
+        },
+        "speed": {
+          "type": "number"
+        },
+        "time_sec": {
+          "type": "number"
+        },
+        "trim_end": {
+          "type": "number"
+        },
+        "trim_start": {
+          "type": "number"
+        },
+        "type": {
+          "type": "string"
+        },
+        "video_id": {
+          "type": "string"
+        },
+        "video_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  }
+]

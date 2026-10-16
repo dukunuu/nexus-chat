@@ -144,6 +144,28 @@ impl ToolSpec {
         )
     }
 
+    pub(super) fn def_compact(&self, live: &[&str]) -> ToolDef {
+        let mut def = self.def(live);
+        let mut description = self.purpose.to_string();
+        for action in self
+            .actions
+            .iter()
+            .filter(|action| live.contains(&action.name))
+        {
+            description.push_str("\n- ");
+            if let Some(selector) = self.selector {
+                let _ = write!(description, "{selector}=");
+            }
+            description.push_str(action.name);
+            if !action.required.is_empty() {
+                let _ = write!(description, " (needs {})", action.required.join(", "));
+            }
+        }
+        def.description = description;
+        super::strip_param_descriptions(&mut def.parameters);
+        def
+    }
+
     fn selected_action(&self, value: &Value) -> Option<&ActionSpec> {
         match self.selector {
             Some(selector) => {
@@ -852,6 +874,61 @@ const TOOLS: &[&ToolSpec] = &[
 mod tests {
     use super::*;
     use crate::tools::{ToolBox, is_read_only_tool, public_call};
+
+    #[test]
+    fn compact_definitions_preserve_live_schemas_and_required_parameters() {
+        fn assert_schema(full: &Value, compact: &Value) {
+            match full {
+                Value::Object(object) => {
+                    for (key, value) in object {
+                        if key == "description" {
+                            assert!(compact.get(key).is_none());
+                        } else if key == "properties" {
+                            let properties = value.as_object().unwrap();
+                            assert_eq!(properties.len(), compact[key].as_object().unwrap().len());
+                            for (name, property) in properties {
+                                assert_schema(property, &compact[key][name]);
+                            }
+                        } else {
+                            assert_schema(value, &compact[key]);
+                        }
+                    }
+                }
+                Value::Array(values) => {
+                    assert_eq!(values.len(), compact.as_array().unwrap().len());
+                    for (index, value) in values.iter().enumerate() {
+                        assert_schema(value, &compact[index]);
+                    }
+                }
+                _ => assert_eq!(full, compact),
+            }
+        }
+        for tool in TOOLS {
+            let all: Vec<_> = tool.actions.iter().map(|action| action.name).collect();
+            for live in [all.as_slice(), &all[..1]] {
+                let full = tool.def(live);
+                let compact = tool.def_compact(live);
+                assert_eq!(full.name, compact.name);
+                assert_schema(&full.parameters, &compact.parameters);
+                assert!(compact.description.starts_with(tool.purpose));
+                assert_eq!(compact.description.lines().count(), live.len() + 1);
+                assert!(!compact.description.contains("optional"));
+            }
+        }
+        assert_eq!(
+            SCRIPTS.def_compact(&["list", "edit"]).description,
+            "Manage confined space scripts, run skill or space scripts, and install packages.\n- action=list\n- action=edit (needs path, edits)"
+        );
+        assert_eq!(
+            FETCH_URL.def_compact(&["fetch_url"]).description,
+            "Fetch readable, paged text from URLs, PDFs, or YouTube transcripts, using the 24-hour cache and respecting verifier cache-only mode.\n- fetch_url (needs url)"
+        );
+        assert!(
+            SKILLS.def_compact(&["create"]).parameters["properties"]
+                .get("description")
+                .is_some()
+        );
+    }
 
     // Explicit legacy routing expectations, with each action's required arguments.
     const ROUTES: &[(&str, &str, &str)] = &[

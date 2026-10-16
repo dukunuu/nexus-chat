@@ -67,6 +67,13 @@ fn tool_defs_snapshot() {
 }
 
 #[test]
+fn tool_defs_compact_snapshot() {
+    let a = fixture_app();
+    let actual = serde_json::to_string_pretty(&a.toolbox.defs_compact()).unwrap() + "\n";
+    assert_snapshot("tool-defs-compact.json", &actual);
+}
+
+#[test]
 fn chat_prompt_and_tool_defs_fit_the_token_budget() {
     let a = fixture_app();
     let defs = serde_json::to_string(&a.toolbox.defs()).unwrap();

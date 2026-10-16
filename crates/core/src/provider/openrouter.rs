@@ -1570,16 +1570,21 @@ impl OpenRouter {
                         // the db stores it; `build_history` applies the same
                         // rule on replay, keeping the cache prefix intact.
                         let key = (call.name.clone(), call.arguments.clone());
+                        // Compare capped content, as seeded from replayed history.
+                        let visible = params.tool_result_cap.map_or_else(
+                            || result.clone(),
+                            |cap| crate::tools::cap_head_tail(&result, cap),
+                        );
                         let content = match seen_results.get(&key) {
-                            Some(prev) if *prev == result => {
+                            Some(prev) if *prev == visible => {
                                 crate::tools::tool_result_unchanged_note(
                                     &call.name,
                                     &call.arguments,
                                 )
                             }
                             _ => {
-                                seen_results.insert(key, result.clone());
-                                result.clone()
+                                seen_results.insert(key, visible.clone());
+                                visible
                             }
                         };
                         if params.trace.is_some() {
@@ -1672,6 +1677,69 @@ impl OpenRouter {
         Ok(())
     }
 
+    fn chat_completions_body(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        params: &ChatParams,
+        tools: &[ToolDef],
+        disable_tool_choice: bool,
+    ) -> serde_json::Value {
+        // A local runtime that leaves Harmony framing in `content` also
+        // refuses to take it back ("you have passed a message containing
+        // <|channel|> tags"), which wedges every later turn of a session
+        // recorded before the demux existed. Repair the replay.
+        let repaired = self
+            .is_local()
+            .then(|| harmony::sanitize_history(messages))
+            .flatten();
+        let messages = repaired.as_deref().unwrap_or(messages);
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "stream": true,
+        });
+        let obj = body.as_object_mut().expect("body is a json object");
+        self.flavor.add_stream_usage(obj);
+        if let Some(key) = &params.prompt_cache_key {
+            self.flavor.add_prompt_cache_key(obj, key);
+        }
+        // mark_cache_breakpoints marks the system block and pre-tail; this
+        // automatic marker makes 3 total, below Anthropic's limit of 4.
+        self.flavor.add_auto_cache_control(obj, model);
+        if let Some(effort) = &params.reasoning_effort {
+            self.flavor.add_reasoning_effort(obj, effort);
+        }
+        if let Some(t) = params.temperature {
+            obj.insert("temperature".into(), serde_json::json!(t));
+        }
+        if let Some(p) = params.top_p {
+            obj.insert("top_p".into(), serde_json::json!(p));
+        }
+        if let Some(m) = params.max_tokens {
+            obj.insert("max_tokens".into(), serde_json::json!(m));
+        }
+        if !tools.is_empty() {
+            let wire: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": { "name": t.name, "description": t.description, "parameters": t.parameters },
+                    })
+                })
+                .collect();
+            obj.insert("tools".into(), serde_json::json!(wire));
+            if disable_tool_choice {
+                obj.insert("tool_choice".into(), serde_json::json!("none"));
+            }
+            if params.parallel_tool_calls == Some(false) {
+                obj.insert("parallel_tool_calls".into(), serde_json::json!(false));
+            }
+        }
+        body
+    }
+
     /// One request/response over SSE. Doesn't send `Done` itself — the caller
     /// decides whether another tool round-trip follows.
     // Long by design (stream processing).
@@ -1702,55 +1770,7 @@ impl OpenRouter {
                 .await;
         }
         let (base, model) = self.opencode_route(model);
-        // A local runtime that leaves Harmony framing in `content` also
-        // refuses to take it back ("you have passed a message containing
-        // <|channel|> tags"), which wedges every later turn of a session
-        // recorded before the demux existed. Repair the replay.
-        let repaired = self
-            .is_local()
-            .then(|| harmony::sanitize_history(messages))
-            .flatten();
-        let messages = repaired.as_deref().unwrap_or(messages);
-        let mut body = serde_json::json!({
-            "model": model,
-            "messages": messages,
-            "stream": true,
-        });
-        let obj = body.as_object_mut().expect("body is a json object");
-        self.flavor.add_stream_usage(obj);
-        if let Some(key) = &params.prompt_cache_key {
-            self.flavor.add_prompt_cache_key(obj, key);
-        }
-        // mark_cache_breakpoints marks the system block and pre-tail; this
-        // automatic marker makes 3 total, below Anthropic's limit of 4.
-        self.flavor.add_auto_cache_control(obj, &model);
-        if let Some(effort) = &params.reasoning_effort {
-            self.flavor.add_reasoning_effort(obj, effort);
-        }
-        if let Some(t) = params.temperature {
-            obj.insert("temperature".into(), serde_json::json!(t));
-        }
-        if let Some(p) = params.top_p {
-            obj.insert("top_p".into(), serde_json::json!(p));
-        }
-        if let Some(m) = params.max_tokens {
-            obj.insert("max_tokens".into(), serde_json::json!(m));
-        }
-        if !tools.is_empty() {
-            let wire: Vec<serde_json::Value> = tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": { "name": t.name, "description": t.description, "parameters": t.parameters },
-                    })
-                })
-                .collect();
-            obj.insert("tools".into(), serde_json::json!(wire));
-            if disable_tool_choice {
-                obj.insert("tool_choice".into(), serde_json::json!("none"));
-            }
-        }
+        let body = self.chat_completions_body(&model, messages, params, tools, disable_tool_choice);
         let request = self
             .authenticate(self.client.post(format!("{base}/chat/completions")))
             .json(&body);
@@ -3571,6 +3591,176 @@ fn codex_fallback_models() -> Vec<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_body_disables_parallel_calls_only_with_tools_and_explicit_false() {
+        let tools = [ToolDef {
+            name: "test".into(),
+            description: "Test.".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }];
+        let messages = [ChatMessage::text("user", "Hi")];
+        for provider in [
+            OpenRouter::openrouter_flavor(String::new()),
+            OpenRouter::openai(String::new()),
+            OpenRouter::local("http://127.0.0.1:9/v1").unwrap(),
+        ] {
+            for tools in [&[][..], tools.as_slice()] {
+                for disable_tool_choice in [false, true] {
+                    let baseline = provider.chat_completions_body(
+                        "test",
+                        &messages,
+                        &ChatParams::default(),
+                        tools,
+                        disable_tool_choice,
+                    );
+                    for parallel_tool_calls in [None, Some(true), Some(false)] {
+                        let params = ChatParams {
+                            parallel_tool_calls,
+                            tool_result_cap: Some(4_000),
+                            ..ChatParams::default()
+                        };
+                        let mut body = provider.chat_completions_body(
+                            "test",
+                            &messages,
+                            &params,
+                            tools,
+                            disable_tool_choice,
+                        );
+                        if parallel_tool_calls == Some(false) && !tools.is_empty() {
+                            assert_eq!(body["parallel_tool_calls"], false);
+                            body.as_object_mut().unwrap().remove("parallel_tool_calls");
+                        } else {
+                            assert!(body.get("parallel_tool_calls").is_none());
+                        }
+                        assert_eq!(body, baseline);
+                    }
+                }
+            }
+        }
+    }
+
+    struct ProfileToolExecutor {
+        result: String,
+    }
+
+    impl ToolExecutor for ProfileToolExecutor {
+        fn defs(&self) -> Vec<ToolDef> {
+            vec![ToolDef {
+                name: "test".into(),
+                description: "Test.".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }]
+        }
+
+        fn is_read_only(&self, _name: &str, _args: &str) -> bool {
+            true
+        }
+
+        fn run<'a>(
+            &'a self,
+            _name: &'a str,
+            _args: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (String, String)> + Send + 'a>>
+        {
+            Box::pin(async move { (self.result.clone(), "Done".into()) })
+        }
+
+        fn supports_images(&self) -> bool {
+            false
+        }
+
+        fn space_files_dir(&self) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_loop_caps_only_model_visible_results_and_dedups_capped_replay() {
+        for (cap, replay) in [(None, false), (Some(4_000), false), (Some(4_000), true)] {
+            let result = format!("HEAD:{}:TAIL", "界".repeat(7_990));
+            let executor = Arc::new(ProfileToolExecutor {
+                result: result.clone(),
+            });
+            let visible = cap.map_or_else(
+                || result.clone(),
+                |cap| crate::tools::cap_head_tail(&result, cap),
+            );
+            let call = ToolCall {
+                id: "old".into(),
+                name: "test".into(),
+                arguments: "{}".into(),
+            };
+            let mut history = vec![ChatMessage::text("user", "Read")];
+            if replay {
+                history.push(ChatMessage {
+                    role: "assistant".into(),
+                    tool_calls: Some(vec![call]),
+                    ..ChatMessage::default()
+                });
+                history.push(ChatMessage {
+                    role: "tool".into(),
+                    content: visible.clone(),
+                    tool_call_id: Some("old".into()),
+                    ..ChatMessage::default()
+                });
+                history.push(ChatMessage::text("user", "Read again"));
+            }
+            let first = fake_chat_frames(&[serde_json::json!({"choices": [{"delta": {
+                "tool_calls": [{"index": 0, "id": "new", "type": "function", "function": {
+                    "name": "test", "arguments": "{}"
+                }}]
+            }}]})]);
+            let second = fake_chat_frames(&[
+                serde_json::json!({"choices": [{"delta": {"content": "Done"}}]}),
+            ]);
+            let (provider, server) = fake_chat_server(vec![first, second]).await;
+            let (mut rx, _) = provider.stream_chat(
+                "test".into(),
+                history,
+                ChatParams {
+                    tool_result_cap: cap,
+                    ..ChatParams::default()
+                },
+                executor.defs(),
+                executor,
+                2,
+            );
+            let mut stored = None;
+            while let Some(event) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                    .await
+                    .unwrap()
+            {
+                match event {
+                    StreamEvent::Error(error) => panic!("stream failed: {error}"),
+                    StreamEvent::ToolCall { result, .. } => stored = Some(result),
+                    _ => {}
+                }
+            }
+            assert_eq!(stored.as_deref(), Some(result.as_str()));
+            let requests = server.await.unwrap();
+            let messages = requests[1]["messages"].as_array().unwrap();
+            let content = messages.last().unwrap()["content"].as_str().unwrap();
+            if replay {
+                assert_eq!(
+                    content,
+                    crate::tools::tool_result_unchanged_note("test", "{}")
+                );
+                assert_eq!(
+                    &requests[0]["messages"],
+                    &serde_json::json!(&messages[..messages.len() - 2])
+                );
+            } else {
+                assert_eq!(content, visible);
+                assert!(content.starts_with("HEAD:"));
+                assert!(content.ends_with(":TAIL"));
+                if let Some(cap) = cap {
+                    assert!(content.chars().count() <= cap);
+                }
+            }
+        }
+    }
 
     async fn fake_chat_server(
         responses: Vec<Vec<u8>>,

@@ -174,6 +174,8 @@ provider = "ollama" # or "mlx", "mlx_serve", "lmstudio", "edge0"
 # endpoint = "http://localhost:11434/v1" # optional inference URL override
 # context_length = 32768 # Ollama default; minimum 2048 tokens
 # kv_cache_q8 = true # optional Ollama KV-cache quantization; default false
+# parallel_tool_calls = false # enable only if the local model supports parallel calls
+# tier = "small" # small (default), medium, or large; small uses compact tool definitions
 ```
 
 `context_length` is reported for every model discovered through this runtime,
@@ -188,13 +190,19 @@ default f16 cache for long contexts. Other runtimes ignore this launch option.
 Use `/local restart` to apply launch settings to a managed server; configure
 servers started elsewhere yourself so their window matches this setting.
 
+Local chat requests no parallel tool calls and uses compact tool definitions
+by default. Set `parallel_tool_calls = true` to allow parallel calls, or `tier = "medium"`
+(or `"large"`) to use full definitions. Tool results in local chat history are
+head-and-tail capped to one eighth of the context window (2,000–8,000
+characters; 4,000 if unknown); stored results and hosted requests are unchanged.
+
 Nexus warns once per prompt-cache epoch if the system prompt plus tool
 definitions alone use more than half the known context window. The estimate is
 advisory and never blocks a request.
 
 Switching runtimes from `/local` drops a custom `endpoint`/`list_command` and
-context/KV-cache settings, since those are written for one runtime;
-re-selecting the active runtime keeps them.
+context/KV-cache and model-profile settings, since those are written for one
+runtime; re-selecting the active runtime keeps them.
 
 Nexus runs the runtime's discovery command when loading/refreshing `/model`:
 

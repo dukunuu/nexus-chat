@@ -1,5 +1,66 @@
 use super::*;
 
+#[test]
+fn model_profile_caps_local_tool_replay_without_changing_hosted_or_stored_results() {
+    let result = format!("HEAD:{}:TAIL", "界".repeat(7_990));
+    for backend in [BackendTag::OpenRouter, BackendTag::Local] {
+        let mut app = app_with_key();
+        let root = app.space.root.clone();
+        app.models[0].backend = backend;
+        app.models[0].context_length = Some(8_000);
+        let model = composite_id(&app.models[0]);
+        app.current_model = Some(model.clone());
+        app.saved.local = Some(toml::from_str("provider = 'ollama'").unwrap());
+        let session = app
+            .db
+            .create_session("profile", &model, &app.active_space.id, "chat")
+            .unwrap();
+        for id in ["first", "duplicate"] {
+            app.db
+                .add_tool_call_message(
+                    &session.id,
+                    &serde_json::json!({
+                        "id": id, "name": "test", "arguments": "{}", "result": result,
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+        }
+        app.messages = app.db.load_messages(&session.id).unwrap();
+        app.session = Some(session.clone());
+        let history = app.build_history();
+        let tools: Vec<_> = history
+            .iter()
+            .filter(|message| message.role == "tool")
+            .collect();
+        assert_eq!(tools.len(), 2);
+        if backend == BackendTag::OpenRouter {
+            assert_eq!(tools[0].content, result);
+        } else {
+            assert!(tools[0].content.starts_with("HEAD:"));
+            assert!(tools[0].content.ends_with(":TAIL"));
+            assert!(tools[0].content.contains(" characters omitted] …\n"));
+            assert!(tools[0].content.chars().count() <= 4_000);
+            assert_eq!(
+                tools[0].content,
+                crate::tools::cap_head_tail(&result, 4_000)
+            );
+        }
+        assert_eq!(
+            tools[1].content,
+            crate::tools::tool_result_unchanged_note("test", "{}")
+        );
+        let seeded = crate::provider::seed_tool_result_dedup(&history);
+        assert_eq!(seeded[&("test".into(), "{}".into())], tools[0].content);
+        for message in app.db.load_messages(&session.id).unwrap() {
+            let row: serde_json::Value = serde_json::from_str(&message.content).unwrap();
+            assert_eq!(row["result"], result);
+        }
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// A throwaway space dir under the OS temp dir, unique per test.
 fn test_space() -> Space {
     Space {
@@ -166,6 +227,8 @@ async fn local_backend_discovers_models_and_uses_local_utility_fallback() {
         memory_budget_mb: None,
         context_length: None,
         kv_cache_q8: false,
+        parallel_tool_calls: None,
+        tier: None,
     });
     app.rebuild_all_backends();
     assert!(app.backends.configured(BackendTag::Local));
@@ -211,6 +274,8 @@ fn bare_local_command_reports_the_current_runtime() {
         memory_budget_mb: None,
         context_length: None,
         kv_cache_q8: false,
+        parallel_tool_calls: None,
+        tier: None,
     });
     app.configure_local("  ");
     let status = last_status(&mut app);

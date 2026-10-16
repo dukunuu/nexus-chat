@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::db::Message;
 use crate::prompts;
+use crate::provider::profile::{ModelProfile, profile_for};
 use crate::provider::{ChatMessage, ChatParams, StreamEvent, ToolCall, Usage};
 
 use super::{App, SPINNER_COLORS, SpinnerColor, THINKING, parse_topic, verbosity_clause};
@@ -190,6 +191,15 @@ impl App {
         self.start_stream()
     }
 
+    fn model_profile(&self) -> ModelProfile {
+        profile_for(
+            self.models.iter().find(|model| {
+                self.current_model.as_deref() == Some(super::composite_id(model).as_str())
+            }),
+            self.saved.local.as_ref(),
+        )
+    }
+
     /// The exact message list a completion request will carry: system prompt,
     /// compaction digest, then the effective conversation tail.
     /// User messages with images become multimodal parts for vision models, or
@@ -216,6 +226,7 @@ impl App {
             ));
         }
         let vision = self.current_model_supports_images();
+        let result_cap = self.model_profile().result_cap;
         // Dedup state for replayed tool results: (tool, arguments) → latest
         // full result. A row whose result is byte-identical to the latest
         // one for the same tool+arguments (e.g. a re-read of an unchanged
@@ -255,6 +266,7 @@ impl App {
                     &mut index,
                     &mut seen_results,
                     tool_images_dir.as_deref(),
+                    result_cap,
                 );
                 continue;
             }
@@ -346,6 +358,7 @@ impl App {
     }
 
     /// Build history and fire one independently-routed streaming request.
+    #[allow(clippy::too_many_lines)] // Request/profile setup and independent task registration.
     pub fn start_stream(&mut self) -> Result<()> {
         let Some(model) = self.current_model.clone() else {
             return Ok(());
@@ -374,8 +387,15 @@ impl App {
             None => (None, None),
         };
         self.push_status(reasoning_warning.unwrap_or_default());
-        let params = self.chat_params(reasoning_effort, provider.backend_tag());
-        let tools = self.toolbox.defs();
+        let profile = self.model_profile();
+        let mut params = self.chat_params(reasoning_effort, provider.backend_tag());
+        params.parallel_tool_calls = (!profile.parallel_calls).then_some(false);
+        params.tool_result_cap = profile.result_cap;
+        let tools = if profile.compact_tools {
+            self.toolbox.defs_compact()
+        } else {
+            self.toolbox.defs()
+        };
         if provider.backend_tag() == crate::provider::BackendTag::Local
             && !self.context_warned
             && let Some(limit) = self.context_limit()
@@ -1510,6 +1530,7 @@ fn append_tool_call_history(
     index: &mut usize,
     seen_results: &mut std::collections::HashMap<(String, String), String>,
     tool_images_dir: Option<&std::path::Path>,
+    result_cap: Option<usize>,
 ) {
     let start = *index;
     let mut rows = Vec::new();
@@ -1541,13 +1562,18 @@ fn append_tool_call_history(
         let images = tool_images_dir
             .and_then(|dir| crate::provider::openrouter::extract_tool_images(&row.result, dir));
         let key = (call.name.clone(), call.arguments.clone());
+        // Dedup the model-visible result so replay and live-loop seeding agree.
+        let visible = result_cap.map_or_else(
+            || row.result.clone(),
+            |cap| crate::tools::cap_head_tail(&row.result, cap),
+        );
         let content = match seen_results.get(&key) {
-            Some(prev) if *prev == row.result => {
+            Some(prev) if *prev == visible => {
                 crate::tools::tool_result_unchanged_note(&call.name, &call.arguments)
             }
             _ => {
-                seen_results.insert(key, row.result.clone());
-                row.result
+                seen_results.insert(key, visible.clone());
+                visible
             }
         };
         history.push(ChatMessage {

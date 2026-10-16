@@ -405,6 +405,10 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
 pub trait ToolExecutor: Send + Sync + 'static {
     /// Tool definitions to attach to the request (see `ToolBox::defs`).
     fn defs(&self) -> Vec<ToolDef>;
+    /// Compact tool definitions for small models; custom executors may keep full definitions.
+    fn defs_compact(&self) -> Vec<ToolDef> {
+        self.defs()
+    }
     /// Whether a call is read-only (see `is_read_only_tool`) — parallel
     /// calls run concurrently only when every one of them is.
     fn is_read_only(&self, name: &str, args: &str) -> bool;
@@ -426,6 +430,10 @@ pub trait ToolExecutor: Send + Sync + 'static {
 impl ToolExecutor for ToolBox {
     fn defs(&self) -> Vec<ToolDef> {
         ToolBox::defs(self)
+    }
+
+    fn defs_compact(&self) -> Vec<ToolDef> {
+        ToolBox::defs_compact(self)
     }
 
     fn is_read_only(&self, name: &str, args: &str) -> bool {
@@ -673,9 +681,25 @@ impl ToolBox {
     /// request (keeps models that don't support tools working). `search` always works —
     /// it prefers configured API backends, then uses keyless HTML fallbacks
     /// when those are unavailable, so it needs no setup.
+    pub fn defs(&self) -> Vec<ToolDef> {
+        self.tool_definitions(false)
+    }
+
+    /// The same live tools and schemas, with concise descriptions for small models.
+    pub fn defs_compact(&self) -> Vec<ToolDef> {
+        self.tool_definitions(true)
+    }
+
     // Long by design (tool-definition table).
     #[allow(clippy::too_many_lines)]
-    pub fn defs(&self) -> Vec<ToolDef> {
+    fn tool_definitions(&self, compact: bool) -> Vec<ToolDef> {
+        let def = |spec: &spec::ToolSpec, live: &[&str]| {
+            if compact {
+                spec.def_compact(live)
+            } else {
+                spec.def(live)
+            }
+        };
         let mut defs = Vec::new();
         defs.push(tool_def(
             "batch",
@@ -709,12 +733,13 @@ impl ToolBox {
         if has_skills {
             skills_actions.insert(0, "load");
         }
-        defs.push(spec::SKILLS.def(&skills_actions));
-        defs.push(
-            spec::SCRIPTS.def(&["list", "read", "write", "edit", "run", "python", "install"]),
-        );
-        defs.push(spec::SEARCH.def(&["web", "academic", "discussion"]));
-        defs.push(spec::FETCH_URL.def(&["fetch_url"]));
+        defs.push(def(&spec::SKILLS, &skills_actions));
+        defs.push(def(
+            &spec::SCRIPTS,
+            &["list", "read", "write", "edit", "run", "python", "install"],
+        ));
+        defs.push(def(&spec::SEARCH, &["web", "academic", "discussion"]));
+        defs.push(def(&spec::FETCH_URL, &["fetch_url"]));
         let has_session_sources = self.research_session_id.is_some();
         let has_citations = self.citation_count() > 0;
         if has_session_sources || has_citations {
@@ -725,10 +750,10 @@ impl ToolBox {
             if has_citations {
                 scopes.push("citations");
             }
-            defs.push(spec::RESEARCH_LOOKUP.def(&scopes));
+            defs.push(def(&spec::RESEARCH_LOOKUP, &scopes));
         }
         if self.files_count() > 0 {
-            defs.push(spec::FILES.def(&["search", "read", "pdf_page"]));
+            defs.push(def(&spec::FILES, &["search", "read", "pdf_page"]));
         }
         if self.apps.is_some() {
             defs.push(tool_def(
@@ -770,10 +795,20 @@ impl ToolBox {
             ]);
         }
         if !media_actions.is_empty() {
-            defs.push(spec::MEDIA.def(&media_actions));
+            defs.push(def(&spec::MEDIA, &media_actions));
         }
         if self.research_only {
             defs.retain(|d| matches!(d.name.as_str(), "search" | "fetch_url"));
+        }
+        if compact {
+            for tool in &mut defs {
+                if matches!(tool.name.as_str(), "batch" | "app") {
+                    if let Some(end) = tool.description.find(". ") {
+                        tool.description.truncate(end + 2);
+                    }
+                    strip_param_descriptions(&mut tool.parameters);
+                }
+            }
         }
         defs
     }
@@ -3273,6 +3308,45 @@ fn cap_result(result: String, max_chars: usize) -> String {
     capped
 }
 
+/// Cap context-visible text while retaining roughly 70% head and 30% tail.
+/// Counts Unicode characters, including the omission marker, not UTF-8 bytes.
+#[must_use]
+pub fn cap_head_tail(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_string();
+    }
+    // Reserve enough marker space even if the omitted count has fewer digits.
+    let marker = format!("\n… [{count} characters omitted] …\n");
+    let keep = max_chars.saturating_sub(marker.chars().count());
+    let head = keep * 7 / 10;
+    let tail = keep - head;
+    let omitted = count - keep;
+    let marker = format!("\n… [{omitted} characters omitted] …\n");
+    let mut result: String = text.chars().take(head).collect();
+    result.extend(marker.chars().take(max_chars - keep));
+    result.extend(text.chars().skip(count - tail));
+    result
+}
+
+/// Remove schema annotations without removing parameters named `description`.
+fn strip_param_descriptions(schema: &mut serde_json::Value) {
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("description");
+    }
+    if let Some(properties) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for property in properties.values_mut() {
+            strip_param_descriptions(property);
+        }
+    }
+    if let Some(items) = schema.get_mut("items") {
+        strip_param_descriptions(items);
+    }
+}
+
 /// Quick check: does a string look like a UUID (36 chars, 4 dashes)?
 fn looks_like_uuid(s: &str) -> bool {
     s.len() == 36 && s.chars().filter(|c| *c == '-').count() == 4
@@ -4966,6 +5040,101 @@ fn build_lighting_filter(preset: &str, intensity: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn head_tail_cap_keeps_both_ends_and_counts_omitted_characters() {
+        let text = format!("{}{}{}", "H".repeat(300), "M".repeat(400), "T".repeat(300));
+        let capped = cap_head_tail(&text, 200);
+        assert!(capped.starts_with(&"H".repeat(110)));
+        assert!(capped.ends_with(&"T".repeat(45)));
+        assert!(capped.chars().count() <= 200);
+        let (head, rest) = capped.split_once("\n… [").unwrap();
+        let (omitted, tail) = rest.split_once(" characters omitted] …\n").unwrap();
+        let omitted: usize = omitted.parse().unwrap();
+        assert_eq!(head.chars().count() + tail.chars().count() + omitted, 1_000);
+    }
+
+    #[test]
+    fn head_tail_cap_is_unicode_safe_and_identity_when_it_fits() {
+        let text = format!("{}{}", "界".repeat(300), "🦀".repeat(300));
+        let capped = cap_head_tail(&text, 200);
+        assert!(capped.starts_with(&"界".repeat(110)));
+        assert!(capped.ends_with(&"🦀".repeat(45)));
+        assert!(capped.chars().count() <= 200);
+        assert_eq!(cap_head_tail(&text, 600), text);
+        assert_eq!(cap_head_tail(&text, 700), text);
+        assert_eq!(cap_head_tail("", 0), "");
+        for limit in 0..200 {
+            assert!(cap_head_tail(&text, limit).chars().count() <= limit);
+        }
+    }
+
+    #[test]
+    fn compact_batch_and_app_keep_schemas_and_first_sentences() {
+        let dir = std::env::temp_dir().join(format!("nexus-compact-{}", uuid::Uuid::new_v4()));
+        let mut toolbox = ToolBox::new(
+            dir.join("skills"),
+            None,
+            None,
+            "auto".into(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        toolbox.apps = Some(AppsCtx {
+            dir: dir.join("apps"),
+            registry: crate::appserver::AppRegistry::load(&dir),
+            space_name: "test".into(),
+            server_port: 8642,
+            public_base: None,
+            space_id: "test".into(),
+            space_db_path: dir.join("test.db"),
+            files_dir: dir.join("files"),
+            session_id: String::new(),
+        });
+        let full = toolbox.defs();
+        let compact = toolbox.defs_compact();
+        assert_eq!(full.len(), compact.len());
+        for (full, compact) in full.iter().zip(&compact) {
+            assert_eq!(full.name, compact.name);
+            assert_eq!(full.parameters["required"], compact.parameters["required"]);
+        }
+        let batch = compact.iter().find(|tool| tool.name == "batch").unwrap();
+        assert_eq!(
+            batch.description,
+            "Run several independent tool operations in ONE call — multiple searches, multiple file searches/reads, or multiple app/script writes. "
+        );
+        assert_eq!(
+            batch.parameters["properties"]["calls"]["items"]["required"],
+            serde_json::json!(["tool"])
+        );
+        assert!(
+            batch.parameters["properties"]["calls"]
+                .get("description")
+                .is_none()
+        );
+        assert!(
+            batch.parameters["properties"]["calls"]["items"]["properties"]["arguments"]
+                .get("description")
+                .is_none()
+        );
+        let app = compact.iter().find(|tool| tool.name == "app").unwrap();
+        let full_app = full.iter().find(|tool| tool.name == "app").unwrap();
+        assert_eq!(
+            app.description,
+            "Build and manage locally served web apps. "
+        );
+        assert_eq!(
+            app.parameters["properties"]["action"],
+            full_app.parameters["properties"]["action"]
+        );
+        assert!(
+            app.parameters["properties"]["edits"]["items"]["properties"]["hash"]
+                .get("description")
+                .is_none()
+        );
+    }
 
     #[test]
     fn classify_tool_result_kinds() {

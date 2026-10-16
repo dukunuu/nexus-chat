@@ -1,6 +1,7 @@
 pub mod harmony;
 pub mod local;
 pub mod openrouter;
+pub mod profile;
 pub mod serve;
 
 use serde::{Deserialize, Serialize};
@@ -220,6 +221,10 @@ pub struct ChatParams {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// Send `false` to disable parallel tool calls; otherwise omit the wire key.
+    pub parallel_tool_calls: Option<bool>,
+    /// Maximum tool-result characters in context; does not affect persistence.
+    pub tool_result_cap: Option<usize>,
     /// Device-local recording context; absent unless chat training is enabled.
     pub trace: Option<crate::trace::TraceContext>,
 }
