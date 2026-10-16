@@ -164,6 +164,8 @@ async fn local_backend_discovers_models_and_uses_local_utility_fallback() {
             "mlx-community/test-model\\n".into(),
         ]),
         memory_budget_mb: None,
+        context_length: None,
+        kv_cache_q8: false,
     });
     app.rebuild_all_backends();
     assert!(app.backends.configured(BackendTag::Local));
@@ -207,6 +209,8 @@ fn bare_local_command_reports_the_current_runtime() {
         endpoint: None,
         list_command: None,
         memory_budget_mb: None,
+        context_length: None,
+        kv_cache_q8: false,
     });
     app.configure_local("  ");
     let status = last_status(&mut app);
@@ -214,6 +218,72 @@ fn bare_local_command_reports_the_current_runtime() {
         status.contains("LM Studio") && status.contains("http://localhost:1234/v1"),
         "{status}"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_prompt_budget_warning_is_advisory_once_per_epoch_and_never_hosted() {
+    // Never yield: abort each request before the single-threaded runtime can
+    // poll its provider task, so this exercises start_stream without network.
+    for (backend, context_length, warns) in [
+        (BackendTag::Local, Some(2048), true),
+        (BackendTag::OpenRouter, Some(2048), false),
+        (BackendTag::Local, Some(1_000_000), false),
+        (BackendTag::Local, None, false),
+    ] {
+        let mut app = app_with_key();
+        app.models[0].backend = backend;
+        app.models[0].context_length = context_length;
+        let model = composite_id(&app.models[0]);
+        app.current_model = Some(model.clone());
+        if backend == BackendTag::Local {
+            app.backends.set(
+                BackendTag::Local,
+                crate::provider::openrouter::OpenRouter::local("http://127.0.0.1:9/v1").unwrap(),
+            );
+        }
+        let session = app
+            .db
+            .create_session("budget", &model, &app.active_space.id, "chat")
+            .unwrap();
+        let session_id = session.id.clone();
+        app.session = Some(session);
+        app.pending_events.clear();
+        for (attempt, new_epoch) in [false, false, true].into_iter().enumerate() {
+            if new_epoch {
+                app.bump_cache_epoch();
+            }
+            app.start_stream().unwrap();
+            assert!(app.is_streaming(), "the warning must not block the request");
+            app.discard_chat_task(&session_id);
+            let warnings: Vec<_> = app
+                .pending_events
+                .drain(..)
+                .filter_map(|event| match event {
+                    AppEvent::Status(text)
+                        if text.starts_with("prompt + tool definitions use ~") =>
+                    {
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                warnings.len(),
+                usize::from(warns && attempt != 1),
+                "{backend:?} {context_length:?}, attempt {attempt}"
+            );
+            for warning in warnings {
+                let tokens: u64 = warning
+                    .strip_prefix("prompt + tool definitions use ~")
+                    .unwrap()
+                    .strip_suffix(" of 2048 tokens — raise [local] context_length")
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert!(tokens > 1024);
+            }
+        }
+    }
 }
 
 #[test]

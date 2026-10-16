@@ -4,7 +4,7 @@ use chrono::Utc;
 use crate::provider::BackendTag;
 use crate::provider::local::{LocalConfig, LocalRuntime};
 use crate::provider::openrouter::OpenRouter;
-use crate::provider::serve::RuntimeStatus;
+use crate::provider::serve::{LaunchOptions, RuntimeStatus};
 
 use super::{App, ModelPickTarget, Popup};
 
@@ -113,7 +113,13 @@ impl App {
             .as_deref()
             .and_then(|id| id.strip_prefix("local:"))
             .map(str::to_owned);
-        let argv = self.local_servers.start(runtime, model.as_deref(), port)?;
+        let options = LaunchOptions {
+            context_length: config.effective_context(),
+            kv_cache_q8: config.kv_cache_q8,
+        };
+        let argv = self
+            .local_servers
+            .start(runtime, model.as_deref(), port, options)?;
         self.push_status(format!(
             "{} starting: {argv} — /local status when it answers",
             runtime.label()

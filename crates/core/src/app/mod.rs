@@ -797,6 +797,8 @@ pub struct App {
     /// App-local prompt-cache epoch. Changes that alter the serialized prefix
     /// advance it so a provider gets a fresh cache lane.
     pub(crate) cache_epoch: u64,
+    /// Whether the local prompt-budget warning has fired in this cache epoch.
+    pub(crate) context_warned: bool,
     /// Timestamp captured for the current prompt-cache epoch. Keeping the
     /// `{{datetime}}` expansion stable prevents a clock tick from invalidating
     /// the entire serialized prefix on every request.
@@ -1144,6 +1146,7 @@ impl App {
             memory_model: utility_model.clone(),
             memory_snapshot: String::new(),
             cache_epoch: 0,
+            context_warned: false,
             prompt_datetime: Utc::now().format("%Y-%m-%d %H:%M UTC, %A").to_string(),
             transcriber_model: utility_model.clone(),
             ocr_model: utility_model,

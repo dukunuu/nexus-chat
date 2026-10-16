@@ -47,6 +47,15 @@ pub enum Launch {
     },
 }
 
+/// Context and KV-cache settings for a local server launch.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LaunchOptions {
+    /// Context window to request when the runtime supports it.
+    pub context_length: Option<u32>,
+    /// Use Ollama's `q8_0` KV cache with flash attention.
+    pub kv_cache_q8: bool,
+}
+
 impl LocalRuntime {
     /// Whether starting this runtime's server requires naming a model.
     /// Ollama, mlx-serve and LM Studio load models on demand through their own API;
@@ -60,7 +69,7 @@ impl LocalRuntime {
     ///
     /// # Errors
     /// Reports the missing model for runtimes that serve exactly one.
-    pub fn launch(self, model: Option<&str>, port: u16) -> Result<Launch> {
+    pub fn launch(self, model: Option<&str>, port: u16, options: LaunchOptions) -> Result<Launch> {
         let model = || -> Result<String> {
             model
                 .map(str::to_owned)
@@ -74,10 +83,20 @@ impl LocalRuntime {
         };
         Ok(match self {
             // Ollama takes its listen address from the environment, not argv.
-            Self::Ollama => Launch::Owned {
-                argv: vec!["ollama".into(), "serve".into()],
-                env: vec![("OLLAMA_HOST".into(), format!("127.0.0.1:{port}"))],
-            },
+            Self::Ollama => {
+                let mut env = vec![("OLLAMA_HOST".into(), format!("127.0.0.1:{port}"))];
+                if let Some(context_length) = options.context_length {
+                    env.push(("OLLAMA_CONTEXT_LENGTH".into(), context_length.to_string()));
+                }
+                if options.kv_cache_q8 {
+                    env.push(("OLLAMA_KV_CACHE_TYPE".into(), "q8_0".into()));
+                    env.push(("OLLAMA_FLASH_ATTENTION".into(), "1".into()));
+                }
+                Launch::Owned {
+                    argv: vec!["ollama".into(), "serve".into()],
+                    env,
+                }
+            }
             Self::Mlx => Launch::Owned {
                 argv: vec![
                     "mlx_lm.server".into(),
@@ -223,6 +242,7 @@ impl ManagedServers {
         runtime: LocalRuntime,
         model: Option<&str>,
         port: u16,
+        options: LaunchOptions,
     ) -> Result<String> {
         self.reap();
         anyhow::ensure!(
@@ -231,7 +251,7 @@ impl ManagedServers {
             runtime.label(),
             runtime.token()
         );
-        let launch = runtime.launch(model, port)?;
+        let launch = runtime.launch(model, port, options)?;
         let (argv, env, detached) = match &launch {
             Launch::Owned { argv, env } => (argv.clone(), env.clone(), false),
             Launch::Detached { start, .. } => (start.clone(), Vec::new(), true),
@@ -291,7 +311,8 @@ impl ManagedServers {
         }
         if let Some(index) = self.detached.iter().position(|r| *r == runtime) {
             self.detached.remove(index);
-            if let Ok(Launch::Detached { stop, .. }) = runtime.launch(None, port)
+            if let Ok(Launch::Detached { stop, .. }) =
+                runtime.launch(None, port, LaunchOptions::default())
                 && let Ok(handle) = tokio::runtime::Handle::try_current()
             {
                 handle.spawn(async move {
@@ -333,7 +354,9 @@ impl ManagedServers {
             let port = LocalConfig::for_runtime(runtime, None)
                 .port()
                 .unwrap_or_default();
-            if let Ok(Launch::Detached { stop, .. }) = runtime.launch(None, port) {
+            if let Ok(Launch::Detached { stop, .. }) =
+                runtime.launch(None, port, LaunchOptions::default())
+            {
                 let _ = Command::new(&stop[0])
                     .args(&stop[1..])
                     .stdin(Stdio::null())
@@ -546,13 +569,19 @@ mod tests {
 
     #[test]
     fn launch_commands_carry_the_port_and_require_a_model_where_it_is_served() {
-        let Launch::Owned { argv, env } = LocalRuntime::Ollama.launch(None, 11434).unwrap() else {
+        let Launch::Owned { argv, env } = LocalRuntime::Ollama
+            .launch(None, 11434, LaunchOptions::default())
+            .unwrap()
+        else {
             panic!("ollama is an owned server");
         };
         assert_eq!(argv, ["ollama", "serve"]);
         assert_eq!(env, [("OLLAMA_HOST".to_string(), "127.0.0.1:11434".into())]);
 
-        let Launch::Owned { argv, .. } = LocalRuntime::MlxServe.launch(None, 11234).unwrap() else {
+        let Launch::Owned { argv, .. } = LocalRuntime::MlxServe
+            .launch(None, 11234, LaunchOptions::default())
+            .unwrap()
+        else {
             panic!("mlx-serve is an owned server");
         };
         assert_eq!(
@@ -568,8 +597,9 @@ mod tests {
         );
         assert!(!LocalRuntime::MlxServe.serves_one_model());
 
-        let Launch::Owned { argv, .. } =
-            LocalRuntime::Edge0.launch(Some("edge0-8b"), 8000).unwrap()
+        let Launch::Owned { argv, .. } = LocalRuntime::Edge0
+            .launch(Some("edge0-8b"), 8000, LaunchOptions::default())
+            .unwrap()
         else {
             panic!("edge0 is an owned server");
         };
@@ -586,7 +616,9 @@ mod tests {
             ]
         );
 
-        let Launch::Detached { start, stop } = LocalRuntime::Lmstudio.launch(None, 1234).unwrap()
+        let Launch::Detached { start, stop } = LocalRuntime::Lmstudio
+            .launch(None, 1234, LaunchOptions::default())
+            .unwrap()
         else {
             panic!("LM Studio hands off to its own daemon");
         };
@@ -597,11 +629,67 @@ mod tests {
         // than launching a server with no weights.
         for runtime in [LocalRuntime::Mlx, LocalRuntime::Edge0] {
             assert!(runtime.serves_one_model());
-            let error = runtime.launch(None, 8000).unwrap_err().to_string();
+            let error = runtime
+                .launch(None, 8000, LaunchOptions::default())
+                .unwrap_err()
+                .to_string();
             assert!(error.contains("serves one model"), "{error}");
-            assert!(runtime.launch(Some("  "), 8000).is_err());
+            assert!(
+                runtime
+                    .launch(Some("  "), 8000, LaunchOptions::default())
+                    .is_err()
+            );
         }
         assert!(!LocalRuntime::Ollama.serves_one_model());
+    }
+
+    #[test]
+    fn ollama_launch_sets_context_and_enables_flash_attention_for_q8_cache() {
+        for kv_cache_q8 in [false, true] {
+            let options = LaunchOptions {
+                context_length: Some(65_536),
+                kv_cache_q8,
+            };
+            let Launch::Owned { argv, env } =
+                LocalRuntime::Ollama.launch(None, 11434, options).unwrap()
+            else {
+                panic!("ollama is an owned server");
+            };
+            assert_eq!(argv, ["ollama", "serve"]);
+            assert!(env.contains(&("OLLAMA_HOST".into(), "127.0.0.1:11434".into())));
+            assert!(env.contains(&("OLLAMA_CONTEXT_LENGTH".into(), "65536".into())));
+            for (key, value) in [
+                ("OLLAMA_KV_CACHE_TYPE", "q8_0"),
+                ("OLLAMA_FLASH_ATTENTION", "1"),
+            ] {
+                let actual = env.iter().find(|(name, _)| name == key);
+                assert_eq!(
+                    actual.map(|(_, value)| value.as_str()),
+                    kv_cache_q8.then_some(value)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn other_runtimes_ignore_context_and_kv_cache_options() {
+        let options = LaunchOptions {
+            context_length: Some(65_536),
+            kv_cache_q8: true,
+        };
+        for runtime in [
+            LocalRuntime::Mlx,
+            LocalRuntime::MlxServe,
+            LocalRuntime::Lmstudio,
+            LocalRuntime::Edge0,
+        ] {
+            assert_eq!(
+                runtime.launch(Some("org/model"), 8080, options).unwrap(),
+                runtime
+                    .launch(Some("org/model"), 8080, LaunchOptions::default())
+                    .unwrap()
+            );
+        }
     }
 
     #[test]

@@ -92,6 +92,8 @@ fn local_popup_lists_runtimes_with_discovery_and_endpoint() {
         endpoint: None,
         list_command: None,
         memory_budget_mb: None,
+        context_length: None,
+        kv_cache_q8: false,
     });
     app.open_local_popup();
     let screen = render_to_string(80, 24, |f| super::local::render(f, &app));

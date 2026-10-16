@@ -376,6 +376,19 @@ impl App {
         self.push_status(reasoning_warning.unwrap_or_default());
         let params = self.chat_params(reasoning_effort, provider.backend_tag());
         let tools = self.toolbox.defs();
+        if provider.backend_tag() == crate::provider::BackendTag::Local
+            && !self.context_warned
+            && let Some(limit) = self.context_limit()
+        {
+            let defs = serde_json::to_string(&tools)?;
+            let tokens = (self.system_prompt().chars().count() + defs.chars().count()) as u64 / 4;
+            if tokens > limit / 2 {
+                self.push_status(format!(
+                    "prompt + tool definitions use ~{tokens} of {limit} tokens — raise [local] context_length"
+                ));
+                self.context_warned = true;
+            }
+        }
         let (rx, abort) = provider.stream_chat(
             raw_model.clone(),
             history,

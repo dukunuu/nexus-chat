@@ -87,6 +87,12 @@ pub struct LocalConfig {
     /// Unset means a fraction of physical memory. Advisory only: Nexus warns,
     /// it never stops a server on its own.
     pub memory_budget_mb: Option<u64>,
+    /// Context window in tokens; Ollama defaults to 32,768 when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+    /// Use Ollama's `q8_0` KV cache with flash attention.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kv_cache_q8: bool,
 }
 
 impl LocalConfig {
@@ -110,12 +116,25 @@ impl LocalConfig {
             .and_then(|url| url.port_or_known_default())
     }
 
+    /// Configured context window, or Ollama's default; other runtimes size their own.
+    #[must_use]
+    pub fn effective_context(&self) -> Option<u32> {
+        self.context_length
+            .or((self.provider == LocalRuntime::Ollama).then_some(32_768))
+    }
+
     /// Validate settings without executing commands or contacting a server.
     ///
     /// # Errors
-    /// Rejects invalid URLs and empty discovery commands.
+    /// Rejects invalid URLs, empty discovery commands and context windows below 2,048 tokens.
     pub fn validate(&self) -> Result<()> {
         super::openrouter::OpenRouter::local(self.endpoint())?;
+        if let Some(context_length) = self.context_length {
+            anyhow::ensure!(
+                context_length >= 2048,
+                "local.context_length must be at least 2048 tokens"
+            );
+        }
         if let Some(command) = &self.list_command {
             anyhow::ensure!(
                 command
@@ -128,8 +147,9 @@ impl LocalConfig {
     }
 
     /// Switch to `provider`, carrying over the settings that still apply: a
-    /// custom endpoint and discovery command are written for one runtime, so
-    /// they survive re-selecting it and are dropped when the runtime changes.
+    /// custom endpoint, discovery command, context window and KV-cache settings
+    /// are written for one runtime, so they survive re-selecting it and are
+    /// dropped when the runtime changes.
     /// The memory budget describes the machine rather than the runtime, so it
     /// always carries.
     #[must_use]
@@ -140,6 +160,8 @@ impl LocalConfig {
             endpoint: carried.and_then(|config| config.endpoint.clone()),
             list_command: carried.and_then(|config| config.list_command.clone()),
             memory_budget_mb: current.and_then(|config| config.memory_budget_mb),
+            context_length: carried.and_then(|config| config.context_length),
+            kv_cache_q8: carried.is_some_and(|config| config.kv_cache_q8),
         }
     }
 
@@ -227,7 +249,7 @@ impl LocalConfig {
                 name: format!("{id} ({})", self.provider.label()),
                 id,
                 backend: BackendTag::Local,
-                context_length: None,
+                context_length: self.effective_context().map(u64::from),
                 reasoning_efforts: Vec::new(),
                 supports_images: false,
                 supports_image_generation: false,
@@ -417,12 +439,80 @@ mod tests {
     }
 
     #[test]
+    fn effective_context_defaults_and_explicit_settings_follow_the_runtime() {
+        for runtime in LocalRuntime::ALL {
+            let mut config = LocalConfig::for_runtime(runtime, None);
+            assert_eq!(config.context_length, None);
+            assert!(!config.kv_cache_q8);
+            assert_eq!(
+                config.effective_context(),
+                (runtime == LocalRuntime::Ollama).then_some(32_768)
+            );
+            config.context_length = Some(65_536);
+            config.kv_cache_q8 = true;
+            assert_eq!(config.effective_context(), Some(65_536));
+            let same = LocalConfig::for_runtime(runtime, Some(&config));
+            assert_eq!(same.context_length, Some(65_536));
+            assert!(same.kv_cache_q8);
+            let other = if runtime == LocalRuntime::Ollama {
+                LocalRuntime::Mlx
+            } else {
+                LocalRuntime::Ollama
+            };
+            let switched = LocalConfig::for_runtime(other, Some(&config));
+            assert_eq!(switched.context_length, None);
+            assert!(!switched.kv_cache_q8);
+        }
+    }
+
+    #[test]
+    fn context_validation_rejects_small_windows_and_accepts_the_minimum() {
+        let mut config = LocalConfig::for_runtime(LocalRuntime::Ollama, None);
+        for context_length in [0, 1024, 2047] {
+            config.context_length = Some(context_length);
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains("local.context_length"), "{error}");
+            assert!(error.contains("at least 2048 tokens"), "{error}");
+        }
+        config.context_length = Some(2048);
+        config.validate().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discovered_models_have_the_effective_context_for_every_runtime() {
+        for runtime in LocalRuntime::ALL {
+            for context_length in [None, Some(65_536)] {
+                let mut config = LocalConfig::for_runtime(runtime, None);
+                config.context_length = context_length;
+                config.list_command = Some(vec![
+                    "/usr/bin/printf".into(),
+                    "org/model\\nother/model\\n".into(),
+                ]);
+                let models = config.list_models().await.unwrap();
+                let expected = match (runtime, context_length) {
+                    (_, Some(value)) => Some(u64::from(value)),
+                    (LocalRuntime::Ollama, None) => Some(32_768),
+                    (_, None) => None,
+                };
+                assert_eq!(models.len(), 2);
+                for model in models {
+                    assert_eq!(model.backend, BackendTag::Local);
+                    assert_eq!(model.context_length, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn spec_parsing_selects_disables_and_carries_runtime_settings() {
         let current = LocalConfig {
             provider: LocalRuntime::Ollama,
             endpoint: Some("http://127.0.0.1:9999/v1".into()),
             list_command: Some(vec!["my-list".into()]),
             memory_budget_mb: Some(4096),
+            context_length: None,
+            kv_cache_q8: false,
         };
         // Re-selecting a runtime keeps the settings written for it; an
         // explicit endpoint wins; switching runtimes drops both.
@@ -496,6 +586,8 @@ mod tests {
                 "org/model\norg/model\nother/model\n".into(),
             ]),
             memory_budget_mb: None,
+            context_length: None,
+            kv_cache_q8: false,
         };
         let models = config.list_models().await.unwrap();
         assert_eq!(models.len(), 2);

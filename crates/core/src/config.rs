@@ -791,6 +791,39 @@ mod tests {
     }
 
     #[test]
+    fn local_context_settings_parse_and_round_trip_with_defaults_and_overrides() {
+        for (settings, context_length, kv_cache_q8) in [
+            ("", None, false),
+            (
+                "context_length = 65536\nkv_cache_q8 = true\n",
+                Some(65_536),
+                true,
+            ),
+            (
+                "context_length = 2048\nkv_cache_q8 = false\n",
+                Some(2048),
+                false,
+            ),
+        ] {
+            let cfg: Config = toml::from_str(&format!(
+                "[provider]\nopenai_key = 'test-key'\n[local]\nprovider = 'ollama'\n{settings}"
+            ))
+            .unwrap();
+            assert_eq!(cfg.provider.openai_key, "test-key");
+            let local = cfg.local.unwrap();
+            local.validate().unwrap();
+            assert_eq!(local.context_length, context_length);
+            assert_eq!(local.kv_cache_q8, kv_cache_q8);
+            let encoded = toml::to_string(&local).unwrap();
+            assert_eq!(encoded.contains("context_length"), context_length.is_some());
+            assert_eq!(encoded.contains("kv_cache_q8"), kv_cache_q8);
+            let decoded: crate::provider::local::LocalConfig = toml::from_str(&encoded).unwrap();
+            assert_eq!(decoded.context_length, context_length);
+            assert_eq!(decoded.kv_cache_q8, kv_cache_q8);
+        }
+    }
+
+    #[test]
     fn parses_keys() {
         let cfg: Config = toml::from_str(
             "[provider]\nopenrouter_key = \"sk-or-abc\"\nopenai_key = \"sk-proj-abc\"\n",

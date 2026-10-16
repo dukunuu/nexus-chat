@@ -44,6 +44,7 @@ impl App {
     /// boundary such as a memory or prompt refresh.
     pub(crate) fn bump_cache_epoch(&mut self) {
         self.cache_epoch = self.cache_epoch.wrapping_add(1);
+        self.context_warned = false;
         self.prompt_datetime = chrono::Utc::now()
             .format("%Y-%m-%d %H:%M UTC, %A")
             .to_string();

@@ -172,11 +172,29 @@ The same block can be written by hand:
 [local]
 provider = "ollama" # or "mlx", "mlx_serve", "lmstudio", "edge0"
 # endpoint = "http://localhost:11434/v1" # optional inference URL override
+# context_length = 32768 # Ollama default; minimum 2048 tokens
+# kv_cache_q8 = true # optional Ollama KV-cache quantization; default false
 ```
 
-Switching runtimes from `/local` drops a custom `endpoint`/`list_command`,
-since those are written for one runtime; re-selecting the active runtime keeps
-them.
+`context_length` is reported for every model discovered through this runtime,
+enabling automatic compaction. Ollama defaults to 32,768 tokens; Nexus passes
+that window as `OLLAMA_CONTEXT_LENGTH` when starting its server. Other runtimes
+have no assumed window: set this key to their actual server context size. It
+does not resize mlx-lm, mlx-serve, LM Studio or edge0 servers.
+
+For Ollama, `kv_cache_q8 = true` enables `OLLAMA_KV_CACHE_TYPE=q8_0` and
+`OLLAMA_FLASH_ATTENTION=1`, roughly halving KV-cache memory compared with the
+default f16 cache for long contexts. Other runtimes ignore this launch option.
+Use `/local restart` to apply launch settings to a managed server; configure
+servers started elsewhere yourself so their window matches this setting.
+
+Nexus warns once per prompt-cache epoch if the system prompt plus tool
+definitions alone use more than half the known context window. The estimate is
+advisory and never blocks a request.
+
+Switching runtimes from `/local` drops a custom `endpoint`/`list_command` and
+context/KV-cache settings, since those are written for one runtime;
+re-selecting the active runtime keeps them.
 
 Nexus runs the runtime's discovery command when loading/refreshing `/model`:
 
@@ -239,7 +257,7 @@ What gets launched:
 
 | Runtime | Server command | Needs a model |
 | --- | --- | --- |
-| `ollama` | `ollama serve` (with `OLLAMA_HOST`) | no — loads on demand |
+| `ollama` | `ollama serve` (with `OLLAMA_HOST` and `OLLAMA_CONTEXT_LENGTH`) | no — loads on demand |
 | `lmstudio` | `lms server start` (a daemon, stopped with `lms server stop`) | no |
 | `mlx` (mlx-lm) | `mlx_lm.server --model <selected>` | yes |
 | `mlx_serve` | `mlx-serve serve --host 127.0.0.1 --port 11234` | no — loads on demand |
@@ -273,7 +291,7 @@ Reading memory needs `ps`, and `lsof` for servers Nexus did not start; without
 them liveness still works and the size column is simply blank.
 
 The server's API must accept the discovered model ID. Model downloads,
-authenticated local servers, host gateway forwarding, and capability/context
+authenticated local servers, host gateway forwarding, and automatic capability/context
 discovery are not implemented yet. Tool calling depends on the runtime/model.
 Local utility fallback uses the selected/installed model rather than a cloud
 model name.
