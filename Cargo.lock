@@ -2086,6 +2086,7 @@ dependencies = [
  "futures-util",
  "ignore",
  "image",
+ "libc",
  "nexus-chat-core",
  "open",
  "pdf-extract",

@@ -36,6 +36,9 @@ const TOOL_ERROR_PREFIXES: &[(&str, &str)] = &[
     ("invalid scope for", "invalid_args"),
     ("invalid tool arguments", "invalid_args"),
     ("invalid path", "invalid_args"),
+    ("privilege escalation is blocked", "blocked"),
+    ("could not parse this command", "invalid_args"),
+    ("timed out after", "upstream"),
     ("unknown tool:", "unknown_tool"),
     ("path escapes", "confinement"),
     ("unknown file:", "not_found"),
@@ -760,6 +763,7 @@ impl ToolBox {
                     "list", "glob", "grep", "read", "edit", "write", "move", "delete",
                 ],
             ));
+            defs.push(def(&spec::SHELL, &["run", "log"]));
         }
         let has_session_sources = self.research_session_id.is_some();
         let has_citations = self.citation_count() > 0;
@@ -967,6 +971,17 @@ impl ToolBox {
         let name = dispatch_name.as_str();
         let args = dispatch_args.as_str();
         let (result, status) = match name {
+            "shell_run" | "shell_log" => match &self.workspace {
+                None => (
+                    "shell needs an agent workspace · switch with /agent <path>".to_string(),
+                    "blocked".to_string(),
+                ),
+                Some(workspace) => (
+                    crate::workspace::shell::action(workspace, self.db_path.as_deref(), name, args)
+                        .await,
+                    format!("Running {name}…"),
+                ),
+            },
             "fs_list" | "fs_glob" | "fs_grep" | "fs_read" | "fs_edit" | "fs_write" | "fs_move"
             | "fs_delete" => match &self.workspace {
                 None => (

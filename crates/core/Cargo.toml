@@ -25,6 +25,9 @@ test-helpers = []
 # `App::last_status`/`drain_composer_sets`).
 nexus-chat-core = { path = ".", features = ["test-helpers"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.186"
+
 [dependencies]
 # ── Core deps ─────────────────────────────────────────────────────────────
 anyhow = { workspace = true }

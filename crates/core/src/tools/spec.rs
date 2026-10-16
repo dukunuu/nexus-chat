@@ -650,6 +650,57 @@ pub(super) static FS: ToolSpec = ToolSpec {
     ],
 };
 
+pub(super) static SHELL: ToolSpec = ToolSpec {
+    name: "shell",
+    purpose: "Run one-shot commands in the agent workspace without privilege escalation, or page their saved output logs.",
+    selector: Some("action"),
+    params: &[
+        Param {
+            name: "cmd",
+            kind: Kind::Str,
+            doc: "shell command to run with sh -c",
+        },
+        Param {
+            name: "cwd",
+            kind: Kind::Str,
+            doc: "workspace directory (default workspace root)",
+        },
+        Param {
+            name: "timeout_s",
+            kind: Kind::Int,
+            doc: "timeout in seconds (default 120, maximum 600)",
+        },
+        Param {
+            name: "id",
+            kind: Kind::Str,
+            doc: "saved log id returned by run",
+        },
+        Param {
+            name: "offset",
+            kind: Kind::Int,
+            doc: "1-based starting line (default 1, 400 lines per page)",
+        },
+    ],
+    actions: &[
+        ActionSpec {
+            name: "run",
+            summary: "Run a noninteractive command, returning its exit code and head/tail output",
+            required: &["cmd"],
+            optional: &["cwd", "timeout_s"],
+            read_only: false,
+            internal: "shell_run",
+        },
+        ActionSpec {
+            name: "log",
+            summary: "Page the full saved output of a command",
+            required: &["id"],
+            optional: &["offset"],
+            read_only: true,
+            internal: "shell_log",
+        },
+    ],
+};
+
 pub(super) static RESEARCH_LOOKUP: ToolSpec = ToolSpec {
     name: "research_lookup",
     purpose: "Look up previously gathered research material.",
@@ -985,6 +1036,7 @@ const TOOLS: &[&ToolSpec] = &[
     &SEARCH,
     &FETCH_URL,
     &FS,
+    &SHELL,
     &RESEARCH_LOOKUP,
     &FILES,
     &MEDIA,
@@ -1118,6 +1170,12 @@ mod tests {
         ),
         ("fs", r#"{"action":"move","path":"x","to":"y"}"#, "fs_move"),
         ("fs", r#"{"action":"delete","path":"x"}"#, "fs_delete"),
+        ("shell", r#"{"action":"run","cmd":"echo hi"}"#, "shell_run"),
+        (
+            "shell",
+            r#"{"action":"log","id":"0123456789ab"}"#,
+            "shell_log",
+        ),
         (
             "research_lookup",
             r#"{"scope":"session_sources","query":"x"}"#,
@@ -1259,6 +1317,7 @@ mod tests {
             "fs_glob",
             "fs_grep",
             "fs_read",
+            "shell_log",
         ];
         for &(tool, args, internal) in ROUTES {
             let expected = read_only.contains(&internal);

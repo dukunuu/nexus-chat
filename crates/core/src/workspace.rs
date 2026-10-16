@@ -9,6 +9,9 @@ use std::time::SystemTime;
 
 use sha2::{Digest, Sha256};
 
+pub mod escalation;
+pub(crate) mod shell;
+
 /// A canonical workspace root, its hard exclusions, and the files last read.
 pub struct Workspace {
     root: PathBuf,
