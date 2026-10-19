@@ -25,6 +25,7 @@ impl App {
         self.session = None;
         self.reset_work_mode();
         self.messages.clear();
+        self.mask_through = 0;
         self.refresh_memory_snapshot();
         self.context_total = None;
         self.push_viewport_reset();

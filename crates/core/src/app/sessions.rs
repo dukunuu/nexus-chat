@@ -22,6 +22,7 @@ impl App {
         self.reset_work_mode();
         self.refresh_toolbox();
         self.messages.clear();
+        self.mask_through = 0;
         self.refresh_memory_snapshot();
         // A selection points into the old session's wrapped lines — a stale
         // one would mis-highlight the new chat and resolve links against the
@@ -76,6 +77,11 @@ impl App {
             return Ok(());
         };
         self.messages = self.db.load_messages(&s.id)?;
+        self.mask_through = if self.incognito {
+            0
+        } else {
+            self.db.session_mask(&s.id)
+        };
         self.unread.remove(&s.id);
         self.notifications.retain(|n| n.session_id != s.id);
         self.push_status(format!("switched to: {}", s.title));

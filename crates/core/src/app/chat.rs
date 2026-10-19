@@ -118,6 +118,7 @@ impl App {
         if let Some(session) = &self.session {
             return Ok(session.id.clone());
         }
+        self.mask_through = 0;
         self.refresh_memory_snapshot();
         let title = title_from(text);
         let s = if self.incognito {
@@ -194,6 +195,12 @@ impl App {
             }
         }
         self.messages.truncate(user_index + 1);
+        if self.mask_through > self.messages.len() {
+            self.mask_through = self.messages.len();
+            if !self.incognito {
+                let _ = self.db.set_session_mask(&session_id, self.mask_through);
+            }
+        }
         self.push_history_invalidated();
         if let Some((turn_session, turn_id)) = &self.last_turn
             && turn_session == &session_id
@@ -383,6 +390,105 @@ impl App {
         )
     }
 
+    /// After a reply, clear old observations in bulk once the token trigger is met.
+    pub fn maybe_mask(&mut self) {
+        if !self.experiments.mask_tool_results || self.is_streaming() {
+            return;
+        }
+        let trigger = if self.experiments.mask_trigger_tokens > 0 {
+            self.experiments.mask_trigger_tokens
+        } else if let Some(limit) = self.context_limit() {
+            limit / 2
+        } else {
+            return;
+        };
+        if self.context_used() < trigger {
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let keep = self.experiments.mask_keep_rounds as usize;
+        let through = if keep == 0 {
+            self.messages.len()
+        } else {
+            let Some((index, _)) = self
+                .messages
+                .iter()
+                .enumerate()
+                .filter(|(i, m)| {
+                    m.role == "tool_call" && (*i == 0 || self.messages[*i - 1].role != "tool_call")
+                })
+                .rev()
+                .nth(keep - 1)
+            else {
+                return;
+            };
+            index
+        };
+        if through <= self.mask_through {
+            return;
+        }
+        // Already compacted or masked observations cannot save any more context.
+        let start = self
+            .mask_through
+            .max(self.messages.len() - self.effective_messages().len());
+        let mut count = 0;
+        let mut chars = 0;
+        for message in &self.messages[start.min(through)..through] {
+            if message.role == "tool_call"
+                && !Self::excluded_from_model_history(message)
+                && let Some(row) = parse_tool_call_row(&message.content)
+                && crate::tools::classify_tool_result(&row.result, "").is_none()
+            {
+                count += 1;
+                chars += row.result.chars().count();
+            }
+        }
+        let tokens = chars / 4;
+        if tokens < 2_000 {
+            return;
+        }
+        if !self.incognito {
+            let _ = self.db.set_session_mask(&session.id, through);
+        }
+        self.mask_through = through;
+        self.bump_cache_epoch();
+        self.push_status(format!(
+            "masked {count} old tool results (~{tokens} tokens) · experiment"
+        ));
+    }
+
+    /// Conversation estimate with cleared observations counted at their masked size.
+    pub(super) fn effective_conversation_chars(&self) -> usize {
+        let effective = self.effective_messages();
+        let offset = self.messages.len() - effective.len();
+        effective
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role != "compaction")
+            .map(|(index, m)| {
+                let chars = m.content.chars().count();
+                if self.experiments.mask_tool_results
+                    && offset + index < self.mask_through
+                    && m.role == "tool_call"
+                    && let Some(row) = parse_tool_call_row(&m.content)
+                    && crate::tools::classify_tool_result(&row.result, "").is_none()
+                {
+                    let note =
+                        crate::tools::tool_result_masked_note(&row.call.name, &row.call.arguments);
+                    return chars.saturating_sub(
+                        serde_json::Value::String(row.result)
+                            .to_string()
+                            .chars()
+                            .count(),
+                    ) + serde_json::Value::String(note).to_string().chars().count();
+                }
+                chars
+            })
+            .sum()
+    }
+
     /// The exact message list a completion request will carry: system prompt,
     /// compaction digest, then the effective conversation tail.
     /// User messages with images become multimodal parts for vision models, or
@@ -420,6 +526,12 @@ impl App {
         let mut seen_results: std::collections::HashMap<(String, String), String> =
             std::collections::HashMap::new();
         let effective = self.effective_messages();
+        let mask_through = if self.experiments.mask_tool_results {
+            self.mask_through
+                .saturating_sub(self.messages.len() - effective.len())
+        } else {
+            0
+        };
         let tool_images_dir = self
             .toolbox
             .supports_images()
@@ -450,6 +562,7 @@ impl App {
                     &mut seen_results,
                     tool_images_dir.as_deref(),
                     result_cap,
+                    mask_through,
                 );
                 continue;
             }
@@ -1118,6 +1231,9 @@ impl App {
             if !task.incognito {
                 self.maybe_generate_title();
                 self.maybe_extract_memory();
+            }
+            self.maybe_mask();
+            if !task.incognito {
                 self.maybe_compact();
             }
         }
@@ -1467,6 +1583,7 @@ impl App {
         }
         self.session = None;
         self.messages.clear();
+        self.mask_through = 0;
         self.refresh_memory_snapshot();
         self.context_total = None;
         self.push_composer_clear();
@@ -1779,12 +1896,15 @@ fn append_tool_call_history(
     seen_results: &mut std::collections::HashMap<(String, String), String>,
     tool_images_dir: Option<&std::path::Path>,
     result_cap: Option<usize>,
+    mask_through: usize,
 ) {
     let start = *index;
     let mut rows = Vec::new();
     while *index < effective.len() && effective[*index].role == "tool_call" {
         if let Some(row) = parse_tool_call_row(&effective[*index].content) {
-            rows.push(row);
+            let masked = *index < mask_through
+                && crate::tools::classify_tool_result(&row.result, "").is_none();
+            rows.push((row, masked));
         }
         *index += 1;
     }
@@ -1793,9 +1913,16 @@ fn append_tool_call_history(
         debug_assert!(*index > start);
         return;
     }
-    let calls = rows.iter().map(|row| row.call.clone()).collect::<Vec<_>>();
-    let reasoning_content = rows.iter().find_map(|row| row.reasoning_content.clone());
-    let assistant_content = rows.iter().find_map(|row| row.assistant_content.clone());
+    let calls = rows
+        .iter()
+        .map(|(row, _)| row.call.clone())
+        .collect::<Vec<_>>();
+    let reasoning_content = rows
+        .iter()
+        .find_map(|(row, _)| row.reasoning_content.clone());
+    let assistant_content = rows
+        .iter()
+        .find_map(|(row, _)| row.assistant_content.clone());
     history.push(ChatMessage {
         role: "assistant".to_string(),
         content: assistant_content.unwrap_or_default(),
@@ -1805,9 +1932,10 @@ fn append_tool_call_history(
         images: Vec::new(),
         cache_breakpoint: false,
     });
-    for row in rows {
+    for (row, masked) in rows {
         let call = row.call;
         let images = tool_images_dir
+            .filter(|_| !masked)
             .and_then(|dir| crate::provider::openrouter::extract_tool_images(&row.result, dir));
         let key = (call.name.clone(), call.arguments.clone());
         // Dedup the model-visible result so replay and live-loop seeding agree.
@@ -1815,13 +1943,17 @@ fn append_tool_call_history(
             || row.result.clone(),
             |cap| crate::tools::cap_head_tail(&row.result, cap),
         );
-        let content = match seen_results.get(&key) {
-            Some(prev) if *prev == visible => {
-                crate::tools::tool_result_unchanged_note(&call.name, &call.arguments)
-            }
-            _ => {
-                seen_results.insert(key, visible.clone());
-                visible
+        let content = if masked {
+            crate::tools::tool_result_masked_note(&call.name, &call.arguments)
+        } else {
+            match seen_results.get(&key) {
+                Some(prev) if *prev == visible => {
+                    crate::tools::tool_result_unchanged_note(&call.name, &call.arguments)
+                }
+                _ => {
+                    seen_results.insert(key, visible.clone());
+                    visible
+                }
             }
         };
         history.push(ChatMessage {

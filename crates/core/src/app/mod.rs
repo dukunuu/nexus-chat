@@ -33,6 +33,8 @@ pub mod export;
 mod files;
 pub mod headless;
 mod images;
+#[cfg(test)]
+mod masking_tests;
 mod memory;
 mod models;
 #[cfg(test)]
@@ -1154,6 +1156,8 @@ pub struct App {
 
     pub session: Option<Session>,
     pub messages: Vec<Message>,
+    /// Tool-call rows before this device-local session boundary replay masked.
+    pub mask_through: usize,
 
     /// Central event channel for all in-flight chat tasks.
     pub chat_event_tx: mpsc::UnboundedSender<ChatEvent>,
@@ -1382,6 +1386,7 @@ impl App {
             reasoning: HashMap::new(),
             session: None,
             messages: Vec::new(),
+            mask_through: 0,
             chat_event_tx,
             chat_event_rx,
             chat_tasks: HashMap::new(),

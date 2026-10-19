@@ -3771,6 +3771,14 @@ pub fn tool_result_unchanged_note(name: &str, args: &str) -> String {
     )
 }
 
+/// Marker for an old tool result cleared by the observation-masking experiment.
+pub const TOOL_RESULT_MASKED_PREFIX: &str = "[result cleared to save context — call ";
+
+/// One-line replacement for an old result; its call and arguments stay in history.
+pub fn tool_result_masked_note(name: &str, _args: &str) -> String {
+    format!("{TOOL_RESULT_MASKED_PREFIX}{name} again if you need it]")
+}
+
 /// Bound every tool result before it is sent back to the model and persisted.
 /// This is especially important for fetched web pages, which can otherwise
 /// consume the conversation context one tool call at a time.

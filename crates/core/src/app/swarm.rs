@@ -270,6 +270,7 @@ impl App {
                     self.push_status("swarm turn complete".to_string());
                     self.maybe_generate_title();
                     self.maybe_extract_memory();
+                    self.maybe_mask();
                     self.maybe_compact();
                 }
             }

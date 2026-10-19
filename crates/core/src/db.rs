@@ -393,6 +393,11 @@ pub fn migrate_cache(conn: &Connection, schema: &str) -> Result<()> {
             root TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS {schema}.session_masks (
+            session_id TEXT PRIMARY KEY,
+            mask_through INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS {schema}.tool_events (
             id INTEGER PRIMARY KEY,
             at TEXT NOT NULL,
@@ -480,6 +485,33 @@ impl Db {
             .ok()
             .flatten()
             .map(std::path::PathBuf::from)
+    }
+
+    /// Persist a session's device-local tool-result masking boundary.
+    pub fn set_session_mask(&self, id: &str, mask_through: usize) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO cache.session_masks (session_id, mask_through, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id) DO UPDATE SET
+                 mask_through = excluded.mask_through, updated_at = excluded.updated_at",
+            (id, i64::try_from(mask_through)?, Utc::now().to_rfc3339()),
+        )?;
+        Ok(())
+    }
+
+    /// Read a session's masking boundary on this device, or zero if absent.
+    pub fn session_mask(&self, id: &str) -> usize {
+        self.conn
+            .query_row(
+                "SELECT mask_through FROM cache.session_masks WHERE session_id = ?1",
+                [id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0)
     }
 
     /// The underlying connection — crate-internal access for the sync

@@ -2058,6 +2058,7 @@ impl super::App {
         let space_id = self.active_space.id.clone();
         let space_name = self.active_space.name.clone();
         self.session = Some(session.clone());
+        self.mask_through = 0;
         self.reset_work_mode();
         self.refresh_memory_snapshot();
         let prompt_cache_key = format!("research:{}", self.prompt_cache_key_for(&session.id));

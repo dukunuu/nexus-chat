@@ -248,6 +248,12 @@ impl App {
                         created_at: anchor,
                     },
                 );
+                if through < self.mask_through {
+                    self.mask_through += 1;
+                    if !self.incognito {
+                        let _ = self.db.set_session_mask(&id, self.mask_through);
+                    }
+                }
                 history_invalidated = true;
             }
         }
@@ -281,6 +287,12 @@ impl App {
                 })
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
             let _ = self.db.add_compaction_message(&id, &summary, &anchor);
+            if !in_view {
+                let mask_through = self.db.session_mask(&id);
+                if usize::try_from(through).unwrap_or(0) < mask_through {
+                    let _ = self.db.set_session_mask(&id, mask_through + 1);
+                }
+            }
         }
         self.context_total = None;
         let after_pct = self
@@ -334,6 +346,12 @@ impl App {
                 created_at: Some(anchor),
             },
         );
+        if through < self.mask_through {
+            self.mask_through += 1;
+            if !self.incognito {
+                let _ = self.db.set_session_mask(&id, self.mask_through);
+            }
+        }
         self.push_history_invalidated();
     }
 
@@ -367,14 +385,7 @@ impl App {
             skills_chars += std::fs::read_to_string(skill.dir.join("SKILL.md"))
                 .map_or(0, |md| crate::skills::skill_body(&md).chars().count());
         }
-        let mut conversation_chars: usize = self
-            .effective_messages()
-            .iter()
-            // The digest transcript row is the same text as `compact_summary`
-            // (counted below) — never double-count it.
-            .filter(|m| m.role != "compaction")
-            .map(|m| m.content.chars().count())
-            .sum();
+        let mut conversation_chars = self.effective_conversation_chars();
         if let Some(s) = self
             .session
             .as_ref()

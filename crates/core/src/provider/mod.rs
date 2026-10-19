@@ -444,8 +444,8 @@ pub struct Completion {
 /// from the incoming history so its compression decisions match what the
 /// next turn's replay will rebuild — which keeps the prompt-cache prefix
 /// continuous across turns. Note messages (marked with
-/// `TOOL_RESULT_OMITTED_PREFIX`) never update the map, exactly as in the
-/// replay.
+/// `TOOL_RESULT_OMITTED_PREFIX` or `TOOL_RESULT_MASKED_PREFIX`) never update
+/// the map, exactly as in the replay.
 pub fn seed_tool_result_dedup(
     messages: &[ChatMessage],
 ) -> std::collections::HashMap<(String, String), String> {
@@ -466,6 +466,9 @@ pub fn seed_tool_result_dedup(
             && !msg
                 .content
                 .starts_with(crate::tools::TOOL_RESULT_OMITTED_PREFIX)
+            && !msg
+                .content
+                .starts_with(crate::tools::TOOL_RESULT_MASKED_PREFIX)
         {
             seen.insert((name, args), msg.content.clone());
         }

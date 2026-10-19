@@ -401,14 +401,7 @@ impl App {
             chars += std::fs::read_to_string(skill.dir.join("SKILL.md"))
                 .map_or(0, |md| crate::skills::skill_body(&md).chars().count());
         }
-        chars += self
-            .effective_messages()
-            .iter()
-            // The digest transcript row duplicates `compact_summary` (counted
-            // above) — never double-count it.
-            .filter(|m| m.role != "compaction")
-            .map(|m| m.content.chars().count())
-            .sum::<usize>();
+        chars += self.effective_conversation_chars();
         if let Some(buf) = self.active_streaming_text() {
             chars += buf.chars().count();
         }
