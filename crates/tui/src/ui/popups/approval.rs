@@ -40,10 +40,15 @@ fn escaped_rows(text: &str, width: usize, normal: Style, dim: Style) -> Vec<Line
 }
 
 fn shell_unread(app: &AppView) -> bool {
-    app.approval_request
-        .as_ref()
-        .is_some_and(|request| request.tool == "shell")
-        && app.approval_max_scroll.get() > 0
+    app.approval_request.as_ref().is_some_and(|request| {
+        request.tool == "shell"
+            || (request.tool == "wave"
+                && request.summary.lines().next().is_some_and(|counts| {
+                    counts
+                        .split(", ")
+                        .any(|count| count.ends_with(" command") || count.ends_with(" commands"))
+                }))
+    }) && app.approval_max_scroll.get() > 0
         && !app.approval_seen_end.get()
 }
 
@@ -56,8 +61,10 @@ pub fn render(f: &mut Frame, app: &AppView) {
     let width = usize::from(inner.width);
     let height = usize::from(inner.height);
     let dim = Style::default().fg(app.theme.fg_dim);
+    let wave = request.tool == "wave";
+    let header = if wave { "approve" } else { &request.tool };
     let mut lines = escaped_rows(
-        &format!("{} · {}", request.tool, request.action),
+        &format!("{header} · {}", request.action),
         width,
         Style::default().fg(app.theme.accent),
         dim,
@@ -86,7 +93,11 @@ pub fn render(f: &mut Frame, app: &AppView) {
     } else {
         " approve ".to_string()
     };
-    let hint = if shell_unread(app) {
+    let hint = if wave && shell_unread(app) {
+        "↑↓ scroll · scroll to the end to approve · r review each · n deny all"
+    } else if wave {
+        "y approve all · a all for this session · r review each · n deny all"
+    } else if shell_unread(app) {
         "↑↓ scroll · scroll to the end to allow · n deny"
     } else if max_scroll > 0 {
         "↑↓ scroll · y allow · a allow for this session · n deny"
@@ -144,10 +155,19 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> anyhow::Result<()> {
         KeyCode::Char('y') if !super::is_chord(key) => Decision::Allow,
         KeyCode::Char('a') if !super::is_chord(key) => Decision::AllowForSession,
         KeyCode::Char('n') if !super::is_chord(key) => Decision::Deny,
+        KeyCode::Char('r')
+            if !super::is_chord(key)
+                && app
+                    .approval_request
+                    .as_ref()
+                    .is_some_and(|request| request.tool == "wave") =>
+        {
+            Decision::ReviewEach
+        }
         _ => return Ok(()),
     };
     if decision != Decision::Deny
-        && (shell_unread(app)
+        && ((decision != Decision::ReviewEach && shell_unread(app))
             || app
                 .approval_opened_at
                 .is_some_and(|opened| opened.elapsed() < app.approval_delay))
@@ -155,4 +175,106 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> anyhow::Result<()> {
         return Ok(());
     }
     app.execute(AppCommand::Approve { decision })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nexus_core::app::{App, Popup};
+    use nexus_core::db::Db;
+    use nexus_core::space::Space;
+    use nexus_core::tools::ApprovalRequest;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use std::time::{Duration, Instant};
+
+    fn wave_app(summary: String) -> (AppView, tokio::sync::oneshot::Receiver<Decision>) {
+        let root = std::env::temp_dir().join(format!("nexus-wave-popup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = AppView::new(App::new(
+            Db::open_in_memory().unwrap(),
+            Some("k"),
+            Space { root },
+        ));
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.pending_approval = Some(sender);
+        app.pending_approval_request = Some(ApprovalRequest {
+            tool: "wave".into(),
+            action: "2 calls".into(),
+            summary,
+        });
+        app.sync_approval_popup();
+        (app, receiver)
+    }
+
+    fn draw(app: &AppView) {
+        Terminal::new(TestBackend::new(120, 24))
+            .unwrap()
+            .draw(|f| render(f, app))
+            .unwrap();
+    }
+
+    #[test]
+    fn wave_keys_map_to_combined_decisions_and_keep_the_open_delay() {
+        for (key, expected) in [
+            (KeyCode::Char('y'), Decision::Allow),
+            (KeyCode::Char('a'), Decision::AllowForSession),
+            (KeyCode::Char('r'), Decision::ReviewEach),
+            (KeyCode::Char('n'), Decision::Deny),
+            (KeyCode::Esc, Decision::Deny),
+        ] {
+            let (mut app, mut receiver) = wave_app(
+                "1 edit, 1 command\n1. fs write\n  write one\n2. shell run\n  $ true".into(),
+            );
+            let root = app.space.root.clone();
+            draw(&app);
+            app.approval_delay = Duration::from_millis(400);
+            app.approval_opened_at = Some(Instant::now() + Duration::from_secs(1));
+            handle_key(&mut app, key.into()).unwrap();
+            if expected != Decision::Deny {
+                assert!(receiver.try_recv().is_err());
+                assert_eq!(app.popup, Popup::Approval);
+                app.approval_opened_at = Some(Instant::now() - Duration::from_secs(1));
+                handle_key(&mut app, key.into()).unwrap();
+            }
+            assert_eq!(receiver.try_recv().unwrap(), expected);
+            assert_eq!(app.popup, Popup::None);
+            assert!(app.pending_approval.is_none());
+            drop(app);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn combined_shell_requires_scrolling_for_allow_but_not_review_or_denial() {
+        for (key, expected) in [
+            (KeyCode::Char('y'), Decision::Allow),
+            (KeyCode::Char('a'), Decision::AllowForSession),
+            (KeyCode::Char('r'), Decision::ReviewEach),
+            (KeyCode::Esc, Decision::Deny),
+        ] {
+            let summary = format!(
+                "1 edit, 1 command\n1. fs edit\n{}\n2. shell run\n  $ echo LAST_COMMAND",
+                "  +a line of diff\n".repeat(50)
+            );
+            let (mut app, mut receiver) = wave_app(summary);
+            let root = app.space.root.clone();
+            draw(&app);
+            assert!(app.approval_max_scroll.get() > 0);
+            assert!(!app.approval_seen_end.get());
+            handle_key(&mut app, key.into()).unwrap();
+            if matches!(expected, Decision::Allow | Decision::AllowForSession) {
+                assert!(receiver.try_recv().is_err());
+                while app.approval_scroll.get() < app.approval_max_scroll.get() {
+                    handle_key(&mut app, KeyCode::PageDown.into()).unwrap();
+                    draw(&app);
+                }
+                assert!(app.approval_seen_end.get());
+                handle_key(&mut app, key.into()).unwrap();
+            }
+            assert_eq!(receiver.try_recv().unwrap(), expected);
+            drop(app);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
 }

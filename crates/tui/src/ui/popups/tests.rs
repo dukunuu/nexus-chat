@@ -278,6 +278,52 @@ fn approval_ignores_allow_keys_during_the_open_delay_but_never_delays_denial() {
 }
 
 #[test]
+fn approval_popup_combined_wave_snapshot() {
+    let (mut app, _receiver) = approval_app(
+        "wave",
+        "2 edits, 1 command\n1. fs edit\n  edit one\n  --- a/one\n  +++ b/one\n  @@ -1 +1 @@\n  -old\n  +new\n2. fs write\n  write two\n3. shell run\n  $ cargo test".into(),
+    );
+    let root = app.space.root.clone();
+    app.pending_approval_request.as_mut().unwrap().action = "3 calls".into();
+    app.sync_approval_popup();
+    let screen = render_to_string(120, 40, |f| super::approval::render(f, &app));
+    assert!(screen.contains(" approve "), "{screen}");
+    assert!(
+        screen.contains("y approve all · a all for this session · r review each · n deny all"),
+        "{screen}"
+    );
+    let snapshot: Vec<_> = screen
+        .lines()
+        .filter_map(|line| {
+            let (_, body) = line.split_once('│')?;
+            let (body, _) = body.rsplit_once('│')?;
+            let body = body.trim_end();
+            (!body.trim().is_empty()).then_some(body)
+        })
+        .collect();
+    assert_eq!(
+        snapshot,
+        [
+            " approve · 3 calls",
+            " 2 edits, 1 command",
+            " 1. fs edit",
+            "   edit one",
+            "   --- a/one",
+            "   +++ b/one",
+            "   @@ -1 +1 @@",
+            "   -old",
+            "   +new",
+            " 2. fs write",
+            "   write two",
+            " 3. shell run",
+            "   $ cargo test",
+        ]
+    );
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn approval_popup_shell_and_diff_snapshots() {
     let mut app = test_app();
     let root = app.space.root.clone();

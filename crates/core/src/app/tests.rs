@@ -4378,6 +4378,216 @@ async fn allow_for_session_answers_waiting_requests_of_the_same_kind_unseen() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+fn wave_requests() -> Vec<ApprovalRequest> {
+    [
+        ("fs", "edit", "edit a\n-old\n+new"),
+        ("fs", "write", "write b"),
+        ("fs", "move", "move c -> d"),
+        ("fs", "delete", "delete e (1 lines)"),
+        ("shell", "run", "$ true"),
+    ]
+    .into_iter()
+    .map(|(tool, action, summary)| ApprovalRequest {
+        tool: tool.into(),
+        action: action.into(),
+        summary: summary.into(),
+    })
+    .collect()
+}
+
+#[tokio::test]
+async fn channel_wave_summary_and_decisions_remember_every_requested_kind() {
+    for (answer, expected) in [
+        (Decision::Allow, WaveDecision::AllowAll),
+        (Decision::AllowForSession, WaveDecision::AllowAllForSession),
+        (Decision::ReviewEach, WaveDecision::ReviewEach),
+        (Decision::Deny, WaveDecision::DenyAll),
+    ] {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let approver = ChannelApprover::new(sender);
+        let requests = wave_requests();
+        let (decision, ()) = tokio::join!(approver.request_many(requests.clone()), async {
+            let (shown, reply) = receiver.recv().await.unwrap();
+            assert_eq!(shown.tool, "wave");
+            assert_eq!(shown.action, "5 calls");
+            assert_eq!(
+                shown.summary,
+                "2 edits, 1 move, 1 delete, 1 command\n1. fs edit\n  edit a\n  -old\n  +new\n2. fs write\n  write b\n3. fs move\n  move c -> d\n4. fs delete\n  delete e (1 lines)\n5. shell run\n  $ true"
+            );
+            reply.send(answer).unwrap();
+        });
+        assert_eq!(decision, expected);
+        if answer == Decision::AllowForSession {
+            assert_eq!(
+                approver.request_many(requests.clone()).await,
+                WaveDecision::AllowAll
+            );
+            for request in requests {
+                assert_eq!(approver.request(request).await, Decision::Allow);
+            }
+            assert!(receiver.try_recv().is_err());
+        } else {
+            assert!(approver.allowed.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn channel_wave_drops_granted_kinds_and_uses_a_plain_prompt_for_one_remaining_kind() {
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let approver = ChannelApprover::new(sender);
+    let requests = wave_requests();
+    let edit = requests[0].clone();
+    let delete = requests[3].clone();
+    let shell = requests[4].clone();
+    let (_, ()) = tokio::join!(approver.request(edit.clone()), async {
+        receiver
+            .recv()
+            .await
+            .unwrap()
+            .1
+            .send(Decision::AllowForSession)
+            .unwrap();
+    });
+    let (decision, ()) = tokio::join!(
+        approver.request_many(vec![edit.clone(), delete.clone(), shell]),
+        async {
+            let (shown, reply) = receiver.recv().await.unwrap();
+            assert_eq!(shown.action, "2 calls");
+            assert!(
+                shown
+                    .summary
+                    .starts_with("1 delete, 1 command\n1. fs delete\n")
+            );
+            assert!(!shown.summary.contains("edit a"));
+            reply.send(Decision::Deny).unwrap();
+        }
+    );
+    assert_eq!(decision, WaveDecision::DenyAll);
+    assert_eq!(
+        approver.request_many(vec![edit.clone()]).await,
+        WaveDecision::AllowAll
+    );
+    assert_eq!(
+        approver.request_many(vec![edit, delete.clone()]).await,
+        WaveDecision::ReviewEach
+    );
+    assert!(receiver.try_recv().is_err());
+    let (decision, ()) = tokio::join!(approver.request(delete.clone()), async {
+        let (shown, reply) = receiver.recv().await.unwrap();
+        assert_eq!(shown, delete);
+        reply.send(Decision::Allow).unwrap();
+    });
+    assert_eq!(decision, Decision::Allow);
+}
+
+#[tokio::test]
+async fn remembered_shell_kind_does_not_allow_an_unparseable_command_without_review() {
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let approver = ChannelApprover::new(sender);
+    let shell = wave_requests().pop().unwrap();
+    let (_, ()) = tokio::join!(approver.request(shell.clone()), async {
+        receiver
+            .recv()
+            .await
+            .unwrap()
+            .1
+            .send(Decision::AllowForSession)
+            .unwrap();
+    });
+    let unparseable = ApprovalRequest {
+        summary: "could not parse safely: computed command word\n$ \"$COMMAND\"".into(),
+        ..shell
+    };
+    let (decision, ()) = tokio::join!(approver.request(unparseable.clone()), async {
+        let (shown, reply) = receiver.recv().await.unwrap();
+        assert_eq!(shown, unparseable);
+        reply.send(Decision::Deny).unwrap();
+    });
+    assert_eq!(decision, Decision::Deny);
+}
+
+#[test]
+fn remembering_shell_permission_keeps_queued_unparseable_commands_for_individual_review() {
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    let shell = wave_requests().pop().unwrap();
+    let (first, mut first_answer) = oneshot::channel();
+    let (second, mut second_answer) = oneshot::channel();
+    app.pending_approval = Some(first);
+    app.pending_approval_request = Some(shell.clone());
+    let unparseable = ApprovalRequest {
+        summary: "could not parse safely: computed command word\n$ \"$COMMAND\"".into(),
+        ..shell
+    };
+    app.approval_queue.push_back((unparseable.clone(), second));
+    app.execute(AppCommand::Approve {
+        decision: Decision::AllowForSession,
+    })
+    .unwrap();
+    assert_eq!(first_answer.try_recv().unwrap(), Decision::AllowForSession);
+    assert!(second_answer.try_recv().is_err());
+    assert_eq!(app.pending_approval_request.as_ref(), Some(&unparseable));
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn combined_approval_cancels_with_its_caller_and_denies_closed_channels() {
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let approver = Arc::new(ChannelApprover::new(sender));
+    let caller = tokio::spawn({
+        let approver = approver.clone();
+        async move { approver.request_many(wave_requests()).await }
+    });
+    let (shown, mut reply) = receiver.recv().await.unwrap();
+    assert_eq!(shown.tool, "wave");
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    reply.closed().await;
+    assert!(reply.is_closed());
+    assert!(approver.allowed.lock().unwrap().is_empty());
+    drop(receiver);
+    assert_eq!(
+        approver.request_many(wave_requests()).await,
+        WaveDecision::DenyAll
+    );
+}
+
+#[test]
+fn allowing_a_wave_for_the_session_never_allows_an_unrelated_queued_wave_by_count() {
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    let request = ApprovalRequest {
+        tool: "wave".into(),
+        action: "2 calls".into(),
+        summary: "2 edits".into(),
+    };
+    let (first, mut first_answer) = oneshot::channel();
+    let (second, mut second_answer) = oneshot::channel();
+    app.pending_approval = Some(first);
+    app.pending_approval_request = Some(request.clone());
+    app.approval_queue.push_back((
+        ApprovalRequest {
+            summary: "2 deletes".into(),
+            ..request
+        },
+        second,
+    ));
+    app.execute(AppCommand::Approve {
+        decision: Decision::AllowForSession,
+    })
+    .unwrap();
+    assert_eq!(first_answer.try_recv().unwrap(), Decision::AllowForSession);
+    assert!(second_answer.try_recv().is_err());
+    assert_eq!(
+        app.pending_approval_request.as_ref().unwrap().summary,
+        "2 deletes"
+    );
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn approvals_whose_tool_call_went_away_are_skipped() {
     let mut app = app_with_key();
@@ -4386,7 +4596,7 @@ async fn approvals_whose_tool_call_went_away_are_skipped() {
     app.approval_rx = Some(receiver);
     let (_, mut first_answer) = queued_request(&sender, "write", "write a");
     let (_, dropped_answer) = queued_request(&sender, "write", "write b");
-    let (third, mut third_answer) = queued_request(&sender, "write", "write c");
+    let (third, third_answer) = queued_request(&sender, "write", "write c");
     receive_approvals(&mut app, 3).await;
     drop(dropped_answer);
     assert_eq!(app.approval_count(), 2);

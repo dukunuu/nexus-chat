@@ -8,13 +8,14 @@
     clippy::cast_sign_loss
 )]
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::tools::{ApprovalRequest, Approver, Decision};
+use crate::tools::{ApprovalRequest, Approver, Decision, WaveDecision};
 
 use crate::config;
 use crate::db::{DEFAULT_SPACE, Db, Message, Session, Space as SpaceRow};
@@ -96,11 +97,12 @@ impl Approver for ChannelApprover {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Decision> + Send + '_>> {
         Box::pin(async move {
             let key = (req.tool.clone(), req.action.clone());
-            if self
-                .allowed
-                .lock()
-                .expect("approval permissions")
-                .contains(&key)
+            if !req.summary.starts_with("could not parse safely:")
+                && self
+                    .allowed
+                    .lock()
+                    .expect("approval permissions")
+                    .contains(&key)
             {
                 return Decision::Allow;
             }
@@ -116,6 +118,68 @@ impl Approver for ChannelApprover {
                     .insert(key);
             }
             decision
+        })
+    }
+
+    fn request_many(
+        &self,
+        mut reqs: Vec<ApprovalRequest>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WaveDecision> + Send + '_>> {
+        Box::pin(async move {
+            {
+                let allowed = self.allowed.lock().expect("approval permissions");
+                reqs.retain(|req| !allowed.contains(&(req.tool.clone(), req.action.clone())));
+            }
+            match reqs.len() {
+                0 => return WaveDecision::AllowAll,
+                1 => return WaveDecision::ReviewEach,
+                _ => {}
+            }
+            let mut counts = [0; 4];
+            for req in &reqs {
+                let index = match (req.tool.as_str(), req.action.as_str()) {
+                    ("fs", "edit" | "write") => 0,
+                    ("fs", "move") => 1,
+                    ("fs", "delete") => 2,
+                    ("shell", _) => 3,
+                    _ => continue,
+                };
+                counts[index] += 1;
+            }
+            let mut summary = counts
+                .into_iter()
+                .zip(["edit", "move", "delete", "command"])
+                .filter(|(count, _)| *count > 0)
+                .map(|(count, kind)| format!("{count} {kind}{}", if count == 1 { "" } else { "s" }))
+                .collect::<Vec<_>>()
+                .join(", ");
+            for (index, req) in reqs.iter().enumerate() {
+                let _ = write!(summary, "\n{}. {} {}", index + 1, req.tool, req.action);
+                for line in req.summary.split('\n') {
+                    let _ = write!(summary, "\n  {line}");
+                }
+            }
+            let request = ApprovalRequest {
+                tool: "wave".to_string(),
+                action: format!("{} calls", reqs.len()),
+                summary,
+            };
+            let (sender, receiver) = oneshot::channel();
+            if self.sender.send((request, sender)).is_err() {
+                return WaveDecision::DenyAll;
+            }
+            match receiver.await.unwrap_or(Decision::Deny) {
+                Decision::Allow => WaveDecision::AllowAll,
+                Decision::AllowForSession => {
+                    self.allowed
+                        .lock()
+                        .expect("approval permissions")
+                        .extend(reqs.into_iter().map(|req| (req.tool, req.action)));
+                    WaveDecision::AllowAllForSession
+                }
+                Decision::ReviewEach => WaveDecision::ReviewEach,
+                Decision::Deny => WaveDecision::DenyAll,
+            }
         })
     }
 }
@@ -2082,7 +2146,7 @@ impl App {
             let _ = sender.send(decision);
         }
         if decision == Decision::AllowForSession
-            && let Some(request) = request
+            && let Some(request) = request.filter(|request| request.tool != "wave")
         {
             if let Some(receiver) = self.approval_rx.as_mut() {
                 while let Ok(item) = receiver.try_recv() {
@@ -2090,7 +2154,10 @@ impl App {
                 }
             }
             for (queued, reply) in std::mem::take(&mut self.approval_queue) {
-                if queued.tool == request.tool && queued.action == request.action {
+                if queued.tool == request.tool
+                    && queued.action == request.action
+                    && !queued.summary.starts_with("could not parse safely:")
+                {
                     let _ = reply.send(Decision::Allow);
                 } else {
                     self.approval_queue.push_back((queued, reply));

@@ -117,11 +117,39 @@ pub enum Decision {
     Allow,
     AllowForSession,
     Deny,
+    /// Fall back to individual prompts for a combined request.
+    ReviewEach,
+}
+
+/// Permission for every call in a response, or a return to individual prompts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveDecision {
+    AllowAll,
+    AllowAllForSession,
+    ReviewEach,
+    DenyAll,
+}
+
+/// Pre-approval outcome for one scheduled call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gate {
+    NotNeeded,
+    Approved,
+    Denied,
+    AskEach,
 }
 
 /// Interactive permission provider; absent in headless toolboxes.
 pub trait Approver: Send + Sync {
     fn request(&self, req: ApprovalRequest) -> Pin<Box<dyn Future<Output = Decision> + Send + '_>>;
+
+    /// Ask once for several actions; providers without a combined prompt review each.
+    fn request_many(
+        &self,
+        _reqs: Vec<ApprovalRequest>,
+    ) -> Pin<Box<dyn Future<Output = WaveDecision> + Send + '_>> {
+        Box::pin(std::future::ready(WaveDecision::ReviewEach))
+    }
 }
 
 // Independent capability and privacy switches, not mutually exclusive states.
@@ -480,6 +508,22 @@ pub trait ToolExecutor: Send + Sync + 'static {
         name: &'a str,
         args: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (String, String)> + Send + 'a>>;
+    /// Collect permission for a response before any of its calls run.
+    fn preapprove<'a>(
+        &'a self,
+        calls: &'a [(String, String)],
+    ) -> Pin<Box<dyn Future<Output = Vec<Gate>> + Send + 'a>> {
+        Box::pin(std::future::ready(vec![Gate::NotNeeded; calls.len()]))
+    }
+    /// Run a call with its pre-approval outcome; executors without a gate use `run`.
+    fn run_gated<'a>(
+        &'a self,
+        name: &'a str,
+        args: &'a str,
+        _gate: Gate,
+    ) -> Pin<Box<dyn Future<Output = (String, String)> + Send + 'a>> {
+        self.run(name, args)
+    }
     /// Whether the current model accepts image inputs.
     fn supports_images(&self) -> bool;
     /// The active space's files dir, for resolving image references in tool
@@ -592,6 +636,61 @@ impl ToolExecutor for ToolBox {
         Box::pin(ToolBox::run(self, name, args))
     }
 
+    fn preapprove<'a>(
+        &'a self,
+        calls: &'a [(String, String)],
+    ) -> Pin<Box<dyn Future<Output = Vec<Gate>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut gates = vec![Gate::NotNeeded; calls.len()];
+            if !self.require_approval || self.research_only {
+                return gates;
+            }
+            let mut requests = Vec::new();
+            let mut indices = Vec::new();
+            for (index, (name, args)) in calls.iter().enumerate() {
+                let Ok((name, args)) = public_call(name, args) else {
+                    continue;
+                };
+                if !(name.starts_with("fs_") || name == "shell_run")
+                    || is_read_only_tool(&name, &args)
+                {
+                    continue;
+                }
+                let Ok(request) = self.approval_request(&name, &args) else {
+                    continue;
+                };
+                gates[index] = Gate::AskEach;
+                if request.summary.starts_with("could not parse safely:") {
+                    continue;
+                }
+                requests.push(request);
+                indices.push(index);
+            }
+            if requests.len() >= 2
+                && let Some(approver) = &self.approver
+            {
+                let gate = match approver.request_many(requests).await {
+                    WaveDecision::AllowAll | WaveDecision::AllowAllForSession => Gate::Approved,
+                    WaveDecision::ReviewEach => Gate::AskEach,
+                    WaveDecision::DenyAll => Gate::Denied,
+                };
+                for index in indices {
+                    gates[index] = gate;
+                }
+            }
+            gates
+        })
+    }
+
+    fn run_gated<'a>(
+        &'a self,
+        name: &'a str,
+        args: &'a str,
+        gate: Gate,
+    ) -> Pin<Box<dyn Future<Output = (String, String)> + Send + 'a>> {
+        Box::pin(self.run_with_gate(name, args, gate))
+    }
+
     fn supports_images(&self) -> bool {
         self.supports_images
     }
@@ -611,8 +710,9 @@ pub(crate) async fn run_scheduled(
 ) -> Vec<(String, String)> {
     use futures_util::StreamExt as _;
 
+    let gates = exec.preapprove(calls).await;
     if let [(name, args)] = calls {
-        return vec![exec.run(name, args).await];
+        return vec![exec.run_gated(name, args, gates[0]).await];
     }
     let effects: Vec<Effect> = calls
         .iter()
@@ -623,7 +723,7 @@ pub(crate) async fn run_scheduled(
         let done: Vec<(String, String)> = futures_util::stream::iter(
             wave.iter()
                 .copied()
-                .map(|index| exec.run(&calls[index].0, &calls[index].1)),
+                .map(|index| exec.run_gated(&calls[index].0, &calls[index].1, gates[index])),
         )
         .buffered(MAX_PARALLEL_CALLS)
         .collect()
@@ -1074,8 +1174,12 @@ impl ToolBox {
     /// Run a tool by name. Returns `(result text sent back to the model,
     /// status label shown in the UI while it runs)`.
     pub async fn run(&self, name: &str, args: &str) -> (String, String) {
+        self.run_with_gate(name, args, Gate::NotNeeded).await
+    }
+
+    async fn run_with_gate(&self, name: &str, args: &str, gate: Gate) -> (String, String) {
         let started = Instant::now();
-        let (result, status) = self.run_inner(name, args).await;
+        let (result, status) = self.run_inner(name, args, gate).await;
         let latency = started.elapsed();
         let error_kind = classify_tool_result(&result, &status);
         let outcome = ToolOutcome {
@@ -1176,7 +1280,13 @@ impl ToolBox {
 
     // Long by design: the model tool dispatch (each arm is one tool).
     #[allow(clippy::too_many_lines)]
-    async fn run_inner(&self, name: &str, args: &str) -> (String, String) {
+    async fn run_inner(&self, name: &str, args: &str, gate: Gate) -> (String, String) {
+        if gate == Gate::Denied {
+            return (
+                "denied by the user · ask what they want instead of retrying".to_string(),
+                "blocked".to_string(),
+            );
+        }
         if self.research_only
             && !matches!(
                 name,
@@ -1203,20 +1313,28 @@ impl ToolBox {
                 Ok(request) => request,
                 Err(error) => return (error, "blocked".to_string()),
             };
-            let Some(approver) = &self.approver else {
-                return (
-                    "needs approval · not available here (headless); describe the change and let the user apply it".to_string(),
-                    "blocked".to_string(),
-                );
-            };
             let unparseable = request.summary.starts_with("could not parse safely:");
-            if approver.request(request).await == Decision::Deny {
-                return (
-                    "denied by the user · ask what they want instead of retrying".to_string(),
-                    "blocked".to_string(),
-                );
+            if gate != Gate::Approved || unparseable {
+                let Some(approver) = &self.approver else {
+                    return (
+                        "needs approval · not available here (headless); describe the change and let the user apply it".to_string(),
+                        "blocked".to_string(),
+                    );
+                };
+                // Only an explicit allow runs the call; anything else
+                // (deny, or a review answer meant for a combined prompt) is
+                // a denial.
+                if !matches!(
+                    approver.request(request).await,
+                    Decision::Allow | Decision::AllowForSession
+                ) {
+                    return (
+                        "denied by the user · ask what they want instead of retrying".to_string(),
+                        "blocked".to_string(),
+                    );
+                }
+                allow_unparseable = unparseable;
             }
-            allow_unparseable = unparseable;
         }
         let (result, status) = match name {
             "propose_command" => {
@@ -1259,7 +1377,10 @@ impl ToolBox {
                     action: "agent".to_string(),
                     summary: format!("switch this session to agent mode in {root}\n{reason}"),
                 };
-                if approver.request(request).await == Decision::Deny {
+                if !matches!(
+                    approver.request(request).await,
+                    Decision::Allow | Decision::AllowForSession
+                ) {
                     return (
                         "denied by the user · ask what they want instead of retrying".to_string(),
                         "blocked".to_string(),
@@ -9766,5 +9887,339 @@ mod tests {
         assert_eq!(results.len(), 12);
         assert_eq!(results[11].0, "read /w/11");
         assert_eq!(exec.peak.load(std::sync::atomic::Ordering::SeqCst), 8);
+    }
+
+    struct WaveApprover {
+        decision: WaveDecision,
+        each: Decision,
+        requests: std::sync::Mutex<Vec<ApprovalRequest>>,
+        waves: std::sync::Mutex<Vec<Vec<ApprovalRequest>>>,
+    }
+
+    impl WaveApprover {
+        fn new(decision: WaveDecision, each: Decision) -> Arc<Self> {
+            Arc::new(Self {
+                decision,
+                each,
+                requests: std::sync::Mutex::default(),
+                waves: std::sync::Mutex::default(),
+            })
+        }
+    }
+
+    impl Approver for WaveApprover {
+        fn request(
+            &self,
+            req: ApprovalRequest,
+        ) -> Pin<Box<dyn Future<Output = Decision> + Send + '_>> {
+            self.requests.lock().unwrap().push(req);
+            Box::pin(std::future::ready(self.each))
+        }
+
+        fn request_many(
+            &self,
+            reqs: Vec<ApprovalRequest>,
+        ) -> Pin<Box<dyn Future<Output = WaveDecision> + Send + '_>> {
+            self.waves.lock().unwrap().push(reqs);
+            Box::pin(std::future::ready(self.decision))
+        }
+    }
+
+    async fn editable_wave(toolbox: &ToolBox) -> Vec<(String, String)> {
+        let root = toolbox.workspace.as_ref().unwrap().root();
+        let mut calls = Vec::new();
+        for path in ["one", "two"] {
+            std::fs::write(root.join(path), "original\n").unwrap();
+            toolbox
+                .run("fs", &json!({"action": "read", "path": path}).to_string())
+                .await;
+            calls.push((
+                "fs".to_string(),
+                json!({
+                    "action": "edit", "path": path,
+                    "edits": [{"hash": line_hash("original"), "new": "replacement"}],
+                })
+                .to_string(),
+            ));
+        }
+        calls.push((
+            "shell".to_string(),
+            json!({"action": "run", "cmd": "printf approved > command-ran"}).to_string(),
+        ));
+        calls
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wave_decisions_allow_deny_or_review_every_call_before_running() {
+        for decision in [
+            WaveDecision::AllowAll,
+            WaveDecision::DenyAll,
+            WaveDecision::ReviewEach,
+        ] {
+            let (mut toolbox, dir) = fs_toolbox();
+            toolbox.require_approval = true;
+            toolbox.db_path = Some(dir.join("nexus.db"));
+            let approver = WaveApprover::new(decision, Decision::Allow);
+            toolbox.approver = Some(approver.clone());
+            let calls = editable_wave(&toolbox).await;
+            let results = run_scheduled(&toolbox, &calls).await;
+            let waves = approver.waves.lock().unwrap();
+            assert_eq!(waves.len(), 1);
+            assert_eq!(waves[0].len(), 3);
+            assert_eq!(waves[0][0].action, "edit");
+            assert!(waves[0][0].summary.contains("-original\n+replacement"));
+            assert!(waves[0][1].summary.starts_with("edit two\n"));
+            assert_eq!(waves[0][2].tool, "shell");
+            assert_eq!(results.len(), 3);
+            let denied = decision == WaveDecision::DenyAll;
+            let root = toolbox.workspace.as_ref().unwrap().root();
+            for path in ["one", "two"] {
+                assert_eq!(
+                    std::fs::read_to_string(root.join(path)).unwrap(),
+                    if denied {
+                        "original\n"
+                    } else {
+                        "replacement\n"
+                    }
+                );
+            }
+            assert_eq!(root.join("command-ran").exists(), !denied);
+            if denied {
+                for (result, status) in results {
+                    assert_eq!(
+                        result,
+                        "denied by the user · ask what they want instead of retrying"
+                    );
+                    assert_eq!(status, "blocked");
+                }
+            } else {
+                assert!(results[0].0.starts_with("edited one"), "{results:?}");
+                assert!(results[1].0.starts_with("edited two"), "{results:?}");
+                assert!(results[2].0.starts_with("exit 0"), "{results:?}");
+            }
+            assert_eq!(
+                approver.requests.lock().unwrap().len(),
+                if decision == WaveDecision::ReviewEach {
+                    3
+                } else {
+                    0
+                }
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn single_gated_call_uses_the_original_prompt_and_default_approvers_review_each() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        let approver = WaveApprover::new(WaveDecision::DenyAll, Decision::Allow);
+        toolbox.approver = Some(approver.clone());
+        let calls = wave_calls(&[("fs", r#"{"action":"write","path":"new","content":"yes"}"#)]);
+        assert!(
+            run_scheduled(&toolbox, &calls).await[0]
+                .0
+                .starts_with("wrote new")
+        );
+        assert_eq!(approver.requests.lock().unwrap().len(), 1);
+        assert!(approver.waves.lock().unwrap().is_empty());
+        let default = FakeApprover::new(Decision::Deny);
+        toolbox.approver = Some(default.clone());
+        let calls = wave_calls(&[
+            ("fs", r#"{"action":"write","path":"a","content":"no"}"#),
+            ("fs", r#"{"action":"write","path":"b","content":"no"}"#),
+        ]);
+        let results = run_scheduled(&toolbox, &calls).await;
+        assert!(
+            results
+                .iter()
+                .all(|(result, _)| result.starts_with("denied"))
+        );
+        assert_eq!(default.requests.lock().unwrap().len(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_edits_blocked_escalation_and_bad_args_are_not_in_the_wave_prompt() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        toolbox.db_path = Some(dir.join("nexus.db"));
+        let approver = WaveApprover::new(WaveDecision::AllowAll, Decision::Allow);
+        toolbox.approver = Some(approver.clone());
+        let mut calls = editable_wave(&toolbox).await;
+        let root = toolbox.workspace.as_ref().unwrap().root();
+        std::fs::write(root.join("one"), "changed\n").unwrap();
+        calls.extend(wave_calls(&[
+            ("shell", r#"{"action":"run","cmd":"sudo true"}"#),
+            ("fs", r#"{"action":"write","path":"invalid"}"#),
+        ]));
+        let results = run_scheduled(&toolbox, &calls).await;
+        assert!(results[0].0.contains("changed since your last read"));
+        assert!(results[3].0.starts_with("privilege escalation is blocked"));
+        assert!(results[4].0.starts_with("missing required field"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("one")).unwrap(),
+            "changed\n"
+        );
+        let waves = approver.waves.lock().unwrap();
+        assert_eq!(waves.len(), 1);
+        assert_eq!(waves[0].len(), 2);
+        assert!(waves[0][0].summary.starts_with("edit two\n"));
+        assert_eq!(waves[0][1].tool, "shell");
+        assert!(approver.requests.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn approved_calls_still_check_staleness_escalation_and_confinement() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        toolbox.approver = Some(WaveApprover::new(WaveDecision::AllowAll, Decision::Deny));
+        let calls = editable_wave(&toolbox).await;
+        let gates = toolbox.preapprove(&calls).await;
+        assert_eq!(gates, vec![Gate::Approved; 3]);
+        let path = toolbox.workspace.as_ref().unwrap().root().join("one");
+        std::fs::write(&path, "changed\n").unwrap();
+        let (result, _) = toolbox.run_gated(&calls[0].0, &calls[0].1, gates[0]).await;
+        assert!(result.contains("changed since your last read"), "{result}");
+        for (name, args, refusal) in [
+            (
+                "shell",
+                r#"{"action":"run","cmd":"sudo true"}"#,
+                "privilege escalation is blocked",
+            ),
+            (
+                "fs",
+                r#"{"action":"write","path":"../outside","content":"no"}"#,
+                "path escapes",
+            ),
+        ] {
+            let (result, status) = toolbox.run_gated(name, args, Gate::Approved).await;
+            assert!(result.starts_with(refusal), "{result}");
+            assert_eq!(status, "blocked");
+        }
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "changed\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unparseable_shell_is_reviewed_separately_even_with_an_approved_gate() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        toolbox.db_path = Some(dir.join("nexus.db"));
+        let approver = WaveApprover::new(WaveDecision::AllowAll, Decision::Deny);
+        toolbox.approver = Some(approver.clone());
+        let mut calls = editable_wave(&toolbox).await;
+        let args = r#"{"action":"run","cmd":"\"$COMMAND\""}"#;
+        calls.push(("shell".to_string(), args.to_string()));
+        let results = run_scheduled(&toolbox, &calls).await;
+        assert!(results[3].0.starts_with("denied by the user"));
+        assert_eq!(approver.waves.lock().unwrap()[0].len(), 3);
+        assert_eq!(approver.requests.lock().unwrap().len(), 1);
+        assert!(
+            approver.requests.lock().unwrap()[0]
+                .summary
+                .starts_with("could not parse safely:")
+        );
+        assert!(
+            toolbox
+                .run_gated("shell", args, Gate::Approved)
+                .await
+                .0
+                .starts_with("denied")
+        );
+        assert_eq!(approver.requests.lock().unwrap().len(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remembered_wave_kinds_allow_a_later_response_without_another_prompt() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        toolbox.db_path = Some(dir.join("nexus.db"));
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        toolbox.approver = Some(Arc::new(crate::app::ChannelApprover::new(sender)));
+        let calls = editable_wave(&toolbox).await;
+        let (results, ()) = tokio::join!(run_scheduled(&toolbox, &calls), async {
+            let (request, reply) = receiver.recv().await.unwrap();
+            assert_eq!(request.tool, "wave");
+            assert_eq!(request.action, "3 calls");
+            assert!(request.summary.starts_with("2 edits, 1 command\n"));
+            let root = toolbox.workspace.as_ref().unwrap().root();
+            assert_eq!(
+                std::fs::read_to_string(root.join("one")).unwrap(),
+                "original\n"
+            );
+            assert!(!root.join("command-ran").exists());
+            reply.send(Decision::AllowForSession).unwrap();
+        });
+        assert!(results.iter().all(|(_, status)| status != "blocked"));
+        let calls = editable_wave(&toolbox).await;
+        let results = tokio::time::timeout(Duration::from_secs(2), run_scheduled(&toolbox, &calls))
+            .await
+            .unwrap();
+        assert!(results[0].0.starts_with("edited one"));
+        assert!(results[1].0.starts_with("edited two"));
+        assert!(results[2].0.starts_with("exit 0"));
+        assert!(receiver.try_recv().is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_uses_one_combined_approval_for_its_mutating_subcalls() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        let approver = WaveApprover::new(WaveDecision::AllowAll, Decision::Deny);
+        toolbox.approver = Some(approver.clone());
+        let args = json!({"calls": [
+            {"tool": "fs", "arguments": {"action": "write", "path": "one", "content": "one"}},
+            {"tool": "fs", "arguments": {"action": "write", "path": "two", "content": "two"}},
+        ]})
+        .to_string();
+        let (result, _) = toolbox.run("batch", &args).await;
+        assert!(result.contains("wrote one"), "{result}");
+        assert!(result.contains("wrote two"), "{result}");
+        let root = toolbox.workspace.as_ref().unwrap().root();
+        assert_eq!(std::fs::read_to_string(root.join("one")).unwrap(), "one");
+        assert_eq!(std::fs::read_to_string(root.join("two")).unwrap(), "two");
+        assert_eq!(approver.waves.lock().unwrap().len(), 1);
+        assert_eq!(approver.waves.lock().unwrap()[0].len(), 2);
+        assert!(approver.requests.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_a_combined_reply_denies_every_gated_call() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        toolbox.approver = Some(Arc::new(crate::app::ChannelApprover::new(sender)));
+        let calls = editable_wave(&toolbox).await;
+        let (results, ()) = tokio::join!(run_scheduled(&toolbox, &calls), async {
+            let (request, reply) = receiver.recv().await.unwrap();
+            assert_eq!(request.tool, "wave");
+            drop(reply);
+        });
+        assert_eq!(results.len(), 3);
+        assert!(
+            results
+                .iter()
+                .all(|(result, status)| result.starts_with("denied") && status == "blocked")
+        );
+        let root = toolbox.workspace.as_ref().unwrap().root();
+        assert_eq!(
+            std::fs::read_to_string(root.join("one")).unwrap(),
+            "original\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("two")).unwrap(),
+            "original\n"
+        );
+        assert!(!root.join("command-ran").exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

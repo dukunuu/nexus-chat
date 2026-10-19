@@ -264,7 +264,7 @@ pub enum AppCommand {
     Send { text: String },
     /// Cancel an in-flight chat response; `None` = the active one (Esc).
     Cancel { task: Option<u64> },
-    /// Answer the current workspace permission request.
+    /// Answer the current workspace permission request, including wave review.
     Approve { decision: crate::tools::Decision },
     /// `/steer` — queue an extra instruction for the running research job.
     Steer { text: String },
