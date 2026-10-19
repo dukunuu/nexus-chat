@@ -9,10 +9,22 @@
 #      the plist path is compiled but never exercised.
 #   Both upstreams still pin 0.39; there is no compatible upgrade.
 #
+# RUSTSEC-2026-0367 / RUSTSEC-2026-0368 / RUSTSEC-2026-0369 (zip <9.0.0):
+#   all three are in ZipArchive::extract / ZipStreamReader::extract (SUID bits,
+#   symlink targets, permissions through symlinks on extraction to disk). No
+#   code calls either: archives are only written, or read entry by entry into
+#   memory (sync.rs, extract.rs, cli.rs, host/browser_sync.rs). The fix (zip 9)
+#   changes ZipFile::name() to return a Result, which needs an edit in host code
+#   that is out of scope right now. Drop these when zip is upgraded, and never
+#   add an extract() call before then.
+#
 # Unmaintained warnings (bincode/ttf-parser/yaml-rust) are informational —
 # transitive, no known vulnerability, no maintained replacement upstream.
 [advisories]
 ignore = [
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
 ]
