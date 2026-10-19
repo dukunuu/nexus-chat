@@ -170,6 +170,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &[],
     },
     Command {
+        name: "auto",
+        desc: "toggle agent / agent·auto approval policy",
+        aliases: &[],
+    },
+    Command {
         name: "incognito",
         desc: "toggle incognito (no persistence, no apps)",
         aliases: &["private", "anon"],
@@ -332,6 +337,8 @@ pub enum AppCommand {
     Export,
     /// `/web` — toggle web-answer mode.
     ToggleWeb,
+    /// `/auto` — toggle automatic approval while in an agent mode.
+    ToggleAuto,
     /// `/agent [path]` or `/chat` — choose local workspace access.
     SetWorkMode {
         mode: WorkMode,
@@ -429,6 +436,7 @@ impl App {
                     root: (!root.is_empty()).then_some(root),
                 })
             }
+            "auto" => Ok(AppCommand::ToggleAuto),
             "chat" => Ok(AppCommand::SetWorkMode {
                 mode: WorkMode::Chat,
                 root: None,
@@ -528,6 +536,22 @@ impl App {
                 self.export_report()?;
             }
             AppCommand::ToggleWeb => self.toggle_web_mode(),
+            AppCommand::ToggleAuto => {
+                if self.work_mode.is_agent() {
+                    let mode = if self.work_mode == WorkMode::AgentAuto {
+                        WorkMode::Agent
+                    } else {
+                        WorkMode::AgentAuto
+                    };
+                    let root = self
+                        .workspace
+                        .as_ref()
+                        .map(|workspace| workspace.root().to_string_lossy().into_owned());
+                    self.set_work_mode(mode, root.as_deref())?;
+                } else {
+                    self.push_status("/auto needs agent mode · run /agent first");
+                }
+            }
             AppCommand::SetWorkMode { mode, root } => {
                 self.set_work_mode(mode, root.as_deref())?;
             }

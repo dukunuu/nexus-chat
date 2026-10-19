@@ -44,6 +44,7 @@ fn approval_app(
         tool: tool.into(),
         action: if tool == "shell" { "run" } else { "edit" }.into(),
         summary,
+        allow_session: true,
     });
     app.sync_approval_popup();
     (app, receiver)
@@ -461,6 +462,7 @@ fn approval_popup_shell_and_diff_snapshots() {
             tool: tool.into(),
             action: action.into(),
             summary: summary.into(),
+            allow_session: true,
         });
         let screen = render_to_string(120, 40, |f| super::approval::render(f, &app));
         assert!(screen.contains(" approve "), "{screen}");

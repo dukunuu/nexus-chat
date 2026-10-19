@@ -550,10 +550,10 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
 
     match key.code {
         KeyCode::BackTab => {
-            let mode = if app.work_mode == WorkMode::Chat {
-                WorkMode::Agent
-            } else {
-                WorkMode::Chat
+            let mode = match app.work_mode {
+                WorkMode::Chat => WorkMode::Agent,
+                WorkMode::Agent => WorkMode::AgentAuto,
+                WorkMode::AgentAuto => WorkMode::Chat,
             };
             let root = app
                 .workspace
@@ -965,6 +965,7 @@ mod tests {
             tool: "shell".into(),
             action: "run".into(),
             summary: "$ true".into(),
+            allow_session: true,
         });
         app.apply_event(&AppEvent::Status("unrelated status".into()));
         assert_eq!(app.popup, Popup::Approval);
@@ -1001,6 +1002,7 @@ mod tests {
                 tool: "shell".into(),
                 action: "run".into(),
                 summary: "$ true".into(),
+                allow_session: true,
             });
             app.popup = Popup::Approval;
             app.execute(AppCommand::OpenSettings).unwrap();
@@ -1020,6 +1022,17 @@ mod tests {
     }
 
     #[test]
+    fn shift_tab_cycles_all_three_modes() {
+        let mut app = test_app();
+        app.set_input("keep this draft");
+        for mode in [WorkMode::Agent, WorkMode::AgentAuto, WorkMode::Chat] {
+            handle_key(&mut app, KeyCode::BackTab.into()).unwrap();
+            assert_eq!(app.work_mode, mode);
+            assert_eq!(app.input_text(), "keep this draft");
+        }
+    }
+
+    #[test]
     fn shift_tab_toggles_work_mode_reusing_the_root_without_changing_the_draft() {
         let mut app = test_app();
         let root = std::env::temp_dir().join(format!("nexus-toggle-{}", uuid::Uuid::new_v4()));
@@ -1030,6 +1043,9 @@ mod tests {
         })
         .unwrap();
         app.set_input("keep this draft");
+        handle_key(&mut app, KeyCode::BackTab.into()).unwrap();
+        assert_eq!(app.work_mode, WorkMode::AgentAuto);
+        assert_eq!(app.input_text(), "keep this draft");
         handle_key(&mut app, KeyCode::BackTab.into()).unwrap();
         assert_eq!(app.work_mode, WorkMode::Chat);
         assert_eq!(app.input_text(), "keep this draft");

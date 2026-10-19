@@ -146,11 +146,13 @@ impl App {
             }
             s
         };
-        if !self.incognito && self.work_mode == WorkMode::Agent {
+        if !self.incognito && self.work_mode.is_agent() {
             self.db.set_session_workspace(
                 &s.id,
                 self.workspace.as_ref().map(|workspace| workspace.root()),
             )?;
+            self.db
+                .set_session_workspace_mode(&s.id, self.work_mode.binding_mode())?;
         }
         let id = s.id.clone();
         self.session = Some(s);
@@ -184,7 +186,7 @@ impl App {
             return Ok(());
         }
         let session_id = session.id.clone();
-        let changed_files = self.work_mode == WorkMode::Agent
+        let changed_files = self.work_mode.is_agent()
             && self
                 .workspace
                 .as_ref()
@@ -226,11 +228,7 @@ impl App {
             self.push_status("wait — response still streaming");
             return Ok(());
         }
-        let Some(workspace) = self
-            .workspace
-            .clone()
-            .filter(|_| self.work_mode == WorkMode::Agent)
-        else {
+        let Some(workspace) = self.workspace.clone().filter(|_| self.work_mode.is_agent()) else {
             self.push_status("/undo works in agent mode · switch with /agent <path>");
             return Ok(());
         };
@@ -252,7 +250,7 @@ impl App {
         if let Some(workspace) = self
             .workspace
             .as_ref()
-            .filter(|_| self.work_mode == WorkMode::Agent)
+            .filter(|_| self.work_mode.is_agent())
         {
             return workspace.root().to_path_buf();
         }
@@ -709,10 +707,20 @@ impl App {
                 self.context_warned = true;
             }
         }
-        if self.work_mode == WorkMode::Agent
+        if self.work_mode.is_agent()
             && let (Some(workspace), Some(session)) = (&self.workspace, &self.session)
         {
             workspace.begin_turn(&session.id);
+        }
+        if let Some(session) = &self.session {
+            let task = self
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "user")
+                .map(|message| message.content.chars().take(2_000).collect())
+                .unwrap_or_default();
+            *self.decision_context.lock().expect("decision context") = (session.id.clone(), task);
         }
         let (rx, abort) = provider.stream_chat(
             raw_model.clone(),
@@ -1382,7 +1390,7 @@ impl App {
             parts.push(crate::interactive::INSTRUCTIONS.to_string());
         }
         parts.push(self.environment_section());
-        if self.work_mode == WorkMode::Agent {
+        if self.work_mode.is_agent() {
             parts.push(prompts::render(prompts::AGENT, &[]));
         }
         if !self.incognito {
@@ -1455,12 +1463,17 @@ impl App {
             std::env::consts::OS,
             std::env::consts::ARCH
         );
-        if self.work_mode == WorkMode::Agent
+        if self.work_mode.is_agent()
             && let Some(workspace) = &self.workspace
         {
             let _ = write!(
                 section,
-                "\n- Mode: agent · workspace {}",
+                "\n- Mode: {} · workspace {}",
+                if self.work_mode == WorkMode::AgentAuto {
+                    "agent·auto"
+                } else {
+                    "agent"
+                },
                 workspace.root().display()
             );
         }

@@ -1,5 +1,96 @@
 use super::*;
 
+#[test]
+fn auto_refuses_chat_and_restores_its_device_local_mode() {
+    let mut app = app_with_key();
+    app.run_command("auto").unwrap();
+    assert_eq!(app.work_mode, WorkMode::Chat);
+    assert!(app.last_status().contains("/agent first"));
+    let workspace = test_space().root;
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session = app
+        .db
+        .create_session("auto", "a/one", &app.active_space.id, "chat")
+        .unwrap();
+    app.switch_to_session_by_id(&session.id).unwrap();
+    app.run_command(&format!("agent {}", workspace.display()))
+        .unwrap();
+    app.run_command("auto").unwrap();
+    assert_eq!(app.work_mode, WorkMode::AgentAuto);
+    assert_eq!(
+        app.db.session_workspace_mode(&session.id).as_deref(),
+        Some("auto")
+    );
+    assert!(app.toolbox.defs().iter().any(|tool| tool.name == "fs"));
+    assert!(app.system_prompt().contains("## Agent mode"));
+    app.new_session();
+    app.switch_to_session_by_id(&session.id).unwrap();
+    assert_eq!(app.work_mode, WorkMode::AgentAuto);
+    app.run_command("auto").unwrap();
+    assert_eq!(app.work_mode, WorkMode::Agent);
+    assert_eq!(
+        app.db.session_workspace_mode(&session.id).as_deref(),
+        Some("agent")
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn auto_decisions_use_the_session_created_after_the_toolbox() {
+    let mut app = app_with_key();
+    let data = app.space.root.clone();
+    let workspace = test_space().root;
+    std::fs::create_dir_all(&workspace).unwrap();
+    app.saved.agent.allow = vec!["fs write approved".into()];
+    app.run_command(&format!("agent {}", workspace.display()))
+        .unwrap();
+    app.run_command("auto").unwrap();
+    assert!(app.session.is_none());
+    app.current_model = Some("a/one".into());
+    app.send_message("make the approved change".into()).unwrap();
+    let id = app.session.as_ref().unwrap().id.clone();
+    app.stop_stream().unwrap();
+    let (result, _) = app
+        .toolbox
+        .run(
+            "fs",
+            r#"{"action":"write","path":"approved","content":"ok"}"#,
+        )
+        .await;
+    assert!(result.starts_with("wrote approved"), "{result}");
+    let recorded = Db::open(&app.space.db_path()).unwrap();
+    let rows = recorded.decisions(&id).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].verdict, "allow");
+    assert_eq!(rows[0].by, "rules");
+    assert!(recorded.decisions("").unwrap().is_empty());
+    drop(recorded);
+    drop(app);
+    std::fs::remove_dir_all(data).unwrap();
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn one_time_requests_ignore_and_do_not_create_session_grants() {
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let approver = ChannelApprover::new(sender);
+    let request = ApprovalRequest {
+        tool: "fs".into(),
+        action: "delete".into(),
+        summary: "delete file".into(),
+        allow_session: false,
+    };
+    for _ in 0..2 {
+        let (decision, ()) = tokio::join!(approver.request(request.clone()), async {
+            let (shown, reply) = receiver.recv().await.unwrap();
+            assert!(!shown.allow_session);
+            reply.send(Decision::AllowForSession).unwrap();
+        });
+        assert_eq!(decision, Decision::Allow);
+    }
+    assert!(approver.allowed.lock().unwrap().is_empty());
+}
+
 fn approval_test_app() -> (App, std::path::PathBuf) {
     let mut app = app_with_key();
     let workspace = test_space().root;
@@ -35,6 +126,7 @@ async fn installed_approver_round_trip_writes_only_after_the_approval_command() 
             tool: "fs".into(),
             action: "write".into(),
             summary: "write approved".into(),
+            allow_session: true,
         }
     );
     assert!(app.pending_approval.is_some());
@@ -267,6 +359,7 @@ async fn channel_approver_remembers_only_the_requested_action_for_its_session() 
         tool: "fs".into(),
         action: "edit".into(),
         summary: "edit file".into(),
+        allow_session: true,
     };
     let mut calls = 0;
     let (decision, ()) = tokio::join!(approver.request(request.clone()), async {
@@ -311,6 +404,7 @@ async fn approval_command_answers_a_pending_channel_request() {
         tool: "shell".into(),
         action: "run".into(),
         summary: "$ true".into(),
+        allow_session: true,
     };
     for answer in [Decision::Allow, Decision::Allow, Decision::Deny] {
         let (decision, ()) = tokio::join!(approver.request(request.clone()), async {
@@ -333,6 +427,7 @@ async fn channel_approver_denies_closed_channels_and_cancels_with_the_caller() {
         tool: "fs".into(),
         action: "write".into(),
         summary: "write file".into(),
+        allow_session: true,
     };
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let approver = Arc::new(ChannelApprover::new(sender));
@@ -4297,6 +4392,7 @@ fn queued_request(
         tool: "fs".into(),
         action: action.into(),
         summary: summary.into(),
+        allow_session: true,
     };
     let (reply, answer) = oneshot::channel();
     sender.send((request.clone(), reply)).unwrap();
@@ -4391,6 +4487,7 @@ fn wave_requests() -> Vec<ApprovalRequest> {
         tool: tool.into(),
         action: action.into(),
         summary: summary.into(),
+        allow_session: true,
     })
     .collect()
 }
@@ -4562,6 +4659,7 @@ fn allowing_a_wave_for_the_session_never_allows_an_unrelated_queued_wave_by_coun
         tool: "wave".into(),
         action: "2 calls".into(),
         summary: "2 edits".into(),
+        allow_session: true,
     };
     let (first, mut first_answer) = oneshot::channel();
     let (second, mut second_answer) = oneshot::channel();

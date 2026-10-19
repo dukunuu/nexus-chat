@@ -7,6 +7,11 @@ use super::Workspace;
 const WRITE_CONFINEMENT_UNAVAILABLE: &str =
     "shell write confinement unavailable · this eval task needs macOS sandbox-exec";
 
+/// Whether unattended commands can be confined to workspace writes.
+pub(crate) fn write_confinement_available() -> bool {
+    cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").exists()
+}
+
 pub(crate) async fn action(
     workspace: &Workspace,
     db_path: Option<&Path>,

@@ -19,6 +19,51 @@ use super::style::glyph;
 use super::{humanize, popups};
 use crate::app_view::AppView;
 
+#[cfg(test)]
+mod auto_mode_tests {
+    use super::*;
+    use nexus_core::app::{App, WorkMode};
+    use nexus_core::db::Db;
+    use nexus_core::space::Space;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn auto_badge_visibly_reports_unavailable_confinement() {
+        let root = std::env::temp_dir().join(format!("nexus-auto-status-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = AppView::new(App::new(
+            Db::open_in_memory().unwrap(),
+            None,
+            Space {
+                root: root.join("data"),
+            },
+        ));
+        app.workspace = Some(std::sync::Arc::new(
+            nexus_core::workspace::Workspace::open(&root, vec![]).unwrap(),
+        ));
+        app.work_mode = WorkMode::AgentAuto;
+        for (available, expected) in [(true, "agent·auto ·"), (false, "agent·auto (no sandbox) ·")]
+        {
+            app.auto_sandbox_available = available;
+            let mut terminal = Terminal::new(TestBackend::new(180, 1)).unwrap();
+            terminal
+                .draw(|frame| render_status(frame, &app, frame.area()))
+                .unwrap();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(screen.contains(expected), "{screen}");
+        }
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// Green → yellow → red gradient for `t` in 0.0..=1.0.
 fn gradient(t: f64) -> Color {
     // Two linear segments: green→yellow (0..0.5), yellow→red (0.5..1).
@@ -48,7 +93,7 @@ pub(super) fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
     if app.active_space.name != DEFAULT_SPACE {
         tags.push(format!("{} {}", glyph::SPACE, app.active_space.name));
     }
-    if app.work_mode == nexus_core::app::WorkMode::Agent
+    if app.work_mode.is_agent()
         && let Some(workspace) = &app.workspace
     {
         let mut root = workspace.root().display().to_string();
@@ -71,7 +116,16 @@ pub(super) fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
                 root.chars().skip(len - max_root + 1).collect::<String>()
             );
         }
-        tags.push(format!("{} agent · {root}", glyph::TOOL));
+        let mode = if app.work_mode == nexus_core::app::WorkMode::AgentAuto {
+            if app.auto_sandbox_available {
+                "agent·auto"
+            } else {
+                "agent·auto (no sandbox)"
+            }
+        } else {
+            "agent"
+        };
+        tags.push(format!("{} {mode} · {root}", glyph::TOOL));
     }
     if app.web_mode {
         tags.push(format!("{} web", glyph::WEB));

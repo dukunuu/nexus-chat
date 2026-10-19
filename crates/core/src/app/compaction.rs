@@ -391,7 +391,7 @@ impl App {
             + self.resolved_system_prompt_overlay().chars().count()
             + self.environment_section().chars().count()
             + self.now_section().chars().count();
-        if self.work_mode == super::WorkMode::Agent {
+        if self.work_mode.is_agent() {
             instructions_chars += prompts::render(prompts::AGENT, &[]).chars().count();
         }
         if self.interactive_ui {

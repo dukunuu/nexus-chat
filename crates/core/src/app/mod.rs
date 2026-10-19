@@ -136,7 +136,9 @@ impl Approver for ChannelApprover {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Decision> + Send + '_>> {
         Box::pin(async move {
             let key = (req.tool.clone(), req.action.clone());
-            if !req.summary.starts_with("could not parse safely:")
+            let allow_session = req.allow_session;
+            if allow_session
+                && !req.summary.starts_with("could not parse safely:")
                 && self
                     .allowed
                     .lock()
@@ -150,6 +152,9 @@ impl Approver for ChannelApprover {
                 return Decision::Deny;
             }
             let decision = receiver.await.unwrap_or(Decision::Deny);
+            if decision == Decision::AllowForSession && !allow_session {
+                return Decision::Allow;
+            }
             if decision == Decision::AllowForSession {
                 self.allowed
                     .lock()
@@ -167,7 +172,9 @@ impl Approver for ChannelApprover {
         Box::pin(async move {
             {
                 let allowed = self.allowed.lock().expect("approval permissions");
-                reqs.retain(|req| !allowed.contains(&(req.tool.clone(), req.action.clone())));
+                reqs.retain(|req| {
+                    !req.allow_session || !allowed.contains(&(req.tool.clone(), req.action.clone()))
+                });
             }
             match reqs.len() {
                 0 => return WaveDecision::AllowAll,
@@ -202,13 +209,16 @@ impl Approver for ChannelApprover {
                 tool: "wave".to_string(),
                 action: format!("{} calls", reqs.len()),
                 summary,
+                allow_session: reqs.iter().all(|req| req.allow_session),
             };
+            let allow_session = request.allow_session;
             let (sender, receiver) = oneshot::channel();
             if self.sender.send((request, sender)).is_err() {
                 return WaveDecision::DenyAll;
             }
             match receiver.await.unwrap_or(Decision::Deny) {
                 Decision::Allow => WaveDecision::AllowAll,
+                Decision::AllowForSession if !allow_session => WaveDecision::AllowAll,
                 Decision::AllowForSession => {
                     self.allowed
                         .lock()
@@ -390,6 +400,22 @@ pub struct ContextBreakdown {
 pub enum WorkMode {
     Chat,
     Agent,
+    AgentAuto,
+}
+
+impl WorkMode {
+    /// Both agent modes expose the same workspace tools and prompt.
+    pub fn is_agent(self) -> bool {
+        self != Self::Chat
+    }
+
+    pub(super) fn binding_mode(self) -> &'static str {
+        if self == Self::AgentAuto {
+            "auto"
+        } else {
+            "agent"
+        }
+    }
 }
 
 /// What the session picker is doing: browsing, renaming the highlighted row, or
@@ -1050,6 +1076,9 @@ pub struct App {
     pub web_mode: bool,
     /// Chat by default; agent mode exposes the bound workspace's tools.
     pub work_mode: WorkMode,
+    /// Device capability, also used for the visible auto-mode fallback badge.
+    pub auto_sandbox_available: bool,
+    decision_context: Arc<Mutex<(String, String)>>,
     /// Active workspace, retained in chat for Shift+Tab until the session changes.
     pub workspace: Option<std::sync::Arc<crate::workspace::Workspace>>,
     pub incognito: bool,
@@ -1315,6 +1344,8 @@ impl App {
             forced_skill: None,
             web_mode: false,
             work_mode: WorkMode::Chat,
+            auto_sandbox_available: crate::workspace::shell::write_confinement_available(),
+            decision_context: Arc::default(),
             workspace: None,
             incognito: false,
             incognito_img_dir: None,
@@ -1480,11 +1511,11 @@ impl App {
     }
 
     fn set_work_mode(&mut self, mode: WorkMode, root: Option<&str>) -> Result<()> {
-        if mode == WorkMode::Agent && self.incognito {
+        if mode.is_agent() && self.incognito {
             self.push_status("agent mode is not available in incognito mode");
             return Ok(());
         }
-        let workspace = if mode == WorkMode::Agent {
+        let workspace = if mode.is_agent() {
             match self.open_workspace(root) {
                 Ok(workspace) => Some(workspace),
                 Err(error) => {
@@ -1502,17 +1533,26 @@ impl App {
                 &session.id,
                 workspace
                     .as_ref()
-                    .filter(|_| mode == WorkMode::Agent)
+                    .filter(|_| mode.is_agent())
                     .map(|workspace| workspace.root()),
             )?;
+            if mode.is_agent() {
+                self.db
+                    .set_session_workspace_mode(&session.id, mode.binding_mode())?;
+            }
         }
         self.work_mode = mode;
         self.workspace = workspace;
         self.refresh_toolbox();
         self.bump_cache_epoch();
-        self.push_status(if mode == WorkMode::Agent {
+        self.push_status(if mode.is_agent() {
             format!(
-                "agent mode · workspace {}",
+                "{} mode · workspace {}",
+                if mode == WorkMode::AgentAuto {
+                    "agent·auto"
+                } else {
+                    "agent"
+                },
                 self.workspace
                     .as_ref()
                     .expect("opened workspace")
@@ -1664,6 +1704,20 @@ impl App {
         }
     }
 
+    fn configure_auto_policy(&mut self, toolbox: &mut crate::tools::ToolBox) {
+        toolbox.require_approval = self.work_mode.is_agent();
+        if self.work_mode == WorkMode::AgentAuto {
+            toolbox.auto_decider = Some(Arc::new(crate::decider::Chain::new(
+                self.saved.agent.allow.clone(),
+                Vec::new(),
+            )));
+        }
+        toolbox.sandbox_available = self.auto_sandbox_available;
+        self.decision_context = Arc::default();
+        toolbox.decision_context = self.decision_context.clone();
+        toolbox.decision_scrubber = crate::trace::Scrubber::new(self.saved_secrets());
+    }
+
     /// Rebuild the toolbox from the current `searxng_url`, so a settings
     /// change takes effect immediately (no restart). Web search tries the
     /// configured backends first and has keyless HTML fallbacks.
@@ -1743,7 +1797,7 @@ impl App {
         toolbox.space_scripts_dir = self.space.scripts_dir(&self.active_space.name);
         toolbox.supports_images = self.current_model_supports_images();
         toolbox.record_events = !self.incognito;
-        toolbox.require_approval = self.work_mode == WorkMode::Agent;
+        self.configure_auto_policy(&mut toolbox);
         toolbox.interactive_ui = self.interactive_ui;
         self.pending_approval = None;
         self.pending_approval_request = None;
@@ -1759,7 +1813,7 @@ impl App {
         toolbox.workspace = self
             .workspace
             .as_ref()
-            .filter(|_| self.work_mode == WorkMode::Agent)
+            .filter(|_| self.work_mode.is_agent())
             .cloned();
         if self.eval_approver.is_some() {
             toolbox.confine_shell_writes =
@@ -2242,6 +2296,15 @@ impl App {
     /// they are never shown.
     pub(crate) fn answer_approval(&mut self, decision: Decision) {
         let request = self.pending_approval_request.take();
+        let decision = if decision == Decision::AllowForSession
+            && request
+                .as_ref()
+                .is_some_and(|request| !request.allow_session)
+        {
+            Decision::Allow
+        } else {
+            decision
+        };
         if let Some(sender) = self.pending_approval.take() {
             let _ = sender.send(decision);
         }
@@ -2256,6 +2319,7 @@ impl App {
             for (queued, reply) in std::mem::take(&mut self.approval_queue) {
                 if queued.tool == request.tool
                     && queued.action == request.action
+                    && queued.allow_session
                     && !queued.summary.starts_with("could not parse safely:")
                 {
                     let _ = reply.send(Decision::Allow);
@@ -2482,7 +2546,8 @@ mod eval_tests {
                     .request(ApprovalRequest {
                         tool: "fs".into(),
                         action: action.into(),
-                        summary: "file".into()
+                        summary: "file".into(),
+                        allow_session: true,
                     })
                     .await,
                 Decision::Allow
@@ -2503,7 +2568,8 @@ mod eval_tests {
                     .request(ApprovalRequest {
                         tool: "shell".into(),
                         action: "run".into(),
-                        summary: summary.into()
+                        summary: summary.into(),
+                        allow_session: true,
                     })
                     .await,
                 if allowed {
@@ -2519,6 +2585,7 @@ mod eval_tests {
                 tool: "shell".into(),
                 action: "run".into(),
                 summary: format!("$ cargo test {forbidden} echo bad"),
+                allow_session: true,
             };
             assert_eq!(approver.request(request).await, Decision::Deny);
         }
@@ -2528,7 +2595,8 @@ mod eval_tests {
                     .request(ApprovalRequest {
                         tool: tool.into(),
                         action: action.into(),
-                        summary: "$ ls".into()
+                        summary: "$ ls".into(),
+                        allow_session: true,
                     })
                     .await,
                 Decision::Deny

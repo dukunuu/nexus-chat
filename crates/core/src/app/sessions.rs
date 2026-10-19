@@ -54,7 +54,13 @@ impl App {
         };
         match self.open_workspace(Some(&root.to_string_lossy())) {
             Ok(workspace) => {
-                self.work_mode = WorkMode::Agent;
+                self.work_mode = if self.session.as_ref().is_some_and(|session| {
+                    self.db.session_workspace_mode(&session.id).as_deref() == Some("auto")
+                }) {
+                    WorkMode::AgentAuto
+                } else {
+                    WorkMode::Agent
+                };
                 self.workspace = Some(workspace);
             }
             Err(_) => self.push_status(format!(

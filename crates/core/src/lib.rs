@@ -18,6 +18,7 @@ pub mod appserver;
 pub mod citations;
 pub mod config;
 pub mod db;
+pub mod decider;
 pub mod eval;
 pub mod extract;
 pub mod host;

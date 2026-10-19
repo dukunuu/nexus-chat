@@ -95,10 +95,16 @@ pub fn render(f: &mut Frame, app: &AppView) {
     };
     let hint = if wave && shell_unread(app) {
         "↑↓ scroll · scroll to the end to approve · r review each · n deny all"
+    } else if wave && !request.allow_session {
+        "y approve all · r review each · n deny all"
     } else if wave {
         "y approve all · a all for this session · r review each · n deny all"
     } else if shell_unread(app) {
         "↑↓ scroll · scroll to the end to allow · n deny"
+    } else if !request.allow_session && max_scroll > 0 {
+        "↑↓ scroll · y allow · n deny"
+    } else if !request.allow_session {
+        "y allow · n deny"
     } else if max_scroll > 0 {
         "↑↓ scroll · y allow · a allow for this session · n deny"
     } else {
@@ -153,7 +159,15 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> anyhow::Result<()> {
     let decision = match key.code {
         KeyCode::Esc => Decision::Deny,
         KeyCode::Char('y') if !super::is_chord(key) => Decision::Allow,
-        KeyCode::Char('a') if !super::is_chord(key) => Decision::AllowForSession,
+        KeyCode::Char('a')
+            if !super::is_chord(key)
+                && app
+                    .approval_request
+                    .as_ref()
+                    .is_some_and(|request| request.allow_session) =>
+        {
+            Decision::AllowForSession
+        }
         KeyCode::Char('n') if !super::is_chord(key) => Decision::Deny,
         KeyCode::Char('r')
             if !super::is_chord(key)
@@ -202,6 +216,7 @@ mod tests {
             tool: "wave".into(),
             action: "2 calls".into(),
             summary,
+            allow_session: true,
         });
         app.sync_approval_popup();
         (app, receiver)
@@ -212,6 +227,29 @@ mod tests {
             .unwrap()
             .draw(|f| render(f, app))
             .unwrap();
+    }
+
+    #[test]
+    fn one_time_wave_hides_and_ignores_session_approval() {
+        let (mut app, mut receiver) = wave_app("1 delete".into());
+        app.approval_request.as_mut().unwrap().allow_session = false;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(!screen.contains("a all for this session"));
+        handle_key(&mut app, KeyCode::Char('a').into()).unwrap();
+        assert!(receiver.try_recv().is_err());
+        handle_key(&mut app, KeyCode::Char('y').into()).unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), Decision::Allow);
+        let root = app.space.root.clone();
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

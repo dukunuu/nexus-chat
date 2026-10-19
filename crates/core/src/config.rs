@@ -46,6 +46,15 @@ struct Config {
     local: Option<crate::provider::local::LocalConfig>,
     #[serde(default)]
     experiments: Experiments,
+    #[serde(default)]
+    agent: AgentConfig,
+}
+
+/// Explicit, machine-local allow rules for agent-auto policy.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AgentConfig {
+    pub allow: Vec<String>,
 }
 
 /// Opt-in context experiments; defaults preserve the current behavior.
@@ -150,6 +159,8 @@ pub struct SavedCreds {
     pub local: Option<crate::provider::local::LocalConfig>,
     /// Opt-in experiments from the same machine-local config.
     pub experiments: Experiments,
+    /// Deterministic agent-auto allow rules.
+    pub agent: AgentConfig,
     pub openrouter_key: Option<String>,
     pub openai_key: Option<String>,
     pub opencode_key: Option<String>,
@@ -263,6 +274,7 @@ pub fn load_creds_offline() -> SavedCreds {
     SavedCreds {
         local: load_local_config().ok().flatten(),
         experiments: load_experiments().unwrap_or_default(),
+        agent: load_agent_config().unwrap_or_default(),
         openrouter_key: (!openrouter_key.is_empty()).then_some(openrouter_key),
         openai_key: (!openai_key.is_empty()).then_some(openai_key),
         opencode_key: (!opencode_key.is_empty()).then_some(opencode_key),
@@ -285,6 +297,7 @@ pub async fn load_all_providers() -> Result<SavedCreds> {
     let mut saved = load_creds_offline();
     saved.local = load_local_config()?;
     saved.experiments = load_experiments()?;
+    saved.agent = load_agent_config()?;
     if let Some(local) = &saved.local {
         local.validate()?;
     }
@@ -294,6 +307,17 @@ pub async fn load_all_providers() -> Result<SavedCreds> {
         saved.codex = Some(creds);
     }
     Ok(saved)
+}
+
+fn load_agent_config() -> Result<AgentConfig> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(AgentConfig::default());
+    }
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let config: Config = toml::from_str(&text).context("parsing agent configuration")?;
+    Ok(config.agent)
 }
 
 fn load_experiments() -> Result<Experiments> {

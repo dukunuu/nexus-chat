@@ -428,8 +428,89 @@ pub fn migrate_cache(conn: &Connection, schema: &str) -> Result<()> {
             latency_ms INTEGER NOT NULL,
             result_chars INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS {schema}.tool_events_at ON tool_events(at);",
+        CREATE INDEX IF NOT EXISTS {schema}.tool_events_at ON tool_events(at);
+        CREATE TABLE IF NOT EXISTS {schema}.decisions (
+            id INTEGER PRIMARY KEY,
+            at TEXT,
+            session_id TEXT,
+            tool TEXT,
+            action TEXT,
+            class TEXT,
+            summary TEXT,
+            by TEXT,
+            verdict TEXT,
+            p_in_scope REAL,
+            risk TEXT,
+            user_answer TEXT
+        );",
     ))?;
+    let mut stmt = conn.prepare(&format!("PRAGMA {schema}.table_info(session_workspaces)"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|column| column == "mode") {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {schema}.session_workspaces ADD COLUMN mode TEXT"
+        ))?;
+    }
+    Ok(())
+}
+
+/// One device-local policy decision, including the eventual user answer.
+#[derive(Debug)]
+pub struct DecisionRow {
+    pub id: i64,
+    pub tool: String,
+    pub action: String,
+    pub class: String,
+    pub summary: String,
+    pub by: String,
+    pub verdict: String,
+    pub p_in_scope: Option<f64>,
+    pub risk: Option<String>,
+    pub user_answer: Option<String>,
+}
+
+/// Record a scrubbed policy decision on an attached cache connection.
+pub fn insert_decision(
+    conn: &Connection,
+    session_id: &str,
+    req: &crate::decider::DecisionRequest,
+    answer: &crate::decider::Verdicts,
+    scrubber: &crate::trace::Scrubber,
+) -> Result<i64> {
+    let verdict = match answer.verdict {
+        crate::decider::Verdict::Allow => "allow",
+        crate::decider::Verdict::Deny(_) => "deny",
+        crate::decider::Verdict::Ask => "ask",
+    };
+    let summary: String = scrubber.scrub(&req.summary).chars().take(2_000).collect();
+    conn.execute(
+        "INSERT INTO cache.decisions
+         (at, session_id, tool, action, class, summary, by, verdict, p_in_scope, risk)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            Utc::now().to_rfc3339(),
+            session_id,
+            req.tool,
+            req.action,
+            req.class.as_str(),
+            summary,
+            answer.by,
+            verdict,
+            answer.p_in_scope,
+            answer.risk,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Fill in the user label after a single or combined approval prompt.
+pub fn answer_decision(conn: &Connection, id: i64, answer: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE cache.decisions SET user_answer = ?2 WHERE id = ?1",
+        (id, answer),
+    )?;
     Ok(())
 }
 
@@ -526,6 +607,51 @@ impl Db {
             )?;
         }
         Ok(())
+    }
+
+    /// Store the mode alongside an existing device-local workspace binding.
+    pub fn set_session_workspace_mode(&self, id: &str, mode: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE cache.session_workspaces SET mode = ?2 WHERE session_id = ?1",
+            (id, mode),
+        )?;
+        Ok(())
+    }
+
+    /// Missing mode values are legacy plain-agent bindings.
+    pub fn session_workspace_mode(&self, id: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT mode FROM cache.session_workspaces WHERE session_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// Policy decisions for one session, in execution order.
+    pub fn decisions(&self, session_id: &str) -> Result<Vec<DecisionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tool, action, class, summary, by, verdict, p_in_scope, risk, user_answer
+             FROM cache.decisions WHERE session_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([session_id], |row| {
+            Ok(DecisionRow {
+                id: row.get(0)?,
+                tool: row.get(1)?,
+                action: row.get(2)?,
+                class: row.get(3)?,
+                summary: row.get(4)?,
+                by: row.get(5)?,
+                verdict: row.get(6)?,
+                p_in_scope: row.get(7)?,
+                risk: row.get(8)?,
+                user_answer: row.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Read a session's workspace binding on this device, if any.
@@ -3368,6 +3494,62 @@ mod tests {
         assert_eq!(summary.rows.len(), 50);
         assert_eq!(summary.rows.first().unwrap().count, 55);
         assert_eq!(summary.rows.last().unwrap().count, 6);
+    }
+
+    #[test]
+    fn cache_migration_adds_workspace_mode_to_legacy_bindings() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("ATTACH DATABASE ':memory:' AS cache; CREATE TABLE cache.session_workspaces (session_id TEXT PRIMARY KEY, root TEXT NOT NULL, updated_at TEXT NOT NULL);
+            INSERT INTO cache.session_workspaces VALUES ('old', '/workspace', 'now');").unwrap();
+        migrate_cache(&conn, "cache").unwrap();
+        migrate_cache(&conn, "cache").unwrap();
+        let mode: Option<String> = conn
+            .query_row(
+                "SELECT mode FROM cache.session_workspaces WHERE session_id = 'old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode, None);
+        let db = Db { conn };
+        db.set_session_workspace_mode("old", "auto").unwrap();
+        assert_eq!(db.session_workspace_mode("old").as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn decision_log_caps_scrubbed_unicode_summaries_and_records_answers() {
+        let db = Db::open_in_memory().unwrap();
+        let req = crate::decider::DecisionRequest {
+            tool: "fs".into(),
+            action: "write".into(),
+            summary: format!("saved-secret-value {}", "é".repeat(2_100)),
+            task: String::new(),
+            root: "/workspace".into(),
+            effect: crate::tools::Effect::default(),
+            class: crate::decider::Class::WriteInRoot,
+        };
+        let answer = crate::decider::Verdicts {
+            verdict: crate::decider::Verdict::Allow,
+            p_in_scope: None,
+            risk: None,
+            by: "rules",
+        };
+        let id = insert_decision(
+            &db.conn,
+            "session",
+            &req,
+            &answer,
+            &crate::trace::Scrubber::new(vec!["saved-secret-value".into()]),
+        )
+        .unwrap();
+        answer_decision(&db.conn, id, "allow_session").unwrap();
+        let rows = db.decisions("session").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].summary.chars().count(), 2_000);
+        assert!(rows[0].summary.starts_with("[REDACTED]"));
+        assert_eq!(rows[0].verdict, "allow");
+        assert_eq!(rows[0].by, "rules");
+        assert_eq!(rows[0].user_answer.as_deref(), Some("allow_session"));
     }
 
     #[test]
