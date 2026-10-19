@@ -1249,6 +1249,174 @@ async fn retry_keeps_a_skill_row() {
     a.stop_stream().unwrap();
 }
 
+fn agent_app_with_reply() -> (App, std::path::PathBuf) {
+    let mut a = app_with_reply();
+    let workspace = test_space().root;
+    std::fs::create_dir_all(&workspace).unwrap();
+    a.run_command(&format!("agent {}", workspace.display()))
+        .unwrap();
+    while a.pop_pending_event().is_some() {}
+    (a, workspace.canonicalize().unwrap())
+}
+
+#[tokio::test]
+async fn undo_refuses_outside_agent_mode_and_while_streaming() {
+    let mut a = app_with_reply();
+    assert_eq!(a.parse_command("undo").unwrap(), AppCommand::Undo);
+    a.run_command("undo").unwrap();
+    assert!(a.last_status().contains("works in agent mode"));
+    let (mut a, workspace) = agent_app_with_reply();
+    let root = a.space.root.clone();
+    a.run_command("undo").unwrap();
+    assert!(a.last_status().contains("nothing to undo"));
+    a.start_stream().unwrap();
+    a.run_command("undo").unwrap();
+    assert!(a.last_status().contains("still streaming"));
+    a.stop_stream().unwrap();
+    drop(a);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn undo_restores_the_last_agent_turn_and_retry_points_to_it() {
+    let (mut a, workspace) = agent_app_with_reply();
+    let root = a.space.root.clone();
+    let file = workspace.join("notes");
+    std::fs::write(&file, "original").unwrap();
+    let mut toolbox = crate::tools::ToolBox::new(
+        root.join("skills"),
+        None,
+        None,
+        "auto".to_string(),
+        Vec::new(),
+        None,
+        None,
+        None,
+    );
+    toolbox.workspace.clone_from(&a.workspace);
+    let session_id = a.session.as_ref().unwrap().id.clone();
+    for content in ["turn one", "turn two"] {
+        a.start_stream().unwrap();
+        a.stop_stream().unwrap();
+        toolbox
+            .run("fs", r#"{"action":"read","path":"notes"}"#)
+            .await;
+        let args = serde_json::json!({"action": "write", "path": "notes", "content": content});
+        let (result, _) = toolbox.run("fs", &args.to_string()).await;
+        assert!(result.starts_with("wrote notes"), "{result}");
+    }
+    toolbox
+        .run(
+            "fs",
+            r#"{"action":"write","path":"created","content":"new"}"#,
+        )
+        .await;
+    assert!(
+        root.join("checkpoints")
+            .join(&session_id)
+            .join("2")
+            .exists()
+    );
+
+    while a.pop_pending_event().is_some() {}
+    a.run_command("retry").unwrap();
+    assert!(a.last_status().contains("/undo"));
+    a.stop_stream().unwrap();
+    assert!(
+        !root
+            .join("checkpoints")
+            .join(&session_id)
+            .join("3")
+            .exists()
+    );
+
+    a.run_command("undo").unwrap();
+    assert_eq!(
+        a.last_status(),
+        "undid 2 file changes from the last agent turn · 0 skipped (changed since) · shell commands are not undone"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "turn one");
+    assert!(!workspace.join("created").exists());
+    assert!(a.workspace.as_ref().unwrap().last_read(&file).is_none());
+    std::fs::write(&file, "user edit").unwrap();
+    a.run_command("undo").unwrap();
+    assert_eq!(
+        a.last_status(),
+        "undid 0 file changes from the last agent turn · 1 skipped (changed since: notes) · shell commands are not undone"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "user edit");
+    a.run_command("undo").unwrap();
+    assert!(a.last_status().contains("nothing to undo"));
+    drop(a);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn undo_waits_for_the_workspace_root_its_turn_changed() {
+    let (mut a, root_a) = agent_app_with_reply();
+    let root = a.space.root.clone();
+    let root_b = test_space().root;
+    std::fs::create_dir_all(&root_b).unwrap();
+    let root_b = root_b.canonicalize().unwrap();
+    let file = root_a.join("notes");
+    std::fs::write(&file, "original").unwrap();
+    let mut toolbox = crate::tools::ToolBox::new(
+        root.join("skills"),
+        None,
+        None,
+        "auto".to_string(),
+        Vec::new(),
+        None,
+        None,
+        None,
+    );
+    toolbox.workspace.clone_from(&a.workspace);
+    a.start_stream().unwrap();
+    a.stop_stream().unwrap();
+    toolbox
+        .run("fs", r#"{"action":"read","path":"notes"}"#)
+        .await;
+    let (result, _) = toolbox
+        .run(
+            "fs",
+            r#"{"action":"write","path":"notes","content":"agent"}"#,
+        )
+        .await;
+    assert!(result.starts_with("wrote notes"), "{result}");
+    let checkpoint = root
+        .join("checkpoints")
+        .join(&a.session.as_ref().unwrap().id)
+        .join("1");
+
+    a.run_command(&format!("agent {}", root_b.display()))
+        .unwrap();
+    while a.pop_pending_event().is_some() {}
+    a.run_command("undo").unwrap();
+    assert_eq!(
+        a.last_status(),
+        format!(
+            "the last agent turn changed files in {root} · switch back with /agent {root} to undo it",
+            root = root_a.display()
+        )
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "agent");
+    assert!(checkpoint.exists());
+
+    a.run_command(&format!("agent {}", root_a.display()))
+        .unwrap();
+    while a.pop_pending_event().is_some() {}
+    a.run_command("undo").unwrap();
+    assert!(a.last_status().starts_with("undid 1 file changes"));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
+    assert!(!checkpoint.exists());
+    drop(a);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(root_a).unwrap();
+    std::fs::remove_dir_all(root_b).unwrap();
+}
+
 #[test]
 fn retry_refuses_when_nothing_to_retry() {
     let mut a = app_with_key();

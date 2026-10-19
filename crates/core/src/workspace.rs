@@ -9,14 +9,19 @@ use std::time::SystemTime;
 
 use sha2::{Digest, Sha256};
 
+mod checkpoint;
 pub mod escalation;
 pub(crate) mod shell;
+
+pub use checkpoint::UndoReport;
 
 /// A canonical workspace root, its hard exclusions, and the files last read.
 pub struct Workspace {
     root: PathBuf,
     deny: Vec<PathBuf>,
     stamps: Mutex<HashMap<PathBuf, FileStamp>>,
+    /// Per-turn pre-images of agent changes; off unless `with_checkpoints`.
+    checkpoints: Option<checkpoint::Checkpoints>,
 }
 
 /// The identity of a file's contents at read time.
@@ -95,6 +100,7 @@ impl Workspace {
             root,
             deny,
             stamps: Mutex::new(HashMap::new()),
+            checkpoints: None,
         })
     }
 

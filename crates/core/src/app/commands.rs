@@ -180,6 +180,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["regen"],
     },
     Command {
+        name: "undo",
+        desc: "restore the files the agent changed in its last turn",
+        aliases: &[],
+    },
+    Command {
         name: "copy",
         desc: "copy last reply",
         aliases: &["yank", "clip"],
@@ -294,6 +299,8 @@ pub enum AppCommand {
     SetTheme { mode: String },
     /// `/retry` — regenerate the last reply.
     Retry,
+    /// `/undo` — restore the files the last agent turn changed.
+    Undo,
     /// `/copy` — the copy menu.
     OpenCopyMenu,
     /// `/skills` — the skills popup.
@@ -378,6 +385,7 @@ impl App {
                 mode: rest(cmd, token),
             }),
             "retry" => Ok(AppCommand::Retry),
+            "undo" => Ok(AppCommand::Undo),
             "copy" => Ok(AppCommand::OpenCopyMenu),
             "skills" => Ok(AppCommand::OpenSkills),
             "files" => Ok(AppCommand::OpenFiles {
@@ -469,6 +477,7 @@ impl App {
             AppCommand::LocalServer { verb, runtime } => self.manage_local_server(&verb, &runtime),
             AppCommand::Send { text } => self.send_message(text)?,
             AppCommand::Retry => self.retry_last_reply()?,
+            AppCommand::Undo => self.undo_last_turn()?,
             AppCommand::Cancel { task } => match task {
                 Some(id) => self.cancel_chat_task(id)?,
                 None => self.stop_stream()?,

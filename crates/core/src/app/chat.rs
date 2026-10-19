@@ -178,6 +178,11 @@ impl App {
             return Ok(());
         }
         let session_id = session.id.clone();
+        let changed_files = self.work_mode == WorkMode::Agent
+            && self
+                .workspace
+                .as_ref()
+                .is_some_and(|workspace| workspace.turn_changed_files(&session_id));
         if !self.incognito {
             for id in self.db.reply_ids_after_last_user(&session_id)? {
                 self.db.delete_message(&id)?;
@@ -194,7 +199,39 @@ impl App {
                 let _ = store.add_label(&step, "rejected", "retry");
             }
         }
-        self.start_stream()
+        self.start_stream()?;
+        if changed_files {
+            self.push_status(
+                "retrying · the replaced turn's file changes are kept · /undo walks back one agent turn at a time",
+            );
+        }
+        Ok(())
+    }
+
+    /// Restore the files the last agent turn changed, unless changed since.
+    pub fn undo_last_turn(&mut self) -> Result<()> {
+        if self.is_streaming() {
+            self.push_status("wait — response still streaming");
+            return Ok(());
+        }
+        let Some(workspace) = self
+            .workspace
+            .clone()
+            .filter(|_| self.work_mode == WorkMode::Agent)
+        else {
+            self.push_status("/undo works in agent mode · switch with /agent <path>");
+            return Ok(());
+        };
+        let report = match &self.session {
+            Some(session) => workspace.undo_last(&session.id),
+            None => Ok(None),
+        };
+        match report {
+            Ok(Some(report)) => self.push_status(report.summary()),
+            Ok(None) => self.push_status("nothing to undo — no agent file changes in this session"),
+            Err(error) => self.push_status(format!("undo failed: {error}")),
+        }
+        Ok(())
     }
 
     fn model_profile(&self) -> ModelProfile {
@@ -414,6 +451,11 @@ impl App {
                 ));
                 self.context_warned = true;
             }
+        }
+        if self.work_mode == WorkMode::Agent
+            && let (Some(workspace), Some(session)) = (&self.workspace, &self.session)
+        {
+            workspace.begin_turn(&session.id);
         }
         let (rx, abort) = provider.stream_chat(
             raw_model.clone(),

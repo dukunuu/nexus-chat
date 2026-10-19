@@ -1305,7 +1305,8 @@ impl App {
         if config_dir.exists() {
             deny.push(config_dir.canonicalize()?);
         }
-        let workspace = crate::workspace::Workspace::open(&root, deny)?;
+        let workspace = crate::workspace::Workspace::open(&root, deny)?
+            .with_checkpoints(self.space.root.join("checkpoints"));
         workspace.resolve(".", crate::workspace::Access::Read)?;
         Ok(std::sync::Arc::new(workspace))
     }
