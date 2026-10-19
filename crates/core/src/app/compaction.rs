@@ -66,22 +66,22 @@ impl App {
             .is_some_and(|s| self.is_compacting_session(&s.id))
     }
 
-    /// After a reply, auto-compact once context usage crosses the configured
-    /// threshold (0 disables it).
+    /// After a reply, auto-compact once context usage crosses the percentage
+    /// threshold or experimental token budget (0 disables each trigger).
     pub fn maybe_compact(&mut self) {
-        if self.settings.compact_threshold == 0 || self.compact_rx.is_some() || self.is_streaming()
-        {
+        if self.compact_rx.is_some() || self.is_streaming() {
             return;
         }
-        let Some(limit) = self.context_limit() else {
-            return;
-        };
         let used = self.context_used();
-        let pct = used
-            .checked_mul(100)
-            .and_then(|v| v.checked_div(limit))
+        let pct = self
+            .context_limit()
+            .and_then(|limit| used.checked_mul(100)?.checked_div(limit))
             .unwrap_or(0);
-        if pct < u64::from(self.settings.compact_threshold) {
+        let threshold_reached = self.settings.compact_threshold > 0
+            && pct >= u64::from(self.settings.compact_threshold);
+        let budget_reached = self.experiments.compaction_budget_tokens > 0
+            && used >= self.experiments.compaction_budget_tokens;
+        if !threshold_reached && !budget_reached {
             return;
         }
         self.start_compaction(pct);
@@ -105,7 +105,15 @@ impl App {
         let through = usize::try_from(session.compact_through)
             .unwrap_or(0)
             .min(self.messages.len());
-        if compaction_tail(&self.messages, through).trim().is_empty() {
+        let end = compaction_end(
+            &self.messages,
+            through,
+            self.experiments.compaction_tail_turns,
+        );
+        if compaction_tail(&self.messages[..end], through)
+            .trim()
+            .is_empty()
+        {
             self.push_status("nothing new to compact".to_string());
             return;
         }
@@ -131,7 +139,12 @@ impl App {
                 .min(self.messages.len());
             (session.id.clone(), through, session.compact_summary.clone())
         };
-        let tail = compaction_tail(&self.messages, through);
+        let end = compaction_end(
+            &self.messages,
+            through,
+            self.experiments.compaction_tail_turns,
+        );
+        let tail = compaction_tail(&self.messages[..end], through);
         if tail.trim().is_empty() {
             return; // only the existing digest or excluded UI rows remain
         }
@@ -156,7 +169,12 @@ impl App {
             ));
             return;
         };
-        let new_through = self.messages.len() as i64;
+        let new_through = end as i64;
+        let prompt = compaction_prompt(
+            prior_summary.as_deref(),
+            &tail,
+            self.experiments.compaction_itemized,
+        );
         let prompt_cache_key = format!("compaction:{}", self.prompt_cache_key_for(&session_id));
         let (tx, rx) = mpsc::unbounded_channel();
         self.compact_rx = Some(rx);
@@ -164,15 +182,6 @@ impl App {
         // The history pane gets a transient "compacting" block immediately;
         // the input bar also keeps its compact status while the request runs.
         tokio::spawn(async move {
-            let mut prompt = String::new();
-            if let Some(s) = &prior_summary {
-                prompt.push_str("Existing summary of earlier conversation:\n");
-                prompt.push_str(s);
-                prompt.push_str("\n\n");
-            }
-            prompt.push_str("New messages since that summary:\n");
-            prompt.push_str(&tail);
-            prompt.push_str(&prompts::render(prompts::COMPACTION, &[]));
             let msgs = vec![ChatMessage::text("user", prompt)];
             let params = ChatParams {
                 prompt_cache_key: Some(prompt_cache_key),
@@ -206,6 +215,14 @@ impl App {
             self.push_status("compaction failed — no digest returned".to_string());
             return;
         };
+        if self.experiments.compaction_itemized
+            && !summary.lines().any(|line| line.trim() == "## Goal")
+        {
+            self.push_status(
+                "compaction returned an unstructured digest · kept the previous one".to_string(),
+            );
+            return;
+        }
         let _ = self.db.set_compaction(&id, &summary, through);
         if let Some(s) = self.session.as_mut().filter(|s| s.id == id) {
             s.compact_summary = Some(summary.clone());
@@ -295,14 +312,25 @@ impl App {
             }
         }
         self.context_total = None;
+        self.push_status(self.compaction_status(before_pct));
+    }
+
+    fn compaction_status(&self, before_pct: u64) -> String {
         let after_pct = self
             .context_limit()
             .filter(|&l| l > 0)
             .map(|l| self.context_used() * 100 / l);
-        self.push_status(match after_pct {
+        let mut status = match after_pct {
             Some(after) => format!("compacted: {before_pct}% → {after}%"),
             None => "compacted".to_string(),
-        });
+        };
+        if self.experiments.compaction_tail_turns > 0
+            || self.experiments.compaction_itemized
+            || self.experiments.compaction_budget_tokens > 0
+        {
+            status.push_str(" · experiment");
+        }
+        status
     }
 
     /// Sessions compacted before compaction rows existed (or loaded from a
@@ -450,6 +478,45 @@ impl App {
     }
 }
 
+/// End of the compactable prefix, keeping the requested recent user turns
+/// intact. At least one new user turn must precede the retained tail.
+fn compaction_end(messages: &[Message], through: usize, tail_turns: u32) -> usize {
+    if tail_turns == 0 {
+        return messages.len();
+    }
+    let mut turns = messages
+        .iter()
+        .enumerate()
+        .skip(through)
+        .filter(|(_, m)| m.role == "user")
+        .rev();
+    let Some((end, _)) = turns.nth(tail_turns as usize - 1) else {
+        return through;
+    };
+    if turns.next().is_none() {
+        return through;
+    }
+    end
+}
+
+fn compaction_prompt(prior_summary: Option<&str>, tail: &str, itemized: bool) -> String {
+    let mut prompt = String::new();
+    if let Some(s) = prior_summary {
+        prompt.push_str("Existing summary of earlier conversation:\n");
+        prompt.push_str(s);
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str("New messages since that summary:\n");
+    prompt.push_str(tail);
+    let template = if itemized {
+        prompts::COMPACTION_ITEMIZED
+    } else {
+        prompts::COMPACTION
+    };
+    prompt.push_str(&prompts::render(template, &[]));
+    prompt
+}
+
 /// The message tail handed to the compaction model: everything since the
 /// last digest except rows that must never reach a model via
 /// `App::excluded_from_model_history`. Tool-call rows are retained so a
@@ -507,6 +574,316 @@ mod tests {
         a.messages = a.db.load_messages(&sid).unwrap();
         a.session = a.db.get_session(&sid).unwrap();
         (a, sid)
+    }
+
+    fn discard(app: App) {
+        let root = app.space.root.clone();
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn tool_message(id: &str, result: &str) -> Message {
+        msg(
+            "tool_call",
+            &serde_json::json!({
+                "id": id, "name": "fs",
+                "arguments": format!(r#"{{"action":"read","path":"{id}"}}"#),
+                "result": result,
+                "reasoning_content": "Check the file", "assistant_content": "Reading",
+            })
+            .to_string(),
+        )
+    }
+
+    #[test]
+    fn default_compaction_input_boundary_and_prompt_match_the_legacy_path() {
+        let experiments = crate::config::Experiments::default();
+        assert_eq!(experiments.compaction_tail_turns, 0);
+        assert!(!experiments.compaction_itemized);
+        assert_eq!(experiments.compaction_budget_tokens, 0);
+        let messages = vec![
+            msg("user", "earlier question"),
+            msg("assistant", "earlier answer"),
+            msg("compaction", "earlier digest"),
+            msg("user", "inspect src/main.rs"),
+            tool_message("read", "fn main() {}"),
+            msg("assistant", "keep the entry point"),
+            msg("error", "excluded failure"),
+        ];
+        for through in [0, 2] {
+            for prior in [None, Some("prior digest")] {
+                let legacy_tail = messages[through..]
+                    .iter()
+                    .filter(|m| !App::excluded_from_model_history(m))
+                    .map(|m| format!("{}: {}", m.role, m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                let mut legacy_prompt = String::new();
+                if let Some(summary) = prior {
+                    legacy_prompt.push_str("Existing summary of earlier conversation:\n");
+                    legacy_prompt.push_str(summary);
+                    legacy_prompt.push_str("\n\n");
+                }
+                legacy_prompt.push_str("New messages since that summary:\n");
+                legacy_prompt.push_str(&legacy_tail);
+                legacy_prompt.push_str(&prompts::render(prompts::COMPACTION, &[]));
+
+                let end = compaction_end(&messages, through, experiments.compaction_tail_turns);
+                assert_eq!(end, messages.len());
+                let input = compaction_tail(&messages[..end], through);
+                assert_eq!(input, legacy_tail);
+                assert_eq!(
+                    compaction_prompt(prior, &input, experiments.compaction_itemized),
+                    legacy_prompt
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tail_keeps_two_whole_turns_and_replays_them_verbatim_after_the_digest() {
+        let (mut a, sid) = app_with_session(0);
+        a.experiments.compaction_tail_turns = 2;
+        for turn in 0..5 {
+            a.db.add_user_message(&sid, &format!("u{turn}")).unwrap();
+            for call in 0..2 {
+                let row =
+                    tool_message(&format!("c{turn}-{call}"), &format!("result {turn}-{call}"));
+                a.db.add_tool_call_message(&sid, &row.content).unwrap();
+            }
+            a.db.add_assistant_message(
+                &sid,
+                &format!("a{turn}"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        a.messages = a.db.load_messages(&sid).unwrap();
+        let original = a.build_history();
+        let replay_start = original
+            .iter()
+            .position(|m| m.role == "user" && m.content == "u3")
+            .unwrap();
+        let end = compaction_end(&a.messages, 0, a.experiments.compaction_tail_turns);
+        assert_eq!(end, 12); // user + two tool calls + assistant per turn
+        assert_eq!(a.messages[end].role, "user");
+        assert_eq!(a.messages[end].content, "u3");
+        assert_eq!(a.messages[end - 1].role, "assistant");
+        let input = compaction_tail(&a.messages[..end], 0);
+        assert!(input.contains("result 2-1"));
+        for excluded in ["u3", "u4", "result 3-0", "result 3-1", "result 4-0", "a4"] {
+            assert!(!input.contains(excluded), "{input}");
+        }
+
+        a.on_compact_result(Some((sid.clone(), "digest".into(), end as i64, 60)));
+        assert_eq!(a.session.as_ref().unwrap().compact_through, end as i64);
+        assert_eq!(a.messages[end].role, "compaction");
+        assert_eq!(a.messages[end + 1].content, "u3");
+        let history = a.build_history();
+        assert_eq!(history[1].role, "system");
+        assert_eq!(
+            history[1].content,
+            "Summary of earlier conversation (auto-compacted for length):\ndigest"
+        );
+        assert_eq!(
+            serde_json::to_vec(&history[2..]).unwrap(),
+            serde_json::to_vec(&original[replay_start..]).unwrap()
+        );
+        assert!(a.last_status().ends_with(" · experiment"));
+        a.messages = a.db.load_messages(&sid).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&a.build_history()[2..]).unwrap(),
+            serde_json::to_vec(&original[replay_start..]).unwrap()
+        );
+        discard(a);
+    }
+
+    #[test]
+    fn tail_requires_a_new_user_turn_before_the_retained_turns() {
+        let (mut a, _) = app_with_session(5);
+        assert_eq!(compaction_end(&a.messages, 4, 2), 6);
+        for through in [5, 6, 7, 8, 10] {
+            assert_eq!(compaction_end(&a.messages, through, 2), through);
+        }
+        a.experiments.compaction_tail_turns = 2;
+        a.experiments.compaction_budget_tokens = 1;
+        a.context_total = Some(1);
+        a.drain_ui_events();
+        for messages in [
+            vec![],
+            vec![msg("user", "only one")],
+            vec![msg("user", "first"), msg("user", "second")],
+            vec![
+                msg("assistant", "old tail"),
+                msg("user", "first"),
+                msg("user", "second"),
+            ],
+        ] {
+            a.messages = messages;
+            a.force_compact();
+            assert!(a.compact_rx.is_none());
+            assert_eq!(a.last_status(), "nothing new to compact");
+            a.maybe_compact();
+            assert!(a.compact_rx.is_none());
+            assert!(a.last_status().is_empty());
+        }
+        let mut excluded = msg("user", "excluded persona row");
+        excluded.persona = Some("researcher".into());
+        a.messages = vec![
+            excluded,
+            msg("survey", "excluded survey"),
+            msg("user", "retained first"),
+            msg("user", "retained second"),
+        ];
+        a.force_compact();
+        assert!(a.compact_rx.is_none());
+        assert_eq!(a.last_status(), "nothing new to compact");
+        a.maybe_compact();
+        assert!(a.compact_rx.is_none());
+        assert!(a.last_status().is_empty());
+        discard(a);
+    }
+
+    #[test]
+    fn itemized_prompt_includes_fixed_sections_and_edits_the_prior_list() {
+        for prior in [None, Some("## Goal\n- Keep src/main.rs and budget 42000")] {
+            let prompt = compaction_prompt(prior, "user: add a regression test", true);
+            for heading in [
+                "## Goal",
+                "## Decisions",
+                "## Files and code",
+                "## Facts learned",
+                "## Open threads",
+            ] {
+                assert!(prompt.lines().any(|line| line == heading));
+            }
+            assert!(prompt.contains("user: add a regression test"));
+            assert!(prompt.contains("edit the list, do not rewrite it"));
+            assert!(prompt.contains("complete updated list"));
+            assert!(prompt.contains("keep every prior item verbatim"));
+            if let Some(summary) = prior {
+                assert!(prompt.contains(summary));
+            }
+        }
+    }
+
+    #[test]
+    fn itemized_result_rejects_unstructured_text_without_changing_the_previous_digest() {
+        let (mut a, sid) = app_with_session(3);
+        a.on_compact_result(Some((sid.clone(), "previous digest".into(), 2, 60)));
+        a.experiments.compaction_itemized = true;
+        a.context_total = Some(777);
+        let epoch = a.cache_epoch;
+        let before = serde_json::to_vec(&a.build_history()).unwrap();
+        for reply in ["unstructured digest", "mentions ## Goal but has no heading"] {
+            let (_tx, rx) = mpsc::unbounded_channel();
+            a.compact_rx = Some(rx);
+            a.compacting_session_id = Some(sid.clone());
+            a.on_compact_result(Some((sid.clone(), reply.into(), 6, 60)));
+            assert!(a.compact_rx.is_none());
+            assert!(a.compacting_session_id.is_none());
+            let stored = a.db.get_session(&sid).unwrap().unwrap();
+            assert_eq!(stored.compact_summary.as_deref(), Some("previous digest"));
+            assert_eq!(stored.compact_through, 2);
+            assert_eq!(a.session.as_ref().unwrap().compact_through, 2);
+            assert_eq!(serde_json::to_vec(&a.build_history()).unwrap(), before);
+            assert_eq!(a.context_total, Some(777));
+            assert_eq!(a.cache_epoch, epoch);
+            assert_eq!(
+                a.last_status(),
+                "compaction returned an unstructured digest · kept the previous one"
+            );
+        }
+        let summary = "## Goal\n- Fix compaction\n## Decisions\n- Keep two turns\n\
+                       ## Files and code\n- compaction.rs\n## Facts learned\n- Budget 42000\n\
+                       ## Open threads\n- Run checks";
+        a.on_compact_result(Some((sid.clone(), summary.into(), 6, 60)));
+        let stored = a.db.get_session(&sid).unwrap().unwrap();
+        assert_eq!(stored.compact_summary.as_deref(), Some(summary));
+        assert_eq!(stored.compact_through, 6);
+        assert_eq!(
+            a.session.as_ref().unwrap().compact_summary.as_deref(),
+            Some(summary)
+        );
+        assert_eq!(
+            a.messages
+                .iter()
+                .find(|m| m.role == "compaction")
+                .unwrap()
+                .content,
+            summary
+        );
+        assert!(a.last_status().ends_with(" · experiment"));
+        discard(a);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn budget_and_percentage_triggers_are_independent() {
+        // No await: spawned provider tasks are never polled by this runtime.
+        for (limit, threshold, budget, used, triggers) in [
+            (None, 60, 40_000, 40_000, true),
+            (None, 0, 40_000, 40_000, true),
+            (None, 60, 40_000, 39_999, false),
+            (None, 60, 0, 90_000, false),
+            (Some(1_000_000), 60, 40_000, 40_000, true),
+            (Some(100_000), 60, 40_000, 39_999, false),
+            (Some(100_000), 60, 80_000, 60_000, true),
+            (Some(100_000), 60, 0, 60_000, true),
+            (Some(100_000), 0, 0, 90_000, false),
+        ] {
+            let (mut a, sid) = app_with_session(2);
+            a.current_model = Some("m".into());
+            a.models = vec![crate::provider::Model {
+                id: "m".into(),
+                name: "model".into(),
+                reasoning_efforts: Vec::new(),
+                context_length: limit,
+                supports_images: false,
+                supports_image_generation: false,
+                supports_video_generation: false,
+                backend: crate::provider::BackendTag::OpenRouter,
+                pricing: None,
+            }];
+            a.settings.compact_threshold = threshold;
+            a.experiments.compaction_budget_tokens = budget;
+            a.context_total = Some(used);
+            a.drain_ui_events();
+            a.maybe_compact();
+            assert_eq!(
+                a.compact_rx.is_some(),
+                triggers,
+                "{limit:?}, {threshold}, {budget}, {used}"
+            );
+            assert_eq!(
+                a.compacting_session_id.as_deref(),
+                triggers.then_some(sid.as_str())
+            );
+            assert!(a.last_status().is_empty());
+            discard(a);
+        }
+    }
+
+    #[test]
+    fn compaction_status_marks_each_experiment_but_not_the_default_path() {
+        for (turns, itemized, budget, suffix) in [
+            (0, false, 0, ""),
+            (2, false, 0, " · experiment"),
+            (0, true, 0, " · experiment"),
+            (0, false, 40_000, " · experiment"),
+        ] {
+            let (mut a, sid) = app_with_session(3);
+            a.experiments.compaction_tail_turns = turns;
+            a.experiments.compaction_itemized = itemized;
+            a.experiments.compaction_budget_tokens = budget;
+            a.on_compact_result(Some((sid, "## Goal\n- Continue".into(), 2, 60)));
+            assert_eq!(a.last_status(), format!("compacted{suffix}"));
+            discard(a);
+        }
     }
 
     #[test]

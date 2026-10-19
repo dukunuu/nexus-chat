@@ -31,6 +31,8 @@ pub const RESEARCH_TOPIC_FROM_CHAT: &str =
 pub const OCR: &str = include_str!("../assets/prompts/ocr.md");
 /// Conversation compaction instructions.
 pub const COMPACTION: &str = include_str!("../assets/prompts/compaction.md");
+/// Experimental item-preserving conversation compaction instructions.
+pub const COMPACTION_ITEMIZED: &str = include_str!("../assets/prompts/compaction-itemized.md");
 /// Durable memory extraction instructions.
 pub const MEMORY: &str = include_str!("../assets/prompts/memory.md");
 /// Session title and slug instructions.
@@ -102,6 +104,27 @@ mod tests {
         (SWARM_MODERATOR, &["topic", "transcript"]),
         (SWARM_SYNTHESIS, &["topic", "transcript"]),
     ];
+
+    #[test]
+    fn itemized_compaction_template_renders_without_placeholders() {
+        let rendered = render(COMPACTION_ITEMIZED, &[]);
+        assert!(!rendered.contains("{{"));
+        assert!(COMPACTION_ITEMIZED.ends_with('\n'));
+        assert!(!COMPACTION_ITEMIZED.ends_with("\n\n"));
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("## "))
+                .collect::<Vec<_>>(),
+            [
+                "## Goal",
+                "## Decisions",
+                "## Files and code",
+                "## Facts learned",
+                "## Open threads",
+            ]
+        );
+    }
 
     #[test]
     fn agent_addendum_renders_without_placeholders() {

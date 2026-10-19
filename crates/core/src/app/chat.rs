@@ -397,6 +397,8 @@ impl App {
         }
         let trigger = if self.experiments.mask_trigger_tokens > 0 {
             self.experiments.mask_trigger_tokens
+        } else if self.experiments.compaction_budget_tokens > 0 {
+            self.experiments.compaction_budget_tokens / 2
         } else if let Some(limit) = self.context_limit() {
             limit / 2
         } else {

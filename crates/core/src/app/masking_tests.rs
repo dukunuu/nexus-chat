@@ -202,6 +202,42 @@ fn mask_trigger_uses_half_the_window_and_requires_two_thousand_maskable_tokens()
 }
 
 #[test]
+fn masking_fallback_uses_half_the_compaction_budget_with_or_without_a_known_window() {
+    for limit in [None, Some(100_000)] {
+        let mut app = fixture(2, 5_000);
+        app.experiments.mask_tool_results = true;
+        app.experiments.mask_keep_rounds = 1;
+        app.experiments.compaction_budget_tokens = 40_000;
+        app.models[0].context_length = limit;
+        app.context_total = Some(19_999);
+        app.maybe_mask();
+        assert_eq!(app.mask_through, 0);
+        app.context_total = Some(20_000);
+        app.maybe_mask();
+        assert_eq!(app.mask_through, 5);
+        assert!(app.last_status().ends_with(" · experiment"));
+        discard(app);
+    }
+}
+
+#[test]
+fn explicit_masking_trigger_takes_precedence_over_the_compaction_budget() {
+    let mut app = fixture(2, 5_000);
+    app.experiments.mask_tool_results = true;
+    app.experiments.mask_keep_rounds = 1;
+    app.experiments.mask_trigger_tokens = 30_000;
+    app.experiments.compaction_budget_tokens = 40_000;
+    app.models[0].context_length = None;
+    app.context_total = Some(29_999);
+    app.maybe_mask();
+    assert_eq!(app.mask_through, 0);
+    app.context_total = Some(30_000);
+    app.maybe_mask();
+    assert_eq!(app.mask_through, 5);
+    discard(app);
+}
+
+#[test]
 fn errors_and_compacted_observations_do_not_count_toward_the_mask_budget() {
     let mut app = fixture(2, 5_000);
     app.experiments.mask_tool_results = true;
