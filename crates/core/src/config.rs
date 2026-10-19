@@ -44,6 +44,65 @@ struct Config {
     host: Option<HostSettings>,
     #[serde(default)]
     local: Option<crate::provider::local::LocalConfig>,
+    #[serde(default)]
+    experiments: Experiments,
+}
+
+/// Opt-in context experiments; defaults preserve the current behavior.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Experiments {
+    pub mask_tool_results: bool,
+    pub mask_keep_rounds: u32,
+    pub mask_trigger_tokens: u64,
+    pub compaction_tail_turns: u32,
+    pub compaction_itemized: bool,
+    pub compaction_budget_tokens: u64,
+    pub cache_ttl_1h: bool,
+}
+
+impl Default for Experiments {
+    fn default() -> Self {
+        Self {
+            mask_tool_results: false,
+            mask_keep_rounds: 10,
+            mask_trigger_tokens: 0,
+            compaction_tail_turns: 0,
+            compaction_itemized: false,
+            compaction_budget_tokens: 0,
+            cache_ttl_1h: false,
+        }
+    }
+}
+
+impl Experiments {
+    /// Set one experiment by its unqualified field name.
+    ///
+    /// # Errors
+    /// Rejects unknown keys and values that do not parse as the field's type.
+    pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
+        const KEYS: &str = "mask_tool_results, mask_keep_rounds, mask_trigger_tokens, compaction_tail_turns, compaction_itemized, compaction_budget_tokens, cache_ttl_1h";
+        let invalid = || anyhow::anyhow!("invalid experiment {key}={value}; valid keys: {KEYS}");
+        match key {
+            "mask_tool_results" => self.mask_tool_results = value.parse().map_err(|_| invalid())?,
+            "mask_keep_rounds" => self.mask_keep_rounds = value.parse().map_err(|_| invalid())?,
+            "mask_trigger_tokens" => {
+                self.mask_trigger_tokens = value.parse().map_err(|_| invalid())?;
+            }
+            "compaction_tail_turns" => {
+                self.compaction_tail_turns = value.parse().map_err(|_| invalid())?;
+            }
+            "compaction_itemized" => {
+                self.compaction_itemized = value.parse().map_err(|_| invalid())?;
+            }
+            "compaction_budget_tokens" => {
+                self.compaction_budget_tokens = value.parse().map_err(|_| invalid())?;
+            }
+            "cache_ttl_1h" => self.cache_ttl_1h = value.parse().map_err(|_| invalid())?,
+            _ => return Err(invalid()),
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -89,6 +148,8 @@ struct HostSettings {
 pub struct SavedCreds {
     /// Independent local runtime configuration, never synced between machines.
     pub local: Option<crate::provider::local::LocalConfig>,
+    /// Opt-in experiments from the same machine-local config.
+    pub experiments: Experiments,
     pub openrouter_key: Option<String>,
     pub openai_key: Option<String>,
     pub opencode_key: Option<String>,
@@ -201,6 +262,7 @@ pub fn load_creds_offline() -> SavedCreds {
     }
     SavedCreds {
         local: load_local_config().ok().flatten(),
+        experiments: load_experiments().unwrap_or_default(),
         openrouter_key: (!openrouter_key.is_empty()).then_some(openrouter_key),
         openai_key: (!openai_key.is_empty()).then_some(openai_key),
         opencode_key: (!opencode_key.is_empty()).then_some(opencode_key),
@@ -222,6 +284,7 @@ pub async fn load_all_providers() -> Result<SavedCreds> {
     }
     let mut saved = load_creds_offline();
     saved.local = load_local_config()?;
+    saved.experiments = load_experiments()?;
     if let Some(local) = &saved.local {
         local.validate()?;
     }
@@ -231,6 +294,17 @@ pub async fn load_all_providers() -> Result<SavedCreds> {
         saved.codex = Some(creds);
     }
     Ok(saved)
+}
+
+fn load_experiments() -> Result<Experiments> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(Experiments::default());
+    }
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let config: Config = toml::from_str(&text).context("parsing experiments configuration")?;
+    Ok(config.experiments)
 }
 
 fn load_local_config() -> Result<Option<crate::provider::local::LocalConfig>> {
@@ -694,12 +768,77 @@ fn write_config(
         body.push_str("\n[local]\n");
         body.push_str(&toml::to_string(local).context("serializing local runtime configuration")?);
     }
+    if path.exists() {
+        let text = std::fs::read_to_string(&path)?;
+        let config: toml::Value = toml::from_str(&text)?;
+        if let Some(experiments) = config.get("experiments") {
+            body.push_str("\n[experiments]\n");
+            body.push_str(&toml::to_string(experiments)?);
+        }
+    }
     write_secret_file(&path, &body)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn experiment_defaults_round_trip_and_set() {
+        let defaults = Experiments::default();
+        assert_eq!(defaults.mask_keep_rounds, 10);
+        assert_eq!(toml::from_str::<Config>("").unwrap().experiments, defaults);
+        let encoded = toml::to_string(&defaults).unwrap();
+        assert_eq!(toml::from_str::<Experiments>(&encoded).unwrap(), defaults);
+        let mut experiments = defaults;
+        for (key, value) in [
+            ("mask_tool_results", "true"),
+            ("mask_keep_rounds", "12"),
+            ("mask_trigger_tokens", "12345"),
+            ("compaction_tail_turns", "3"),
+            ("compaction_itemized", "true"),
+            ("compaction_budget_tokens", "40000"),
+            ("cache_ttl_1h", "true"),
+        ] {
+            experiments.set(key, value).unwrap();
+            let error = experiments.set(key, "invalid").unwrap_err().to_string();
+            assert!(error.contains("valid keys:"));
+            assert!(error.contains(key));
+        }
+        assert_eq!(
+            experiments,
+            Experiments {
+                mask_tool_results: true,
+                mask_keep_rounds: 12,
+                mask_trigger_tokens: 12345,
+                compaction_tail_turns: 3,
+                compaction_itemized: true,
+                compaction_budget_tokens: 40000,
+                cache_ttl_1h: true,
+            }
+        );
+        let section = format!("[experiments]\n{}", toml::to_string(&experiments).unwrap());
+        assert_eq!(
+            toml::from_str::<Config>(&section).unwrap().experiments,
+            experiments
+        );
+        assert_eq!(
+            toml::from_str::<Config>("[experiments]\ncache_ttl_1h = true")
+                .unwrap()
+                .experiments
+                .mask_keep_rounds,
+            10
+        );
+        for (key, value) in [
+            ("unknown", "true"),
+            ("mask_keep_rounds", "-1"),
+            ("mask_trigger_tokens", "-1"),
+            ("cache_ttl_1h", "1"),
+        ] {
+            assert!(experiments.set(key, value).is_err());
+        }
+        assert!(toml::from_str::<Config>("[experiments]\nunknown = true").is_err());
+    }
 
     #[test]
     fn overlay_migration_deletes_every_shipped_default() {

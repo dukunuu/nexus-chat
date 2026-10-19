@@ -4,26 +4,52 @@ use std::path::Path;
 
 use super::Workspace;
 
+const WRITE_CONFINEMENT_UNAVAILABLE: &str =
+    "shell write confinement unavailable · this eval task needs macOS sandbox-exec";
+
 pub(crate) async fn action(
     workspace: &Workspace,
     db_path: Option<&Path>,
+    confine_shell_writes: Option<&Path>,
     name: &str,
     args: &str,
     allow_unparseable: bool,
 ) -> String {
+    #[cfg(not(target_os = "macos"))]
+    if name == "shell_run" && confine_shell_writes.is_some() {
+        return WRITE_CONFINEMENT_UNAVAILABLE.to_string();
+    }
     #[cfg(unix)]
     {
         let args = match serde_json::from_str(args) {
             Ok(args) => args,
             Err(error) => return format!("invalid tool arguments: {error}"),
         };
-        unix::action(workspace, db_path, name, &args, allow_unparseable)
+        let result = if let Some(root) = confine_shell_writes {
+            unix::action_with_confinement(
+                workspace,
+                db_path,
+                name,
+                &args,
+                allow_unparseable,
+                Some(root),
+            )
             .await
-            .unwrap_or_else(|error| format!("shell failed: {error}"))
+        } else {
+            unix::action(workspace, db_path, name, &args, allow_unparseable).await
+        };
+        result.unwrap_or_else(|error| format!("shell failed: {error}"))
     }
     #[cfg(not(unix))]
     {
-        let _ = (workspace, db_path, name, args, allow_unparseable);
+        let _ = (
+            workspace,
+            db_path,
+            confine_shell_writes,
+            name,
+            args,
+            allow_unparseable,
+        );
         "shell is only available on Unix".to_string()
     }
 }
@@ -43,7 +69,7 @@ mod unix {
     use serde_json::Value;
     use tokio::process::Command;
 
-    use super::Workspace;
+    use super::{WRITE_CONFINEMENT_UNAVAILABLE, Workspace};
     use crate::workspace::Access;
     use crate::workspace::escalation::{Escalation, check_command};
 
@@ -88,6 +114,17 @@ mod unix {
         args: &Value,
         allow_unparseable: bool,
     ) -> anyhow::Result<String> {
+        action_with_confinement(workspace, db_path, name, args, allow_unparseable, None).await
+    }
+
+    pub(super) async fn action_with_confinement(
+        workspace: &Workspace,
+        db_path: Option<&Path>,
+        name: &str,
+        args: &Value,
+        allow_unparseable: bool,
+        confine_shell_writes: Option<&Path>,
+    ) -> anyhow::Result<String> {
         let runs = runs_dir(db_path);
         PRUNE_LOGS.call_once(|| {
             let _ = prune_logs(&runs);
@@ -124,7 +161,9 @@ mod unix {
         let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
         let path = runs.join(format!("{id}.log"));
         let output = File::create_new(&path)?;
-        let (mut command, sandbox_note) = command(cmd);
+        let Some((mut command, sandbox_note)) = command(cmd, confine_shell_writes, &runs) else {
+            return Ok(WRITE_CONFINEMENT_UNAVAILABLE.to_string());
+        };
         environment(&mut command, &shims)?;
         // Both descriptors share one open-file offset: stdout and stderr are
         // recorded in kernel write order, without competing reader tasks.
@@ -251,22 +290,56 @@ mod unix {
         Ok(())
     }
 
-    fn command(cmd: &str) -> (Command, &'static str) {
+    #[cfg(target_os = "macos")]
+    fn confined_profile(root: &Path, runs: &Path) -> anyhow::Result<String> {
+        let escape = |path: &Path| -> anyhow::Result<String> {
+            let path = path.canonicalize()?;
+            let text = path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("non-UTF-8 sandbox path"))?;
+            Ok(text.replace('\\', "\\\\").replace('"', "\\\""))
+        };
+        let root = escape(root)?;
+        let temp = escape(&std::env::temp_dir())?;
+        let runs = escape(runs)?;
+        Ok(format!(
+            "{PROFILE}(deny file-write* (require-not (subpath \"{root}\")))(allow file-write* (subpath \"{temp}\") (literal \"/dev/null\") (literal \"/dev/tty\") (subpath \"/dev/fd\") (subpath \"{runs}\"))"
+        ))
+    }
+
+    fn command(
+        cmd: &str,
+        confine_shell_writes: Option<&Path>,
+        runs: &Path,
+    ) -> Option<(Command, &'static str)> {
         #[cfg(target_os = "macos")]
         let (mut command, note) = if Path::new("/usr/bin/sandbox-exec").exists() {
+            let profile = match confine_shell_writes {
+                Some(root) => confined_profile(root, runs).ok()?,
+                None => PROFILE.to_string(),
+            };
             let mut command = Command::new("/usr/bin/sandbox-exec");
-            command.args(["-p", PROFILE, "sh"]);
+            command.args(["-p", &profile, "sh"]);
             (command, "")
         } else {
+            if confine_shell_writes.is_some() {
+                return None;
+            }
             (
                 Command::new("sh"),
                 " · escalation sandbox unavailable on this machine",
             )
         };
         #[cfg(not(target_os = "macos"))]
-        let (mut command, note) = (Command::new("sh"), "");
+        let (mut command, note) = {
+            let _ = runs;
+            if confine_shell_writes.is_some() {
+                return None;
+            }
+            (Command::new("sh"), "")
+        };
         command.args(["-c", cmd]);
-        (command, note)
+        Some((command, note))
     }
 
     fn session(command: &mut Command) {
@@ -410,6 +483,80 @@ mod unix {
             fn drop(&mut self) {
                 fs::remove_dir_all(&self.dir).unwrap();
             }
+        }
+
+        #[cfg(target_os = "macos")]
+        #[tokio::test]
+        async fn eval_shell_confines_writes_including_script_children() {
+            let mut fixture = Fixture::new();
+            let root = fixture.dir.join("workspace/quoted\"\\root");
+            fs::create_dir(&root).unwrap();
+            fixture.toolbox.workspace = Some(Arc::new(Workspace::open(&root, Vec::new()).unwrap()));
+            let temp = std::env::temp_dir().canonicalize().unwrap();
+            // The system temp directory is an explicit exception in the profile.
+            let outside_parent = ["/private/tmp", "/private/var/tmp"]
+                .into_iter()
+                .map(Path::new)
+                .find(|path| !path.starts_with(&temp))
+                .unwrap();
+            let outside_dir =
+                outside_parent.join(format!("nexus-shell-outside-{}", uuid::Uuid::new_v4()));
+            fs::create_dir(&outside_dir).unwrap();
+            let outside = outside_dir.join("outside");
+            let touch_outside = format!("touch '{}'", outside.display());
+            assert!(fixture.toolbox.confine_shell_writes.is_none());
+            let unconfined = fixture.run(&touch_outside).await;
+            let unconfined_created = outside.exists();
+            if unconfined_created {
+                fs::remove_file(&outside).unwrap();
+            }
+            fixture.toolbox.confine_shell_writes = Some(root.clone());
+            let inside = fixture.run("touch inside").await;
+            let confined = fixture.run(&touch_outside).await;
+            let confined_created = outside.exists();
+            if confined_created {
+                fs::remove_file(&outside).unwrap();
+            }
+            fs::write(
+                root.join("test.sh"),
+                format!("#!/bin/sh\n{touch_outside}\n"),
+            )
+            .unwrap();
+            let script = fixture.run("sh test.sh").await;
+            let script_created = outside.exists();
+            fs::remove_dir_all(outside_dir).unwrap();
+            assert!(unconfined.starts_with("exit 0"), "{unconfined}");
+            assert!(unconfined_created);
+            assert!(inside.starts_with("exit 0"), "{inside}");
+            assert!(root.join("inside").exists());
+            assert!(confined.starts_with("exit 1"), "{confined}");
+            assert!(!confined_created);
+            assert!(script.starts_with("exit 1"), "{script}");
+            assert!(!script_created);
+        }
+
+        #[cfg(target_os = "macos")]
+        #[tokio::test]
+        async fn invalid_confinement_profile_refuses_the_command() {
+            let mut fixture = Fixture::new();
+            fixture.toolbox.confine_shell_writes = Some(fixture.dir.join("missing"));
+            assert_eq!(
+                fixture.run("touch inside").await,
+                WRITE_CONFINEMENT_UNAVAILABLE
+            );
+            assert!(!fixture.dir.join("workspace/inside").exists());
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        #[tokio::test]
+        async fn unavailable_write_confinement_refuses_the_command() {
+            let mut fixture = Fixture::new();
+            fixture.toolbox.confine_shell_writes = Some(fixture.dir.join("workspace"));
+            assert_eq!(
+                fixture.run("touch inside").await,
+                WRITE_CONFINEMENT_UNAVAILABLE
+            );
+            assert!(!fixture.dir.join("workspace/inside").exists());
         }
 
         #[tokio::test]

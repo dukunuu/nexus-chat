@@ -1,0 +1,2 @@
+Release policy: the next public greeting must end with the marker BLUE-17 in square brackets, after the exclamation point.
+Keep the script POSIX sh compatible. The default name is world.

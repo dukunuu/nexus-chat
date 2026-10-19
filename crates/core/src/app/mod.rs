@@ -70,6 +70,43 @@ use chat::split_inline_reasoning;
 use memory::parse_memory_ops;
 use sessions::parse_topic;
 
+/// Non-interactive permissions for a disposable eval workspace.
+#[derive(Default)]
+pub struct EvalApprover {
+    /// Exact command-text prefixes allowed for shell runs.
+    pub allow_shell: Vec<String>,
+}
+
+impl Approver for EvalApprover {
+    fn request(
+        &self,
+        req: ApprovalRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Decision> + Send + '_>> {
+        Box::pin(async move {
+            if req.tool == "fs" {
+                return Decision::Allow;
+            }
+            if req.tool == "shell"
+                && req.action == "run"
+                && let Some(summary) = req.summary.strip_prefix("$ ")
+            {
+                // The toolbox appends a separate cwd annotation to the command.
+                let command = summary.rsplit_once("\nin ").map_or(summary, |(cmd, _)| cmd);
+                if crate::workspace::escalation::check_command(command).is_ok()
+                    && !command.contains([';', '&', '|', '$', '`', '>', '<', '\n', '\r'])
+                    && self
+                        .allow_shell
+                        .iter()
+                        .any(|prefix| command.starts_with(prefix))
+                {
+                    return Decision::Allow;
+                }
+            }
+            Decision::Deny
+        })
+    }
+}
+
 /// Sends permission requests to an interactive frontend and remembers grants
 /// only for the lifetime of this approver.
 pub struct ChannelApprover {
@@ -914,6 +951,8 @@ pub struct App {
     pub backends: Backends,
     /// Every credential configured on disk, kept in sync with `backends`.
     pub saved: crate::config::SavedCreds,
+    /// Opt-in experiments loaded at boot; no reductions are implemented here.
+    pub experiments: config::Experiments,
     /// Device-local trace store, opened only when a chat turn needs recording.
     pub trace_store: Option<std::sync::Arc<crate::trace::TraceStore>>,
     /// Most recently recorded chat turn's session and turn IDs.
@@ -967,6 +1006,8 @@ pub struct App {
     pub interactive_ui: bool,
     /// Whether a frontend can ask the user for workspace permissions.
     pub interactive_approvals: bool,
+    /// Eval permissions survive toolbox refreshes without interactive prompts.
+    pub eval_approver: Option<Arc<dyn Approver>>,
     /// Reply channel for the currently displayed approval request.
     pub pending_approval: Option<oneshot::Sender<Decision>>,
     /// The action waiting for a response from the interactive frontend.
@@ -1256,6 +1297,7 @@ impl App {
             space,
             backends,
             saved,
+            experiments: config::Experiments::default(),
             trace_store: None,
             last_turn: None,
             skills,
@@ -1319,6 +1361,7 @@ impl App {
             system_prompt_overlay: String::new(),
             interactive_ui: false,
             interactive_approvals: false,
+            eval_approver: None,
             pending_approval: None,
             pending_approval_request: None,
             approval_queue: VecDeque::new(),
@@ -1381,6 +1424,14 @@ impl App {
             None => cwd,
         }
         .canonicalize()?;
+        Ok(Arc::new(
+            self.open_workspace_root(&root)?
+                .with_checkpoints(self.space.root.join("checkpoints")),
+        ))
+    }
+
+    fn open_workspace_root(&self, root: &std::path::Path) -> Result<crate::workspace::Workspace> {
+        let root = root.canonicalize()?;
         let data = self.space.root.canonicalize()?;
         if data.starts_with(&root) || root.starts_with(&data) {
             anyhow::bail!(
@@ -1393,10 +1444,29 @@ impl App {
         if config_dir.exists() {
             deny.push(config_dir.canonicalize()?);
         }
-        let workspace = crate::workspace::Workspace::open(&root, deny)?
-            .with_checkpoints(self.space.root.join("checkpoints"));
+        let workspace = crate::workspace::Workspace::open(&root, deny)?;
         workspace.resolve(".", crate::workspace::Access::Read)?;
-        Ok(std::sync::Arc::new(workspace))
+        Ok(workspace)
+    }
+
+    /// Enter a disposable agent workspace in incognito, with no session binding
+    /// or durable checkpoints. Set `eval_approver` first to permit shell prefixes.
+    ///
+    /// # Errors
+    /// Rejects inaccessible roots and the same denied paths as normal agent mode.
+    pub fn enter_eval_workspace(&mut self, root: &std::path::Path) -> Result<()> {
+        let workspace = self.open_workspace_root(root)?;
+        if !self.incognito {
+            self.execute(AppCommand::Incognito { on: true })?;
+        }
+        self.workspace = Some(Arc::new(workspace));
+        self.work_mode = WorkMode::Agent;
+        if self.eval_approver.is_none() {
+            self.eval_approver = Some(Arc::new(EvalApprover::default()));
+        }
+        self.refresh_toolbox();
+        self.bump_cache_epoch();
+        Ok(())
     }
 
     fn set_work_mode(&mut self, mode: WorkMode, root: Option<&str>) -> Result<()> {
@@ -1603,7 +1673,21 @@ impl App {
             key,
             self.search_provider.clone(),
             self.blocked_domains(),
-            Some(self.space.db_path()),
+            Some(
+                self.eval_approver
+                    .as_ref()
+                    .and(self.workspace.as_ref())
+                    .map_or_else(
+                        || self.space.db_path(),
+                        |workspace| {
+                            workspace
+                                .root()
+                                .parent()
+                                .expect("eval workspace parent")
+                                .join("runtime.db")
+                        },
+                    ),
+            ),
             Some(crate::tools::FilesCtx {
                 db_path: self.space.db_path(),
                 space_id: self.active_space.id.clone(),
@@ -1655,7 +1739,9 @@ impl App {
         self.pending_approval_request = None;
         self.approval_queue.clear();
         self.approval_rx = None;
-        if self.interactive_approvals {
+        if let Some(approver) = &self.eval_approver {
+            toolbox.approver = Some(approver.clone());
+        } else if self.interactive_approvals {
             let (sender, receiver) = mpsc::unbounded_channel();
             toolbox.approver = Some(Arc::new(ChannelApprover::new(sender)));
             self.approval_rx = Some(receiver);
@@ -1665,6 +1751,10 @@ impl App {
             .as_ref()
             .filter(|_| self.work_mode == WorkMode::Agent)
             .cloned();
+        if self.eval_approver.is_some() {
+            toolbox.confine_shell_writes =
+                toolbox.workspace.as_ref().map(|w| w.root().to_path_buf());
+        }
         toolbox.session_id = self
             .session
             .as_ref()
@@ -2365,4 +2455,148 @@ fn first_line(result: &str) -> String {
         .unwrap_or("")
         .trim_end_matches(':')
         .to_string()
+}
+
+#[cfg(test)]
+mod eval_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn eval_permissions_are_confined_to_fs_and_allowlisted_shell() {
+        let approver = EvalApprover {
+            allow_shell: vec!["cargo test".into(), "ls".into()],
+        };
+        for action in ["read", "write", "edit", "delete"] {
+            assert_eq!(
+                approver
+                    .request(ApprovalRequest {
+                        tool: "fs".into(),
+                        action: action.into(),
+                        summary: "file".into()
+                    })
+                    .await,
+                Decision::Allow
+            );
+        }
+        for (summary, allowed) in [
+            ("$ cargo test", true),
+            ("$ cargo test --offline", true),
+            ("$ ls\nin src", true),
+            ("$ rm file", false),
+            ("could not parse safely: bad\n$ cargo test", false),
+            ("$ ls\nrm file", false),
+            ("$ ls 'quoted\nin name; bad'", false),
+            ("$ ls 'quoted\nin name'\nin src", false),
+        ] {
+            assert_eq!(
+                approver
+                    .request(ApprovalRequest {
+                        tool: "shell".into(),
+                        action: "run".into(),
+                        summary: summary.into()
+                    })
+                    .await,
+                if allowed {
+                    Decision::Allow
+                } else {
+                    Decision::Deny
+                },
+                "{summary}"
+            );
+        }
+        for forbidden in [';', '&', '|', '$', '`', '>', '<'] {
+            let request = ApprovalRequest {
+                tool: "shell".into(),
+                action: "run".into(),
+                summary: format!("$ cargo test {forbidden} echo bad"),
+            };
+            assert_eq!(approver.request(request).await, Decision::Deny);
+        }
+        for (tool, action) in [("shell", "log"), ("request_workspace", "open")] {
+            assert_eq!(
+                approver
+                    .request(ApprovalRequest {
+                        tool: tool.into(),
+                        action: action.into(),
+                        summary: "$ ls".into()
+                    })
+                    .await,
+                Decision::Deny
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn eval_workspace_is_incognito_and_has_no_binding_or_durable_checkpoints() {
+        let dir = std::env::temp_dir().join(format!("nexus-eval-app-{}", uuid::Uuid::new_v4()));
+        let data = dir.join("data");
+        let root = dir.join("copy/workspace");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = App::new(
+            Db::open_in_memory().unwrap(),
+            None,
+            Space { root: data.clone() },
+        );
+        app.execute(AppCommand::Incognito { on: true }).unwrap();
+        app.eval_approver = Some(Arc::new(EvalApprover {
+            allow_shell: vec!["printf ok".into()],
+        }));
+        let session = app
+            .db
+            .create_session("test", "model", &app.active_space.id, "chat")
+            .unwrap();
+        let session_id = session.id.clone();
+        app.session = Some(session);
+        app.enter_eval_workspace(&root).unwrap();
+        assert!(app.incognito);
+        assert_eq!(app.work_mode, WorkMode::Agent);
+        assert_eq!(
+            app.workspace.as_ref().unwrap().root(),
+            root.canonicalize().unwrap()
+        );
+        assert_eq!(app.db.session_workspace(&session_id), None);
+        app.refresh_toolbox();
+        app.workspace.as_ref().unwrap().begin_turn(&session_id);
+        let (result, _) = app
+            .toolbox
+            .run("fs", r#"{"action":"write","path":"new","content":"yes"}"#)
+            .await;
+        assert!(root.join("new").exists(), "{result}");
+        let (result, _) = app
+            .toolbox
+            .run("shell", r#"{"action":"run","cmd":"printf ok"}"#)
+            .await;
+        #[cfg(target_os = "macos")]
+        {
+            assert!(result.starts_with("exit 0"), "{result}");
+            assert!(root.parent().unwrap().join("runs").exists());
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            result,
+            "shell write confinement unavailable · this eval task needs macOS sandbox-exec"
+        );
+        assert!(!data.join("runs").exists());
+        assert!(!data.join("checkpoints").exists());
+        let rows: i64 = app
+            .db
+            .conn_for_test()
+            .query_row("SELECT count(*) FROM cache.session_workspaces", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0);
+        assert!(app.enter_eval_workspace(&data).is_err());
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn boot_backend_wiring_carries_loaded_experiments() {
+        let mut app = tests::app_with_key();
+        app.saved.experiments.cache_ttl_1h = true;
+        app.rebuild_all_backends();
+        assert!(app.experiments.cache_ttl_1h);
+    }
 }

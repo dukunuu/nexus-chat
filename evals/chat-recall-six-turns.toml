@@ -1,0 +1,13 @@
+name = "chat-recall-six-turns"
+turns = [
+  "We are planning a fictional library event. Its internal reference is ORCHID-742, and the reserved room is Copper Finch. Remember those details for later; just acknowledge for now. Do not use tools during this conversation.",
+  "Suggest three short titles for a library event about maps. Do not repeat the internal reference or room.",
+  "Choose the friendliest title and explain your choice in one sentence.",
+  "Draft a two-sentence invitation using that title, without logistical details.",
+  "Give two accessibility considerations for this event. Leave out the internal reference and room.",
+  "What were the exact internal reference and reserved room I gave you at the start? Answer with only those two details.",
+]
+
+[check]
+answer_contains = ["ORCHID-742", "Copper Finch"]
+max_tool_calls = 0

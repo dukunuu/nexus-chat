@@ -11,6 +11,7 @@
 // human-readable scaling — never on unbounded input.
 #![allow(clippy::cast_precision_loss)]
 
+use std::fmt::Write as _;
 use std::io::{IsTerminal, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -82,6 +83,12 @@ pub enum Command {
         /// Only tasks whose names contain this substring.
         #[arg(long)]
         filter: Option<String>,
+        /// Override experiments.FIELD=VALUE (repeatable).
+        #[arg(long, value_name = "KEY=VALUE", value_parser = parse_eval_setting)]
+        set: Vec<EvalSetting>,
+        /// Run baseline first, then the overrides, and compare results.
+        #[arg(long, requires = "set")]
+        compare: bool,
         /// Emit task results and totals as a JSON object.
         #[arg(long)]
         json: bool,
@@ -415,8 +422,20 @@ pub async fn run(cmd: Command) -> Result<()> {
             dir,
             model,
             filter,
+            set,
+            compare,
             json,
-        } => eval(&dir, model.as_deref(), filter.as_deref(), json).await,
+        } => {
+            eval(
+                &dir,
+                model.as_deref(),
+                filter.as_deref(),
+                &set,
+                compare,
+                json,
+            )
+            .await
+        }
         Command::Clip {
             instruction,
             instruction_option,
@@ -642,6 +661,50 @@ fn print_ask_outcome(outcome: &app::headless::AskOutcome, json: bool, quiet: boo
     Ok(())
 }
 
+/// A validated, non-persistent experiment override for an eval run.
+#[derive(Clone)]
+pub struct EvalSetting {
+    key: String,
+    value: String,
+}
+
+fn parse_eval_setting(text: &str) -> Result<EvalSetting, String> {
+    let (key, value) = text
+        .split_once('=')
+        .ok_or("expected experiments.FIELD=VALUE")?;
+    let key = key
+        .strip_prefix("experiments.")
+        .ok_or("only experiments.FIELD overrides are supported")?;
+    config::Experiments::default()
+        .set(key, value)
+        .map_err(|error| error.to_string())?;
+    Ok(EvalSetting {
+        key: key.to_string(),
+        value: value.to_string(),
+    })
+}
+
+fn apply_eval_settings(
+    experiments: &mut config::Experiments,
+    settings: &[EvalSetting],
+) -> Result<()> {
+    for setting in settings {
+        experiments.set(&setting.key, &setting.value)?;
+    }
+    Ok(())
+}
+
+fn experiments_header(experiments: &config::Experiments) -> String {
+    let fields = serde_json::to_value(experiments).expect("experiment fields serialize");
+    let settings: Vec<_> = fields
+        .as_object()
+        .expect("experiment fields")
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    format!("experiments: {}", settings.join(", "))
+}
+
 #[derive(Default, serde::Serialize)]
 struct EvalTaskResult {
     name: String,
@@ -651,76 +714,105 @@ struct EvalTaskResult {
     invalid_tool_calls: usize,
     prompt_tokens: u64,
     completion_tokens: u64,
+    cache_read_tokens: u64,
     cost: Option<f64>,
 }
 
-async fn run_eval_task(task: &eval::EvalTask, model: Option<&str>) -> EvalTaskResult {
+async fn run_eval_task(
+    task: &eval::EvalTask,
+    model: Option<&str>,
+    settings: &[EvalSetting],
+) -> EvalTaskResult {
     let mut result = EvalTaskResult {
         name: task.name.clone(),
+        cost: Some(0.0),
         ..Default::default()
     };
-    let mut app = match build_app(model, None).await {
-        Ok(app) => app,
-        Err(error) => {
-            result.failures.push(format!("{error:#}"));
-            return result;
-        }
-    };
-    let outcome = async {
+    let outcome: Result<()> = async {
+        let mut app = build_app(model, None).await?;
+        apply_eval_settings(&mut app.experiments, settings)?;
         app.execute(app::AppCommand::Incognito { on: true })?;
         if task.web {
             app.execute(app::AppCommand::ToggleWeb)?;
         }
-        app.ask_headless(
-            task.prompt.clone(),
-            app::headless::TurnOpts {
-                stream: false,
-                quiet: true,
-            },
-        )
-        .await
+        let workspace = task
+            .workspace
+            .as_deref()
+            .map(eval::EvalWorkspace::copy_from)
+            .transpose()?;
+        if let Some(workspace) = &workspace {
+            app.eval_approver = Some(std::sync::Arc::new(app::EvalApprover {
+                allow_shell: task.allow_shell.clone(),
+            }));
+            app.enter_eval_workspace(&workspace.root())?;
+        }
+        let mut observed = eval::Observed {
+            answer: String::new(),
+            calls: Vec::new(),
+        };
+        for prompt in task.prompts() {
+            let outcome = app
+                .ask_headless(
+                    prompt.clone(),
+                    app::headless::TurnOpts {
+                        stream: false,
+                        quiet: true,
+                    },
+                )
+                .await;
+            let start = app
+                .messages
+                .iter()
+                .rposition(|message| message.role == "user")
+                .map_or(app.messages.len(), |index| index + 1);
+            let turn = &app.messages[start..];
+            let current = eval::observed_from_messages(
+                outcome
+                    .as_ref()
+                    .map_or("", |outcome| outcome.answer.as_str()),
+                turn,
+            );
+            observed.answer = current.answer;
+            observed.calls.extend(current.calls);
+            result.tool_calls = observed.calls.len();
+            result.invalid_tool_calls = observed
+                .calls
+                .iter()
+                .filter(|call| {
+                    matches!(
+                        nexus_core::tools::classify_tool_result(&call.result, ""),
+                        Some("invalid_args" | "unknown_tool")
+                    )
+                })
+                .count();
+            if let Some(call) = observed.calls.iter().find(|call| {
+                matches!(call.name.as_str(), "shell" | "shell_run" | "batch")
+                    && call.result.contains("shell write confinement unavailable")
+            }) {
+                bail!("{}", call.result);
+            }
+            let outcome = outcome?;
+            let usage = outcome.usage.unwrap_or_default();
+            result.prompt_tokens += usage.prompt_tokens;
+            result.completion_tokens += usage.completion_tokens;
+            result.cache_read_tokens += usage.cache_read_tokens;
+            let cost = usage.cost.or_else(|| {
+                turn.iter()
+                    .rev()
+                    .find(|message| message.role == "assistant")
+                    .and_then(|message| message.cost)
+            });
+            result.cost = result.cost.zip(cost).map(|(total, cost)| total + cost);
+        }
+        let root = workspace.as_ref().map(eval::EvalWorkspace::root);
+        result.failures = eval::check_workspace(task, &observed, root.as_deref());
+        Ok(())
     }
     .await;
-    let start = app
-        .messages
-        .iter()
-        .rposition(|message| message.role == "user")
-        .map_or(app.messages.len(), |index| index + 1);
-    let turn = &app.messages[start..];
-    let observed = eval::observed_from_messages(
-        outcome
-            .as_ref()
-            .map_or("", |outcome| outcome.answer.as_str()),
-        turn,
-    );
-    let usage = outcome
-        .as_ref()
-        .ok()
-        .and_then(|outcome| outcome.usage)
-        .unwrap_or_default();
-    result.tool_calls = observed.calls.len();
-    result.invalid_tool_calls = observed
-        .calls
-        .iter()
-        .filter(|call| {
-            matches!(
-                nexus_core::tools::classify_tool_result(&call.result, ""),
-                Some("invalid_args" | "unknown_tool")
-            )
-        })
-        .count();
-    result.prompt_tokens = usage.prompt_tokens;
-    result.completion_tokens = usage.completion_tokens;
-    result.cost = usage.cost.or_else(|| {
-        turn.iter()
-            .rev()
-            .find(|message| message.role == "assistant")
-            .and_then(|message| message.cost)
-    });
-    result.failures = match outcome {
-        Ok(_) => eval::check(task, &observed),
-        Err(error) => vec![format!("{error:#}")],
-    };
+    if let Err(error) = outcome {
+        result.cost = None;
+        result.failures.push(format!("{error:#}"));
+    }
     result.passed = result.failures.is_empty();
     result
 }
@@ -729,25 +821,202 @@ fn eval_cost(cost: Option<f64>) -> String {
     cost.map_or_else(|| "$unknown".to_string(), |cost| format!("${cost:.6}"))
 }
 
+fn eval_task_cells(result: &EvalTaskResult) -> String {
+    format!(
+        "{} | {} | {} | {} | {}",
+        if result.passed { "PASS" } else { "FAIL" },
+        result.tool_calls,
+        result.prompt_tokens,
+        result.cache_read_tokens,
+        eval_cost(result.cost)
+    )
+}
+
 fn print_eval_task(result: &EvalTaskResult) {
     out(format!(
-        "{} {} · calls {} · invalid {} · tokens {}/{} · {}",
+        "{} {} · calls {} · invalid {} · tokens {}/{} · cached {} · {}",
         if result.passed { "PASS" } else { "FAIL" },
         result.name,
         result.tool_calls,
         result.invalid_tool_calls,
         result.prompt_tokens,
         result.completion_tokens,
-        eval_cost(result.cost),
+        result.cache_read_tokens,
+        eval_cost(result.cost)
     ));
+    print_eval_failures(result, "");
+}
+
+fn print_eval_failures(result: &EvalTaskResult, side: &str) {
     for failure in &result.failures {
         for line in failure.lines() {
-            out(format!("  {line}"));
+            out(format!("  {side}{}: {line}", result.name));
         }
     }
 }
 
-async fn eval(dir: &Path, model: Option<&str>, filter: Option<&str>, json: bool) -> Result<()> {
+#[derive(serde::Serialize)]
+struct EvalTotals {
+    passed: usize,
+    total: usize,
+    tool_calls: usize,
+    invalid_tool_calls: usize,
+    invalid_call_rate: f64,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cache_read_tokens: u64,
+    cost: Option<f64>,
+}
+
+fn eval_totals(results: &[EvalTaskResult]) -> EvalTotals {
+    let tool_calls = results.iter().map(|result| result.tool_calls).sum();
+    let invalid_tool_calls = results.iter().map(|result| result.invalid_tool_calls).sum();
+    EvalTotals {
+        passed: results.iter().filter(|result| result.passed).count(),
+        total: results.len(),
+        tool_calls,
+        invalid_tool_calls,
+        invalid_call_rate: if tool_calls == 0 {
+            0.0
+        } else {
+            invalid_tool_calls as f64 / tool_calls as f64
+        },
+        prompt_tokens: results.iter().map(|result| result.prompt_tokens).sum(),
+        completion_tokens: results.iter().map(|result| result.completion_tokens).sum(),
+        cache_read_tokens: results.iter().map(|result| result.cache_read_tokens).sum(),
+        cost: results.iter().map(|result| result.cost).sum(),
+    }
+}
+
+fn eval_totals_line(totals: &EvalTotals) -> String {
+    format!(
+        "passed {}/{} · calls {} · invalid-call rate {:.2}% ({}/{}) · tokens {}/{} · cached {} · {}",
+        totals.passed,
+        totals.total,
+        totals.tool_calls,
+        totals.invalid_call_rate * 100.0,
+        totals.invalid_tool_calls,
+        totals.tool_calls,
+        totals.prompt_tokens,
+        totals.completion_tokens,
+        totals.cache_read_tokens,
+        eval_cost(totals.cost)
+    )
+}
+
+#[derive(serde::Serialize)]
+struct EvalDeltas {
+    prompt_tokens: i128,
+    prompt_tokens_percent: Option<f64>,
+    cost: Option<f64>,
+    cost_percent: Option<f64>,
+    passed_before: usize,
+    passed_after: usize,
+}
+
+fn percent_delta(before: f64, after: f64) -> Option<f64> {
+    (before != 0.0).then(|| (after - before) / before * 100.0)
+}
+
+fn eval_deltas(baseline: &EvalTotals, variant: &EvalTotals) -> EvalDeltas {
+    EvalDeltas {
+        prompt_tokens: i128::from(variant.prompt_tokens) - i128::from(baseline.prompt_tokens),
+        prompt_tokens_percent: percent_delta(
+            baseline.prompt_tokens as f64,
+            variant.prompt_tokens as f64,
+        ),
+        cost: baseline
+            .cost
+            .zip(variant.cost)
+            .map(|(before, after)| after - before),
+        cost_percent: baseline
+            .cost
+            .zip(variant.cost)
+            .and_then(|(before, after)| percent_delta(before, after)),
+        passed_before: baseline.passed,
+        passed_after: variant.passed,
+    }
+}
+
+fn format_eval_compare(baseline: &[EvalTaskResult], variant: &[EvalTaskResult]) -> String {
+    let mut text = String::from(
+        "task | baseline: pass | calls | prompt | cached | cost | variant: pass | calls | prompt | cached | cost\n",
+    );
+    for (before, after) in baseline.iter().zip(variant) {
+        let _ = writeln!(
+            text,
+            "{} | {} | {}",
+            before.name,
+            eval_task_cells(before),
+            eval_task_cells(after)
+        );
+    }
+    let before = eval_totals(baseline);
+    let after = eval_totals(variant);
+    let delta = eval_deltas(&before, &after);
+    let percent = |value: Option<f64>| {
+        value.map_or_else(
+            || "unknown".to_string(),
+            |value| format!("{value:+.0}%").replace('-', "−"),
+        )
+    };
+    let _ = writeln!(text, "baseline totals: {}", eval_totals_line(&before));
+    let _ = writeln!(text, "variant totals: {}", eval_totals_line(&after));
+    let _ = write!(
+        text,
+        "tokens {} · cost {} · passed {}/{} → {}/{}",
+        percent(delta.prompt_tokens_percent),
+        percent(delta.cost_percent),
+        before.passed,
+        before.total,
+        after.passed,
+        after.total
+    );
+    text
+}
+
+#[derive(serde::Serialize)]
+struct EvalRun {
+    experiments: config::Experiments,
+    totals: EvalTotals,
+    tasks: Vec<EvalTaskResult>,
+}
+
+async fn eval_run(
+    tasks: &[eval::EvalTask],
+    model: Option<&str>,
+    settings: &[EvalSetting],
+    json: bool,
+    compare: bool,
+) -> Result<EvalRun> {
+    let mut experiments = config::load_creds_offline().experiments;
+    apply_eval_settings(&mut experiments, settings)?;
+    if !json {
+        out(experiments_header(&experiments));
+    }
+    let mut results = Vec::new();
+    for task in tasks {
+        let result = run_eval_task(task, model, settings).await;
+        if !json && !compare {
+            print_eval_task(&result);
+        }
+        results.push(result);
+    }
+    Ok(EvalRun {
+        experiments,
+        totals: eval_totals(&results),
+        tasks: results,
+    })
+}
+
+async fn eval(
+    dir: &Path,
+    model: Option<&str>,
+    filter: Option<&str>,
+    settings: &[EvalSetting],
+    compare: bool,
+    json: bool,
+) -> Result<()> {
     let mut tasks = eval::load_tasks(dir)?;
     if let Some(filter) = filter {
         tasks.retain(|task| task.name.contains(filter));
@@ -755,49 +1024,35 @@ async fn eval(dir: &Path, model: Option<&str>, filter: Option<&str>, json: bool)
     if tasks.is_empty() {
         bail!("no eval tasks matched in {}", dir.display());
     }
-    let mut results = Vec::new();
-    for task in &tasks {
-        let result = run_eval_task(task, model).await;
-        if !json {
-            print_eval_task(&result);
-        }
-        results.push(result);
-    }
-    let passed = results.iter().filter(|result| result.passed).count();
-    let total = results.len();
-    let tool_calls: usize = results.iter().map(|result| result.tool_calls).sum();
-    let invalid_tool_calls: usize = results.iter().map(|result| result.invalid_tool_calls).sum();
-    let invalid_call_rate = if tool_calls == 0 {
-        0.0
+    let baseline = if compare {
+        Some(eval_run(&tasks, model, &[], json, compare).await?)
     } else {
-        invalid_tool_calls as f64 / tool_calls as f64
+        None
     };
-    let prompt_tokens: u64 = results.iter().map(|result| result.prompt_tokens).sum();
-    let completion_tokens: u64 = results.iter().map(|result| result.completion_tokens).sum();
-    let cost: Option<f64> = results.iter().map(|result| result.cost).sum();
-    if json {
-        out(serde_json::to_string_pretty(&serde_json::json!({
-            "tasks": results,
-            "totals": {
-                "passed": passed,
-                "total": total,
-                "tool_calls": tool_calls,
-                "invalid_tool_calls": invalid_tool_calls,
-                "invalid_call_rate": invalid_call_rate,
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "cost": cost,
-            },
-        }))?);
+    let variant = eval_run(&tasks, model, settings, json, compare).await?;
+    let mut failed = variant.totals.total - variant.totals.passed;
+    let output = if let Some(baseline) = baseline {
+        failed += baseline.totals.total - baseline.totals.passed;
+        if !json {
+            out(format_eval_compare(&baseline.tasks, &variant.tasks));
+            for (side, results) in [("baseline ", &baseline.tasks), ("variant ", &variant.tasks)] {
+                for result in results {
+                    print_eval_failures(result, side);
+                }
+            }
+        }
+        serde_json::json!({ "baseline": baseline, "variant": variant, "deltas": eval_deltas(&baseline.totals, &variant.totals) })
     } else {
-        out(format!(
-            "passed {passed}/{total} · calls {tool_calls} · invalid-call rate {:.2}% ({invalid_tool_calls}/{tool_calls}) · tokens {prompt_tokens}/{completion_tokens} · {}",
-            invalid_call_rate * 100.0,
-            eval_cost(cost),
-        ));
+        if !json {
+            out(eval_totals_line(&variant.totals));
+        }
+        serde_json::to_value(variant)?
+    };
+    if json {
+        out(serde_json::to_string_pretty(&output)?);
     }
-    if passed != total {
-        bail!("{} eval task(s) failed", total - passed);
+    if failed != 0 {
+        bail!("{failed} eval task run(s) failed");
     }
     Ok(())
 }
@@ -2949,6 +3204,97 @@ fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eval_overrides_validate_at_parse_time_and_compare_requires_them() {
+        assert!(Cli::try_parse_from(["nexus", "eval", "--compare"]).is_err());
+        for setting in [
+            "local.x=1",
+            "experiments.unknown=true",
+            "experiments.cache_ttl_1h=no",
+            "experiments.mask_keep_rounds=-1",
+            "experiments.cache_ttl_1h",
+        ] {
+            assert!(
+                Cli::try_parse_from(["nexus", "eval", "--set", setting]).is_err(),
+                "{setting}"
+            );
+        }
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "eval",
+            "--compare",
+            "--set",
+            "experiments.cache_ttl_1h=true",
+            "--set",
+            "experiments.mask_keep_rounds=7",
+        ])
+        .unwrap();
+        let Some(Command::Eval { set, compare, .. }) = cli.command else {
+            panic!("expected eval");
+        };
+        assert!(compare);
+        let mut experiments = config::Experiments::default();
+        apply_eval_settings(&mut experiments, &set).unwrap();
+        assert!(experiments.cache_ttl_1h);
+        assert_eq!(experiments.mask_keep_rounds, 7);
+        assert!(!experiments.mask_tool_results);
+        let header = experiments_header(&experiments);
+        assert!(header.starts_with("experiments: "));
+        assert!(header.contains("cache_ttl_1h=true"));
+        assert!(header.contains("mask_keep_rounds=7"));
+    }
+
+    #[test]
+    fn compare_formatter_and_deltas_show_both_sides_and_totals() {
+        let result = |name: &str, passed, tokens, cached, calls, cost| EvalTaskResult {
+            name: name.into(),
+            passed,
+            prompt_tokens: tokens,
+            cache_read_tokens: cached,
+            tool_calls: calls,
+            cost,
+            ..Default::default()
+        };
+        let baseline = [
+            result("one", true, 100, 10, 3, Some(0.02)),
+            result("two", false, 300, 20, 4, Some(0.08)),
+        ];
+        let variant = [
+            result("one", true, 50, 30, 2, Some(0.01)),
+            result("two", true, 150, 80, 3, Some(0.04)),
+        ];
+        let text = format_eval_compare(&baseline, &variant);
+        assert!(
+            text.contains("one | PASS | 3 | 100 | 10 | $0.020000 | PASS | 2 | 50 | 30 | $0.010000"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "two | FAIL | 4 | 300 | 20 | $0.080000 | PASS | 3 | 150 | 80 | $0.040000"
+            )
+        );
+        assert!(text.contains("baseline totals: passed 1/2 · calls 7"));
+        assert!(text.contains("variant totals: passed 2/2 · calls 5"));
+        assert!(text.ends_with("tokens −50% · cost −50% · passed 1/2 → 2/2"));
+        let deltas = eval_deltas(&eval_totals(&baseline), &eval_totals(&variant));
+        assert_eq!(deltas.prompt_tokens, -200);
+        assert!((deltas.cost.unwrap() + 0.05).abs() < f64::EPSILON);
+        assert!((deltas.prompt_tokens_percent.unwrap() + 50.0).abs() < f64::EPSILON);
+        assert_eq!(deltas.passed_before, 1);
+        assert_eq!(deltas.passed_after, 2);
+        let unknown = [result("unknown", true, 0, 0, 0, None)];
+        let totals = eval_totals(&unknown);
+        assert!(totals.cost.is_none());
+        let delta = eval_deltas(&totals, &eval_totals(&variant));
+        assert!(delta.prompt_tokens_percent.is_none());
+        assert!(delta.cost.is_none());
+        assert!(delta.cost_percent.is_none());
+        assert!(format_eval_compare(&unknown, &unknown).contains("tokens unknown · cost unknown"));
+        let json = serde_json::to_value(deltas).unwrap();
+        assert_eq!(json["prompt_tokens"], -200);
+        assert_eq!(json["passed_after"], 2);
+    }
 
     #[test]
     fn launch_flags_parse_without_a_subcommand() {

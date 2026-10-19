@@ -157,6 +157,8 @@ pub trait Approver: Send + Sync {
 pub struct ToolBox {
     /// Confined agent filesystem access; absent outside agent mode.
     pub workspace: Option<Arc<Workspace>>,
+    /// Eval-only write confinement for shell commands; absent on normal paths.
+    pub confine_shell_writes: Option<PathBuf>,
     /// Require permission before mutating workspace calls.
     pub require_approval: bool,
     /// Interactive permission provider; absent on headless paths.
@@ -755,6 +757,7 @@ impl ToolBox {
     ) -> Self {
         Self {
             workspace: None,
+            confine_shell_writes: None,
             require_approval: false,
             approver: None,
             interactive_ui: false,
@@ -1402,6 +1405,7 @@ impl ToolBox {
                     crate::workspace::shell::action(
                         workspace,
                         self.db_path.as_deref(),
+                        self.confine_shell_writes.as_deref(),
                         name,
                         args,
                         allow_unparseable,

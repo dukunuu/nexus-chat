@@ -12,6 +12,7 @@ impl App {
     /// Rebuild every backend from the on-disk saved credentials (after boot,
     /// or after a settings change). Keeps `saved` and `backends` in sync.
     pub fn rebuild_all_backends(&mut self) {
+        self.experiments = self.saved.experiments.clone();
         self.backends = super::Backends::default();
         if let Some(k) = self.saved.openrouter_key.clone() {
             self.backends

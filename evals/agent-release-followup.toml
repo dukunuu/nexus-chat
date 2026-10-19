@@ -1,0 +1,17 @@
+name = "agent-release-followup"
+workspace = "fixtures/release-greeting"
+allow_shell = ["sh test.sh", "ls"]
+turns = [
+  "Read notes.txt, greet.sh, and test.sh using fs. Remember the release marker for a later request, but do not quote it in your response. Do not edit anything yet; briefly describe the current greeting behavior.",
+  "Change greet.sh to greet the supplied name with Hello instead of Hi, keeping the exclamation point. Update test.sh to expect the new greeting. Do not add the release marker yet.",
+  "Run sh test.sh with the shell tool and fix any failures. Report whether the test passed.",
+  "Now append the release marker from the notes you read in the first turn, in square brackets after the greeting. Use what you remember; do not reread notes.txt. Update test.sh and run sh test.sh again. Briefly confirm the change.",
+]
+
+[check]
+tool_called = ["fs", "shell"]
+file_contains = [["greet.sh", "Hello,"], ["greet.sh", "BLUE-17"], ["test.sh", "Hello, Ada! [BLUE-17]"]]
+file_not_contains = [["greet.sh", "Hi,"]]
+shell_succeeded = ["sh test.sh"]
+no_invalid_tool_calls = true
+max_tool_calls = 35

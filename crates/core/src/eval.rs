@@ -1,7 +1,7 @@
 //! Golden-task loading and deterministic answer/tool-call checks for `nexus eval`.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
@@ -11,19 +11,74 @@ use crate::tools::classify_tool_result;
 
 /// One golden task, loaded from a TOML file.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "TaskInput")]
 pub struct EvalTask {
     /// Display name; defaults to the task file's stem when omitted.
     #[serde(default)]
     pub name: String,
     /// Question sent to the model.
     pub prompt: String,
+    /// Ordered prompts sharing a session, instead of `prompt`.
+    pub turns: Vec<String>,
+    /// Fixture directory, resolved inside the eval directory by `load_tasks`.
+    pub workspace: Option<PathBuf>,
+    /// Shell command prefixes permitted in a disposable workspace.
+    pub allow_shell: Vec<String>,
     /// Enable search-first web mode for this task.
     #[serde(default)]
     pub web: bool,
     /// Deterministic expectations for the answer and tool calls.
     #[serde(default)]
     pub check: EvalChecks,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskInput {
+    #[serde(default)]
+    name: String,
+    prompt: Option<String>,
+    turns: Option<Vec<String>>,
+    workspace: Option<PathBuf>,
+    #[serde(default)]
+    allow_shell: Vec<String>,
+    #[serde(default)]
+    web: bool,
+    #[serde(default)]
+    check: EvalChecks,
+}
+
+impl TryFrom<TaskInput> for EvalTask {
+    type Error = anyhow::Error;
+
+    fn try_from(input: TaskInput) -> Result<Self> {
+        let (prompt, turns) = match (input.prompt, input.turns) {
+            (Some(prompt), None) => (prompt, Vec::new()),
+            (None, Some(turns)) if !turns.is_empty() => (String::new(), turns),
+            _ => bail!("task must give exactly one of prompt or non-empty turns"),
+        };
+        Ok(Self {
+            name: input.name,
+            prompt,
+            turns,
+            workspace: input.workspace,
+            allow_shell: input.allow_shell,
+            web: input.web,
+            check: input.check,
+        })
+    }
+}
+
+impl EvalTask {
+    /// Prompts to send in order in the same session.
+    #[must_use]
+    pub fn prompts(&self) -> &[String] {
+        if self.turns.is_empty() {
+            std::slice::from_ref(&self.prompt)
+        } else {
+            &self.turns
+        }
+    }
 }
 
 /// Optional checks; at least one effective check is required per task.
@@ -37,6 +92,9 @@ pub struct EvalChecks {
     pub tool_args_contains: Vec<String>,
     pub max_tool_calls: Option<usize>,
     pub no_invalid_tool_calls: bool,
+    pub file_contains: Vec<[String; 2]>,
+    pub file_not_contains: Vec<[String; 2]>,
+    pub shell_succeeded: Vec<String>,
 }
 
 impl EvalChecks {
@@ -48,6 +106,9 @@ impl EvalChecks {
             && self.tool_args_contains.is_empty()
             && self.max_tool_calls.is_none()
             && !self.no_invalid_tool_calls
+            && self.file_contains.is_empty()
+            && self.file_not_contains.is_empty()
+            && self.shell_succeeded.is_empty()
     }
 }
 
@@ -73,6 +134,25 @@ pub fn load_tasks(dir: &Path) -> Result<Vec<EvalTask>> {
         if task.check.is_empty() {
             bail!("{}: task has no checks", path.display());
         }
+        if let Some(workspace) = &task.workspace {
+            let eval_root = dir.canonicalize()?;
+            let fixture = dir
+                .join(workspace)
+                .canonicalize()
+                .with_context(|| format!("{}: opening workspace", path.display()))?;
+            if workspace.is_absolute() || !fixture.starts_with(&eval_root) || !fixture.is_dir() {
+                bail!(
+                    "{}: workspace must be a directory inside the eval directory",
+                    path.display()
+                );
+            }
+            task.workspace = Some(fixture);
+        }
+        if task.workspace.is_none()
+            && (!task.check.file_contains.is_empty() || !task.check.file_not_contains.is_empty())
+        {
+            bail!("{}: file checks require a workspace", path.display());
+        }
         tasks.push(task);
     }
     tasks.sort_by(|a, b| a.name.cmp(&b.name));
@@ -87,7 +167,7 @@ pub struct ObservedCall {
     pub result: String,
 }
 
-/// The model's final answer and the calls made during its turn.
+/// The model's final answer and the calls made across all observed turns.
 #[derive(Debug)]
 pub struct Observed {
     pub answer: String,
@@ -97,6 +177,12 @@ pub struct Observed {
 /// Return every unmet expectation as a human-readable failure; empty means pass.
 #[must_use]
 pub fn check(task: &EvalTask, observed: &Observed) -> Vec<String> {
+    check_workspace(task, observed, None)
+}
+
+/// Check the final answer, all turns' calls, and files in the disposable copy.
+#[must_use]
+pub fn check_workspace(task: &EvalTask, observed: &Observed, root: Option<&Path>) -> Vec<String> {
     let mut failures = Vec::new();
     let answer = observed.answer.to_lowercase();
     for needle in &task.check.answer_contains {
@@ -150,7 +236,105 @@ pub fn check(task: &EvalTask, observed: &Observed) -> Vec<String> {
             }
         }
     }
+    check_shell(&task.check, &observed.calls, &mut failures);
+    check_files(&task.check, root, &mut failures);
     failures
+}
+
+fn check_shell(checks: &EvalChecks, calls: &[ObservedCall], failures: &mut Vec<String>) {
+    for prefix in &checks.shell_succeeded {
+        if !calls.iter().any(|call| {
+            let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) else {
+                return false;
+            };
+            (call.name == "shell_run" || (call.name == "shell" && args["action"] == "run"))
+                && args["cmd"]
+                    .as_str()
+                    .is_some_and(|cmd| cmd.starts_with(prefix))
+                && call
+                    .result
+                    .strip_prefix("exit 0")
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        }) {
+            failures.push(format!("shell_succeeded: {prefix:?} did not return exit 0"));
+        }
+    }
+}
+
+fn check_files(checks: &EvalChecks, root: Option<&Path>, failures: &mut Vec<String>) {
+    for (kind, pairs, expected) in [
+        ("file_contains", &checks.file_contains, true),
+        ("file_not_contains", &checks.file_not_contains, false),
+    ] {
+        for [path, needle] in pairs {
+            let content = (|| -> Result<String> {
+                let root = root
+                    .context("file check needs a workspace")?
+                    .canonicalize()?;
+                let target = root.join(path).canonicalize()?;
+                if Path::new(path).is_absolute() || !target.starts_with(&root) {
+                    bail!("file check path escapes workspace");
+                }
+                Ok(fs::read_to_string(target)?)
+            })();
+            match content {
+                Ok(content) if content.contains(needle) == expected => {}
+                Ok(_) => failures.push(format!("{kind}: {path:?}, {needle:?}")),
+                Err(error) => failures.push(format!("{kind}: {path:?}: {error:#}")),
+            }
+        }
+    }
+}
+
+/// Disposable fixture copy. Dropping it removes edits and runtime logs.
+pub struct EvalWorkspace {
+    dir: PathBuf,
+}
+
+impl EvalWorkspace {
+    /// Copy a fixture's regular files and directories; symlinks are rejected.
+    ///
+    /// # Errors
+    /// Returns filesystem errors or unsupported fixture entry types.
+    pub fn copy_from(fixture: &Path) -> Result<Self> {
+        let copy = Self {
+            dir: std::env::temp_dir().join(format!("nexus-eval-{}", uuid::Uuid::new_v4())),
+        };
+        copy_fixture(fixture, &copy.root())?;
+        Ok(copy)
+    }
+
+    /// Workspace root, separate from disposable runtime logs.
+    #[must_use]
+    pub fn root(&self) -> PathBuf {
+        self.dir.join("workspace")
+    }
+}
+
+impl Drop for EvalWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn copy_fixture(source: &Path, target: &Path) -> Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let dest = target.join(entry.file_name());
+        if kind.is_dir() {
+            copy_fixture(&entry.path(), &dest)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), dest)?;
+        } else {
+            bail!(
+                "fixture entries must be regular files or directories: {}",
+                entry.path().display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Extract calls from a turn's stored `tool_call` rows, as history replay does.
@@ -170,6 +354,125 @@ pub fn observed_from_messages(answer: &str, turn: &[Message]) -> Observed {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn multi_turn_loading_and_new_checks() {
+        let dir = TempDir::new();
+        fs::create_dir(dir.0.join("fixture")).unwrap();
+        let path = dir.0.join("task.toml");
+        fs::write(&path, "turns = ['read', 'edit']\nworkspace = 'fixture'\nallow_shell = ['ls']\n[check]\nfile_contains = [['a', 'yes']]\nfile_not_contains = [['a', 'no']]\nshell_succeeded = ['ls']\n").unwrap();
+        let tasks = load_tasks(&dir.0).unwrap();
+        assert_eq!(tasks[0].prompts(), ["read", "edit"]);
+        assert_eq!(
+            tasks[0].workspace.as_ref().unwrap(),
+            &dir.0.join("fixture").canonicalize().unwrap()
+        );
+        assert_eq!(tasks[0].allow_shell, ["ls"]);
+        assert_eq!(tasks[0].check.file_contains, [["a", "yes"]]);
+        assert_eq!(tasks[0].check.file_not_contains, [["a", "no"]]);
+        assert_eq!(tasks[0].check.shell_succeeded, ["ls"]);
+        for input in [
+            "prompt = 'hi'\nturns = ['hi']",
+            "turns = []",
+            "",
+            "prompt = 'hi'\nworkspace = '..'",
+            "prompt = 'hi'\nworkspace = '/tmp'",
+            "prompt = 'hi'\nworkspace = 'task.toml'",
+        ] {
+            fs::write(&path, format!("{input}\n[check]\nmax_tool_calls = 0\n")).unwrap();
+            assert!(load_tasks(&dir.0).is_err(), "{input}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_symlink_must_stay_in_eval_dir() {
+        let dir = TempDir::new();
+        let outside = TempDir::new();
+        std::os::unix::fs::symlink(&outside.0, dir.0.join("fixture")).unwrap();
+        fs::write(
+            dir.0.join("task.toml"),
+            "prompt = 'hi'\nworkspace = 'fixture'\n[check]\nmax_tool_calls = 0",
+        )
+        .unwrap();
+        assert!(load_tasks(&dir.0).is_err());
+    }
+
+    #[test]
+    fn final_answer_and_all_turns_tools_are_checked() {
+        let task: EvalTask = toml::from_str("turns = ['first', 'second']\n[check]\nanswer_contains = ['final']\nanswer_not_contains = ['earlier']\ntool_called = ['fs', 'shell']\ntool_not_called = ['search']\ntool_args_contains = ['notes']\nmax_tool_calls = 2\nno_invalid_tool_calls = true\nshell_succeeded = ['sh test.sh']").unwrap();
+        let first = vec![message(
+            "tool_call",
+            serde_json::json!({"name":"fs", "arguments":"notes", "result":"old detail"})
+                .to_string(),
+        )];
+        let last = vec![message("tool_call", serde_json::json!({"name":"shell", "arguments":r#"{"action":"run","cmd":"sh test.sh"}"#, "result":"exit 0\nok"}).to_string())];
+        let mut observed = observed_from_messages("earlier", &first);
+        let final_turn = observed_from_messages("final", &last);
+        observed.answer = final_turn.answer;
+        observed.calls.extend(final_turn.calls);
+        assert!(check(&task, &observed).is_empty());
+        observed.calls[0].result = "unknown tool: fs".into();
+        assert!(
+            check(&task, &observed)
+                .iter()
+                .any(|failure| failure.contains("no_invalid_tool_calls"))
+        );
+        observed.calls[0].name = "search".into();
+        observed.calls.push(ObservedCall {
+            name: "fs".into(),
+            arguments: String::new(),
+            result: String::new(),
+        });
+        let failures = check(&task, &observed);
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("tool_not_called"))
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("max_tool_calls"))
+        );
+        for result in ["exit 01", "exit 1\nexit 0", "blocked", "text exit 0"] {
+            observed.calls[1].result = result.into();
+            assert!(
+                check(&task, &observed)
+                    .iter()
+                    .any(|failure| failure.contains("shell_succeeded"))
+            );
+        }
+    }
+
+    #[test]
+    fn file_checks_and_disposable_copy() {
+        let dir = TempDir::new();
+        fs::write(dir.0.join("notes"), "original").unwrap();
+        fs::create_dir(dir.0.join("nested")).unwrap();
+        fs::write(dir.0.join("nested/one"), "one").unwrap();
+        let copy = EvalWorkspace::copy_from(&dir.0).unwrap();
+        let root = copy.root();
+        assert_eq!(fs::read_to_string(root.join("nested/one")).unwrap(), "one");
+        fs::write(root.join("notes"), "changed detail").unwrap();
+        let task: EvalTask = toml::from_str("prompt = 'hi'\n[check]\nfile_contains = [['notes', 'detail']]\nfile_not_contains = [['notes', 'original']]").unwrap();
+        let observed = Observed {
+            answer: String::new(),
+            calls: Vec::new(),
+        };
+        assert!(check_workspace(&task, &observed, Some(&root)).is_empty());
+        fs::write(root.join("notes"), "original").unwrap();
+        assert_eq!(check_workspace(&task, &observed, Some(&root)).len(), 2);
+        fs::remove_file(root.join("notes")).unwrap();
+        assert_eq!(check_workspace(&task, &observed, Some(&root)).len(), 2);
+        assert_eq!(fs::read_to_string(dir.0.join("notes")).unwrap(), "original");
+        let escape: EvalTask =
+            toml::from_str("prompt = 'hi'\n[check]\nfile_contains = [['../../notes', 'original']]")
+                .unwrap();
+        assert_eq!(check_workspace(&escape, &observed, Some(&root)).len(), 1);
+        drop(copy);
+        assert!(!root.parent().unwrap().exists());
+    }
 
     struct TempDir(PathBuf);
 
@@ -408,6 +711,8 @@ mod tests {
         assert_eq!(
             names,
             [
+                "agent-release-followup",
+                "chat-recall-six-turns",
                 "knows-the-date",
                 "lists-scripts",
                 "no-tools-for-small-talk",
