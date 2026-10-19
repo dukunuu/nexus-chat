@@ -184,6 +184,11 @@ impl AppView {
             }
             Popup::InteractiveUi => self.interactive.paste(text),
             Popup::Key => self.key_input.push_str(text),
+            Popup::Jobs => {
+                if let Some(form) = &mut self.jobs_popup.form {
+                    form.values[form.field].push_str(text);
+                }
+            }
             Popup::Session if self.session_mode == SessionMode::Rename => {
                 self.session_edit.push_str(text);
             }
@@ -645,6 +650,8 @@ impl AppView {
                     self.open_apps_popup();
                 }
             }
+            AppCommand::OpenJobs => crate::ui::popups::jobs::open(self, false)?,
+            AppCommand::OpenJobForm => crate::ui::popups::jobs::open(self, true)?,
             AppCommand::OpenUsage => self.open_usage_popup(),
             AppCommand::OpenHelp => self.open_help(),
             AppCommand::OpenProcs => {

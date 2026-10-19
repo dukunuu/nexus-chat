@@ -145,6 +145,16 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["watches"],
     },
     Command {
+        name: "jobs",
+        desc: "scheduled agent jobs — /job new to create",
+        aliases: &[],
+    },
+    Command {
+        name: "job",
+        desc: "create a scheduled agent job: /job new",
+        aliases: &[],
+    },
+    Command {
         name: "usage",
         desc: "token/cache/cost analytics by backend and model",
         aliases: &["analytics", "costs", "billing"],
@@ -355,6 +365,18 @@ pub enum AppCommand {
     SetTraining { on: Option<bool> },
     /// `/watch [topic]` — open the watch picker, or create a watch.
     Watch { topic: Option<String> },
+    /// `/jobs` — durable scheduled agent runs.
+    OpenJobs,
+    /// `/job new` — the job creation form.
+    OpenJobForm,
+    /// Create a validated device-owned job.
+    CreateJob { spec: crate::jobs::JobSpec },
+    /// Enable or disable a job owned by this device.
+    SetJobEnabled { id: String, on: bool },
+    /// Launch an isolated headless run, independent of the TUI.
+    RunJobNow { id: String },
+    /// Replicate a soft deletion without deleting review branches or transcripts.
+    DeleteJob { id: String },
     /// `/usage` — the analytics popup.
     OpenUsage,
     /// `/harness` — tool failures over the last seven days.
@@ -376,6 +398,20 @@ pub enum AppCommand {
 }
 
 impl App {
+    fn owned_job(&self, id: &str) -> Result<crate::jobs::Job> {
+        let job = self
+            .db
+            .list_jobs()?
+            .into_iter()
+            .find(|job| job.id == id)
+            .ok_or_else(|| anyhow::anyhow!("job not found"))?;
+        anyhow::ensure!(
+            job.device_id == self.db.device_id()?,
+            "job belongs to another device; read-only here"
+        );
+        Ok(job)
+    }
+
     /// Parse a `/`-command line (without the leading slash) into the command
     /// seam. Resolves aliases via the `COMMANDS` catalog and recognizes
     /// `/<skill-name>` arms. `Err` carries a status-line message for unknown
@@ -465,6 +501,9 @@ impl App {
                     topic: (!arg.is_empty()).then_some(arg),
                 })
             }
+            "jobs" => Ok(AppCommand::OpenJobs),
+            "job" if rest(cmd, token) == "new" => Ok(AppCommand::OpenJobForm),
+            "job" => Err("usage: /job new".into()),
             "usage" => Ok(AppCommand::OpenUsage),
             "harness" => Ok(AppCommand::Harness),
             "procs" => Ok(AppCommand::OpenProcs),
@@ -507,9 +546,59 @@ impl App {
             | AppCommand::OpenFiles { .. }
             | AppCommand::OpenApps
             | AppCommand::OpenUsage
+            | AppCommand::OpenJobForm
             | AppCommand::OpenProcs
             | AppCommand::OpenHelp
             | AppCommand::Watch { .. } => {}
+            AppCommand::OpenJobs => self.collect_job_notifications()?,
+            AppCommand::CreateJob { mut spec } => {
+                spec.validate()?;
+                spec.root = self.validate_job_root(&spec.root)?;
+                let job = crate::jobs::Job {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    space_id: self.active_space.id.clone(),
+                    session_id: self
+                        .session
+                        .as_ref()
+                        .map(|session| session.id.clone())
+                        .unwrap_or_default(),
+                    device_id: self.db.device_id()?,
+                    spec,
+                    enabled: 1,
+                    last_run_at: None,
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                };
+                self.db.save_job(&job)?;
+                self.push_status("job created · run `nexus jobs daemon` to schedule it");
+            }
+            AppCommand::SetJobEnabled { id, on } => {
+                let mut job = self.owned_job(&id)?;
+                job.enabled = i64::from(on);
+                job.updated_at = chrono::Utc::now().to_rfc3339();
+                self.db.save_job(&job)?;
+            }
+            AppCommand::DeleteJob { id } => {
+                let mut job = self.owned_job(&id)?;
+                job.enabled = -1;
+                job.updated_at = chrono::Utc::now().to_rfc3339();
+                self.db.save_job(&job)?;
+            }
+            AppCommand::RunJobNow { id } => {
+                self.owned_job(&id)?;
+                let mut command = std::process::Command::new(std::env::current_exe()?);
+                command
+                    .args(["jobs", "run", &id])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt as _;
+                    command.process_group(0);
+                }
+                command.spawn()?;
+                self.push_status("job launched · /jobs to review the result");
+            }
             AppCommand::Harness => {
                 let since = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
                 self.harness = Some(self.db.harness_summary(&since)?);

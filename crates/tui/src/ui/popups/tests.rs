@@ -29,6 +29,68 @@ fn render_to_string(width: u16, height: u16, render: impl FnOnce(&mut ratatui::F
     out
 }
 
+#[test]
+fn jobs_popup_two_jobs_and_parked_run_snapshot() {
+    use nexus_core::jobs::{Job, JobRun, JobSpec};
+
+    let mut app = test_app();
+    let device = app.db.device_id().unwrap();
+    app.jobs_popup.jobs = [("morning", "interval"), ("fix tests", "until_done")]
+        .into_iter()
+        .map(|(name, trigger)| Job {
+            id: name.into(),
+            space_id: app.active_space.id.clone(),
+            session_id: String::new(),
+            device_id: device.clone(),
+            spec: JobSpec {
+                name: name.into(),
+                trigger_kind: trigger.into(),
+                ..JobSpec::default()
+            },
+            enabled: 1,
+            last_run_at: None,
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        })
+        .collect();
+    app.jobs_popup.selected = 1;
+    app.jobs_popup.runs.push(JobRun {
+        id: "run".into(),
+        job_id: "fix tests".into(),
+        device_id: device,
+        started_at: "2026-01-01T00:00:00Z".into(),
+        finished_at: Some("2026-01-01T00:01:00Z".into()),
+        status: "parked".into(),
+        iters: 1,
+        cost_usd: 0.01,
+        branch: Some("nexus/job/fix/run".into()),
+        summary: "parked: needs approval for fs write fixed".into(),
+        updated_at: "2026-01-01T00:01:00Z".into(),
+    });
+    let screen = render_to_string(120, 30, |frame| super::jobs::render(frame, &app));
+    assert!(screen.contains(" jobs "), "{screen}");
+    let snapshot: Vec<_> = screen
+        .lines()
+        .filter_map(|line| {
+            let (_, body) = line.split_once('│')?;
+            let (body, _) = body.rsplit_once('│')?;
+            let body = body.trim();
+            (!body.is_empty()).then_some(body)
+        })
+        .collect();
+    assert_eq!(
+        snapshot,
+        [
+            "morning · interval · enabled · never run",
+            "▸ fix tests · until_done · enabled · parked",
+            "nexus/job/fix/run",
+            "parked: needs approval for fs write fixed",
+        ]
+    );
+    let root = app.space.root.clone();
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn procs_popup_two_processes_snapshot() {

@@ -135,7 +135,12 @@ impl App {
                         }
                         _ => {}
                     }
+                    let parked = matches!(&ev, StreamEvent::ToolCall { result, .. } if result == crate::jobs::PARKED);
                     self.on_chat_event(task_id, ev)?;
+                    if parked && self.job_approver.is_some() {
+                        self.stop_stream()?;
+                        return Ok((crate::jobs::PARKED.to_string(), usage));
+                    }
                     if self.chat_tasks.is_empty() {
                         break;
                     }

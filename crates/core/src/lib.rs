@@ -23,6 +23,7 @@ pub mod eval;
 pub mod extract;
 pub mod host;
 pub mod interactive;
+pub mod jobs;
 pub mod markdown;
 pub mod prompts;
 pub mod provider;

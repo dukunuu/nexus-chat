@@ -163,6 +163,11 @@ pub enum Command {
         #[arg(long)]
         quiet: bool,
     },
+    /// Durable agent jobs, independent of the host and terminal UI.
+    Jobs {
+        #[command(subcommand)]
+        cmd: JobsCmd,
+    },
     /// Standing research watches: list, or run them from cron.
     Watch {
         #[command(subcommand)]
@@ -322,6 +327,22 @@ pub enum Command {
 }
 
 #[derive(Subcommand)]
+pub enum JobsCmd {
+    /// List jobs, including read-only jobs owned by other devices.
+    List,
+    /// Run one job immediately (also used by the TUI).
+    Run { id: String },
+    /// Run each due job once, then exit.
+    RunDue,
+    /// Check every 60 seconds, running one job at a time.
+    Daemon,
+    /// Write a per-user service definition, without activating it.
+    InstallService,
+    /// Remove the service definition, without stopping a loaded service.
+    UninstallService,
+}
+
+#[derive(Subcommand, Debug)]
 pub enum WatchCmd {
     /// List watches (topic, interval, due state).
     List,
@@ -466,6 +487,7 @@ pub async fn run(cmd: Command) -> Result<()> {
             json,
             quiet,
         } => research(topic, model, space, approve, json, quiet).await,
+        Command::Jobs { cmd } => jobs(cmd).await,
         Command::Watch { cmd } => watch(cmd).await,
         Command::Usage {
             range,
@@ -1342,6 +1364,87 @@ async fn research(
                 short_id(&outcome.session_id)
             );
         }
+    }
+    Ok(())
+}
+
+async fn jobs(cmd: JobsCmd) -> Result<()> {
+    use nexus_core::jobs;
+
+    match cmd {
+        JobsCmd::InstallService => {
+            let path = jobs::service::install_service()?;
+            out(format!("wrote {}", path.display()));
+            if cfg!(target_os = "macos") {
+                out(format!(
+                    "activate: launchctl bootstrap gui/$(id -u) '{}'",
+                    path.display()
+                ));
+            } else {
+                out(
+                    "activate: systemctl --user daemon-reload && systemctl --user enable --now nexus-jobs.service",
+                );
+            }
+        }
+        JobsCmd::UninstallService => {
+            out(
+                "stop the loaded service first: launchctl bootout gui/$(id -u)/chat.nexus.jobs (macOS), or systemctl --user disable --now nexus-jobs.service (Linux)",
+            );
+            out(format!(
+                "service file removed: {}",
+                jobs::service::uninstall_service()?
+            ));
+        }
+        JobsCmd::List => {
+            let space = space::Space::open()?;
+            let db = db::Db::open(&space.db_path())?;
+            let device = db.device_id()?;
+            for job in db.list_jobs()? {
+                out(format!(
+                    "{} · {} · {} · {}{}",
+                    job.id,
+                    job.spec.name,
+                    job.spec.trigger_kind,
+                    if job.enabled == 1 {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    if job.device_id == device {
+                        ""
+                    } else {
+                        " · other device (read-only)"
+                    }
+                ));
+            }
+        }
+        JobsCmd::Run { id } => {
+            let mut app = build_app(None, None).await?;
+            let job = app
+                .db
+                .list_jobs()?
+                .into_iter()
+                .find(|job| job.id == id)
+                .context("job not found")?;
+            anyhow::ensure!(
+                job.device_id == app.db.device_id()?,
+                "job belongs to another device"
+            );
+            let Ok(_lock) = jobs::DaemonLock::acquire(&app.space.root) else {
+                jobs::request_run(&app.space.root, &job)?;
+                out("job queued for the active daemon");
+                return Ok(());
+            };
+            let run = jobs::run_with_app(&mut app, &job).await?;
+            out(format!("{} · {}\n{}", run.id, run.status, run.summary));
+        }
+        JobsCmd::RunDue => {
+            let mut app = build_app(None, None).await?;
+            for run in jobs::run_due(&mut app).await? {
+                out(format!("{} · {}\n{}", run.id, run.status, run.summary));
+            }
+        }
+        JobsCmd::Daemon => jobs::daemon(&mut build_app(None, None).await?).await?,
     }
     Ok(())
 }

@@ -58,7 +58,7 @@ pub async fn run(
     terminal: &mut DefaultTerminal,
     selection_requests: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
 ) -> Result<()> {
-    let result = run_loop(&mut app, terminal, selection_requests).await;
+    let result = Box::pin(run_loop(&mut app, terminal, selection_requests)).await;
     app.cancel_chat_tasks();
     app.procs.shutdown().await;
     // Servers started with `/local start` are Nexus's to clean up; ones the
@@ -87,6 +87,7 @@ async fn run_loop(
     // Cheap poll for a theme switch (omarchy's symlink, Ghostty's config) so
     // changing the terminal theme restyles the running app.
     let mut theme_poll = tokio::time::interval(std::time::Duration::from_secs(2));
+    let mut jobs_poll = tokio::time::interval(std::time::Duration::from_secs(60));
     loop {
         app.sync_approval_popup();
         take_proposed_command(app);
@@ -240,6 +241,11 @@ async fn run_loop(
                     std::future::pending::<()>().await;
                 }
             } => {}
+            _ = jobs_poll.tick() => {
+                if let Err(error) = app.collect_job_notifications() {
+                    app.push_status(format!("jobs notifications: {error}"));
+                }
+            }
             _ = theme_poll.tick() => {
                 let target = crate::theme::source_stamp();
                 if target != app.theme_link {
@@ -354,6 +360,7 @@ fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
         Popup::Local => {
             ui::popups::local::handle_key(app, key);
         }
+        Popup::Jobs => ui::popups::jobs::handle_key(app, key)?,
         Popup::Harness => ui::popups::harness::handle_key(app, key)?,
         Popup::Procs => ui::popups::procs::handle_key(app, key)?,
         Popup::Help => ui::popups::help::handle_key(app, key),

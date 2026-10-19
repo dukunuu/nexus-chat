@@ -295,6 +295,8 @@ pub enum Popup {
     Harness,
     /// `/procs`: session-owned background commands.
     Procs,
+    /// Durable scheduled agent jobs and their creation form.
+    Jobs,
     /// `/login`'s provider selector (`OpenRouter` / `OpenCode` Go / `OpenAI` /
     /// Codex / local runtime).
     Login,
@@ -1045,6 +1047,8 @@ pub struct App {
     pub interactive_approvals: bool,
     /// Eval permissions survive toolbox refreshes without interactive prompts.
     pub eval_approver: Option<Arc<dyn Approver>>,
+    /// Unattended job gate, retained across toolbox refreshes.
+    pub job_approver: Option<Arc<crate::jobs::JobApprover>>,
     /// Reply channel for the currently displayed approval request.
     pub pending_approval: Option<oneshot::Sender<Decision>>,
     /// The action waiting for a response from the interactive frontend.
@@ -1417,6 +1421,7 @@ impl App {
             interactive_ui: false,
             interactive_approvals: false,
             eval_approver: None,
+            job_approver: None,
             pending_approval: None,
             pending_approval_request: None,
             approval_queue: VecDeque::new(),
@@ -1484,6 +1489,75 @@ impl App {
             self.open_workspace_root(&root)?
                 .with_checkpoints(self.space.root.join("checkpoints")),
         ))
+    }
+
+    /// Validate and canonicalize a job's source using the normal workspace deny list.
+    pub fn validate_job_root(&self, root: &str) -> Result<String> {
+        Ok(self
+            .open_workspace(Some(root))?
+            .root()
+            .to_string_lossy()
+            .into_owned())
+    }
+
+    /// Enter only a generated run directory; source workspaces are validated separately.
+    pub(crate) fn enter_job_workspace(
+        &mut self,
+        root: &std::path::Path,
+        mode: WorkMode,
+        approver: Arc<crate::jobs::JobApprover>,
+    ) -> Result<()> {
+        let root = root.canonicalize()?;
+        let parent = self.space.root.join("job-worktrees").canonicalize()?;
+        anyhow::ensure!(
+            root.parent() == Some(parent.as_path()),
+            "invalid job run directory"
+        );
+        let mut deny = Vec::new();
+        let config_dir = config::project_dirs()?.config_dir().to_path_buf();
+        if config_dir.exists() {
+            deny.push(config_dir);
+        }
+        let workspace = crate::workspace::Workspace::open(&root, deny)?;
+        workspace.resolve(".", crate::workspace::Access::Read)?;
+        self.workspace = Some(Arc::new(workspace));
+        self.work_mode = mode;
+        self.job_approver = Some(approver);
+        self.refresh_toolbox();
+        Ok(())
+    }
+
+    /// Surface newly finished daemon runs using existing TUI notification state.
+    pub fn collect_job_notifications(&mut self) -> Result<()> {
+        let seen = self.db.setting("jobs_seen").unwrap_or_default();
+        let jobs = self.db.list_jobs()?;
+        let mut newest = seen.clone();
+        for run in self.db.list_job_runs()? {
+            let Some(finished) = &run.finished_at else {
+                continue;
+            };
+            if finished <= &seen {
+                continue;
+            }
+            newest = newest.max(finished.clone());
+            let Some(job) = jobs.iter().find(|job| job.id == run.job_id) else {
+                continue;
+            };
+            if job.spec.notify == "on_failure" && run.status == "done" {
+                continue;
+            }
+            self.unread.insert(run.id.clone());
+            self.notifications.push_back(ChatNotification {
+                session_id: run.id,
+                title: format!("job: {}", job.spec.name),
+                text: format!("{} · {}", run.status, run.summary),
+                success: run.status == "done",
+            });
+        }
+        if newest != seen {
+            self.db.set_setting("jobs_seen", &newest)?;
+        }
+        Ok(())
     }
 
     fn open_workspace_root(&self, root: &std::path::Path) -> Result<crate::workspace::Workspace> {
@@ -1853,7 +1927,9 @@ impl App {
         self.pending_approval_request = None;
         self.approval_queue.clear();
         self.approval_rx = None;
-        if let Some(approver) = &self.eval_approver {
+        if let Some(approver) = &self.job_approver {
+            toolbox.approver = Some(approver.clone());
+        } else if let Some(approver) = &self.eval_approver {
             toolbox.approver = Some(approver.clone());
         } else if self.interactive_approvals {
             let (sender, receiver) = mpsc::unbounded_channel();
@@ -1865,7 +1941,7 @@ impl App {
             .as_ref()
             .filter(|_| self.work_mode.is_agent())
             .cloned();
-        if self.eval_approver.is_some() {
+        if self.eval_approver.is_some() || self.job_approver.is_some() {
             toolbox.confine_shell_writes =
                 toolbox.workspace.as_ref().map(|w| w.root().to_path_buf());
         }
@@ -1875,7 +1951,14 @@ impl App {
             .as_ref()
             .map(|s| s.id.clone())
             .unwrap_or_default();
-        self.toolbox = std::sync::Arc::new(toolbox);
+        self.toolbox = if let Some(approver) = &self.job_approver {
+            Arc::new(crate::jobs::JobExecutor {
+                inner: Arc::new(toolbox),
+                approver: Arc::clone(approver),
+            })
+        } else {
+            Arc::new(toolbox)
+        };
         self.reload_skills();
     }
 

@@ -132,6 +132,7 @@ pub struct AppView {
     pub usage_scroll: usize,
     /// Selected failure mode in the `/harness` popup.
     pub harness_selected: usize,
+    pub jobs_popup: crate::ui::popups::jobs::JobsPopup,
     /// Background-process popup selection, output view and kill confirmation.
     pub procs_selected: usize,
     pub procs_output: Option<String>,
@@ -272,6 +273,9 @@ impl AppView {
         core.interactive_approvals = true;
         // Rebuild with the approver and `propose_command` this frontend offers.
         core.refresh_toolbox();
+        if let Err(error) = core.collect_job_notifications() {
+            core.push_status(format!("jobs notifications: {error}"));
+        }
         // `App::new` queues the launch status line as an event; seed the
         // view's status field from it so the first frame reads correctly.
         let status = core
@@ -346,6 +350,7 @@ impl AppView {
             usage_data: None,
             usage_scroll: 0,
             harness_selected: 0,
+            jobs_popup: crate::ui::popups::jobs::JobsPopup::default(),
             procs_selected: 0,
             procs_output: None,
             procs_scroll: 0,
