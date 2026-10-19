@@ -88,9 +88,14 @@ impl Approver for EvalApprover {
             if req.tool == "fs" {
                 return Decision::Allow;
             }
-            if req.tool == "shell"
-                && req.action == "run"
-                && let Some(summary) = req.summary.strip_prefix("$ ")
+            if matches!(
+                (req.tool.as_str(), req.action.as_str()),
+                ("shell", "run") | ("proc", "start")
+            ) && let Some(summary) = req
+                .summary
+                .strip_prefix("background: ")
+                .unwrap_or(&req.summary)
+                .strip_prefix("$ ")
             {
                 // The toolbox appends a separate cwd annotation to the command.
                 let command = summary.rsplit_once("\nin ").map_or(summary, |(cmd, _)| cmd);
@@ -288,6 +293,8 @@ pub enum Popup {
     Usage,
     /// `/harness`: ranked tool failure modes and their latest transcripts.
     Harness,
+    /// `/procs`: session-owned background commands.
+    Procs,
     /// `/login`'s provider selector (`OpenRouter` / `OpenCode` Go / `OpenAI` /
     /// Codex / local runtime).
     Login,
@@ -1121,6 +1128,8 @@ pub struct App {
     /// Composer buffer for the live research-activity view's steer input.
     pub research_live_input: String,
     pub toolbox: std::sync::Arc<dyn crate::tools::ToolExecutor>,
+    /// Background commands survive session switches, but not app exit.
+    pub procs: Arc<crate::workspace::procs::Procs>,
     /// Local static server for model-created apps (None if it failed to bind).
     pub app_server: Option<crate::appserver::AppServer>,
     pub skills_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
@@ -1364,6 +1373,7 @@ impl App {
             research_topic_rx: None,
             research_live_input: String::new(),
             toolbox,
+            procs: Arc::default(),
             app_server: None,
             skills_rx: None,
             ocr_rx: None,
@@ -1760,6 +1770,7 @@ impl App {
     /// Rebuild the toolbox from the current `searxng_url`, so a settings
     /// change takes effect immediately (no restart). Web search tries the
     /// configured backends first and has keyless HTML fallbacks.
+    #[allow(clippy::too_many_lines)] // Keep the toolbox's capability wiring together.
     pub fn refresh_toolbox(&mut self) {
         let url =
             (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
@@ -1858,6 +1869,7 @@ impl App {
             toolbox.confine_shell_writes =
                 toolbox.workspace.as_ref().map(|w| w.root().to_path_buf());
         }
+        toolbox.procs = Arc::clone(&self.procs);
         toolbox.session_id = self
             .session
             .as_ref()

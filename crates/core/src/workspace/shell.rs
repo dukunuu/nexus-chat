@@ -60,7 +60,7 @@ pub(crate) async fn action(
 }
 
 #[cfg(unix)]
-mod unix {
+pub(super) mod unix {
     use std::fmt::Write as _;
     use std::fs::{self, File};
     use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom};
@@ -162,27 +162,16 @@ mod unix {
         if !cwd.is_dir() {
             return Ok("invalid path: shell cwd must be a directory".to_string());
         }
-        let shims = shims(&runs)?;
         let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
-        let path = runs.join(format!("{id}.log"));
-        let output = File::create_new(&path)?;
-        let Some((mut command, sandbox_note)) = command(cmd, confine_shell_writes, &runs) else {
+        let Some(Spawned {
+            mut child,
+            group,
+            path,
+            sandbox_note,
+        }) = spawn(cmd, &cwd, confine_shell_writes, &runs, &id)?
+        else {
             return Ok(WRITE_CONFINEMENT_UNAVAILABLE.to_string());
         };
-        environment(&mut command, &shims)?;
-        // Both descriptors share one open-file offset: stdout and stderr are
-        // recorded in kernel write order, without competing reader tasks.
-        command
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .stdout(output.try_clone()?)
-            .stderr(output)
-            .kill_on_drop(true);
-        session(&mut command);
-        let mut child = command.spawn()?;
-        let group = ProcessGroup(
-            libc::pid_t::try_from(child.id().expect("spawned child pid")).expect("pid fits pid_t"),
-        );
         let seconds = args["timeout_s"].as_u64().unwrap_or(120).min(600);
         let header = wait(&mut child, &group, &path, seconds).await?;
         // One-shot commands must not leave background descendants behind even
@@ -195,7 +184,49 @@ mod unix {
         )?)
     }
 
-    fn runs_dir(db_path: Option<&Path>) -> PathBuf {
+    pub(crate) struct Spawned {
+        pub child: tokio::process::Child,
+        pub group: ProcessGroup,
+        pub path: PathBuf,
+        pub sandbox_note: &'static str,
+    }
+
+    pub(crate) fn spawn(
+        cmd: &str,
+        cwd: &Path,
+        confinement: Option<&Path>,
+        runs: &Path,
+        id: &str,
+    ) -> anyhow::Result<Option<Spawned>> {
+        let shims = shims(runs)?;
+        let path = runs.join(format!("{id}.log"));
+        let output = File::create_new(&path)?;
+        let Some((mut command, sandbox_note)) = command(cmd, confinement, runs) else {
+            return Ok(None);
+        };
+        environment(&mut command, &shims)?;
+        // Both descriptors share one open-file offset: stdout and stderr are
+        // recorded in kernel write order, without competing reader tasks.
+        command
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(output.try_clone()?)
+            .stderr(output)
+            .kill_on_drop(true);
+        session(&mut command);
+        let child = command.spawn()?;
+        let group = ProcessGroup(
+            libc::pid_t::try_from(child.id().expect("spawned child pid")).expect("pid fits pid_t"),
+        );
+        Ok(Some(Spawned {
+            child,
+            group,
+            path,
+            sandbox_note,
+        }))
+    }
+
+    pub(crate) fn runs_dir(db_path: Option<&Path>) -> PathBuf {
         db_path.map_or_else(
             || std::env::temp_dir().join("nexus-runs"),
             |path| path.parent().unwrap_or(Path::new(".")).join("runs"),
@@ -365,13 +396,26 @@ mod unix {
         }
     }
 
-    struct ProcessGroup(libc::pid_t);
+    pub(crate) struct ProcessGroup(libc::pid_t);
 
     impl ProcessGroup {
-        fn kill(&self) {
-            // SAFETY: the positive pid came from our child, which made itself
-            // session/group leader before exec. Negating it targets that group.
-            unsafe { libc::kill(-self.0, libc::SIGKILL) };
+        pub(crate) fn terminate(&self) {
+            if self.0 != 0 {
+                // SAFETY: this is the session/group created by our child.
+                unsafe { libc::kill(-self.0, libc::SIGTERM) };
+            }
+        }
+
+        pub(crate) fn kill(&self) {
+            if self.0 != 0 {
+                // SAFETY: the positive pid came from our child, which made itself
+                // session/group leader before exec. Negating it targets that group.
+                unsafe { libc::kill(-self.0, libc::SIGKILL) };
+            }
+        }
+
+        pub(crate) fn disarm(&mut self) {
+            self.0 = 0;
         }
     }
 

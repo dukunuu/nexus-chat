@@ -156,6 +156,12 @@ pub(super) fn render_status(f: &mut Frame, app: &AppView, area: Rect) {
         left.push(Span::styled(tag, Style::default().fg(theme.accent2)));
     }
 
+    let procs = app.procs.running_count();
+    if procs > 0 {
+        left.push(sep());
+        left.push(Span::styled(format!("{procs} procs"), dim));
+    }
+
     // Right: the context meter and numbers, when the window is known.
     let mut right: Vec<Span> = Vec::new();
     if app.settings.show_stats

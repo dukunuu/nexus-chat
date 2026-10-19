@@ -647,6 +647,13 @@ impl AppView {
             }
             AppCommand::OpenUsage => self.open_usage_popup(),
             AppCommand::OpenHelp => self.open_help(),
+            AppCommand::OpenProcs => {
+                self.core.execute(AppCommand::OpenProcs)?;
+                self.procs_output = None;
+                self.procs_kill_confirm = None;
+                self.procs_scroll = 0;
+                self.popup = Popup::Procs;
+            }
             AppCommand::Harness => {
                 self.core.execute(AppCommand::Harness)?;
                 self.popup = Popup::Harness;

@@ -60,6 +60,7 @@ pub async fn run(
 ) -> Result<()> {
     let result = run_loop(&mut app, terminal, selection_requests).await;
     app.cancel_chat_tasks();
+    app.procs.shutdown().await;
     // Servers started with `/local start` are Nexus's to clean up; ones the
     // user started elsewhere are untouched.
     app.stop_local_servers().await;
@@ -354,6 +355,7 @@ fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
             ui::popups::local::handle_key(app, key);
         }
         Popup::Harness => ui::popups::harness::handle_key(app, key)?,
+        Popup::Procs => ui::popups::procs::handle_key(app, key)?,
         Popup::Help => ui::popups::help::handle_key(app, key),
 
         Popup::None => handle_normal(app, key)?,

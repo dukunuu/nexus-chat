@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 mod checkpoint;
 pub mod escalation;
+pub mod procs;
 pub(crate) mod shell;
 
 pub use checkpoint::UndoReport;

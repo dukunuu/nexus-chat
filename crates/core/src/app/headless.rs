@@ -185,7 +185,10 @@ impl App {
     /// session title so `nexus sessions` shows a real name instead of the
     /// prompt prefix. A slow title must never hold the ask hostage — capped.
     pub async fn ask_headless(&mut self, prompt: String, opts: TurnOpts) -> Result<AskOutcome> {
-        let (answer, usage) = self.run_turn(prompt, opts).await?;
+        let result = self.run_turn(prompt, opts).await;
+        std::mem::take(&mut self.procs).shutdown().await;
+        self.refresh_toolbox();
+        let (answer, usage) = result?;
 
         if self.title_rx.is_some() {
             let timeout = tokio::time::sleep(std::time::Duration::from_secs(15));
@@ -248,6 +251,7 @@ impl App {
             )
             .await?;
         }
+        self.procs.shutdown().await;
         Ok(())
     }
 

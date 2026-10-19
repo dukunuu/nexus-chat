@@ -29,6 +29,67 @@ fn render_to_string(width: u16, height: u16, render: impl FnOnce(&mut ratatui::F
     out
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn procs_popup_two_processes_snapshot() {
+    use nexus_core::tools::ToolBox;
+    use nexus_core::workspace::Workspace;
+
+    let app = test_app();
+    let root = app.space.root.clone();
+    let mut toolbox = ToolBox::new(
+        std::path::PathBuf::new(),
+        None,
+        None,
+        "auto".into(),
+        vec![],
+        Some(root.join("nexus.db")),
+        None,
+        None,
+    );
+    toolbox.workspace = Some(std::sync::Arc::new(Workspace::open(&root, vec![]).unwrap()));
+    toolbox.procs = std::sync::Arc::clone(&app.procs);
+    for (session, name, line) in [
+        ("", "server", "listening"),
+        ("other", "watcher", "watching"),
+    ] {
+        toolbox.session_id = session.into();
+        let args = serde_json::json!({"action":"start", "cmd":format!("echo {line}; sleep 30"), "name":name, "ready_when":line});
+        let (result, _) = toolbox.run("proc", &args.to_string()).await;
+        assert!(result.contains(" · ready ·"), "{result}");
+    }
+    let screen = render_to_string(120, 30, |f| super::procs::render(f, &app));
+    assert!(screen.contains(" procs "), "{screen}");
+    let snapshot: Vec<_> = screen
+        .lines()
+        .filter_map(|line| {
+            let (_, body) = line.split_once('│')?;
+            let (body, _) = body.rsplit_once('│')?;
+            let body = body.trim();
+            if body.is_empty() {
+                return None;
+            }
+            Some(if let Some((name, rest)) = body.split_once(" · running ") {
+                let (_, output) = rest.split_once(" · ").unwrap();
+                format!("{name} · running <uptime> · {output}")
+            } else {
+                body.to_string()
+            })
+        })
+        .collect();
+    assert_eq!(
+        snapshot,
+        [
+            "this session first · processes stop when Nexus exits",
+            "▸ server · running <uptime> · listening",
+            "watcher · running <uptime> · watching",
+        ]
+    );
+    app.procs.shutdown().await;
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn approval_app(
     tool: &str,
     summary: String,

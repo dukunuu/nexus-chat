@@ -155,6 +155,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &[],
     },
     Command {
+        name: "procs",
+        desc: "background processes started by the agent",
+        aliases: &[],
+    },
+    Command {
         name: "web",
         desc: "toggle web answer mode (search-first, cited)",
         aliases: &["websearch"],
@@ -354,6 +359,8 @@ pub enum AppCommand {
     OpenUsage,
     /// `/harness` — tool failures over the last seven days.
     Harness,
+    /// `/procs` — background processes started by the agent.
+    OpenProcs,
     /// `/help` — the keybinding + command reference.
     OpenHelp,
     /// `/<skill-name> [text]` — arm a skill; `text` sends it immediately.
@@ -460,6 +467,7 @@ impl App {
             }
             "usage" => Ok(AppCommand::OpenUsage),
             "harness" => Ok(AppCommand::Harness),
+            "procs" => Ok(AppCommand::OpenProcs),
             "help" => Ok(AppCommand::OpenHelp),
             other => {
                 if self.skills.iter().any(|s| s.name == other) {
@@ -499,6 +507,7 @@ impl App {
             | AppCommand::OpenFiles { .. }
             | AppCommand::OpenApps
             | AppCommand::OpenUsage
+            | AppCommand::OpenProcs
             | AppCommand::OpenHelp
             | AppCommand::Watch { .. } => {}
             AppCommand::Harness => {

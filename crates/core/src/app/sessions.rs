@@ -112,6 +112,129 @@ impl App {
     }
 }
 
+#[cfg(all(test, unix))]
+mod procs_tests {
+    use super::*;
+    use crate::db::Db;
+    use crate::space::Space;
+    use crate::workspace::procs::Context;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn headless_ask_cleans_up_even_on_error_and_allows_another_turn() {
+        let root = std::env::temp_dir().join(format!("nexus-procs-ask-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = App::new(
+            Db::open_in_memory().unwrap(),
+            None,
+            Space { root: root.clone() },
+        );
+        let workspace = Arc::new(crate::workspace::Workspace::open(&root, vec![]).unwrap());
+        app.workspace = Some(Arc::clone(&workspace));
+        app.work_mode = WorkMode::Agent;
+        app.current_model = None;
+        for turn in 0..2 {
+            let result = app
+                .procs
+                .action(
+                    Context {
+                        workspace: &workspace,
+                        db_path: Some(&root.join("nexus.db")),
+                        confinement: None,
+                        session_id: "session",
+                        allow_unparseable: false,
+                    },
+                    "proc_start",
+                    r#"{"cmd":"sleep 30","name":"server","wait_s":0}"#,
+                )
+                .await;
+            assert!(
+                result.contains("started (not yet ready)"),
+                "turn {turn}: {result}"
+            );
+            if turn == 1 {
+                assert!(
+                    app.toolbox
+                        .run("proc", r#"{"action":"list"}"#)
+                        .await
+                        .0
+                        .contains("server · running")
+                );
+            }
+            let old = Arc::clone(&app.procs);
+            assert!(
+                app.ask_headless(
+                    "question".into(),
+                    super::super::headless::TurnOpts {
+                        stream: false,
+                        quiet: true
+                    }
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(old.running_count(), 0);
+            assert!(!Arc::ptr_eq(&old, &app.procs));
+        }
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn processes_survive_new_switches_and_toolbox_refreshes() {
+        let root =
+            std::env::temp_dir().join(format!("nexus-procs-sessions-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let data = root.join("data");
+        let workspace_root = root.join("workspace");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let mut app = App::new(Db::open_in_memory().unwrap(), None, Space { root: data });
+        let first = app
+            .db
+            .create_session("first", "model", &app.active_space.id, "chat")
+            .unwrap();
+        let second = app
+            .db
+            .create_session("second", "model", &app.active_space.id, "chat")
+            .unwrap();
+        app.switch_to_session_by_id(&first.id).unwrap();
+        app.run_command(&format!("agent {}", workspace_root.display()))
+            .unwrap();
+        let workspace = Arc::clone(app.workspace.as_ref().unwrap());
+        for (session, name) in [(&first.id, "server"), (&second.id, "watcher")] {
+            let args = serde_json::json!({"cmd":"echo ready; sleep 30", "name":name, "ready_when":"ready"});
+            let result = app
+                .procs
+                .action(
+                    Context {
+                        workspace: &workspace,
+                        db_path: Some(&root.join("nexus.db")),
+                        confinement: None,
+                        session_id: session,
+                        allow_unparseable: false,
+                    },
+                    "proc_start",
+                    &args.to_string(),
+                )
+                .await;
+            assert!(result.contains(" · ready ·"), "{result}");
+        }
+        app.new_session();
+        assert_eq!(app.procs.running_count(), 2);
+        app.switch_to_session_by_id(&second.id).unwrap();
+        assert_eq!(app.procs.list(&second.id)[0].name, "watcher");
+        app.switch_to_session_by_id(&first.id).unwrap();
+        let result = app.toolbox.run("proc", r#"{"action":"list"}"#).await.0;
+        assert!(result.contains("server · running"), "{result}");
+        assert!(result.contains("watcher · running"), "{result}");
+        assert_eq!(app.procs.list(&first.id)[0].name, "server");
+        app.procs.shutdown().await;
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// Best fuzzy score of `needle` against a session's title, slug, and uuid.
 pub fn session_score(s: &Session, needle: &str) -> Option<i32> {
     use crate::app::fuzzy_score;

@@ -700,6 +700,88 @@ pub(super) static SHELL: ToolSpec = ToolSpec {
     ],
 };
 
+pub(super) static PROC: ToolSpec = ToolSpec {
+    name: "proc",
+    purpose: "Start and manage session-owned background commands in the agent workspace. Commands stop when Nexus exits.",
+    selector: Some("action"),
+    params: &[
+        Param {
+            name: "cmd",
+            kind: Kind::Str,
+            doc: "background command to run with sh -c",
+        },
+        Param {
+            name: "name",
+            kind: Kind::Str,
+            doc: "short display name (default command)",
+        },
+        Param {
+            name: "cwd",
+            kind: Kind::Str,
+            doc: "workspace directory (default workspace root)",
+        },
+        Param {
+            name: "ready_when",
+            kind: Kind::Str,
+            doc: "output substring indicating readiness (literal, not a regex)",
+        },
+        Param {
+            name: "ready_port",
+            kind: Kind::Int,
+            doc: "localhost TCP port indicating readiness",
+        },
+        Param {
+            name: "wait_s",
+            kind: Kind::Int,
+            doc: "readiness grace period in seconds (default 5, maximum 60)",
+        },
+        Param {
+            name: "id",
+            kind: Kind::Str,
+            doc: "8-character process id returned by start or list",
+        },
+        Param {
+            name: "since",
+            kind: Kind::Int,
+            doc: "1-based starting line; default new output since the previous read",
+        },
+    ],
+    actions: &[
+        ActionSpec {
+            name: "start",
+            summary: "Start a server, watcher or long command, returning when ready, exited or after the grace period",
+            required: &["cmd"],
+            optional: &["name", "cwd", "ready_when", "ready_port", "wait_s"],
+            read_only: false,
+            internal: "proc_start",
+        },
+        ActionSpec {
+            name: "read",
+            summary: "Read new output with the running or exited state and head/tail shaping",
+            required: &["id"],
+            optional: &["since"],
+            read_only: true,
+            internal: "proc_read",
+        },
+        ActionSpec {
+            name: "list",
+            summary: "List processes, this session first, with state, uptime and last output line",
+            required: &[],
+            optional: &[],
+            read_only: true,
+            internal: "proc_list",
+        },
+        ActionSpec {
+            name: "kill",
+            summary: "Stop a process group without asking for approval",
+            required: &["id"],
+            optional: &[],
+            read_only: false,
+            internal: "proc_kill",
+        },
+    ],
+};
+
 pub(super) static RESEARCH_LOOKUP: ToolSpec = ToolSpec {
     name: "research_lookup",
     purpose: "Look up previously gathered research material.",
@@ -1088,6 +1170,7 @@ const TOOLS: &[&ToolSpec] = &[
     &FETCH_URL,
     &FS,
     &SHELL,
+    &PROC,
     &RESEARCH_LOOKUP,
     &FILES,
     &MEDIA,
@@ -1237,6 +1320,14 @@ mod tests {
             "shell_log",
         ),
         (
+            "proc",
+            r#"{"action":"start","cmd":"sleep 1"}"#,
+            "proc_start",
+        ),
+        ("proc", r#"{"action":"read","id":"0123abcd"}"#, "proc_read"),
+        ("proc", r#"{"action":"list"}"#, "proc_list"),
+        ("proc", r#"{"action":"kill","id":"0123abcd"}"#, "proc_kill"),
+        (
             "research_lookup",
             r#"{"scope":"session_sources","query":"x"}"#,
             "search_sources",
@@ -1378,6 +1469,8 @@ mod tests {
             "fs_grep",
             "fs_read",
             "shell_log",
+            "proc_read",
+            "proc_list",
         ];
         for &(tool, args, internal) in ROUTES {
             let expected = read_only.contains(&internal);

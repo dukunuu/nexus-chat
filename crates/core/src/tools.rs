@@ -171,6 +171,8 @@ pub trait Approver: Send + Sync {
 pub struct ToolBox {
     /// Confined agent filesystem access; absent outside agent mode.
     pub workspace: Option<Arc<Workspace>>,
+    /// App-owned background commands, shared across toolbox refreshes.
+    pub procs: Arc<crate::workspace::procs::Procs>,
     /// Eval write confinement; auto-approved commands also confine per call.
     pub confine_shell_writes: Option<PathBuf>,
     /// Present only in agent-auto mode, with rules first.
@@ -612,7 +614,12 @@ impl ToolExecutor for ToolBox {
                 exec: true,
                 ..Effect::read_only()
             },
-            Ok("shell_log") => Effect::read_only(),
+            Ok("proc_start") => Effect {
+                exec: true,
+                ..Effect::barrier()
+            },
+            Ok("shell_log" | "proc_read" | "proc_list") => Effect::read_only(),
+            Ok("proc_kill") => Effect::barrier(),
             Ok(
                 action @ ("fs_list" | "fs_glob" | "fs_grep" | "fs_read" | "fs_edit" | "fs_write"
                 | "fs_move" | "fs_delete"),
@@ -682,7 +689,7 @@ impl ToolExecutor for ToolBox {
                 let Ok((name, args)) = public_call(name, args) else {
                     continue;
                 };
-                if !(name.starts_with("fs_") || name == "shell_run")
+                if !(name.starts_with("fs_") || matches!(name.as_str(), "shell_run" | "proc_start"))
                     || is_read_only_tool(&name, &args)
                 {
                     continue;
@@ -691,7 +698,11 @@ impl ToolExecutor for ToolBox {
                     continue;
                 };
                 gates[index] = Gate::AskEach;
-                if request.summary.starts_with("could not parse safely:") {
+                if request
+                    .summary
+                    .trim_start_matches("background: ")
+                    .starts_with("could not parse safely:")
+                {
                     continue;
                 }
                 requests.push(request);
@@ -786,6 +797,7 @@ impl ToolBox {
     ) -> Self {
         Self {
             workspace: None,
+            procs: Arc::default(),
             confine_shell_writes: None,
             auto_decider: None,
             sandbox_available: crate::workspace::shell::write_confinement_available(),
@@ -1072,6 +1084,7 @@ impl ToolBox {
                 ],
             ));
             defs.push(def(&spec::SHELL, &["run", "log"]));
+            defs.push(def(&spec::PROC, &["start", "read", "list", "kill"]));
         }
         if self.interactive_ui {
             defs.push(def(&spec::PROPOSE_COMMAND, &["propose_command"]));
@@ -1298,7 +1311,8 @@ impl ToolBox {
             let Ok((name, args)) = public_call(name, args) else {
                 continue;
             };
-            if !(name.starts_with("fs_") || name == "shell_run") || is_read_only_tool(&name, &args)
+            if !(name.starts_with("fs_") || matches!(name.as_str(), "shell_run" | "proc_start"))
+                || is_read_only_tool(&name, &args)
             {
                 continue;
             }
@@ -1312,19 +1326,26 @@ impl ToolBox {
                 .root()
                 .to_path_buf();
             let effect = self.effect(&name, &args);
-            let summary = if request.tool == "shell" {
+            let summary = if matches!(request.tool.as_str(), "shell" | "proc") {
                 let args: serde_json::Value =
                     serde_json::from_str(&args).expect("validated arguments");
                 format!("$ {}", args["cmd"].as_str().expect("validated command"))
             } else {
                 request.summary.clone()
             };
+            // Background starts use shell policy, including its hard denies and
+            // configured command allow rules; the approval still names proc.
+            let (policy_tool, policy_action) = if request.tool == "proc" {
+                ("shell", "run")
+            } else {
+                (request.tool.as_str(), request.action.as_str())
+            };
             let class =
-                crate::decider::classify(&request.tool, &request.action, &root, &effect, &summary);
+                crate::decider::classify(policy_tool, policy_action, &root, &effect, &summary);
             request.allow_session = !matches!(class, Class::Destructive | Class::Outside);
             reqs.push(DecisionRequest {
-                tool: request.tool.clone(),
-                action: request.action.clone(),
+                tool: policy_tool.to_string(),
+                action: policy_action.to_string(),
                 summary,
                 task: self
                     .decision_scrubber
@@ -1384,7 +1405,10 @@ impl ToolBox {
         conn: Option<&rusqlite::Connection>,
         session_id: &str,
     ) -> PreparedDecision {
-        let unparseable = request.summary.starts_with("could not parse safely:");
+        let unparseable = request
+            .summary
+            .trim_start_matches("background: ")
+            .starts_with("could not parse safely:");
         let hard_deny = answer.by == "rules" && matches!(answer.verdict, Verdict::Deny(_));
         if !hard_deny
             && (matches!(req.class, Class::Destructive | Class::Outside)
@@ -1481,7 +1505,7 @@ impl ToolBox {
         let workspace = self.workspace.as_ref().ok_or_else(|| {
             format!("{tool} needs an agent workspace · switch with /agent <path>")
         })?;
-        let summary = if tool == "shell" {
+        let summary = if matches!(tool, "shell" | "proc") {
             let cmd = args["cmd"].as_str().expect("validated command");
             let mut summary = match check_command(cmd) {
                 Ok(()) => String::new(),
@@ -1501,6 +1525,9 @@ impl ToolBox {
                 return Err("invalid path: shell cwd must be a directory".to_string());
             }
             let _ = write!(summary, "$ {cmd}");
+            if tool == "proc" {
+                summary = format!("background: {summary}");
+            }
             if cwd != workspace.root() {
                 let _ = write!(summary, "\nin {}", fs_relative(workspace, &cwd));
             }
@@ -1547,7 +1574,7 @@ impl ToolBox {
         let mut gate = gate;
         if self.require_approval
             && self.auto_decider.is_some()
-            && (name.starts_with("fs_") || name == "shell_run")
+            && (name.starts_with("fs_") || matches!(name, "shell_run" | "proc_start"))
             && !is_read_only_tool(name, args)
         {
             if !matches!(gate, Gate::Policy(_)) {
@@ -1594,14 +1621,17 @@ impl ToolBox {
             }
         }
         if self.require_approval
-            && (name.starts_with("fs_") || name == "shell_run")
+            && (name.starts_with("fs_") || matches!(name, "shell_run" | "proc_start"))
             && !is_read_only_tool(name, args)
         {
             let request = match self.approval_request(name, args) {
                 Ok(request) => request,
                 Err(error) => return (error, "blocked".to_string()),
             };
-            let unparseable = request.summary.starts_with("could not parse safely:");
+            let unparseable = request
+                .summary
+                .trim_start_matches("background: ")
+                .starts_with("could not parse safely:");
             if gate != Gate::Approved || (unparseable && !allow_unparseable) {
                 let Some(approver) = &self.approver else {
                     return (
@@ -1682,6 +1712,31 @@ impl ToolBox {
                     "Requesting a workspace…".to_string(),
                 )
             }
+            "proc_start" | "proc_read" | "proc_list" | "proc_kill" => match &self.workspace {
+                None => (
+                    "proc needs an agent workspace · switch with /agent <path>".to_string(),
+                    "blocked".to_string(),
+                ),
+                Some(workspace) => (
+                    self.procs
+                        .action(
+                            crate::workspace::procs::Context {
+                                workspace,
+                                db_path: self.db_path.as_deref(),
+                                confinement: self
+                                    .confine_shell_writes
+                                    .as_deref()
+                                    .or_else(|| auto_allowed.then(|| workspace.root())),
+                                session_id: &self.session_id,
+                                allow_unparseable,
+                            },
+                            name,
+                            args,
+                        )
+                        .await,
+                    format!("Running {name}…"),
+                ),
+            },
             "shell_run" | "shell_log" => match &self.workspace {
                 None => (
                     "shell needs an agent workspace · switch with /agent <path>".to_string(),

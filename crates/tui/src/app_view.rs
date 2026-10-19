@@ -132,6 +132,11 @@ pub struct AppView {
     pub usage_scroll: usize,
     /// Selected failure mode in the `/harness` popup.
     pub harness_selected: usize,
+    /// Background-process popup selection, output view and kill confirmation.
+    pub procs_selected: usize,
+    pub procs_output: Option<String>,
+    pub procs_scroll: u16,
+    pub procs_kill_confirm: Option<String>,
     /// `/help` popup scroll offset (clamped at render time).
     pub help_scroll: u16,
     pub key_input: String,
@@ -341,6 +346,10 @@ impl AppView {
             usage_data: None,
             usage_scroll: 0,
             harness_selected: 0,
+            procs_selected: 0,
+            procs_output: None,
+            procs_scroll: 0,
+            procs_kill_confirm: None,
             help_scroll: 0,
             key_input: String::new(),
             key_target: KeyTarget::OpenRouter,

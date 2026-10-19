@@ -10,6 +10,7 @@ pub mod key;
 pub mod local;
 pub mod login;
 pub mod model;
+pub mod procs;
 pub mod research_live;
 pub mod session;
 pub mod settings;

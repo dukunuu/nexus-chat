@@ -109,6 +109,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         Popup::Swarm => popups::swarm::render(f, app),
         Popup::Usage => popups::usage::render(f, app),
         Popup::Harness => popups::harness::render(f, app),
+        Popup::Procs => popups::procs::render(f, app),
         Popup::Login => popups::login::render(f, app),
         Popup::Local => popups::local::render(f, app),
         Popup::Help => popups::help::render(f, app),
