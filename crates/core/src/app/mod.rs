@@ -907,6 +907,12 @@ pub struct App {
     pub pending_approval: Option<oneshot::Sender<Decision>>,
     /// The action waiting for a response from the interactive frontend.
     pub pending_approval_request: Option<ApprovalRequest>,
+    /// Requests waiting behind the displayed one, oldest first: concurrent
+    /// tool calls can each ask at once.
+    pub approval_queue: VecDeque<(ApprovalRequest, oneshot::Sender<Decision>)>,
+    /// Counts requests that reached the display, so a view can tell two
+    /// identical requests in a row apart.
+    pub approval_shown: u64,
     /// Requests from the current interactive toolbox (agent edits and commands,
     /// or a chat-mode `request_workspace`).
     pub approval_rx: Option<mpsc::UnboundedReceiver<(ApprovalRequest, oneshot::Sender<Decision>)>>,
@@ -1251,6 +1257,8 @@ impl App {
             interactive_approvals: false,
             pending_approval: None,
             pending_approval_request: None,
+            approval_queue: VecDeque::new(),
+            approval_shown: 0,
             approval_rx: None,
             proposed_command: None,
             queued_workspace: None,
@@ -1581,6 +1589,7 @@ impl App {
         toolbox.interactive_ui = self.interactive_ui;
         self.pending_approval = None;
         self.pending_approval_request = None;
+        self.approval_queue.clear();
         self.approval_rx = None;
         if self.interactive_approvals {
             let (sender, receiver) = mpsc::unbounded_channel();
@@ -1842,14 +1851,14 @@ impl App {
                     Some(receiver) => receiver.recv().await,
                     None => std::future::pending().await,
                 }
-            }, if self.pending_approval.is_none() => {
+            } => {
                 if let Some((request, reply)) = request {
                     if reply.is_closed() {
                         return AppEvent::Status("approval cancelled".to_string());
                     }
                     let status = format!("approval needed · {} {}", request.tool, request.action);
-                    self.pending_approval = Some(reply);
-                    self.pending_approval_request = Some(request);
+                    self.approval_queue.push_back((request, reply));
+                    self.show_next_approval();
                     AppEvent::Status(status)
                 } else {
                     self.approval_rx = None;
@@ -1864,6 +1873,7 @@ impl App {
             } => {
                 self.pending_approval = None;
                 self.pending_approval_request = None;
+                self.show_next_approval();
                 AppEvent::Status("approval cancelled".to_string())
             },
             ev = self.chat_event_rx.recv() => {
@@ -2030,6 +2040,64 @@ impl App {
         self.chat_tasks.clear();
         self.pending_approval = None;
         self.pending_approval_request = None;
+        self.approval_queue.clear();
+    }
+
+    /// Display the oldest queued approval once nothing is displayed,
+    /// skipping requests whose tool call has gone away. Returns whether one
+    /// was shown.
+    pub fn show_next_approval(&mut self) -> bool {
+        if self.pending_approval.is_some() {
+            return false;
+        }
+        while let Some((request, reply)) = self.approval_queue.pop_front() {
+            if reply.is_closed() {
+                continue;
+            }
+            self.pending_approval = Some(reply);
+            self.pending_approval_request = Some(request);
+            self.approval_shown += 1;
+            return true;
+        }
+        false
+    }
+
+    /// Requests awaiting an answer: the displayed one and the live queued ones.
+    #[must_use]
+    pub fn approval_count(&self) -> usize {
+        usize::from(self.pending_approval.is_some())
+            + self
+                .approval_queue
+                .iter()
+                .filter(|(_, reply)| !reply.is_closed())
+                .count()
+    }
+
+    /// Answer the displayed approval and display the next one. Allowing for
+    /// the session also allows every waiting request of the same kind, so
+    /// they are never shown.
+    pub(crate) fn answer_approval(&mut self, decision: Decision) {
+        let request = self.pending_approval_request.take();
+        if let Some(sender) = self.pending_approval.take() {
+            let _ = sender.send(decision);
+        }
+        if decision == Decision::AllowForSession
+            && let Some(request) = request
+        {
+            if let Some(receiver) = self.approval_rx.as_mut() {
+                while let Ok(item) = receiver.try_recv() {
+                    self.approval_queue.push_back(item);
+                }
+            }
+            for (queued, reply) in std::mem::take(&mut self.approval_queue) {
+                if queued.tool == request.tool && queued.action == request.action {
+                    let _ = reply.send(Decision::Allow);
+                } else {
+                    self.approval_queue.push_back((queued, reply));
+                }
+            }
+        }
+        self.show_next_approval();
     }
 }
 

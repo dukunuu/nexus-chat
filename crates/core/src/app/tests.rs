@@ -4287,3 +4287,124 @@ async fn retry_keeps_user_command_rows_and_replaces_only_the_reply_after_them() 
     );
     a.stop_stream().unwrap();
 }
+
+fn queued_request(
+    sender: &mpsc::UnboundedSender<(ApprovalRequest, oneshot::Sender<Decision>)>,
+    action: &str,
+    summary: &str,
+) -> (ApprovalRequest, oneshot::Receiver<Decision>) {
+    let request = ApprovalRequest {
+        tool: "fs".into(),
+        action: action.into(),
+        summary: summary.into(),
+    };
+    let (reply, answer) = oneshot::channel();
+    sender.send((request.clone(), reply)).unwrap();
+    (request, answer)
+}
+
+async fn receive_approvals(app: &mut App, count: usize) {
+    while app.pop_pending_event().is_some() {}
+    for _ in 0..count {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), app.next_event())
+            .await
+            .unwrap();
+        assert!(matches!(event, AppEvent::Status(status) if status.starts_with("approval needed")));
+    }
+}
+
+#[tokio::test]
+async fn concurrent_approvals_queue_and_are_answered_in_order() {
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    let (sender, receiver) = mpsc::unbounded_channel();
+    app.approval_rx = Some(receiver);
+    let (first, mut first_answer) = queued_request(&sender, "write", "write a");
+    let (second, mut second_answer) = queued_request(&sender, "write", "write b");
+    receive_approvals(&mut app, 2).await;
+    assert_eq!(app.pending_approval_request.as_ref(), Some(&first));
+    assert_eq!(app.approval_count(), 2);
+    app.execute(AppCommand::Approve {
+        decision: Decision::Allow,
+    })
+    .unwrap();
+    assert_eq!(first_answer.try_recv().unwrap(), Decision::Allow);
+    assert!(second_answer.try_recv().is_err());
+    assert_eq!(app.pending_approval_request.as_ref(), Some(&second));
+    assert_eq!(app.approval_count(), 1);
+    app.execute(AppCommand::Approve {
+        decision: Decision::Deny,
+    })
+    .unwrap();
+    assert_eq!(second_answer.try_recv().unwrap(), Decision::Deny);
+    assert!(app.pending_approval.is_none());
+    assert!(app.pending_approval_request.is_none());
+    assert_eq!(app.approval_count(), 0);
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn allow_for_session_answers_waiting_requests_of_the_same_kind_unseen() {
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    let (sender, receiver) = mpsc::unbounded_channel();
+    app.approval_rx = Some(receiver);
+    let (_, mut edit_answer) = queued_request(&sender, "edit", "edit a");
+    let (delete, mut delete_answer) = queued_request(&sender, "delete", "delete b");
+    let (_, mut queued_edit_answer) = queued_request(&sender, "edit", "edit c");
+    receive_approvals(&mut app, 3).await;
+    // Still in the channel when the grant lands: answered all the same.
+    let (_, mut unreceived_edit_answer) = queued_request(&sender, "edit", "edit d");
+    let shown = app.approval_shown;
+    app.execute(AppCommand::Approve {
+        decision: Decision::AllowForSession,
+    })
+    .unwrap();
+    assert_eq!(edit_answer.try_recv().unwrap(), Decision::AllowForSession);
+    assert_eq!(queued_edit_answer.try_recv().unwrap(), Decision::Allow);
+    assert_eq!(unreceived_edit_answer.try_recv().unwrap(), Decision::Allow);
+    assert_eq!(app.pending_approval_request.as_ref(), Some(&delete));
+    assert_eq!(app.approval_shown, shown + 1);
+    assert_eq!(app.approval_count(), 1);
+    assert!(delete_answer.try_recv().is_err());
+    app.execute(AppCommand::Approve {
+        decision: Decision::Deny,
+    })
+    .unwrap();
+    assert_eq!(delete_answer.try_recv().unwrap(), Decision::Deny);
+    assert!(app.pending_approval.is_none());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn approvals_whose_tool_call_went_away_are_skipped() {
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    let (sender, receiver) = mpsc::unbounded_channel();
+    app.approval_rx = Some(receiver);
+    let (_, mut first_answer) = queued_request(&sender, "write", "write a");
+    let (_, dropped_answer) = queued_request(&sender, "write", "write b");
+    let (third, mut third_answer) = queued_request(&sender, "write", "write c");
+    receive_approvals(&mut app, 3).await;
+    drop(dropped_answer);
+    assert_eq!(app.approval_count(), 2);
+    app.execute(AppCommand::Approve {
+        decision: Decision::Allow,
+    })
+    .unwrap();
+    assert_eq!(first_answer.try_recv().unwrap(), Decision::Allow);
+    assert_eq!(app.pending_approval_request.as_ref(), Some(&third));
+    assert!(app.approval_queue.is_empty());
+    // The displayed request going away shows nothing further.
+    drop(third_answer);
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), app.next_event())
+        .await
+        .unwrap();
+    assert!(matches!(event, AppEvent::Status(status) if status == "approval cancelled"));
+    assert!(app.pending_approval.is_none());
+    assert!(app.pending_approval_request.is_none());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}

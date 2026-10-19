@@ -256,22 +256,24 @@ declares before it runs.
 
 ```rust
 pub struct Effect {
-    reads:  Vec<PathBuf>,   // resolved, canonical
-    writes: Vec<PathBuf>,
-    exec:   bool,           // runs a program
-    network: bool,
-    outside_root: bool,
-    tier: Risk,             // Read < Write < Exec < Outside < Destructive
+    reads:   Vec<PathBuf>,  // canonical, from Workspace::resolve
+    writes:  Vec<PathBuf>,
+    exec:    bool,          // runs a program: conflicts with everything
+    barrier: bool,          // mutates state not describable by path
+    network: bool,          // informational
 }
 
 trait ToolExecutor {
-    fn effect(&self, name: &str, args: &str) -> Effect;  // replaces is_read_only
+    fn is_read_only(&self, name: &str, args: &str) -> bool;
+    fn effect(&self, name: &str, args: &str) -> Effect; // default: read-only or barrier
     // …
 }
 ```
 
-`is_read_only` becomes `effect().tier == Risk::Read`, so research and swarm
-keep working unchanged.
+`effect()` has a default built from `is_read_only`, so research, swarm and
+test executors keep working unchanged; `ToolBox` overrides it with paths for
+`fs`, `exec` for `shell run`, the union for `batch`, and barriers for every
+other mutating tool.
 
 ### Scheduling
 

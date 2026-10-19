@@ -3,7 +3,10 @@
 //! `research_lookup`, `files`, `app`, `media`) that dispatch onto a larger
 //! set of specialized implementations below, behind the `ToolExecutor` seam.
 
+mod effect;
 mod spec;
+
+pub use effect::{Effect, plan_waves};
 
 use std::fmt::Write as _;
 use std::future::Future;
@@ -26,6 +29,8 @@ const MAX_TOOL_RESULT_CHARS: usize = 8_000;
 /// Maximum sub-operations in one `batch` call — bounds execution time and
 /// the size of the combined result.
 const MAX_BATCH_CALLS: usize = 8;
+/// Calls run concurrently within one wave of `run_scheduled`.
+const MAX_PARALLEL_CALLS: usize = 8;
 /// Combined-result cap for a `batch` call. Each sub-result is already capped
 /// at `MAX_TOOL_RESULT_CHARS`; this lets a few of them through together
 /// while still bounding what a runaway batch pushes into the conversation.
@@ -453,9 +458,20 @@ pub trait ToolExecutor: Send + Sync + 'static {
     fn defs_compact(&self) -> Vec<ToolDef> {
         self.defs()
     }
-    /// Whether a call is read-only (see `is_read_only_tool`) — parallel
-    /// calls run concurrently only when every one of them is.
+    /// Whether a call is read-only (see `is_read_only_tool`); the default
+    /// `effect` builds on it.
     fn is_read_only(&self, name: &str, args: &str) -> bool;
+    /// What a call touches, declared before it runs — `run_scheduled` lets
+    /// calls whose effects don't conflict run together. Without path
+    /// knowledge, a read-only call touches nothing and any other call is a
+    /// barrier.
+    fn effect(&self, name: &str, args: &str) -> Effect {
+        if self.is_read_only(name, args) {
+            Effect::read_only()
+        } else {
+            Effect::barrier()
+        }
+    }
     /// Run one tool call, returning `(result, status-label)`. Boxed future
     /// so the trait stays dyn-compatible (the loops hold `Arc<dyn
     /// ToolExecutor>`).
@@ -484,6 +500,90 @@ impl ToolExecutor for ToolBox {
         is_read_only_tool(name, args)
     }
 
+    /// Workspace calls declare the paths they resolve to; `shell run` is a
+    /// barrier, as are the user bridges, which must stay in call order. A
+    /// path that fails to resolve declares nothing: that call fails without
+    /// touching anything.
+    fn effect(&self, name: &str, args: &str) -> Effect {
+        if matches!(name, "propose_command" | "request_workspace") {
+            return Effect::barrier();
+        }
+        if name == "batch" {
+            let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+            let mut union = Effect::read_only();
+            for item in v
+                .get("calls")
+                .and_then(|c| c.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let tool = item
+                    .get("tool")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default();
+                let arguments = item
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let effect = self.effect(tool, &arguments.to_string());
+                union.reads.extend(effect.reads);
+                union.writes.extend(effect.writes);
+                union.exec |= effect.exec;
+                union.barrier |= effect.barrier;
+                union.network |= effect.network;
+            }
+            return union;
+        }
+        let internal = public_call(name, args).map(|(internal, _)| internal);
+        match internal.as_deref() {
+            Ok("shell_run") => Effect {
+                exec: true,
+                ..Effect::read_only()
+            },
+            Ok("shell_log") => Effect::read_only(),
+            Ok(
+                action @ ("fs_list" | "fs_glob" | "fs_grep" | "fs_read" | "fs_edit" | "fs_write"
+                | "fs_move" | "fs_delete"),
+            ) => {
+                let Some(workspace) = &self.workspace else {
+                    return Effect::read_only();
+                };
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let arg = |key: &str| v.get(key).and_then(serde_json::Value::as_str);
+                let resolved = match action {
+                    "fs_list" | "fs_glob" | "fs_grep" | "fs_read" => workspace
+                        .resolve(arg("path").unwrap_or("."), Access::Read)
+                        .map(|path| Effect {
+                            reads: vec![path],
+                            ..Effect::read_only()
+                        }),
+                    "fs_move" => workspace
+                        .resolve(arg("path").unwrap_or_default(), Access::Write)
+                        .and_then(|from| {
+                            let to =
+                                workspace.resolve(arg("to").unwrap_or_default(), Access::Write)?;
+                            Ok(Effect {
+                                writes: vec![from, to],
+                                ..Effect::read_only()
+                            })
+                        }),
+                    _ => workspace
+                        .resolve(arg("path").unwrap_or_default(), Access::Write)
+                        .map(|path| Effect {
+                            writes: vec![path],
+                            ..Effect::read_only()
+                        }),
+                };
+                resolved.unwrap_or_default()
+            }
+            _ if is_read_only_tool(name, args) => Effect {
+                network: matches!(name, "search" | "fetch_url" | "research_lookup"),
+                ..Effect::read_only()
+            },
+            _ => Effect::barrier(),
+        }
+    }
+
     fn run<'a>(
         &'a self,
         name: &'a str,
@@ -499,6 +599,43 @@ impl ToolExecutor for ToolBox {
     fn space_files_dir(&self) -> Option<std::path::PathBuf> {
         Some(self.space_files_dir.clone())
     }
+}
+
+/// Run calls in waves of non-conflicting effects (see `plan_waves`): the
+/// calls in a wave run concurrently, at most `MAX_PARALLEL_CALLS` at a time,
+/// and each wave waits for the one before. Results come back in call order,
+/// whatever order the calls finish in.
+pub(crate) async fn run_scheduled(
+    exec: &dyn ToolExecutor,
+    calls: &[(String, String)],
+) -> Vec<(String, String)> {
+    use futures_util::StreamExt as _;
+
+    if let [(name, args)] = calls {
+        return vec![exec.run(name, args).await];
+    }
+    let effects: Vec<Effect> = calls
+        .iter()
+        .map(|(name, args)| exec.effect(name, args))
+        .collect();
+    let mut results = vec![None; calls.len()];
+    for wave in plan_waves(&effects) {
+        let done: Vec<(String, String)> = futures_util::stream::iter(
+            wave.iter()
+                .copied()
+                .map(|index| exec.run(&calls[index].0, &calls[index].1)),
+        )
+        .buffered(MAX_PARALLEL_CALLS)
+        .collect()
+        .await;
+        for (index, result) in wave.into_iter().zip(done) {
+            results[index] = Some(result);
+        }
+    }
+    results
+        .into_iter()
+        .map(|result| result.expect("every call runs in one wave"))
+        .collect()
 }
 
 impl ToolBox {
@@ -1882,10 +2019,11 @@ impl ToolBox {
                     );
                 }
                 let status = format!("Running {} batched operations…", calls.len());
-                // Serialize each sub-call once. Read-only batches run
-                // concurrently (network latency overlaps); any mutating call
-                // keeps the whole batch sequential so writes to the same file
-                // can't race. Results are zipped back into call order.
+                // Serialize each sub-call once. Sub-calls run in waves of
+                // non-conflicting effects (`run_scheduled`): reads and writes
+                // to different files overlap, while writes to the same file
+                // or a program run keep their order. Results are zipped back
+                // into call order.
                 let items: Vec<(String, String)> = calls
                     .iter()
                     .map(|(tool, arguments)| {
@@ -1895,26 +2033,9 @@ impl ToolBox {
                         )
                     })
                     .collect();
-                let results: Vec<(String, String)> = if items.len() > 1
-                    && items
-                        .iter()
-                        .all(|(tool, args)| is_read_only_tool(tool, args))
-                {
-                    // Box::pin keeps the recursive `run` future behind a
-                    // pointer so the join_all future stays finitely sized.
-                    futures_util::future::join_all(
-                        items
-                            .iter()
-                            .map(|(tool, args)| Box::pin(self.run(tool, args))),
-                    )
-                    .await
-                } else {
-                    let mut results = Vec::with_capacity(items.len());
-                    for (tool, args) in &items {
-                        results.push(Box::pin(self.run(tool, args)).await);
-                    }
-                    results
-                };
+                // Sub-calls go through `ToolExecutor::run`, whose Box::pin
+                // keeps the recursive `run` future finitely sized.
+                let results: Vec<(String, String)> = run_scheduled(self, &items).await;
                 let mut out = String::new();
                 for (i, ((tool, _), (_, arguments))) in items.iter().zip(calls.iter()).enumerate() {
                     if i > 0 {
@@ -9411,5 +9532,239 @@ mod tests {
             assert!(result.contains("cannot run inside batch"), "{result}");
         }
         assert!(allow.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn toolbox_effects_declare_resolved_workspace_paths() {
+        let (toolbox, dir) = fs_toolbox();
+        let root = toolbox.workspace.as_ref().unwrap().root().to_path_buf();
+        let reads = |paths: &[&str]| Effect {
+            reads: paths.iter().map(|path| root.join(path)).collect(),
+            ..Effect::read_only()
+        };
+        let writes = |paths: &[&str]| Effect {
+            writes: paths.iter().map(|path| root.join(path)).collect(),
+            ..Effect::read_only()
+        };
+        for (args, expected) in [
+            (json!({"action": "list"}), reads(&[""])),
+            (json!({"action": "list", "path": "src"}), reads(&["src"])),
+            (
+                json!({"action": "glob", "pattern": "*.rs", "path": "src"}),
+                reads(&["src"]),
+            ),
+            (json!({"action": "grep", "pattern": "fn"}), reads(&[""])),
+            (
+                json!({"action": "read", "path": "src/a.rs"}),
+                reads(&["src/a.rs"]),
+            ),
+            (
+                json!({"action": "edit", "path": "a.rs", "edits": [{"hash": "x", "new": "y"}]}),
+                writes(&["a.rs"]),
+            ),
+            (
+                json!({"action": "write", "path": "a.rs", "content": "x"}),
+                writes(&["a.rs"]),
+            ),
+            (
+                json!({"action": "delete", "path": "a.rs"}),
+                writes(&["a.rs"]),
+            ),
+            (
+                json!({"action": "move", "path": "a.rs", "to": "b/c.rs"}),
+                writes(&["a.rs", "b/c.rs"]),
+            ),
+            // Unresolvable paths declare nothing; the call fails on its own.
+            (
+                json!({"action": "read", "path": "../outside"}),
+                Effect::read_only(),
+            ),
+            (
+                json!({"action": "move", "path": "a.rs", "to": "../outside"}),
+                Effect::read_only(),
+            ),
+        ] {
+            assert_eq!(toolbox.effect("fs", &args.to_string()), expected, "{args}");
+        }
+        assert_eq!(
+            toolbox.effect("shell", r#"{"action":"run","cmd":"cargo test"}"#),
+            Effect {
+                exec: true,
+                ..Effect::read_only()
+            }
+        );
+        assert_eq!(
+            toolbox.effect("shell", r#"{"action":"log","id":"1"}"#),
+            Effect::read_only()
+        );
+        let batch = json!({"calls": [
+            {"tool": "fs", "arguments": {"action": "write", "path": "a.rs", "content": "x"}},
+            {"tool": "fs", "arguments": {"action": "write", "path": "b.rs", "content": "y"}},
+        ]})
+        .to_string();
+        let union = toolbox.effect("batch", &batch);
+        assert_eq!(union, writes(&["a.rs", "b.rs"]));
+        assert!(!union.conflicts(&reads(&["c.rs"])));
+        assert!(union.conflicts(&reads(&["b.rs"])));
+        assert_eq!(
+            toolbox.effect(
+                "scripts",
+                r#"{"action":"edit","path":"a.py","edits":[{"hash":"x","new":"y"}]}"#
+            ),
+            Effect::barrier()
+        );
+        assert_eq!(
+            toolbox.effect("search", r#"{"mode":"web","query":"rust"}"#),
+            Effect {
+                network: true,
+                ..Effect::read_only()
+            }
+        );
+        for (tool, args) in [
+            ("propose_command", r#"{"cmd":"make","reason":"build"}"#),
+            ("request_workspace", r#"{"root":"/x","reason":"fix"}"#),
+        ] {
+            assert_eq!(toolbox.effect(tool, args), Effect::barrier(), "{tool}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        let no_workspace = bare_toolbox();
+        assert_eq!(
+            no_workspace.effect("fs", r#"{"action":"write","path":"a.rs","content":"x"}"#),
+            Effect::read_only()
+        );
+    }
+
+    /// Records when each call starts and ends; a path ending in `slow`
+    /// takes longer, so finishing order differs from call order.
+    #[derive(Default)]
+    struct WaveExecutor {
+        log: std::sync::Mutex<Vec<String>>,
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ToolExecutor for WaveExecutor {
+        fn defs(&self) -> Vec<ToolDef> {
+            Vec::new()
+        }
+
+        fn is_read_only(&self, name: &str, _args: &str) -> bool {
+            name == "read"
+        }
+
+        fn effect(&self, name: &str, args: &str) -> Effect {
+            let path = PathBuf::from(args);
+            if name == "read" {
+                Effect {
+                    reads: vec![path],
+                    ..Effect::read_only()
+                }
+            } else {
+                Effect {
+                    writes: vec![path],
+                    ..Effect::read_only()
+                }
+            }
+        }
+
+        fn run<'a>(
+            &'a self,
+            name: &'a str,
+            args: &'a str,
+        ) -> Pin<Box<dyn Future<Output = (String, String)> + Send + 'a>> {
+            use std::sync::atomic::Ordering::SeqCst;
+            Box::pin(async move {
+                let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+                self.peak.fetch_max(now, SeqCst);
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("start {name} {args}"));
+                let ms = if args.ends_with("slow") { 60 } else { 10 };
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                self.log.lock().unwrap().push(format!("end {name} {args}"));
+                self.in_flight.fetch_sub(1, SeqCst);
+                (format!("{name} {args}"), "Done".to_string())
+            })
+        }
+
+        fn supports_images(&self) -> bool {
+            false
+        }
+
+        fn space_files_dir(&self) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    fn wave_calls(calls: &[(&str, &str)]) -> Vec<(String, String)> {
+        calls
+            .iter()
+            .map(|(name, args)| ((*name).to_string(), (*args).to_string()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn scheduler_overlaps_independent_writes_and_orders_same_file_writes() {
+        let exec = WaveExecutor::default();
+        run_scheduled(&exec, &wave_calls(&[("write", "/w/a"), ("write", "/w/b")])).await;
+        let log = exec.log.lock().unwrap().clone();
+        assert!(
+            log[..2].iter().all(|entry| entry.starts_with("start")),
+            "{log:?}"
+        );
+
+        let exec = WaveExecutor::default();
+        run_scheduled(&exec, &wave_calls(&[("write", "/w/a"), ("write", "/w/a")])).await;
+        assert_eq!(
+            *exec.log.lock().unwrap(),
+            [
+                "start write /w/a",
+                "end write /w/a",
+                "start write /w/a",
+                "end write /w/a"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_returns_results_in_call_order_whatever_finishes_first() {
+        let exec = WaveExecutor::default();
+        let calls = wave_calls(&[
+            ("write", "/w/slow"),
+            ("read", "/w/b"),
+            ("write", "/w/c"),
+            ("read", "/w/slow"),
+        ]);
+        let results = run_scheduled(&exec, &calls).await;
+        assert_eq!(
+            results,
+            calls
+                .iter()
+                .map(|(name, args)| (format!("{name} {args}"), "Done".to_string()))
+                .collect::<Vec<_>>()
+        );
+        let log = exec.log.lock().unwrap().clone();
+        let at = |entry: &str| log.iter().position(|e| e == entry).unwrap();
+        assert!(at("end read /w/b") < at("end write /w/slow"), "{log:?}");
+        // The read of the written path waits for the write.
+        assert!(
+            at("end write /w/slow") < at("start read /w/slow"),
+            "{log:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_runs_at_most_eight_calls_at_once() {
+        let exec = WaveExecutor::default();
+        let paths: Vec<String> = (0..12).map(|i| format!("/w/{i}")).collect();
+        let calls: Vec<(String, String)> = paths
+            .iter()
+            .map(|path| ("read".to_string(), path.clone()))
+            .collect();
+        let results = run_scheduled(&exec, &calls).await;
+        assert_eq!(results.len(), 12);
+        assert_eq!(results[11].0, "read /w/11");
+        assert_eq!(exec.peak.load(std::sync::atomic::Ordering::SeqCst), 8);
     }
 }

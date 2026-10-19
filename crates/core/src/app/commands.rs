@@ -498,12 +498,7 @@ impl App {
                 Some(id) => self.cancel_chat_task(id)?,
                 None => self.stop_stream()?,
             },
-            AppCommand::Approve { decision } => {
-                self.pending_approval_request = None;
-                if let Some(sender) = self.pending_approval.take() {
-                    let _ = sender.send(decision);
-                }
-            }
+            AppCommand::Approve { decision } => self.answer_approval(decision),
             AppCommand::Steer { text } => self.steer_research(&text),
             AppCommand::AnswerGate { text } => self.reply_to_survey_gate(&text),
             AppCommand::NewSession => self.new_session(),

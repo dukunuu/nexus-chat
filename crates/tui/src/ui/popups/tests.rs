@@ -146,6 +146,73 @@ fn approval_overflow_is_counted_scrollable_and_reset_for_each_request() {
 }
 
 #[test]
+fn queued_approvals_show_their_position_and_reset_the_guards_at_the_head() {
+    use crossterm::event::KeyCode;
+    use nexus_core::tools::Decision;
+    use std::time::{Duration, Instant};
+
+    let command = format!("$ echo {}\necho LAST_COMMAND", "payload ".repeat(500));
+    let (mut app, mut first) = approval_app("shell", command);
+    let root = app.space.root.clone();
+    let request = app.pending_approval_request.clone().unwrap();
+    let mut queued = Vec::new();
+    for _ in 0..2 {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.approval_queue.push_back((request.clone(), sender));
+        queued.push(receiver);
+    }
+    let mut third = queued.pop().unwrap();
+    let second = queued.pop().unwrap();
+    let screen = render_to_string(120, 24, |f| super::approval::render(f, &app));
+    assert!(screen.contains(" approve · 1 of 3 "), "{screen}");
+    // Read the first to its end and let its open delay pass.
+    let read_to_end = |app: &mut AppView| {
+        while app.approval_scroll.get() < app.approval_max_scroll.get() {
+            super::approval::handle_key(app, KeyCode::PageDown.into()).unwrap();
+            render_to_string(120, 24, |f| super::approval::render(f, app));
+        }
+        app.approval_delay = Duration::from_millis(400);
+        app.approval_opened_at = Some(Instant::now() - Duration::from_secs(1));
+    };
+    read_to_end(&mut app);
+    super::approval::handle_key(&mut app, KeyCode::Char('y').into()).unwrap();
+    assert_eq!(first.try_recv().unwrap(), Decision::Allow);
+    // The identical second request reaches the head with fresh guards.
+    app.sync_approval_popup();
+    let assert_fresh = |app: &AppView| {
+        assert_eq!(app.popup, nexus_core::app::Popup::Approval);
+        assert_eq!(app.approval_request.as_ref(), Some(&request));
+        assert_eq!(app.approval_scroll.get(), 0);
+        assert!(!app.approval_seen_end.get());
+        assert!(
+            app.approval_opened_at
+                .is_some_and(|opened| opened.elapsed() < Duration::from_secs(1))
+        );
+    };
+    assert_fresh(&app);
+    let screen = render_to_string(120, 24, |f| super::approval::render(f, &app));
+    assert!(screen.contains(" approve · 1 of 2 "), "{screen}");
+    read_to_end(&mut app);
+    // Its tool call going away shows the third, again with fresh guards.
+    drop(second);
+    app.sync_approval_popup();
+    assert_fresh(&app);
+    let screen = render_to_string(120, 24, |f| super::approval::render(f, &app));
+    assert!(screen.contains(" approve "), "{screen}");
+    assert!(!screen.contains("1 of"), "{screen}");
+    app.approval_opened_at = Some(Instant::now() - Duration::from_secs(1));
+    super::approval::handle_key(&mut app, KeyCode::Char('y').into()).unwrap();
+    assert!(third.try_recv().is_err(), "the unread command stays locked");
+    read_to_end(&mut app);
+    super::approval::handle_key(&mut app, KeyCode::Char('y').into()).unwrap();
+    assert_eq!(third.try_recv().unwrap(), Decision::Allow);
+    app.sync_approval_popup();
+    assert_eq!(app.popup, nexus_core::app::Popup::None);
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn approval_requires_the_end_of_a_wrapped_shell_command_before_allowing() {
     use crossterm::event::KeyCode;
     use nexus_core::tools::Decision;

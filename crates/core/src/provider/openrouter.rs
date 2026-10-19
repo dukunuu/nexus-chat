@@ -1527,29 +1527,16 @@ impl OpenRouter {
                         tool_calls: Some(calls.clone()),
                         ..Default::default()
                     });
-                    // Parallel calls the model issued in one response run
-                    // concurrently when they're all read-only (searches,
-                    // fetches, file/app reads) — network latency overlaps
-                    // instead of stacking. Any mutating call keeps the batch
-                    // sequential so writes to the same file can't race.
-                    // Results are zipped back into call order either way.
-                    let results: Vec<(String, String)> = if calls.len() > 1
-                        && calls
-                            .iter()
-                            .all(|call| toolbox.is_read_only(&call.name, &call.arguments))
-                    {
-                        futures_util::future::join_all(calls.iter().map(|call| {
-                            let toolbox = toolbox.clone();
-                            async move { toolbox.run(&call.name, &call.arguments).await }
-                        }))
-                        .await
-                    } else {
-                        let mut results = Vec::with_capacity(calls.len());
-                        for call in &calls {
-                            results.push(toolbox.run(&call.name, &call.arguments).await);
-                        }
-                        results
-                    };
+                    // Parallel calls the model issued in one response run in
+                    // waves of non-conflicting effects: reads, fetches and
+                    // writes to different files overlap instead of stacking,
+                    // while writes to the same file and program runs keep
+                    // their order. Results are zipped back into call order.
+                    let pending: Vec<(String, String)> = calls
+                        .iter()
+                        .map(|call| (call.name.clone(), call.arguments.clone()))
+                        .collect();
+                    let results = crate::tools::run_scheduled(&*toolbox, &pending).await;
                     for (index, (call, (result, status))) in calls.iter().zip(results).enumerate() {
                         let _ = tx.send(StreamEvent::Status("Running tool…".to_string()));
                         let _ = tx.send(StreamEvent::Status(status));
@@ -5058,5 +5045,142 @@ mod tests {
             normalize_video_params("openai/sora-2-pro", 6, "720p", "16:9");
         assert_eq!(duration, 4);
         assert_eq!(resolution, "720p");
+    }
+
+    /// `write`/`read` calls on the `path` argument; `ms` sets how long one
+    /// takes, so calls can finish out of order.
+    struct PathToolExecutor;
+
+    impl ToolExecutor for PathToolExecutor {
+        fn defs(&self) -> Vec<ToolDef> {
+            Vec::new()
+        }
+
+        fn is_read_only(&self, name: &str, _args: &str) -> bool {
+            name == "read"
+        }
+
+        fn effect(&self, name: &str, args: &str) -> crate::tools::Effect {
+            let v: serde_json::Value = serde_json::from_str(args).unwrap();
+            let path = std::path::PathBuf::from(v["path"].as_str().unwrap());
+            if name == "read" {
+                crate::tools::Effect {
+                    reads: vec![path],
+                    ..crate::tools::Effect::read_only()
+                }
+            } else {
+                crate::tools::Effect {
+                    writes: vec![path],
+                    ..crate::tools::Effect::read_only()
+                }
+            }
+        }
+
+        fn run<'a>(
+            &'a self,
+            name: &'a str,
+            args: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (String, String)> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let v: serde_json::Value = serde_json::from_str(args).unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(v["ms"].as_u64().unwrap()))
+                    .await;
+                (
+                    format!("{name} {}", v["path"].as_str().unwrap()),
+                    format!("Running {name}…"),
+                )
+            })
+        }
+
+        fn supports_images(&self) -> bool {
+            false
+        }
+
+        fn space_files_dir(&self) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduled_tool_calls_report_and_reply_in_call_order() {
+        let calls = [
+            ("c0", "write", r#"{"path":"/w/a","ms":60}"#),
+            ("c1", "read", r#"{"path":"/w/b","ms":1}"#),
+            ("c2", "write", r#"{"path":"/w/a","ms":1}"#),
+            ("c3", "read", r#"{"path":"/w/c","ms":30}"#),
+        ];
+        let tool_calls: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .map(|(index, (id, name, arguments))| {
+                serde_json::json!({"index": index, "id": id, "type": "function", "function": {
+                    "name": name, "arguments": arguments
+                }})
+            })
+            .collect();
+        let first = fake_chat_frames(&[
+            serde_json::json!({"choices": [{"delta": {"tool_calls": tool_calls}}]}),
+        ]);
+        let second =
+            fake_chat_frames(&[serde_json::json!({"choices": [{"delta": {"content": "Done"}}]})]);
+        let (provider, server) = fake_chat_server(vec![first, second]).await;
+        let executor = Arc::new(PathToolExecutor);
+        let (mut rx, _) = provider.stream_chat(
+            "test".into(),
+            vec![ChatMessage::text("user", "Go")],
+            ChatParams::default(),
+            Vec::new(),
+            executor,
+            2,
+        );
+        let mut reported = Vec::new();
+        while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+        {
+            match event {
+                StreamEvent::Error(error) => panic!("stream failed: {error}"),
+                StreamEvent::ToolCall {
+                    id, name, result, ..
+                } => reported.push((id, name, result)),
+                _ => {}
+            }
+        }
+        let expected: Vec<_> = calls
+            .iter()
+            .map(|(id, name, arguments)| {
+                let path = serde_json::from_str::<serde_json::Value>(arguments).unwrap()["path"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                (
+                    (*id).to_string(),
+                    (*name).to_string(),
+                    format!("{name} {path}"),
+                )
+            })
+            .collect();
+        assert_eq!(reported, expected);
+        let requests = server.await.unwrap();
+        let replies: Vec<_> = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .map(|message| {
+                (
+                    message["tool_call_id"].as_str().unwrap().to_string(),
+                    message["content"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            replies,
+            expected
+                .into_iter()
+                .map(|(id, _, result)| (id, result))
+                .collect::<Vec<_>>()
+        );
     }
 }

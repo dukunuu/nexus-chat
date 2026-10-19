@@ -80,6 +80,12 @@ pub fn render(f: &mut Frame, app: &AppView) {
     if offset == max_scroll && height > 0 && width > 0 {
         app.approval_seen_end.set(true);
     }
+    let queued = app.approval_count();
+    let title = if queued > 1 {
+        format!(" approve{}1 of {queued} ", crate::ui::style::SEP)
+    } else {
+        " approve ".to_string()
+    };
     let hint = if shell_unread(app) {
         "↑↓ scroll · scroll to the end to allow · n deny"
     } else if max_scroll > 0 {
@@ -90,10 +96,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     chrome::render_hinted(
         f,
         area,
-        Line::from(Span::styled(
-            " approve ",
-            Style::default().fg(app.theme.accent),
-        )),
+        Line::from(Span::styled(title, Style::default().fg(app.theme.accent))),
         hint,
         app,
         true,

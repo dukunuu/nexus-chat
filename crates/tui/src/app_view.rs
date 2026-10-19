@@ -74,6 +74,9 @@ pub struct AppView {
     pub popup: Popup,
     /// The workspace action currently displayed for permission.
     pub approval_request: Option<nexus_core::tools::ApprovalRequest>,
+    /// The core's `approval_shown` when `approval_request` was displayed, so
+    /// the next of two identical queued requests still resets the guards.
+    pub approval_displayed: u64,
     /// Wrapped-row offset and bounds from the last approval render.
     pub approval_scroll: std::cell::Cell<usize>,
     pub approval_max_scroll: std::cell::Cell<usize>,
@@ -288,6 +291,7 @@ impl AppView {
             at_state: None,
             popup: Popup::None,
             approval_request: None,
+            approval_displayed: 0,
             approval_scroll: std::cell::Cell::new(0),
             approval_max_scroll: std::cell::Cell::new(0),
             approval_page_height: std::cell::Cell::new(1),
@@ -422,9 +426,14 @@ impl AppView {
             self.pending_approval = None;
             self.pending_approval_request = None;
         }
+        self.show_next_approval();
         if let Some(request) = &self.pending_approval_request {
-            if self.popup != Popup::Approval || self.approval_request.as_ref() != Some(request) {
+            if self.popup != Popup::Approval
+                || self.approval_request.as_ref() != Some(request)
+                || self.approval_displayed != self.approval_shown
+            {
                 self.approval_request = Some(request.clone());
+                self.approval_displayed = self.approval_shown;
                 self.approval_scroll.set(0);
                 self.approval_max_scroll.set(0);
                 self.approval_page_height.set(1);
