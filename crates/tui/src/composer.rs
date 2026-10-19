@@ -647,6 +647,10 @@ impl AppView {
             }
             AppCommand::OpenUsage => self.open_usage_popup(),
             AppCommand::OpenHelp => self.open_help(),
+            AppCommand::Harness => {
+                self.core.execute(AppCommand::Harness)?;
+                self.popup = Popup::Harness;
+            }
             // The picker (browse/open/delete watches) works anywhere; creating
             // one starts research, which from a plain chat would migrate the
             // conversation — so that part stays research-session-only.

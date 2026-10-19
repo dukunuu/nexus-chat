@@ -61,6 +61,25 @@ pub struct Session {
     pub research_parent_id: Option<String>,
 }
 
+/// Tool-call totals and the most frequent failure modes in a time window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HarnessSummary {
+    pub calls: u64,
+    pub failures: u64,
+    pub rows: Vec<FailureRow>,
+}
+
+/// One failure mode and the latest transcript where it occurred.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureRow {
+    pub tool: String,
+    pub action: String,
+    pub error_kind: String,
+    pub count: u64,
+    pub last_at: String,
+    pub last_session_id: String,
+}
+
 /// One row of a session's `/swarm` roster: a model + a personality blurb.
 #[derive(Debug, Clone)]
 pub struct Persona {
@@ -452,6 +471,42 @@ impl Db {
         let mut db = Db { conn };
         db.migrate()?;
         Ok(db)
+    }
+
+    /// Summarize tool calls at or after a UTC RFC3339 cutoff, with at most
+    /// 50 failure modes ranked by count, then most recent occurrence.
+    pub fn harness_summary(&self, since: &str) -> Result<HarnessSummary> {
+        let (calls, failures) = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(ok = 0), 0)
+             FROM cache.tool_events WHERE at >= ?1",
+            [since],
+            |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+        )?;
+        // SQLite's single MAX aggregate takes bare columns from the row
+        // supplying that maximum, so session_id belongs to the latest event.
+        let mut stmt = self.conn.prepare(
+            "SELECT tool, action, error_kind, COUNT(*), MAX(at) AS last_at, session_id
+             FROM cache.tool_events WHERE at >= ?1 AND ok = 0
+             GROUP BY tool, action, error_kind
+             ORDER BY COUNT(*) DESC, last_at DESC LIMIT 50",
+        )?;
+        let rows = stmt
+            .query_map([since], |row| {
+                Ok(FailureRow {
+                    tool: row.get(0)?,
+                    action: row.get(1)?,
+                    error_kind: row.get(2)?,
+                    count: row.get::<_, i64>(3)? as u64,
+                    last_at: row.get(4)?,
+                    last_session_id: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(HarnessSummary {
+            calls,
+            failures,
+            rows,
+        })
     }
 
     /// Set or remove a session's device-local workspace binding.
@@ -3239,6 +3294,81 @@ pub fn count_files(conn: &Connection, space_id: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_summary_groups_ranks_and_filters_the_window() {
+        let db = Db::open_in_memory().unwrap();
+        let since = "2026-07-07T12:00:00+00:00";
+        assert_eq!(
+            db.harness_summary(since).unwrap(),
+            HarnessSummary::default()
+        );
+        db.conn
+            .execute_batch(
+                "INSERT INTO cache.tool_events
+                 (at, session_id, tool, action, error_kind, ok, latency_ms, result_chars) VALUES
+                 ('2026-07-07T11:59:59+00:00', 'old', 'scripts', 'edit', 'stale_edit', 0, 1, 1),
+                 ('2026-07-07T12:00:00+00:00', 'boundary', 'scripts', 'edit', 'stale_edit', 0, 1, 1),
+                 ('2026-07-13T12:00:00+00:00', 'latest', 'scripts', 'edit', 'stale_edit', 0, 1, 1),
+                 ('2026-07-12T12:00:00+00:00', 'middle', 'scripts', 'edit', 'stale_edit', 0, 1, 1),
+                 ('2026-07-14T11:00:00+00:00', 'invalid-latest', 'scripts', 'edit', 'invalid_args', 0, 1, 1),
+                 ('2026-07-07T12:00:00+00:00', 'invalid-old', 'scripts', 'edit', 'invalid_args', 0, 1, 1),
+                 ('2026-07-14T10:00:00+00:00', 'run-latest', 'scripts', 'run', 'upstream', 0, 1, 1),
+                 ('2026-07-07T12:00:00+00:00', 'run-old', 'scripts', 'run', 'upstream', 0, 1, 1),
+                 ('2026-07-14T12:00:00+00:00', 'edit', 'scripts', 'edit', 'upstream', 0, 1, 1),
+                 ('2026-07-14T09:00:00+00:00', 'fs', 'fs', 'edit', 'stale_edit', 0, 1, 1),
+                 ('2026-07-14T13:00:00+00:00', 'ok', 'scripts', 'edit', NULL, 1, 1, 1);",
+            )
+            .unwrap();
+        let summary = db.harness_summary(since).unwrap();
+        assert_eq!((summary.calls, summary.failures), (10, 9));
+        let modes: Vec<_> = summary
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.tool.as_str(),
+                    row.action.as_str(),
+                    row.error_kind.as_str(),
+                    row.count,
+                    row.last_session_id.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            modes,
+            [
+                ("scripts", "edit", "stale_edit", 3, "latest"),
+                ("scripts", "edit", "invalid_args", 2, "invalid-latest"),
+                ("scripts", "run", "upstream", 2, "run-latest"),
+                ("scripts", "edit", "upstream", 1, "edit"),
+                ("fs", "edit", "stale_edit", 1, "fs"),
+            ]
+        );
+        assert_eq!(summary.rows[0].last_at, "2026-07-13T12:00:00+00:00");
+    }
+
+    #[test]
+    fn harness_summary_caps_modes_but_not_totals() {
+        let db = Db::open_in_memory().unwrap();
+        for count in 1..=55 {
+            for _ in 0..count {
+                db.conn
+                    .execute(
+                        "INSERT INTO cache.tool_events
+                         (at, session_id, tool, action, ok, error_kind, latency_ms, result_chars)
+                         VALUES ('2026-07-14T12:00:00+00:00', 'session', ?1, '', 0, 'io', 1, 1)",
+                        [format!("tool-{count}")],
+                    )
+                    .unwrap();
+            }
+        }
+        let summary = db.harness_summary("2026-07-07T12:00:00+00:00").unwrap();
+        assert_eq!((summary.calls, summary.failures), (1540, 1540));
+        assert_eq!(summary.rows.len(), 50);
+        assert_eq!(summary.rows.first().unwrap().count, 55);
+        assert_eq!(summary.rows.last().unwrap().count, 6);
+    }
 
     #[test]
     fn session_workspace_binding_is_cache_only_and_round_trips() {

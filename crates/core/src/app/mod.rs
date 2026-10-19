@@ -276,6 +276,8 @@ pub enum Popup {
     Swarm,
     /// `/usage`: aggregated per-backend/per-model token, cache, and cost stats.
     Usage,
+    /// `/harness`: ranked tool failure modes and their latest transcripts.
+    Harness,
     /// `/login`'s provider selector (`OpenRouter` / `OpenCode` Go / `OpenAI` /
     /// Codex / local runtime).
     Login,
@@ -1142,6 +1144,8 @@ pub struct App {
     /// Time window the `/usage` dashboard aggregates (`24h/7d/30d/all`) — a
     /// persisted preference, applied by `apply_setting` on load.
     pub usage_range: crate::db::UsageRange,
+    /// Device-local tool-call summary loaded by `/harness`.
+    pub harness: Option<crate::db::HarnessSummary>,
 
     /// Live model catalog (fetched on demand, never hardcoded).
     pub models: Vec<Model>,
@@ -1348,6 +1352,7 @@ impl App {
             images_cache: Vec::new(),
             scripts_cache: Vec::new(),
             usage_range: crate::db::UsageRange::default(),
+            harness: None,
             active_space,
             memory_model: utility_model.clone(),
             memory_snapshot: String::new(),

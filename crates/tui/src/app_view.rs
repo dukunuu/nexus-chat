@@ -130,6 +130,8 @@ pub struct AppView {
     /// The `/usage` popup: aggregates snapshot + recent-list cursor.
     pub usage_data: Option<nexus_core::app::usage::UsageData>,
     pub usage_scroll: usize,
+    /// Selected failure mode in the `/harness` popup.
+    pub harness_selected: usize,
     /// `/help` popup scroll offset (clamped at render time).
     pub help_scroll: u16,
     pub key_input: String,
@@ -338,6 +340,7 @@ impl AppView {
             skills_edit: String::new(),
             usage_data: None,
             usage_scroll: 0,
+            harness_selected: 0,
             help_scroll: 0,
             key_input: String::new(),
             key_target: KeyTarget::OpenRouter,

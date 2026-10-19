@@ -353,6 +353,7 @@ fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
         Popup::Local => {
             ui::popups::local::handle_key(app, key);
         }
+        Popup::Harness => ui::popups::harness::handle_key(app, key)?,
         Popup::Help => ui::popups::help::handle_key(app, key),
 
         Popup::None => handle_normal(app, key)?,

@@ -50,6 +50,112 @@ fn approval_app(
 }
 
 #[test]
+fn harness_popup_three_rows_snapshot() {
+    use nexus_core::db::{FailureRow, HarnessSummary};
+
+    let mut app = test_app();
+    let root = app.space.root.clone();
+    app.settings.hide_hints = false;
+    let now = chrono::Utc::now();
+    app.harness = Some(HarnessSummary {
+        calls: 40,
+        failures: 20,
+        rows: [
+            ("scripts", "edit", "stale_edit", 14, 150),
+            ("shell", "run", "blocked", 4, 5),
+            ("fs", "read", "not_found", 2, 3000),
+        ]
+        .into_iter()
+        .map(|(tool, action, kind, count, minutes)| FailureRow {
+            tool: tool.into(),
+            action: action.into(),
+            error_kind: kind.into(),
+            count,
+            last_at: (now - chrono::Duration::minutes(minutes) - chrono::Duration::seconds(30))
+                .to_rfc3339(),
+            last_session_id: "session".into(),
+        })
+        .collect(),
+    });
+    let screen = render_to_string(120, 30, |f| super::harness::render(f, &app));
+    assert!(screen.contains(" harness "), "{screen}");
+    assert!(
+        screen.contains("↑↓ select · enter open the latest transcript · esc close"),
+        "{screen}"
+    );
+    let snapshot: Vec<_> = screen
+        .lines()
+        .filter_map(|line| {
+            let (_, body) = line.split_once('│')?;
+            let (body, _) = body.rsplit_once('│')?;
+            let body = body.trim();
+            (!body.is_empty()).then_some(body)
+        })
+        .collect();
+    assert_eq!(
+        snapshot,
+        [
+            "40 calls · 20 failed (50%) · last 7 days",
+            "▸ scripts edit · stale_edit ×14 · 2h ago",
+            "shell run · blocked ×4 · 5m ago",
+            "fs read · not_found ×2 · 2d ago",
+        ]
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|f| super::harness::render(f, &app)).unwrap();
+    let counts: Vec<_> = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .filter(|cell| cell.symbol() == "×")
+        .collect();
+    assert_eq!(counts.len(), 3);
+    assert!(counts.iter().all(|cell| cell.fg == app.theme.accent));
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn harness_popup_empty_state_snapshots() {
+    use nexus_core::db::HarnessSummary;
+
+    let mut app = test_app();
+    let root = app.space.root.clone();
+    for (incognito, calls, expected) in [
+        (false, 0, "no tool failures in the last 7 days"),
+        (true, 0, "nothing recorded in incognito"),
+        (true, 5, "no tool failures in the last 7 days"),
+    ] {
+        app.incognito = incognito;
+        app.harness = Some(HarnessSummary {
+            calls,
+            failures: 0,
+            rows: Vec::new(),
+        });
+        let screen = render_to_string(120, 30, |f| super::harness::render(f, &app));
+        let snapshot: Vec<_> = screen
+            .lines()
+            .filter_map(|line| {
+                let (_, body) = line.split_once('│')?;
+                let (body, _) = body.rsplit_once('│')?;
+                let body = body.trim();
+                (!body.is_empty()).then_some(body)
+            })
+            .collect();
+        assert_eq!(
+            snapshot,
+            [
+                format!("{calls} calls · 0 failed (0%) · last 7 days"),
+                expected.to_string(),
+            ]
+        );
+    }
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn approval_escapes_terminal_controls_in_the_header_and_command() {
     let (mut app, _receiver) = approval_app("shell", "$ echo \x1b[2K\rhidden\tend\nnext".into());
     let root = app.space.root.clone();

@@ -150,6 +150,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["analytics", "costs", "billing"],
     },
     Command {
+        name: "harness",
+        desc: "where the tools fail — last 7 days",
+        aliases: &[],
+    },
+    Command {
         name: "web",
         desc: "toggle web answer mode (search-first, cited)",
         aliases: &["websearch"],
@@ -340,6 +345,8 @@ pub enum AppCommand {
     Watch { topic: Option<String> },
     /// `/usage` — the analytics popup.
     OpenUsage,
+    /// `/harness` — tool failures over the last seven days.
+    Harness,
     /// `/help` — the keybinding + command reference.
     OpenHelp,
     /// `/<skill-name> [text]` — arm a skill; `text` sends it immediately.
@@ -444,6 +451,7 @@ impl App {
                 })
             }
             "usage" => Ok(AppCommand::OpenUsage),
+            "harness" => Ok(AppCommand::Harness),
             "help" => Ok(AppCommand::OpenHelp),
             other => {
                 if self.skills.iter().any(|s| s.name == other) {
@@ -485,6 +493,10 @@ impl App {
             | AppCommand::OpenUsage
             | AppCommand::OpenHelp
             | AppCommand::Watch { .. } => {}
+            AppCommand::Harness => {
+                let since = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
+                self.harness = Some(self.db.harness_summary(&since)?);
+            }
             AppCommand::ConfigureLocal { spec } => self.configure_local(&spec),
             AppCommand::LocalServer { verb, runtime } => self.manage_local_server(&verb, &runtime),
             AppCommand::Send { text } => self.send_message(text)?,
@@ -611,5 +623,39 @@ fn local_command(spec: &str) -> AppCommand {
         None => AppCommand::ConfigureLocal {
             spec: spec.to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod harness_tests {
+    use super::*;
+
+    #[test]
+    fn harness_command_parses_and_loads_seven_days_including_incognito() {
+        let mut app = crate::app::tests::app_with_key();
+        let now = chrono::Utc::now();
+        for days in [0, 6, 8] {
+            app.db
+                .conn_for_test()
+                .execute(
+                    "INSERT INTO cache.tool_events
+                     (at, session_id, tool, action, ok, error_kind, latency_ms, result_chars)
+                     VALUES (?1, 'session', 'scripts', 'edit', 0, 'stale_edit', 1, 1)",
+                    [(now - chrono::Duration::days(days)).to_rfc3339()],
+                )
+                .unwrap();
+        }
+        assert_eq!(app.parse_command("harness"), Ok(AppCommand::Harness));
+        for incognito in [false, true] {
+            app.incognito = incognito;
+            app.run_command("harness").unwrap();
+            let summary = app.harness.as_ref().unwrap();
+            assert_eq!((summary.calls, summary.failures), (2, 2));
+            assert_eq!(summary.rows.len(), 1);
+            assert_eq!(summary.rows[0].count, 2);
+        }
+        let root = app.space.root.clone();
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
