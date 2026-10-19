@@ -604,6 +604,7 @@ struct ResearchUsage {
     db_path: std::path::PathBuf,
     session_id: String,
     prompt_cache_key: String,
+    cache_ttl_1h: bool,
     space_id: String,
     backend: &'static str,
 }
@@ -612,6 +613,7 @@ impl ResearchUsage {
     fn chat_params(&self) -> ChatParams {
         ChatParams {
             prompt_cache_key: Some(self.prompt_cache_key.clone()),
+            cache_ttl_1h: self.cache_ttl_1h,
             ..ChatParams::default()
         }
     }
@@ -1009,6 +1011,7 @@ pub struct ResearchOptions {
     pub tx: mpsc::UnboundedSender<ResearchMsg>,
     pub session_id: String,
     pub prompt_cache_key: String,
+    pub cache_ttl_1h: bool,
     pub space_id: String,
     pub space_name: String,
 }
@@ -1249,6 +1252,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         opts.space_name.clone(),
     );
     let prompt_cache_key = opts.prompt_cache_key.clone();
+    let cache_ttl_1h = opts.cache_ttl_1h;
     let ResearchOptions {
         research_provider,
         research_model,
@@ -1267,6 +1271,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         db_path: db_path.to_path_buf(),
         session_id: ids.0.clone(),
         prompt_cache_key,
+        cache_ttl_1h,
         space_id: ids.1.clone(),
         backend: research_provider.backend_tag().name(),
     });
@@ -2086,6 +2091,7 @@ impl super::App {
             tx,
             session_id: session.id,
             prompt_cache_key,
+            cache_ttl_1h: self.experiments.cache_ttl_1h,
             space_id,
             space_name,
         }));
@@ -2692,6 +2698,23 @@ mod tests {
         a
     }
 
+    #[test]
+    fn research_params_pass_the_cache_ttl_experiment() {
+        for enabled in [false, true] {
+            let usage = ResearchUsage {
+                db_path: std::path::PathBuf::new(),
+                session_id: "s".to_string(),
+                prompt_cache_key: "research:s:0".to_string(),
+                cache_ttl_1h: enabled,
+                space_id: "sp".to_string(),
+                backend: "OpenRouter",
+            };
+            let params = usage.chat_params();
+            assert_eq!(params.cache_ttl_1h, enabled);
+            assert_eq!(params.prompt_cache_key.as_deref(), Some("research:s:0"));
+        }
+    }
+
     #[tokio::test]
     async fn drain_steers_collects_all_queued_without_blocking() {
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3201,6 +3224,7 @@ mod tests {
             db_path: std::env::temp_dir().join("nexus-research-test.db"),
             session_id: ids.0.clone(),
             prompt_cache_key: "s:0".to_string(),
+            cache_ttl_1h: false,
             space_id: ids.1.clone(),
             backend: provider.backend_tag().name(),
         };

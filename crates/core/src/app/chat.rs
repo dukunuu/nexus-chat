@@ -785,6 +785,7 @@ impl App {
                 .session
                 .as_ref()
                 .map(|session| self.prompt_cache_key_for(&session.id)),
+            cache_ttl_1h: self.experiments.cache_ttl_1h,
             temperature: self.settings.temperature,
             top_p: self.settings.top_p,
             max_tokens: self.settings.max_tokens,
@@ -2297,6 +2298,16 @@ pub fn split_inline_reasoning(text: &str) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_params_pass_the_cache_ttl_experiment() {
+        let mut app = super::super::tests::app_with_key();
+        for enabled in [false, true] {
+            app.experiments.cache_ttl_1h = enabled;
+            let params = app.chat_params(None, crate::provider::BackendTag::OpenRouter);
+            assert_eq!(params.cache_ttl_1h, enabled);
+        }
+    }
 
     fn temp_dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("nexus-usercmd-{}", uuid::Uuid::new_v4()));

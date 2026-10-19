@@ -387,6 +387,23 @@ impl ProviderFlavor {
     }
 }
 
+/// Apply one TTL to every existing marker without changing cache boundaries.
+fn add_cache_ttl_1h(body: &mut serde_json::Value, model: &str, enabled: bool) {
+    if !enabled || !crate::provider::model_needs_cache_breakpoints(model) {
+        return;
+    }
+    if let Some(cache_control) = body.get_mut("cache_control") {
+        cache_control["ttl"] = serde_json::json!("1h");
+    }
+    for message in body["messages"].as_array_mut().into_iter().flatten() {
+        for part in message["content"].as_array_mut().into_iter().flatten() {
+            if let Some(cache_control) = part.get_mut("cache_control") {
+                cache_control["ttl"] = serde_json::json!("1h");
+            }
+        }
+    }
+}
+
 fn looks_like_openrouter_key(key: &str) -> bool {
     key.trim_start().starts_with("sk-or-")
 }
@@ -1195,6 +1212,7 @@ impl OpenRouter {
         {
             self.flavor.add_prompt_cache_key(obj, key);
         }
+        add_cache_ttl_1h(&mut body, model, params.cache_ttl_1h);
         self.post_completion_with_usage(body).await
     }
 
@@ -1724,6 +1742,7 @@ impl OpenRouter {
                 obj.insert("parallel_tool_calls".into(), serde_json::json!(false));
             }
         }
+        add_cache_ttl_1h(&mut body, model, params.cache_ttl_1h);
         body
     }
 
@@ -4620,6 +4639,167 @@ mod tests {
         let mut body = serde_json::Map::new();
         ProviderFlavor::OpenAiCodex.add_prompt_cache_key(&mut body, "session-1");
         assert!(body.is_empty(), "Codex should not carry it");
+    }
+
+    fn cache_ttl_messages() -> [ChatMessage; 3] {
+        [
+            ChatMessage {
+                cache_breakpoint: true,
+                ..ChatMessage::text("system", "Stable")
+            },
+            ChatMessage {
+                cache_breakpoint: true,
+                images: vec![
+                    "data:image/png;base64,AA==".into(),
+                    "data:image/png;base64,BB==".into(),
+                ],
+                ..ChatMessage::text("user", "Look")
+            },
+            ChatMessage::text("assistant", "Answer"),
+        ]
+    }
+
+    #[test]
+    fn cache_ttl_is_opt_in_and_uniform_for_anthropic_requests() {
+        assert!(!ChatParams::default().cache_ttl_1h);
+        for (provider, model, automatic) in [
+            (
+                OpenRouter::openrouter_flavor(String::new()),
+                "anthropic/claude-sonnet-4",
+                true,
+            ),
+            (
+                OpenRouter::opencode_go(String::new()),
+                "claude-sonnet-4",
+                false,
+            ),
+        ] {
+            for enabled in [false, true] {
+                let params = ChatParams {
+                    cache_ttl_1h: enabled,
+                    ..ChatParams::default()
+                };
+                let marker = if enabled {
+                    serde_json::json!({"type": "ephemeral", "ttl": "1h"})
+                } else {
+                    serde_json::json!({"type": "ephemeral"})
+                };
+                let mut expected = serde_json::json!({
+                    "model": model,
+                    "stream": true,
+                    "messages": [
+                        {"role": "system", "content": [
+                            {"type": "text", "text": "Stable", "cache_control": marker}
+                        ]},
+                        {"role": "user", "content": [
+                            {"type": "text", "text": "Look"},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,BB=="}, "cache_control": marker}
+                        ]},
+                        {"role": "assistant", "content": "Answer"}
+                    ]
+                });
+                if automatic {
+                    expected["usage"] = serde_json::json!({"include": true});
+                    expected["cache_control"] = marker;
+                } else {
+                    expected["stream_options"] = serde_json::json!({"include_usage": true});
+                }
+                let body = provider.chat_completions_body(
+                    model,
+                    &cache_ttl_messages(),
+                    &params,
+                    &[],
+                    false,
+                );
+                assert_eq!(
+                    serde_json::to_vec(&body).unwrap(),
+                    serde_json::to_vec(&expected).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_string(&body).unwrap().contains("\"ttl\""),
+                    enabled
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cache_ttl_does_not_add_markers_to_non_anthropic_requests() {
+        for provider in [
+            OpenRouter::openrouter_flavor(String::new()),
+            OpenRouter::openai(String::new()),
+            OpenRouter::opencode_go(String::new()),
+        ] {
+            for model in [
+                "openai/gpt-5",
+                "gpt-5",
+                "google/gemini-2.5-pro",
+                "deepseek/deepseek-chat",
+            ] {
+                let messages = [
+                    ChatMessage::text("system", "Stable"),
+                    ChatMessage::text("user", "Hi"),
+                ];
+                let baseline = provider.chat_completions_body(
+                    model,
+                    &messages,
+                    &ChatParams::default(),
+                    &[],
+                    false,
+                );
+                let params = ChatParams {
+                    cache_ttl_1h: true,
+                    ..ChatParams::default()
+                };
+                let body = provider.chat_completions_body(model, &messages, &params, &[], false);
+                assert_eq!(body, baseline);
+                let wire = serde_json::to_string(&body).unwrap();
+                assert!(!wire.contains("\"cache_control\""));
+                assert!(!wire.contains("\"ttl\""));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn one_shot_requests_apply_the_same_ttl_to_existing_markers() {
+        let response = serde_json::to_vec(&serde_json::json!({
+            "choices": [{"message": {"content": "Done"}}]
+        }))
+        .unwrap();
+        let (provider, server) = fake_chat_server(vec![response.clone(), response]).await;
+        let model = "claude-sonnet-4";
+        for enabled in [false, true] {
+            let params = ChatParams {
+                cache_ttl_1h: enabled,
+                ..ChatParams::default()
+            };
+            let completion = provider
+                .complete_with_params(model, cache_ttl_messages().to_vec(), &params)
+                .await
+                .unwrap();
+            assert_eq!(completion.text, "Done");
+        }
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        for (request, enabled) in requests.iter().zip([false, true]) {
+            let mut expected = serde_json::json!({
+                "model": model,
+                "messages": cache_ttl_messages(),
+                "stream": false,
+            });
+            if enabled {
+                expected["messages"][0]["content"][0]["cache_control"]["ttl"] =
+                    serde_json::json!("1h");
+                expected["messages"][1]["content"][2]["cache_control"]["ttl"] =
+                    serde_json::json!("1h");
+            }
+            assert_eq!(request, &expected);
+            assert_eq!(
+                serde_json::to_string(request).unwrap().contains("\"ttl\""),
+                enabled
+            );
+        }
     }
 
     #[test]

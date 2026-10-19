@@ -118,6 +118,7 @@ impl App {
             toolbox: self.toolbox.clone(),
             user_message,
             prompt_cache_key: format!("swarm:{}", self.prompt_cache_key_for(&session.id)),
+            cache_ttl_1h: self.experiments.cache_ttl_1h,
             session_id: session.id,
             tx,
         }));
@@ -343,13 +344,25 @@ pub struct SwarmTurnOptions {
     pub toolbox: Arc<dyn ToolExecutor>,
     pub user_message: String,
     pub prompt_cache_key: String,
+    pub cache_ttl_1h: bool,
     pub session_id: String,
     pub tx: mpsc::UnboundedSender<SwarmMsg>,
+}
+
+impl SwarmTurnOptions {
+    fn chat_params(&self) -> ChatParams {
+        ChatParams {
+            prompt_cache_key: Some(self.prompt_cache_key.clone()),
+            cache_ttl_1h: self.cache_ttl_1h,
+            ..ChatParams::default()
+        }
+    }
 }
 
 // Long by design (roundtable orchestration).
 #[allow(clippy::too_many_lines)]
 async fn run_swarm_turn(opts: SwarmTurnOptions) {
+    let params = opts.chat_params();
     let SwarmTurnOptions {
         backends,
         meta_provider,
@@ -361,9 +374,9 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
         base_history,
         toolbox,
         user_message,
-        prompt_cache_key,
         session_id,
         tx,
+        ..
     } = opts;
     let send = |u: SwarmUpdate| {
         let _ = tx.send((session_id.clone(), u));
@@ -375,7 +388,7 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
             &raw_meta_model,
             &user_message,
             &default_model,
-            &prompt_cache_key,
+            &params,
         )
         .await
         {
@@ -460,10 +473,7 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
             let (mut rx, abort) = persona_provider.stream_chat(
                 raw_persona_model,
                 messages,
-                ChatParams {
-                    prompt_cache_key: Some(prompt_cache_key.clone()),
-                    ..ChatParams::default()
-                },
+                params.clone(),
                 tools,
                 persona_toolbox,
                 SWARM_PERSONA_MAX_TOOL_ITERS,
@@ -549,7 +559,7 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
             &raw_meta_model,
             &user_message,
             &discussion,
-            &prompt_cache_key,
+            &params,
         )
         .await
         {
@@ -578,7 +588,7 @@ async fn run_swarm_turn(opts: SwarmTurnOptions) {
         &raw_meta_model,
         &user_message,
         &discussion,
-        &prompt_cache_key,
+        &params,
     )
     .await
     {
@@ -615,16 +625,12 @@ async fn suggest_personas(
     meta_model: &str,
     topic: &str,
     default_model: &str,
-    prompt_cache_key: &str,
+    params: &ChatParams,
 ) -> Result<Vec<Persona>, String> {
     let prompt = prompts::render(prompts::SWARM_ROSTER, &[("topic", topic)]);
-    let params = ChatParams {
-        prompt_cache_key: Some(prompt_cache_key.to_string()),
-        ..ChatParams::default()
-    };
     let raw = timeout(
         Duration::from_mins(1),
-        provider.complete_with_params(meta_model, vec![ChatMessage::text("user", prompt)], &params),
+        provider.complete_with_params(meta_model, vec![ChatMessage::text("user", prompt)], params),
     )
     .await
     .map_err(|_| "timed out after 60s".to_string())?
@@ -668,20 +674,16 @@ async fn moderator_check(
     meta_model: &str,
     topic: &str,
     discussion: &[(String, String)],
-    prompt_cache_key: &str,
+    params: &ChatParams,
 ) -> Result<ModeratorVerdict, String> {
     let transcript = render_discussion(discussion).unwrap_or_default();
     let prompt = prompts::render(
         prompts::SWARM_MODERATOR,
         &[("topic", topic), ("transcript", &transcript)],
     );
-    let params = ChatParams {
-        prompt_cache_key: Some(prompt_cache_key.to_string()),
-        ..ChatParams::default()
-    };
     let raw = timeout(
         Duration::from_secs(30),
-        provider.complete_with_params(meta_model, vec![ChatMessage::text("user", prompt)], &params),
+        provider.complete_with_params(meta_model, vec![ChatMessage::text("user", prompt)], params),
     )
     .await
     .map_err(|_| "timed out after 30s".to_string())?
@@ -714,20 +716,16 @@ async fn synthesize(
     meta_model: &str,
     topic: &str,
     discussion: &[(String, String)],
-    prompt_cache_key: &str,
+    params: &ChatParams,
 ) -> Result<String> {
     let transcript = render_discussion(discussion).unwrap_or_default();
     let prompt = prompts::render(
         prompts::SWARM_SYNTHESIS,
         &[("topic", topic), ("transcript", &transcript)],
     );
-    let params = ChatParams {
-        prompt_cache_key: Some(prompt_cache_key.to_string()),
-        ..ChatParams::default()
-    };
     timeout(
         Duration::from_secs(90),
-        provider.complete_with_params(meta_model, vec![ChatMessage::text("user", prompt)], &params),
+        provider.complete_with_params(meta_model, vec![ChatMessage::text("user", prompt)], params),
     )
     .await
     .map_err(|_| anyhow::anyhow!("timed out after 90s"))?
@@ -737,6 +735,34 @@ async fn synthesize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn swarm_params_pass_the_cache_ttl_experiment() {
+        let app = super::super::tests::app_with_key();
+        let provider = OpenRouter::openrouter_flavor("test-key".to_string());
+        for enabled in [false, true] {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let opts = SwarmTurnOptions {
+                backends: app.backends.clone(),
+                meta_provider: provider.clone(),
+                raw_meta_model: "anthropic/claude-sonnet-4".to_string(),
+                personas: Vec::new(),
+                default_model: "anthropic/claude-sonnet-4".to_string(),
+                default_provider: provider.clone(),
+                raw_default_model: "anthropic/claude-sonnet-4".to_string(),
+                base_history: Vec::new(),
+                toolbox: app.toolbox.clone(),
+                user_message: "topic".to_string(),
+                prompt_cache_key: "swarm:s:0".to_string(),
+                cache_ttl_1h: enabled,
+                session_id: "s".to_string(),
+                tx,
+            };
+            let params = opts.chat_params();
+            assert_eq!(params.cache_ttl_1h, enabled);
+            assert_eq!(params.prompt_cache_key.as_deref(), Some("swarm:s:0"));
+        }
+    }
 
     #[test]
     fn persona_editor_round_trips_name_model_and_multiline_blurb() {

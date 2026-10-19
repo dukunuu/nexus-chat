@@ -218,6 +218,8 @@ pub struct ChatParams {
     /// Stable per-session key used by compatible OpenAI-wire backends to
     /// keep prompt-cache entries on one cache lane.
     pub prompt_cache_key: Option<String>,
+    /// Request a one-hour TTL on Anthropic cache markers; otherwise use the default.
+    pub cache_ttl_1h: bool,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub max_tokens: Option<u32>,
