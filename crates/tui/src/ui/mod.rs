@@ -95,6 +95,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         Popup::Model => popups::model::render(f, app),
         Popup::Session => popups::session::render(f, app),
         Popup::Copy => popups::copy::render(f, app),
+        Popup::Approval => popups::approval::render(f, app),
         Popup::Key => popups::key::render(f, app),
         Popup::Settings => popups::settings::render(f, app),
         Popup::Space => popups::space::render(f, app),

@@ -87,6 +87,7 @@ async fn run_loop(
     // changing the terminal theme restyles the running app.
     let mut theme_poll = tokio::time::interval(std::time::Duration::from_secs(2));
     loop {
+        app.sync_approval_popup();
         // Locally-queued UI feedback (status lines, composer restore,
         // viewport resets) applies before the draw so it lands on the same
         // frame as the action that caused it.
@@ -325,6 +326,7 @@ fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
         Popup::Key => crate::ui::popups::key::handle_key(app, key),
         Popup::Settings => ui::popups::settings::handle_key(app, key)?,
         Popup::Copy => crate::ui::popups::copy::handle_key(app, key),
+        Popup::Approval => ui::popups::approval::handle_key(app, key)?,
         Popup::Space => crate::ui::popups::space::handle_key(app, key)?,
         Popup::Context => crate::ui::popups::context::handle_key(app, key),
         Popup::Skills => crate::ui::popups::skills::handle_key(app, key),
@@ -356,6 +358,11 @@ fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
 const QUIT_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_millis(1500);
 
 fn ctrl_c(app: &mut AppView) -> Result<()> {
+    if app.popup == Popup::Approval {
+        return app.execute(AppCommand::Approve {
+            decision: nexus_core::tools::Decision::Deny,
+        });
+    }
     if app.popup != Popup::None {
         if app.popup == Popup::InteractiveUi {
             app.interactive.unfocus();
@@ -751,6 +758,9 @@ fn handle_popup_mouse(app: &mut AppView, m: MouseEvent) -> Result<()> {
 /// Route mouse events: composer click/drag when no popup is open, else the
 /// open popup.
 fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
+    if app.popup == Popup::Approval {
+        return Ok(());
+    }
     if app.popup == Popup::None {
         if m.kind == MouseEventKind::Down(MouseButton::Left) {
             let pos = Position::new(m.column, m.row);
@@ -840,6 +850,117 @@ mod tests {
 
     fn ctrl(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[tokio::test]
+    async fn pending_approval_opens_the_popup_and_allow_resolves_the_tool_call() {
+        let mut app = test_app();
+        let root = app.space.root.clone();
+        let workspace =
+            std::env::temp_dir().join(format!("nexus-approval-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        app.run_command(&format!("agent {}", workspace.display()))
+            .unwrap();
+        while app.pop_pending_event().is_some() {}
+        let toolbox = std::sync::Arc::clone(&app.toolbox);
+        let call = tokio::spawn(async move {
+            toolbox
+                .run(
+                    "fs",
+                    r#"{"action":"write","path":"approved","content":"yes"}"#,
+                )
+                .await
+        });
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), app.core.next_event())
+            .await
+            .unwrap();
+        assert!(
+            matches!(event, AppEvent::Status(status) if status == "approval needed · fs write")
+        );
+        assert_ne!(app.popup, Popup::Approval);
+        app.apply_event(&AppEvent::HistoryInvalidated);
+        assert_eq!(app.popup, Popup::Approval);
+        assert_eq!(app.approval_request, app.pending_approval_request);
+        assert_eq!(
+            app.approval_request.as_ref().unwrap().summary,
+            "write approved"
+        );
+        assert!(!workspace.join("approved").exists());
+        handle_key(&mut app, KeyCode::Char('y').into()).unwrap();
+        assert_ne!(call.await.unwrap().1, "blocked");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("approved")).unwrap(),
+            "yes"
+        );
+        assert_eq!(app.popup, Popup::None);
+        assert!(app.pending_approval_request.is_none());
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn approval_popup_closes_when_its_pending_request_is_gone() {
+        let mut app = test_app();
+        let root = app.space.root.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.pending_approval = Some(sender);
+        app.pending_approval_request = Some(nexus_core::tools::ApprovalRequest {
+            tool: "shell".into(),
+            action: "run".into(),
+            summary: "$ true".into(),
+        });
+        app.apply_event(&AppEvent::Status("unrelated status".into()));
+        assert_eq!(app.popup, Popup::Approval);
+        drop(receiver);
+        app.sync_approval_popup();
+        assert_eq!(app.popup, Popup::None);
+        assert!(app.pending_approval.is_none());
+        assert!(app.pending_approval_request.is_none());
+        assert!(app.approval_request.is_none());
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn approval_keys_resolve_once_and_other_popups_cannot_replace_the_prompt() {
+        use nexus_core::tools::{ApprovalRequest, Decision};
+
+        let mut app = test_app();
+        let root = app.space.root.clone();
+        assert!(app.interactive_approvals);
+        for (key, decision) in [
+            (KeyEvent::from(KeyCode::Char('y')), Decision::Allow),
+            (
+                KeyEvent::from(KeyCode::Char('a')),
+                Decision::AllowForSession,
+            ),
+            (KeyEvent::from(KeyCode::Char('n')), Decision::Deny),
+            (KeyEvent::from(KeyCode::Esc), Decision::Deny),
+            (ctrl('c'), Decision::Deny),
+        ] {
+            let (sender, mut receiver) = tokio::sync::oneshot::channel();
+            app.pending_approval = Some(sender);
+            app.approval_request = Some(ApprovalRequest {
+                tool: "shell".into(),
+                action: "run".into(),
+                summary: "$ true".into(),
+            });
+            app.popup = Popup::Approval;
+            app.execute(AppCommand::OpenSettings).unwrap();
+            app.apply_event(&AppEvent::OpenLoginPopup);
+            assert_eq!(app.popup, Popup::Approval);
+            handle_key(&mut app, KeyCode::Enter.into()).unwrap();
+            assert_eq!(app.popup, Popup::Approval);
+            assert!(receiver.try_recv().is_err());
+            handle_key(&mut app, key).unwrap();
+            assert_eq!(receiver.try_recv().unwrap(), decision);
+            assert_eq!(app.popup, Popup::None);
+            assert!(app.pending_approval.is_none());
+            assert!(app.approval_request.is_none());
+        }
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

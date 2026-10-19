@@ -8,10 +8,13 @@
     clippy::cast_sign_loss
 )]
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use chrono::Utc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+use crate::tools::{ApprovalRequest, Approver, Decision};
 
 use crate::config;
 use crate::db::{DEFAULT_SPACE, Db, Message, Session, Space as SpaceRow};
@@ -63,6 +66,57 @@ use chat::split_inline_reasoning;
 use memory::parse_memory_ops;
 use sessions::parse_topic;
 
+/// Sends permission requests to an interactive frontend and remembers grants
+/// only for the lifetime of this approver.
+pub struct ChannelApprover {
+    sender: mpsc::UnboundedSender<(ApprovalRequest, oneshot::Sender<Decision>)>,
+    allowed: Arc<Mutex<HashSet<(String, String)>>>,
+}
+
+impl ChannelApprover {
+    /// Start a new approval session with no remembered permissions.
+    #[must_use]
+    pub fn new(
+        sender: mpsc::UnboundedSender<(ApprovalRequest, oneshot::Sender<Decision>)>,
+    ) -> Self {
+        Self {
+            sender,
+            allowed: Arc::default(),
+        }
+    }
+}
+
+impl Approver for ChannelApprover {
+    fn request(
+        &self,
+        req: ApprovalRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Decision> + Send + '_>> {
+        Box::pin(async move {
+            let key = (req.tool.clone(), req.action.clone());
+            if self
+                .allowed
+                .lock()
+                .expect("approval permissions")
+                .contains(&key)
+            {
+                return Decision::Allow;
+            }
+            let (sender, receiver) = oneshot::channel();
+            if self.sender.send((req, sender)).is_err() {
+                return Decision::Deny;
+            }
+            let decision = receiver.await.unwrap_or(Decision::Deny);
+            if decision == Decision::AllowForSession {
+                self.allowed
+                    .lock()
+                    .expect("approval permissions")
+                    .insert(key);
+            }
+            decision
+        })
+    }
+}
+
 /// Nudge a bounded selection index by `delta`, hard-clamping to `[0, len-1]`
 /// (or `0` if `len` is `0`). Shared by the picker/list selection-movement
 /// methods that clamp at the ends rather than wrapping around.
@@ -102,6 +156,8 @@ pub enum Popup {
     Key,
     Settings,
     Copy,
+    /// Permission for one workspace mutation or command.
+    Approval,
     Space,
     Context,
     Skills,
@@ -839,6 +895,14 @@ pub struct App {
     pub system_prompt_overlay: String,
     /// Client capability advertised to the model, not persistent view state.
     pub interactive_ui: bool,
+    /// Whether a frontend can ask the user for workspace permissions.
+    pub interactive_approvals: bool,
+    /// Reply channel for the currently displayed approval request.
+    pub pending_approval: Option<oneshot::Sender<Decision>>,
+    /// The action waiting for a response from the interactive frontend.
+    pub pending_approval_request: Option<ApprovalRequest>,
+    /// Requests from the current interactive agent toolbox.
+    pub approval_rx: Option<mpsc::UnboundedReceiver<(ApprovalRequest, oneshot::Sender<Decision>)>>,
     /// Answer-length preference woven into the system prompt: "normal",
     /// "concise" (default), or "caveman".
     pub verbosity: String,
@@ -1171,6 +1235,10 @@ impl App {
             base_system_prompt: config::BASE_SYSTEM_PROMPT.to_string(),
             system_prompt_overlay: String::new(),
             interactive_ui: false,
+            interactive_approvals: false,
+            pending_approval: None,
+            pending_approval_request: None,
+            approval_rx: None,
             verbosity: "concise".to_string(),
             memory_rx: None,
             compact_rx: None,
@@ -1489,6 +1557,14 @@ impl App {
         toolbox.supports_images = self.current_model_supports_images();
         toolbox.record_events = !self.incognito;
         toolbox.require_approval = self.work_mode == WorkMode::Agent;
+        self.pending_approval = None;
+        self.pending_approval_request = None;
+        self.approval_rx = None;
+        if self.interactive_approvals && self.work_mode == WorkMode::Agent {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            toolbox.approver = Some(Arc::new(ChannelApprover::new(sender)));
+            self.approval_rx = Some(receiver);
+        }
         toolbox.workspace = self
             .workspace
             .as_ref()
@@ -1732,12 +1808,42 @@ impl App {
 
     /// Next background event from either the streaming task or a model fetch.
     /// Pends on an idle source, so it only resolves when something happens.
+    #[allow(clippy::too_many_lines)] // One select branch per background source.
     pub async fn next_event(&mut self) -> AppEvent {
         // Locally-queued events (status lines, gate arming) drain first.
         if let Some(ev) = self.pending_events.pop_front() {
             return ev;
         }
         tokio::select! {
+            request = async {
+                match self.approval_rx.as_mut() {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending().await,
+                }
+            }, if self.pending_approval.is_none() => {
+                if let Some((request, reply)) = request {
+                    if reply.is_closed() {
+                        return AppEvent::Status("approval cancelled".to_string());
+                    }
+                    let status = format!("approval needed · {} {}", request.tool, request.action);
+                    self.pending_approval = Some(reply);
+                    self.pending_approval_request = Some(request);
+                    AppEvent::Status(status)
+                } else {
+                    self.approval_rx = None;
+                    AppEvent::Status(String::new())
+                }
+            },
+            () = async {
+                match self.pending_approval.as_mut() {
+                    Some(reply) => reply.closed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                self.pending_approval = None;
+                self.pending_approval_request = None;
+                AppEvent::Status("approval cancelled".to_string())
+            },
             ev = self.chat_event_rx.recv() => {
                 AppEvent::Stream(ev.map(|event| (event.task_id, event.event)))
             },
@@ -1886,6 +1992,8 @@ impl App {
             task.abort.abort();
         }
         self.chat_tasks.clear();
+        self.pending_approval = None;
+        self.pending_approval_request = None;
     }
 }
 

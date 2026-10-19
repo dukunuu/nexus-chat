@@ -554,7 +554,19 @@ impl AppView {
     /// opens, the watch picker) and delegating everything else to the domain
     /// `App::execute`.
     pub fn execute(&mut self, cmd: AppCommand) -> Result<()> {
+        if self.popup == Popup::Approval
+            && !matches!(cmd, AppCommand::Approve { .. } | AppCommand::Cancel { .. })
+        {
+            return Ok(());
+        }
         match cmd {
+            AppCommand::Approve { decision } => {
+                self.core.execute(AppCommand::Approve { decision })?;
+                self.approval_request = None;
+                if self.popup == Popup::Approval {
+                    self.popup = Popup::None;
+                }
+            }
             AppCommand::Quit => self.should_quit = true,
             AppCommand::OpenSessionPicker => self.open_session_picker()?,
             AppCommand::OpenSpacePicker => {

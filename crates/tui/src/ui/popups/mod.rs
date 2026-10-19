@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod apps;
 pub mod chrome;
 pub mod context;

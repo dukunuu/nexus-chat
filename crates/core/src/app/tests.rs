@@ -1,5 +1,332 @@
 use super::*;
 
+fn approval_test_app() -> (App, std::path::PathBuf) {
+    let mut app = app_with_key();
+    let workspace = test_space().root;
+    std::fs::create_dir_all(&workspace).unwrap();
+    app.interactive_approvals = true;
+    app.run_command(&format!("agent {}", workspace.display()))
+        .unwrap();
+    while app.pop_pending_event().is_some() {}
+    (app, workspace)
+}
+
+#[tokio::test]
+async fn installed_approver_round_trip_writes_only_after_the_approval_command() {
+    let (mut app, workspace) = approval_test_app();
+    let root = app.space.root.clone();
+    let path = workspace.join("approved");
+    let toolbox = Arc::clone(&app.toolbox);
+    let call = tokio::spawn(async move {
+        toolbox
+            .run(
+                "fs",
+                r#"{"action":"write","path":"approved","content":"allowed"}"#,
+            )
+            .await
+    });
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), app.next_event())
+        .await
+        .unwrap();
+    assert!(matches!(event, AppEvent::Status(status) if status == "approval needed · fs write"));
+    assert_eq!(
+        app.pending_approval_request.as_ref().unwrap(),
+        &ApprovalRequest {
+            tool: "fs".into(),
+            action: "write".into(),
+            summary: "write approved".into(),
+        }
+    );
+    assert!(app.pending_approval.is_some());
+    assert!(!path.exists());
+    app.execute(AppCommand::Approve {
+        decision: Decision::Allow,
+    })
+    .unwrap();
+    assert!(app.pending_approval.is_none());
+    assert!(app.pending_approval_request.is_none());
+    let (result, status) = call.await.unwrap();
+    assert!(result.starts_with("wrote approved"), "{result}");
+    assert_ne!(status, "blocked");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "allowed");
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn installed_session_grants_reset_on_refresh_and_mode_switches() {
+    let (mut app, workspace) = approval_test_app();
+    let root = app.space.root.clone();
+    for reset_mode in [false, true] {
+        let toolbox = Arc::clone(&app.toolbox);
+        let call = tokio::spawn(async move {
+            toolbox
+                .run(
+                    "fs",
+                    r#"{"action":"write","path":"first","content":"allowed"}"#,
+                )
+                .await
+        });
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), app.next_event())
+            .await
+            .unwrap();
+        assert!(
+            matches!(event, AppEvent::Status(status) if status == "approval needed · fs write")
+        );
+        app.execute(AppCommand::Approve {
+            decision: Decision::AllowForSession,
+        })
+        .unwrap();
+        assert_ne!(call.await.unwrap().1, "blocked");
+        let (result, status) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app.toolbox.run(
+                "fs",
+                r#"{"action":"write","path":"second","content":"allowed"}"#,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result.starts_with("wrote second"), "{result}");
+        assert_ne!(status, "blocked");
+        let toolbox = Arc::clone(&app.toolbox);
+        let delete = tokio::spawn(async move {
+            toolbox
+                .run("fs", r#"{"action":"delete","path":"first"}"#)
+                .await
+        });
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), app.next_event())
+            .await
+            .unwrap();
+        assert!(
+            matches!(event, AppEvent::Status(status) if status == "approval needed · fs delete")
+        );
+        app.execute(AppCommand::Approve {
+            decision: Decision::Deny,
+        })
+        .unwrap();
+        assert_eq!(delete.await.unwrap().1, "blocked");
+        assert!(workspace.join("first").exists());
+        if reset_mode {
+            app.run_command("chat").unwrap();
+            assert!(app.approval_rx.is_none());
+            app.run_command(&format!("agent {}", workspace.display()))
+                .unwrap();
+        } else {
+            app.refresh_toolbox();
+        }
+        while app.pop_pending_event().is_some() {}
+    }
+    let toolbox = Arc::clone(&app.toolbox);
+    let call = tokio::spawn(async move {
+        toolbox
+            .run(
+                "fs",
+                r#"{"action":"write","path":"third","content":"denied"}"#,
+            )
+            .await
+    });
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), app.next_event())
+        .await
+        .unwrap();
+    assert!(matches!(event, AppEvent::Status(status) if status == "approval needed · fs write"));
+    app.execute(AppCommand::Approve {
+        decision: Decision::Deny,
+    })
+    .unwrap();
+    assert_eq!(call.await.unwrap().1, "blocked");
+    assert!(!workspace.join("third").exists());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn dropped_tool_call_clears_the_pending_approval_in_next_event() {
+    let (mut app, workspace) = approval_test_app();
+    let root = app.space.root.clone();
+    let toolbox = Arc::clone(&app.toolbox);
+    let call = tokio::spawn(async move {
+        toolbox
+            .run(
+                "fs",
+                r#"{"action":"write","path":"cancelled","content":"no"}"#,
+            )
+            .await
+    });
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), app.next_event())
+        .await
+        .unwrap();
+    assert!(matches!(event, AppEvent::Status(status) if status == "approval needed · fs write"));
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), app.next_event())
+        .await
+        .unwrap();
+    assert!(matches!(event, AppEvent::Status(status) if status == "approval cancelled"));
+    assert!(app.pending_approval.is_none());
+    assert!(app.pending_approval_request.is_none());
+    assert!(!workspace.join("cancelled").exists());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn finishing_or_cancelling_chat_clears_its_pending_approval() {
+    for cancel in [false, true] {
+        let (mut app, workspace) = approval_test_app();
+        let root = app.space.root.clone();
+        let session = app
+            .db
+            .create_session("approval", "a/one", &app.active_space.id, "chat")
+            .unwrap();
+        app.session = Some(session.clone());
+        let toolbox = Arc::clone(&app.toolbox);
+        let call = tokio::spawn(async move {
+            toolbox
+                .run(
+                    "fs",
+                    r#"{"action":"write","path":"cancelled","content":"no"}"#,
+                )
+                .await
+        });
+        app.chat_tasks.insert(
+            1,
+            ChatTask {
+                id: 1,
+                session_id: session.id,
+                session_title: session.title,
+                space_id: app.active_space.id.clone(),
+                model: "a/one".into(),
+                model_id: "a/one".into(),
+                backend: BackendTag::OpenRouter,
+                incognito: false,
+                buffer: String::new(),
+                thinking: String::new(),
+                tool_status: None,
+                usage: None,
+                usage_row_id: None,
+                started: std::time::Instant::now(),
+                thinking_idx: 0,
+                spinner_color: SpinnerColor::Green,
+                abort: call.abort_handle(),
+            },
+        );
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), app.next_event())
+            .await
+            .unwrap();
+        assert!(
+            matches!(event, AppEvent::Status(status) if status == "approval needed · fs write")
+        );
+        if cancel {
+            app.cancel_chat_task(1).unwrap();
+            assert!(call.await.unwrap_err().is_cancelled());
+        } else {
+            app.on_chat_event(1, StreamEvent::Done).unwrap();
+            assert_eq!(call.await.unwrap().1, "blocked");
+        }
+        assert!(app.pending_approval.is_none());
+        assert!(app.pending_approval_request.is_none());
+        assert!(!workspace.join("cancelled").exists());
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn channel_approver_remembers_only_the_requested_action_for_its_session() {
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let approver = ChannelApprover::new(sender);
+    let request = ApprovalRequest {
+        tool: "fs".into(),
+        action: "edit".into(),
+        summary: "edit file".into(),
+    };
+    let mut calls = 0;
+    let (decision, ()) = tokio::join!(approver.request(request.clone()), async {
+        let (shown, reply) = receiver.recv().await.unwrap();
+        calls += 1;
+        assert_eq!(shown, request);
+        reply.send(Decision::AllowForSession).unwrap();
+    });
+    assert_eq!(decision, Decision::AllowForSession);
+    assert_eq!(approver.request(request.clone()).await, Decision::Allow);
+    assert!(receiver.try_recv().is_err());
+    let different = ApprovalRequest {
+        action: "delete".into(),
+        ..request.clone()
+    };
+    let (decision, ()) = tokio::join!(approver.request(different.clone()), async {
+        let (shown, reply) = receiver.recv().await.unwrap();
+        calls += 1;
+        assert_eq!(shown, different);
+        reply.send(Decision::Deny).unwrap();
+    });
+    assert_eq!(decision, Decision::Deny);
+    assert_eq!(calls, 2);
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let fresh = ChannelApprover::new(sender);
+    let (decision, ()) = tokio::join!(fresh.request(request.clone()), async {
+        let (shown, reply) = receiver.recv().await.unwrap();
+        assert_eq!(shown, request);
+        reply.send(Decision::Deny).unwrap();
+    });
+    assert_eq!(decision, Decision::Deny);
+}
+
+#[tokio::test]
+async fn approval_command_answers_a_pending_channel_request() {
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    assert!(!app.interactive_approvals);
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let approver = ChannelApprover::new(sender);
+    let request = ApprovalRequest {
+        tool: "shell".into(),
+        action: "run".into(),
+        summary: "$ true".into(),
+    };
+    for answer in [Decision::Allow, Decision::Allow, Decision::Deny] {
+        let (decision, ()) = tokio::join!(approver.request(request.clone()), async {
+            let (shown, reply) = receiver.recv().await.unwrap();
+            assert_eq!(shown, request);
+            app.pending_approval = Some(reply);
+            app.execute(AppCommand::Approve { decision: answer })
+                .unwrap();
+            assert!(app.pending_approval.is_none());
+        });
+        assert_eq!(decision, answer);
+    }
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn channel_approver_denies_closed_channels_and_cancels_with_the_caller() {
+    let request = ApprovalRequest {
+        tool: "fs".into(),
+        action: "write".into(),
+        summary: "write file".into(),
+    };
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let approver = Arc::new(ChannelApprover::new(sender));
+    let caller = tokio::spawn({
+        let approver = Arc::clone(&approver);
+        let request = request.clone();
+        async move { approver.request(request).await }
+    });
+    let (_, mut reply) = receiver.recv().await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    reply.closed().await;
+    assert!(reply.is_closed());
+    drop(receiver);
+    assert_eq!(approver.request(request).await, Decision::Deny);
+}
+
 #[test]
 fn model_profile_caps_local_tool_replay_without_changing_hosted_or_stored_results() {
     let result = format!("HEAD:{}:TAIL", "界".repeat(7_990));
@@ -684,7 +1011,7 @@ async fn agent_toolbox_reads_but_blocks_mutations_and_chat_hides_workspace_tools
         let (result, status) = app.toolbox.run(tool, args).await;
         assert_eq!(
             result,
-            "needs approval · the approval prompt is not available yet; describe the change and let the user apply it"
+            "needs approval · not available here (headless); describe the change and let the user apply it"
         );
         assert_eq!(status, "blocked");
     }

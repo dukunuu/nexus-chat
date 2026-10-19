@@ -72,6 +72,17 @@ pub struct AppView {
     // ── Popup chrome ──────────────────────────────────────────────────────
     /// Which modal popover, if any, is open.
     pub popup: Popup,
+    /// The workspace action currently displayed for permission.
+    pub approval_request: Option<nexus_core::tools::ApprovalRequest>,
+    /// Wrapped-row offset and bounds from the last approval render.
+    pub approval_scroll: std::cell::Cell<usize>,
+    pub approval_max_scroll: std::cell::Cell<usize>,
+    pub approval_page_height: std::cell::Cell<usize>,
+    /// A shell command stays locked until its final wrapped row has been shown.
+    pub approval_seen_end: std::cell::Cell<bool>,
+    pub approval_opened_at: Option<std::time::Instant>,
+    /// Brief input guard, injectable so approval tests need not sleep.
+    pub approval_delay: std::time::Duration,
     /// Model-authored UI state, isolated by message and source revision.
     pub interactive: crate::interactive::Widgets,
     pub spaces_cache: Vec<SpaceRow>,
@@ -248,6 +259,7 @@ impl AppView {
     #[allow(clippy::too_many_lines)]
     pub fn new(mut core: App) -> Self {
         core.interactive_ui = true;
+        core.interactive_approvals = true;
         // `App::new` queues the launch status line as an event; seed the
         // view's status field from it so the first frame reads correctly.
         let status = core
@@ -273,6 +285,17 @@ impl AppView {
             recall_draft: String::new(),
             at_state: None,
             popup: Popup::None,
+            approval_request: None,
+            approval_scroll: std::cell::Cell::new(0),
+            approval_max_scroll: std::cell::Cell::new(0),
+            approval_page_height: std::cell::Cell::new(1),
+            approval_seen_end: std::cell::Cell::new(false),
+            approval_opened_at: None,
+            approval_delay: if cfg!(test) {
+                std::time::Duration::ZERO
+            } else {
+                std::time::Duration::from_millis(400)
+            },
             interactive: crate::interactive::Widgets::default(),
             spaces_cache: Vec::new(),
             space_selected: 0,
@@ -382,8 +405,34 @@ impl AppView {
                 self.sel.clear();
             }
             AppEvent::HistoryInvalidated => self.invalidate_history_cache(),
-            AppEvent::OpenLoginPopup => self.open_login_popup(),
+            AppEvent::OpenLoginPopup if self.popup != Popup::Approval => self.open_login_popup(),
             _ => {}
+        }
+        self.sync_approval_popup();
+    }
+
+    pub(crate) fn sync_approval_popup(&mut self) {
+        if self
+            .pending_approval
+            .as_ref()
+            .is_some_and(tokio::sync::oneshot::Sender::is_closed)
+        {
+            self.pending_approval = None;
+            self.pending_approval_request = None;
+        }
+        if let Some(request) = &self.pending_approval_request {
+            if self.popup != Popup::Approval || self.approval_request.as_ref() != Some(request) {
+                self.approval_request = Some(request.clone());
+                self.approval_scroll.set(0);
+                self.approval_max_scroll.set(0);
+                self.approval_page_height.set(1);
+                self.approval_seen_end.set(false);
+                self.approval_opened_at = Some(std::time::Instant::now());
+                self.popup = Popup::Approval;
+            }
+        } else if self.popup == Popup::Approval && self.pending_approval.is_none() {
+            self.approval_request = None;
+            self.popup = Popup::None;
         }
     }
 

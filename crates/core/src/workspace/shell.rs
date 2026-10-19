@@ -9,6 +9,7 @@ pub(crate) async fn action(
     db_path: Option<&Path>,
     name: &str,
     args: &str,
+    allow_unparseable: bool,
 ) -> String {
     #[cfg(unix)]
     {
@@ -16,13 +17,13 @@ pub(crate) async fn action(
             Ok(args) => args,
             Err(error) => return format!("invalid tool arguments: {error}"),
         };
-        unix::action(workspace, db_path, name, &args)
+        unix::action(workspace, db_path, name, &args, allow_unparseable)
             .await
             .unwrap_or_else(|error| format!("shell failed: {error}"))
     }
     #[cfg(not(unix))]
     {
-        let _ = (workspace, db_path, name, args);
+        let _ = (workspace, db_path, name, args, allow_unparseable);
         "shell is only available on Unix".to_string()
     }
 }
@@ -85,6 +86,7 @@ mod unix {
         db_path: Option<&Path>,
         name: &str,
         args: &Value,
+        allow_unparseable: bool,
     ) -> anyhow::Result<String> {
         let runs = runs_dir(db_path);
         PRUNE_LOGS.call_once(|| {
@@ -98,18 +100,18 @@ mod unix {
             return Ok("missing required field: cmd".to_string());
         }
         match check_command(cmd) {
-            Ok(()) => {}
             Err(Escalation::Blocked(word)) => {
                 return Ok(format!(
                     "privilege escalation is blocked: {word} · ask the user to run it themselves (propose the command; they can run it with !)"
                 ));
             }
-            Err(Escalation::Unparseable(_)) => {
+            Err(Escalation::Unparseable(_)) if !allow_unparseable => {
                 return Ok(
                     "could not parse this command safely · simplify it (no unbalanced quotes)"
                         .to_string(),
                 );
             }
+            Ok(()) | Err(Escalation::Unparseable(_)) => {}
         }
         let cwd = match workspace.resolve(args["cwd"].as_str().unwrap_or("."), Access::Read) {
             Ok(cwd) => cwd,
@@ -493,6 +495,24 @@ mod unix {
                 let metadata = fs::metadata(fixture.dir.join("runs/shims").join(name)).unwrap();
                 assert_eq!(metadata.permissions().mode() & 0o777, 0o755);
             }
+        }
+
+        #[tokio::test]
+        async fn unparseable_permission_never_bypasses_a_blocked_escalation() {
+            let fixture = Fixture::new();
+            let result = action(
+                fixture.toolbox.workspace.as_ref().unwrap(),
+                Some(&fixture.dir.join("test.db")),
+                "shell_run",
+                &json!({"cmd": "sudo true"}),
+                true,
+            )
+            .await
+            .unwrap();
+            assert!(
+                result.starts_with("privilege escalation is blocked"),
+                "{result}"
+            );
         }
 
         #[tokio::test]

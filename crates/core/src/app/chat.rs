@@ -780,6 +780,14 @@ impl App {
             .and_then(|id| self.chat_tasks.remove(&id))
         {
             task.abort.abort();
+            if self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.id == session_id)
+            {
+                self.pending_approval = None;
+                self.pending_approval_request = None;
+            }
         }
     }
 
@@ -802,6 +810,14 @@ impl App {
         error: Option<String>,
         stopped: bool,
     ) -> Result<()> {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.id == task.session_id)
+        {
+            self.pending_approval = None;
+            self.pending_approval_request = None;
+        }
         let mut reasoning = task.thinking;
         let (buf, inline) = split_inline_reasoning(&task.buffer);
         if let Some(inline) = inline {

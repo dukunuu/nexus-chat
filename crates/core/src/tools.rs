@@ -6,8 +6,10 @@
 mod spec;
 
 use std::fmt::Write as _;
+use std::future::Future;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -96,13 +98,36 @@ pub fn classify_tool_result(result: &str, status: &str) -> Option<&'static str> 
     .then_some("upstream")
 }
 
+/// A workspace action waiting for the user's permission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalRequest {
+    pub tool: String,
+    pub action: String,
+    pub summary: String,
+}
+
+/// Permission for one action, its kind for this session, or neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Decision {
+    Allow,
+    AllowForSession,
+    Deny,
+}
+
+/// Interactive permission provider; absent in headless toolboxes.
+pub trait Approver: Send + Sync {
+    fn request(&self, req: ApprovalRequest) -> Pin<Box<dyn Future<Output = Decision> + Send + '_>>;
+}
+
 // Independent capability and privacy switches, not mutually exclusive states.
 #[allow(clippy::struct_excessive_bools)]
 pub struct ToolBox {
     /// Confined agent filesystem access; absent outside agent mode.
     pub workspace: Option<Arc<Workspace>>,
-    /// Refuse mutating workspace calls until the user can approve them.
+    /// Require permission before mutating workspace calls.
     pub require_approval: bool,
+    /// Interactive permission provider; absent on headless paths.
+    pub approver: Option<Arc<dyn Approver>>,
     /// App-managed destination for newly created or downloaded skills.
     pub skills_dir: PathBuf,
     /// Skill roots in precedence order. These include the app-managed root and
@@ -492,6 +517,7 @@ impl ToolBox {
         Self {
             workspace: None,
             require_approval: false,
+            approver: None,
             skill_dirs: vec![skills_dir.clone()],
             skills_dir,
             searxng_url,
@@ -953,6 +979,55 @@ impl ToolBox {
         );
     }
 
+    fn approval_request(&self, name: &str, args: &str) -> Result<ApprovalRequest, String> {
+        use crate::workspace::escalation::{Escalation, check_command};
+
+        let (tool, action) = name.split_once('_').expect("workspace tool action");
+        let mut args: serde_json::Value = serde_json::from_str(args)
+            .map_err(|error| format!("invalid tool arguments: {error}"))?;
+        args.as_object_mut()
+            .ok_or_else(|| "invalid tool arguments: expected an object".to_string())?
+            .insert("action".to_string(), action.into());
+        spec::find(tool)
+            .expect("workspace tool spec")
+            .validate(&args)?;
+        let workspace = self.workspace.as_ref().ok_or_else(|| {
+            format!("{tool} needs an agent workspace · switch with /agent <path>")
+        })?;
+        let summary = if tool == "shell" {
+            let cmd = args["cmd"].as_str().expect("validated command");
+            let mut summary = match check_command(cmd) {
+                Ok(()) => String::new(),
+                Err(Escalation::Blocked(word)) => {
+                    return Err(format!(
+                        "privilege escalation is blocked: {word} · ask the user to run it themselves (propose the command; they can run it with !)"
+                    ));
+                }
+                Err(Escalation::Unparseable(reason)) => {
+                    format!("could not parse safely: {reason}\n")
+                }
+            };
+            let cwd = workspace
+                .resolve(args["cwd"].as_str().unwrap_or("."), Access::Read)
+                .map_err(|error| error.to_string())?;
+            if !cwd.is_dir() {
+                return Err("invalid path: shell cwd must be a directory".to_string());
+            }
+            let _ = write!(summary, "$ {cmd}");
+            if cwd != workspace.root() {
+                let _ = write!(summary, "\nin {}", fs_relative(workspace, &cwd));
+            }
+            summary
+        } else {
+            fs_approval_summary(workspace, name, &args)?
+        };
+        Ok(ApprovalRequest {
+            tool: tool.to_string(),
+            action: action.to_string(),
+            summary,
+        })
+    }
+
     // Long by design: the model tool dispatch (each arm is one tool).
     #[allow(clippy::too_many_lines)]
     async fn run_inner(&self, name: &str, args: &str) -> (String, String) {
@@ -973,14 +1048,29 @@ impl ToolBox {
         };
         let name = dispatch_name.as_str();
         let args = dispatch_args.as_str();
+        let mut allow_unparseable = false;
         if self.require_approval
-            && (name.starts_with("fs_") || name.starts_with("shell_"))
+            && (name.starts_with("fs_") || name == "shell_run")
             && !is_read_only_tool(name, args)
         {
-            return (
-                "needs approval · the approval prompt is not available yet; describe the change and let the user apply it".to_string(),
-                "blocked".to_string(),
-            );
+            let request = match self.approval_request(name, args) {
+                Ok(request) => request,
+                Err(error) => return (error, "blocked".to_string()),
+            };
+            let Some(approver) = &self.approver else {
+                return (
+                    "needs approval · not available here (headless); describe the change and let the user apply it".to_string(),
+                    "blocked".to_string(),
+                );
+            };
+            let unparseable = request.summary.starts_with("could not parse safely:");
+            if approver.request(request).await == Decision::Deny {
+                return (
+                    "denied by the user · ask what they want instead of retrying".to_string(),
+                    "blocked".to_string(),
+                );
+            }
+            allow_unparseable = unparseable;
         }
         let (result, status) = match name {
             "shell_run" | "shell_log" => match &self.workspace {
@@ -989,8 +1079,14 @@ impl ToolBox {
                     "blocked".to_string(),
                 ),
                 Some(workspace) => (
-                    crate::workspace::shell::action(workspace, self.db_path.as_deref(), name, args)
-                        .await,
+                    crate::workspace::shell::action(
+                        workspace,
+                        self.db_path.as_deref(),
+                        name,
+                        args,
+                        allow_unparseable,
+                    )
+                    .await,
                     format!("Running {name}…"),
                 ),
             },
@@ -3593,6 +3689,19 @@ fn fs_replace(
     current: &str,
     permissions: Option<std::fs::Permissions>,
 ) -> Result<String, PathError> {
+    let content = match fs_replacement(name, args, current) {
+        Ok(content) => content,
+        Err(error) => return Ok(error),
+    };
+    let rel = fs_relative(workspace, path);
+    let (diff, added, deleted) = fs_diff(&rel, current, &content, 200);
+    let stamp = fs_atomic_write(path, &content, permissions)?;
+    workspace.record_read(path, stamp);
+    let verb = if name == "fs_edit" { "edited" } else { "wrote" };
+    Ok(format!("{verb} {rel} (+{added} −{deleted})\n{diff}"))
+}
+
+fn fs_replacement(name: &str, args: &serde_json::Value, current: &str) -> Result<String, String> {
     let mut content = if name == "fs_edit" {
         let edits: Vec<_> = args
             .get("edits")
@@ -3611,10 +3720,7 @@ fn fs_replace(
                 ))
             })
             .collect();
-        match apply_hashline_edits(current, &edits) {
-            Ok((content, _)) => content,
-            Err(error) => return Ok(error),
-        }
+        apply_hashline_edits(current, &edits)?.0
     } else {
         args.get("content")
             .and_then(serde_json::Value::as_str)
@@ -3624,12 +3730,69 @@ fn fs_replace(
     if current.contains("\r\n") && !content.contains("\r\n") {
         content = content.replace('\n', "\r\n");
     }
-    let rel = fs_relative(workspace, path);
-    let (diff, added, deleted) = fs_diff(&rel, current, &content, 200);
-    let stamp = fs_atomic_write(path, &content, permissions)?;
-    workspace.record_read(path, stamp);
-    let verb = if name == "fs_edit" { "edited" } else { "wrote" };
-    Ok(format!("{verb} {rel} (+{added} −{deleted})\n{diff}"))
+    Ok(content)
+}
+
+fn fs_approval_summary(
+    workspace: &Workspace,
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let path = workspace
+        .resolve(
+            args["path"].as_str().expect("validated path"),
+            Access::Write,
+        )
+        .map_err(|error| error.to_string())?;
+    let rel = fs_relative(workspace, &path);
+    let exists = path.try_exists().map_err(|error| error.to_string())?;
+    if name == "fs_write" && !exists {
+        return Ok(format!("write {rel}"));
+    }
+    let previous = workspace.last_read(&path).ok_or_else(|| {
+        format!(
+            "fs.{} needs a fresh read · call fs with action=read on {rel} first",
+            name.trim_start_matches("fs_")
+        )
+    })?;
+    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+    let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+    let stamp = Workspace::stamp_bytes(&bytes, &metadata).map_err(|error| error.to_string())?;
+    let current = String::from_utf8_lossy(&bytes);
+    if previous.len != stamp.len || previous.sha256 != stamp.sha256 {
+        let mut result = format!("{rel} changed since your last read · re-read it and re-apply");
+        if let Some(text) = previous.text {
+            let _ = write!(result, "\n{}", fs_diff(&rel, &text, &current, 60).0);
+        }
+        return Err(result);
+    }
+    match name {
+        "fs_write" | "fs_edit" => {
+            if name == "fs_edit" && (bytes.contains(&0) || std::str::from_utf8(&bytes).is_err()) {
+                return Err(format!(
+                    "fs.edit needs a UTF-8 text file · {rel} is binary or not UTF-8; use write to replace it whole"
+                ));
+            }
+            let content = fs_replacement(name, args, &current)?;
+            Ok(format!(
+                "{} {rel}\n{}",
+                name.trim_start_matches("fs_"),
+                fs_diff(&rel, &current, &content, 40).0
+            ))
+        }
+        "fs_move" => {
+            let to = args["to"].as_str().expect("validated destination");
+            let target = workspace
+                .resolve(to, Access::Write)
+                .map_err(|error| error.to_string())?;
+            if target.try_exists().map_err(|error| error.to_string())? {
+                return Err(format!("fs.move target exists: {to} · choose a new path"));
+            }
+            Ok(format!("move {rel} -> {}", fs_relative(workspace, &target)))
+        }
+        "fs_delete" => Ok(format!("delete {rel} ({} lines)", current.lines().count())),
+        _ => unreachable!("fs approval action"),
+    }
 }
 
 fn fs_atomic_write(
@@ -5554,6 +5717,265 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    struct FakeApprover {
+        decision: Decision,
+        requests: std::sync::Mutex<Vec<ApprovalRequest>>,
+    }
+
+    impl FakeApprover {
+        fn new(decision: Decision) -> Arc<Self> {
+            Arc::new(Self {
+                decision,
+                requests: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl Approver for FakeApprover {
+        fn request(
+            &self,
+            req: ApprovalRequest,
+        ) -> Pin<Box<dyn Future<Output = Decision> + Send + '_>> {
+            self.requests.lock().unwrap().push(req);
+            Box::pin(std::future::ready(self.decision))
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_denies_without_writing_and_allows_an_edit_once() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        let path = toolbox.workspace.as_ref().unwrap().root().join("file");
+        std::fs::write(&path, "original\n").unwrap();
+        toolbox
+            .run("fs", r#"{"action":"read","path":"file"}"#)
+            .await;
+        let args = json!({
+            "action": "edit", "path": "file",
+            "edits": [{"hash": line_hash("original"), "new": "replacement"}],
+        })
+        .to_string();
+        let deny = FakeApprover::new(Decision::Deny);
+        toolbox.approver = Some(deny.clone());
+        let (result, status) = toolbox.run("fs", &args).await;
+        assert_eq!(
+            result,
+            "denied by the user · ask what they want instead of retrying"
+        );
+        assert_eq!(status, "blocked");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
+        let requests = deny.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].tool, "fs");
+        assert_eq!(requests[0].action, "edit");
+        assert!(requests[0].summary.starts_with("edit file\n"));
+        assert!(requests[0].summary.contains("\n--- "));
+        assert!(requests[0].summary.contains("\n-original\n+replacement"));
+        let allow = FakeApprover::new(Decision::Allow);
+        toolbox.approver = Some(allow.clone());
+        let (result, status) = toolbox.run("fs", &args).await;
+        assert!(result.starts_with("edited file"), "{result}");
+        assert_ne!(status, "blocked");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement\n");
+        assert_eq!(allow.requests.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn approval_summaries_cover_writes_moves_and_deletes() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        let deny = FakeApprover::new(Decision::Deny);
+        toolbox.approver = Some(deny.clone());
+        let path = toolbox.workspace.as_ref().unwrap().root().join("file");
+        let original = "old\n".repeat(60);
+        std::fs::write(&path, &original).unwrap();
+        toolbox
+            .run("fs", r#"{"action":"read","path":"file"}"#)
+            .await;
+        for args in [
+            json!({"action": "write", "path": "new", "content": "new\n"}),
+            json!({"action": "write", "path": "file", "content": "new\n".repeat(60)}),
+            json!({"action": "move", "path": "file", "to": "moved"}),
+            json!({"action": "delete", "path": "file"}),
+        ] {
+            assert_eq!(toolbox.run("fs", &args.to_string()).await.1, "blocked");
+        }
+        let requests = deny.requests.lock().unwrap();
+        assert_eq!(requests[0].summary, "write new");
+        assert!(requests[1].summary.starts_with("write file\n"));
+        assert!(requests[1].summary.contains("\n--- "));
+        assert_eq!(requests[1].summary.lines().count(), 42);
+        assert!(
+            requests[1]
+                .summary
+                .lines()
+                .last()
+                .unwrap()
+                .contains("more lines")
+        );
+        assert_eq!(requests[2].summary, "move file -> moved");
+        assert_eq!(requests[3].summary, "delete file (60 lines)");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_workspace_mutations_never_request_approval() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        let allow = FakeApprover::new(Decision::Allow);
+        toolbox.approver = Some(allow.clone());
+        let path = toolbox.workspace.as_ref().unwrap().root().join("file");
+        std::fs::write(&path, "original\n").unwrap();
+        for (tool, args) in [
+            ("fs", json!({"action": "write", "path": "file"})),
+            ("fs_write", json!(null)),
+            (
+                "fs",
+                json!({"action": "write", "path": "../outside", "content": "no"}),
+            ),
+            (
+                "fs",
+                json!({"action": "write", "path": ".env", "content": "no"}),
+            ),
+            ("fs", json!({"action": "delete", "path": "file"})),
+            (
+                "shell",
+                json!({"action": "run", "cmd": "echo no", "cwd": "file"}),
+            ),
+        ] {
+            let (result, _) = toolbox.run(tool, &args.to_string()).await;
+            assert!(!result.starts_with("needs approval"), "{result}");
+        }
+        toolbox
+            .run("fs", r#"{"action":"read","path":"file"}"#)
+            .await;
+        let (result, _) = toolbox
+            .run(
+                "fs",
+                &json!({
+                    "action": "edit", "path": "file", "edits": [{"hash": "missing", "new": "no"}],
+                })
+                .to_string(),
+            )
+            .await;
+        assert!(result.contains("not found"), "{result}");
+        std::fs::write(&path, "changed\n").unwrap();
+        let (result, _) = toolbox
+            .run("fs", r#"{"action":"delete","path":"file"}"#)
+            .await;
+        assert!(result.contains("changed since your last read"), "{result}");
+        assert!(allow.requests.lock().unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "changed\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shell_approval_explains_unparseable_input_but_never_allows_escalation() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        let deny = FakeApprover::new(Decision::Deny);
+        toolbox.approver = Some(deny.clone());
+        let (result, status) = toolbox
+            .run("shell", r#"{"action":"run","cmd":"\"$COMMAND\""}"#)
+            .await;
+        assert!(result.starts_with("denied by the user"), "{result}");
+        assert_eq!(status, "blocked");
+        let requests = deny.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].summary.starts_with("could not parse safely:"));
+        assert!(requests[0].summary.ends_with("$ \"$COMMAND\""));
+        let (result, status) = toolbox
+            .run("shell", r#"{"action":"run","cmd":"sudo true"}"#)
+            .await;
+        assert!(
+            result.starts_with("privilege escalation is blocked"),
+            "{result}"
+        );
+        assert_eq!(status, "blocked");
+        assert_eq!(deny.requests.lock().unwrap().len(), 1);
+        std::fs::create_dir(toolbox.workspace.as_ref().unwrap().root().join("sub")).unwrap();
+        toolbox
+            .run("shell", r#"{"action":"run","cmd":"true","cwd":"sub"}"#)
+            .await;
+        assert_eq!(deny.requests.lock().unwrap()[1].summary, "$ true\nin sub");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unparseable_shell_runs_only_with_permission_for_that_call() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.db_path = Some(dir.join("nexus.db"));
+        let path = toolbox.workspace.as_ref().unwrap().root().join("approved");
+        let args = json!({
+            "action": "run",
+            "cmd": "program=printf; \"$program\" approved > approved",
+        })
+        .to_string();
+        let (result, _) = toolbox.run("shell", &args).await;
+        assert!(
+            result.starts_with("could not parse this command safely"),
+            "{result}"
+        );
+        assert!(!path.exists());
+        toolbox.require_approval = true;
+        let deny = FakeApprover::new(Decision::Deny);
+        toolbox.approver = Some(deny.clone());
+        assert_eq!(toolbox.run("shell", &args).await.1, "blocked");
+        assert!(!path.exists());
+        assert!(
+            deny.requests.lock().unwrap()[0]
+                .summary
+                .starts_with("could not parse safely:")
+        );
+        let allow = FakeApprover::new(Decision::Allow);
+        toolbox.approver = Some(allow.clone());
+        let (result, status) = toolbox.run("shell", &args).await;
+        assert!(result.starts_with("exit 0"), "{result}");
+        assert_ne!(status, "blocked");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "approved");
+        assert_eq!(allow.requests.lock().unwrap().len(), 1);
+        let (result, status) = toolbox
+            .run("shell", r#"{"action":"run","cmd":"sudo true"}"#)
+            .await;
+        assert!(
+            result.starts_with("privilege escalation is blocked"),
+            "{result}"
+        );
+        assert_eq!(status, "blocked");
+        assert_eq!(allow.requests.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_approval_reply_blocks_the_tool_call() {
+        let (mut toolbox, dir) = fs_toolbox();
+        toolbox.require_approval = true;
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        toolbox.approver = Some(Arc::new(crate::app::ChannelApprover::new(sender)));
+        let (outcome, ()) = tokio::join!(
+            toolbox.run("fs", r#"{"action":"write","path":"new","content":"no"}"#),
+            async {
+                let (_, reply) = receiver.recv().await.unwrap();
+                drop(reply);
+            },
+        );
+        assert!(outcome.0.starts_with("denied by the user"));
+        assert_eq!(outcome.1, "blocked");
+        assert!(
+            !toolbox
+                .workspace
+                .as_ref()
+                .unwrap()
+                .root()
+                .join("new")
+                .exists()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn fs_toolbox() -> (ToolBox, PathBuf) {
         let (mut toolbox, dir) = skills_toolbox();
         let root = dir.join("workspace");
@@ -5588,7 +6010,7 @@ mod tests {
                 let (result, status) = toolbox.run(&name, &args.to_string()).await;
                 assert_eq!(
                     result,
-                    "needs approval · the approval prompt is not available yet; describe the change and let the user apply it"
+                    "needs approval · not available here (headless); describe the change and let the user apply it"
                 );
                 assert_eq!(status, "blocked");
                 assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");

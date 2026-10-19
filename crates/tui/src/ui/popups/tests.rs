@@ -29,6 +29,241 @@ fn render_to_string(width: u16, height: u16, render: impl FnOnce(&mut ratatui::F
     out
 }
 
+fn approval_app(
+    tool: &str,
+    summary: String,
+) -> (
+    AppView,
+    tokio::sync::oneshot::Receiver<nexus_core::tools::Decision>,
+) {
+    let mut app = test_app();
+    app.settings.hide_hints = false;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.pending_approval = Some(sender);
+    app.pending_approval_request = Some(nexus_core::tools::ApprovalRequest {
+        tool: tool.into(),
+        action: if tool == "shell" { "run" } else { "edit" }.into(),
+        summary,
+    });
+    app.sync_approval_popup();
+    (app, receiver)
+}
+
+#[test]
+fn approval_escapes_terminal_controls_in_the_header_and_command() {
+    let (mut app, _receiver) = approval_app("shell", "$ echo \x1b[2K\rhidden\tend\nnext".into());
+    let root = app.space.root.clone();
+    app.pending_approval_request.as_mut().unwrap().action = "run\x7f\n".into();
+    app.sync_approval_popup();
+    let screen = render_to_string(120, 40, |f| super::approval::render(f, &app));
+    assert!(screen.contains("shell · run\\u{7f}\\u{a}"), "{screen}");
+    assert!(
+        screen.contains("$ echo \\u{1b}[2K\\u{d}hidden    end"),
+        "{screen}"
+    );
+    assert!(!screen.chars().any(|c| c.is_control() && c != '\n'));
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|f| super::approval::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let escapes: Vec<_> = buffer
+        .content
+        .iter()
+        .filter(|cell| cell.symbol() == "\\")
+        .collect();
+    assert!(!escapes.is_empty());
+    assert!(escapes.iter().all(|cell| cell.fg == app.theme.fg_dim));
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn approval_overflow_is_counted_scrollable_and_reset_for_each_request() {
+    let summary = (0..40)
+        .map(|i| format!("+row {i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (mut app, _receiver) = approval_app("fs", summary.clone());
+    let root = app.space.root.clone();
+    let screen = render_to_string(120, 24, |f| super::approval::render(f, &app));
+    assert!(
+        screen.contains("↑↓ scroll · y allow · a allow for this session · n deny"),
+        "{screen}"
+    );
+    let (marker_row, marker) = screen
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("more lines"))
+        .unwrap();
+    let remaining: usize = marker
+        .split_once('…')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let shown = screen.lines().filter(|line| line.contains("+row ")).count();
+    assert_eq!(shown + remaining, 40);
+    assert!(remaining > 0);
+    assert!(screen.lines().nth(marker_row + 1).unwrap().contains('╰'));
+    for (key, offset) in [
+        (crossterm::event::KeyCode::Down, 1),
+        (crossterm::event::KeyCode::Char('j'), 2),
+        (crossterm::event::KeyCode::Up, 1),
+        (crossterm::event::KeyCode::Char('k'), 0),
+    ] {
+        super::approval::handle_key(&mut app, key.into()).unwrap();
+        assert_eq!(app.approval_scroll.get(), offset);
+    }
+    while app.approval_scroll.get() < app.approval_max_scroll.get() {
+        super::approval::handle_key(&mut app, crossterm::event::KeyCode::PageDown.into()).unwrap();
+        render_to_string(120, 24, |f| super::approval::render(f, &app));
+    }
+    let screen = render_to_string(120, 24, |f| super::approval::render(f, &app));
+    assert!(screen.contains("+row 39"), "{screen}");
+    assert!(!screen.contains("more lines"), "{screen}");
+    super::approval::handle_key(&mut app, crossterm::event::KeyCode::PageUp.into()).unwrap();
+    assert!(app.approval_scroll.get() < app.approval_max_scroll.get());
+    let opened = app.approval_opened_at.unwrap();
+    let (sender, mut receiver) = tokio::sync::oneshot::channel();
+    app.pending_approval = Some(sender);
+    app.pending_approval_request.as_mut().unwrap().summary =
+        format!("edit another file\n{summary}");
+    app.sync_approval_popup();
+    assert_eq!(app.approval_scroll.get(), 0);
+    assert!(!app.approval_seen_end.get());
+    assert!(app.approval_opened_at.unwrap() >= opened);
+    render_to_string(120, 24, |f| super::approval::render(f, &app));
+    assert!(!app.approval_seen_end.get());
+    super::approval::handle_key(&mut app, crossterm::event::KeyCode::Char('a').into()).unwrap();
+    assert_eq!(
+        receiver.try_recv().unwrap(),
+        nexus_core::tools::Decision::AllowForSession
+    );
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn approval_requires_the_end_of_a_wrapped_shell_command_before_allowing() {
+    use crossterm::event::KeyCode;
+    use nexus_core::tools::Decision;
+
+    for (key, decision) in [('y', Decision::Allow), ('a', Decision::AllowForSession)] {
+        let (mut app, mut receiver) = approval_app(
+            "shell",
+            format!("$ echo {}\necho LAST_COMMAND", "payload ".repeat(500)),
+        );
+        let root = app.space.root.clone();
+        let screen = render_to_string(120, 24, |f| super::approval::render(f, &app));
+        assert!(screen.contains("scroll to the end to allow"), "{screen}");
+        assert!(screen.contains("more lines"), "{screen}");
+        super::approval::handle_key(&mut app, KeyCode::Char(key).into()).unwrap();
+        assert!(receiver.try_recv().is_err());
+        assert!(app.pending_approval.is_some());
+        while app.approval_scroll.get() < app.approval_max_scroll.get() {
+            super::approval::handle_key(&mut app, KeyCode::PageDown.into()).unwrap();
+            render_to_string(120, 24, |f| super::approval::render(f, &app));
+        }
+        let screen = render_to_string(120, 24, |f| super::approval::render(f, &app));
+        assert!(screen.contains("echo LAST_COMMAND"), "{screen}");
+        assert!(!screen.contains("scroll to the end to allow"), "{screen}");
+        super::approval::handle_key(&mut app, KeyCode::PageUp.into()).unwrap();
+        render_to_string(120, 24, |f| super::approval::render(f, &app));
+        super::approval::handle_key(&mut app, KeyCode::Char(key).into()).unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), decision);
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn approval_ignores_allow_keys_during_the_open_delay_but_never_delays_denial() {
+    use crossterm::event::KeyCode;
+    use nexus_core::tools::Decision;
+    use std::time::{Duration, Instant};
+
+    let (mut app, mut receiver) = approval_app("shell", "$ true".into());
+    let root = app.space.root.clone();
+    render_to_string(120, 24, |f| super::approval::render(f, &app));
+    app.approval_delay = Duration::from_millis(400);
+    app.approval_opened_at = Some(Instant::now() + Duration::from_secs(1));
+    for key in ['y', 'a'] {
+        super::approval::handle_key(&mut app, KeyCode::Char(key).into()).unwrap();
+        assert!(receiver.try_recv().is_err());
+        assert!(app.pending_approval.is_some());
+    }
+    app.approval_opened_at = Some(Instant::now() - Duration::from_millis(401));
+    super::approval::handle_key(&mut app, KeyCode::Char('y').into()).unwrap();
+    assert_eq!(receiver.try_recv().unwrap(), Decision::Allow);
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+    for key in [KeyCode::Char('n'), KeyCode::Esc] {
+        let (mut app, mut receiver) = approval_app("shell", "$ true".into());
+        let root = app.space.root.clone();
+        app.approval_delay = Duration::from_millis(400);
+        super::approval::handle_key(&mut app, key.into()).unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), Decision::Deny);
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn approval_popup_shell_and_diff_snapshots() {
+    let mut app = test_app();
+    let root = app.space.root.clone();
+    app.settings.hide_hints = false;
+    app.popup = nexus_core::app::Popup::Approval;
+    for (tool, action, summary, expected) in [
+        (
+            "shell",
+            "run",
+            "$ cargo test\nin crates/core",
+            vec!["shell · run", "$ cargo test", "in crates/core"],
+        ),
+        (
+            "fs",
+            "write",
+            "write file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new",
+            vec![
+                "fs · write",
+                "write file",
+                "--- a/file",
+                "+++ b/file",
+                "@@ -1 +1 @@",
+                "-old",
+                "+new",
+            ],
+        ),
+    ] {
+        app.approval_request = Some(nexus_core::tools::ApprovalRequest {
+            tool: tool.into(),
+            action: action.into(),
+            summary: summary.into(),
+        });
+        let screen = render_to_string(120, 40, |f| super::approval::render(f, &app));
+        assert!(screen.contains(" approve "), "{screen}");
+        assert!(
+            screen.contains("y allow · a allow for this session · n deny"),
+            "{screen}"
+        );
+        let snapshot: Vec<_> = screen
+            .lines()
+            .filter_map(|line| {
+                let (_, body) = line.split_once('│')?;
+                let (body, _) = body.rsplit_once('│')?;
+                let body = body.trim();
+                (!body.is_empty()).then_some(body)
+            })
+            .collect();
+        assert_eq!(snapshot, expected);
+    }
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn agent_status_tag_is_mode_specific_and_left_truncates_long_roots() {
     let mut app = test_app();
