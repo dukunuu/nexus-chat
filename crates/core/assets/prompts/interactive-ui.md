@@ -23,6 +23,14 @@ Emit a closed `nexus-ui` fenced block containing a JSON object:
     Default rows: 3.
   - `{"type":"input","key":"name","label":"Your name"}` occupies 3 rows;
     its state field must remain a single-line string. Never solicit passwords/API keys.
+  - `{"type":"kv","items":[["Name","{{name}}"]]}`: 1–8 label/value pairs, one row each.
+  - `{"type":"table","columns":["Name"],"rows_data":[["{{name}}"]],"select":"row"}`: 1–6 columns, 0–8 equal-width data rows plus header; optional numeric selection field; Up/Down or click selects (clamped; empty index 0).
+  - `{"type":"progress","label":"Done","value":{"get":"count"},"max":10}`: one row; numeric expressions clamped to [0,max]; max defaults to 1 (nonpositive means empty).
+  - `{"type":"bars","items":[{"label":"Done","value":{"get":"count"}}]}`: 1–8 rows, numeric expressions scaled to the largest value; negatives display as zero.
+  - `{"type":"sparkline","values":[1,3,2],"rows":1}`: 1–64 numeric expressions, height 1–3 (default 1); negatives display as zero.
+  - `{"type":"checklist","items":[{"label":"Ready","key":"ready"}]}`: 1–8 rows bound to booleans; Enter/Space or click toggles each item locally.
+  - `{"type":"select","key":"mode","label":"Mode","options":["Fast","Full"]}`: one row; string field must stay in 2–8 options (each ≤64 bytes); Left/Right or click cycles locally.
+  - `{"type":"toggle","key":"ready","label":"Ready"}`: one row bound to a boolean; Enter/Space or click flips locally. New labels, headers and cells are templates. Tab moves between controls; local changes run no actions.
 - `actions`: map of names to sequential action steps:
   - `{"op":"set","key":"count","value":{"add":[{"get":"count"},1]}}`
   - `{"op":"call","action":"another_action"}` (no cycles).
@@ -46,7 +54,7 @@ e.g. `{"number":{"get":"amount"}}`. Strings are not code. No loops, URLs, file a
 network requests, timers, arbitrary handlers or dynamically created nodes.
 Identifiers are 1–32 ASCII letters/digits/underscores/hyphens. Source is at most
 16 KiB; scalar strings at most 1024 bytes; text at most 4096 bytes; numbers are
-finite and at most 1e12 in magnitude. Rows may be 1–8. Keep UIs compact. Actions
+finite and at most 1e12 in magnitude. Text/button rows may be 1–8. Keep UIs compact. Actions
 are transactional and bounded. Local state is temporary, reset on session/space
 changes or reopening the app. Only explicit submitted messages enter chat history.
 
