@@ -5,16 +5,24 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 mod approval;
+mod judging;
+pub(crate) mod research;
 mod runner;
 pub mod service;
 mod tree;
 
 pub use approval::{JobApprover, JobExecutor, PARKED};
+pub(crate) use judging::notification_visible;
+pub use judging::{JudgeState, Judgement, Verdict, judge};
 pub use runner::{DaemonLock, daemon, request_run, run_due, run_once, run_with_app};
 
 /// User-editable job parameters. Times are RFC 3339; intervals are minutes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JobSpec {
+    #[serde(default = "agent_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub topic: Option<String>,
     pub name: String,
     pub prompt: String,
     pub root: String,
@@ -31,7 +39,9 @@ pub struct JobSpec {
 
 impl PartialEq for JobSpec {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
+        self.kind == other.kind
+            && self.topic == other.topic
+            && self.name == other.name
             && self.prompt == other.prompt
             && self.root == other.root
             && self.mode == other.mode
@@ -51,6 +61,8 @@ impl Eq for JobSpec {}
 impl Default for JobSpec {
     fn default() -> Self {
         Self {
+            kind: agent_kind(),
+            topic: None,
             name: String::new(),
             prompt: String::new(),
             root: String::new(),
@@ -67,12 +79,29 @@ impl Default for JobSpec {
     }
 }
 
+fn agent_kind() -> String {
+    "agent".into()
+}
+
 impl JobSpec {
     /// Validate the form independently of workspace accessibility.
     pub fn validate(&self) -> Result<()> {
         ensure!(!self.name.trim().is_empty(), "name is required");
         ensure!(!self.prompt.trim().is_empty(), "prompt is required");
-        ensure!(!self.root.trim().is_empty(), "workspace root is required");
+        ensure!(
+            matches!(self.kind.as_str(), "agent" | "research"),
+            "invalid job kind"
+        );
+        if self.kind == "research" {
+            ensure!(
+                self.topic
+                    .as_deref()
+                    .is_some_and(|topic| !topic.trim().is_empty()),
+                "research topic is required"
+            );
+        } else {
+            ensure!(!self.root.trim().is_empty(), "workspace root is required");
+        }
         ensure!(
             matches!(self.mode.as_str(), "agent" | "auto"),
             "mode must be agent or auto"
@@ -100,8 +129,8 @@ impl JobSpec {
             "cost budget must be positive and finite"
         );
         ensure!(
-            matches!(self.notify.as_str(), "always" | "on_failure"),
-            "notify must be always or on_failure"
+            matches!(self.notify.as_str(), "always" | "on_failure" | "on_change"),
+            "notify must be always, on_failure or on_change"
         );
         Ok(())
     }
@@ -174,5 +203,7 @@ pub fn due(jobs: &[Job], now: DateTime<Utc>, device_id: &str) -> Vec<Job> {
         .collect()
 }
 
+#[cfg(test)]
+mod judging_tests;
 #[cfg(test)]
 mod tests;

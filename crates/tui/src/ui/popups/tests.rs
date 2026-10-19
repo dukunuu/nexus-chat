@@ -80,8 +80,8 @@ fn jobs_popup_two_jobs_and_parked_run_snapshot() {
     assert_eq!(
         snapshot,
         [
-            "morning · interval · enabled · never run",
-            "▸ fix tests · until_done · enabled · parked",
+            "morning · agent · interval · enabled · never run",
+            "▸ fix tests · agent · until_done · enabled · parked",
             "nexus/job/fix/run",
             "parked: needs approval for fs write fixed",
         ]

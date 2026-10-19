@@ -70,6 +70,9 @@ async fn run(app: &mut App, job: &Job, cancelled: &mut watch::Receiver<bool>) ->
     if let Some(session) = app.db.get_session(&job.session_id)? {
         app.current_model = Some(session.model);
     }
+    if job.spec.kind == "research" {
+        return super::research::run(app, job, cancelled).await;
+    }
     let model = app.current_model.clone().unwrap_or_default();
     let now = Utc::now().to_rfc3339();
     let title = format!("job: {} · {}", job.spec.name, Utc::now().format("%Y-%m-%d"));
@@ -105,7 +108,8 @@ async fn run(app: &mut App, job: &Job, cancelled: &mut watch::Receiver<bool>) ->
         run.summary = format!("{}\n{error:#}", run.summary);
     }
     run.cost_usd = app.db.conn().query_row(
-        "SELECT COALESCE(SUM(cost), 0) FROM usage_log WHERE session_id = ?1",
+        "SELECT COALESCE((SELECT SUM(cost) FROM usage_log WHERE session_id = ?1), 0)
+         + COALESCE((SELECT SUM(cost) FROM cache.decisions WHERE session_id = ?1 AND tool = 'job'), 0)",
         [&run.id],
         |row| row.get(0),
     )?;
@@ -135,9 +139,13 @@ async fn execute(
     )?;
     run.branch.clone_from(&tree.branch);
     app.db.save_job_run(run)?;
-    let result = iterate(app, job, run, &tree.path, started + limit, cancelled).await;
+    let result = iterate(app, job, run, &tree, started + limit, cancelled).await;
     let _ = app.execute(AppCommand::Cancel { task: None });
     std::mem::take(&mut app.procs).shutdown().await;
+    let diff_stat = tree.changes()?;
+    if tree.branch.is_some() && !diff_stat.is_empty() {
+        writeln!(run.summary, "[diff]\n{diff_stat}")?;
+    }
     let review = tree.finish(&job.spec.name, &run.id);
     if !run.summary.is_empty() {
         run.summary.push('\n');
@@ -148,6 +156,9 @@ async fn execute(
     }
     result?;
     review?;
+    if run.status == "done" && job.spec.notify == "on_change" {
+        super::judging::on_change(app, run, &diff_stat).await?;
+    }
     Ok(())
 }
 
@@ -155,10 +166,11 @@ async fn iterate(
     app: &mut App,
     job: &Job,
     run: &mut JobRun,
-    root: &Path,
+    tree: &Tree,
     deadline: Instant,
     cancelled: &mut watch::Receiver<bool>,
 ) -> Result<()> {
+    let root = &tree.path;
     let approver = Arc::new(JobApprover::default());
     app.enter_job_workspace(
         root,
@@ -199,7 +211,7 @@ async fn iterate(
         };
         if let Some(summary) = approver.summary() {
             run.status = "parked".into();
-            run.summary = summary;
+            writeln!(run.summary, "{summary}")?;
             if let Ok(outcome) = result {
                 run.cost_usd += outcome.usage.and_then(|usage| usage.cost).unwrap_or(0.0);
             }
@@ -207,55 +219,123 @@ async fn iterate(
         }
         let outcome = result?;
         run.cost_usd += outcome.usage.and_then(|usage| usage.cost).unwrap_or(0.0);
-        run.summary = outcome.answer;
+        writeln!(run.summary, "iteration {}:\n{}", run.iters, outcome.answer)?;
         app.db.save_job_run(run)?;
-        if job.spec.trigger_kind != "until_done"
-            || job.spec.stop_command.as_deref().is_none_or(str::is_empty)
-        {
+        if job.spec.trigger_kind != "until_done" {
             run.status = "done".into();
             break;
         }
-        let command = job.spec.stop_command.as_deref().expect("stop command");
-        if !crate::workspace::shell::write_confinement_available() {
-            run.status = "parked".into();
-            run.summary = format!("{PARKED}\nstop check needs shell write confinement: {command}");
-            break;
-        }
-        let args = serde_json::json!({"cmd": command, "timeout_s": 600}).to_string();
-        let db_path = app.space.db_path();
-        let check = tokio::select! {
-            output = crate::workspace::shell::action(app.workspace.as_deref().expect("job workspace"), Some(&db_path), Some(root), "shell_run", &args, false) => Some(output),
-            () = tokio::time::sleep_until(deadline.into()) => None,
-            _ = cancelled.changed() => {
-                run.status = "cancelled".into();
-                None
+        let Some(command) = job
+            .spec
+            .stop_command
+            .as_deref()
+            .filter(|cmd| !cmd.is_empty())
+        else {
+            let state = super::JudgeState {
+                session_id: run.id.clone(),
+                task: job.spec.prompt.clone(),
+                iteration: run.iters,
+                last_answer: outcome.answer,
+                files_changed: tree.changes()?,
+                last_check_output: String::new(),
+            };
+            if judge_iteration(app, run, &state, deadline, cancelled).await? {
+                break;
             }
+            prompt =
+                "Continue working on the task using the evidence from the last iteration.".into();
+            continue;
         };
-        let Some(check) = check else {
-            if run.status != "cancelled" {
-                run.status = "budget".into();
-            }
+        let Some(next) = stop_check(app, run, root, command, deadline, cancelled).await? else {
             break;
         };
-        if check.starts_with("exit 0 ·") {
-            run.status = "done".into();
-            break;
-        }
-        let exit = check
-            .lines()
-            .next()
-            .unwrap_or("unknown exit")
-            .split(" ·")
-            .next()
-            .unwrap_or("unknown exit");
-        let mut tail: Vec<_> = check.lines().rev().take(60).collect();
-        tail.reverse();
-        prompt = format!(
-            "the stop check `{command}` failed ({exit}):\n{}\nKeep working until it passes.",
-            tail.join("\n")
-        );
+        prompt = next;
     }
     Ok(())
+}
+
+async fn judge_iteration(
+    app: &mut App,
+    run: &mut JobRun,
+    state: &super::JudgeState,
+    deadline: Instant,
+    cancelled: &mut watch::Receiver<bool>,
+) -> Result<bool> {
+    let judgement = tokio::select! {
+        judgement = super::judge(app, state) => judgement,
+        () = tokio::time::sleep_until(deadline.into()) => {
+            run.status = "budget".into();
+            return Ok(true);
+        }
+        _ = cancelled.changed() => {
+            run.status = "cancelled".into();
+            return Ok(true);
+        }
+    };
+    writeln!(
+        run.summary,
+        "[judge] {}",
+        serde_json::to_string(&judgement)?
+    )?;
+    run.cost_usd += app.db.conn().query_row(
+        "SELECT COALESCE(cost, 0) FROM cache.decisions WHERE session_id = ?1 AND tool = 'job' AND action = 'judge' ORDER BY id DESC LIMIT 1",
+        [&run.id], |row| row.get::<_, f64>(0),
+    ).unwrap_or(0.0);
+    let finished = super::judging::apply(run, &judgement);
+    app.db.save_job_run(run)?;
+    Ok(finished)
+}
+
+async fn stop_check(
+    app: &mut App,
+    run: &mut JobRun,
+    root: &Path,
+    command: &str,
+    deadline: Instant,
+    cancelled: &mut watch::Receiver<bool>,
+) -> Result<Option<String>> {
+    if !crate::workspace::shell::write_confinement_available() {
+        run.status = "parked".into();
+        writeln!(
+            run.summary,
+            "{PARKED}\nstop check needs shell write confinement: {command}"
+        )?;
+        return Ok(None);
+    }
+    let args = serde_json::json!({"cmd": command, "timeout_s": 600}).to_string();
+    let db_path = app.space.db_path();
+    let check = tokio::select! {
+        output = crate::workspace::shell::action(app.workspace.as_deref().expect("job workspace"), Some(&db_path), Some(root), "shell_run", &args, false) => Some(output),
+        () = tokio::time::sleep_until(deadline.into()) => None,
+        _ = cancelled.changed() => {
+            run.status = "cancelled".into();
+            None
+        }
+    };
+    let Some(check) = check else {
+        if run.status != "cancelled" {
+            run.status = "budget".into();
+        }
+        return Ok(None);
+    };
+    writeln!(run.summary, "stop check `{command}`:\n{check}")?;
+    if check.starts_with("exit 0 ·") {
+        run.status = "done".into();
+        return Ok(None);
+    }
+    let exit = check
+        .lines()
+        .next()
+        .unwrap_or("unknown exit")
+        .split(" ·")
+        .next()
+        .unwrap_or("unknown exit");
+    let mut tail: Vec<_> = check.lines().rev().take(60).collect();
+    tail.reverse();
+    Ok(Some(format!(
+        "the stop check `{command}` failed ({exit}):\n{}\nKeep working until it passes.",
+        tail.join("\n")
+    )))
 }
 
 /// Queue an immediate run for the lock-owning daemon (or the next run-due pass).

@@ -24,7 +24,7 @@ const LABELS: [&str; 12] = [
     "max iterations",
     "max cost USD",
     "max wall minutes",
-    "notify (always|on_failure)",
+    "notify (always|on_failure|on_change)",
 ];
 
 #[derive(Default)]
@@ -80,6 +80,7 @@ impl JobForm {
                 .parse()
                 .context("wall minutes must be an integer")?,
             notify: value[11].clone(),
+            ..JobSpec::default()
         };
         spec.validate()?;
         Ok(spec)
@@ -171,8 +172,9 @@ pub fn render(frame: &mut Frame, app: &AppView) {
                 let run = app.jobs_popup.runs.iter().find(|run| run.job_id == job.id);
                 let status = run.map_or("never run", |run| run.status.as_str());
                 ListItem::new(Line::from(format!(
-                    "{} · {} · {} · {status}{}",
+                    "{} · {} · {} · {} · {status}{}",
                     job.spec.name,
+                    job.spec.kind,
                     job.spec.trigger_kind,
                     if job.enabled == 1 {
                         "enabled"
@@ -204,15 +206,28 @@ pub fn render(frame: &mut Frame, app: &AppView) {
     if let Some(job) = app.jobs_popup.jobs.get(app.jobs_popup.selected)
         && let Some(run) = app.jobs_popup.runs.iter().find(|run| run.job_id == job.id)
     {
-        frame.render_widget(
-            Paragraph::new(format!(
-                "{}\n{}",
-                run.branch.as_deref().unwrap_or("non-git copy"),
-                run.summary
-            ))
-            .style(dim),
-            parts[1],
-        );
+        frame.render_widget(Paragraph::new(run_details(job, run)).style(dim), parts[1]);
+    }
+}
+
+fn run_details(job: &Job, run: &JobRun) -> String {
+    let location = if job.spec.kind == "research" {
+        "research"
+    } else {
+        run.branch.as_deref().unwrap_or("non-git copy")
+    };
+    let judgement = (job.spec.kind == "agent")
+        .then(|| {
+            run.summary
+                .lines()
+                .rev()
+                .find(|line| line.starts_with("[judge] "))
+        })
+        .flatten();
+    if let Some(judgement) = judgement {
+        format!("{location}\n{judgement}\n{}", run.summary)
+    } else {
+        format!("{location}\n{}", run.summary)
     }
 }
 

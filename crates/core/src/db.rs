@@ -429,6 +429,10 @@ pub fn migrate_cache(conn: &Connection, schema: &str) -> Result<()> {
             result_chars INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS {schema}.tool_events_at ON tool_events(at);
+        CREATE TABLE IF NOT EXISTS {schema}.watch_jobs (
+            watch_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS {schema}.decisions (
             id INTEGER PRIMARY KEY,
             at TEXT,
@@ -835,7 +839,8 @@ impl Db {
                 interval_minutes INTEGER NOT NULL, run_at TEXT, stop_command TEXT,
                 max_iters INTEGER NOT NULL, max_cost_usd REAL NOT NULL,
                 max_wall_minutes INTEGER NOT NULL, notify TEXT NOT NULL,
-                enabled INTEGER NOT NULL, last_run_at TEXT, updated_at TEXT NOT NULL
+                enabled INTEGER NOT NULL, last_run_at TEXT, updated_at TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'agent', topic TEXT
             );
             CREATE TABLE IF NOT EXISTS job_runs (
                 id TEXT PRIMARY KEY, job_id TEXT NOT NULL, device_id TEXT NOT NULL,
@@ -891,6 +896,17 @@ impl Db {
                 PRIMARY KEY (peer_id, table_name)
             );",
         )?;
+        for (column, ddl) in [
+            (
+                "kind",
+                "ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent'",
+            ),
+            ("topic", "ALTER TABLE jobs ADD COLUMN topic TEXT"),
+        ] {
+            if !has_column(&self.conn, "jobs", column)? {
+                self.conn.execute(ddl, [])?;
+            }
+        }
         // user_version-gated migrations. Legacy dbs (version 0) get the
         // column adds they may still lack — guarded by `PRAGMA table_info`,
         // the only tolerated "duplicate" — plus a one-time move of the
@@ -1051,6 +1067,7 @@ impl Db {
             "UPDATE sessions SET space_id = ?1 WHERE space_id IS NULL",
             [&default_id],
         )?;
+        self.migrate_watch_jobs()?;
         Ok(())
     }
 
@@ -2207,7 +2224,29 @@ impl Db {
              VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
             (&id, space_id, topic, interval_hours, session_id, &now),
         )?;
+        self.migrate_watch_jobs()?;
         Ok(id)
+    }
+
+    /// Keep the legacy watch sync surface unchanged. Reusing the watch UUID
+    /// makes migration idempotent even after cache loss or a sync import.
+    pub fn migrate_watch_jobs(&self) -> Result<()> {
+        let device = self.device_id()?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO jobs
+             (id, space_id, session_id, device_id, name, prompt, root, mode,
+              trigger_kind, interval_minutes, max_iters, max_cost_usd, max_wall_minutes,
+              notify, enabled, last_run_at, updated_at, kind, topic)
+             SELECT id, space_id, session_id, ?1, topic, topic, '', 'agent',
+              'interval', interval_hours * 60, 5, 1.0, 30, 'on_change', 1,
+              last_run_at, COALESCE(updated_at, ?2), 'research', topic FROM watches",
+            (&device, Utc::now().to_rfc3339()),
+        )?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO cache.watch_jobs (watch_id, job_id) SELECT id, id FROM watches",
+            [],
+        )?;
+        Ok(())
     }
 
     pub fn list_watches(&self, space_id: &str) -> Result<Vec<Watch>> {
@@ -2230,10 +2269,11 @@ impl Db {
 
     /// All visible jobs, including read-only jobs owned by other devices.
     pub fn list_jobs(&self) -> Result<Vec<crate::jobs::Job>> {
+        self.migrate_watch_jobs()?;
         let mut statement = self.conn.prepare(
             "SELECT id, space_id, session_id, device_id, name, prompt, root, mode,
              trigger_kind, interval_minutes, run_at, stop_command, max_iters,
-             max_cost_usd, max_wall_minutes, notify, enabled, last_run_at, updated_at
+             max_cost_usd, max_wall_minutes, notify, enabled, last_run_at, updated_at, kind, topic
              FROM jobs WHERE enabled >= 0 ORDER BY name, id",
         )?;
         Ok(statement
@@ -2244,6 +2284,8 @@ impl Db {
                     session_id: row.get(2)?,
                     device_id: row.get(3)?,
                     spec: crate::jobs::JobSpec {
+                        kind: row.get(19)?,
+                        topic: row.get(20)?,
                         name: row.get(4)?,
                         prompt: row.get(5)?,
                         root: row.get(6)?,
@@ -2269,14 +2311,35 @@ impl Db {
     pub fn save_job(&self, job: &crate::jobs::Job) -> Result<()> {
         let spec = &job.spec;
         self.conn.execute(
-            "INSERT INTO jobs VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
+            "INSERT INTO jobs (id, space_id, session_id, device_id, name, prompt, root, mode,
+             trigger_kind, interval_minutes, run_at, stop_command, max_iters, max_cost_usd,
+             max_wall_minutes, notify, enabled, last_run_at, updated_at, kind, topic)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
              ON CONFLICT(id) DO UPDATE SET session_id=?3, enabled=?17,
              last_run_at=?18, updated_at=?19",
-            rusqlite::params![job.id, job.space_id, job.session_id, job.device_id,
-                spec.name, spec.prompt, spec.root, spec.mode, spec.trigger_kind,
-                spec.interval_minutes, spec.run_at, spec.stop_command, spec.max_iters,
-                spec.max_cost_usd, spec.max_wall_minutes, spec.notify, job.enabled,
-                job.last_run_at, job.updated_at],
+            rusqlite::params![
+                job.id,
+                job.space_id,
+                job.session_id,
+                job.device_id,
+                spec.name,
+                spec.prompt,
+                spec.root,
+                spec.mode,
+                spec.trigger_kind,
+                spec.interval_minutes,
+                spec.run_at,
+                spec.stop_command,
+                spec.max_iters,
+                spec.max_cost_usd,
+                spec.max_wall_minutes,
+                spec.notify,
+                job.enabled,
+                job.last_run_at,
+                job.updated_at,
+                spec.kind,
+                spec.topic
+            ],
         )?;
         Ok(())
     }
@@ -2353,6 +2416,10 @@ impl Db {
             "UPDATE watches SET last_run_at = ?2, updated_at = ?3 WHERE id = ?1",
             (id, now_rfc3339, Utc::now().to_rfc3339()),
         )?;
+        self.conn.execute(
+            "UPDATE jobs SET last_run_at = ?2, updated_at = ?2 WHERE id = ?1 AND kind = 'research'",
+            (id, now_rfc3339),
+        )?;
         Ok(())
     }
 
@@ -2360,6 +2427,10 @@ impl Db {
     pub fn set_watch_interval(&self, id: &str, interval_hours: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE watches SET interval_hours = ?2, updated_at = ?3 WHERE id = ?1",
+            (id, interval_hours, Utc::now().to_rfc3339()),
+        )?;
+        self.conn.execute(
+            "UPDATE jobs SET interval_minutes = ?2 * 60, updated_at = ?3 WHERE id = ?1 AND kind = 'research'",
             (id, interval_hours, Utc::now().to_rfc3339()),
         )?;
         Ok(())
@@ -2373,10 +2444,18 @@ impl Db {
             "UPDATE watches SET session_id = ?2, updated_at = ?3 WHERE id = ?1",
             (id, session_id, Utc::now().to_rfc3339()),
         )?;
+        self.conn.execute(
+            "UPDATE jobs SET session_id = ?2, updated_at = ?3 WHERE id = ?1 AND kind = 'research'",
+            (id, session_id, Utc::now().to_rfc3339()),
+        )?;
         Ok(())
     }
 
     pub fn delete_watch(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET enabled = -1, updated_at = ?2 WHERE id = ?1 AND kind = 'research'",
+            (id, Utc::now().to_rfc3339()),
+        )?;
         self.conn
             .execute("DELETE FROM watches WHERE id = ?1", [id])?;
         self.tombstone("watches", id)?;

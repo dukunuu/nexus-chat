@@ -369,7 +369,13 @@ impl App {
         all: bool,
         quiet: bool,
     ) -> Result<Vec<(String, ResearchOutcome)>> {
-        let watches = self.db.list_all_watches().context("listing watches")?;
+        let _lock = crate::jobs::DaemonLock::acquire(&self.space.root)?;
+        let jobs = self.db.list_jobs().context("listing research jobs")?;
+        let watches: Vec<Watch> = jobs
+            .iter()
+            .filter(|job| job.spec.kind == "research")
+            .map(crate::jobs::research::watch)
+            .collect();
         let targets: Vec<Watch> = match (watch_ref, all) {
             (Some(r), _) => {
                 let w = watches
@@ -381,7 +387,11 @@ impl App {
                 vec![w.clone()]
             }
             (None, true) => watches,
-            (None, false) => crate::app::watches::due_watches(&watches, chrono::Utc::now()),
+            (None, false) => crate::jobs::due(&jobs, chrono::Utc::now(), &self.db.device_id()?)
+                .iter()
+                .filter(|job| job.spec.kind == "research")
+                .map(crate::jobs::research::watch)
+                .collect(),
         };
         if targets.is_empty() {
             bail!("no watches to run — `nexus watch list` shows them");
@@ -389,53 +399,18 @@ impl App {
         let mut ran = Vec::new();
         for w in targets {
             note(quiet, format!("watch: {} …", w.topic));
-            if !self.run_one_watch(&w) {
-                note(
-                    quiet,
-                    "  could not start (no session to run from?) — skipped",
-                );
-                continue;
+            let job = jobs
+                .iter()
+                .find(|job| job.id == w.id)
+                .context("research job missing")?;
+            let run = crate::jobs::run_with_app(self, job).await?;
+            if run.status != "done" {
+                bail!("watch {}: {} — {}", w.topic, run.status, run.summary);
             }
-            // Drain this watch's job to completion; its session is active
-            // during the run, so `research_headless`-style gate handling is
-            // not needed (watches are always ungated).
-            let mut report: Option<String> = None;
-            let mut error: Option<String> = None;
-            loop {
-                match self.next_event().await {
-                    AppEvent::Research(Some((session_id, space_id, space_name, update))) => {
-                        if let super::research::ResearchUpdate::Stage { label, detail } = &update {
-                            note(quiet, stage_content(label, detail));
-                        }
-                        match &update {
-                            super::research::ResearchUpdate::Done(Ok(text)) => {
-                                report = Some(text.clone());
-                            }
-                            super::research::ResearchUpdate::Done(Err(e)) => {
-                                error = Some(e.clone());
-                            }
-                            _ => {}
-                        }
-                        self.on_research_done(Some((session_id, space_id, space_name, update)));
-                    }
-                    AppEvent::Research(None) => break,
-                    _ => {}
-                }
-            }
-            let Some(report) = report else {
-                bail!(
-                    "{}",
-                    error.unwrap_or_else(|| "watch finished without a report".to_string())
-                );
-            };
-            // The watch row was repointed at its fresh session during
-            // `run_one_watch` — re-read it for the closing line.
+            let report = run.summary;
             let session = self
                 .db
-                .list_all_watches()
-                .ok()
-                .and_then(|ws| ws.into_iter().find(|x| x.id == w.id))
-                .and_then(|x| self.db.get_session(&x.session_id).ok().flatten())
+                .get_session(&run.id)?
                 .context("watch session vanished")?;
             ran.push((
                 w.topic,

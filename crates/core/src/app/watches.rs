@@ -1,5 +1,5 @@
-//! Standing research: `watches` re-run their topic's research on an
-//! interval, with no daemon — `due_watches` is checked once on app startup.
+//! Standing research jobs, with a startup fallback when no daemon is running.
+//! Legacy watch rows and the pure `due_watches` helper remain compatible.
 
 use chrono::{DateTime, Utc};
 use std::fmt::Write as _;
@@ -71,7 +71,12 @@ impl super::App {
             .db
             .create_watch(&self.active_space.id, topic, 24, &session.id)
         {
-            Ok(_) => self.push_status(format!("watching: {topic} (every 24h)")),
+            Ok(id) => {
+                let session_id = session.id.clone();
+                let _ = self.db.touch_watch(&id, &chrono::Utc::now().to_rfc3339());
+                let _ = crate::jobs::research::started(self, &id, &session_id);
+                self.push_status(format!("watching: {topic} (every 24h)"));
+            }
             Err(e) => self.push_status(format!("watch creation failed: {e}")),
         }
     }
@@ -92,12 +97,22 @@ impl super::App {
     /// start (e.g. no model configured) is silently skipped; it'll be
     /// retried on the next app open since `last_run_at` isn't touched.
     pub fn run_due_watches(&mut self) {
-        let Ok(all) = self.db.list_all_watches() else {
+        let Ok(lock) = crate::jobs::DaemonLock::acquire(&self.space.root) else {
             return;
         };
-        let due = due_watches(&all, chrono::Utc::now());
-        for w in due {
-            let _ = self.run_one_watch(&w);
+        let Ok(all) = self.db.list_jobs() else {
+            return;
+        };
+        let Ok(device) = self.db.device_id() else {
+            return;
+        };
+        for job in crate::jobs::due(&all, chrono::Utc::now(), &device) {
+            if job.spec.kind == "research"
+                && self.run_one_watch(&crate::jobs::research::watch(&job))
+            {
+                self.research_job_lock = Some(lock);
+                break;
+            }
         }
     }
 
@@ -146,6 +161,7 @@ impl super::App {
             {
                 let _ = self.db.set_watch_session(&w.id, &new_session.id);
                 let _ = self.db.touch_watch(&w.id, &chrono::Utc::now().to_rfc3339());
+                let _ = crate::jobs::research::started(self, &w.id, &new_session.id);
                 started = true;
             }
         }

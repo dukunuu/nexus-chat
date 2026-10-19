@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result, ensure};
+use sha2::{Digest as _, Sha256};
 
 const COPY_LIMIT: u64 = 200 * 1024 * 1024;
 
@@ -122,6 +123,31 @@ impl Tree {
             }
         }
         Ok(tree)
+    }
+
+    pub fn changes(&self) -> Result<String> {
+        if self.branch.is_none() {
+            return Ok(self
+                .copy_diff()?
+                .lines()
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join("\n"));
+        }
+        let tracked = git(&self.path, &["diff", "HEAD", "--stat", "--patch"])?;
+        let untracked = git(&self.path, &["ls-files", "--others", "--exclude-standard"])?;
+        let mut changes = String::from_utf8_lossy(&tracked.stdout).into_owned();
+        for path in String::from_utf8_lossy(&untracked.stdout).lines() {
+            let file = self.path.join(path);
+            if file.symlink_metadata()?.is_file() {
+                write!(changes, "new file {path}: ")?;
+                for byte in Sha256::digest(fs::read(file)?) {
+                    write!(changes, "{byte:02x}")?;
+                }
+                changes.push('\n');
+            }
+        }
+        Ok(changes)
     }
 
     pub fn finish(&self, name: &str, run_id: &str) -> Result<String> {

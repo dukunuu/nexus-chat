@@ -65,6 +65,7 @@ pub use snapshot::{
     CoreSnapshot, MessageSnapshot, ModelSnapshot, SessionSnapshot, SettingsSnapshot, TaskSnapshot,
 };
 pub use swarm::{SwarmUpdate, parse_persona_editor};
+pub use watches::due_watches;
 
 #[cfg(test)]
 use chat::split_inline_reasoning;
@@ -1049,6 +1050,7 @@ pub struct App {
     pub eval_approver: Option<Arc<dyn Approver>>,
     /// Unattended job gate, retained across toolbox refreshes.
     pub job_approver: Option<Arc<crate::jobs::JobApprover>>,
+    pub(crate) research_job_lock: Option<crate::jobs::DaemonLock>,
     /// Reply channel for the currently displayed approval request.
     pub pending_approval: Option<oneshot::Sender<Decision>>,
     /// The action waiting for a response from the interactive frontend.
@@ -1422,6 +1424,7 @@ impl App {
             interactive_approvals: false,
             eval_approver: None,
             job_approver: None,
+            research_job_lock: None,
             pending_approval: None,
             pending_approval_request: None,
             approval_queue: VecDeque::new(),
@@ -1532,7 +1535,8 @@ impl App {
         let seen = self.db.setting("jobs_seen").unwrap_or_default();
         let jobs = self.db.list_jobs()?;
         let mut newest = seen.clone();
-        for run in self.db.list_job_runs()? {
+        let runs = self.db.list_job_runs()?;
+        for run in &runs {
             let Some(finished) = &run.finished_at else {
                 continue;
             };
@@ -1543,12 +1547,16 @@ impl App {
             let Some(job) = jobs.iter().find(|job| job.id == run.job_id) else {
                 continue;
             };
-            if job.spec.notify == "on_failure" && run.status == "done" {
+            if run.status == "done"
+                && (job.spec.notify == "on_failure"
+                    || (job.spec.notify == "on_change"
+                        && !crate::jobs::notification_visible(&self.db, run, &runs)?))
+            {
                 continue;
             }
             self.unread.insert(run.id.clone());
             self.notifications.push_back(ChatNotification {
-                session_id: run.id,
+                session_id: run.id.clone(),
                 title: format!("job: {}", job.spec.name),
                 text: format!("{} · {}", run.status, run.summary),
                 success: run.status == "done",
@@ -1665,7 +1673,7 @@ impl App {
     }
 
     /// Every saved credential, for scrubbing traces and command output.
-    fn saved_secrets(&self) -> Vec<String> {
+    pub(crate) fn saved_secrets(&self) -> Vec<String> {
         [
             self.saved.openrouter_key.as_deref(),
             self.saved.openai_key.as_deref(),
@@ -2305,7 +2313,12 @@ impl App {
                     Some(rx) => rx.recv().await,
                     None => std::future::pending().await,
                 }
-            } => AppEvent::Research(r),
+            } => {
+                if let Some(event) = &r {
+                    crate::jobs::research::event(self, event).await;
+                }
+                AppEvent::Research(r)
+            },
             r = async {
                 match self.research_topic_rx.as_mut() {
                     Some(rx) => rx.recv().await,

@@ -286,6 +286,8 @@ pub const TABLES: &[TableSpec] = &[
             "enabled",
             "last_run_at",
             "updated_at",
+            "kind",
+            "topic",
         ],
         apply_columns: &[
             "id",
@@ -307,6 +309,8 @@ pub const TABLES: &[TableSpec] = &[
             "enabled",
             "last_run_at",
             "updated_at",
+            "kind",
+            "topic",
         ],
         pk: &["id"],
         cursor: Cursor::UpdatedAt,
@@ -1120,6 +1124,11 @@ fn apply_row(
     match spec.cursor {
         Cursor::UpdatedAt if spec.name == "spaces" => apply_space(db, space, row),
         Cursor::UpdatedAt if spec.name == "files" => apply_file(db, row),
+        Cursor::UpdatedAt if spec.name == "jobs" && row.get("kind").is_none() => {
+            let mut row = row.clone();
+            row["kind"] = "agent".into();
+            apply_lww(db, spec, &row)
+        }
         Cursor::UpdatedAt => apply_lww(db, spec, row),
         Cursor::Tuple(_) | Cursor::AutoId => Ok(if apply_append(db, spec, row)? {
             LwwOutcome::Applied

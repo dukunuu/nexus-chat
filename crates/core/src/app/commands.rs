@@ -282,6 +282,7 @@ pub fn command_score(c: &Command, needle: &str) -> Option<i32> {
 /// plain (strings, bools, optionals, [`FilesTab`](super::FilesTab)), so the
 /// seam itself is the wire type; no mirror needed.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::large_enum_variant)] // Keep the infrequent job form's existing command payload.
 pub enum AppCommand {
     /// `/quit` — exit the app.
     Quit,
@@ -553,7 +554,9 @@ impl App {
             AppCommand::OpenJobs => self.collect_job_notifications()?,
             AppCommand::CreateJob { mut spec } => {
                 spec.validate()?;
-                spec.root = self.validate_job_root(&spec.root)?;
+                if spec.kind == "agent" {
+                    spec.root = self.validate_job_root(&spec.root)?;
+                }
                 let job = crate::jobs::Job {
                     id: uuid::Uuid::new_v4().to_string(),
                     space_id: self.active_space.id.clone(),
