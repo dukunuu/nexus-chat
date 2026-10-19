@@ -234,6 +234,42 @@ pub(super) fn push_skill(
     out.push(Line::from(""));
 }
 
+/// A command the user ran with `!`: the command and how it ended, then the
+/// head of its output (the full output stays in the row).
+pub(super) fn push_user_command(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) {
+    const MAX_OUTPUT_LINES: usize = 12;
+    let row: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
+    let cmd = row["cmd"].as_str().unwrap_or_default();
+    let outcome = nexus_core::app::user_command_outcome(&row);
+    let you = Style::default().fg(theme.accent);
+    out.push(style::event_head(
+        glyph::YOU,
+        you,
+        format!("$ {cmd}{}{outcome}", style::SEP),
+        you,
+    ));
+    let output = row["output"].as_str().unwrap_or_default().trim_end();
+    if !output.is_empty() {
+        let meta = Style::default().fg(theme.fg_dim);
+        let lines = wrap_plain(output, width.saturating_sub(2));
+        for line in lines.iter().take(MAX_OUTPUT_LINES) {
+            out.push(style::event_body(line, meta));
+        }
+        if lines.len() > MAX_OUTPUT_LINES {
+            out.push(style::event_body(
+                &format!("… {} more lines", lines.len() - MAX_OUTPUT_LINES),
+                meta,
+            ));
+        }
+    }
+    out.push(Line::from(""));
+}
+
 /// A transient row while a compaction request runs. Deliberately not a
 /// `Message`: failed or cancelled jobs must vanish without leaving a fake
 /// conversation turn in the database.

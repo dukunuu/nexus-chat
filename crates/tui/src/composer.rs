@@ -17,11 +17,39 @@ use anyhow::Result;
 use ratatui::style::{Color, Style};
 use tui_textarea::{CursorMove, TextArea};
 
-use nexus_core::app::{AppCommand, Match, Popup};
+use nexus_core::app::{AppCommand, Match, PendingEditor, Popup};
 
 use crate::app_view::AppView;
 
 const COMPOSER_MULTI_CLICK: Duration = Duration::from_millis(400);
+
+/// What a composer line starting with `!` asks to run.
+#[derive(Debug, PartialEq, Eq)]
+enum UserCommand {
+    /// `!` (or `!tty`) with nothing after it.
+    Empty,
+    /// Output captured into the conversation.
+    Captured(String),
+    /// Gets the real terminal: `!tty <cmd>`, or a `sudo`/`doas`/`su`/`pkexec`/`ssh` command.
+    Interactive(String),
+}
+
+/// Parse a `!` line; `None` means an ordinary message.
+fn parse_user_command(text: &str) -> Option<UserCommand> {
+    let cmd = text.trim().strip_prefix('!')?.trim();
+    let tty = cmd
+        .strip_prefix("tty")
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+    Some(match (tty, cmd.split_whitespace().next()) {
+        (Some(rest), _) if rest.trim().is_empty() => UserCommand::Empty,
+        (Some(rest), _) => UserCommand::Interactive(rest.trim().to_string()),
+        (None, None) => UserCommand::Empty,
+        (None, Some("sudo" | "doas" | "su" | "pkexec" | "ssh")) => {
+            UserCommand::Interactive(cmd.to_string())
+        }
+        (None, Some(_)) => UserCommand::Captured(cmd.to_string()),
+    })
+}
 
 /// A composer `TextArea` with sane styling: no underlined cursor line, and a
 /// selection highlight that keeps the text readable (default is a blank white bg).
@@ -518,8 +546,9 @@ impl AppView {
     }
 
     /// Send the composer's current text (Enter): clear, then route through
-    /// `run_command` for `/`-commands or `Send` for plain messages. Domain
-    /// failure paths restore the text via `AppEvent::ComposerSet`.
+    /// `run_command` for `/`-commands, the user-command path for `!cmd`, or
+    /// `Send` for plain messages. Domain failure paths restore the text via
+    /// `AppEvent::ComposerSet`.
     pub fn submit(&mut self) -> Result<()> {
         self.recall = None;
         let text = self.input_text();
@@ -531,6 +560,19 @@ impl AppView {
         }
         if let Some(cmd) = text.strip_prefix('/') {
             self.run_command(cmd)?;
+        } else if let Some(command) = parse_user_command(text) {
+            match command {
+                UserCommand::Empty => {}
+                UserCommand::Captured(cmd) => self.execute(AppCommand::RunUserCommand { cmd })?,
+                UserCommand::Interactive(_) if self.core.is_streaming() => {
+                    self.push_status("wait — response still streaming");
+                    self.set_input(text);
+                }
+                // The event loop owns the terminal, so it runs this.
+                UserCommand::Interactive(cmd) => {
+                    self.pending_editor = Some(PendingEditor::UserCommand(cmd));
+                }
+            }
         } else {
             self.core.send_message(text.to_string())?;
         }
@@ -905,5 +947,50 @@ mod tests {
         assert_eq!(a.input_text(), "half-typed", "the draft comes back");
         a.recall_next();
         assert_eq!(a.input_text(), "half-typed");
+    }
+
+    #[test]
+    fn bang_lines_parse_into_user_commands() {
+        for (text, expected) in [
+            ("!ls", Some(UserCommand::Captured("ls".into()))),
+            (
+                "  ! cargo test  ",
+                Some(UserCommand::Captured("cargo test".into())),
+            ),
+            ("!tty vim x", Some(UserCommand::Interactive("vim x".into()))),
+            (
+                "!sudo make install",
+                Some(UserCommand::Interactive("sudo make install".into())),
+            ),
+            (
+                "!ssh host",
+                Some(UserCommand::Interactive("ssh host".into())),
+            ),
+            ("!ttyd", Some(UserCommand::Captured("ttyd".into()))),
+            ("!", Some(UserCommand::Empty)),
+            ("!tty ", Some(UserCommand::Empty)),
+            ("hello !x", None),
+        ] {
+            assert_eq!(parse_user_command(text), expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn submitting_bang_lines_never_sends_them_to_the_model() {
+        let mut a = test_app();
+        a.current_model = Some("a/one".into());
+        a.set_input("!");
+        a.submit().unwrap();
+        assert!(a.session.is_none());
+        assert!(a.core.messages.is_empty());
+        assert!(a.pending_editor.is_none());
+        a.set_input("!tty vim x");
+        a.submit().unwrap();
+        assert!(matches!(
+            a.pending_editor.take(),
+            Some(PendingEditor::UserCommand(cmd)) if cmd == "vim x"
+        ));
+        assert!(a.session.is_none());
+        assert!(a.input_text().is_empty());
     }
 }

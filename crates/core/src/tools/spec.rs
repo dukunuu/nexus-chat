@@ -223,7 +223,7 @@ impl ToolSpec {
 }
 
 pub(super) fn find(name: &str) -> Option<&'static ToolSpec> {
-    TOOLS.iter().copied().find(|tool| tool.name == name)
+    all_tools().find(|tool| tool.name == name)
 }
 
 pub(super) fn read_only(name: &str, args: &str) -> Option<bool> {
@@ -234,8 +234,7 @@ pub(super) fn read_only(name: &str, args: &str) -> Option<bool> {
                 .is_some_and(|action| action.read_only),
         );
     }
-    TOOLS
-        .iter()
+    all_tools()
         .flat_map(|tool| tool.actions)
         .find(|action| action.internal == name)
         .map(|action| action.read_only)
@@ -1030,6 +1029,58 @@ pub(super) static MEDIA: ToolSpec = ToolSpec {
     ],
 };
 
+pub(super) static PROPOSE_COMMAND: ToolSpec = ToolSpec {
+    name: "propose_command",
+    purpose: "Hand the user a command to run themselves in their own terminal: anything needing root, a password, or their interactive terminal. It is placed in their composer as !<cmd> and runs only when they press Enter; its output then appears in the conversation.",
+    selector: None,
+    params: &[
+        Param {
+            name: "cmd",
+            kind: Kind::Str,
+            doc: "exact shell command for the user to run",
+        },
+        Param {
+            name: "reason",
+            kind: Kind::Str,
+            doc: "one line on why it is needed, shown to the user",
+        },
+    ],
+    actions: &[ActionSpec {
+        name: "propose_command",
+        summary: "Propose a command for the user to run",
+        required: &["cmd", "reason"],
+        optional: &[],
+        read_only: true,
+        internal: "propose_command",
+    }],
+};
+
+pub(super) static REQUEST_WORKSPACE: ToolSpec = ToolSpec {
+    name: "request_workspace",
+    purpose: "Ask the user to switch this session into agent mode on a directory, which gives you the fs and shell workspace tools from your next turn. The user approves or denies.",
+    selector: None,
+    params: &[
+        Param {
+            name: "root",
+            kind: Kind::Str,
+            doc: "absolute path of the directory to work in",
+        },
+        Param {
+            name: "reason",
+            kind: Kind::Str,
+            doc: "one line on why you need it, shown to the user",
+        },
+    ],
+    actions: &[ActionSpec {
+        name: "request_workspace",
+        summary: "Request agent mode in a directory",
+        required: &["root", "reason"],
+        optional: &[],
+        read_only: false,
+        internal: "request_workspace",
+    }],
+};
+
 const TOOLS: &[&ToolSpec] = &[
     &SKILLS,
     &SCRIPTS,
@@ -1041,6 +1092,15 @@ const TOOLS: &[&ToolSpec] = &[
     &FILES,
     &MEDIA,
 ];
+
+/// Tools that hand a step to the user instead of acting. The frontend (a
+/// terminal UI, an approver) decides whether they are offered; they route
+/// through the same validation and read-only classes as `TOOLS`.
+const USER_BRIDGES: &[&ToolSpec] = &[&PROPOSE_COMMAND, &REQUEST_WORKSPACE];
+
+fn all_tools() -> impl Iterator<Item = &'static ToolSpec> {
+    TOOLS.iter().chain(USER_BRIDGES).copied()
+}
 
 #[cfg(test)]
 mod tests {

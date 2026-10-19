@@ -88,6 +88,7 @@ async fn run_loop(
     let mut theme_poll = tokio::time::interval(std::time::Duration::from_secs(2));
     loop {
         app.sync_approval_popup();
+        take_proposed_command(app);
         // Locally-queued UI feedback (status lines, composer restore,
         // viewport resets) applies before the draw so it lands on the same
         // frame as the action that caused it.
@@ -295,6 +296,11 @@ fn on_key(app: &mut AppView, terminal: &mut DefaultTerminal, k: KeyEvent) -> Res
                     }
                     app.refresh_scripts();
                 }
+                nexus_core::app::PendingEditor::UserCommand(cmd) => {
+                    let cwd = app.user_command_cwd();
+                    let (exit, started) = run_interactive_command(terminal, &cmd, &cwd)?;
+                    app.execute(AppCommand::RecordUserCommand { cmd, exit, started })?;
+                }
             }
         }
     }
@@ -387,23 +393,32 @@ fn ctrl_c(app: &mut AppView) -> Result<()> {
     Ok(())
 }
 
-/// Suspend the TUI, open `path` in `$EDITOR` (falling back to `vi`), then
-/// restore the terminal and force a full redraw (its contents are gone after
-/// the editor exits).
-fn edit_in_external_editor(terminal: &mut DefaultTerminal, path: &std::path::Path) -> Result<()> {
+/// A `propose_command` lands in the composer only when it is empty; a draft
+/// is never replaced, so the proposal shows as a status line instead.
+fn take_proposed_command(app: &mut AppView) {
+    let Some(cmd) = app.core.proposed_command.take() else {
+        return;
+    };
+    if app.input_text().is_empty() {
+        app.set_input(&cmd);
+    } else {
+        app.push_status(format!("proposed: {cmd}"));
+    }
+}
+
+/// Suspend the TUI, run `child` with the real terminal, then restore it and
+/// force a full redraw (its contents are gone after the child exits).
+fn with_terminal_suspended<T>(
+    terminal: &mut DefaultTerminal,
+    child: impl FnOnce() -> T,
+) -> Result<T> {
     let _ = crossterm::execute!(
         std::io::stdout(),
         crossterm::event::DisableMouseCapture,
         crossterm::event::DisableBracketedPaste
     );
     ratatui::restore();
-    let editor_raw = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-    let mut parts = editor_raw.split_whitespace();
-    let editor = parts.next().unwrap_or("vi");
-    let status = std::process::Command::new(editor)
-        .args(parts)
-        .arg(path)
-        .status();
+    let result = child();
     *terminal = ratatui::init();
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -411,6 +426,46 @@ fn edit_in_external_editor(terminal: &mut DefaultTerminal, path: &std::path::Pat
         crossterm::event::EnableBracketedPaste
     );
     terminal.clear()?;
+    Ok(result)
+}
+
+/// Hand the real terminal to an interactive `!` command (`!tty`, `sudo`,
+/// `ssh`, …) the way `$EDITOR` gets it: what the user types, passwords
+/// included, never passes through nexus. Its output stays on screen until
+/// the user presses Enter. Returns its exit code and whether it started.
+fn run_interactive_command(
+    terminal: &mut DefaultTerminal,
+    cmd: &str,
+    cwd: &std::path::Path,
+) -> Result<(Option<i32>, bool)> {
+    with_terminal_suspended(terminal, || {
+        let status = std::process::Command::new("sh")
+            .args(["-c", cmd])
+            .current_dir(cwd)
+            .status();
+        let started = status.is_ok();
+        let exit = status.ok().and_then(|status| status.code());
+        let outcome = nexus_core::app::user_command_outcome_label(exit, started);
+        print!("\n[{outcome}] press Enter to return to nexus");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let _ = std::io::stdin().read_line(&mut String::new());
+        (exit, started)
+    })
+}
+
+/// Suspend the TUI, open `path` in `$EDITOR` (falling back to `vi`), then
+/// restore the terminal and force a full redraw (its contents are gone after
+/// the editor exits).
+fn edit_in_external_editor(terminal: &mut DefaultTerminal, path: &std::path::Path) -> Result<()> {
+    let editor_raw = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let mut parts = editor_raw.split_whitespace();
+    let editor = parts.next().unwrap_or("vi");
+    let status = with_terminal_suspended(terminal, || {
+        std::process::Command::new(editor)
+            .args(parts)
+            .arg(path)
+            .status()
+    })?;
     match status {
         Ok(code) if code.success() => Ok(()),
         Ok(code) => {
@@ -1046,6 +1101,21 @@ mod tests {
         assert_eq!(app.popup, Popup::None);
         assert!(!app.should_quit);
         assert_eq!(app.input_text(), "keep this draft");
+    }
+
+    #[test]
+    fn proposed_command_fills_only_an_empty_composer() {
+        let mut app = test_app();
+        app.core.proposed_command = Some("!sudo make install".into());
+        take_proposed_command(&mut app);
+        assert_eq!(app.input_text(), "!sudo make install");
+        assert!(app.core.proposed_command.is_none());
+        app.set_input("keep this draft");
+        app.core.proposed_command = Some("!make".into());
+        take_proposed_command(&mut app);
+        assert_eq!(app.input_text(), "keep this draft");
+        assert!(app.core.proposed_command.is_none());
+        assert_eq!(app.last_status(), "proposed: !make");
     }
 
     #[test]

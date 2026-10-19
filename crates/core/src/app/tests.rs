@@ -110,9 +110,32 @@ async fn installed_session_grants_reset_on_refresh_and_mode_switches() {
         assert!(workspace.join("first").exists());
         if reset_mode {
             app.run_command("chat").unwrap();
-            assert!(app.approval_rx.is_none());
+            assert!(app.approval_rx.is_some());
             app.run_command(&format!("agent {}", workspace.display()))
                 .unwrap();
+            while app.pop_pending_event().is_some() {}
+            let toolbox = Arc::clone(&app.toolbox);
+            let regrant = tokio::spawn(async move {
+                toolbox
+                    .run(
+                        "fs",
+                        r#"{"action":"write","path":"regrant","content":"denied"}"#,
+                    )
+                    .await
+            });
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), app.next_event())
+                .await
+                .unwrap();
+            assert!(
+                matches!(event, AppEvent::Status(status) if status == "approval needed · fs write"),
+                "a grant made before /chat must not carry over"
+            );
+            app.execute(AppCommand::Approve {
+                decision: Decision::Deny,
+            })
+            .unwrap();
+            assert_eq!(regrant.await.unwrap().1, "blocked");
+            assert!(!workspace.join("regrant").exists());
         } else {
             app.refresh_toolbox();
         }
@@ -3903,4 +3926,364 @@ fn turn_cache_reports_the_turn_not_its_last_request() {
         (after - 2160.0 / 3600.0).abs() < 1e-9,
         "rate moved: {after}"
     );
+}
+
+fn user_command_app() -> App {
+    let mut app = app_with_key();
+    app.interactive_ui = true;
+    app
+}
+
+fn insert_chat_task(app: &mut App, session_id: &str) {
+    let abort = tokio::spawn(async {}).abort_handle();
+    app.chat_tasks.insert(
+        1,
+        ChatTask {
+            id: 1,
+            session_id: session_id.to_string(),
+            session_title: "chat".into(),
+            space_id: app.active_space.id.clone(),
+            model: "a/one".into(),
+            model_id: "a/one".into(),
+            backend: BackendTag::OpenRouter,
+            incognito: app.incognito,
+            buffer: String::new(),
+            thinking: String::new(),
+            tool_status: None,
+            usage: None,
+            usage_row_id: None,
+            started: std::time::Instant::now(),
+            thinking_idx: 0,
+            spinner_color: SpinnerColor::Green,
+            abort,
+        },
+    );
+}
+
+/// Drive `next_event` until the captured command lands, returning the last status.
+async fn finish_captured_command(app: &mut App) -> String {
+    let mut status = String::new();
+    loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), app.next_event())
+            .await
+            .unwrap();
+        match event {
+            AppEvent::Status(text) => status = text,
+            AppEvent::HistoryInvalidated => break,
+            _ => {}
+        }
+    }
+    while let Some(event) = app.pop_pending_event() {
+        if let AppEvent::Status(text) = event {
+            status = text;
+        }
+    }
+    status
+}
+
+#[tokio::test]
+async fn captured_user_command_stores_its_output_and_replays_as_a_user_message() {
+    let mut app = user_command_app();
+    let root = app.space.root.clone();
+    app.execute(AppCommand::RunUserCommand {
+        cmd: "echo hello; echo oops >&2; exit 3".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        app.last_status(),
+        "running: echo hello; echo oops >&2; exit 3"
+    );
+    assert_eq!(
+        finish_captured_command(&mut app).await,
+        "ran: echo hello; echo oops >&2; exit 3 · exit 3"
+    );
+    let row = app.messages.last().unwrap();
+    assert_eq!(row.role, "user_command");
+    let content: serde_json::Value = serde_json::from_str(&row.content).unwrap();
+    let cwd = app.user_command_cwd().display().to_string();
+    assert_eq!(content["cmd"], "echo hello; echo oops >&2; exit 3");
+    assert_eq!(content["cwd"], cwd.as_str());
+    assert_eq!(content["exit"], 3);
+    assert_eq!(content["output"], "hello\noops\n");
+    assert_eq!(content["interactive"], false);
+    let session = app.session.as_ref().unwrap().id.clone();
+    assert_eq!(
+        app.db.load_messages(&session).unwrap().last().unwrap().role,
+        "user_command"
+    );
+    let history = app.build_history();
+    let replay = history.last().unwrap();
+    assert_eq!(replay.role, "user");
+    assert_eq!(
+        replay.content,
+        format!(
+            "I ran `echo hello; echo oops >&2; exit 3` in {cwd} (exit 3):\n```\nhello\noops\n```"
+        )
+    );
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn captured_user_command_scrubs_saved_secrets() {
+    let mut app = user_command_app();
+    let root = app.space.root.clone();
+    app.saved.host_token = Some("hosttoken-0123456789abcdef".into());
+    app.execute(AppCommand::RunUserCommand {
+        cmd: "printf 'token=hosttoken-%s\\n' 0123456789abcdef".into(),
+    })
+    .unwrap();
+    finish_captured_command(&mut app).await;
+    let content: serde_json::Value =
+        serde_json::from_str(&app.messages.last().unwrap().content).unwrap();
+    assert_eq!(content["output"], "token=[REDACTED]\n");
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn user_commands_are_refused_headless_and_while_a_reply_streams() {
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    for command in [
+        AppCommand::RunUserCommand { cmd: "ls".into() },
+        AppCommand::RecordUserCommand {
+            cmd: "sudo true".into(),
+            exit: Some(0),
+            started: true,
+        },
+    ] {
+        app.execute(command).unwrap();
+        assert_eq!(app.last_status(), "!commands run only in the terminal UI");
+    }
+    assert!(app.session.is_none());
+    assert!(app.user_command_rx.is_none());
+    app.interactive_ui = true;
+    let session = app
+        .db
+        .create_session("chat", "a/one", &app.active_space.id, "chat")
+        .unwrap();
+    app.session = Some(session.clone());
+    insert_chat_task(&mut app, &session.id);
+    app.execute(AppCommand::RunUserCommand { cmd: "ls".into() })
+        .unwrap();
+    let (sets, status) = app.drain_ui_events();
+    assert_eq!(status, "wait — response still streaming");
+    assert_eq!(sets, vec!["!ls".to_string()]);
+    assert!(app.user_command_rx.is_none());
+    assert!(app.messages.is_empty());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn incognito_user_commands_stay_in_memory() {
+    let mut app = user_command_app();
+    let root = app.space.root.clone();
+    app.incognito = true;
+    app.execute(AppCommand::RunUserCommand {
+        cmd: "echo private".into(),
+    })
+    .unwrap();
+    finish_captured_command(&mut app).await;
+    app.execute(AppCommand::RecordUserCommand {
+        cmd: "ssh host".into(),
+        exit: Some(0),
+        started: true,
+    })
+    .unwrap();
+    let session = app.session.as_ref().unwrap().id.clone();
+    assert_eq!(
+        app.messages
+            .iter()
+            .filter(|message| message.role == "user_command")
+            .count(),
+        2
+    );
+    assert!(app.db.load_messages(&session).unwrap().is_empty());
+    assert!(app.db.get_session(&session).unwrap().is_none());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn recorded_interactive_command_keeps_only_its_command_and_exit_code() {
+    let mut app = user_command_app();
+    let root = app.space.root.clone();
+    app.execute(AppCommand::RecordUserCommand {
+        cmd: "sudo make install".into(),
+        exit: Some(1),
+        started: true,
+    })
+    .unwrap();
+    assert_eq!(app.last_status(), "ran: sudo make install · exit 1");
+    let row = app.messages.last().unwrap();
+    assert_eq!(row.role, "user_command");
+    let content: serde_json::Value = serde_json::from_str(&row.content).unwrap();
+    assert_eq!(content["exit"], 1);
+    assert_eq!(content["interactive"], true);
+    assert_eq!(
+        content["output"],
+        "(interactive — output not captured; paste anything relevant)"
+    );
+    let session = app.session.as_ref().unwrap().id.clone();
+    assert_eq!(app.db.load_messages(&session).unwrap().len(), 1);
+    let replay = app.build_history().pop().unwrap();
+    assert_eq!(replay.role, "user");
+    assert!(
+        replay.content.starts_with("I ran `sudo make install` in "),
+        "{}",
+        replay.content
+    );
+    assert!(
+        replay
+            .content
+            .ends_with("(exit 1):\n(interactive — output not captured; paste anything relevant)"),
+        "{}",
+        replay.content
+    );
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn propose_command_tool_call_sets_the_proposal_and_its_reason() {
+    let mut app = user_command_app();
+    let root = app.space.root.clone();
+    let session = app
+        .db
+        .create_session("chat", "a/one", &app.active_space.id, "chat")
+        .unwrap();
+    app.session = Some(session.clone());
+    insert_chat_task(&mut app, &session.id);
+    while app.pop_pending_event().is_some() {}
+    app.on_chat_event(
+        1,
+        StreamEvent::ToolCall {
+            id: "call_1".into(),
+            reasoning: None,
+            assistant_content: None,
+            name: "propose_command".into(),
+            arguments: r#"{"cmd":"sudo make install","reason":"installs into /usr/local"}"#
+                .into(),
+            result: "proposed to the user: !sudo make install · wait for them to run it; its output will appear in the conversation".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(app.proposed_command.as_deref(), Some("!sudo make install"));
+    assert_eq!(app.last_status(), "installs into /usr/local");
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn request_workspace_switches_to_agent_mode_only_after_an_approved_turn() {
+    for decision in [Decision::Allow, Decision::Deny] {
+        let mut app = app_with_key();
+        let root = app.space.root.clone();
+        let workspace = test_space().root;
+        std::fs::create_dir_all(&workspace).unwrap();
+        app.interactive_approvals = true;
+        app.refresh_toolbox();
+        assert!(
+            app.toolbox
+                .defs()
+                .iter()
+                .any(|def| def.name == "request_workspace")
+        );
+        let session = app
+            .db
+            .create_session("chat", "a/one", &app.active_space.id, "chat")
+            .unwrap();
+        app.session = Some(session.clone());
+        insert_chat_task(&mut app, &session.id);
+        while app.pop_pending_event().is_some() {}
+        let arguments = serde_json::json!({
+            "root": workspace.display().to_string(),
+            "reason": "to run the tests",
+        })
+        .to_string();
+        let toolbox = Arc::clone(&app.toolbox);
+        let call_arguments = arguments.clone();
+        let call =
+            tokio::spawn(async move { toolbox.run("request_workspace", &call_arguments).await });
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), app.next_event())
+            .await
+            .unwrap();
+        assert!(
+            matches!(event, AppEvent::Status(status) if status == "approval needed · request_workspace agent")
+        );
+        assert_eq!(
+            app.pending_approval_request.as_ref().unwrap().summary,
+            format!(
+                "switch this session to agent mode in {}\nto run the tests",
+                workspace.display()
+            )
+        );
+        app.execute(AppCommand::Approve { decision }).unwrap();
+        let (result, _) = call.await.unwrap();
+        app.on_chat_event(
+            1,
+            StreamEvent::ToolCall {
+                id: "call_1".into(),
+                reasoning: None,
+                assistant_content: None,
+                name: "request_workspace".into(),
+                arguments,
+                result,
+            },
+        )
+        .unwrap();
+        assert_eq!(app.work_mode, WorkMode::Chat, "never mid-turn");
+        app.on_chat_event(1, StreamEvent::Done).unwrap();
+        if decision == Decision::Allow {
+            assert_eq!(app.work_mode, WorkMode::Agent);
+            assert_eq!(
+                app.workspace.as_ref().unwrap().root(),
+                workspace.canonicalize().unwrap()
+            );
+        } else {
+            assert_eq!(app.work_mode, WorkMode::Chat);
+            assert!(app.workspace.is_none());
+        }
+        assert!(app.queued_workspace.is_none());
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn retry_keeps_user_command_rows_and_replaces_only_the_reply_after_them() {
+    let mut a = app_with_reply();
+    let sid = a.session.as_ref().unwrap().id.clone();
+    let row = r#"{"cmd":"cargo test","cwd":"/w","exit":101,"started":true,"output":"failed","interactive":false}"#;
+    a.db.add_user_command_message(&sid, row).unwrap();
+    a.messages = a.db.load_messages(&sid).unwrap();
+    a.run_command("retry").unwrap();
+    assert_eq!(
+        a.last_status(),
+        "nothing to retry — no reply after the last user message"
+    );
+    assert!(!a.is_streaming());
+    assert_eq!(a.db.load_messages(&sid).unwrap().len(), 3);
+
+    a.db.add_assistant_message(&sid, "fixed it", None, None, None, None, None, None)
+        .unwrap();
+    a.messages = a.db.load_messages(&sid).unwrap();
+    a.run_command("retry").unwrap();
+    let stored = a.db.load_messages(&sid).unwrap();
+    for messages in [&a.messages, &stored] {
+        let roles: Vec<_> = messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant", "user_command"]);
+    }
+    assert!(a.is_streaming());
+    assert!(
+        a.build_history()
+            .last()
+            .unwrap()
+            .content
+            .starts_with("I ran `cargo test` in /w (exit 101):")
+    );
+    a.stop_stream().unwrap();
 }

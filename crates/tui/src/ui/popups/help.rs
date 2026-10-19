@@ -24,6 +24,10 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
             ("Shift+Tab", "toggle chat / agent workspace"),
             ("Esc", "stop the reply, or clear the composer"),
             ("/  @", "command menu · reference a space file"),
+            (
+                "!cmd · !tty cmd",
+                "run a command yourself (output joins the chat) · on the real terminal",
+            ),
             ("Ctrl+A · Ctrl+X", "select all · cut"),
             ("Ctrl+Shift+C · Ctrl+V", "copy selection · paste"),
             ("Ctrl+Backspace", "delete the previous word"),

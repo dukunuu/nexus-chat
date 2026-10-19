@@ -16,7 +16,7 @@ use ratatui::widgets::Paragraph;
 use super::cards::{
     push_assistant_stored, push_assistant_streaming, push_compaction, push_compaction_pending,
     push_error, push_research_plan, push_research_stage, push_session_link, push_skill,
-    push_survey_section, push_tool_call, push_user_card,
+    push_survey_section, push_tool_call, push_user_card, push_user_command,
 };
 use super::welcome::render_welcome;
 use crate::app_view::AppView;
@@ -479,6 +479,8 @@ fn sync_cache(app: &mut AppView, width: usize) {
             );
         } else if m.role == "skill" {
             push_skill(&mut c.lines, &m.content, width, &theme);
+        } else if m.role == "user_command" {
+            push_user_command(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "compaction" {
             push_compaction(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "research_stage" {
@@ -880,6 +882,33 @@ mod tests {
         assert!(text.contains("skill web-search"), "{text}");
         assert!(text.contains("active for this session"), "{text}");
         assert!(!text.contains("SECRET BODY"), "{text}");
+    }
+
+    #[test]
+    fn user_command_card_shows_the_command_exit_code_and_at_most_twelve_lines() {
+        let mut a = test_app();
+        let output: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+        let content = serde_json::json!({
+            "cmd": "cargo test",
+            "cwd": "/w",
+            "exit": 101,
+            "output": output,
+            "interactive": false,
+        })
+        .to_string();
+        a.messages.push(msg("user_command", &content));
+        sync_cache(&mut a, 80);
+        let text = a
+            .history_cache
+            .lines
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("❯ $ cargo test · exit 101"), "{text}");
+        assert!(text.contains("  line 12\n"), "{text}");
+        assert!(!text.contains("line 13"), "{text}");
+        assert!(text.contains("… 8 more lines"), "{text}");
     }
 
     #[test]

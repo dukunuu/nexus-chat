@@ -128,6 +128,8 @@ pub struct ToolBox {
     pub require_approval: bool,
     /// Interactive permission provider; absent on headless paths.
     pub approver: Option<Arc<dyn Approver>>,
+    /// Offer `propose_command`: only a terminal UI has a composer to put it in.
+    pub interactive_ui: bool,
     /// App-managed destination for newly created or downloaded skills.
     pub skills_dir: PathBuf,
     /// Skill roots in precedence order. These include the app-managed root and
@@ -518,6 +520,7 @@ impl ToolBox {
             workspace: None,
             require_approval: false,
             approver: None,
+            interactive_ui: false,
             skill_dirs: vec![skills_dir.clone()],
             skills_dir,
             searxng_url,
@@ -793,6 +796,12 @@ impl ToolBox {
                 ],
             ));
             defs.push(def(&spec::SHELL, &["run", "log"]));
+        }
+        if self.interactive_ui {
+            defs.push(def(&spec::PROPOSE_COMMAND, &["propose_command"]));
+        }
+        if self.workspace.is_none() && self.approver.is_some() {
+            defs.push(def(&spec::REQUEST_WORKSPACE, &["request_workspace"]));
         }
         let has_session_sources = self.research_session_id.is_some();
         let has_citations = self.citation_count() > 0;
@@ -1073,6 +1082,59 @@ impl ToolBox {
             allow_unparseable = unparseable;
         }
         let (result, status) = match name {
+            "propose_command" => {
+                if !self.interactive_ui {
+                    return (
+                        "propose_command needs the terminal UI · tell the user the exact command and why instead".to_string(),
+                        "blocked".to_string(),
+                    );
+                }
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let cmd = v["cmd"].as_str().unwrap_or_default().trim();
+                // The command lands in the user's composer: one visible line,
+                // so nothing can hide below or behind what they read.
+                if cmd.is_empty() || cmd.chars().any(char::is_control) {
+                    return (
+                        "invalid tool arguments: propose_command takes one non-empty line without control characters · join steps with && or propose them one at a time".to_string(),
+                        "invalid arguments".to_string(),
+                    );
+                }
+                (
+                    format!(
+                        "proposed to the user: !{cmd} · wait for them to run it; its output will appear in the conversation"
+                    ),
+                    "Proposing a command…".to_string(),
+                )
+            }
+            "request_workspace" => {
+                let Some(approver) = self.approver.as_ref().filter(|_| self.workspace.is_none())
+                else {
+                    return (
+                        "request_workspace is only available in chat mode in the terminal UI · ask the user to run /agent <path>".to_string(),
+                        "blocked".to_string(),
+                    );
+                };
+                let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let root = v["root"].as_str().unwrap_or_default().trim();
+                let reason = v["reason"].as_str().unwrap_or_default().trim();
+                let request = ApprovalRequest {
+                    tool: "request_workspace".to_string(),
+                    action: "agent".to_string(),
+                    summary: format!("switch this session to agent mode in {root}\n{reason}"),
+                };
+                if approver.request(request).await == Decision::Deny {
+                    return (
+                        "denied by the user · ask what they want instead of retrying".to_string(),
+                        "blocked".to_string(),
+                    );
+                }
+                (
+                    format!(
+                        "approved: agent mode in {root} · workspace tools are available from your next turn"
+                    ),
+                    "Requesting a workspace…".to_string(),
+                )
+            }
             "shell_run" | "shell_log" => match &self.workspace {
                 None => (
                     "shell needs an agent workspace · switch with /agent <path>".to_string(),
@@ -1806,6 +1868,15 @@ impl ToolBox {
                 if calls.iter().any(|(tool, _)| tool == "batch") {
                     return (
                         "nested batch calls are not allowed — flatten them into one list"
+                            .to_string(),
+                        "Running batch…".to_string(),
+                    );
+                }
+                if calls.iter().any(|(tool, _)| {
+                    matches!(tool.as_str(), "propose_command" | "request_workspace")
+                }) {
+                    return (
+                        "propose_command and request_workspace cannot run inside batch — call them directly"
                             .to_string(),
                         "Running batch…".to_string(),
                     );
@@ -6970,6 +7041,22 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[tokio::test]
+    async fn propose_command_refuses_multiline_and_control_characters() {
+        let (mut toolbox, dir) = skills_toolbox();
+        toolbox.interactive_ui = true;
+        for cmd in ["make\nrm -rf x", "ls\u{1b}[2K"] {
+            let args = json!({ "cmd": cmd, "reason": "r" }).to_string();
+            let (result, _) = toolbox.run("propose_command", &args).await;
+            assert!(result.starts_with("invalid tool arguments"), "{result}");
+        }
+        let (result, _) = toolbox
+            .run("propose_command", r#"{"cmd":"make install","reason":"r"}"#)
+            .await;
+        assert!(result.starts_with("proposed to the user: !make install"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn head_tail_cap_keeps_both_ends_and_counts_omitted_characters() {
         let text = format!("{}{}{}", "H".repeat(300), "M".repeat(400), "T".repeat(300));
@@ -9209,5 +9296,120 @@ mod tests {
             )
             .await;
         assert!(result.contains("not cached"), "{result}");
+    }
+
+    fn bare_toolbox() -> ToolBox {
+        ToolBox::new(
+            PathBuf::new(),
+            None,
+            None,
+            "auto".to_string(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn tool_names(toolbox: &ToolBox) -> Vec<String> {
+        toolbox.defs().into_iter().map(|def| def.name).collect()
+    }
+
+    #[tokio::test]
+    async fn propose_command_is_offered_only_to_the_terminal_ui() {
+        let mut toolbox = bare_toolbox();
+        let args = r#"{"cmd":"sudo make install","reason":"installs to /usr/local"}"#;
+        assert!(!tool_names(&toolbox).contains(&"propose_command".to_string()));
+        assert_eq!(toolbox.run("propose_command", args).await.1, "blocked");
+        toolbox.interactive_ui = true;
+        let def = toolbox
+            .defs()
+            .into_iter()
+            .find(|def| def.name == "propose_command")
+            .unwrap();
+        assert_eq!(def.parameters["required"], json!(["cmd", "reason"]));
+        let (result, status) = toolbox.run("propose_command", args).await;
+        assert_eq!(
+            result,
+            "proposed to the user: !sudo make install · wait for them to run it; its output will appear in the conversation"
+        );
+        assert_eq!(classify_tool_result(&result, &status), None);
+        assert!(is_read_only_tool("propose_command", args));
+        let (result, status) = toolbox.run("propose_command", r#"{"cmd":"make"}"#).await;
+        assert!(
+            result.starts_with("missing required field: reason"),
+            "{result}"
+        );
+        assert_eq!(status, "invalid arguments");
+    }
+
+    #[test]
+    fn request_workspace_is_offered_only_in_chat_mode_with_an_approver() {
+        let (mut toolbox, dir) = fs_toolbox();
+        let offered = |toolbox: &ToolBox| tool_names(toolbox).contains(&"request_workspace".into());
+        toolbox.approver = Some(FakeApprover::new(Decision::Allow));
+        assert!(!offered(&toolbox), "agent mode already has a workspace");
+        toolbox.workspace = None;
+        assert!(offered(&toolbox));
+        toolbox.approver = None;
+        assert!(!offered(&toolbox), "headless toolboxes cannot ask");
+        assert!(!is_read_only_tool(
+            "request_workspace",
+            r#"{"root":"/x","reason":"y"}"#
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_workspace_asks_the_user_and_reports_the_decision() {
+        let mut toolbox = bare_toolbox();
+        let args = r#"{"root":"/src/app","reason":"to fix the failing test"}"#;
+        let (result, status) = toolbox.run("request_workspace", args).await;
+        assert!(
+            result.starts_with("request_workspace is only available"),
+            "{result}"
+        );
+        assert_eq!(status, "blocked");
+        let allow = FakeApprover::new(Decision::Allow);
+        toolbox.approver = Some(allow.clone());
+        let (result, status) = toolbox.run("request_workspace", args).await;
+        assert_eq!(
+            result,
+            "approved: agent mode in /src/app · workspace tools are available from your next turn"
+        );
+        assert_eq!(classify_tool_result(&result, &status), None);
+        assert_eq!(
+            allow.requests.lock().unwrap().as_slice(),
+            [ApprovalRequest {
+                tool: "request_workspace".into(),
+                action: "agent".into(),
+                summary: "switch this session to agent mode in /src/app\nto fix the failing test"
+                    .into(),
+            }]
+        );
+        toolbox.approver = Some(FakeApprover::new(Decision::Deny));
+        let (result, status) = toolbox.run("request_workspace", args).await;
+        assert_eq!(
+            result,
+            "denied by the user · ask what they want instead of retrying"
+        );
+        assert_eq!(status, "blocked");
+    }
+
+    #[tokio::test]
+    async fn batch_refuses_the_user_bridge_tools() {
+        let mut toolbox = bare_toolbox();
+        toolbox.interactive_ui = true;
+        let allow = FakeApprover::new(Decision::Allow);
+        toolbox.approver = Some(allow.clone());
+        for tool in ["propose_command", "request_workspace"] {
+            let args = json!({ "calls": [{ "tool": tool, "arguments": {
+                "cmd": "make", "root": "/x", "reason": "y"
+            } }] })
+            .to_string();
+            let (result, _) = toolbox.run("batch", &args).await;
+            assert!(result.contains("cannot run inside batch"), "{result}");
+        }
+        assert!(allow.requests.lock().unwrap().is_empty());
     }
 }

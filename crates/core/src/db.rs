@@ -1286,13 +1286,14 @@ impl Db {
         Ok(())
     }
 
-    /// IDs after the last user message, in load order; empty without a user or reply.
+    /// IDs after the last user message or `!` command row, in load order; empty
+    /// without one or a reply.
     pub fn reply_ids_after_last_user(&self, session_id: &str) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT id FROM messages
              WHERE session_id = ?1 AND (created_at, rowid) > (
                  SELECT created_at, rowid FROM messages
-                 WHERE session_id = ?1 AND role = 'user'
+                 WHERE session_id = ?1 AND role IN ('user', 'user_command')
                  ORDER BY created_at DESC, rowid DESC LIMIT 1
              ) ORDER BY created_at ASC, rowid ASC",
         )?;
@@ -1383,6 +1384,22 @@ impl Db {
     pub fn add_skill_message(&self, session_id: &str, content: &str) -> Result<String> {
         self.insert_message(
             session_id, "skill", content, None, None, None, None, None, None,
+        )
+    }
+
+    /// Insert a command the user ran with `!` (JSON: cmd, cwd, exit, output,
+    /// interactive), replayed to the model as a user message. Returns its id.
+    pub fn add_user_command_message(&self, session_id: &str, content: &str) -> Result<String> {
+        self.insert_message(
+            session_id,
+            "user_command",
+            content,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
     }
 

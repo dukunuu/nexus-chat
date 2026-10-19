@@ -301,6 +301,17 @@ pub enum AppCommand {
     Retry,
     /// `/undo` — restore the files the last agent turn changed.
     Undo,
+    /// `!cmd` in the composer — run it as the user, output captured into the
+    /// conversation (terminal UI only).
+    RunUserCommand { cmd: String },
+    /// An interactive `!` command the terminal UI already ran on the real
+    /// terminal — record its command and exit code, `None` when it was killed
+    /// or (`started: false`) never started (terminal UI only).
+    RecordUserCommand {
+        cmd: String,
+        exit: Option<i32>,
+        started: bool,
+    },
     /// `/copy` — the copy menu.
     OpenCopyMenu,
     /// `/skills` — the skills popup.
@@ -453,6 +464,7 @@ impl App {
     /// popup opens, the watch picker) before delegating here; headless
     /// consumers only ever send domain commands. `run_command` is the
     /// `/`-string parse front.
+    #[allow(clippy::too_many_lines)] // Long by design: one arm per command.
     pub fn execute(&mut self, cmd: AppCommand) -> Result<()> {
         match cmd {
             // View-only commands — the TUI's `AppView::execute` handles these
@@ -478,6 +490,10 @@ impl App {
             AppCommand::Send { text } => self.send_message(text)?,
             AppCommand::Retry => self.retry_last_reply()?,
             AppCommand::Undo => self.undo_last_turn()?,
+            AppCommand::RunUserCommand { cmd } => self.run_user_command(cmd)?,
+            AppCommand::RecordUserCommand { cmd, exit, started } => {
+                self.record_user_command(&cmd, exit, started)?;
+            }
             AppCommand::Cancel { task } => match task {
                 Some(id) => self.cancel_chat_task(id)?,
                 None => self.stop_stream()?,

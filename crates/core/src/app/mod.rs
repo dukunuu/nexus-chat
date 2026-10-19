@@ -50,7 +50,10 @@ mod transcribe;
 pub mod usage;
 mod watches;
 pub use backends::{Backends, composite_id};
-pub use chat::{MERMAID_PREVIEW_EXAMPLES, code_blocks, human_size, pick_greeting};
+pub use chat::{
+    MERMAID_PREVIEW_EXAMPLES, code_blocks, human_size, pick_greeting, user_command_outcome,
+    user_command_outcome_label,
+};
 pub use commands::{AppCommand, COMMANDS, Command, Match, command_score, fuzzy_score};
 pub use files::OcrUpdate;
 pub use research::{PlanQuestion, ResearchUpdate};
@@ -758,6 +761,9 @@ pub enum PendingEditor {
     AppFile(std::path::PathBuf),
     Persona(std::path::PathBuf),
     ScriptFile(std::path::PathBuf),
+    /// An interactive `!` command (`!tty <cmd>`, `sudo`, `ssh`, …) that gets
+    /// the real terminal; only its command and exit code are recorded.
+    UserCommand(String),
 }
 
 /// Ensures a child stream spawned by `OpenRouter::stream_chat` is cancelled
@@ -901,8 +907,15 @@ pub struct App {
     pub pending_approval: Option<oneshot::Sender<Decision>>,
     /// The action waiting for a response from the interactive frontend.
     pub pending_approval_request: Option<ApprovalRequest>,
-    /// Requests from the current interactive agent toolbox.
+    /// Requests from the current interactive toolbox (agent edits and commands,
+    /// or a chat-mode `request_workspace`).
     pub approval_rx: Option<mpsc::UnboundedReceiver<(ApprovalRequest, oneshot::Sender<Decision>)>>,
+    /// A `propose_command` (`!<cmd>`) the view moves into an empty composer.
+    pub proposed_command: Option<String>,
+    /// An approved `request_workspace` root, applied when its chat task finishes.
+    pub(crate) queued_workspace: Option<(ChatTaskId, String)>,
+    /// The running captured `!` command's result, at most one at a time.
+    user_command_rx: Option<mpsc::UnboundedReceiver<chat::UserCommandRun>>,
     /// Answer-length preference woven into the system prompt: "normal",
     /// "concise" (default), or "caveman".
     pub verbosity: String,
@@ -1239,6 +1252,9 @@ impl App {
             pending_approval: None,
             pending_approval_request: None,
             approval_rx: None,
+            proposed_command: None,
+            queued_workspace: None,
+            user_command_rx: None,
             verbosity: "concise".to_string(),
             memory_rx: None,
             compact_rx: None,
@@ -1367,11 +1383,9 @@ impl App {
                 == Some("on")
     }
 
-    fn open_trace_store(&mut self) -> Option<std::sync::Arc<crate::trace::TraceStore>> {
-        if let Some(store) = &self.trace_store {
-            return Some(store.clone());
-        }
-        let secrets = [
+    /// Every saved credential, for scrubbing traces and command output.
+    fn saved_secrets(&self) -> Vec<String> {
+        [
             self.saved.openrouter_key.as_deref(),
             self.saved.openai_key.as_deref(),
             self.saved.opencode_key.as_deref(),
@@ -1386,10 +1400,16 @@ impl App {
         .flatten()
         .filter(|secret| !secret.is_empty())
         .map(str::to_string)
-        .collect();
+        .collect()
+    }
+
+    fn open_trace_store(&mut self) -> Option<std::sync::Arc<crate::trace::TraceStore>> {
+        if let Some(store) = &self.trace_store {
+            return Some(store.clone());
+        }
         match crate::trace::TraceStore::open(
             &self.space.traces_dir(),
-            crate::trace::Scrubber::new(secrets),
+            crate::trace::Scrubber::new(self.saved_secrets()),
         ) {
             Ok(store) => {
                 let store = std::sync::Arc::new(store);
@@ -1558,10 +1578,11 @@ impl App {
         toolbox.supports_images = self.current_model_supports_images();
         toolbox.record_events = !self.incognito;
         toolbox.require_approval = self.work_mode == WorkMode::Agent;
+        toolbox.interactive_ui = self.interactive_ui;
         self.pending_approval = None;
         self.pending_approval_request = None;
         self.approval_rx = None;
-        if self.interactive_approvals && self.work_mode == WorkMode::Agent {
+        if self.interactive_approvals {
             let (sender, receiver) = mpsc::unbounded_channel();
             toolbox.approver = Some(Arc::new(ChannelApprover::new(sender)));
             self.approval_rx = Some(receiver);
@@ -1847,6 +1868,20 @@ impl App {
             },
             ev = self.chat_event_rx.recv() => {
                 AppEvent::Stream(ev.map(|event| (event.task_id, event.event)))
+            },
+            run = async {
+                match self.user_command_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                self.user_command_rx = None;
+                if let Some(run) = run
+                    && let Err(error) = self.finish_user_command(&run)
+                {
+                    self.push_status(format!("could not record the command: {error}"));
+                }
+                AppEvent::HistoryInvalidated
             },
             res = async {
                 match self.models_rx.as_mut() {

@@ -260,6 +260,8 @@ impl AppView {
     pub fn new(mut core: App) -> Self {
         core.interactive_ui = true;
         core.interactive_approvals = true;
+        // Rebuild with the approver and `propose_command` this frontend offers.
+        core.refresh_toolbox();
         // `App::new` queues the launch status line as an event; seed the
         // view's status field from it so the first frame reads correctly.
         let status = core
