@@ -329,7 +329,7 @@ Chained, first non-`Ask` wins:
    plus user allow rules (`allow shell "cargo test*"`). Deterministic,
    always first, cannot be overridden by a model.
 2. **`JevDecider`**: one `POST /api/alpha/decisions` call per wave,
-   `typesafe/jev-1.13` pinned. A compact state (task, root, last few steps,
+   `typesafe/jev-1.14` (configurable). A compact state (task, root, last few steps,
    the calls) and per call a `noul` "serves the task?" plus a `score` risk
    scale. Allow only if `p(in_scope)` and the risk position clear
    thresholds set by tier. Only available with an OpenRouter key; it is a

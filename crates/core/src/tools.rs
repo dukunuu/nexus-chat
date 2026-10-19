@@ -179,6 +179,8 @@ pub struct ToolBox {
     pub sandbox_available: bool,
     /// Session id and last user message for the current turn.
     pub decision_context: Arc<Mutex<(String, String)>>,
+    /// Last five completed call summaries, scoped to the live session.
+    pub(crate) decision_steps: Arc<Mutex<(String, Vec<String>)>>,
     /// Saved credentials used to redact decision summaries.
     pub decision_scrubber: crate::trace::Scrubber,
     prepared_decisions: Mutex<HashMap<u64, PreparedDecision>>,
@@ -788,6 +790,7 @@ impl ToolBox {
             auto_decider: None,
             sandbox_available: crate::workspace::shell::write_confinement_available(),
             decision_context: Arc::default(),
+            decision_steps: Arc::default(),
             decision_scrubber: crate::trace::Scrubber::new(Vec::new()),
             prepared_decisions: Mutex::default(),
             next_decision: AtomicU64::new(0),
@@ -1225,6 +1228,23 @@ impl ToolBox {
             result_chars: result.chars().count(),
         };
         self.record_tool_event(name, args, &outcome);
+        if self.auto_decider.is_some() {
+            let session = self
+                .decision_context
+                .lock()
+                .expect("decision context")
+                .0
+                .clone();
+            let mut recent = self.decision_steps.lock().expect("decision steps");
+            if recent.0 != session {
+                *recent = (session, Vec::new());
+            }
+            let summary = self.decision_scrubber.scrub(&format!("{name} {args}"));
+            recent.1.push(summary.chars().take(300).collect());
+            if recent.1.len() > 5 {
+                recent.1.remove(0);
+            }
+        }
         (result, status)
     }
 
@@ -1306,18 +1326,23 @@ impl ToolBox {
                 tool: request.tool.clone(),
                 action: request.action.clone(),
                 summary,
-                task: task.chars().take(2_000).collect(),
+                task: self
+                    .decision_scrubber
+                    .scrub(&task)
+                    .chars()
+                    .take(2_000)
+                    .collect(),
                 root,
                 effect,
                 class,
             });
             pending.push((index, request));
         }
-        let answers = self
+        let (answers, cost) = self
             .auto_decider
             .as_ref()
             .expect("auto policy")
-            .decide(&reqs)
+            .decide_with_cost(&reqs)
             .await;
         let conn = self
             .db_path
@@ -1334,6 +1359,13 @@ impl ToolBox {
                 )
             })
             .collect();
+        // Attribute the entire wave's reported cost to its first row, even if rules resolved it.
+        if let Some(cost) = cost
+            && let Some(conn) = &conn
+            && let Some(id) = prepared.first().and_then(|(_, decision)| decision.row_id)
+        {
+            let _ = crate::db::set_decision_cost(conn, id, cost);
+        }
         self.approve_auto_wave(&mut prepared).await;
         let mut tickets = self.prepared_decisions.lock().expect("prepared decisions");
         for (index, decision) in prepared {
@@ -6327,6 +6359,112 @@ mod tests {
                     })
                     .collect(),
             ))
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_records_reported_wave_cost_only_on_the_first_row_and_never_in_incognito() {
+        use crate::decider::{Availability, JevDecider, LlmDecider, ModelContext};
+        use crate::provider::openrouter::decider_mock::server;
+
+        for (llm, cost, malformed, record) in [
+            (false, Some(0.06), false, true),
+            (false, None, false, true),
+            (false, Some(0.0), false, true),
+            (false, Some(0.06), true, true),
+            (true, Some(0.06), false, true),
+            (true, Some(0.06), true, true),
+            (false, Some(0.06), false, false),
+        ] {
+            let mut body = if llm {
+                let text = if malformed {
+                    "not JSON".into()
+                } else {
+                    json!({"calls": [
+                        {"id": "c0", "in_scope": 0.99, "risk": 1},
+                        {"id": "c1", "in_scope": 0.99, "risk": 1}
+                    ]})
+                    .to_string()
+                };
+                json!({"choices": [{"message": {"content": text}}]})
+            } else {
+                let mut body = json!({"answers": {
+                    "c0_scope": {"noul": 0.99},
+                    "c0_risk": {"score": 1, "confidence": 0.95},
+                    "c1_scope": {"noul": 0.99},
+                    "c1_risk": {"score": 1, "confidence": 0.95}
+                }});
+                if malformed {
+                    body["answers"].as_object_mut().unwrap().remove("c1_risk");
+                }
+                body
+            };
+            body["usage"] = json!({"cost": cost});
+            let (provider, handle) = server(200, body.to_string(), Duration::ZERO, 1).await;
+            let (mut toolbox, dir) = fs_toolbox();
+            let db_path = dir.join("nexus.db");
+            let db = crate::db::Db::open(&db_path).unwrap();
+            toolbox.db_path = Some(db_path);
+            toolbox.record_events = record;
+            toolbox.require_approval = true;
+            toolbox.approver = Some(FakeApprover::new(Decision::Allow));
+            *toolbox.decision_context.lock().unwrap() =
+                ("session".into(), "write the files".into());
+            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let context = ModelContext {
+                session: toolbox.decision_context.clone(),
+                recent_steps: toolbox.decision_steps.clone(),
+                scrubber: crate::trace::Scrubber::new(Vec::new()),
+                sandbox_available: true,
+                config: crate::config::AgentConfig::default(),
+                availability: Arc::new(Availability::new(sender)),
+            };
+            let model: Arc<dyn Decider> = if llm {
+                Arc::new(LlmDecider {
+                    backend: Some((provider, "utility-model".into())),
+                    context,
+                })
+            } else {
+                Arc::new(JevDecider {
+                    provider: Some(provider),
+                    context,
+                })
+            };
+            toolbox.auto_decider = Some(Arc::new(Chain::new(
+                vec!["fs write src/**".into()],
+                vec![model],
+            )));
+            let calls = ["src/rule.rs", "one.rs", "two.rs"].map(|path| {
+                (
+                    "fs".into(),
+                    json!({"action": "write", "path": path, "content": "ok"}).to_string(),
+                )
+            });
+            let results = run_scheduled(&toolbox, &calls).await;
+            assert!(
+                results
+                    .iter()
+                    .all(|(result, _)| result.starts_with("wrote "))
+            );
+            let rows = db.decisions("session").unwrap();
+            if record {
+                assert_eq!(rows.len(), 3);
+                assert_eq!(rows[0].by, "rules");
+                assert_eq!(rows[0].cost, cost);
+                assert!(rows[1..].iter().all(|row| row.cost.is_none()));
+                if malformed {
+                    assert!(rows[1..].iter().all(|row| row.verdict == "ask"));
+                }
+            } else {
+                assert!(rows.is_empty());
+            }
+            let requests = handle.await.unwrap();
+            assert_eq!(requests.len(), 1);
+            if !llm {
+                assert_eq!(requests[0].1["state"]["calls"].as_array().unwrap().len(), 2);
+            }
+            drop(db);
+            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 

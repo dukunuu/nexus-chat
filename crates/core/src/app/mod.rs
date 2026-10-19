@@ -1079,6 +1079,8 @@ pub struct App {
     /// Device capability, also used for the visible auto-mode fallback badge.
     pub auto_sandbox_available: bool,
     decision_context: Arc<Mutex<(String, String)>>,
+    decider_availability: Arc<crate::decider::Availability>,
+    decider_status_rx: mpsc::UnboundedReceiver<String>,
     /// Active workspace, retained in chat for Shift+Tab until the session changes.
     pub workspace: Option<std::sync::Arc<crate::workspace::Workspace>>,
     pub incognito: bool,
@@ -1306,6 +1308,7 @@ impl App {
         let skill_dirs = crate::skills::app_skill_roots(&space.root);
         let skills = crate::skills::load_skills_from_dirs(&skill_dirs);
         let (chat_event_tx, chat_event_rx) = mpsc::unbounded_channel();
+        let (decider_status_tx, decider_status_rx) = mpsc::unbounded_channel();
         // Built with search disabled; `load_settings()` below reads the
         // persisted config (if any) and rebuilds this via `refresh_toolbox`.
         let toolbox = std::sync::Arc::new(
@@ -1346,6 +1349,8 @@ impl App {
             work_mode: WorkMode::Chat,
             auto_sandbox_available: crate::workspace::shell::write_confinement_available(),
             decision_context: Arc::default(),
+            decider_availability: Arc::new(crate::decider::Availability::new(decider_status_tx)),
+            decider_status_rx,
             workspace: None,
             incognito: false,
             incognito_img_dir: None,
@@ -1705,17 +1710,51 @@ impl App {
     }
 
     fn configure_auto_policy(&mut self, toolbox: &mut crate::tools::ToolBox) {
+        use crate::config::ModelDecider;
+        use crate::decider::{Chain, Decider, JevDecider, LlmDecider, ModelContext};
+
         toolbox.require_approval = self.work_mode.is_agent();
-        if self.work_mode == WorkMode::AgentAuto {
-            toolbox.auto_decider = Some(Arc::new(crate::decider::Chain::new(
-                self.saved.agent.allow.clone(),
-                Vec::new(),
-            )));
-        }
         toolbox.sandbox_available = self.auto_sandbox_available;
         self.decision_context = Arc::default();
         toolbox.decision_context = self.decision_context.clone();
         toolbox.decision_scrubber = crate::trace::Scrubber::new(self.saved_secrets());
+        if self.work_mode == WorkMode::AgentAuto {
+            let context = ModelContext {
+                session: self.decision_context.clone(),
+                recent_steps: toolbox.decision_steps.clone(),
+                scrubber: crate::trace::Scrubber::new(self.saved_secrets()),
+                sandbox_available: self.auto_sandbox_available,
+                config: self.saved.agent.clone(),
+                availability: self.decider_availability.clone(),
+            };
+            let has_key = self
+                .saved
+                .openrouter_key
+                .as_ref()
+                .is_some_and(|key| !key.trim().is_empty());
+            let following: Vec<Arc<dyn Decider>> = match self.saved.agent.selected_decider(has_key)
+            {
+                ModelDecider::Jev => vec![Arc::new(JevDecider {
+                    provider: self.backends.get(BackendTag::OpenRouter).cloned(),
+                    context,
+                })],
+                ModelDecider::Llm => {
+                    let backend = if self.memory_model.trim().is_empty() {
+                        self.current_model
+                            .as_deref()
+                            .and_then(|id| self.resolve_model_backend(id))
+                    } else {
+                        self.resolve_utility_model_backend(&self.memory_model)
+                    };
+                    vec![Arc::new(LlmDecider { backend, context })]
+                }
+                ModelDecider::Rules => Vec::new(),
+            };
+            toolbox.auto_decider = Some(Arc::new(Chain::new(
+                self.saved.agent.allow.clone(),
+                following,
+            )));
+        }
     }
 
     /// Rebuild the toolbox from the current `searxng_url`, so a settings
@@ -2094,6 +2133,7 @@ impl App {
                 self.show_next_approval();
                 AppEvent::Status("approval cancelled".to_string())
             },
+            Some(status) = self.decider_status_rx.recv() => AppEvent::Status(status),
             ev = self.chat_event_rx.recv() => {
                 AppEvent::Stream(ev.map(|event| (event.task_id, event.event)))
             },
@@ -2529,6 +2569,106 @@ fn first_line(result: &str) -> String {
         .unwrap_or("")
         .trim_end_matches(':')
         .to_string()
+}
+
+#[cfg(test)]
+mod model_decider_tests {
+    use super::*;
+    use crate::provider::openrouter::decider_mock::server;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn auto_uses_jev_in_incognito_without_logging_and_passes_recent_calls() {
+        let dir = std::env::temp_dir().join(format!("nexus-decider-{}", uuid::Uuid::new_v4()));
+        let root = dir.join("workspace");
+        let data = dir.join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let body = serde_json::json!({"answers": {
+            "c0_scope": {"noul": 0.99},
+            "c0_risk": {"score": 1.0, "confidence": 0.95}
+        }});
+        let (provider, handle) = server(200, body.to_string(), Duration::ZERO, 1).await;
+        let space = Space { root: data };
+        let mut app = App::new(Db::open(&space.db_path()).unwrap(), None, space);
+        app.saved.openrouter_key = Some("mock-decider-key".into());
+        app.backends.set(BackendTag::OpenRouter, provider);
+        app.work_mode = WorkMode::AgentAuto;
+        app.incognito = true;
+        app.workspace = Some(Arc::new(
+            crate::workspace::Workspace::open(&root, Vec::new()).unwrap(),
+        ));
+        app.refresh_toolbox();
+        *app.decision_context.lock().unwrap() = ("private-session".into(), "create new.rs".into());
+        app.toolbox.run("fs", r#"{"action":"list"}"#).await;
+        let (result, _) = app
+            .toolbox
+            .run("fs", r#"{"action":"write","path":"new.rs","content":"ok"}"#)
+            .await;
+        assert!(result.starts_with("wrote new.rs"), "{result}");
+        assert_eq!(std::fs::read_to_string(root.join("new.rs")).unwrap(), "ok");
+        assert!(app.db.decisions("private-session").unwrap().is_empty());
+        let requests = handle.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].1["state"]["task"], "create new.rs");
+        assert_eq!(requests[0].1["session_id"], "private-session");
+        assert!(
+            requests[0].1["state"]["recent_steps"][0]
+                .as_str()
+                .unwrap()
+                .contains("list")
+        );
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn llm_wiring_follows_utility_and_session_model_changes() {
+        let body = serde_json::json!({"choices": [{"message": {"content":
+            r#"{"calls":[{"id":"c0","in_scope":0.99,"risk":1}]}"#
+        }}]});
+        let (provider, handle) = server(200, body.to_string(), Duration::ZERO, 3).await;
+        let mut app = tests::app_with_key();
+        let dir = app.space.root.clone();
+        let root = dir.join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        app.saved.openrouter_key = None;
+        app.backends = Backends::default();
+        app.backends.set(BackendTag::Local, provider);
+        app.models[0].id = "utility".into();
+        app.models[1].id = "session".into();
+        for model in &mut app.models {
+            model.backend = BackendTag::Local;
+        }
+        app.current_model = Some("local:session".into());
+        app.memory_model.clear();
+        app.work_mode = WorkMode::AgentAuto;
+        app.incognito = true;
+        app.workspace = Some(Arc::new(
+            crate::workspace::Workspace::open(&root, Vec::new()).unwrap(),
+        ));
+        app.refresh_toolbox();
+        app.model_pick_target = ModelPickTarget::Memory;
+        app.pick_model("local:utility").unwrap();
+        for path in ["one", "two", "three"] {
+            let args = serde_json::json!({"action": "write", "path": path, "content": "ok"});
+            let (result, _) = app.toolbox.run("fs", &args.to_string()).await;
+            assert!(result.starts_with("wrote "), "{result}");
+            if path == "one" {
+                app.clear_memory_model().unwrap();
+            } else if path == "two" {
+                app.model_pick_target = ModelPickTarget::Session;
+                app.pick_model("local:utility").unwrap();
+            }
+        }
+        let requests = handle.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].1["model"], "utility");
+        assert_eq!(requests[1].1["model"], "session");
+        assert_eq!(requests[2].1["model"], "utility");
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 #[cfg(test)]

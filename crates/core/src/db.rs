@@ -441,7 +441,8 @@ pub fn migrate_cache(conn: &Connection, schema: &str) -> Result<()> {
             verdict TEXT,
             p_in_scope REAL,
             risk TEXT,
-            user_answer TEXT
+            user_answer TEXT,
+            cost REAL
         );",
     ))?;
     let mut stmt = conn.prepare(&format!("PRAGMA {schema}.table_info(session_workspaces)"))?;
@@ -451,6 +452,15 @@ pub fn migrate_cache(conn: &Connection, schema: &str) -> Result<()> {
     if !columns.iter().any(|column| column == "mode") {
         conn.execute_batch(&format!(
             "ALTER TABLE {schema}.session_workspaces ADD COLUMN mode TEXT"
+        ))?;
+    }
+    let mut stmt = conn.prepare(&format!("PRAGMA {schema}.table_info(decisions)"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|column| column == "cost") {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {schema}.decisions ADD COLUMN cost REAL"
         ))?;
     }
     Ok(())
@@ -469,6 +479,8 @@ pub struct DecisionRow {
     pub p_in_scope: Option<f64>,
     pub risk: Option<String>,
     pub user_answer: Option<String>,
+    /// Total wave cost on the first row only; other rows and unknown costs are NULL.
+    pub cost: Option<f64>,
 }
 
 /// Record a scrubbed policy decision on an attached cache connection.
@@ -503,6 +515,15 @@ pub fn insert_decision(
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Record a wave's total cost on its first decision row; other rows stay NULL.
+pub fn set_decision_cost(conn: &Connection, id: i64, cost: f64) -> Result<()> {
+    conn.execute(
+        "UPDATE cache.decisions SET cost = ?2 WHERE id = ?1",
+        (id, cost),
+    )?;
+    Ok(())
 }
 
 /// Fill in the user label after a single or combined approval prompt.
@@ -634,7 +655,7 @@ impl Db {
     /// Policy decisions for one session, in execution order.
     pub fn decisions(&self, session_id: &str) -> Result<Vec<DecisionRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, tool, action, class, summary, by, verdict, p_in_scope, risk, user_answer
+            "SELECT id, tool, action, class, summary, by, verdict, p_in_scope, risk, user_answer, cost
              FROM cache.decisions WHERE session_id = ?1 ORDER BY id",
         )?;
         let rows = stmt.query_map([session_id], |row| {
@@ -649,6 +670,7 @@ impl Db {
                 p_in_scope: row.get(7)?,
                 risk: row.get(8)?,
                 user_answer: row.get(9)?,
+                cost: row.get(10)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -3514,6 +3536,46 @@ mod tests {
         let db = Db { conn };
         db.set_session_workspace_mode("old", "auto").unwrap();
         assert_eq!(db.session_workspace_mode("old").as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn decision_cost_migration_is_nullable_guarded_and_preserves_existing_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "ATTACH DATABASE ':memory:' AS cache;
+             CREATE TABLE cache.decisions (id INTEGER PRIMARY KEY, summary TEXT);
+             INSERT INTO cache.decisions VALUES (1, 'legacy decision');",
+        )
+        .unwrap();
+        migrate_cache(&conn, "cache").unwrap();
+        migrate_cache(&conn, "cache").unwrap();
+        let row: (String, Option<f64>) = conn
+            .query_row(
+                "SELECT summary, cost FROM cache.decisions WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("legacy decision".into(), None));
+        set_decision_cost(&conn, 1, 0.06).unwrap();
+        migrate_cache(&conn, "cache").unwrap();
+        let cost: Option<f64> = conn
+            .query_row("SELECT cost FROM cache.decisions WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(cost, Some(0.06));
+        conn.execute(
+            "INSERT INTO cache.decisions (id, summary) VALUES (2, 'new decision')",
+            [],
+        )
+        .unwrap();
+        let cost: Option<f64> = conn
+            .query_row("SELECT cost FROM cache.decisions WHERE id = 2", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(cost, None);
     }
 
     #[test]

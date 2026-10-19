@@ -496,6 +496,14 @@ impl App {
                 self.push_status(format!("persona model: {id}"));
             }
         }
+        if self.work_mode == super::WorkMode::AgentAuto
+            && matches!(
+                self.model_pick_target,
+                ModelPickTarget::Session | ModelPickTarget::Memory
+            )
+        {
+            self.refresh_toolbox();
+        }
         Ok(())
     }
 
@@ -519,6 +527,9 @@ impl App {
         self.memory_model.clear();
         self.db.set_setting("memory_model", "")?;
         self.push_status("memory model cleared — extraction disabled".to_string());
+        if self.work_mode == super::WorkMode::AgentAuto {
+            self.refresh_toolbox();
+        }
         Ok(())
     }
 

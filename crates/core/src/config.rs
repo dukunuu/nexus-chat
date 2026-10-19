@@ -50,11 +50,48 @@ struct Config {
     agent: AgentConfig,
 }
 
-/// Explicit, machine-local allow rules for agent-auto policy.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Machine-local rules and model thresholds for agent-auto policy.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
     pub allow: Vec<String>,
+    pub decider: Option<ModelDecider>,
+    pub decider_model: String,
+    pub scope_threshold: f64,
+    pub risk_threshold: f64,
+    pub exec_risk_threshold: f64,
+}
+
+/// Model policy following the deterministic rules.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelDecider {
+    Jev,
+    Llm,
+    Rules,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            allow: Vec::new(),
+            decider: None,
+            decider_model: "typesafe/jev-1.14".into(),
+            scope_threshold: 0.90,
+            risk_threshold: 1.5,
+            exec_risk_threshold: 2.2,
+        }
+    }
+}
+
+impl AgentConfig {
+    pub(crate) fn selected_decider(&self, has_openrouter_key: bool) -> ModelDecider {
+        self.decider.unwrap_or(if has_openrouter_key {
+            ModelDecider::Jev
+        } else {
+            ModelDecider::Llm
+        })
+    }
 }
 
 /// Opt-in context experiments; defaults preserve the current behavior.

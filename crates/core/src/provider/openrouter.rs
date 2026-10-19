@@ -192,6 +192,20 @@ pub struct OpenRouter {
     local_config: Option<super::local::LocalConfig>,
 }
 
+/// Non-generative Decisions API answers, retaining optional provider cost.
+#[derive(Debug, Deserialize)]
+pub struct DecisionsResponse {
+    pub answers: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub usage: DecisionsUsage,
+}
+
+/// Usage reported by the Decisions API.
+#[derive(Debug, Default, Deserialize)]
+pub struct DecisionsUsage {
+    pub cost: Option<f64>,
+}
+
 /// Everything needed to generate a video: model, prompt, params, optional
 /// frame/reference images, and provider-specific options keyed by provider
 /// slug (e.g. `{"alibaba": {"parameters": {"video": "data:..."}}}`),
@@ -728,6 +742,26 @@ impl OpenRouter {
             ProviderFlavor::OpenAiCodex => crate::provider::BackendTag::Codex,
             ProviderFlavor::OpencodeGo => crate::provider::BackendTag::OpencodeGo,
         }
+    }
+
+    /// Submit one non-streaming wave to the `OpenRouter` Decisions API.
+    ///
+    /// # Errors
+    /// Returns provider, timeout, HTTP or response parsing errors.
+    pub async fn decide(&self, body: &serde_json::Value) -> Result<DecisionsResponse> {
+        anyhow::ensure!(self.is_openrouter(), "decisions require OpenRouter");
+        let base = self.api_base().trim_end_matches("/v1");
+        self.authenticate(self.client.post(format!("{base}/alpha/decisions")))
+            .timeout(std::time::Duration::from_secs(10))
+            .json(body)
+            .send()
+            .await
+            .context("decisions request")?
+            .error_for_status()
+            .context("decisions failed")?
+            .json()
+            .await
+            .context("parsing decisions")
     }
 
     /// Video gen is OpenRouter-only (not OpenAI/Codex/OpenCode).
@@ -3592,6 +3626,67 @@ fn codex_fallback_models() -> Vec<Model> {
             &[E::Low, E::Medium, E::High, E::XHigh],
         ),
     ]
+}
+
+#[cfg(test)]
+pub(crate) mod decider_mock {
+    use super::OpenRouter;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    pub(crate) async fn server(
+        status: u16,
+        body: String,
+        delay: Duration,
+        count: usize,
+    ) -> (
+        OpenRouter,
+        tokio::task::JoinHandle<Vec<(String, serde_json::Value)>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let mut provider = OpenRouter::openrouter_flavor("mock-decider-key".into());
+        provider.endpoint = Some(format!("http://{}/api/v1", listener.local_addr().unwrap()));
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..count {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut headers = String::new();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(stream.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                    headers.push_str(&line);
+                }
+                let mut request = vec![0; length];
+                stream.read_exact(&mut request).await.unwrap();
+                requests.push((headers, serde_json::from_slice(&request).unwrap()));
+                tokio::time::sleep(delay).await;
+                let headers = format!(
+                    "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .get_mut()
+                    .write_all(headers.as_bytes())
+                    .await
+                    .unwrap();
+                stream.get_mut().write_all(body.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (provider, handle)
+    }
 }
 
 #[cfg(test)]
