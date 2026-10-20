@@ -448,6 +448,9 @@ fn sync_cache(app: &mut AppView, width: usize) {
                 && cached.msg_count == app.messages.len()
             {
                 *c = cached;
+                // Reattach the restored cache; returning without this left
+                // the view empty for a frame and re-wrapped everything next.
+                app.history_cache = cache;
                 return;
             }
             // New session or stale cache — full reset.
@@ -1189,6 +1192,32 @@ mod tests {
         assert!(
             after.starts_with(&before[..before.len().min(24)]),
             "tool call landing above the viewport jumped: before={before:?} after={after:?}"
+        );
+    }
+
+    #[test]
+    fn switching_back_to_a_session_reuses_its_wrapped_history() {
+        let mut a = tall_tool_call_app();
+        let first =
+            a.db.create_session("first", "m", &a.active_space.id, "chat")
+                .unwrap();
+        let second =
+            a.db.create_session("second", "m", &a.active_space.id, "chat")
+                .unwrap();
+        a.session = Some(first.clone());
+        sync_cache(&mut a, 80);
+        let wrapped = a.history_cache.lines.len();
+        assert!(wrapped > 0);
+        let messages = std::mem::take(&mut a.messages);
+        a.session = Some(second);
+        sync_cache(&mut a, 80);
+        a.messages = messages;
+        a.session = Some(first);
+        sync_cache(&mut a, 80);
+        assert_eq!(
+            a.history_cache.lines.len(),
+            wrapped,
+            "restored, not dropped"
         );
     }
 
