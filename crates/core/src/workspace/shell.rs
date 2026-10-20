@@ -173,7 +173,9 @@ pub(super) mod unix {
             return Ok(WRITE_CONFINEMENT_UNAVAILABLE.to_string());
         };
         let seconds = args["timeout_s"].as_u64().unwrap_or(120).min(600);
+        let started = std::time::Instant::now();
         let header = wait(&mut child, &group, &path, seconds).await?;
+        let header = format!("{header} · {:.1}s", started.elapsed().as_secs_f64());
         // One-shot commands must not leave background descendants behind even
         // when the shell itself exits before them.
         drop(group);

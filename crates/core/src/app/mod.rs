@@ -51,7 +51,9 @@ mod spaces;
 mod swarm;
 #[cfg(test)]
 mod tests;
+mod tool_view;
 mod transcribe;
+pub use tool_view::{ToolOutcome, ToolView, tool_call_view};
 pub mod usage;
 mod watches;
 pub use backends::{Backends, composite_id};
@@ -215,6 +217,7 @@ impl Approver for ChannelApprover {
             }
             let request = ApprovalRequest {
                 tool: "wave".to_string(),
+                class: None,
                 action: format!("{} calls", reqs.len()),
                 summary,
                 allow_session: reqs.iter().all(|req| req.allow_session),
@@ -2601,6 +2604,9 @@ pub fn send_system_notification(title: &str, body: &str) {
 /// The one-line transcript summary for a tool-call block: the tool's name
 /// plus the argument (and result shape) a reader actually cares about.
 pub fn tool_call_summary(name: &str, args: &str, result: &str) -> String {
+    if let Some(view) = tool_view::parse(name, args, result) {
+        return view.summary();
+    }
     let v: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
     let f = |k: &str| {
         v.get(k)
@@ -2888,6 +2894,7 @@ mod eval_tests {
                 approver
                     .request(ApprovalRequest {
                         tool: "fs".into(),
+                        class: None,
                         action: action.into(),
                         summary: "file".into(),
                         allow_session: true,
@@ -2910,6 +2917,7 @@ mod eval_tests {
                 approver
                     .request(ApprovalRequest {
                         tool: "shell".into(),
+                        class: None,
                         action: "run".into(),
                         summary: summary.into(),
                         allow_session: true,
@@ -2926,6 +2934,7 @@ mod eval_tests {
         for forbidden in [';', '&', '|', '$', '`', '>', '<'] {
             let request = ApprovalRequest {
                 tool: "shell".into(),
+                class: None,
                 action: "run".into(),
                 summary: format!("$ cargo test {forbidden} echo bad"),
                 allow_session: true,
@@ -2937,6 +2946,7 @@ mod eval_tests {
                 approver
                     .request(ApprovalRequest {
                         tool: tool.into(),
+                        class: None,
                         action: action.into(),
                         summary: "$ ls".into(),
                         allow_session: true,

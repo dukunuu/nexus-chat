@@ -173,6 +173,11 @@ pub(super) fn push_tool_call(
             .to_string()
     };
     let (name, args, result) = (field("name"), field("arguments"), field("result"));
+    let view = nexus_core::app::tool_call_view(&name, &args, &result);
+    if !view.verb.is_empty() {
+        push_workspace_call(out, &view, expanded, settings, width, theme);
+        return;
+    }
     let summary = nexus_core::app::tool_call_summary(&name, &args, &result);
     let hint = if expanded || settings.hide_hints {
         ""
@@ -196,6 +201,96 @@ pub(super) fn push_tool_call(
         // Expanded detail gets breathing room; collapsed calls stack into
         // one compact block above the reply they fed.
         out.push(Line::from(""));
+    }
+}
+
+fn push_workspace_call(
+    out: &mut Vec<Line<'static>>,
+    view: &nexus_core::app::ToolView,
+    expanded: bool,
+    settings: &nexus_core::app::Settings,
+    width: usize,
+    theme: &crate::theme::Theme,
+) {
+    use nexus_core::app::ToolOutcome;
+    let failed = view.outcome != ToolOutcome::Ok;
+    let dim = Style::default().fg(theme.fg_dim);
+    let mut head = vec![Span::styled(
+        format!("{} ", if failed { glyph::FAIL } else { glyph::TOOL }),
+        Style::default().fg(if failed { theme.error } else { theme.accent2 }),
+    )];
+    let mut append = |text: String, style: Style| {
+        for line in super::diff::escaped_rows(&text, usize::MAX, style, dim) {
+            head.extend(line.spans);
+        }
+    };
+    append(
+        format!("{} {}", view.verb, view.target),
+        Style::default().fg(theme.fg),
+    );
+    if let Some(added) = view.added {
+        append(format!("  +{added}"), Style::default().fg(theme.success));
+    }
+    if let Some(deleted) = view.deleted {
+        append(format!(" −{deleted}"), Style::default().fg(theme.error));
+    }
+    for stat in &view.stats {
+        append(
+            format!("{}{stat}", style::SEP),
+            if failed
+                && (stat.starts_with("exit")
+                    || matches!(stat.as_str(), "failed" | "denied" | "blocked"))
+            {
+                Style::default().fg(theme.error)
+            } else {
+                dim
+            },
+        );
+    }
+    out.push(Line::from(head));
+    let body_width = width.saturating_sub(3);
+    let body = if let Some(diff) = &view.diff {
+        super::diff::render(
+            diff,
+            body_width,
+            theme,
+            super::diff::Options {
+                max_rows: if expanded { None } else { Some(8) },
+                context: if expanded { 3 } else { 1 },
+                hint: if settings.hide_hints {
+                    ""
+                } else {
+                    " · Ctrl+T"
+                },
+            },
+        )
+    } else if let Some(output) = &view.output {
+        let rows: Vec<_> = output
+            .split('\n')
+            .flat_map(|line| super::diff::escaped_rows(line, body_width, dim, dim))
+            .collect();
+        if expanded {
+            rows
+        } else if view.verb == "$" && failed {
+            rows.into_iter()
+                .rev()
+                .take(5)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    for mut row in body {
+        row.spans.insert(0, Span::raw("   "));
+        out.push(row);
+    }
+    if expanded {
+        out.push(Line::default());
     }
 }
 
@@ -826,6 +921,110 @@ fn md_colors(theme: &crate::theme::Theme) -> crate::ui::markdown::MdColors {
         heading: theme.accent,
         rule: theme.border_dim,
         code: theme.warning,
+    }
+}
+
+#[cfg(test)]
+mod tool_card_tests {
+    use super::*;
+    use nexus_core::app::Settings;
+    use serde_json::json;
+
+    fn card(
+        name: &str,
+        args: serde_json::Value,
+        result: &str,
+        expanded: bool,
+        hide_hints: bool,
+    ) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        let settings = Settings {
+            hide_hints,
+            ..Settings::default()
+        };
+        push_tool_call(
+            &mut lines,
+            &json!({"name":name,"arguments":args.to_string(),"result":result}).to_string(),
+            expanded,
+            &settings,
+            80,
+            &crate::theme::Theme::default(),
+        );
+        lines
+    }
+
+    #[test]
+    fn compact_edit_is_capped_and_expanded_diff_never_shows_arguments() {
+        let diff = (1..=20)
+            .map(|n| format!("+new line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = format!(
+            "edited src/a (+20 −1)\n--- a/src/a\n+++ b/src/a\n@@ -1 +1,20 @@\n-old\n{diff}"
+        );
+        let args =
+            json!({"action":"edit","path":"src/a","edits":[{"hash":"secret hash","new":"new"}]});
+        let compact = card("fs", args.clone(), &result, false, false);
+        assert_eq!(compact[0].to_string(), "⚒ edit src/a  +20 −1");
+        assert_eq!(compact.len(), 9);
+        assert!(
+            compact
+                .last()
+                .unwrap()
+                .to_string()
+                .contains("more lines · Ctrl+T")
+        );
+        assert!(
+            compact[1..]
+                .iter()
+                .all(|line| line.to_string().starts_with("   "))
+        );
+        let expanded = card("fs", args.clone(), &result, true, false);
+        let text = expanded
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("new line 20"));
+        assert!(!text.contains("secret hash"));
+        assert!(!text.contains("\"action\""));
+        assert_eq!(expanded.last().unwrap().to_string(), "");
+        assert!(
+            !card("fs", args, &result, false, true)
+                .last()
+                .unwrap()
+                .to_string()
+                .contains("Ctrl+T")
+        );
+    }
+
+    #[test]
+    fn failed_command_shows_only_output_tail_until_expanded() {
+        let args = json!({"action":"run","cmd":"cargo build"});
+        let result = "exit 101 · 9.8s\nfirst\nsecond\nthird\nfourth\nfifth\nsixth\nlast\x1b[2J";
+        let compact = card("shell", args.clone(), result, false, false);
+        assert_eq!(compact[0].to_string(), "✗ $ cargo build · exit 101 · 9.8s");
+        assert_eq!(compact.len(), 6);
+        assert_eq!(compact[1].to_string(), "   third");
+        assert!(compact[5].to_string().contains("last\\u{1b}[2J"));
+        let expanded = card("shell", args, result, true, false);
+        assert!(expanded.iter().any(|line| line.to_string() == "   first"));
+        assert!(
+            !expanded
+                .iter()
+                .any(|line| line.to_string().contains("\"cmd\""))
+        );
+        assert_eq!(
+            card(
+                "shell",
+                json!({"action":"run","cmd":"true"}),
+                "exit 0\nok",
+                false,
+                false
+            )
+            .len(),
+            1
+        );
     }
 }
 

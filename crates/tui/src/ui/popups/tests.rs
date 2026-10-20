@@ -165,6 +165,7 @@ fn approval_app(
     app.pending_approval = Some(sender);
     app.pending_approval_request = Some(nexus_core::tools::ApprovalRequest {
         tool: tool.into(),
+        class: None,
         action: if tool == "shell" { "run" } else { "edit" }.into(),
         summary,
         allow_session: true,
@@ -316,7 +317,7 @@ fn approval_overflow_is_counted_scrollable_and_reset_for_each_request() {
     let root = app.space.root.clone();
     let screen = render_to_string(120, 24, |f| super::approval::render(f, &app));
     assert!(
-        screen.contains("↑↓ scroll · y allow · a allow for this session · n deny"),
+        screen.contains("↑↓ scroll · y allow · a allow edits this session · n deny"),
         "{screen}"
     );
     let (marker_row, marker) = screen
@@ -519,7 +520,7 @@ fn approval_popup_combined_wave_snapshot() {
     let screen = render_to_string(120, 40, |f| super::approval::render(f, &app));
     assert!(screen.contains(" approve "), "{screen}");
     assert!(
-        screen.contains("y approve all · a all for this session · r review each · n deny all"),
+        screen.contains("y approve all · a this session · r review each · n deny all"),
         "{screen}"
     );
     let snapshot: Vec<_> = screen
@@ -534,20 +535,137 @@ fn approval_popup_combined_wave_snapshot() {
     assert_eq!(
         snapshot,
         [
-            " approve · 3 calls",
-            " 2 edits, 1 command",
-            " 1. fs edit",
-            "   edit one",
-            "   --- a/one",
-            "   +++ b/one",
-            "   @@ -1 +1 @@",
-            "   -old",
-            "   +new",
-            " 2. fs write",
-            "   write two",
-            " 3. shell run",
-            "   $ cargo test",
+            " ▍ 1  edit one  +1 −1",
+            " 1 − old",
+            " 1 + new",
+            " ▍ 2  write two",
+            " ▍ 3  shell · run",
+            " $ cargo test",
         ]
+    );
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn approval_edit_at_80_columns_has_colored_diff_and_class_badge() {
+    let (mut app, _receiver) = approval_app("fs", "edit src/app.rs (+2 −1)\n--- a/src/app.rs\n+++ b/src/app.rs\n@@ -41,2 +41,3 @@\n let cfg = load()?;\n-let n = cfg.limit;\n+let n = cfg.limit.max(1);\n+let m = n * 2;".into());
+    let root = app.space.root.clone();
+    app.approval_request.as_mut().unwrap().class = Some("write in workspace".into());
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| super::approval::render(frame, &app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let snapshot: Vec<_> = (0..24)
+        .filter_map(|y| {
+            let row: String = (0..80).map(|x| buffer[(x, y)].symbol()).collect();
+            let (_, body) = row.split_once('│')?;
+            let (body, _) = body.rsplit_once('│')?;
+            let body = body.trim();
+            (!body.is_empty()).then(|| body.to_string())
+        })
+        .collect();
+    assert_eq!(
+        snapshot,
+        [
+            "edit src/app.rs  +2 −1                  write in workspace",
+            "41   let cfg = load()?;",
+            "42 − let n = cfg.limit;",
+            "42 + let n = cfg.limit.max(1);",
+            "43 + let m = n * 2;",
+        ]
+    );
+    for (symbol, color) in [("+", app.theme.success), ("−", app.theme.error)] {
+        let cells: Vec<_> = buffer
+            .content
+            .iter()
+            .filter(|cell| cell.symbol() == symbol)
+            .collect();
+        assert!(cells.len() >= 2);
+        assert!(cells.iter().all(|cell| cell.fg == color));
+    }
+    let badge = buffer
+        .content
+        .iter()
+        .find(|cell| cell.symbol() == "w")
+        .unwrap();
+    assert_eq!(badge.fg, app.theme.fg_dim);
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn approval_shell_warning_is_above_bold_command_and_delay_dims_keys() {
+    let (mut app, _receiver) = approval_app(
+        "shell",
+        "could not parse safely: computed command word\n$ \"$COMMAND\"\nin sub".into(),
+    );
+    let root = app.space.root.clone();
+    app.approval_request.as_mut().unwrap().class = Some("runs a command".into());
+    app.approval_delay = std::time::Duration::from_secs(10);
+    app.approval_opened_at = Some(std::time::Instant::now());
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| super::approval::render(frame, &app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let warning = buffer
+        .content
+        .iter()
+        .position(|cell| cell.symbol() == "c" && cell.fg == app.theme.warning)
+        .unwrap();
+    let command = buffer
+        .content
+        .iter()
+        .position(|cell| cell.symbol() == "$")
+        .unwrap();
+    assert!(warning < command);
+    assert!(
+        buffer.content[command]
+            .modifier
+            .contains(ratatui::style::Modifier::BOLD)
+    );
+    assert!(
+        buffer
+            .content
+            .iter()
+            .any(|cell| cell.symbol() == "y"
+                && cell.modifier.contains(ratatui::style::Modifier::DIM))
+    );
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn approval_auto_evidence_preserves_diff_colors_and_escaped_controls() {
+    let (app, _receiver) = approval_app(
+        "fs",
+        "in_scope 0.50 · risk: uncertain\nedit file (+1 −1)\ndiff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\x1b[2J".into(),
+    );
+    let root = app.space.root.clone();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| super::approval::render(frame, &app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let screen = render_to_string(80, 24, |frame| super::approval::render(frame, &app));
+    assert!(screen.contains("edit file  +1 −1"));
+    assert!(screen.contains("in_scope 0.50 · risk: uncertain"));
+    assert!(screen.contains("new\\u{1b}[2J"));
+    assert!(!screen.contains("--- a/file"));
+    let escapes: Vec<_> = buffer
+        .content
+        .iter()
+        .filter(|cell| cell.symbol() == "\\")
+        .collect();
+    assert!(!escapes.is_empty());
+    assert!(escapes.iter().all(|cell| cell.fg == app.theme.fg_dim));
+    assert!(
+        buffer
+            .content
+            .iter()
+            .any(|cell| cell.symbol() == "n" && cell.fg == app.theme.success)
     );
     drop(app);
     std::fs::remove_dir_all(root).unwrap();
@@ -570,18 +688,11 @@ fn approval_popup_shell_and_diff_snapshots() {
             "fs",
             "write",
             "write file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new",
-            vec![
-                "fs · write",
-                "write file",
-                "--- a/file",
-                "+++ b/file",
-                "@@ -1 +1 @@",
-                "-old",
-                "+new",
-            ],
+            vec!["write file  +1 −1", "1 − old", "1 + new"],
         ),
     ] {
         app.approval_request = Some(nexus_core::tools::ApprovalRequest {
+            class: None,
             tool: tool.into(),
             action: action.into(),
             summary: summary.into(),
@@ -590,7 +701,11 @@ fn approval_popup_shell_and_diff_snapshots() {
         let screen = render_to_string(120, 40, |f| super::approval::render(f, &app));
         assert!(screen.contains(" approve "), "{screen}");
         assert!(
-            screen.contains("y allow · a allow for this session · n deny"),
+            screen.contains(if tool == "fs" {
+                "y allow · a allow edits this session · n deny"
+            } else {
+                "y allow · a allow commands this session · n deny"
+            }),
             "{screen}"
         );
         let snapshot: Vec<_> = screen

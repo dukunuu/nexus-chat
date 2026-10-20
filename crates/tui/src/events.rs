@@ -961,7 +961,7 @@ mod tests {
         assert_eq!(app.approval_request, app.pending_approval_request);
         assert_eq!(
             app.approval_request.as_ref().unwrap().summary,
-            "write approved"
+            "write approved (+1 −0)\ndiff --git aa/workspace/approved bb/workspace/approved\nindex e69de29..396a0ba 100644\n--- aa/workspace/approved\n+++ bb/workspace/approved\n@@ -0,0 +1 @@\n+yes\n\\ No newline at end of file"
         );
         assert!(!workspace.join("approved").exists());
         handle_key(&mut app, KeyCode::Char('y').into()).unwrap();
@@ -985,6 +985,7 @@ mod tests {
         app.pending_approval = Some(sender);
         app.pending_approval_request = Some(nexus_core::tools::ApprovalRequest {
             tool: "shell".into(),
+            class: None,
             action: "run".into(),
             summary: "$ true".into(),
             allow_session: true,
@@ -1022,6 +1023,7 @@ mod tests {
             app.pending_approval = Some(sender);
             app.approval_request = Some(ApprovalRequest {
                 tool: "shell".into(),
+                class: None,
                 action: "run".into(),
                 summary: "$ true".into(),
                 allow_session: true,

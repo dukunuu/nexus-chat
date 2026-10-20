@@ -2,41 +2,161 @@ use crossterm::event::{KeyCode, KeyEvent};
 use nexus_core::app::AppCommand;
 use nexus_core::tools::Decision;
 use ratatui::Frame;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use unicode_width::UnicodeWidthChar as _;
 
 use crate::app_view::AppView;
 
 use super::chrome;
+use crate::ui::diff::{self, escaped_rows};
+use crate::ui::style;
 
-fn escaped_rows(text: &str, width: usize, normal: Style, dim: Style) -> Vec<Line<'static>> {
-    let mut rows = vec![Line::default()];
-    let mut used = 0;
-    for c in text.chars() {
-        let (text, style) = if c == '\t' {
-            ("    ".to_string(), normal)
-        } else if c.is_control() {
-            (c.escape_unicode().to_string(), dim)
-        } else {
-            (c.to_string(), normal)
+fn request_lines(
+    tool: &str,
+    action: &str,
+    summary: &str,
+    class: Option<&str>,
+    width: usize,
+    theme: &crate::theme::Theme,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(theme.fg_dim);
+    let normal = Style::default().fg(theme.fg);
+    let (evidence, summary) = summary
+        .split_once('\n')
+        .filter(|(head, _)| head.starts_with("in_scope ") || head.starts_with("risk: "))
+        .unwrap_or(("", summary));
+    let (head, body) = summary.split_once('\n').unwrap_or((summary, ""));
+    let is_diff = body.starts_with("--- ") || body.starts_with("diff --git ");
+    let parsed_counts = head.rsplit_once(" (+").and_then(|(label, counts)| {
+        let (added, deleted) = counts.strip_suffix(')')?.split_once(" −")?;
+        Some((
+            label,
+            added.parse::<usize>().ok()?,
+            deleted.parse::<usize>().ok()?,
+        ))
+    });
+    let label = if tool == "fs" {
+        parsed_counts
+            .map_or(head, |(label, _, _)| label)
+            .to_string()
+    } else {
+        format!("{tool}{}{action}", style::SEP)
+    };
+    let mut header = escaped_rows(&label, width, normal, dim);
+    if is_diff || parsed_counts.is_some() {
+        let (added, deleted) = parsed_counts.map_or_else(
+            || diff::counts(body),
+            |(_, added, deleted)| (added, deleted),
+        );
+        let line = header.last_mut().expect("request has a header");
+        line.spans.push(Span::styled(
+            format!("  +{added}"),
+            Style::default().fg(theme.success),
+        ));
+        line.spans.push(Span::styled(
+            format!(" −{deleted}"),
+            Style::default().fg(theme.error),
+        ));
+    }
+    if let Some(class) = class {
+        let badge_style = match class {
+            "runs a command" => Style::default().fg(theme.accent2),
+            "destructive" => Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
+            "reaches outside" => Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+            _ => dim,
         };
-        for c in text.chars() {
-            let cells = c.width().unwrap_or(0);
-            if used + cells > width.max(1) && used > 0 {
-                rows.push(Line::default());
-                used = 0;
-            }
-            let row = rows.last_mut().expect("approval has a row");
-            match row.spans.last_mut() {
-                Some(span) if span.style == style => span.content.to_mut().push(c),
-                _ => row.spans.push(Span::styled(c.to_string(), style)),
-            }
-            used += cells;
+        let badge = escaped_rows(class, width, badge_style, dim).remove(0);
+        let line = header.last_mut().expect("request has a header");
+        *line = chrome::fit_line(line.clone(), width.saturating_sub(badge.width() + 1));
+        let padding = width.saturating_sub(line.width() + badge.width()).max(1);
+        line.spans.push(Span::raw(" ".repeat(padding)));
+        line.spans.extend(badge.spans);
+    }
+    header.push(Line::default());
+    if !evidence.is_empty() {
+        header.extend(escaped_rows(evidence, width, dim, dim));
+    }
+    if is_diff {
+        header.extend(diff::render(
+            body,
+            width,
+            theme,
+            diff::Options {
+                max_rows: None,
+                context: 3,
+                hint: "",
+            },
+        ));
+    } else {
+        let text = if tool == "fs" { body } else { summary };
+        for line in text.split('\n').filter(|line| !line.is_empty()) {
+            let line = line.strip_prefix("background: ").unwrap_or(line);
+            let color = if line.starts_with("could not parse safely:") {
+                Style::default().fg(theme.warning)
+            } else if line.starts_with("$ ") {
+                normal.add_modifier(Modifier::BOLD)
+            } else if line.starts_with("in ") {
+                dim
+            } else {
+                normal
+            };
+            header.extend(escaped_rows(line, width, color, dim));
         }
     }
-    rows
+    header
+}
+
+fn wave_lines(summary: &str, width: usize, theme: &crate::theme::Theme) -> Vec<Line<'static>> {
+    let mut sections: Vec<(&str, &str, &str, String)> = Vec::new();
+    for line in summary.split('\n').skip(1) {
+        if let Some((number, call)) = line
+            .split_once(". ")
+            .filter(|(number, _)| number.parse::<usize>().is_ok())
+        {
+            let (tool, action) = call.split_once(' ').unwrap_or((call, ""));
+            sections.push((number, tool, action, String::new()));
+        } else if let Some((_, _, _, body)) = sections.last_mut() {
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(line.strip_prefix("  ").unwrap_or(line));
+        }
+    }
+    let mut lines = Vec::new();
+    for (number, tool, action, body) in sections {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        let mut section =
+            request_lines(tool, action, &body, None, width.saturating_sub(5), theme).into_iter();
+        let Some(mut head) = section.next() else {
+            continue;
+        };
+        let section_style = style::section(theme, "", 0).spans[0].style;
+        for span in &mut head.spans {
+            if span.style.fg == Some(theme.fg) {
+                span.style = section_style;
+            }
+        }
+        head.spans.insert(
+            0,
+            Span::styled(
+                format!("{} {number}  ", style::glyph::SECTION),
+                section_style,
+            ),
+        );
+        lines.push(head);
+        lines.extend(section);
+        while lines.last().is_some_and(|line| line.width() == 0) {
+            lines.pop();
+        }
+    }
+    lines
 }
 
 fn shell_unread(app: &AppView) -> bool {
@@ -62,22 +182,18 @@ pub fn render(f: &mut Frame, app: &AppView) {
     let height = usize::from(inner.height);
     let dim = Style::default().fg(app.theme.fg_dim);
     let wave = request.tool == "wave";
-    let header = if wave { "approve" } else { &request.tool };
-    let mut lines = escaped_rows(
-        &format!("{header} · {}", request.action),
-        width,
-        Style::default().fg(app.theme.accent),
-        dim,
-    );
-    lines.push(Line::default());
-    for line in request.summary.split('\n') {
-        lines.extend(escaped_rows(
-            line,
+    let lines = if wave {
+        wave_lines(&request.summary, width, &app.theme)
+    } else {
+        request_lines(
+            &request.tool,
+            &request.action,
+            &request.summary,
+            request.class.as_deref(),
             width,
-            Style::default().fg(app.theme.fg),
-            dim,
-        ));
-    }
+            &app.theme,
+        )
+    };
     let max_scroll = lines.len().saturating_sub(height);
     let offset = app.approval_scroll.get().min(max_scroll);
     app.approval_scroll.set(offset);
@@ -88,17 +204,32 @@ pub fn render(f: &mut Frame, app: &AppView) {
         app.approval_seen_end.set(true);
     }
     let queued = app.approval_count();
-    let title = if queued > 1 {
+    let title = if wave {
+        format!(
+            " approve {}{}{} ",
+            request.action,
+            style::SEP,
+            request.summary.lines().next().unwrap_or_default()
+        )
+    } else if queued > 1 {
         format!(" approve{}1 of {queued} ", crate::ui::style::SEP)
     } else {
         " approve ".to_string()
     };
+    let session = match request.tool.as_str() {
+        "fs" => "a allow edits this session",
+        "shell" | "proc" => "a allow commands this session",
+        _ => "a allow for this session",
+    };
+    let scroll_hint = format!("↑↓ scroll · y allow · {session} · n deny");
+    let session_hint = format!("y allow · {session} · n deny");
     let hint = if wave && shell_unread(app) {
-        "↑↓ scroll · scroll to the end to approve · r review each · n deny all"
+        // Short enough to fit the popup's footer on an 80-column terminal.
+        "↓ read to the end to approve · r review each · n deny all"
     } else if wave && !request.allow_session {
         "y approve all · r review each · n deny all"
     } else if wave {
-        "y approve all · a all for this session · r review each · n deny all"
+        "y approve all · a this session · r review each · n deny all"
     } else if shell_unread(app) {
         "↑↓ scroll · scroll to the end to allow · n deny"
     } else if !request.allow_session && max_scroll > 0 {
@@ -106,19 +237,26 @@ pub fn render(f: &mut Frame, app: &AppView) {
     } else if !request.allow_session {
         "y allow · n deny"
     } else if max_scroll > 0 {
-        "↑↓ scroll · y allow · a allow for this session · n deny"
+        &scroll_hint
     } else {
-        "y allow · a allow for this session · n deny"
+        &session_hint
     };
     chrome::render_hinted(
         f,
         area,
-        Line::from(Span::styled(title, Style::default().fg(app.theme.accent))),
-        hint,
+        escaped_rows(
+            &title,
+            usize::MAX,
+            Style::default().fg(app.theme.accent),
+            dim,
+        )
+        .remove(0),
+        "",
         app,
         true,
         chrome::Tone::Normal,
     );
+    render_footer(f, app, area, hint, offset, max_scroll);
     let visible = if offset < max_scroll {
         height.saturating_sub(1)
     } else {
@@ -134,6 +272,51 @@ pub fn render(f: &mut Frame, app: &AppView) {
         )));
     }
     f.render_widget(Paragraph::new(visible), inner);
+}
+
+fn render_footer(
+    f: &mut Frame,
+    app: &AppView,
+    area: ratatui::layout::Rect,
+    hint: &str,
+    offset: usize,
+    max_scroll: usize,
+) {
+    let percentage = offset
+        .saturating_mul(100)
+        .checked_div(max_scroll)
+        .map_or_else(String::new, |percent| format!(" · {percent}%"));
+    let hint_width = usize::from(area.width.saturating_sub(4));
+    let hint = if app.settings.hide_hints { "" } else { hint };
+    let footer = format!(
+        " {}{} ",
+        chrome::truncate(
+            hint,
+            hint_width.saturating_sub(percentage.chars().count() + 2)
+        ),
+        percentage
+    );
+    let delayed = app
+        .approval_opened_at
+        .is_some_and(|opened| opened.elapsed() < app.approval_delay);
+    let footer_style = if delayed {
+        Style::default()
+            .fg(app.theme.fg_dim)
+            .add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(app.theme.fg)
+    };
+    if !hint.is_empty() || max_scroll > 0 {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(footer, footer_style))).right_aligned(),
+            ratatui::layout::Rect::new(
+                area.x + 2,
+                area.bottom().saturating_sub(1),
+                area.width.saturating_sub(4),
+                1,
+            ),
+        );
+    }
 }
 
 pub fn handle_key(app: &mut AppView, key: KeyEvent) -> anyhow::Result<()> {
@@ -214,6 +397,7 @@ mod tests {
         app.pending_approval = Some(sender);
         app.pending_approval_request = Some(ApprovalRequest {
             tool: "wave".into(),
+            class: None,
             action: "2 calls".into(),
             summary,
             allow_session: true,
@@ -242,7 +426,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(!screen.contains("a all for this session"));
+        assert!(!screen.contains("a this session"));
         handle_key(&mut app, KeyCode::Char('a').into()).unwrap();
         assert!(receiver.try_recv().is_err());
         handle_key(&mut app, KeyCode::Char('y').into()).unwrap();

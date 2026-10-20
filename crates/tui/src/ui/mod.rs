@@ -18,6 +18,7 @@ use nexus_core::app::Popup;
 
 mod cards;
 pub mod citations_style;
+mod diff;
 pub mod history;
 mod input;
 pub mod markdown;

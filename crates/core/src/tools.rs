@@ -112,6 +112,8 @@ pub struct ApprovalRequest {
     pub tool: String,
     pub action: String,
     pub summary: String,
+    /// Human-readable policy class for workspace actions.
+    pub class: Option<String>,
     /// Whether this action may reuse or create a session-wide grant.
     pub allow_session: bool,
 }
@@ -1678,6 +1680,7 @@ impl ToolBox {
     fn approval_request(&self, name: &str, args: &str) -> Result<ApprovalRequest, String> {
         use crate::workspace::escalation::{Escalation, check_command};
 
+        let effect = self.effect(name, args);
         let (tool, action) = name.split_once('_').expect("workspace tool action");
         let mut args: serde_json::Value = serde_json::from_str(args)
             .map_err(|error| format!("invalid tool arguments: {error}"))?;
@@ -1718,12 +1721,49 @@ impl ToolBox {
             }
             summary
         } else {
-            fs_approval_summary(workspace, name, &args)?
+            let mut summary = fs_approval_summary(workspace, name, &args)?;
+            if matches!(action, "edit" | "write" | "delete") {
+                let path = workspace
+                    .resolve(
+                        args["path"].as_str().expect("validated path"),
+                        Access::Write,
+                    )
+                    .map_err(|error| error.to_string())?;
+                let bytes = if path.exists() {
+                    std::fs::read(&path).map_err(|error| error.to_string())?
+                } else {
+                    Vec::new()
+                };
+                let current = String::from_utf8_lossy(&bytes);
+                let candidate = if action == "delete" {
+                    String::new()
+                } else {
+                    fs_replacement(name, &args, &current)?
+                };
+                let (diff, added, deleted) =
+                    fs_diff(&fs_relative(workspace, &path), &current, &candidate, 40);
+                summary = format!(
+                    "{action} {} (+{added} −{deleted})\n{diff}",
+                    fs_relative(workspace, &path)
+                );
+            }
+            summary
+        };
+        let policy_tool = if tool == "proc" { "shell" } else { tool };
+        let command = format!("$ {}", args["cmd"].as_str().unwrap_or_default());
+        let class =
+            crate::decider::classify(policy_tool, action, workspace.root(), &effect, &command);
+        let class = match class {
+            Class::WriteInRoot => "write in workspace",
+            Class::Exec => "runs a command",
+            Class::Destructive => "destructive",
+            Class::Outside => "reaches outside",
         };
         Ok(ApprovalRequest {
             tool: tool.to_string(),
             action: action.to_string(),
             summary,
+            class: Some(class.to_string()),
             allow_session: true,
         })
     }
@@ -1874,6 +1914,7 @@ impl ToolBox {
                     };
                     let request = ApprovalRequest {
                         tool: "task".into(),
+                        class: None,
                         action: "workspace".into(),
                         summary: format!(
                             "sub-agent (workspace): {}",
@@ -1955,6 +1996,7 @@ impl ToolBox {
                 let reason = v["reason"].as_str().unwrap_or_default().trim();
                 let request = ApprovalRequest {
                     tool: "request_workspace".to_string(),
+                    class: None,
                     action: "agent".to_string(),
                     summary: format!("switch this session to agent mode in {root}\n{reason}"),
                     allow_session: true,
@@ -7095,7 +7137,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].tool, "fs");
         assert_eq!(requests[0].action, "edit");
-        assert!(requests[0].summary.starts_with("edit file\n"));
+        assert!(requests[0].summary.starts_with("edit file (+1 −1)\n"));
         assert!(requests[0].summary.contains("\n--- "));
         assert!(requests[0].summary.contains("\n-original\n+replacement"));
         let allow = FakeApprover::new(Decision::Allow);
@@ -7105,6 +7147,44 @@ mod tests {
         assert_ne!(status, "blocked");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement\n");
         assert_eq!(allow.requests.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn approval_classes_describe_edits_and_command_risk() {
+        let (toolbox, dir) = fs_toolbox();
+        let path = toolbox.workspace.as_ref().unwrap().root().join("file");
+        std::fs::write(&path, "old\n").unwrap();
+        toolbox
+            .run("fs", r#"{"action":"read","path":"file"}"#)
+            .await;
+        let edit =
+            json!({"path":"file","edits":[{"hash":line_hash("old"),"new":"new"}]}).to_string();
+        assert_eq!(
+            toolbox
+                .approval_request("fs_edit", &edit)
+                .unwrap()
+                .class
+                .as_deref(),
+            Some("write in workspace")
+        );
+        for (cmd, class) in [
+            ("cargo test", "runs a command"),
+            ("rm -rf x", "destructive"),
+            ("git push", "reaches outside"),
+        ] {
+            for name in ["shell_run", "proc_start"] {
+                let args = json!({"cmd":cmd}).to_string();
+                assert_eq!(
+                    toolbox
+                        .approval_request(name, &args)
+                        .unwrap()
+                        .class
+                        .as_deref(),
+                    Some(class)
+                );
+            }
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -7129,8 +7209,8 @@ mod tests {
             assert_eq!(toolbox.run("fs", &args.to_string()).await.1, "blocked");
         }
         let requests = deny.requests.lock().unwrap();
-        assert_eq!(requests[0].summary, "write new");
-        assert!(requests[1].summary.starts_with("write file\n"));
+        assert!(requests[0].summary.starts_with("write new (+1 −0)\n"));
+        assert!(requests[1].summary.starts_with("write file (+60 −60)\n"));
         assert!(requests[1].summary.contains("\n--- "));
         assert_eq!(requests[1].summary.lines().count(), 42);
         assert!(
@@ -7142,7 +7222,7 @@ mod tests {
                 .contains("more lines")
         );
         assert_eq!(requests[2].summary, "move file -> moved");
-        assert_eq!(requests[3].summary, "delete file (60 lines)");
+        assert!(requests[3].summary.starts_with("delete file (+0 −60)\n"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -10629,6 +10709,7 @@ mod tests {
         assert_eq!(
             allow.requests.lock().unwrap().as_slice(),
             [ApprovalRequest {
+                class: None,
                 allow_session: true,
                 tool: "request_workspace".into(),
                 action: "agent".into(),
@@ -10976,7 +11057,7 @@ mod tests {
             assert_eq!(waves[0].len(), 3);
             assert_eq!(waves[0][0].action, "edit");
             assert!(waves[0][0].summary.contains("-original\n+replacement"));
-            assert!(waves[0][1].summary.starts_with("edit two\n"));
+            assert!(waves[0][1].summary.starts_with("edit two (+1 −1)\n"));
             assert_eq!(waves[0][2].tool, "shell");
             assert_eq!(results.len(), 3);
             let denied = decision == WaveDecision::DenyAll;
@@ -11073,7 +11154,7 @@ mod tests {
         let waves = approver.waves.lock().unwrap();
         assert_eq!(waves.len(), 1);
         assert_eq!(waves[0].len(), 2);
-        assert!(waves[0][0].summary.starts_with("edit two\n"));
+        assert!(waves[0][0].summary.starts_with("edit two (+1 −1)\n"));
         assert_eq!(waves[0][1].tool, "shell");
         assert!(approver.requests.lock().unwrap().is_empty());
         std::fs::remove_dir_all(dir).unwrap();
