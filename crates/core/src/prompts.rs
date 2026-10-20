@@ -3,6 +3,8 @@
 
 /// Workspace exploration and editing instructions for agent sessions.
 pub const AGENT: &str = include_str!("../assets/prompts/agent.md");
+/// Focused nested agent instructions.
+pub const SUBAGENT: &str = include_str!("../assets/prompts/subagent.md");
 /// Research planning instructions.
 pub const RESEARCH_PLANNER: &str = include_str!("../assets/prompts/research/planner.md");
 /// Research scoping instructions.

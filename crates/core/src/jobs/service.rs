@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+pub(crate) use super::tree::{Tree, git};
+
 fn path(home: &Path, config: &Path) -> Result<PathBuf> {
     if cfg!(target_os = "macos") {
         Ok(home.join("Library/LaunchAgents/chat.nexus.jobs.plist"))

@@ -125,6 +125,13 @@ impl ToolSpec {
                 required.push(param.name);
             }
         }
+        if self.name == "task" {
+            properties.get_mut("tools").expect("task tools")["default"] = json!("read-only");
+            let steps = properties.get_mut("max_steps").expect("task steps");
+            steps["default"] = json!(20);
+            steps["minimum"] = json!(1);
+            steps["maximum"] = json!(40);
+        }
         let mut description = self.purpose.to_string();
         for action in actions {
             description.push_str("\n- ");
@@ -214,6 +221,23 @@ impl ToolSpec {
                 ));
             }
         }
+        if self.name == "task" {
+            if value
+                .get("tools")
+                .is_some_and(|tools| !matches!(tools.as_str(), Some("read-only" | "workspace")))
+            {
+                return Err("invalid tool arguments: tools must be read-only or workspace".into());
+            }
+            if value.get("max_steps").is_some_and(|steps| {
+                !steps
+                    .as_u64()
+                    .is_some_and(|steps| (1..=40).contains(&steps))
+            }) {
+                return Err(
+                    "invalid tool arguments: max_steps must be an integer from 1 to 40".into(),
+                );
+            }
+        }
         let action = self.selected_action(value).expect("validated action");
         for name in action.required {
             let param = self
@@ -253,6 +277,10 @@ pub(super) fn public_alias(name: &str) -> Option<(&'static str, &'static str, &'
 }
 
 pub(super) fn read_only(name: &str, args: &str) -> Option<bool> {
+    if name == "task" {
+        let value = serde_json::from_str::<Value>(args).unwrap_or_default();
+        return Some(value.get("tools").is_none_or(|tools| tools == "read-only"));
+    }
     if let Some(tool) = find(name) {
         let value = serde_json::from_str::<Value>(args).unwrap_or_default();
         return Some(
@@ -1277,7 +1305,39 @@ pub(super) static REQUEST_WORKSPACE: ToolSpec = ToolSpec {
     }],
 };
 
+pub(super) static TASK: ToolSpec = ToolSpec {
+    name: "task",
+    purpose: "Delegate a focused investigation to a fresh sub-agent; only its report returns. Workspace tasks require approval and return a branch and diff, never edits to the main tree.",
+    selector: None,
+    params: &[
+        Param {
+            name: "prompt",
+            kind: Kind::Str,
+            doc: "self-contained task for the helper",
+        },
+        Param {
+            name: "tools",
+            kind: Kind::Enum(&["read-only", "workspace"]),
+            doc: "capabilities (default read-only)",
+        },
+        Param {
+            name: "max_steps",
+            kind: Kind::Int,
+            doc: "maximum tool rounds, 1–40 (default 20)",
+        },
+    ],
+    actions: &[ActionSpec {
+        name: "task",
+        summary: "Run a focused helper with the session model",
+        required: &["prompt"],
+        optional: &["tools", "max_steps"],
+        read_only: true,
+        internal: "task",
+    }],
+};
+
 const TOOLS: &[&ToolSpec] = &[
+    &TASK,
     &SKILLS,
     &SCRIPTS,
     &TUI_APP,
@@ -1362,6 +1422,7 @@ mod tests {
 
     // Explicit legacy routing expectations, with each action's required arguments.
     const ROUTES: &[(&str, &str, &str)] = &[
+        ("task", r#"{"prompt":"x"}"#, "task"),
         ("skills", r#"{"action":"load","name":"x"}"#, "skill"),
         (
             "skills",
@@ -1603,6 +1664,7 @@ mod tests {
     #[test]
     fn read_only_classification_is_unchanged() {
         let read_only = [
+            "task",
             "skill",
             "web_search",
             "academic_search",
@@ -1796,6 +1858,7 @@ mod tests {
                 "search" => json!(["mode", "query"]),
                 "fetch_url" => json!(["url"]),
                 "research_lookup" => json!(["scope"]),
+                "task" => json!(["prompt"]),
                 _ => json!(["action"]),
             };
             assert_eq!(def.parameters["required"], expected, "{}", tool.name);

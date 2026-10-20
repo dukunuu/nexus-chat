@@ -185,8 +185,12 @@ pub struct ToolBox {
     pub(crate) decision_steps: Arc<Mutex<(String, Vec<String>)>>,
     /// Saved credentials used to redact decision summaries.
     pub decision_scrubber: crate::trace::Scrubber,
-    prepared_decisions: Mutex<HashMap<u64, PreparedDecision>>,
-    next_decision: AtomicU64,
+    prepared_decisions: Arc<Mutex<HashMap<u64, PreparedDecision>>>,
+    next_decision: Arc<AtomicU64>,
+    subagents: Option<Arc<crate::subagent::Context>>,
+    subagent_workspace: Option<bool>,
+    pub(crate) subagent_environment: String,
+    decision_parent: Option<Arc<Self>>,
     /// Require permission before mutating workspace calls.
     pub require_approval: bool,
     /// Interactive permission provider; absent on headless paths.
@@ -258,6 +262,7 @@ pub struct ToolBox {
 /// Where the file tools read from: the shared db plus the space to scope to.
 /// The toolbox opens its own short-lived connection per call — the app's
 /// `Db` handle stays on the UI task and is never shared with the stream task.
+#[derive(Clone)]
 pub struct FilesCtx {
     pub db_path: std::path::PathBuf,
     pub space_id: String,
@@ -268,6 +273,7 @@ pub struct FilesCtx {
 /// Where the app tools write: the active space's apps dir, plus the
 /// registry, server port and space metadata. Only present while the server
 /// runs.
+#[derive(Clone)]
 pub struct AppsCtx {
     pub dir: PathBuf,
     pub server_port: u16,
@@ -622,6 +628,13 @@ pub trait ToolExecutor: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = (String, String)> + Send + 'a>> {
         self.run(name, args)
     }
+    /// Bind nested tasks to this turn; remote and restricted executors opt out.
+    fn with_subagents(
+        self: Arc<Self>,
+        _context: Arc<crate::subagent::Context>,
+    ) -> Option<Arc<dyn ToolExecutor>> {
+        None
+    }
     /// Whether the current model accepts image inputs.
     fn supports_images(&self) -> bool;
     /// The active space's files dir, for resolving image references in tool
@@ -630,6 +643,18 @@ pub trait ToolExecutor: Send + Sync + 'static {
 }
 
 impl ToolExecutor for ToolBox {
+    fn with_subagents(
+        self: Arc<Self>,
+        context: Arc<crate::subagent::Context>,
+    ) -> Option<Arc<dyn ToolExecutor>> {
+        if self.workspace.is_none() || self.research_only || self.subagent_workspace.is_some() {
+            return None;
+        }
+        let mut toolbox = self.copy(Arc::clone(&self));
+        toolbox.subagents = Some(context);
+        Some(Arc::new(toolbox))
+    }
+
     fn defs(&self) -> Vec<ToolDef> {
         ToolBox::defs(self)
     }
@@ -872,8 +897,12 @@ impl ToolBox {
             decision_context: Arc::default(),
             decision_steps: Arc::default(),
             decision_scrubber: crate::trace::Scrubber::new(Vec::new()),
-            prepared_decisions: Mutex::default(),
-            next_decision: AtomicU64::new(0),
+            prepared_decisions: Arc::default(),
+            next_decision: Arc::new(AtomicU64::new(0)),
+            subagents: None,
+            subagent_workspace: None,
+            subagent_environment: String::new(),
+            decision_parent: None,
             require_approval: false,
             approver: None,
             interactive_ui: false,
@@ -902,6 +931,75 @@ impl ToolBox {
             session_id: String::new(),
             video_gen_backend: None,
         }
+    }
+
+    fn scrubber(&self) -> &crate::trace::Scrubber {
+        self.decision_parent
+            .as_ref()
+            .map_or(&self.decision_scrubber, |parent| parent.scrubber())
+    }
+
+    fn copy(&self, parent: Arc<Self>) -> Self {
+        Self {
+            workspace: self.workspace.clone(),
+            procs: self.procs.clone(),
+            confine_shell_writes: self.confine_shell_writes.clone(),
+            auto_decider: self.auto_decider.clone(),
+            sandbox_available: self.sandbox_available,
+            decision_context: self.decision_context.clone(),
+            decision_steps: self.decision_steps.clone(),
+            decision_scrubber: crate::trace::Scrubber::new(Vec::new()),
+            prepared_decisions: self.prepared_decisions.clone(),
+            next_decision: self.next_decision.clone(),
+            subagents: self.subagents.clone(),
+            subagent_workspace: self.subagent_workspace,
+            subagent_environment: self.subagent_environment.clone(),
+            decision_parent: Some(parent),
+            require_approval: self.require_approval,
+            approver: self.approver.clone(),
+            interactive_ui: self.interactive_ui,
+            tui_app_renderer: self.tui_app_renderer,
+            pending_tui_app: self.pending_tui_app.clone(),
+            space_tui_apps_dir: self.space_tui_apps_dir.clone(),
+            skills_dir: self.skills_dir.clone(),
+            skill_dirs: self.skill_dirs.clone(),
+            searxng_url: self.searxng_url.clone(),
+            langsearch_key: self.langsearch_key.clone(),
+            search_provider: self.search_provider.clone(),
+            research_only: self.research_only,
+            blocked_domains: self.blocked_domains.clone(),
+            db_path: self.db_path.clone(),
+            record_events: self.record_events,
+            research_session_id: self.research_session_id.clone(),
+            client: self.client.clone(),
+            files: self.files.clone(),
+            apps: self.apps.clone(),
+            supports_images: self.supports_images,
+            cache_only: self.cache_only,
+            image_gen_backend: self.image_gen_backend.clone(),
+            space_files_dir: self.space_files_dir.clone(),
+            space_apps_dir: self.space_apps_dir.clone(),
+            space_scripts_dir: self.space_scripts_dir.clone(),
+            session_id: self.session_id.clone(),
+            video_gen_backend: self.video_gen_backend.clone(),
+        }
+    }
+
+    pub(crate) fn for_subagent(&self, workspace: Option<Arc<Workspace>>) -> Self {
+        let mut toolbox = self.copy(self.decision_parent.clone().expect("bound toolbox"));
+        toolbox.subagents = None;
+        toolbox.subagent_workspace = Some(workspace.is_some());
+        if let Some(workspace) = workspace {
+            toolbox.confine_shell_writes = Some(workspace.root().to_path_buf());
+            toolbox.workspace = Some(workspace);
+            toolbox.procs = Arc::default();
+        }
+        toolbox.require_approval = toolbox.auto_decider.is_some();
+        toolbox.approver = None;
+        toolbox.prepared_decisions = Arc::default();
+        toolbox.next_decision = Arc::new(AtomicU64::new(0));
+        toolbox.decision_steps = Arc::default();
+        toolbox
     }
 
     /// Replace the skill roots used for reads while retaining `skills_dir` as
@@ -1107,6 +1205,22 @@ impl ToolBox {
                 spec.def(live)
             }
         };
+        if let Some(writable) = self.subagent_workspace {
+            let actions: &[&str] = if writable {
+                &[
+                    "list", "glob", "grep", "read", "edit", "write", "move", "delete",
+                ]
+            } else {
+                &["list", "glob", "grep", "read"]
+            };
+            return vec![
+                def(&spec::FS, actions),
+                def(
+                    &spec::SHELL,
+                    if writable { &["run", "log"] } else { &["log"] },
+                ),
+            ];
+        }
         let mut defs = Vec::new();
         defs.push(tool_def(
             "batch",
@@ -1156,6 +1270,7 @@ impl ToolBox {
             ));
             defs.push(def(&spec::SHELL, &["run", "log"]));
             defs.push(def(&spec::PROC, &["start", "read", "list", "kill"]));
+            defs.push(def(&spec::TASK, &["task"]));
         }
         if self.interactive_ui {
             defs.push(def(&spec::PROPOSE_COMMAND, &["propose_command"]));
@@ -1327,7 +1442,7 @@ impl ToolBox {
             if recent.0 != session {
                 *recent = (session, Vec::new());
             }
-            let summary = self.decision_scrubber.scrub(&format!("{name} {args}"));
+            let summary = self.scrubber().scrub(&format!("{name} {args}"));
             recent.1.push(summary.chars().take(300).collect());
             if recent.1.len() > 5 {
                 recent.1.remove(0);
@@ -1422,12 +1537,7 @@ impl ToolBox {
                 tool: policy_tool.to_string(),
                 action: policy_action.to_string(),
                 summary,
-                task: self
-                    .decision_scrubber
-                    .scrub(&task)
-                    .chars()
-                    .take(2_000)
-                    .collect(),
+                task: self.scrubber().scrub(&task).chars().take(2_000).collect(),
                 root,
                 effect,
                 class,
@@ -1493,7 +1603,7 @@ impl ToolBox {
             answer.verdict = Verdict::Ask;
         }
         let row_id = conn.and_then(|conn| {
-            crate::db::insert_decision(conn, session_id, req, &answer, &self.decision_scrubber).ok()
+            crate::db::insert_decision(conn, session_id, req, &answer, self.scrubber()).ok()
         });
         if answer.verdict == Verdict::Ask {
             let mut evidence = Vec::new();
@@ -1644,6 +1754,22 @@ impl ToolBox {
         };
         let name = dispatch_name.as_str();
         let args = dispatch_args.as_str();
+        if let Some(writable) = self.subagent_workspace {
+            let allowed = matches!(
+                name,
+                "fs_list" | "fs_glob" | "fs_grep" | "fs_read" | "shell_log"
+            ) || (writable
+                && matches!(
+                    name,
+                    "fs_edit" | "fs_write" | "fs_move" | "fs_delete" | "shell_run"
+                ));
+            if !allowed {
+                return (
+                    format!("tool '{name}' is not available in this sub-agent"),
+                    "blocked".into(),
+                );
+            }
+        }
         let mut allow_unparseable = false;
         let mut auto_allowed = false;
         let mut gate = gate;
@@ -1681,7 +1807,11 @@ impl ToolBox {
                     answer
                 } else {
                     return (
-                        "needs approval · not available here (headless); describe the change and let the user apply it".to_string(),
+                        if self.subagent_workspace.is_some() {
+                            "needs approval · sub-agents cannot prompt; report what you would have done".to_string()
+                        } else {
+                            "needs approval · not available here (headless); describe the change and let the user apply it".to_string()
+                        },
                         "blocked".to_string(),
                     );
                 };
@@ -1730,6 +1860,47 @@ impl ToolBox {
             }
         }
         let (result, status) = match name {
+            "task" => {
+                let Some(context) = &self.subagents else {
+                    return ("task needs an agent turn".into(), "blocked".into());
+                };
+                let value: serde_json::Value = serde_json::from_str(args).expect("validated task");
+                if value["tools"] == "workspace" && gate != Gate::Approved {
+                    let Some(approver) = &self.approver else {
+                        return (
+                            "needs approval · workspace sub-agent cannot run unattended".into(),
+                            "blocked".into(),
+                        );
+                    };
+                    let request = ApprovalRequest {
+                        tool: "task".into(),
+                        action: "workspace".into(),
+                        summary: format!(
+                            "sub-agent (workspace): {}",
+                            value["prompt"]
+                                .as_str()
+                                .expect("validated prompt")
+                                .lines()
+                                .next()
+                                .unwrap_or_default()
+                        ),
+                        allow_session: false,
+                    };
+                    if !matches!(
+                        approver.request(request).await,
+                        Decision::Allow | Decision::AllowForSession
+                    ) {
+                        return (
+                            "denied by the user · workspace sub-agent not started".into(),
+                            "blocked".into(),
+                        );
+                    }
+                }
+                return match crate::subagent::run(context, self, &value).await {
+                    Ok(report) => (report, "Sub-agent finished".into()),
+                    Err(error) => (format!("sub-agent failed: {error}"), "blocked".into()),
+                };
+            }
             "tui_app_list" | "tui_app_read" | "tui_app_write" | "tui_app_edit"
             | "tui_app_preview" | "tui_app_open" => {
                 if !self.interactive_ui {

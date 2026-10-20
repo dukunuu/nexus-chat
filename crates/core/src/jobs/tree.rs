@@ -9,14 +9,14 @@ use sha2::{Digest as _, Sha256};
 
 const COPY_LIMIT: u64 = 200 * 1024 * 1024;
 
-pub(super) struct Tree {
+pub(crate) struct Tree {
     pub path: PathBuf,
     pub branch: Option<String>,
     source: PathBuf,
     before: BTreeMap<PathBuf, Vec<u8>>,
 }
 
-fn git(root: &Path, args: &[&str]) -> Result<Output> {
+pub(crate) fn git(root: &Path, args: &[&str]) -> Result<Output> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)

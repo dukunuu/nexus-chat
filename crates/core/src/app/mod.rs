@@ -1967,6 +1967,7 @@ impl App {
             toolbox.confine_shell_writes =
                 toolbox.workspace.as_ref().map(|w| w.root().to_path_buf());
         }
+        toolbox.subagent_environment = self.environment_section();
         toolbox.procs = Arc::clone(&self.procs);
         toolbox.session_id = self
             .session

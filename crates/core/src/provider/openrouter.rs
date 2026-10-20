@@ -1539,6 +1539,15 @@ impl OpenRouter {
         max_tool_iters: usize,
         tx: &mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<()> {
+        let toolbox = toolbox
+            .clone()
+            .with_subagents(Arc::new(crate::subagent::Context::new(
+                self.clone(),
+                model.clone(),
+                params.clone(),
+                tx.clone(),
+            )))
+            .unwrap_or(toolbox);
         // Dedup state for tool results: (tool, arguments) → latest full
         // result. Seeded from the incoming history (which `build_history`
         // already deduped with the same rule), so a result that duplicates
@@ -1714,6 +1723,41 @@ impl OpenRouter {
         }
         let _ = tx.send(StreamEvent::Done);
         Ok(())
+    }
+
+    pub(crate) async fn subagent_round(
+        &self,
+        request: crate::subagent::Request<'_>,
+    ) -> Result<crate::subagent::Round> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let finish = self
+            .run_stream(
+                request.model,
+                request.messages,
+                request.params,
+                request.tools,
+                request.final_round,
+                &tx,
+            )
+            .await?;
+        let (calls, output) = match finish {
+            Finish::Done(output) => (Vec::new(), output),
+            Finish::ToolCalls(calls, output) => (calls, output),
+            Finish::Errored => {
+                while let Ok(event) = rx.try_recv() {
+                    if let StreamEvent::Error(error) = event {
+                        anyhow::bail!("{error}");
+                    }
+                }
+                anyhow::bail!("sub-agent provider failed");
+            }
+        };
+        Ok(crate::subagent::Round {
+            content: output.content,
+            reasoning: output.reasoning,
+            calls,
+            usage: output.usage,
+        })
     }
 
     fn chat_completions_body(
