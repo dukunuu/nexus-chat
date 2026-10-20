@@ -376,19 +376,49 @@ impl App {
             .and_then(|m| m.context_length)
     }
 
-    /// Tokens used by the current session. Exact (from the provider's usage on
-    /// the last response) when idle; a ~4-chars/token estimate while streaming or
-    /// before the first response.
-    /// Estimate is what would actually be *sent* — system/memory prompt, the
-    /// compaction digest (if any), and only the tail after it, not the full
-    /// (possibly much larger) on-screen scrollback.
+    /// Tokens used by the current session: the provider's latest exact count
+    /// plus an estimate of only what was added since it (a streaming reply,
+    /// tool results). Estimating the whole conversation instead overshot on
+    /// JSON-heavy tool rows and then snapped back to the exact count every
+    /// turn. With no exact count yet (new session, model or prompt switch)
+    /// the whole conversation is estimated, scaled by the last exact/estimate
+    /// ratio so the switch-over doesn't jump.
     pub fn context_used(&self) -> u64 {
-        if !self.is_streaming()
-            && let Some(total) = self.context_total
+        let streaming = self.is_streaming();
+        if let (Some(total), Some(basis)) = (self.context_total, self.context_basis)
+            && total == basis.exact
         {
+            if !streaming && self.messages.len() == basis.messages {
+                return total;
+            }
+            let delta = self.context_chars() as f64 - basis.chars as f64;
+            let tokens = total as f64 + self.calibrated(delta / 4.0);
+            return tokens.max(0.0).round() as u64;
+        }
+        if !streaming && let Some(total) = self.context_total {
             return total;
         }
-        let streaming = self.is_streaming();
+        let estimate = self.calibrated(self.context_chars() as f64 / 4.0) as u64;
+        // Do not let a fresh estimate make the bar shrink at the start of a
+        // request: the previous completed request is a better lower bound
+        // until this one reports exact usage.
+        if streaming {
+            self.context_total
+                .map_or(estimate, |total| total.max(estimate))
+        } else {
+            estimate
+        }
+    }
+
+    /// Scale a ~4-chars/token estimate by what the provider last reported.
+    fn calibrated(&self, tokens: f64) -> f64 {
+        tokens * self.context_ratio.unwrap_or(1.0)
+    }
+
+    /// What the next request will carry, in characters: the system/memory
+    /// prompt, the compaction digest (if any), a forced skill's body, the
+    /// effective conversation tail, and the reply streaming now.
+    pub(crate) fn context_chars(&self) -> usize {
         let mut chars = self.system_prompt().chars().count();
         if let Some(s) = self
             .session
@@ -407,19 +437,31 @@ impl App {
         if let Some(buf) = self.active_streaming_text() {
             chars += buf.chars().count();
         }
-        let estimate = (chars / 4) as u64;
-        // The character estimate is intentionally conservative about wire
-        // overhead and provider tokenization. Do not let it make the status
-        // bar visibly shrink at the start of a new request: the previous
-        // completed request is a better lower bound until this one reports
-        // exact usage. Compaction/model/session boundaries clear
-        // `context_total` before a genuinely smaller context is shown.
-        if streaming {
-            self.context_total
-                .map_or(estimate, |total| total.max(estimate))
-        } else {
-            estimate
+        chars
+    }
+
+    /// Record an exact count reported by one of `task`'s requests. Within a
+    /// turn the conversation only grows, so a smaller count from the same
+    /// task is a nested request (a `task` sub-agent's own prompt) and must
+    /// not move the bar; the first count of a turn is always taken.
+    pub(crate) fn observe_context(&mut self, task: super::ChatTaskId, total: u64) {
+        if self
+            .context_basis
+            .is_some_and(|basis| basis.task == task && total < basis.exact)
+        {
+            return;
         }
+        let chars = self.context_chars();
+        if chars > 0 && total > 0 {
+            self.context_ratio = Some((total as f64 / (chars as f64 / 4.0)).clamp(0.5, 2.0));
+        }
+        self.context_total = Some(total);
+        self.context_basis = Some(super::ContextBasis {
+            exact: total,
+            chars,
+            messages: self.messages.len(),
+            task,
+        });
     }
 
     /// Whether the active model accepts image input (unknown model → false).

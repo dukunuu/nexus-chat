@@ -2403,6 +2403,71 @@ fn context_used_and_limit() {
     assert_eq!(a.context_used(), prompt_only + 10);
 }
 
+fn context_row(role: &str, content: String) -> Message {
+    Message {
+        role: role.into(),
+        content,
+        model: None,
+        reasoning: None,
+        tokens: None,
+        secs: None,
+        cost: None,
+        phrase: None,
+        persona: None,
+        created_at: None,
+    }
+}
+
+#[test]
+fn context_bar_adds_only_what_changed_since_the_last_exact_count() {
+    let mut a = app_with_key();
+    a.skills.clear();
+    a.base_system_prompt = String::new();
+    // JSON-heavy rows the ~4 chars/token rule overestimates.
+    a.messages
+        .push(context_row("user", "\\\"x\\\" ".repeat(20_000)));
+    a.observe_context(1, 30_000);
+    assert_eq!(a.context_used(), 30_000, "idle with nothing new: exact");
+
+    a.messages.push(context_row("assistant", "y".repeat(400)));
+    // 400 chars ≈ 100 estimated tokens, scaled by the learned ratio.
+    let ratio = a.context_ratio.unwrap();
+    assert_eq!(a.context_used(), 30_000 + (100.0 * ratio).round() as u64);
+    assert!(
+        a.context_used() < 31_000,
+        "re-estimating the whole conversation would overshoot by thousands"
+    );
+}
+
+#[test]
+fn smaller_count_inside_a_turn_is_a_sub_agent_and_does_not_move_the_bar() {
+    let mut a = app_with_key();
+    a.skills.clear();
+    a.base_system_prompt = String::new();
+    a.messages.push(context_row("user", "x".repeat(4_000)));
+    a.observe_context(7, 50_000);
+    a.observe_context(7, 3_000); // a `task` sub-agent's own request
+    assert_eq!(a.context_total, Some(50_000));
+    a.observe_context(7, 51_000);
+    assert_eq!(a.context_total, Some(51_000));
+    // A new turn's first count is always taken, even if smaller (/retry).
+    a.observe_context(8, 45_000);
+    assert_eq!(a.context_total, Some(45_000));
+}
+
+#[test]
+fn estimate_without_an_exact_count_uses_the_learned_ratio() {
+    let mut a = app_with_key();
+    a.skills.clear();
+    a.base_system_prompt = String::new();
+    a.messages.push(context_row("user", "x".repeat(4_000))); // ~1,000 estimated
+    a.observe_context(1, 1_500);
+    assert_eq!(a.context_used(), 1_500);
+    // A prompt-cache epoch boundary drops the exact count.
+    a.context_total = None;
+    assert_eq!(a.context_used(), 1_500, "no jump back to the raw estimate");
+}
+
 #[tokio::test]
 async fn streaming_context_estimate_does_not_shrink_below_last_exact_total() {
     let mut a = app_with_key();

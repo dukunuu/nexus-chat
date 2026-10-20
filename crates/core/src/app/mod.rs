@@ -808,6 +808,19 @@ pub const MAX_CHAT_TASKS: usize = 10;
 
 pub type ChatTaskId = u64;
 
+/// An exact context count and the conversation it measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContextBasis {
+    /// The provider's exact count (`context_total` while it still matches).
+    pub exact: u64,
+    /// `context_chars()` when the count arrived.
+    pub chars: usize,
+    /// `messages.len()` then; unchanged and idle means nothing to estimate.
+    pub messages: usize,
+    /// The chat task whose request reported it.
+    pub task: ChatTaskId,
+}
+
 /// Identity of a parked survey/plan gate, as surfaced on the event stream.
 #[derive(Clone)]
 pub struct GateState {
@@ -1236,6 +1249,13 @@ pub struct App {
     pub unread: std::collections::HashSet<String>,
     /// Exact conversation token total from the last completed response.
     pub context_total: Option<u64>,
+    /// The latest exact count and the estimator's view of the conversation
+    /// at that moment, so the bar estimates only what was added since
+    /// rather than re-estimating the whole conversation (which saw-toothed).
+    pub(crate) context_basis: Option<ContextBasis>,
+    /// Exact tokens per estimated token, learned from the last exact count;
+    /// scales estimates made with no basis (after a session or epoch switch).
+    pub(crate) context_ratio: Option<f64>,
     /// Cache accounting for the turn in progress, summed across every API
     /// request it makes (a tool loop is many). Shown next to the context
     /// window. Transient — the per-request numbers live in `usage_log`.
@@ -1470,6 +1490,8 @@ impl App {
             pending_events: VecDeque::new(),
             unread: std::collections::HashSet::new(),
             context_total: None,
+            context_basis: None,
+            context_ratio: None,
             turn_cache: CacheTally::default(),
             last_cache_rate: None,
             settings: Settings::default(),

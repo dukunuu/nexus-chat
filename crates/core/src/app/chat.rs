@@ -909,6 +909,24 @@ impl App {
                 };
                 task.usage = Some(merged);
                 let session_id = task.session_id.clone();
+                if has_tokens
+                    && self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.id == session_id)
+                {
+                    // Every request of a tool loop updates the bar, not
+                    // just the turn's last one.
+                    let total = if u.total_tokens > 0 {
+                        u.total_tokens
+                    } else {
+                        u.prompt_tokens + u.completion_tokens
+                    };
+                    self.observe_context(task_id, total);
+                }
+                let Some(task) = self.chat_tasks.get_mut(&task_id) else {
+                    return Ok(());
+                };
                 let space_id = task.space_id.clone();
                 let model_id = task.model_id.clone();
                 let backend = task.backend;
@@ -1192,7 +1210,11 @@ impl App {
             } else {
                 u.prompt_tokens + u.completion_tokens
             };
-            self.context_total = Some(total);
+            // `observe_context` already took this task's counts as they
+            // arrived; only fill in when it never saw one.
+            if self.context_basis.is_none_or(|basis| basis.task != task.id) {
+                self.context_total = Some(total);
+            }
         }
         let secs = Some(task.started.elapsed().as_secs_f64());
         // Prefer the provider's exact charge; otherwise estimate from the
