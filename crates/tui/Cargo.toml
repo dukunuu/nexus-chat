@@ -16,10 +16,10 @@ path = "src/main.rs"
 
 [dependencies]
 # `version` is required for `cargo publish` (path-only deps can't be
-# rewritten for the registry). The caret `0.1` always resolves to the
-# just-published nexus-chat-core release — both packages ride the same
-# workspace version.
-nexus-chat-core = { path = "../core", version = "0.1" }
+# rewritten for the registry). It is pinned exactly to the workspace
+# version: a caret `0.1` let a fresh `cargo install` resolve an older
+# nexus-chat-core and fail to compile. version-bump.yml rewrites both pins.
+nexus-chat-core = { path = "../core", version = "=0.1.39" }
 anyhow = { workspace = true }
 arboard = { workspace = true }
 chrono = { workspace = true }
@@ -47,4 +47,4 @@ uuid = { workspace = true }
 zip = { workspace = true }
 
 [dev-dependencies]
-nexus-chat-core = { path = "../core", version = "0.1", features = ["test-helpers"] }
+nexus-chat-core = { path = "../core", version = "=0.1.39", features = ["test-helpers"] }

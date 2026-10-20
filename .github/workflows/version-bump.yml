@@ -53,11 +53,15 @@ jobs:
           # churn every dependency).
           sed -i '/^name = "nexus-chat"$/{n;s/^version = ".*"/version = "'"$new"'"/;}' Cargo.lock
           sed -i '/^name = "nexus-chat-core"$/{n;s/^version = ".*"/version = "'"$new"'"/;}' Cargo.lock
+          # The TUI pins nexus-chat-core exactly (a caret let fresh installs
+          # resolve an older core); move the pin with the bump.
+          sed -i 's|nexus-chat-core = { path = "../core", version = "=[^"]*"|nexus-chat-core = { path = "../core", version = "='"$new"'"|' crates/tui/Cargo.toml
+          grep -c 'version = "='"$new"'"' crates/tui/Cargo.toml | grep -qx 2
           # Sanity check: fail loudly if the manifests are inconsistent.
           cargo metadata --no-deps --locked >/dev/null
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
+          git add Cargo.toml Cargo.lock crates/tui/Cargo.toml
           git commit -m "chore: bump to $new"
           git tag "v$new"
           git push origin master

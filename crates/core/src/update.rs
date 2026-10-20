@@ -142,6 +142,11 @@ fn is_dev_build() -> bool {
     std::env::current_exe().is_ok_and(|p| path_is_dev_build(&p))
 }
 
+/// `--locked` installs with the dependency versions the release was tested
+/// with (the packaged `Cargo.lock`) instead of a fresh resolve that may pick
+/// an older nexus-chat-core or a newly broken dependency.
+const INSTALL_ARGS: [&str; 4] = ["install", "--locked", "--force", "nexus-chat"];
+
 /// Is `cargo` on PATH? Auto-update is only possible when it is.
 fn cargo_available() -> bool {
     std::process::Command::new("cargo")
@@ -189,7 +194,7 @@ pub enum AutoUpdateOutcome {
 /// the running binary must be a real install (not a dev build), `cargo`
 /// must be on PATH, `NEXUS_NO_UPDATE` must be unset, and no other
 /// auto-update may be in flight (marker guard). Spawns
-/// `cargo install --force nexus-chat` fully detached — the caller returns
+/// `cargo install --locked --force nexus-chat` fully detached — the caller returns
 /// immediately and the install runs to completion (or failure, logged to
 /// `auto-update.log` next to the marker) on its own, outliving this
 /// process. The new binary is live on the next launch; the running one is
@@ -209,7 +214,7 @@ pub fn try_start_auto_update(data_dir: &Path, latest: &str) -> AutoUpdateOutcome
         return AutoUpdateOutcome::Unavailable;
     }
     let mut cmd = std::process::Command::new("cargo");
-    cmd.args(["install", "--force", "nexus-chat"]);
+    cmd.args(INSTALL_ARGS);
     // Detached: progress goes to the log, never to the TUI's terminal.
     if let Ok(log) = std::fs::OpenOptions::new()
         .create(true)
@@ -241,12 +246,12 @@ pub fn try_start_auto_update(data_dir: &Path, latest: &str) -> AutoUpdateOutcome
     AutoUpdateOutcome::Started
 }
 
-/// Run `cargo install --force nexus-chat` in the foreground, streaming its
+/// Run `cargo install --locked --force nexus-chat` in the foreground, streaming its
 /// output to the terminal — the deliberate `nexus update` path. Returns
 /// the exit status; the caller decides how to report it.
 pub fn install_now() -> anyhow::Result<std::process::ExitStatus> {
     let status = std::process::Command::new("cargo")
-        .args(["install", "--force", "nexus-chat"])
+        .args(INSTALL_ARGS)
         .status()
         .map_err(|e| {
             anyhow::anyhow!("running `cargo install nexus-chat`: {e} (is cargo on PATH?)")
