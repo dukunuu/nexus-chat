@@ -162,6 +162,13 @@ impl App {
         } else {
             self.memory_model.trim().to_string()
         };
+        // The session's own model is the fallback when the utility model's
+        // backend rejects the request (an id from another backend, no credit).
+        let fallback = self
+            .current_model
+            .as_deref()
+            .and_then(|id| self.resolve_model_backend(id))
+            .filter(|_| self.current_model.as_deref() != Some(requested_model.as_str()));
         let Some((provider, raw_model)) = self.resolve_utility_model_backend(&requested_model)
         else {
             self.push_status(format!(
@@ -179,6 +186,8 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel();
         self.compact_rx = Some(rx);
         self.compacting_session_id = Some(session_id.clone());
+        let error_slot = std::sync::Arc::clone(&self.compact_error);
+        *error_slot.lock().expect("compaction error slot") = None;
         // The history pane gets a transient "compacting" block immediately;
         // the input bar also keeps its compact status while the request runs.
         tokio::spawn(async move {
@@ -187,16 +196,40 @@ impl App {
                 prompt_cache_key: Some(prompt_cache_key),
                 ..ChatParams::default()
             };
-            if let Ok(completion) = provider
-                .complete_with_params(&raw_model, msgs, &params)
-                .await
-            {
-                let summary = completion.text.trim().to_string();
-                if !summary.is_empty() {
-                    let _ = tx.send((session_id, summary, new_through, before_pct));
+            let mut attempts = vec![(provider, raw_model)];
+            attempts.extend(fallback);
+            let mut errors = Vec::new();
+            for (provider, model) in attempts {
+                match provider
+                    .complete_with_params(&model, msgs.clone(), &params)
+                    .await
+                {
+                    Ok(completion) if !completion.text.trim().is_empty() => {
+                        let summary = completion.text.trim().to_string();
+                        let _ = tx.send((session_id, summary, new_through, before_pct));
+                        return;
+                    }
+                    Ok(_) => errors.push(format!("{model}: empty digest")),
+                    Err(error) => {
+                        errors.push(format!("{model}: {}", first_line(&error.to_string())));
+                    }
                 }
             }
+            *error_slot.lock().expect("compaction error slot") = Some(errors.join(" · "));
         });
+    }
+
+    /// Say why a compaction produced no digest, once.
+    fn report_compaction_failure(&mut self) {
+        let reason = self
+            .compact_error
+            .lock()
+            .expect("compaction error slot")
+            .take();
+        self.push_status(reason.map_or_else(
+            || "compaction failed — no digest returned".to_string(),
+            |reason| format!("compaction failed — {reason}"),
+        ));
     }
 
     /// Apply a compaction digest to the matching session (in memory + db):
@@ -212,7 +245,7 @@ impl App {
         self.compact_rx = None;
         self.compacting_session_id = None;
         let Some((id, summary, through, before_pct)) = result else {
-            self.push_status("compaction failed — no digest returned".to_string());
+            self.report_compaction_failure();
             return;
         };
         if self.experiments.compaction_itemized
@@ -998,6 +1031,29 @@ mod tests {
     }
 
     #[test]
+    fn compaction_failure_names_the_cause() {
+        let mut a = test_app();
+        let (_tx, rx) = mpsc::unbounded_channel();
+        a.compact_rx = Some(rx);
+        *a.compact_error.lock().unwrap() =
+            Some("openai/gpt-6-luna: request failed (402 Payment Required)".into());
+
+        a.on_compact_result(None);
+
+        assert_eq!(
+            a.last_status(),
+            "compaction failed — openai/gpt-6-luna: request failed (402 Payment Required)"
+        );
+        assert!(a.compact_error.lock().unwrap().is_none(), "reported once");
+    }
+
+    #[test]
+    fn first_line_caps_long_errors_for_the_status_bar() {
+        assert_eq!(first_line("boom\ntrace"), "boom");
+        assert_eq!(first_line(&"x".repeat(300)).chars().count(), 161);
+    }
+
+    #[test]
     fn compaction_tail_skips_rows_that_must_never_reach_the_model() {
         let mut msgs = vec![
             msg("user", "what should we research?"),
@@ -1048,5 +1104,15 @@ mod tests {
         let partial = compaction_tail(&msgs, 1);
         assert!(!partial.contains("what should we research?"), "{partial}");
         assert!(partial.contains("the final question"), "{partial}");
+    }
+}
+
+/// The first line of an error, capped for the status bar.
+fn first_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    if line.chars().count() > 160 {
+        format!("{}…", line.chars().take(160).collect::<String>())
+    } else {
+        line.to_string()
     }
 }

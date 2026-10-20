@@ -1110,6 +1110,9 @@ pub struct App {
     /// Session currently being compacted. Kept separately from `compact_rx` so
     /// the TUI can mark the right row while the job is still in flight.
     pub compacting_session_id: Option<String>,
+    /// Why the last compaction request failed, filled by its background task
+    /// before it drops the result channel, so the status names the cause.
+    pub(crate) compact_error: Arc<std::sync::Mutex<Option<String>>>,
 
     /// Discovered skills (name/description only — bodies are read from disk on
     /// invocation, so this list is cheap and reloaded whenever it changes).
@@ -1483,6 +1486,7 @@ impl App {
             verbosity: "concise".to_string(),
             memory_rx: None,
             compact_rx: None,
+            compact_error: Arc::default(),
             compacting_session_id: None,
             models: Vec::new(),
             current_model: None,
