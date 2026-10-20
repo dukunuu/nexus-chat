@@ -166,6 +166,7 @@ fn approval_app(
     app.pending_approval_request = Some(nexus_core::tools::ApprovalRequest {
         tool: tool.into(),
         class: None,
+        detail: None,
         action: if tool == "shell" { "run" } else { "edit" }.into(),
         summary,
         allow_session: true,
@@ -317,7 +318,7 @@ fn approval_overflow_is_counted_scrollable_and_reset_for_each_request() {
     let root = app.space.root.clone();
     let screen = render_to_string(120, 24, |f| super::approval::render(f, &app));
     assert!(
-        screen.contains("↑↓ scroll · y allow · a allow edits this session · n deny"),
+        screen.contains("y allow once · a allow all edits this session · n deny"),
         "{screen}"
     );
     let (marker_row, marker) = screen
@@ -337,7 +338,8 @@ fn approval_overflow_is_counted_scrollable_and_reset_for_each_request() {
     let shown = screen.lines().filter(|line| line.contains("+row ")).count();
     assert_eq!(shown + remaining, 40);
     assert!(remaining > 0);
-    assert!(screen.lines().nth(marker_row + 1).unwrap().contains('╰'));
+    // Below the preview: a spacer, the pinned key row, then the border.
+    assert!(screen.lines().nth(marker_row + 3).unwrap().contains('╰'));
     for (key, offset) in [
         (crossterm::event::KeyCode::Down, 1),
         (crossterm::event::KeyCode::Char('j'), 2),
@@ -455,7 +457,7 @@ fn approval_requires_the_end_of_a_wrapped_shell_command_before_allowing() {
         );
         let root = app.space.root.clone();
         let screen = render_to_string(120, 24, |f| super::approval::render(f, &app));
-        assert!(screen.contains("scroll to the end to allow"), "{screen}");
+        assert!(screen.contains("scroll to the end to enable y"), "{screen}");
         assert!(screen.contains("more lines"), "{screen}");
         super::approval::handle_key(&mut app, KeyCode::Char(key).into()).unwrap();
         assert!(receiver.try_recv().is_err());
@@ -466,7 +468,10 @@ fn approval_requires_the_end_of_a_wrapped_shell_command_before_allowing() {
         }
         let screen = render_to_string(120, 24, |f| super::approval::render(f, &app));
         assert!(screen.contains("echo LAST_COMMAND"), "{screen}");
-        assert!(!screen.contains("scroll to the end to allow"), "{screen}");
+        assert!(
+            !screen.contains("scroll to the end to enable y"),
+            "{screen}"
+        );
         super::approval::handle_key(&mut app, KeyCode::PageUp.into()).unwrap();
         render_to_string(120, 24, |f| super::approval::render(f, &app));
         super::approval::handle_key(&mut app, KeyCode::Char(key).into()).unwrap();
@@ -520,7 +525,7 @@ fn approval_popup_combined_wave_snapshot() {
     let screen = render_to_string(120, 40, |f| super::approval::render(f, &app));
     assert!(screen.contains(" approve "), "{screen}");
     assert!(
-        screen.contains("y approve all · a this session · r review each · n deny all"),
+        screen.contains("y approve all · a + session · r one by one · n deny all"),
         "{screen}"
     );
     let snapshot: Vec<_> = screen
@@ -535,12 +540,15 @@ fn approval_popup_combined_wave_snapshot() {
     assert_eq!(
         snapshot,
         [
+            " The agent wants to make these 3 calls together. Each is shown below; y approves all of",
+            " them, r lets you decide one by one.",
             " ▍ 1  edit one  +1 −1",
             " 1 − old",
             " 1 + new",
             " ▍ 2  write two",
             " ▍ 3  shell · run",
             " $ cargo test",
+            " y approve all · a + session · r one by one · n deny all",
         ]
     );
     drop(app);
@@ -570,10 +578,13 @@ fn approval_edit_at_80_columns_has_colored_diff_and_class_badge() {
         snapshot,
         [
             "edit src/app.rs  +2 −1                  write in workspace",
+            "The agent wants to change src/app.rs: 2 lines added, 1",
+            "line removed.",
             "41   let cfg = load()?;",
             "42 − let n = cfg.limit;",
             "42 + let n = cfg.limit.max(1);",
             "43 + let m = n * 2;",
+            "y allow once · a allow all edits this session · n deny",
         ]
     );
     for (symbol, color) in [("+", app.theme.success), ("−", app.theme.error)] {
@@ -682,17 +693,30 @@ fn approval_popup_shell_and_diff_snapshots() {
             "shell",
             "run",
             "$ cargo test\nin crates/core",
-            vec!["shell · run", "$ cargo test", "in crates/core"],
+            vec![
+                "shell · run",
+                "The agent wants to run this command:",
+                "$ cargo test",
+                "in crates/core",
+                "y allow once · a allow all commands this session · n deny",
+            ],
         ),
         (
             "fs",
             "write",
             "write file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new",
-            vec!["write file  +1 −1", "1 − old", "1 + new"],
+            vec![
+                "write file  +1 −1",
+                "The agent wants to replace the contents of file: 1 line added, 1 line removed.",
+                "1 − old",
+                "1 + new",
+                "y allow once · a allow all edits this session · n deny",
+            ],
         ),
     ] {
         app.approval_request = Some(nexus_core::tools::ApprovalRequest {
             class: None,
+            detail: None,
             tool: tool.into(),
             action: action.into(),
             summary: summary.into(),
@@ -702,9 +726,9 @@ fn approval_popup_shell_and_diff_snapshots() {
         assert!(screen.contains(" approve "), "{screen}");
         assert!(
             screen.contains(if tool == "fs" {
-                "y allow · a allow edits this session · n deny"
+                "y allow once · a allow all edits this session · n deny"
             } else {
-                "y allow · a allow commands this session · n deny"
+                "y allow once · a allow all commands this session · n deny"
             }),
             "{screen}"
         );
@@ -1940,4 +1964,40 @@ fn wrapped_list_items_hang_under_their_text() {
         lines[bullet + 1].starts_with("  ") && !lines[bullet + 1].starts_with("   "),
         "{lines:#?}"
     );
+}
+
+#[test]
+fn large_write_preview_scrolls_through_the_whole_detail() {
+    use crossterm::event::KeyCode;
+    let body: String = (1..=120)
+        .map(|n| format!("+line {n:03}\n"))
+        .collect::<String>();
+    let detail = format!(
+        "write src/big.rs (+120 −0)\n--- /dev/null\n+++ b/src/big.rs\n@@ -0,0 +1,120 @@\n{}",
+        body.trim_end()
+    );
+    let (mut app, _receiver) =
+        approval_app("fs", "write src/big.rs (+120 −0)\n… 80 more lines".into());
+    let root = app.space.root.clone();
+    {
+        let request = app.approval_request.as_mut().unwrap();
+        request.action = "write".into();
+        request.detail = Some(detail);
+    }
+    let screen = render_to_string(80, 30, |f| super::approval::render(f, &app));
+    assert!(
+        screen.contains("The agent wants to create src/big.rs with 120 lines."),
+        "{screen}"
+    );
+    assert!(screen.contains("lines 1–"), "{screen}");
+    assert!(!screen.contains("line 120"), "{screen}");
+    super::approval::handle_key(&mut app, KeyCode::End.into()).unwrap();
+    let screen = render_to_string(80, 30, |f| super::approval::render(f, &app));
+    assert!(screen.contains("line 120"), "{screen}");
+    super::approval::handle_key(&mut app, KeyCode::Home.into()).unwrap();
+    assert_eq!(app.approval_scroll.get(), 0);
+    super::approval::handle_key(&mut app, KeyCode::Char(' ').into()).unwrap();
+    assert!(app.approval_scroll.get() > 1, "space pages down");
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
 }

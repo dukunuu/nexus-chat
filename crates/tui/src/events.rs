@@ -923,6 +923,15 @@ fn handle_popup_mouse(app: &mut AppView, m: MouseEvent) -> Result<()> {
 /// open popup.
 fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
     if app.popup == Popup::Approval {
+        // The wheel scrolls the preview; clicks never answer an approval.
+        let code = match m.kind {
+            MouseEventKind::ScrollUp => KeyCode::Up,
+            MouseEventKind::ScrollDown => KeyCode::Down,
+            _ => return Ok(()),
+        };
+        for _ in 0..3 {
+            ui::popups::approval::handle_key(app, KeyEvent::from(code))?;
+        }
         return Ok(());
     }
     if app.popup == Popup::None {
@@ -1076,6 +1085,7 @@ mod tests {
         app.pending_approval_request = Some(nexus_core::tools::ApprovalRequest {
             tool: "shell".into(),
             class: None,
+            detail: None,
             action: "run".into(),
             summary: "$ true".into(),
             allow_session: true,
@@ -1114,6 +1124,7 @@ mod tests {
             app.approval_request = Some(ApprovalRequest {
                 tool: "shell".into(),
                 class: None,
+                detail: None,
                 action: "run".into(),
                 summary: "$ true".into(),
                 allow_session: true,

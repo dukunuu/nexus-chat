@@ -77,6 +77,7 @@ async fn one_time_requests_ignore_and_do_not_create_session_grants() {
     let request = ApprovalRequest {
         tool: "fs".into(),
         class: None,
+        detail: None,
         action: "delete".into(),
         summary: "delete file".into(),
         allow_session: false,
@@ -126,6 +127,7 @@ async fn installed_approver_round_trip_writes_only_after_the_approval_command() 
         &ApprovalRequest {
             tool: "fs".into(),
             class: Some("write in workspace".into()),
+            detail: None,
             action: "write".into(),
             summary: "write approved (+1 −0)\ndiff --git aa/workspace/approved bb/workspace/approved\nindex e69de29..3f30d00 100644\n--- aa/workspace/approved\n+++ bb/workspace/approved\n@@ -0,0 +1 @@\n+allowed\n\\ No newline at end of file".into(),
             allow_session: true,
@@ -360,6 +362,7 @@ async fn channel_approver_remembers_only_the_requested_action_for_its_session() 
     let request = ApprovalRequest {
         tool: "fs".into(),
         class: None,
+        detail: None,
         action: "edit".into(),
         summary: "edit file".into(),
         allow_session: true,
@@ -406,6 +409,7 @@ async fn approval_command_answers_a_pending_channel_request() {
     let request = ApprovalRequest {
         tool: "shell".into(),
         class: None,
+        detail: None,
         action: "run".into(),
         summary: "$ true".into(),
         allow_session: true,
@@ -430,6 +434,7 @@ async fn channel_approver_denies_closed_channels_and_cancels_with_the_caller() {
     let request = ApprovalRequest {
         tool: "fs".into(),
         class: None,
+        detail: None,
         action: "write".into(),
         summary: "write file".into(),
         allow_session: true,
@@ -4676,6 +4681,7 @@ fn queued_request(
     let request = ApprovalRequest {
         tool: "fs".into(),
         class: None,
+        detail: None,
         action: action.into(),
         summary: summary.into(),
         allow_session: true,
@@ -4771,6 +4777,7 @@ fn wave_requests() -> Vec<ApprovalRequest> {
     .into_iter()
     .map(|(tool, action, summary)| ApprovalRequest {
         class: None,
+        detail: None,
         tool: tool.into(),
         action: action.into(),
         summary: summary.into(),
@@ -4945,6 +4952,7 @@ fn allowing_a_wave_for_the_session_never_allows_an_unrelated_queued_wave_by_coun
     let request = ApprovalRequest {
         tool: "wave".into(),
         class: None,
+        detail: None,
         action: "2 calls".into(),
         summary: "2 edits".into(),
         allow_session: true,

@@ -159,6 +159,123 @@ fn wave_lines(summary: &str, width: usize, theme: &crate::theme::Theme) -> Vec<L
     lines
 }
 
+/// One plain sentence saying what the agent is asking for, above the preview.
+fn explain(tool: &str, action: &str, text: &str) -> String {
+    let text = text
+        .split_once('\n')
+        .filter(|(head, _)| head.starts_with("in_scope ") || head.starts_with("risk: "))
+        .map_or(text, |(_, rest)| rest);
+    let (head, body) = text.split_once('\n').unwrap_or((text, ""));
+    let (label, counts) = head.rsplit_once(" (+").map_or((head, ""), |(l, c)| (l, c));
+    let path = label.split_once(' ').map_or(label, |(_, path)| path);
+    let (added, deleted) = counts
+        .strip_suffix(')')
+        .and_then(|counts| counts.split_once(" −"))
+        .map_or_else(
+            || {
+                let (added, deleted) = diff::counts(body);
+                (added.to_string(), deleted.to_string())
+            },
+            |(added, deleted)| (added.to_string(), deleted.to_string()),
+        );
+    let (added, deleted) = (added.as_str(), deleted.as_str());
+    let lines = |n: &str| {
+        if n == "1" {
+            "1 line".to_string()
+        } else {
+            format!("{n} lines")
+        }
+    };
+    match (tool, action) {
+        ("wave", _) => format!(
+            "The agent wants to make these {action} together. Each is shown below; \
+             y approves all of them, r lets you decide one by one."
+        ),
+        ("fs", "edit") => format!(
+            "The agent wants to change {path}: {} added, {} removed.",
+            lines(added),
+            lines(deleted)
+        ),
+        ("fs", "write") if body.contains("@@ -0,0 ") || !body.contains("\n-") => {
+            format!("The agent wants to create {path} with {}.", lines(added))
+        }
+        ("fs", "write") => format!(
+            "The agent wants to replace the contents of {path}: {} added, {} removed.",
+            lines(added),
+            lines(deleted)
+        ),
+        ("fs", "delete") => format!("The agent wants to delete {path} ({}).", lines(deleted)),
+        ("fs", "move") => format!("The agent wants to {head}."),
+        ("shell", _) => "The agent wants to run this command:".to_string(),
+        ("proc", _) => "The agent wants to start this in the background:".to_string(),
+        ("task", _) => {
+            "The agent wants a sub-agent to edit files in its own git worktree:".to_string()
+        }
+        _ => format!("The agent wants to use {tool}{}{action}:", style::SEP),
+    }
+}
+
+/// Put the plain-language explanation under the header (first, for a wave).
+fn insert_intro(
+    lines: &mut Vec<Line<'static>>,
+    request: &nexus_core::tools::ApprovalRequest,
+    text: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) {
+    let wave = request.tool == "wave";
+    let at = if wave {
+        0
+    } else {
+        lines
+            .iter()
+            .position(|line| line.width() == 0)
+            .unwrap_or(lines.len())
+    };
+    // Word-wrapped (it's a sentence), then escaped: paths come from the model.
+    let dim = Style::default().fg(theme.fg_dim);
+    let mut intro: Vec<Line<'static>> =
+        crate::ui::cards::wrap_plain(&explain(&request.tool, &request.action, text), width)
+            .iter()
+            .flat_map(|row| escaped_rows(row, width, Style::default().fg(theme.fg), dim))
+            .collect();
+    if wave {
+        intro.push(Line::default());
+    } else {
+        intro.insert(0, Line::default());
+    }
+    lines.splice(at..at, intro);
+}
+
+/// The pinned key row: what each key does for this request.
+fn legend(app: &AppView, request: &nexus_core::tools::ApprovalRequest) -> String {
+    let wave = request.tool == "wave";
+    let session = match request.tool.as_str() {
+        "fs" => "a allow all edits this session",
+        "shell" | "proc" => "a allow all commands this session",
+        "wave" => "a + session",
+        _ => "a allow for this session",
+    };
+    if shell_unread(app) {
+        let deny = if wave { "n deny all" } else { "n deny" };
+        let review = if wave { " · r one by one" } else { "" };
+        format!("scroll to the end to enable y{review} · {deny}")
+    } else if wave {
+        let session = if request.allow_session {
+            format!(" · {session}")
+        } else {
+            String::new()
+        };
+        // Short enough for an 80-column terminal; the sentence above the
+        // preview spells out what y and r do.
+        format!("y approve all{session} · r one by one · n deny all")
+    } else if request.allow_session {
+        format!("y allow once · {session} · n deny")
+    } else {
+        "y allow once · n deny".to_string()
+    }
+}
+
 fn shell_unread(app: &AppView) -> bool {
     app.approval_request.as_ref().is_some_and(|request| {
         request.tool == "shell"
@@ -176,24 +293,38 @@ pub fn render(f: &mut Frame, app: &AppView) {
     let Some(request) = &app.approval_request else {
         return;
     };
-    let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::WIDE.1);
-    let inner = chrome::popup_block_focused("", &app.theme, true, chrome::Tone::Normal).inner(area);
-    let width = usize::from(inner.width);
-    let height = usize::from(inner.height);
-    let dim = Style::default().fg(app.theme.fg_dim);
+    let text = request.detail.as_deref().unwrap_or(&request.summary);
     let wave = request.tool == "wave";
-    let lines = if wave {
-        wave_lines(&request.summary, width, &app.theme)
+    let dim = Style::default().fg(app.theme.fg_dim);
+    // Measure at the normal size; a preview that doesn't fit gets a taller
+    // popup so a large write can be read, not just skimmed.
+    let normal = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::WIDE.1);
+    let width = usize::from(
+        chrome::popup_block_focused("", &app.theme, true, chrome::Tone::Normal)
+            .inner(normal)
+            .width,
+    );
+    let mut lines = if wave {
+        wave_lines(text, width, &app.theme)
     } else {
         request_lines(
             &request.tool,
             &request.action,
-            &request.summary,
+            text,
             request.class.as_deref(),
             width,
             &app.theme,
         )
     };
+    insert_intro(&mut lines, request, text, width, &app.theme);
+    let area = if lines.len() + 4 > usize::from(normal.height) {
+        crate::ui::centered(f.area(), chrome::WIDE.0, 92)
+    } else {
+        normal
+    };
+    let inner = chrome::popup_block_focused("", &app.theme, true, chrome::Tone::Normal).inner(area);
+    // The bottom inner row is the key legend; the preview scrolls above it.
+    let height = usize::from(inner.height).saturating_sub(2);
     let max_scroll = lines.len().saturating_sub(height);
     let offset = app.approval_scroll.get().min(max_scroll);
     app.approval_scroll.set(offset);
@@ -216,31 +347,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
     } else {
         " approve ".to_string()
     };
-    let session = match request.tool.as_str() {
-        "fs" => "a allow edits this session",
-        "shell" | "proc" => "a allow commands this session",
-        _ => "a allow for this session",
-    };
-    let scroll_hint = format!("↑↓ scroll · y allow · {session} · n deny");
-    let session_hint = format!("y allow · {session} · n deny");
-    let hint = if wave && shell_unread(app) {
-        // Short enough to fit the popup's footer on an 80-column terminal.
-        "↓ read to the end to approve · r review each · n deny all"
-    } else if wave && !request.allow_session {
-        "y approve all · r review each · n deny all"
-    } else if wave {
-        "y approve all · a this session · r review each · n deny all"
-    } else if shell_unread(app) {
-        "↑↓ scroll · scroll to the end to allow · n deny"
-    } else if !request.allow_session && max_scroll > 0 {
-        "↑↓ scroll · y allow · n deny"
-    } else if !request.allow_session {
-        "y allow · n deny"
-    } else if max_scroll > 0 {
-        &scroll_hint
-    } else {
-        &session_hint
-    };
+    let legend = legend(app, request);
     chrome::render_hinted(
         f,
         area,
@@ -256,7 +363,8 @@ pub fn render(f: &mut Frame, app: &AppView) {
         true,
         chrome::Tone::Normal,
     );
-    render_footer(f, app, area, hint, offset, max_scroll);
+    render_footer(f, app, area, (offset, height, lines.len()), max_scroll);
+    render_legend(f, app, inner, &legend);
     let visible = if offset < max_scroll {
         height.saturating_sub(1)
     } else {
@@ -271,17 +379,57 @@ pub fn render(f: &mut Frame, app: &AppView) {
             dim,
         )));
     }
-    f.render_widget(Paragraph::new(visible), inner);
+    let body = ratatui::layout::Rect {
+        height: u16::try_from(height).unwrap_or(u16::MAX),
+        ..inner
+    };
+    f.render_widget(Paragraph::new(visible), body);
 }
 
+/// The pinned key row at the bottom of the popup, dim during the open delay
+/// (when the keys don't work yet).
+fn render_legend(f: &mut Frame, app: &AppView, inner: ratatui::layout::Rect, legend: &str) {
+    if inner.height < 2 {
+        return;
+    }
+    let delayed = app
+        .approval_opened_at
+        .is_some_and(|opened| opened.elapsed() < app.approval_delay);
+    let style = if delayed {
+        Style::default()
+            .fg(app.theme.fg_dim)
+            .add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(app.theme.accent)
+    };
+    let row = ratatui::layout::Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            chrome::truncate(legend, usize::from(inner.width)),
+            style,
+        ))),
+        row,
+    );
+}
+
+/// The border's position readout when the preview scrolls.
 fn render_footer(
     f: &mut Frame,
     app: &AppView,
     area: ratatui::layout::Rect,
-    hint: &str,
-    offset: usize,
+    (offset, height, total): (usize, usize, usize),
     max_scroll: usize,
 ) {
+    let hint = if max_scroll > 0 {
+        format!(
+            "lines {}–{} of {total} · ↑↓ PgUp PgDn Home End or wheel",
+            offset + 1,
+            (offset + height).min(total),
+        )
+    } else {
+        String::new()
+    };
+    let hint = hint.as_str();
     let percentage = offset
         .saturating_mul(100)
         .checked_div(max_scroll)
@@ -325,7 +473,9 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> anyhow::Result<()> {
         KeyCode::Up | KeyCode::Char('k') if !super::is_chord(key) => (true, 1),
         KeyCode::Down | KeyCode::Char('j') if !super::is_chord(key) => (false, 1),
         KeyCode::PageUp => (true, page),
-        KeyCode::PageDown => (false, page),
+        KeyCode::PageDown | KeyCode::Char(' ') => (false, page),
+        KeyCode::Home | KeyCode::Char('g') if !super::is_chord(key) => (true, usize::MAX),
+        KeyCode::End | KeyCode::Char('G') if !super::is_chord(key) => (false, usize::MAX),
         _ => (false, 0),
     };
     if amount > 0 {
@@ -398,6 +548,7 @@ mod tests {
         app.pending_approval_request = Some(ApprovalRequest {
             tool: "wave".into(),
             class: None,
+            detail: None,
             action: "2 calls".into(),
             summary,
             allow_session: true,

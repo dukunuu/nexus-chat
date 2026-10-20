@@ -114,6 +114,10 @@ pub struct ApprovalRequest {
     pub summary: String,
     /// Human-readable policy class for workspace actions.
     pub class: Option<String>,
+    /// The full preview shown to the person approving (a large write's
+    /// whole diff). `summary` stays short because deciders, the decision
+    /// log and parked jobs read it; `detail` only ever reaches the popup.
+    pub detail: Option<String>,
     /// Whether this action may reuse or create a session-wide grant.
     pub allow_session: bool,
 }
@@ -1616,7 +1620,11 @@ impl ToolBox {
                 evidence.push(format!("risk: {risk}"));
             }
             if !evidence.is_empty() {
-                request.summary = format!("{}\n{}", evidence.join(" · "), request.summary);
+                let evidence = evidence.join(" · ");
+                request.summary = format!("{evidence}\n{}", request.summary);
+                if let Some(detail) = &mut request.detail {
+                    *detail = format!("{evidence}\n{detail}");
+                }
             }
         }
         PreparedDecision {
@@ -1693,7 +1701,7 @@ impl ToolBox {
         let workspace = self.workspace.as_ref().ok_or_else(|| {
             format!("{tool} needs an agent workspace · switch with /agent <path>")
         })?;
-        let summary = if matches!(tool, "shell" | "proc") {
+        let (summary, detail) = if matches!(tool, "shell" | "proc") {
             let cmd = args["cmd"].as_str().expect("validated command");
             let mut summary = match check_command(cmd) {
                 Ok(()) => String::new(),
@@ -1719,9 +1727,10 @@ impl ToolBox {
             if cwd != workspace.root() {
                 let _ = write!(summary, "\nin {}", fs_relative(workspace, &cwd));
             }
-            summary
+            (summary, None)
         } else {
             let mut summary = fs_approval_summary(workspace, name, &args)?;
+            let mut detail = None;
             if matches!(action, "edit" | "write" | "delete") {
                 let path = workspace
                     .resolve(
@@ -1740,14 +1749,15 @@ impl ToolBox {
                 } else {
                     fs_replacement(name, &args, &current)?
                 };
-                let (diff, added, deleted) =
-                    fs_diff(&fs_relative(workspace, &path), &current, &candidate, 40);
-                summary = format!(
-                    "{action} {} (+{added} −{deleted})\n{diff}",
-                    fs_relative(workspace, &path)
-                );
+                let rel = fs_relative(workspace, &path);
+                let (diff, added, deleted) = fs_diff(&rel, &current, &candidate, 40);
+                summary = format!("{action} {rel} (+{added} −{deleted})\n{diff}");
+                if diff.lines().count() >= 40 {
+                    let (full, _, _) = fs_diff(&rel, &current, &candidate, APPROVAL_DETAIL_LINES);
+                    detail = Some(format!("{action} {rel} (+{added} −{deleted})\n{full}"));
+                }
             }
-            summary
+            (summary, detail)
         };
         let policy_tool = if tool == "proc" { "shell" } else { tool };
         let command = format!("$ {}", args["cmd"].as_str().unwrap_or_default());
@@ -1764,6 +1774,7 @@ impl ToolBox {
             action: action.to_string(),
             summary,
             class: Some(class.to_string()),
+            detail,
             allow_session: true,
         })
     }
@@ -1915,6 +1926,7 @@ impl ToolBox {
                     let request = ApprovalRequest {
                         tool: "task".into(),
                         class: None,
+                        detail: None,
                         action: "workspace".into(),
                         summary: format!(
                             "sub-agent (workspace): {}",
@@ -1997,6 +2009,7 @@ impl ToolBox {
                 let request = ApprovalRequest {
                     tool: "request_workspace".to_string(),
                     class: None,
+                    detail: None,
                     action: "agent".to_string(),
                     summary: format!("switch this session to agent mode in {root}\n{reason}"),
                     allow_session: true,
@@ -4804,6 +4817,9 @@ fn fs_atomic_write(
     result
 }
 
+/// Diff lines a large write's approval preview may carry (the popup scrolls).
+const APPROVAL_DETAIL_LINES: usize = 4_000;
+
 fn fs_diff(path: &str, current: &str, candidate: &str, limit: usize) -> (String, usize, usize) {
     let diff = unified_diff("workspace", path, current, candidate);
     let added = diff
@@ -7147,6 +7163,29 @@ mod tests {
         assert_ne!(status, "blocked");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement\n");
         assert_eq!(allow.requests.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn large_writes_carry_their_whole_diff_for_the_popup_only() {
+        let (toolbox, dir) = fs_toolbox();
+        let content: String = (0..300).map(|n| format!("line {n}\n")).collect();
+        let args = json!({"path":"big.txt","content":content}).to_string();
+        let request = toolbox.approval_request("fs_write", &args).unwrap();
+        // Deciders, the decision log and parked jobs read the short summary.
+        assert!(request.summary.lines().count() <= 42, "{}", request.summary);
+        let detail = request.detail.expect("a large write has a detail");
+        assert!(detail.starts_with("write big.txt (+300 −0)\n"));
+        assert!(detail.contains("+line 299"));
+        // A small edit needs none.
+        let small = json!({"path":"small.txt","content":"one\n"}).to_string();
+        assert!(
+            toolbox
+                .approval_request("fs_write", &small)
+                .unwrap()
+                .detail
+                .is_none()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -10710,6 +10749,7 @@ mod tests {
             allow.requests.lock().unwrap().as_slice(),
             [ApprovalRequest {
                 class: None,
+                detail: None,
                 allow_session: true,
                 tool: "request_workspace".into(),
                 action: "agent".into(),

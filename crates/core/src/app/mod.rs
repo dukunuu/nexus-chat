@@ -211,13 +211,16 @@ impl Approver for ChannelApprover {
                 .join(", ");
             for (index, req) in reqs.iter().enumerate() {
                 let _ = write!(summary, "\n{}. {} {}", index + 1, req.tool, req.action);
-                for line in req.summary.split('\n') {
+                // The popup is the only reader of a wave: show each call's
+                // full preview.
+                for line in req.detail.as_ref().unwrap_or(&req.summary).split('\n') {
                     let _ = write!(summary, "\n  {line}");
                 }
             }
             let request = ApprovalRequest {
                 tool: "wave".to_string(),
                 class: None,
+                detail: None,
                 action: format!("{} calls", reqs.len()),
                 summary,
                 allow_session: reqs.iter().all(|req| req.allow_session),
@@ -2943,6 +2946,7 @@ mod eval_tests {
                     .request(ApprovalRequest {
                         tool: "fs".into(),
                         class: None,
+                        detail: None,
                         action: action.into(),
                         summary: "file".into(),
                         allow_session: true,
@@ -2966,6 +2970,7 @@ mod eval_tests {
                     .request(ApprovalRequest {
                         tool: "shell".into(),
                         class: None,
+                        detail: None,
                         action: "run".into(),
                         summary: summary.into(),
                         allow_session: true,
@@ -2983,6 +2988,7 @@ mod eval_tests {
             let request = ApprovalRequest {
                 tool: "shell".into(),
                 class: None,
+                detail: None,
                 action: "run".into(),
                 summary: format!("$ cargo test {forbidden} echo bad"),
                 allow_session: true,
@@ -2995,6 +3001,7 @@ mod eval_tests {
                     .request(ApprovalRequest {
                         tool: tool.into(),
                         class: None,
+                        detail: None,
                         action: action.into(),
                         summary: "$ ls".into(),
                         allow_session: true,
