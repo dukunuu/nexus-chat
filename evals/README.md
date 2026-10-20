@@ -9,6 +9,7 @@ nexus eval ./evals --filter scripts --json
 nexus eval --set experiments.mask_tool_results=true
 nexus eval --set experiments.mask_tool_results=true --set experiments.mask_keep_rounds=5 --compare
 nexus eval --model MODEL --set experiments.cache_ttl_1h=true --compare --json
+nexus eval --compare-model anthropic/claude-sonnet-4.5 typesafe/jev-router
 ```
 
 Keys and network access are required. **This costs real tokens and money.**
@@ -31,8 +32,22 @@ cached prompt tokens, and cost for both sides, followed by totals and percentage
 deltas for prompt tokens and cost, plus the before/after pass count. Percentages
 are unknown when the baseline is zero or the cost is unavailable. Compare JSON
 contains `baseline` and `variant` objects (each with `experiments`, `tasks`, and
-`totals`) and `deltas` with absolute and percentage changes and both pass counts.
-Inspect individual task passes too: an unchanged total can hide a regression.
+`totals`, plus `model` when specified) and `deltas` with absolute and percentage
+changes and both pass counts. Inspect individual task passes too: an unchanged
+total can hide a regression.
+
+`--compare-model A B` requires two model ids and is mutually exclusive with
+`--compare`. It runs all selected tasks on A, then on B, with the same loaded
+experiment config and the same `--set` overrides on both sides. It reuses the
+comparison table with columns and totals labeled by model; `--json` emits both
+runs as `baseline` (A) and `variant` (B), including their model ids and deltas.
+
+Router ids such as `typesafe/jev-router` and `openrouter/auto` are normal session
+model choices, not automatic per-step switches by nexus. Routers can choose a
+different underlying model per request, making prompt caching less effective;
+the routing evidence is single-turn only. **Use a router for a session only if
+its cost per passed task (total cost divided by passes) beats the fixed model
+without losing passes.** Unknown cost or zero passes cannot establish a win.
 
 **An experiment becomes a default only after `--compare` shows no lost passes on
 the model tiers you use.** The switches are measuring infrastructure; their
@@ -137,7 +152,7 @@ Output includes PASS/FAIL and failure reasons per task, tool-call and invalid-ca
 counts, prompt/completion tokens, cached prompt tokens, and USD cost, followed by totals. Invalid-call
 rate is invalid calls divided by all calls (zero with no calls). `--json` emits a
 single object with `experiments`, `tasks`, and `totals` (or both runs and deltas
-with `--compare`). Missing token/cache usage is reported as zero; unavailable
+with `--compare` or `--compare-model`). Missing token/cache usage is reported as zero; unavailable
 cost is `unknown` in text and `null` in JSON. Total cost is unknown if any task's
 cost is unavailable. Usage is the headless runner's sum over API requests.
 Exit status is 0 when every selected task passes, 1 otherwise (including loading

@@ -90,6 +90,15 @@ pub enum Command {
         /// Run baseline first, then the overrides, and compare results.
         #[arg(long, requires = "set")]
         compare: bool,
+        /// Run the same tasks and experiment settings on two models.
+        #[arg(
+            long,
+            num_args = 2,
+            value_names = ["A", "B"],
+            action = clap::ArgAction::Set,
+            conflicts_with = "compare"
+        )]
+        compare_model: Vec<String>,
         /// Emit task results and totals as a JSON object.
         #[arg(long)]
         json: bool,
@@ -478,6 +487,7 @@ pub async fn run(cmd: Command) -> Result<()> {
             filter,
             set,
             compare,
+            compare_model,
             json,
         } => {
             eval(
@@ -486,6 +496,7 @@ pub async fn run(cmd: Command) -> Result<()> {
                 filter.as_deref(),
                 &set,
                 compare,
+                &compare_model,
                 json,
             )
             .await
@@ -995,8 +1006,16 @@ fn eval_deltas(baseline: &EvalTotals, variant: &EvalTotals) -> EvalDeltas {
 }
 
 fn format_eval_compare(baseline: &[EvalTaskResult], variant: &[EvalTaskResult]) -> String {
-    let mut text = String::from(
-        "task | baseline: pass | calls | prompt | cached | cost | variant: pass | calls | prompt | cached | cost\n",
+    format_eval_compare_labeled(baseline, variant, ("baseline", "variant"))
+}
+
+fn format_eval_compare_labeled(
+    baseline: &[EvalTaskResult],
+    variant: &[EvalTaskResult],
+    (baseline_label, variant_label): (&str, &str),
+) -> String {
+    let mut text = format!(
+        "task | {baseline_label}: pass | calls | prompt | cached | cost | {variant_label}: pass | calls | prompt | cached | cost\n",
     );
     for (before, after) in baseline.iter().zip(variant) {
         let _ = writeln!(
@@ -1016,8 +1035,12 @@ fn format_eval_compare(baseline: &[EvalTaskResult], variant: &[EvalTaskResult]) 
             |value| format!("{value:+.0}%").replace('-', "−"),
         )
     };
-    let _ = writeln!(text, "baseline totals: {}", eval_totals_line(&before));
-    let _ = writeln!(text, "variant totals: {}", eval_totals_line(&after));
+    let _ = writeln!(
+        text,
+        "{baseline_label} totals: {}",
+        eval_totals_line(&before)
+    );
+    let _ = writeln!(text, "{variant_label} totals: {}", eval_totals_line(&after));
     let _ = write!(
         text,
         "tokens {} · cost {} · passed {}/{} → {}/{}",
@@ -1033,6 +1056,8 @@ fn format_eval_compare(baseline: &[EvalTaskResult], variant: &[EvalTaskResult]) 
 
 #[derive(serde::Serialize)]
 struct EvalRun {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     experiments: config::Experiments,
     totals: EvalTotals,
     tasks: Vec<EvalTaskResult>,
@@ -1059,6 +1084,7 @@ async fn eval_run(
         results.push(result);
     }
     Ok(EvalRun {
+        model: model.map(str::to_owned),
         experiments,
         totals: eval_totals(&results),
         tasks: results,
@@ -1071,6 +1097,7 @@ async fn eval(
     filter: Option<&str>,
     settings: &[EvalSetting],
     compare: bool,
+    compare_model: &[String],
     json: bool,
 ) -> Result<()> {
     let mut tasks = eval::load_tasks(dir)?;
@@ -1080,20 +1107,34 @@ async fn eval(
     if tasks.is_empty() {
         bail!("no eval tasks matched in {}", dir.display());
     }
-    let baseline = if compare {
-        Some(eval_run(&tasks, model, &[], json, compare).await?)
+    let labels = match compare_model {
+        [before, after] => Some((before.as_str(), after.as_str())),
+        _ => None,
+    };
+    let comparing = compare || labels.is_some();
+    let (baseline_model, variant_model) = labels.map_or((model, model), |(before, after)| {
+        (Some(before), Some(after))
+    });
+    let baseline = if comparing {
+        let baseline_settings = if compare { &[] } else { settings };
+        Some(eval_run(&tasks, baseline_model, baseline_settings, json, comparing).await?)
     } else {
         None
     };
-    let variant = eval_run(&tasks, model, settings, json, compare).await?;
+    let variant = eval_run(&tasks, variant_model, settings, json, comparing).await?;
     let mut failed = variant.totals.total - variant.totals.passed;
     let output = if let Some(baseline) = baseline {
         failed += baseline.totals.total - baseline.totals.passed;
         if !json {
-            out(format_eval_compare(&baseline.tasks, &variant.tasks));
-            for (side, results) in [("baseline ", &baseline.tasks), ("variant ", &variant.tasks)] {
+            out(labels.map_or_else(
+                || format_eval_compare(&baseline.tasks, &variant.tasks),
+                |labels| format_eval_compare_labeled(&baseline.tasks, &variant.tasks, labels),
+            ));
+            let (before, after) = labels.unwrap_or(("baseline", "variant"));
+            for (side, results) in [(before, &baseline.tasks), (after, &variant.tasks)] {
+                let side = format!("{side} ");
                 for result in results {
-                    print_eval_failures(result, side);
+                    print_eval_failures(result, &side);
                 }
             }
         }
@@ -3508,6 +3549,89 @@ mod tests {
         let json = serde_json::to_value(deltas).unwrap();
         assert_eq!(json["prompt_tokens"], -200);
         assert_eq!(json["passed_after"], 2);
+    }
+
+    #[test]
+    fn compare_model_requires_two_models_and_excludes_experiment_comparison() {
+        for args in [
+            vec!["nexus", "eval", "--compare-model"],
+            vec!["nexus", "eval", "--compare-model", "a/one"],
+            vec![
+                "nexus",
+                "eval",
+                "--compare-model",
+                "a/one",
+                "b/two",
+                "--compare-model",
+                "c/three",
+                "d/four",
+            ],
+            vec![
+                "nexus",
+                "eval",
+                "--compare-model",
+                "a/one",
+                "typesafe/jev-router",
+                "--compare",
+                "--set",
+                "experiments.cache_ttl_1h=true",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "eval",
+            "--compare-model",
+            "a/one",
+            "typesafe/jev-router",
+            "--set",
+            "experiments.cache_ttl_1h=true",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Eval {
+            compare_model,
+            compare,
+            set,
+            json,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected eval");
+        };
+        assert_eq!(compare_model, ["a/one", "typesafe/jev-router"]);
+        assert!(!compare);
+        assert!(json);
+        assert_eq!(set.len(), 1);
+        assert!(
+            Cli::try_parse_from(["nexus", "eval", "--compare-model", "a/one", "b/two"]).is_ok()
+        );
+    }
+
+    #[test]
+    fn model_comparison_labels_columns_and_json_runs_by_model() {
+        let tasks = vec![EvalTaskResult {
+            name: "one".into(),
+            passed: true,
+            cost: Some(0.01),
+            ..Default::default()
+        }];
+        let text = format_eval_compare_labeled(&tasks, &tasks, ("a/one", "typesafe/jev-router"));
+        assert!(text.starts_with("task | a/one: pass |"));
+        assert!(text.contains("| typesafe/jev-router: pass |"));
+        assert!(text.contains("a/one totals: passed 1/1"));
+        assert!(text.contains("typesafe/jev-router totals: passed 1/1"));
+        let run = EvalRun {
+            model: Some("typesafe/jev-router".into()),
+            experiments: config::Experiments::default(),
+            totals: eval_totals(&tasks),
+            tasks,
+        };
+        let json = serde_json::to_value(run).unwrap();
+        assert_eq!(json["model"], "typesafe/jev-router");
+        assert_eq!(json["tasks"][0]["name"], "one");
+        assert_eq!(json["totals"]["passed"], 1);
     }
 
     #[test]

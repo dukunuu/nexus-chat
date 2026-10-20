@@ -55,6 +55,7 @@ struct Config {
 #[serde(default)]
 pub struct AgentConfig {
     pub allow: Vec<String>,
+    pub nexus_repo: Option<String>,
     pub decider: Option<ModelDecider>,
     pub decider_model: String,
     pub scope_threshold: f64,
@@ -75,6 +76,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             allow: Vec::new(),
+            nexus_repo: None,
             decider: None,
             decider_model: "typesafe/jev-1.14".into(),
             scope_threshold: 0.90,

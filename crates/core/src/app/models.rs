@@ -8,6 +8,8 @@ use crate::provider::serve::{LaunchOptions, RuntimeStatus};
 
 use super::{App, ModelPickTarget, Popup};
 
+const ROUTER_MODEL_IDS: &[&str] = &["typesafe/jev-router", "openrouter/auto"];
+
 impl App {
     /// Rebuild every backend from the on-disk saved credentials (after boot,
     /// or after a settings change). Keeps `saved` and `backends` in sync.
@@ -460,6 +462,10 @@ impl App {
                 self.last_used
                     .insert(id.to_string(), Utc::now().to_rfc3339());
                 self.push_status(format!("model: {id}"));
+                if !self.router_note_shown && ROUTER_MODEL_IDS.contains(&id) {
+                    self.router_note_shown = true;
+                    self.push_status("router models pick a model per request · prompt caching is less effective · compare with nexus eval --compare-model first");
+                }
             }
             ModelPickTarget::Memory => {
                 self.memory_model = id.to_string();
@@ -610,6 +616,53 @@ impl App {
                 self.push_status(format!("OpenAI Codex login failed: {e}"));
             }
             None => self.login_rx = None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod router_tests {
+    use super::*;
+    use crate::app::{AppCommand, AppEvent};
+
+    #[test]
+    fn router_note_is_once_per_run_and_only_for_session_selection() {
+        for router in ["typesafe/jev-router", "openrouter/auto"] {
+            let mut app = crate::app::tests::app_with_key();
+            app.model_pick_target = ModelPickTarget::Memory;
+            app.pick_model(router).unwrap();
+            assert!(!app.router_note_shown);
+            app.model_pick_target = ModelPickTarget::Session;
+            let session = app
+                .db
+                .create_session("router", "a/one", &app.active_space.id, "chat")
+                .unwrap();
+            app.session = Some(session.clone());
+            app.execute(AppCommand::SetModel { id: "a/one".into() })
+                .unwrap();
+            assert!(!app.router_note_shown);
+            app.pending_events.clear();
+            for id in [router, router, "a/one", "openrouter/auto"] {
+                app.execute(AppCommand::SetModel { id: id.into() }).unwrap();
+                assert_eq!(app.current_model.as_deref(), Some(id));
+                assert_eq!(app.db.get_session(&session.id).unwrap().unwrap().model, id);
+            }
+            let notes: Vec<_> = app
+                .pending_events
+                .iter()
+                .filter_map(|event| match event {
+                    AppEvent::Status(text) if text.starts_with("router models") => Some(text),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(notes.len(), 1);
+            assert_eq!(
+                notes[0],
+                "router models pick a model per request · prompt caching is less effective · compare with nexus eval --compare-model first"
+            );
+            let root = app.space.root.clone();
+            drop(app);
+            std::fs::remove_dir_all(root).unwrap();
         }
     }
 }

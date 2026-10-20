@@ -564,6 +564,26 @@ branch you review. This is how a Level B app that proved itself becomes a
 native popup, or a recurring Loop 2 proposal becomes code. The running
 binary is never patched in place.
 
+`/improve <what>` implements this workflow. Configure the source checkout in
+machine-local `config.toml` first (otherwise the command refuses):
+
+```toml
+[agent]
+nexus_repo = "~/work/nexus-chat"
+```
+
+It creates a fresh git worktree from that checkout's current `HEAD`, on a
+`nexus/improve/<request-slug>-<short-id>` branch, and enters ordinary agent
+mode there. A conversation with messages is left intact and a new session is
+started; an empty session is reused. The first user message contains the
+request, the top five failure modes from `/harness`'s seven-day window, and
+`scripts/check.sh` as acceptance, with instructions to work only in the
+worktree and finish with a change summary. Normal agent approvals still apply.
+The status reports the review branch and `git worktree remove <path>` cleanup.
+Worktrees live under the system temp directory's `nexus-improve/job-worktrees/`
+and are not removed on app exit. Review and merge the branch yourself; nexus
+neither applies the result nor replaces the running binary.
+
 ### Guardrails
 
 - Model-authored UI text goes through the same sanitizing as history:
@@ -747,55 +767,71 @@ external program the harness runs as a job (in agent mode, through
 
 ## 12. Phases
 
-Each phase ships on its own and passes `scripts/check.sh`.
+Phases 1–16 are implemented, with the deviations noted below.
+Acceptance remains `scripts/check.sh` for each phase.
 
-1. **Fix the security bugs.** Env scrub for every spawn; canonical
+1. **Done — fix the security bugs.** Env scrub for every spawn; canonical
    confinement for app/script tools. Small, independent, worth doing first.
-2. **Exact cache fixes** ([cost research](cost-reduction-research.md) §3,
+2. **Done — exact cache fixes** ([cost research](cost-reduction-research.md) §3,
    "do now" #1–#3 and #5). The Anthropic breakpoint follows the tool loop
    instead of staying where `build_history` put it; OpenRouter gets a
    `session_id` for sticky routing; research and swarm loops get the same
    caching; a forced `/skill` moves to the tail. Same tokens, same model, so
    no quality risk, and the largest cost win in the plan.
-3. **Prompt foundations.** Base-prompt overlay and migration, prompts moved
+3. **Done — prompt foundations.** Base-prompt overlay and migration, prompts moved
    to `assets/prompts/`, generated environment and rendering sections,
    static-first ordering with `{{datetime}}` at the tail, the prompt tests.
    Fixes stale facts for every user immediately.
-4. **Tool-definition tables.** `ActionSpec` for every tool, generated
+4. **Done — tool-definition tables.** `ActionSpec` for every tool, generated
    descriptions (full and compact), per-action validation,
    recovery-oriented errors, `ToolOutcome` and `tool_events` (Loop 1).
-5. **Trace store and `nexus eval`.** Recording, scrubbing, per-space
+5. **Done — trace store and `nexus eval`.** Recording, scrubbing, per-space
    consent, a `/retry` command (an `AppCommand`) whose replaced answer is
    kept as a rejected step, and the eval runner. Early on purpose: data not
    recorded now is gone, and every lossy change after this needs eval
    numbers before it ships.
-6. **Model profiles and local runtime.** Per-model tool support, parallel
+6. **Done — model profiles and local runtime.** Per-model tool support, parallel
    calls, context; Ollama launched with a real context length; caps and
    compaction scaled to context with head + tail capping; compact tool
    defs; one-shot repair of malformed calls; q8_0 KV cache as an option.
-7. **Workspace + `agent` mode.** `Workspace`, `fs.*`, `shell.run`, mode
+7. **Done — workspace + `agent` mode.** `Workspace`, `fs.*`, `shell.run`, mode
    switching, read-before-write and stale-write guards, checkpoints and
    `/undo`, ask-every-time approvals, the privilege lock, and `!` user
    commands with `propose_command`. This alone is a usable coding agent.
-8. **Effects + scheduler.** `effect()` replaces `is_read_only`; wave
+8. **Done — effects + scheduler.** `effect()` replaces `is_read_only`; wave
    execution; one gate per wave; `batch` on the scheduler.
-9. **Context-reduction experiments**, each shipped only if `nexus eval`
-   shows no loss for that model tier (cost research "experiment first"
-   #8–#10, #12): bulk observation masking of old tool results, compaction
-   that keeps a verbatim tail and an itemized digest, an absolute token
-   trigger, a 1-hour cache TTL for slow sessions.
-10. **`nexus-ui` Level A blocks** and the `/harness` popup.
-11. **Decider + `agent·auto`.** Rule, Jev, LLM implementations, offline
+9. **Done — context-reduction experiments.** Bulk observation masking,
+   verbatim compaction tails, itemized digests, absolute token triggers,
+   and a 1-hour cache TTL are implemented, with `nexus eval --set … --compare`
+   to measure them. They remain **off by default pending evals** showing no
+   lost passes for the model tiers in use (cost research "experiment first"
+   #8–#10, #12).
+10. **Done — `nexus-ui` Level A blocks** and the `/harness` popup, ranking
+    recent tool failures with links to their latest transcripts.
+11. **Done — Decider + `agent·auto`.** Rule, Jev, LLM implementations, offline
     degradation; decisions log; sandbox tiers.
-12. **Background processes.** `proc.*`, process-group kill, streaming tails.
-13. **Jobs on the host.** Scheduler, worktrees, until-done, notifications,
-    watches migrated, `harness-review` (Loop 2).
-14. **Export and Loop 4.** `nexus train export`, license filtering, schema
-    migration, eval decontamination, an MLX LoRA job recipe.
-15. **Scripted terminal apps (Level B)** with preview, RPS port.
-16. **Sub-agents, Level C self-modification, Jev Router.** The router is
-    evaluated per session, never switched per step: the routing evidence is
-    single-turn only, and every model switch starts a cold cache.
+12. **Done — background processes.** `proc.*`, process-group kill, streaming tails.
+13. **Done — jobs.** Scheduler, worktrees, bounded until-done runs, judged
+    outcomes, notifications, and watches migrated to research jobs. Jobs run
+    via **`nexus jobs daemon`, not the host**. Loop-2 `harness-review`
+    proposal jobs remain deferred.
+14. **Done — export and Loop 4.** `nexus train export`, license and stale-schema
+    filtering, eval decontamination, and an MLX LoRA job recipe.
+15. **Done — scripted terminal apps (Level B)** with sandboxed Rhai,
+    capability grants, preview, and a bundled RPS example app. There was no
+    native RPS implementation to port or preserve.
+16. **Done — sub-agents, Level C self-modification, Jev Router.** Task
+    sub-agents run nested loops and return only their reports. Router ids
+    are normal session model choices with a one-time cache warning;
+    `nexus eval --compare-model A B` compares models using the same
+    experiments, with model-labeled tables and JSON. Nexus never switches
+    models automatically per step: routing evidence is single-turn only,
+    and every underlying model switch starts a cold cache. Use a router
+    for a session only if cost per passed task improves without losing
+    passes. Level C's `/improve` uses `[agent].nexus_repo` to open an isolated
+    review worktree, seeds the request with recent harness failures, and
+    requires `scripts/check.sh`; the user reviews, merges, and removes the
+    worktree. The running binary is never patched.
 
 ### Testing
 

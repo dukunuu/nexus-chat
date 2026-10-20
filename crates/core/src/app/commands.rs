@@ -185,6 +185,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &[],
     },
     Command {
+        name: "improve",
+        desc: "improve nexus in a review worktree — /improve <what>",
+        aliases: &[],
+    },
+    Command {
         name: "chat",
         desc: "back to plain chat (no workspace)",
         aliases: &[],
@@ -367,6 +372,8 @@ pub enum AppCommand {
         mode: WorkMode,
         root: Option<String>,
     },
+    /// `/improve <what>` — work on the nexus checkout in an isolated review branch.
+    Improve { what: String },
     /// `/incognito` — toggle (`on` is absolute for the host).
     Incognito { on: bool },
     /// `/training [on|off]` — set or toggle device-local recording consent.
@@ -488,6 +495,7 @@ impl App {
                     root: (!root.is_empty()).then_some(root),
                 })
             }
+            "improve" => improve_command(rest(cmd, token)),
             "auto" => Ok(AppCommand::ToggleAuto),
             "chat" => Ok(AppCommand::SetWorkMode {
                 mode: WorkMode::Chat,
@@ -665,6 +673,7 @@ impl App {
             AppCommand::SetWorkMode { mode, root } => {
                 self.set_work_mode(mode, root.as_deref())?;
             }
+            AppCommand::Improve { what } => self.improve_nexus(&what)?,
             AppCommand::Incognito { on } => {
                 if on != self.incognito {
                     self.toggle_incognito()?;
@@ -723,6 +732,14 @@ impl App {
                 Ok(())
             }
         }
+    }
+}
+
+fn improve_command(what: String) -> std::result::Result<AppCommand, String> {
+    if what.is_empty() {
+        Err("usage: /improve <what>".into())
+    } else {
+        Ok(AppCommand::Improve { what })
     }
 }
 

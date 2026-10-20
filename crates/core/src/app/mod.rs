@@ -34,6 +34,8 @@ mod files;
 pub mod headless;
 mod images;
 #[cfg(test)]
+mod improve_tests;
+#[cfg(test)]
 mod masking_tests;
 mod memory;
 mod models;
@@ -1202,6 +1204,8 @@ pub struct App {
     /// Live model catalog (fetched on demand, never hardcoded).
     pub models: Vec<Model>,
     pub current_model: Option<String>,
+    /// Router cache warning is emitted only once per app run, for session picks.
+    router_note_shown: bool,
     pub models_rx: Option<mpsc::UnboundedReceiver<ModelsResult>>,
     /// Model ids marked favorite, and when each model was last used (rfc3339).
     pub favorites: HashSet<String>,
@@ -1447,6 +1451,7 @@ impl App {
             compacting_session_id: None,
             models: Vec::new(),
             current_model: None,
+            router_note_shown: false,
             models_rx: None,
             favorites: HashSet::new(),
             last_used: HashMap::new(),
@@ -1612,6 +1617,81 @@ impl App {
         }
         self.refresh_toolbox();
         self.bump_cache_epoch();
+        Ok(())
+    }
+
+    fn improve_nexus(&mut self, what: &str) -> Result<()> {
+        use crate::jobs::service::{Tree, git};
+
+        let Some(repo) = self
+            .saved
+            .agent
+            .nexus_repo
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+        else {
+            self.push_status(
+                "/improve needs the nexus checkout · set [agent] nexus_repo = \"~/work/nexus-chat\" in config.toml",
+            );
+            return Ok(());
+        };
+        if self.incognito {
+            self.push_status("agent mode is not available in incognito mode");
+            return Ok(());
+        }
+        if !self.backends.any() {
+            self.push_status("set your API key first with /login");
+            return Ok(());
+        }
+        if self.current_model.is_none() {
+            self.push_status("pick a model first with /model");
+            return Ok(());
+        }
+        if self.chat_task_count() >= MAX_CHAT_TASKS {
+            self.push_status(format!("chat task limit reached ({MAX_CHAT_TASKS})"));
+            return Ok(());
+        }
+        let repo = self.open_workspace(Some(repo))?;
+        git(repo.root(), &["rev-parse", "--verify", "HEAD"])?;
+        let since = (Utc::now() - chrono::Duration::days(7)).to_rfc3339();
+        let failures = self
+            .db
+            .harness_summary(&since)?
+            .rows
+            .iter()
+            .take(5)
+            .map(|row| {
+                format!(
+                    "{}.{}: {} ×{}",
+                    row.tool, row.action, row.error_kind, row.count
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = format!(
+            "Improve nexus: {what}.\nRelevant recent tool failures:\n{failures}\nAcceptance: scripts/check.sh must pass. Work only in this worktree; finish with a summary of the change."
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+        let slug: String = sessions::slugify(what).chars().take(60).collect();
+        let branch = format!("nexus/improve/{slug}-{}", &id[..8]);
+        let tree = Tree::prepare(
+            repo.root(),
+            &std::env::temp_dir().join("nexus-improve"),
+            &slug,
+            &id,
+        )?;
+        git(&tree.path, &["branch", "-m", &branch])?;
+        let root = tree.path.to_string_lossy();
+        self.open_workspace(Some(&root))?;
+        if !self.messages.is_empty() {
+            self.new_session();
+        }
+        self.set_work_mode(WorkMode::Agent, Some(&root))?;
+        self.send_message(text)?;
+        self.push_status(format!(
+            "improve branch: {branch} · review and merge yourself · remove with git worktree remove {}",
+            tree.path.display()
+        ));
         Ok(())
     }
 
