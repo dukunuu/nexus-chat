@@ -1322,6 +1322,8 @@ mod tests {
             Rect::new(0, 0, 100, 40),
         )
         .unwrap();
+        assert_eq!(app.popup, Popup::InteractiveUi);
+        handle_key(&mut app, KeyCode::F(2).into()).unwrap();
         assert_eq!(app.popup, Popup::None);
         handle_key(&mut app, KeyCode::F(2).into()).unwrap();
         assert_eq!(app.popup, Popup::InteractiveUi);

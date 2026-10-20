@@ -89,7 +89,7 @@ async fn preview_tool_renders_grid_events_and_errors() {
         .0;
     assert_eq!(
         result,
-        "Tiny                \n                    \nValue 0             \n                    \n                    \n                    \nLog:\n"
+        "╭─ Tiny ──────── ⤢ ╮\n│                  │\n│ Value 0          │\n│                  │\n╰───── F2 keyboard ╯\n                    \nLog:\n"
     );
     let result = toolbox.run("tui_app", &json!({"action":"preview","name":"tiny","events":[{"type":"key","key":"x"},{"type":"button","action":"add"}]}).to_string()).await.0;
     assert!(result.contains("Value 2"), "{result}");
@@ -136,23 +136,23 @@ async fn rps_preview_scores_canvas_and_popup_snapshot() {
         assert!(result.contains(text), "missing {text}:\n{result}");
     }
     let expected = "\n\n\n         ╭terminal app────────────────────────────────────────────────╮
-         │ Rock · Paper · Scissors                                    │
-         │                                                            │
-         │ ╭───▸ Rock (r)────╮ ╭───Paper (p)────╮ ╭──Scissors (s)───╮ │
-         │ │                 │ │                │ │                 │ │
-         │ ╰─────────────────╯ ╰────────────────╯ ╰─────────────────╯ │
-         │ Wins   0                                                   │
-         │ Losses 0                                                   │
-         │ Draws  0                                                   │
-         │ Round  0                                                   │
-         │ Choose a hand                                              │
-         │ You / CPU                                                  │
-         │  ?     ?                                                   │
-         │ [ ]   [ ]                                                  │
-         │ ╭─────────────────────────Reset──────────────────────────╮ │
+         │ ╭─ Rock · Paper · Scissors ─────────────────────────── ⤢ ╮ │
          │ │                                                        │ │
-         │ ╰────────────────────────────────────────────────────────╯ │
-         │                                                            │
+         │ │  Rock (r)   Paper (p)   Scissors (s)                   │ │
+         │ │                                                        │ │
+         │ │ Wins   0                                               │ │
+         │ │ Losses 0                                               │ │
+         │ │ Draws  0                                               │ │
+         │ │ Round  0                                               │ │
+         │ │                                                        │ │
+         │ │ Choose a hand                                          │ │
+         │ │ You / CPU                                              │ │
+         │ │  ?     ?                                               │ │
+         │ │ [ ]   [ ]                                              │ │
+         │ │                                                        │ │
+         │ │  Reset                                                 │ │
+         │ │                                                        │ │
+         │ ╰───────────────────── Tab next · Enter press · Esc done ╯ │
          │                                                            │
          ╰──────────────────── Tab focus · Enter activate · Esc close ╯";
     assert_eq!(snapshot(&mut fixture.app), expected);

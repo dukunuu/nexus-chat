@@ -815,7 +815,7 @@ fn model_authored_ui_is_inline_and_focusable_without_game_commands() {
         "Count: 0",
         "Add one",
         "Name",
-        "Submit result [review]",
+        "Submit result ↵",
         "After",
     ] {
         assert!(screen.contains(label), "{screen}");

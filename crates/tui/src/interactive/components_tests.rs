@@ -2,6 +2,8 @@ use super::*;
 use ratatui::{Terminal, backend::TestBackend};
 use serde_json::{Value, json};
 
+const RPS: &str = include_str!("../../../core/tests/fixtures/interactive/rps.json");
+
 fn source(view: Value, state: Value) -> String {
     json!({"version":1,"title":"Panel","state":state,"view":view,"actions":{}}).to_string()
 }
@@ -22,18 +24,36 @@ fn row_text(buffer: &Buffer, y: u16) -> String {
 }
 fn snapshot(view: Value, state: Value, expected: &[String]) -> Buffer {
     let entry = entry(view, state);
-    let (canvas, _) = entry.canvas(32, &Theme::default(), true, true);
-    let mut terminal = Terminal::new(TestBackend::new(32, canvas.area.height)).unwrap();
+    let (canvas, _) = entry.canvas(36, &Theme::default(), true, true);
+    let mut terminal = Terminal::new(TestBackend::new(36, canvas.area.height)).unwrap();
     terminal
         .draw(|f| f.buffer_mut().clone_from(&canvas))
         .unwrap();
     let buffer = terminal.backend().buffer();
-    assert_eq!(row_text(buffer, 0), "Panel");
-    let rows: Vec<_> = (2..buffer.area.height - 1)
-        .map(|y| row_text(buffer, y))
+    assert!(row_text(buffer, 0).starts_with("╭─ Panel "));
+    // Component expectations describe the content, excluding the new card
+    // padding and blank section separators. Full-card snapshots live below.
+    let regions = node_regions(entry.session.as_ref().unwrap(), 36);
+    let mut content = Buffer::empty(Rect::new(
+        0,
+        0,
+        32,
+        2 + regions.iter().map(|r| r.height).sum::<u16>(),
+    ));
+    let mut y = 2;
+    for region in regions {
+        for row in region.y..region.bottom() {
+            for x in 0..32 {
+                content[(x, y)] = buffer[(x + 2, row)].clone();
+            }
+            y += 1;
+        }
+    }
+    let rows: Vec<_> = (2..content.area.height)
+        .map(|y| row_text(&content, y))
         .collect();
     assert_eq!(rows, expected);
-    buffer.clone()
+    content
 }
 
 #[test]
@@ -190,7 +210,7 @@ fn panel() -> (Widgets, Placement) {
         width: 60,
         owner: 0,
         ordinal: 0,
-        height: Document::parse(&source).unwrap().rows(),
+        height: source_height(&source, 60),
         source,
         complete: true,
     };
@@ -294,6 +314,8 @@ fn focus_order_and_keys_include_new_controls_without_stealing_input() {
     assert_eq!(value(&widgets, &p, "ready"), "false");
     assert_eq!(value(&widgets, &p, "done"), "true");
     widgets.key(KeyCode::Tab.into(), true);
+    assert_eq!(widgets.entries[&p.key()].focus, 7); // Expand is keyboard reachable.
+    widgets.key(KeyCode::Tab.into(), true);
     assert_eq!(widgets.entries[&p.key()].focus, 0);
 }
 
@@ -311,16 +333,16 @@ fn mouse_toggles_checklist_and_toggle_cycles_select_and_selects_table_rows() {
     assert_eq!(value(&widgets, &p, "ready"), "true");
     click_control(&mut widgets, 4, 3);
     assert_eq!(value(&widgets, &p, "row"), "2");
-    // The table starts at document row 10; clipping away header and first data row
+    // The table starts at document row 9; clipping away header and first data row
     // must not make a click on the next visible row select the wrong index.
-    draw(&mut widgets, &p, 12);
+    draw(&mut widgets, &p, 11);
     click_control(&mut widgets, 4, 0);
     assert_eq!(value(&widgets, &p, "row"), "1");
 }
 
 #[test]
 fn labels_are_sanitized_and_narrow_component_views_are_safe() {
-    assert_eq!(safe("A\u{1b}\t\rB\u{7f}\u{fe0f}"), "AB");
+    assert_eq!(safe("A\u{1b}\t\rB\u{7f}\u{fe0f}"), "A\\u{1b}\\t\\rB\\u{7f}");
     snapshot(
         json!([{"type":"toggle","key":"ready","label":"Ready\u{fe0f}"}]),
         json!({"ready":true}),
@@ -346,11 +368,8 @@ fn labels_are_sanitized_and_narrow_component_views_are_safe() {
 }
 
 #[test]
-fn legacy_game_matches_the_original_widget_buffer() {
-    let document = Document::parse(include_str!(
-        "../../../core/tests/fixtures/interactive/rps.json"
-    ))
-    .unwrap();
+fn game_card_snapshots_70_and_80_columns() {
+    let document = Document::parse(RPS).unwrap();
     let entry = Entry {
         session: Ok(Session::new(document).unwrap()),
         focus: 0,
@@ -358,29 +377,6 @@ fn legacy_game_matches_the_original_widget_buffer() {
         scroll: 0,
     };
     let theme = Theme::default();
-    let mut expected = Buffer::empty(Rect::new(0, 0, 70, 17));
-    expected.set_style(expected.area, theme.background_style());
-    Paragraph::new("Rock · Paper · Scissors")
-        .style(
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .render(Rect::new(0, 0, 70, 1), &mut expected);
-    for (y, text, color) in [
-        (2, "You: Pick a move · Computer: ?", theme.accent),
-        (3, "Ready", theme.accent),
-        (4, "Wins 0 · Losses 0 · Draws 0", theme.fg_dim),
-        (
-            16,
-            "F2 interact · click controls · Esc back from focus",
-            theme.fg_dim,
-        ),
-    ] {
-        Paragraph::new(text)
-            .style(Style::default().fg(color))
-            .render(Rect::new(0, y, 70, 1), &mut expected);
-    }
     let bodies: [&[&str]; 3] = [
         &[
             "   _______",
@@ -407,40 +403,60 @@ fn legacy_game_matches_the_original_widget_buffer() {
             "beats paper",
         ],
     ];
-    let buttons: Vec<_> = ["Rock", "Paper", "Scissors"]
-        .iter()
-        .enumerate()
-        .map(|(action, label)| chrome::Button {
-            action,
-            label,
-            body: bodies[action],
-            selected: false,
-            enabled: true,
-        })
-        .collect();
-    chrome::render_buttons(&mut expected, Rect::new(0, 5, 70, 8), &buttons, &theme);
-    chrome::render_buttons(
-        &mut expected,
-        Rect::new(0, 13, 70, 3),
-        &[chrome::Button {
-            action: 3,
-            label: "Reset score",
-            body: &[],
-            selected: false,
-            enabled: true,
-        }],
-        &theme,
-    );
-    let (actual, _) = entry.canvas(70, &theme, false, true);
-    let mut terminal = Terminal::new(TestBackend::new(70, 17)).unwrap();
-    terminal
-        .draw(|f| f.buffer_mut().clone_from(&actual))
-        .unwrap();
-    assert_eq!(terminal.backend().buffer(), &expected);
+    for (width, inner_width) in [(70, 18), (80, 22)] {
+        let tile_top = vec![format!("┌{}┐", "─".repeat(inner_width)); 3].join("  ");
+        let mut expected = vec![
+            top_border("Rock · Paper · Scissors", width),
+            card_row("", width),
+            card_row(" You: Pick a move · Computer: ?", width),
+            card_row(" Ready", width),
+            card_row(" Wins 0 · Losses 0 · Draws 0", width),
+            card_row("", width),
+            card_row(&format!(" {tile_top}"), width),
+        ];
+        for row in 0..5 {
+            let tiles = bodies
+                .iter()
+                .map(|body| {
+                    let padding = inner_width - body[row].width();
+                    format!(
+                        "│{}{}{}│",
+                        " ".repeat(padding.div_ceil(2)),
+                        body[row],
+                        " ".repeat(padding / 2)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("  ");
+            expected.push(card_row(&format!(" {tiles}"), width));
+        }
+        let text_width = inner_width - 2;
+        let labels = ["Rock", "Paper", "Scissors"]
+            .map(|label| format!("│ {label:<text_width$} │"))
+            .join("  ");
+        expected.push(card_row(&format!(" {labels}"), width));
+        let metadata = bodies
+            .map(|body| format!("│ {:<text_width$} │", body[5]))
+            .join("  ");
+        expected.push(card_row(&format!(" {metadata}"), width));
+        let tile_bottom = vec![format!("└{}┘", "─".repeat(inner_width)); 3].join("  ");
+        expected.push(card_row(&format!(" {tile_bottom}"), width));
+        expected.extend([
+            card_row("", width),
+            card_row("  Reset score ", width),
+            card_row("", width),
+            bottom_border(width),
+        ]);
+        assert_card_snapshot(&entry, width, &expected);
+        let (actual, _) = entry.canvas(width, &theme, false, true);
+        assert_eq!(actual[(4, 12)].fg, theme.fg);
+        assert!(actual[(4, 12)].modifier.contains(Modifier::BOLD));
+        assert_eq!(actual[(4, 13)].fg, theme.fg_dim);
+    }
 }
 
 #[test]
-fn legacy_counter_matches_the_original_widget_buffer() {
+fn counter_card_snapshots_70_and_80_columns() {
     let document = Document::parse(super::tests::COUNTER).unwrap();
     let entry = Entry {
         session: Ok(Session::new(document).unwrap()),
@@ -449,58 +465,179 @@ fn legacy_counter_matches_the_original_widget_buffer() {
         scroll: 0,
     };
     let theme = Theme::default();
-    let mut expected = Buffer::empty(Rect::new(0, 0, 70, 13));
-    expected.set_style(expected.area, theme.background_style());
-    Paragraph::new("Counter")
-        .style(
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .render(Rect::new(0, 0, 70, 1), &mut expected);
-    Paragraph::new("Count: 0")
-        .style(Style::default().fg(theme.accent))
-        .render(Rect::new(0, 2, 70, 1), &mut expected);
-    let buttons = [
-        chrome::Button {
-            action: 0,
-            label: "Add one",
-            body: &[],
-            selected: false,
-            enabled: true,
-        },
-        chrome::Button {
-            action: 1,
-            label: "Reset",
-            body: &[],
-            selected: false,
-            enabled: true,
-        },
-    ];
-    chrome::render_buttons(&mut expected, Rect::new(0, 3, 70, 3), &buttons, &theme);
-    chrome::popup_block_focused("Name", &theme, false, chrome::Tone::Normal)
-        .render(Rect::new(0, 6, 70, 3), &mut expected);
-    expected.set_style(Rect::new(2, 7, 66, 1), Style::default().fg(theme.fg));
-    chrome::render_buttons(
-        &mut expected,
-        Rect::new(0, 9, 70, 3),
-        &[chrome::Button {
-            action: 3,
-            label: "Submit result [review]",
-            body: &[],
-            selected: false,
-            enabled: true,
-        }],
-        &theme,
-    );
-    Paragraph::new("F2 interact · click controls · Esc back from focus")
-        .style(Style::default().fg(theme.fg_dim))
-        .render(Rect::new(0, 12, 70, 1), &mut expected);
-    let (actual, _) = entry.canvas(70, &theme, false, true);
-    // Includes every character, foreground/background and modifier, not just text.
-    let mut terminal = Terminal::new(TestBackend::new(70, 13)).unwrap();
+    for width in [70, 80] {
+        let actions_width = usize::from(width - 3);
+        let expected = [
+            top_border("Counter", width),
+            card_row("", width),
+            card_row(" Count: 0", width),
+            card_row("", width),
+            card_row("  Add one   Reset ", width),
+            card_row("", width),
+            card_row(" Name", width),
+            card_row("", width),
+            card_row(&format!("{:>actions_width$}", " Submit result ↵ "), width),
+            card_row("", width),
+            bottom_border(width),
+        ];
+        assert_card_snapshot(&entry, width, &expected);
+        let (actual, _) = entry.canvas(width, &theme, false, true);
+        assert_eq!(actual[(width - 18, 8)].bg, theme.accent);
+        assert_eq!(actual[(width - 18, 8)].fg, theme.bg);
+        assert_eq!(actual[(3, 4)].bg, theme.raised);
+        assert_eq!(actual[(2, 2)].fg, theme.fg);
+    }
+}
+
+fn card_row(content: &str, width: u16) -> String {
+    format!("│{content:<inner$}│", inner = usize::from(width - 2))
+}
+fn top_border(title: &str, width: u16) -> String {
+    let remaining = usize::from(width) - format!("╭─ {title}  ⤢ ╮").width();
+    format!("╭─ {title} {} ⤢ ╮", "─".repeat(remaining))
+}
+fn bottom_border(width: u16) -> String {
+    format!(
+        "╰{} F2 keyboard ╯",
+        "─".repeat(usize::from(width) - "╰ F2 keyboard ╯".width())
+    )
+}
+fn assert_card_snapshot(entry: &Entry, width: u16, expected: &[String]) {
+    let (actual, _) = entry.canvas(width, &Theme::default(), false, true);
+    let mut terminal = Terminal::new(TestBackend::new(width, actual.area.height)).unwrap();
     terminal
         .draw(|f| f.buffer_mut().clone_from(&actual))
         .unwrap();
-    assert_eq!(terminal.backend().buffer(), &expected);
+    let rows: Vec<_> = (0..actual.area.height)
+        .map(|y| row_text(terminal.backend().buffer(), y))
+        .collect();
+    assert_eq!(rows.join("\n"), expected.join("\n"));
+}
+
+#[test]
+fn rps_tiles_share_a_row_and_pad_their_labels_and_metadata() {
+    let entry = Entry {
+        session: Ok(Session::new(Document::parse(RPS).unwrap()).unwrap()),
+        focus: 0,
+        error: String::new(),
+        scroll: 0,
+    };
+    for (width, tile_width, positions) in [(70, 20, [2, 24, 46]), (80, 24, [2, 28, 54])] {
+        let (canvas, hits) = entry.canvas(width, &Theme::default(), false, true);
+        let tiles: Vec<_> = hits.iter().take(3).map(|(rect, _)| *rect).collect();
+        assert_eq!(tiles, positions.map(|x| Rect::new(x, 6, tile_width, 9)));
+        for tile in tiles {
+            for y in [12, 13] {
+                assert_eq!(canvas[(tile.x + 1, y)].symbol(), " ");
+                assert_eq!(canvas[(tile.right() - 2, y)].symbol(), " ");
+            }
+        }
+        assert!(row_text(&canvas, 12).contains("│ Rock"));
+        assert!(row_text(&canvas, 13).contains("│ beats scissors"));
+    }
+}
+
+#[test]
+fn short_last_tile_row_stays_left_aligned_without_stretching() {
+    let mut data: Value = serde_json::from_str(RPS).unwrap();
+    let mut fourth = data["view"][3]["items"][0].clone();
+    fourth["label"] = json!("Fourth");
+    data["view"][3]["items"]
+        .as_array_mut()
+        .unwrap()
+        .push(fourth);
+    let entry = Entry {
+        session: Ok(Session::new(Document::parse(&data.to_string()).unwrap()).unwrap()),
+        focus: 0,
+        error: String::new(),
+        scroll: 0,
+    };
+    let (canvas, hits) = entry.canvas(80, &Theme::default(), false, true);
+    let tiles: Vec<_> = hits.iter().take(4).map(|(rect, _)| *rect).collect();
+    assert_eq!(
+        tiles,
+        [
+            Rect::new(2, 6, 24, 9),
+            Rect::new(28, 6, 24, 9),
+            Rect::new(54, 6, 24, 9),
+            Rect::new(2, 16, 24, 9),
+        ]
+    );
+    assert_eq!(canvas[(25, 16)].symbol(), "┐");
+    assert!((26..78).all(|x| canvas[(x, 16)].symbol() == " "));
+    assert!(row_text(&canvas, 22).contains("│ Fourth"));
+}
+
+#[test]
+fn empty_input_fields_are_visible_and_keep_sixteen_columns_when_space_allows() {
+    let theme = Theme::default();
+    for (width, label, field_start) in [
+        (70, "Name", 8),
+        (80, "Name", 8),
+        (40, "An unusually long input label", 22),
+        (24, "Name", 6),
+    ] {
+        let entry = entry(
+            json!([{"type":"input","key":"name","label":label}]),
+            json!({"name":""}),
+        );
+        let (quiet, _) = entry.canvas(width, &theme, false, true);
+        let (focused, _) = entry.canvas(width, &theme, true, true);
+        for x in field_start..width - 2 {
+            assert_eq!(quiet[(x, 2)].symbol(), " ");
+            assert_eq!(quiet[(x, 2)].bg, theme.raised);
+            assert_eq!(quiet[(x, 2)].underline_color, theme.border_dim);
+            assert!(quiet[(x, 2)].modifier.contains(Modifier::UNDERLINED));
+            assert_eq!(focused[(x, 2)].bg, theme.raised);
+            assert_eq!(focused[(x, 2)].underline_color, theme.accent);
+        }
+        assert_eq!(quiet[(field_start - 1, 2)].bg, theme.bg);
+        assert_eq!(quiet[(width - 2, 2)].bg, theme.bg);
+        assert_eq!(focused[(field_start, 2)].symbol(), "▁");
+    }
+}
+
+#[test]
+fn primary_resolution_prefers_explicit_then_first_send_otherwise_none() {
+    let mut value: Value = serde_json::from_str(super::tests::COUNTER).unwrap();
+    let document = Document::parse(&value.to_string()).unwrap();
+    assert_eq!(primary_button(&document), Some((3, 0)));
+    value["view"][1]["items"][1]["primary"] = json!(true);
+    let document = Document::parse(&value.to_string()).unwrap();
+    assert_eq!(primary_button(&document), Some((1, 1)));
+    value["view"][1]["items"][1]["primary"] = json!(false);
+    value["actions"]["submit"] = json!([]);
+    assert_eq!(
+        primary_button(&Document::parse(&value.to_string()).unwrap()),
+        None
+    );
+}
+
+#[test]
+fn input_labels_remain_literal_for_legacy_documents() {
+    let entry = entry(
+        json!([{"type":"input","key":"name","label":"Name {{literal}}"}]),
+        json!({"name":"Ada"}),
+    );
+    let (buffer, _) = entry.canvas(80, &Theme::default(), false, true);
+    assert!(row_text(&buffer, 2).contains("Name {{literal}}  Ada"));
+}
+
+#[test]
+fn focus_is_only_visible_on_the_focused_control() {
+    let mut entry = entry(
+        json!([{"type":"input","key":"name","label":"Name"}]),
+        json!({"name":"Ada"}),
+    );
+    let theme = Theme::default();
+    let (quiet, _) = entry.canvas(80, &theme, false, true);
+    assert!(!row_text(&quiet, 2).contains('▁'));
+    assert_eq!(quiet[(8, 2)].underline_color, theme.border_dim);
+    let (focused, _) = entry.canvas(80, &theme, true, true);
+    assert!(row_text(&focused, 2).contains("Ada▁"));
+    assert_eq!(focused[(8, 2)].fg, theme.accent);
+    assert!(row_text(&focused, focused.area.height - 1).contains("Tab next"));
+    entry.focus = 1;
+    let (expanded, _) = entry.canvas(80, &theme, true, true);
+    assert_eq!(expanded[(77, 0)].fg, theme.accent);
 }

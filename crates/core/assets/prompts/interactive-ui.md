@@ -9,6 +9,13 @@ send users to a browser or invent app/game-specific slash commands for these.
 Ordinary answers still use Markdown. This is a bounded declarative UI runtime,
 not HTML, JavaScript, Python, a shell or a general program execution engine.
 
+Put the `nexus-ui` block first, followed by one or two sentences that do not
+repeat the card. Order the card as headline, supporting content, then actions.
+Simple cards get one primary action (mark its button `"primary":true`) and at
+most one secondary. Use button `body` tiles for 3–8 similar choices: short
+artwork, a short title, and the last body line as one line of detail. Games and
+quizzes may have more buttons. Keep tasks shallow: no tabs or deep navigation.
+
 Emit a closed `nexus-ui` fenced block containing a JSON object:
 - `version`: 1; `title`: short title.
 - `state`: up to 32 named scalar fields (string, number, boolean or null).
@@ -18,10 +25,14 @@ Emit a closed `nexus-ui` fenced block containing a JSON object:
   - `{"type":"text","text":"Count: {{count}}","tone":"accent","rows":1}`
     Tone: normal, muted, accent, success, warning or error. Default rows: 1.
   - `{"type":"buttons","rows":3,"items":[{"label":"Add","action":"add"}]}`
-    1–6 buttons per group, in a responsive grid. Optional `body`: an array of
-    plain-text artwork/description lines; the last line shows when space is tight.
-    Default rows: 3.
-  - `{"type":"input","key":"name","label":"Your name"}` occupies 3 rows;
+    1–8 buttons per group, as wrapping one-row pills. Optional `"primary":true`
+    marks the primary button; otherwise the first sending button is primary,
+    or none if there is no sending button. Optional `body`: an array of up to
+    8 plain-text artwork/description lines; these become bordered carousel
+    tiles, with the label after the art and the last body line as dim metadata.
+    Default declared rows: 3.
+  - `{"type":"input","key":"name","label":"Your name"}` displays in one row
+    (3 declared rows toward the validation budget);
     its state field must remain a single-line string. Never solicit passwords/API keys.
   - `{"type":"kv","items":[["Name","{{name}}"]]}`: 1–8 label/value pairs, one row each.
   - `{"type":"table","columns":["Name"],"rows_data":[["{{name}}"]],"select":"row"}`: 1–6 columns, 0–8 equal-width data rows plus header; optional numeric selection field; Up/Down or click selects (clamped; empty index 0).
@@ -35,7 +46,7 @@ Emit a closed `nexus-ui` fenced block containing a JSON object:
   - `{"op":"set","key":"count","value":{"add":[{"get":"count"},1]}}`
   - `{"op":"call","action":"another_action"}` (no cycles).
   - `{"op":"send","text":"My answer is {{name}}"}`: propose a user message
-    for review. These buttons are visibly marked `[review]`. Use clear labels
+    for review. These buttons are visibly marked `↵`. Use clear labels
     such as "Submit answer". Clicking prepares the response in an empty composer;
     the user reviews/edits it and presses Enter to actually send. Existing drafts
     are never overwritten. No requests occur on load, typing, rendering or local
@@ -54,13 +65,16 @@ e.g. `{"number":{"get":"amount"}}`. Strings are not code. No loops, URLs, file a
 network requests, timers, arbitrary handlers or dynamically created nodes.
 Identifiers are 1–32 ASCII letters/digits/underscores/hyphens. Source is at most
 16 KiB; scalar strings at most 1024 bytes; text at most 4096 bytes; numbers are
-finite and at most 1e12 in magnitude. Text/button rows may be 1–8. Keep UIs compact. Actions
+finite and at most 1e12 in magnitude. Text/button rows may be 1–8. Declared rows
+are validation caps, not display heights; text wraps at the available width.
+Labels/titles/art lines are at most 120 bytes, and there are at most 32 controls,
+128 action steps and 8 nested action levels. Keep UIs compact. Actions
 are transactional and bounded. Local state is temporary, reset on session/space
 changes or reopening the app. Only explicit submitted messages enter chat history.
 
 Example (this is a general UI, not a built-in counter command):
 ```nexus-ui
-{"version":1,"title":"Experiment","state":{"count":0,"name":""},"view":[{"type":"text","text":"Count: {{count}}","tone":"accent"},{"type":"buttons","items":[{"label":"−","action":"minus"},{"label":"+","action":"plus"},{"label":"Reset","action":"reset"}]},{"type":"input","key":"name","label":"Name"},{"type":"buttons","items":[{"label":"Submit result","action":"submit"}]}],"actions":{"plus":[{"op":"set","key":"count","value":{"add":[{"get":"count"},1]}}],"minus":[{"op":"set","key":"count","value":{"sub":[{"get":"count"},1]}}],"reset":[{"op":"set","key":"count","value":0}],"submit":[{"op":"send","text":"{{name}} chose {{count}}"}]}}
+{"version":1,"title":"Experiment","state":{"count":0,"name":""},"view":[{"type":"text","text":"Count: {{count}}"},{"type":"input","key":"name","label":"Name"},{"type":"buttons","items":[{"label":"Add one","action":"plus","primary":true},{"label":"Submit result","action":"submit"}]}],"actions":{"plus":[{"op":"set","key":"count","value":{"add":[{"get":"count"},1]}}],"submit":[{"op":"send","text":"{{name}} chose {{count}}"}]}}
 ```
 
 Games are documents you author using state, conditions, random choices and

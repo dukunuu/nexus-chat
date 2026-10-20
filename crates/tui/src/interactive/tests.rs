@@ -9,7 +9,7 @@ fn placement(source: &str, owner: usize) -> Placement {
         width: 70,
         owner,
         ordinal: 0,
-        height: Document::parse(source).map_or(6, |doc| doc.rows()),
+        height: source_height(source, 70),
         source: source.into(),
         complete: true,
     }
@@ -97,8 +97,8 @@ fn incomplete_invalid_clipped_and_revised_documents_are_safe() {
     draw(&mut widgets, &[p.clone()], 0);
     assert!(widgets.entries.is_empty());
     p.complete = true;
-    let before = draw(&mut widgets, &[p.clone()], 8);
-    assert!(text(&before).contains("Submit result [review]"));
+    let before = draw(&mut widgets, &[p.clone()], 6);
+    assert!(text(&before).contains("Submit result ↵"));
     assert!(!text(&before).contains("Count: 0"));
     let hit = widgets
         .hits
@@ -122,6 +122,237 @@ fn incomplete_invalid_clipped_and_revised_documents_are_safe() {
     widgets.clear();
     assert!(widgets.entries.is_empty());
     assert!(widgets.hits.is_empty());
+}
+
+#[test]
+fn measured_reservations_match_the_drawn_card_at_actual_widths() {
+    for source in [
+        COUNTER.to_string(),
+        include_str!("../../../core/tests/fixtures/interactive/rps.json").into(),
+        COUNTER.replace(
+            "Count: {{count}}",
+            &"supporting content wraps inside the card. ".repeat(12),
+        ),
+    ] {
+        for width in [60, 80, 120] {
+            let rendered = crate::ui::markdown::render(
+                &format!("```nexus-ui\n{source}\n```"),
+                width,
+                crate::ui::markdown::MdColors::default(),
+            );
+            let p = &rendered.widgets[0];
+            let entry = Entry {
+                session: Ok(Session::new(Document::parse(&source).unwrap()).unwrap()),
+                focus: 0,
+                error: String::new(),
+                scroll: 0,
+            };
+            let (canvas, hits) = entry.canvas(
+                u16::try_from(width).unwrap(),
+                &Theme::default(),
+                false,
+                true,
+            );
+            assert_eq!(p.height, canvas.area.height);
+            assert_eq!(rendered.lines.len(), usize::from(p.height));
+            assert!(
+                hits.iter()
+                    .all(|(rect, _)| rect.intersection(canvas.area) == *rect)
+            );
+            let rows: Vec<_> = (0..canvas.area.height)
+                .map(|y| {
+                    (0..canvas.area.width)
+                        .map(|x| canvas[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect();
+            assert!(rows.last().unwrap().starts_with('╰'));
+            assert!(rows.last().unwrap().ends_with('╯'));
+            if source.contains("supporting content") {
+                assert!(rows.iter().filter(|row| row.contains("supporting")).count() > 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn pill_tile_input_and_expand_clicks_share_the_keyboard_state() {
+    for source in [
+        COUNTER,
+        include_str!("../../../core/tests/fixtures/interactive/rps.json"),
+    ] {
+        let mut widgets = Widgets::default();
+        let p = placement(source, 0);
+        let mut terminal = Terminal::new(TestBackend::new(80, 32)).unwrap();
+        terminal
+            .draw(|f| {
+                widgets.begin_frame(true);
+                widgets.paint(
+                    f,
+                    f.area(),
+                    0,
+                    std::slice::from_ref(&p),
+                    &Theme::default(),
+                    true,
+                );
+            })
+            .unwrap();
+        let controls = widgets.entries[&p.key()].controls();
+        for control in 0..controls.len() + 1 {
+            let hit = widgets
+                .hits
+                .iter()
+                .find(|hit| hit.control == Some(control))
+                .cloned()
+                .unwrap();
+            assert!(
+                widgets
+                    .click(
+                        MouseEvent {
+                            kind: MouseEventKind::Down(MouseButton::Left),
+                            column: hit.rect.x,
+                            row: hit.rect.y,
+                            modifiers: KeyModifiers::NONE
+                        },
+                        Rect::new(0, 0, 80, 32),
+                        true
+                    )
+                    .0
+            );
+            assert_eq!(widgets.focused, Some(p.key()));
+            assert_eq!(widgets.entries[&p.key()].focus, control);
+            if source != COUNTER && control < 3 {
+                assert_eq!(
+                    widgets.entries[&p.key()]
+                        .session
+                        .as_ref()
+                        .unwrap()
+                        .value("you"),
+                    ["Rock", "Paper", "Scissors"][control]
+                );
+            }
+            if source == COUNTER && control == 2 {
+                widgets.paste("Ada");
+                assert_eq!(
+                    widgets.entries[&p.key()]
+                        .session
+                        .as_ref()
+                        .unwrap()
+                        .value("name"),
+                    "Ada"
+                );
+            }
+        }
+        assert!(widgets.expanded);
+        widgets.unfocus();
+        widgets.focus_latest();
+        // Re-entering keeps the expand control selected.
+        widgets.key(KeyCode::Enter.into(), false);
+        assert!(widgets.expanded);
+    }
+}
+
+#[test]
+fn pinned_card_keeps_state_hits_and_composer_clear_until_escape_or_session_reset() {
+    let mut app = app();
+    app.set_input("composer stays visible");
+    app.messages[0]
+        .content
+        .push_str(&format!("\n\n{}", "Following conversation\n\n".repeat(40)));
+    let mut terminal = Terminal::new(TestBackend::new(80, 32)).unwrap();
+    terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+    app.scroll = app.max_scroll;
+    terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+    focus(&mut app);
+    key(&mut app, KeyCode::Enter.into());
+    for _ in 0..app.max_scroll.div_ceil(3) {
+        assert!(mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 10,
+                row: 5,
+                modifiers: KeyModifiers::NONE
+            },
+            Rect::new(0, 0, 80, 32)
+        ));
+    }
+    terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+    let viewport = app.interactive.layout.as_ref().unwrap().0;
+    assert_eq!(
+        terminal.backend().buffer()[(viewport.x + 2, viewport.y)].symbol(),
+        "╭"
+    );
+    let pinned = text(&terminal);
+    assert!(pinned.contains("pinned · Esc to unpin"), "{pinned}");
+    assert!(pinned.contains("Count: 1"));
+    assert!(pinned.contains("composer stays visible"));
+    assert!(
+        app.interactive
+            .hits
+            .iter()
+            .all(|hit| hit.rect.bottom() <= app.input_inner.y - 1)
+    );
+    let hit = app
+        .interactive
+        .hits
+        .iter()
+        .find(|hit| hit.control == Some(0))
+        .unwrap()
+        .clone();
+    mouse(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.rect.x,
+            row: hit.rect.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        Rect::new(0, 0, 80, 32),
+    );
+    terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+    assert!(text(&terminal).contains("Count: 2"));
+    key(&mut app, KeyCode::Esc.into());
+    terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+    assert!(!text(&terminal).contains("pinned · Esc"));
+    app.scroll = app.max_scroll;
+    terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+    focus(&mut app);
+    app.apply_event(&nexus_core::app::AppEvent::ViewportReset);
+    assert!(app.interactive.focused.is_none());
+    assert!(!app.interactive.pinned);
+}
+
+#[test]
+fn enlarged_card_never_covers_the_composer_and_edits_reflow_the_transcript() {
+    let mut app = app();
+    app.messages[0].content = format!(
+        "```nexus-ui\n{}\n```\n\nAfter the card",
+        COUNTER.replace("Count: {{count}}", "Name: {{name}}")
+    );
+    app.set_input("keep this draft");
+    let mut terminal = Terminal::new(TestBackend::new(80, 32)).unwrap();
+    terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+    let before = app.history_cache.widgets[0].height;
+    focus(&mut app);
+    key(&mut app, KeyCode::Tab.into());
+    key(&mut app, KeyCode::Tab.into());
+    app.interactive.paste(&"long name ".repeat(30));
+    terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+    assert!(app.history_cache.widgets[0].height > before);
+    assert!(text(&terminal).contains("After the card"));
+    key(&mut app, KeyCode::Tab.into());
+    key(&mut app, KeyCode::Tab.into());
+    key(&mut app, KeyCode::Enter.into());
+    assert!(app.interactive.expanded);
+    terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+    assert!(text(&terminal).contains("keep this draft"));
+    assert!(
+        app.interactive
+            .hits
+            .iter()
+            .all(|hit| hit.rect.bottom() <= app.input_inner.y - 1)
+    );
 }
 
 #[test]
@@ -160,7 +391,7 @@ fn arbitrary_game_artwork_and_controls_use_the_same_renderer() {
             .iter()
             .filter(|hit| hit.control.is_some())
             .count(),
-        4
+        5 // Four actions and the expand affordance.
     );
 }
 
@@ -176,6 +407,7 @@ fn dense_button_groups_reflow_without_losing_controls() {
             body: &[],
             selected: false,
             enabled: true,
+            primary: false,
         })
         .collect();
     let area = Rect::new(0, 0, 40, 3);

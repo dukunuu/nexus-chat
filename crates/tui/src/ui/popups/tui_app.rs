@@ -10,12 +10,12 @@ use nexus_core::tui_apps::{Cell, Runner, View};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
-use ratatui::widgets::{Paragraph, Widget, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{Frame, Terminal, backend::TestBackend};
 use serde_json::{Value, json};
 
 use crate::app_view::AppView;
-use crate::interactive::{render_nodes, safe};
+use crate::interactive::{card_buffer, card_height, node_regions, render_nodes, safe};
 use crate::theme::Theme;
 
 use super::chrome;
@@ -346,51 +346,41 @@ fn paint(
     theme: &Theme,
     focus: Option<usize>,
 ) -> (Buffer, Vec<(Rect, usize)>) {
-    let document = view.session.document();
-    let mut source = Buffer::empty(Rect::new(0, 0, width, document.rows()));
-    let hits = render_nodes(&view.session, theme, focus, true, &mut source);
-    let height = (0..document.nodes().len())
-        .map(|index| view.rows(index))
-        .sum::<u16>()
-        + 2;
-    let mut target = Buffer::empty(Rect::new(0, 0, width, height));
-    target.set_style(target.area, theme.background_style());
-    Paragraph::new(document.title())
-        .style(Style::default().fg(theme.accent))
-        .render(Rect::new(0, 0, width, 1), &mut target);
-    let mut new_hits = Vec::new();
-    let mut y = 2;
-    let mut source_y = 2;
-    for (index, node) in document.nodes().iter().enumerate() {
-        if let Some(canvas) = view.canvases.get(&index) {
-            for Cell(x, row, text, tone) in &canvas.cells {
+    let mut regions = node_regions(&view.session, width);
+    for (index, canvas) in &view.canvases {
+        let old_height = regions[*index].height;
+        regions[*index].height = canvas.rows;
+        for region in &mut regions[index + 1..] {
+            region.y = region.y - old_height + canvas.rows;
+        }
+    }
+    let mut target = card_buffer(
+        width,
+        card_height(&regions),
+        view.session.document().title(),
+        theme,
+        if focus.is_some() {
+            "Tab next · Enter press · Esc done"
+        } else {
+            "F2 keyboard"
+        },
+    );
+    let hits = render_nodes(&view.session, &regions, theme, focus, true, &mut target);
+    for (index, canvas) in &view.canvases {
+        let region = regions[*index];
+        for Cell(x, row, text, tone) in &canvas.cells {
+            if *x < region.width {
                 target.set_stringn(
-                    *x,
-                    y + row,
+                    region.x + x,
+                    region.y + row,
                     safe(text),
-                    usize::from(width.saturating_sub(*x)),
+                    usize::from(region.width - x),
                     Style::default().fg(color(*tone, theme)),
                 );
             }
-        } else {
-            for row in 0..node.rows() {
-                for x in 0..width {
-                    target[(x, y + row)] = source[(x, source_y + row)].clone();
-                }
-            }
-            for (rect, control) in &hits {
-                if rect.y >= source_y && rect.y < source_y + node.rows() {
-                    new_hits.push((
-                        Rect::new(rect.x, y + rect.y - source_y, rect.width, rect.height),
-                        *control,
-                    ));
-                }
-            }
         }
-        y += view.rows(index);
-        source_y += node.rows();
     }
-    (target, new_hits)
+    (target, hits)
 }
 
 fn copy(buffer: &Buffer, target: &mut Buffer, area: Rect) {

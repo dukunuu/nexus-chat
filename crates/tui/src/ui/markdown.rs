@@ -182,15 +182,17 @@ fn render_normal(r: &mut Rendered, content: &str, width: usize, colors: MdColors
 mod interactive_tests;
 
 fn render_ui(r: &mut Rendered, source: &str, complete: bool, width: usize, colors: MdColors) {
-    push_code_border(r, width, Some("interactive UI"), colors.rule);
     let document = nexus_core::interactive::Document::parse(source);
-    let height = document
-        .as_ref()
-        .map_or(6, nexus_core::interactive::Document::rows);
+    let fallback = width < 8 || (complete && document.is_err());
+    if fallback {
+        push_code_border(r, width, Some("interactive UI"), colors.rule);
+    }
+    let card_width = u16::try_from(width).unwrap_or(u16::MAX);
+    let height = crate::interactive::source_height(source, card_width);
     if width >= 8 {
         r.widgets.push(crate::interactive::Placement {
             row: r.lines.len(),
-            width: u16::try_from(width.saturating_sub(4)).unwrap_or(u16::MAX),
+            width: card_width,
             owner: 0,
             ordinal: r.widgets.len(),
             height,
@@ -207,17 +209,17 @@ fn render_ui(r: &mut Rendered, source: &str, complete: bool, width: usize, color
             } else {
                 ""
             };
-            let text: String = text.chars().take(width.saturating_sub(4)).collect();
-            push_code_content(r, &Line::from(text), width, colors.rule);
+            let text: String = text.chars().take(width).collect();
+            r.push(Line::from(text), Some(r.blocks.len()));
         }
     }
-    if width < 8 || (complete && document.is_err()) {
+    if fallback {
         for line in source.lines() {
             let safe: String = line.chars().flat_map(char::escape_default).collect();
             push_code_content(r, &Line::from(safe), width, colors.rule);
         }
+        push_code_border(r, width, None, colors.rule);
     }
-    push_code_border(r, width, None, colors.rule);
     r.blocks.push(source.into());
 }
 
@@ -575,7 +577,7 @@ fn wrap_code_line(line: &Line, width: usize) -> Vec<Line<'static>> {
     rows.into_iter().map(row_to_line).collect()
 }
 
-fn wrap_styled_line(line: &Line, width: usize) -> Vec<Line<'static>> {
+pub(crate) fn wrap_styled_line(line: &Line, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
     let chars: Vec<(char, Style)> = line
         .spans

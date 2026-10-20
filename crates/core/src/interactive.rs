@@ -13,7 +13,7 @@ pub const INSTRUCTIONS: &str = include_str!("../assets/prompts/interactive-ui.md
 
 /// Maximum serialized UI document size.
 pub const MAX_SOURCE: usize = 16 * 1024;
-/// Maximum transcript height, including title and interaction hint.
+/// Validation row budget, including title and interaction hint.
 pub const ROWS: u16 = 24;
 const MAX_TEXT: usize = 4096;
 const MAX_VALUE: usize = 1024;
@@ -48,6 +48,9 @@ pub struct Button {
     /// Optional plain-text artwork or descriptive lines.
     #[serde(default)]
     pub body: Vec<String>,
+    /// Prefer this item as the document's primary action.
+    #[serde(default)]
+    pub primary: bool,
 }
 
 /// One labelled numeric expression in a bar chart.
@@ -70,7 +73,7 @@ pub struct CheckItem {
     pub key: String,
 }
 
-/// Declarative presentation nodes. Their declared rows never grow with state.
+/// Declarative presentation nodes. Declared rows count toward validation caps.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Node {
@@ -170,7 +173,7 @@ const fn three() -> u16 {
     3
 }
 impl Node {
-    /// Stable space occupied by this node.
+    /// Declared validation budget, independent of frontend layout.
     #[must_use]
     pub fn rows(&self) -> u16 {
         match self {
@@ -305,8 +308,8 @@ impl Document {
                 Node::Text { text, .. } => self.template_ok(text)?,
                 Node::Buttons { items, .. } => {
                     ensure!(
-                        !items.is_empty() && items.len() <= 6,
-                        "a button row needs 1–6 buttons"
+                        !items.is_empty() && items.len() <= 8,
+                        "a button row needs 1–8 buttons"
                     );
                     for button in items {
                         line_ok(&button.label, 120)?;
@@ -495,7 +498,7 @@ impl Document {
     pub fn nodes(&self) -> &[Node] {
         &self.view
     }
-    /// Fixed height for this document; local state changes cannot reflow it.
+    /// Declared validation budget; frontends measure their actual layout.
     #[must_use]
     pub fn rows(&self) -> u16 {
         self.view.iter().map(Node::rows).sum::<u16>() + 3

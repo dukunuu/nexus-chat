@@ -141,10 +141,11 @@ pub struct Button<'a, A> {
     pub selected: bool,
     /// Whether activation is currently permitted.
     pub enabled: bool,
+    /// The document's resolved primary action.
+    pub primary: bool,
 }
 
-/// Render action cards with shared colors and rounded chrome. Small areas
-/// fall back to compact labels; narrow areas stack the cards. The returned
+/// Render compact pills or artwork tiles in measured regions. The returned
 /// hit areas correspond exactly to this frame, not guessed row positions.
 pub fn render_buttons<A: Copy>(
     buffer: &mut ratatui::buffer::Buffer,
@@ -181,66 +182,100 @@ pub fn render_buttons<A: Copy>(
         if rect.is_empty() {
             continue;
         }
-        let fg = if button.selected {
-            theme.accent
-        } else if button.enabled {
-            theme.fg
+        let label = crate::interactive::safe(button.label);
+        if rect.height > 1 && buttons.len() == 1 || !button.body.is_empty() {
+            render_tile(buffer, rect, &label, button.body, button.selected, theme);
         } else {
-            theme.fg_dim
-        };
-        let style = Style::default().fg(fg).bg(if button.selected {
-            theme.raised
-        } else {
-            theme.surface
-        });
-        let label = Line::from(Span::styled(
-            format!(
-                "{}{}",
-                if button.selected {
-                    format!("{} ", crate::ui::style::glyph::SELECTED)
+            let mut style = Style::default()
+                .fg(if !button.enabled {
+                    theme.fg_dim
+                } else if button.primary {
+                    theme.bg
                 } else {
-                    String::new()
-                },
-                button.label
-            ),
-            style.add_modifier(Modifier::BOLD),
-        ));
-        if rect.height < 3 || rect.width < 16 {
-            Paragraph::new(fit_line(label, usize::from(rect.width)))
-                .centered()
-                .style(style)
-                .render(rect, buffer);
-        } else {
-            let block = Block::bordered()
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(if button.selected {
+                    theme.fg
+                })
+                .bg(if button.primary && button.enabled {
                     theme.accent
                 } else {
-                    theme.border_dim
-                }))
-                .style(style)
-                .title(label.centered());
-            let inner = block.inner(rect);
-            block.render(rect, buffer);
-            let body = if usize::from(inner.height) < button.body.len() {
-                button
-                    .body
-                    .last()
-                    .map(|line| vec![Line::from(*line)])
-                    .unwrap_or_default()
-            } else {
-                button.body.iter().map(|line| Line::from(*line)).collect()
-            };
-            Paragraph::new(fit_lines(body, inner.width))
-                .centered()
-                .style(style)
-                .render(inner, buffer);
+                    theme.raised
+                });
+            if button.selected {
+                style = style
+                    .add_modifier(Modifier::UNDERLINED)
+                    .underline_color(theme.accent);
+            }
+            Paragraph::new(fit_line(
+                Line::from(format!(" {label} ")),
+                usize::from(rect.width),
+            ))
+            .style(style)
+            .render(Rect::new(rect.x, rect.y, rect.width, 1), buffer);
         }
         if button.enabled {
             hits.push((rect, button.action));
         }
     }
     hits
+}
+
+fn render_tile(
+    buffer: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    label: &str,
+    body: &[&str],
+    focused: bool,
+    theme: &Theme,
+) {
+    let block = Block::bordered().border_style(Style::default().fg(if focused {
+        theme.accent
+    } else {
+        theme.border_dim
+    }));
+    let inner = block.inner(area);
+    block.render(area, buffer);
+    let art = body.len().saturating_sub(1);
+    for (row, text) in body.iter().take(art).enumerate() {
+        Paragraph::new(crate::interactive::safe(text))
+            .centered()
+            .style(Style::default().fg(theme.fg))
+            .render(
+                Rect::new(
+                    inner.x,
+                    inner.y + u16::try_from(row).unwrap_or(0),
+                    inner.width,
+                    1,
+                ),
+                buffer,
+            );
+    }
+    let text_width = inner.width.saturating_sub(2);
+    Paragraph::new(fit_line(Line::from(label), usize::from(text_width)))
+        .style(Style::default().fg(theme.fg).add_modifier(Modifier::BOLD))
+        .render(
+            Rect::new(
+                inner.x + 1,
+                inner.y + u16::try_from(art).unwrap_or(0),
+                text_width,
+                1,
+            ),
+            buffer,
+        );
+    if let Some(metadata) = body.last() {
+        Paragraph::new(fit_line(
+            Line::from(crate::interactive::safe(metadata)),
+            usize::from(text_width),
+        ))
+        .style(Style::default().fg(theme.fg_dim))
+        .render(
+            Rect::new(
+                inner.x + 1,
+                inner.y + u16::try_from(art).unwrap_or(0) + 1,
+                text_width,
+                1,
+            ),
+            buffer,
+        );
+    }
 }
 
 /// Standard popup list selection: accent `▸ ` marker, bold text, and the

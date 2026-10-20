@@ -9,12 +9,13 @@ use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use nexus_core::app::Popup;
-use nexus_core::interactive::{Document, Node, Session, Tone};
+use nexus_core::interactive::{Button, Document, Node, Session, Tone};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Paragraph, Sparkline, Widget, Wrap};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Clear, Paragraph, Sparkline, Widget, Wrap};
 use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
 
@@ -174,13 +175,25 @@ impl Entry {
         focused: bool,
         can_send: bool,
     ) -> (Buffer, Vec<(Rect, usize)>) {
-        let height = self
+        let regions = self
             .session
             .as_ref()
-            .map_or(6, |session| session.document().rows());
-        let area = Rect::new(0, 0, width, height);
-        let mut buffer = Buffer::empty(area);
-        buffer.set_style(area, theme.background_style());
+            .map_or_else(|_| Vec::new(), |session| node_regions(session, width));
+        let height = self.session.as_ref().map_or(6, |_| card_height(&regions));
+        let mut buffer = card_buffer(
+            width,
+            height,
+            self.session
+                .as_ref()
+                .map_or("UI unavailable", |s| s.document().title()),
+            theme,
+            if focused {
+                "Tab next · Enter press · Esc done"
+            } else {
+                "F2 keyboard"
+            },
+        );
+        let area = buffer.area;
         let hits = Vec::new();
         let Ok(session) = &self.session else {
             let error = self
@@ -194,107 +207,124 @@ impl Entry {
                 .render(area, &mut buffer);
             return (buffer, hits);
         };
-        Paragraph::new(session.document().title())
-            .style(
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .render(Rect::new(0, 0, width, 1), &mut buffer);
         if !self.error.is_empty() {
             Paragraph::new(safe(&self.error))
                 .style(Style::default().fg(theme.error))
-                .render(Rect::new(0, 1, width, 1), &mut buffer);
+                .render(Rect::new(2, 1, width.saturating_sub(4), 1), &mut buffer);
         }
-        let hits = render_nodes(
+        let mut hits = render_nodes(
             session,
+            &regions,
             theme,
             focused.then_some(self.focus),
             can_send,
             &mut buffer,
         );
-        Paragraph::new("F2 interact · click controls · Esc back from focus")
-            .style(Style::default().fg(theme.fg_dim))
-            .render(Rect::new(0, height - 1, width, 1), &mut buffer);
+        if width >= 8 {
+            let expand = Rect::new(width - 4, 0, 3, 1);
+            if focused && self.focus == session_controls(session) {
+                Paragraph::new(" ⤢ ")
+                    .style(
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::UNDERLINED),
+                    )
+                    .render(expand, &mut buffer);
+            }
+            hits.push((expand, session_controls(session)));
+        }
         (buffer, hits)
     }
     fn nodes(
         session: &Session,
+        regions: &[Rect],
         theme: &Theme,
         focus: Option<usize>,
         can_send: bool,
         buffer: &mut Buffer,
     ) -> Vec<(Rect, usize)> {
-        let width = buffer.area.width;
         let mut hits = Vec::new();
-        let mut y = 2;
         let mut control = 0;
-        for node in session.document().nodes() {
-            let region = Rect::new(0, y, width, node.rows());
+        let primary = primary_button(session.document());
+        for (index, (node, region)) in session.document().nodes().iter().zip(regions).enumerate() {
+            let region = *region;
             match node {
                 Node::Text { text, tone, .. } => {
                     let color = match tone {
-                        Tone::Normal => theme.fg,
+                        Tone::Normal | Tone::Accent => theme.fg,
                         Tone::Muted => theme.fg_dim,
-                        Tone::Accent => theme.accent,
                         Tone::Success => theme.success,
                         Tone::Warning => theme.warning,
                         Tone::Error => theme.error,
                     };
-                    Paragraph::new(safe(
-                        &session.text(text).unwrap_or_else(|error| error.to_string()),
-                    ))
-                    .wrap(Wrap { trim: false })
-                    .style(Style::default().fg(color))
-                    .render(region, buffer);
+                    Paragraph::new(text_lines(session, text, region.width))
+                        .style(Style::default().fg(color))
+                        .render(region, buffer);
                 }
                 Node::Buttons { items, .. } => {
-                    let labels: Vec<_> = items
-                        .iter()
-                        .map(|button| {
-                            let mut label = safe(&session.text(&button.label).unwrap_or_default())
-                                .replace('\n', " ");
-                            if session.document().sends(&button.action) {
-                                label.push_str(" [review]");
-                            }
-                            label
-                        })
-                        .collect();
-                    let bodies: Vec<Vec<_>> = items
-                        .iter()
-                        .map(|button| button.body.iter().map(String::as_str).collect())
-                        .collect();
-                    let buttons: Vec<_> = items
-                        .iter()
-                        .enumerate()
-                        .map(|(index, button)| chrome::Button {
-                            action: control + index,
-                            label: &labels[index],
-                            body: &bodies[index],
-                            selected: focus == Some(control + index),
-                            enabled: can_send || !session.document().sends(&button.action),
-                        })
-                        .collect();
-                    hits.extend(chrome::render_buttons(buffer, region, &buttons, theme));
+                    for (item, rect) in button_regions(session, items, region) {
+                        let button = &items[item];
+                        let selected = focus == Some(control + item);
+                        let enabled = can_send || !session.document().sends(&button.action);
+                        let label = button_label(session, button);
+                        let body: Vec<_> = button.body.iter().map(String::as_str).collect();
+                        hits.extend(chrome::render_buttons(
+                            buffer,
+                            rect,
+                            &[chrome::Button {
+                                action: control + item,
+                                label: &label,
+                                body: &body,
+                                selected,
+                                primary: primary == Some((index, item)),
+                                enabled,
+                            }],
+                            theme,
+                        ));
+                    }
                     control += items.len();
                 }
                 Node::Input { key, label } => {
                     let selected = focus == Some(control);
-                    let block = chrome::popup_block_focused(
-                        label.as_str(),
-                        theme,
-                        selected,
-                        chrome::Tone::Normal,
+                    let label = clipped(
+                        &safe(label),
+                        (region.width / 2).min(region.width.saturating_sub(18)),
                     );
-                    let inner = block.inner(region);
-                    block.render(region, buffer);
-                    Paragraph::new(format!(
+                    let offset = u16::try_from(label.width())
+                        .unwrap_or(0)
+                        .saturating_add(2)
+                        .min(region.width.saturating_sub(16));
+                    Paragraph::new(label)
+                        .style(Style::default().fg(theme.fg_dim))
+                        .render(region, buffer);
+                    let value = format!(
                         "{}{}",
                         safe(&session.value(key)),
-                        if selected { "▏" } else { "" }
-                    ))
-                    .style(Style::default().fg(theme.fg))
-                    .render(inner, buffer);
+                        if selected { "▁" } else { "" }
+                    );
+                    let scroll = if selected {
+                        u16::try_from(value.width())
+                            .unwrap_or(u16::MAX)
+                            .saturating_sub(region.width - offset)
+                    } else {
+                        0
+                    };
+                    Paragraph::new(value)
+                        .scroll((0, scroll))
+                        .style(
+                            control_style(theme, selected)
+                                .bg(theme.raised)
+                                .add_modifier(Modifier::UNDERLINED)
+                                .underline_color(if selected {
+                                    theme.accent
+                                } else {
+                                    theme.border_dim
+                                }),
+                        )
+                        .render(
+                            Rect::new(region.x + offset, region.y, region.width - offset, 1),
+                            buffer,
+                        );
                     hits.push((region, control));
                     control += 1;
                 }
@@ -305,26 +335,239 @@ impl Entry {
                     hits.extend(new_hits);
                 }
             }
-            y += node.rows();
         }
         hits
     }
 }
-/// Render validated nexus-ui nodes into a document buffer (nodes start at row 2).
+/// Render validated nodes into their measured, padded regions.
 pub(crate) fn render_nodes(
     session: &Session,
+    regions: &[Rect],
     theme: &Theme,
     focus: Option<usize>,
     can_send: bool,
     buffer: &mut Buffer,
 ) -> Vec<(Rect, usize)> {
-    Entry::nodes(session, theme, focus, can_send, buffer)
+    Entry::nodes(session, regions, theme, focus, can_send, buffer)
+}
+fn text_lines(session: &Session, text: &str, width: u16) -> Vec<Line<'static>> {
+    safe(&session.text(text).unwrap_or_else(|error| error.to_string()))
+        .split('\n')
+        .flat_map(|line| {
+            crate::ui::markdown::wrap_styled_line(&Line::from(line), usize::from(width))
+        })
+        .collect()
+}
+fn primary_button(document: &Document) -> Option<(usize, usize)> {
+    let buttons = || {
+        document
+            .nodes()
+            .iter()
+            .enumerate()
+            .flat_map(|(node, value)| {
+                let items = match value {
+                    Node::Buttons { items, .. } => items.as_slice(),
+                    _ => &[],
+                };
+                items
+                    .iter()
+                    .enumerate()
+                    .map(move |(item, button)| ((node, item), button))
+            })
+    };
+    buttons()
+        .find(|(_, button)| button.primary)
+        .or_else(|| buttons().find(|(_, button)| document.sends(&button.action)))
+        .map(|(index, _)| index)
+}
+fn session_controls(session: &Session) -> usize {
+    session
+        .document()
+        .nodes()
+        .iter()
+        .map(|node| match node {
+            Node::Buttons { items, .. } => items.len(),
+            Node::Checklist { items } => items.len(),
+            Node::Input { .. }
+            | Node::Toggle { .. }
+            | Node::Select { .. }
+            | Node::Table {
+                select: Some(_), ..
+            } => 1,
+            _ => 0,
+        })
+        .sum()
+}
+fn button_label(session: &Session, button: &Button) -> String {
+    format!(
+        "{}{}",
+        display(session, &button.label),
+        if session.document().sends(&button.action) {
+            " ↵"
+        } else {
+            ""
+        }
+    )
+}
+fn button_regions(session: &Session, items: &[Button], area: Rect) -> Vec<(usize, Rect)> {
+    let mut regions = Vec::new();
+    if items.iter().any(|button| !button.body.is_empty()) {
+        let content_width = items
+            .iter()
+            .flat_map(|button| {
+                std::iter::once(button_label(session, button).width())
+                    .chain(button.body.iter().map(|line| safe(line).width()))
+            })
+            .max()
+            .unwrap_or(0);
+        let minimum_width = u16::try_from(content_width)
+            .unwrap_or(u16::MAX)
+            .saturating_add(4);
+        let columns =
+            usize::from((area.width.saturating_add(2) / minimum_width.saturating_add(2)).max(1))
+                .min(items.len());
+        let count = u16::try_from(columns).unwrap_or(1);
+        let width = area.width.saturating_sub((count - 1) * 2) / count;
+        let mut y = area.y;
+        for (row, chunk) in items.chunks(columns).enumerate() {
+            let height = chunk
+                .iter()
+                .map(|button| u16::try_from(button.body.len()).unwrap_or(0) + 3)
+                .max()
+                .unwrap_or(3);
+            for item in 0..chunk.len() {
+                let x = area.x + u16::try_from(item).unwrap_or(0) * (width + 2);
+                regions.push((row * columns + item, Rect::new(x, y, width, height)));
+            }
+            y = y.saturating_add(height).saturating_add(1);
+        }
+    } else {
+        let mut x = area.x;
+        let mut y = area.y;
+        let order = (0..items.len())
+            .filter(|i| !session.document().sends(&items[*i].action))
+            .chain((0..items.len()).filter(|i| session.document().sends(&items[*i].action)));
+        for item in order {
+            let width = u16::try_from(
+                button_label(session, &items[item])
+                    .width()
+                    .saturating_add(2),
+            )
+            .unwrap_or(u16::MAX)
+            .min(area.width);
+            if x > area.x && x.saturating_add(width) > area.right() {
+                x = area.x;
+                y = y.saturating_add(1);
+            }
+            if session.document().sends(&items[item].action) {
+                let remaining: u16 = items[item..]
+                    .iter()
+                    .filter(|b| session.document().sends(&b.action))
+                    .map(|b| {
+                        u16::try_from(button_label(session, b).width() + 3)
+                            .unwrap_or(u16::MAX)
+                            .min(area.width)
+                    })
+                    .fold(0, u16::saturating_add);
+                x = x.max(area.right().saturating_sub(remaining.saturating_sub(1)));
+            }
+            regions.push((item, Rect::new(x, y, width, 1)));
+            x = x.saturating_add(width).saturating_add(1);
+        }
+    }
+    regions
+}
+/// Measure actual content at the available width; declared rows remain core caps.
+pub(crate) fn node_regions(session: &Session, width: u16) -> Vec<Rect> {
+    let width = width.saturating_sub(4);
+    let mut y: u16 = 2;
+    let mut previous_text = false;
+    session
+        .document()
+        .nodes()
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            let text = matches!(node, Node::Text { .. });
+            if index > 0 && !(text && previous_text) {
+                y = y.saturating_add(1);
+            }
+            previous_text = text;
+            let height = match node {
+                Node::Text { text, .. } => u16::try_from(text_lines(session, text, width).len())
+                    .unwrap_or(u16::MAX)
+                    .max(1),
+                Node::Buttons { items, .. } => {
+                    button_regions(session, items, Rect::new(2, 0, width, 0))
+                        .iter()
+                        .map(|(_, rect)| rect.bottom())
+                        .max()
+                        .unwrap_or(1)
+                }
+                Node::Input { .. } => 1,
+                _ => node.rows(),
+            };
+            let region = Rect::new(
+                2,
+                y,
+                width,
+                height.min(u16::MAX.saturating_sub(y.saturating_add(2))),
+            );
+            y = region.bottom();
+            region
+        })
+        .collect()
+}
+pub(crate) fn card_height(regions: &[Rect]) -> u16 {
+    regions
+        .last()
+        .map_or(4, |rect| rect.bottom().saturating_add(2))
+}
+pub(crate) fn source_height(source: &str, width: u16) -> u16 {
+    Document::parse(source)
+        .and_then(Session::new)
+        .map_or(6, |session| card_height(&node_regions(&session, width)))
+}
+pub(crate) fn card_buffer(
+    width: u16,
+    height: u16,
+    title: &str,
+    theme: &Theme,
+    hint: &str,
+) -> Buffer {
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    buffer.set_style(area, theme.background_style());
+    chrome::popup_block_focused(
+        Line::from(Span::styled(
+            format!("─ {} ", clipped(&safe(title), width.saturating_sub(12))),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        )),
+        theme,
+        false,
+        chrome::Tone::Normal,
+    )
+    .title_top(Line::from(Span::styled(" ⤢ ", Style::default().fg(theme.fg_dim))).right_aligned())
+    .title_bottom(
+        Line::from(Span::styled(
+            format!(" {} ", clipped(hint, width.saturating_sub(6))),
+            Style::default().fg(theme.fg_dim),
+        ))
+        .right_aligned(),
+    )
+    .render(area, &mut buffer);
+    buffer
 }
 fn display(session: &Session, template: &str) -> String {
     safe(&session.text(template).unwrap_or_default()).replace('\n', " ")
 }
 fn control_style(theme: &Theme, selected: bool) -> Style {
-    Style::default().fg(if selected { theme.accent } else { theme.fg })
+    let style = Style::default().fg(if selected { theme.accent } else { theme.fg });
+    if selected {
+        style.add_modifier(Modifier::UNDERLINED)
+    } else {
+        style
+    }
 }
 fn render_toggle(
     session: &Session,
@@ -639,6 +882,9 @@ pub struct Widgets {
     focused: Option<Key>,
     screen: Option<Rect>,
     send_ready: bool,
+    expanded: bool,
+    pinned: bool,
+    layout: Option<(Rect, usize, Vec<Placement>)>,
 }
 impl Widgets {
     /// Discard all local state and stale hit areas on a viewport/session reset.
@@ -654,10 +900,14 @@ impl Widgets {
     /// Return keyboard ownership without resetting document state.
     pub fn unfocus(&mut self) {
         self.focused = None;
+        self.expanded = false;
+        self.pinned = false;
     }
     /// Focus the last visible document, if any.
     pub fn focus_latest(&mut self) -> bool {
         self.focused = self.visible.last().cloned();
+        self.expanded = false;
+        self.pinned = false;
         self.focused.is_some()
     }
     fn register(&mut self, key: &Key) {
@@ -677,6 +927,60 @@ impl Widgets {
             },
         );
     }
+    /// Keep transcript reservations in sync with locally edited, wrapping content.
+    pub(crate) fn reflow(
+        &mut self,
+        cache: &mut crate::history_cache::HistoryCache,
+        top: usize,
+        height: u16,
+    ) {
+        for index in 0..cache.widgets.len() {
+            let placement = &cache.widgets[index];
+            if placement.complete
+                && placement.row < top + usize::from(height)
+                && placement.row + usize::from(placement.height) > top
+            {
+                self.register(&placement.key());
+            }
+            let Some(Ok(session)) = self
+                .entries
+                .get(&placement.key())
+                .map(|entry| &entry.session)
+            else {
+                continue;
+            };
+            let height = card_height(&node_regions(session, placement.width));
+            if height == placement.height {
+                continue;
+            }
+            let start = placement.row;
+            let old_height = placement.height;
+            let old_end = start + usize::from(old_height);
+            let count = usize::from(height);
+            let owner = cache.owner[start];
+            let code = cache.code[start];
+            cache
+                .lines
+                .splice(start..old_end, vec![Line::default(); count]);
+            cache
+                .plain
+                .splice(start..old_end, vec![String::new(); count]);
+            cache.owner.splice(start..old_end, vec![owner; count]);
+            cache.code.splice(start..old_end, vec![code; count]);
+            cache
+                .image_at_line
+                .splice(start..old_end, vec![None; count]);
+            for diagram in &mut cache.diagrams {
+                if diagram.row >= old_end {
+                    diagram.row = diagram.row - usize::from(old_height) + count;
+                }
+            }
+            for widget in &mut cache.widgets[index + 1..] {
+                widget.row = widget.row - usize::from(old_height) + count;
+            }
+            cache.widgets[index].height = height;
+        }
+    }
     /// Overlay visible regions and capture exact-frame, clipped control hits.
     pub fn paint(
         &mut self,
@@ -688,59 +992,94 @@ impl Widgets {
         active: bool,
     ) {
         self.screen = Some(f.area());
-        for placement in placements {
+        self.layout = Some((viewport, top, placements.to_vec()));
+        if self
+            .focused
+            .as_ref()
+            .is_some_and(|key| !placements.iter().any(|p| p.complete && p.key() == *key))
+        {
+            self.unfocus();
+        }
+        if self.focused.as_ref().is_some_and(|key| {
+            placements.iter().any(|p| {
+                p.key() == *key
+                    && (p.row + usize::from(p.height) <= top
+                        || p.row >= top + usize::from(viewport.height))
+            })
+        }) {
+            self.pinned = true;
+        }
+        let mut ordered: Vec<_> = placements.iter().collect();
+        ordered.sort_by_key(|p| self.pinned && self.focused.as_ref() == Some(&p.key()));
+        for placement in ordered {
             if !placement.complete {
                 continue;
             }
-            let first = top
-                .saturating_sub(placement.row)
-                .min(usize::from(placement.height));
+            let key = placement.key();
+            let pinned = self.pinned && self.focused.as_ref() == Some(&key);
+            let row = if pinned { top } else { placement.row };
+            let first = top.saturating_sub(row).min(usize::from(placement.height));
             let end = (top + usize::from(viewport.height))
-                .saturating_sub(placement.row)
+                .saturating_sub(row)
                 .min(usize::from(placement.height));
-            let width = placement.width.min(viewport.width.saturating_sub(4));
+            let width = placement.width.min(viewport.width.saturating_sub(2));
             if first >= end || width == 0 {
                 continue;
             }
-            let key = placement.key();
             self.register(&key);
             let Some(entry) = self.entries.get(&key) else {
-                let y = viewport.y + u16::try_from(placement.row.saturating_sub(top)).unwrap_or(0);
+                let y = viewport.y + u16::try_from(row.saturating_sub(top)).unwrap_or(0);
                 f.render_widget(
                     Paragraph::new("UI instance limit reached; start a new session.")
                         .style(Style::default().fg(theme.error)),
-                    Rect::new(viewport.x + 4, y, width, 1),
+                    Rect::new(viewport.x + 2, y, width, 1),
                 );
                 continue;
             };
             self.visible.push(key.clone());
-            let (canvas, mut hits) = entry.canvas(width, theme, false, self.send_ready);
+            let focused = self.focused.as_ref() == Some(&key);
+            let (mut canvas, hits) = entry.canvas(width, theme, focused, self.send_ready);
             let end = end.min(usize::from(canvas.area.height));
+            if pinned {
+                let overlay = Rect::new(
+                    viewport.x + 2,
+                    viewport.y,
+                    width,
+                    u16::try_from(end).unwrap_or(0),
+                );
+                self.hits
+                    .retain(|hit| hit.rect.intersection(overlay).is_empty());
+                let bottom = u16::try_from(end).unwrap_or(0).saturating_sub(1);
+                let border = card_buffer(width, bottom + 1, "", theme, "▴ pinned · Esc to unpin");
+                for x in 0..width {
+                    canvas[(x, bottom)] = border[(x, bottom)].clone();
+                }
+            }
             if first >= end {
                 continue;
             }
-            hits.push((Rect::new(0, placement.height - 1, width, 1), usize::MAX));
-            for row in first..end {
-                let y = viewport.y + u16::try_from(placement.row + row - top).unwrap_or(0);
+            for offset in first..end {
+                let y = viewport.y + u16::try_from(row + offset - top).unwrap_or(0);
                 for x in 0..width {
-                    f.buffer_mut()[(viewport.x + 4 + x, y)] =
-                        canvas[(x, u16::try_from(row).unwrap_or(0))].clone();
+                    f.buffer_mut()[(viewport.x + 2 + x, y)] =
+                        canvas[(x, u16::try_from(offset).unwrap_or(0))].clone();
                 }
             }
             if active {
                 for (rect, control) in hits {
                     let low = usize::from(rect.y).max(first);
-                    let high = usize::from(rect.bottom()).min(end);
+                    let high =
+                        usize::from(rect.bottom()).min(end.saturating_sub(usize::from(pinned)));
                     if low < high {
                         self.hits.push(Hit {
                             rect: Rect::new(
-                                viewport.x + 4 + rect.x,
-                                viewport.y + u16::try_from(placement.row + low - top).unwrap_or(0),
+                                viewport.x + 2 + rect.x,
+                                viewport.y + u16::try_from(row + low - top).unwrap_or(0),
                                 rect.width,
                                 u16::try_from(high - low).unwrap_or(0),
                             ),
                             key: key.clone(),
-                            control: (control != usize::MAX).then_some(control),
+                            control: Some(control),
                             row_offset: u16::try_from(low).unwrap_or(0).saturating_sub(rect.y),
                         });
                     }
@@ -765,6 +1104,10 @@ impl Widgets {
         let Some(entry) = self.entries.get_mut(&hit.key) else {
             return (false, None);
         };
+        if self.focused.as_ref() != Some(&hit.key) {
+            self.pinned = false;
+        }
+        self.focused = Some(hit.key.clone());
         match hit.control.and_then(|index| {
             entry
                 .controls()
@@ -797,6 +1140,8 @@ impl Widgets {
                 (true, entry.activate(index, can_send))
             }
             None => {
+                entry.focus = entry.controls().len();
+                self.expanded = true;
                 self.focused = Some(hit.key);
                 (true, None)
             }
@@ -830,29 +1175,32 @@ impl Widgets {
             return (true, None);
         };
         let controls = entry.controls();
-        if controls.is_empty() {
+        let count = controls.len() + 1;
+        entry.focus %= count;
+        if entry.focus == controls.len() && matches!(key.code, KeyCode::Enter | KeyCode::Char(' '))
+        {
+            self.expanded = true;
             return (false, None);
         }
-        entry.focus %= controls.len();
         if entry.navigate(key.code) {
             return (false, None);
         }
         match key.code {
             KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                entry.focus = (entry.focus + 1) % controls.len();
+                entry.focus = (entry.focus + 1) % count;
             }
             KeyCode::BackTab | KeyCode::Tab | KeyCode::Up | KeyCode::Left => {
-                entry.focus = (entry.focus + controls.len() - 1) % controls.len();
+                entry.focus = (entry.focus + count - 1) % count;
             }
-            KeyCode::Down | KeyCode::Right => entry.focus = (entry.focus + 1) % controls.len(),
+            KeyCode::Down | KeyCode::Right => entry.focus = (entry.focus + 1) % count,
             KeyCode::Enter => {
-                if matches!(controls[entry.focus], Control::Input(_)) {
-                    entry.focus = (entry.focus + 1) % controls.len();
+                if matches!(controls.get(entry.focus), Some(Control::Input(_))) {
+                    entry.focus = (entry.focus + 1) % count;
                 } else {
                     return (false, entry.activate(entry.focus, can_send));
                 }
             }
-            KeyCode::Char(ch) if matches!(controls[entry.focus], Control::Input(_)) => {
+            KeyCode::Char(ch) if matches!(controls.get(entry.focus), Some(Control::Input(_))) => {
                 entry.edit(&ch.to_string(), false);
             }
             KeyCode::Backspace => entry.edit("", true),
@@ -881,6 +1229,8 @@ impl Widgets {
         }
         let height = canvas.area.height;
         entry.scroll = entry.scroll.min(height.saturating_sub(area.height));
+        f.render_widget(Clear, area);
+        f.buffer_mut().set_style(area, app_theme.background_style());
         for y in 0..area.height.min(height) {
             for x in 0..area.width {
                 f.buffer_mut()[(area.x + x, area.y + y)] = canvas[(x, y + entry.scroll)].clone();
@@ -907,7 +1257,14 @@ impl Widgets {
 }
 pub(crate) fn safe(text: &str) -> String {
     text.chars()
-        .filter(|ch| *ch != '\u{FE0F}' && (!ch.is_control() || *ch == '\n'))
+        .filter(|ch| *ch != '\u{FE0F}')
+        .map(|ch| {
+            if ch.is_control() && ch != '\n' {
+                ch.escape_default().to_string()
+            } else {
+                ch.to_string()
+            }
+        })
         .collect()
 }
 /// A proposed response must not race a reply or overwrite the user's draft.
@@ -925,7 +1282,9 @@ fn review(app: &mut AppView, message: Option<String>) {
         app.set_input(&text);
         app.popup = Popup::None;
         app.interactive.unfocus();
-        app.push_status("review the UI response — press Enter to send, or edit/discard it");
+        app.push_status(
+            "UI response in the composer for review — edit/discard it, or press Enter to send",
+        );
     }
 }
 /// Focus the newest visible model-authored output, without a slash command.
@@ -933,14 +1292,40 @@ pub fn focus(app: &mut AppView) {
     if app.interactive.focus_latest() {
         app.popup = Popup::InteractiveUi;
         app.sel.clear();
+        app.push_status("UI send actions prepare a message in the composer for review");
     } else {
         app.push_status("no interactive output in view");
     }
 }
 /// Route inline/popup controls before transcript selection or composer input.
 pub fn mouse(app: &mut AppView, event: MouseEvent, screen: Rect) -> bool {
+    if app.popup == Popup::InteractiveUi {
+        match event.kind {
+            MouseEventKind::ScrollUp => {
+                app.scroll = app.scroll.saturating_add(3).min(app.max_scroll);
+                return true;
+            }
+            MouseEventKind::ScrollDown => {
+                app.scroll = app.scroll.saturating_sub(3);
+                return true;
+            }
+            MouseEventKind::Down(MouseButton::Left)
+                if app
+                    .input_inner
+                    .contains(Position::new(event.column, event.row)) =>
+            {
+                app.interactive.unfocus();
+                app.popup = Popup::None;
+                return true;
+            }
+            _ => {}
+        }
+    }
     let (handled, message) = app.interactive.click(event, screen, can_send(app));
     if app.interactive.focused.is_some() {
+        if handled && app.popup != Popup::InteractiveUi {
+            app.push_status("UI send actions prepare a message in the composer for review");
+        }
         app.popup = Popup::InteractiveUi;
     }
     if handled {
@@ -951,6 +1336,25 @@ pub fn mouse(app: &mut AppView, event: MouseEvent, screen: Rect) -> bool {
 }
 /// Focused keyboard events stay inside the selected document.
 pub fn key(app: &mut AppView, event: KeyEvent) {
+    if event.kind != KeyEventKind::Press
+        || !event.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+    {
+        return;
+    }
+    match event.code {
+        KeyCode::PageUp => {
+            app.scroll = app
+                .scroll
+                .saturating_add(app.history_page())
+                .min(app.max_scroll);
+            return;
+        }
+        KeyCode::PageDown => {
+            app.scroll = app.scroll.saturating_sub(app.history_page());
+            return;
+        }
+        _ => {}
+    }
     let (closed, message) = app.interactive.key(event, can_send(app));
     if closed {
         app.popup = Popup::None;
@@ -959,18 +1363,19 @@ pub fn key(app: &mut AppView, event: KeyEvent) {
 }
 /// Render a keyboard-accessible enlarged view of the same inline state.
 pub fn render_popup(f: &mut Frame, app: &mut AppView) {
-    let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::TALL.1);
-    let inner = chrome::render_hinted(
-        f,
-        area,
-        chrome::popup_title(app, "interactive output"),
-        "Tab/arrows focus · Enter activate · type to edit · Esc back",
-        app,
-        true,
-        chrome::Tone::Normal,
-    );
-    let enabled = can_send(app);
-    app.interactive.popup(f, &app.theme, inner, enabled);
+    let Some((viewport, top, placements)) = app.interactive.layout.clone() else {
+        return;
+    };
+    if app.interactive.expanded {
+        let enabled = can_send(app);
+        app.interactive.popup(f, &app.theme, viewport, enabled);
+    } else {
+        // The popup dispatcher dims the base view. Repaint just this card at
+        // full strength while retaining inline keyboard ownership.
+        app.interactive.hits.clear();
+        app.interactive
+            .paint(f, viewport, top, &placements, &app.theme, true);
+    }
 }
 
 #[cfg(test)]

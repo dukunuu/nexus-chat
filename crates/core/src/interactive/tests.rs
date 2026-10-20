@@ -176,6 +176,27 @@ fn inputs_and_submission_badges_remain_valid_through_called_actions() {
 }
 
 #[test]
+fn optional_primary_and_eight_choice_tiles_preserve_legacy_documents() {
+    let legacy = Document::parse(COUNTER).unwrap();
+    let Node::Buttons { items, .. } = &legacy.nodes()[1] else {
+        panic!("buttons");
+    };
+    assert!(!items[0].primary);
+    let mut data: Value = serde_json::from_str(COUNTER).unwrap();
+    data["view"] = json!([{"type":"buttons","items":(0..8).map(|index| json!({"label":format!("Choice {index}"),"action":"add","body":["art","metadata"],"primary":index == 0})).collect::<Vec<_>>()}]);
+    let mut ui = session(&data.to_string());
+    let Node::Buttons { items, .. } = &ui.document().nodes()[0] else {
+        panic!("buttons");
+    };
+    assert_eq!(items.len(), 8);
+    assert!(items[0].primary);
+    ui.activate("add").unwrap();
+    assert_eq!(ui.value("count"), "1");
+    data["view"][0]["items"][0]["primary"] = json!("yes");
+    assert!(Document::parse(&data.to_string()).is_err());
+}
+
+#[test]
 fn authored_calculators_can_parse_inputs_but_not_code_or_nonfinite_numbers() {
     let mut data: Value = serde_json::from_str(COUNTER).unwrap();
     data["actions"]["add"][0]["value"] = json!({"mul":[{"number":{"get":"name"}},2]});

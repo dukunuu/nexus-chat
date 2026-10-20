@@ -29,7 +29,7 @@ fn ui_fences_keep_order_source_and_copy_metadata_without_a_json_dump() {
         assert_eq!(r.widgets.len(), 1);
         let p = &r.widgets[0];
         assert!(p.complete);
-        assert_eq!(p.height, 13);
+        assert_eq!(p.height, 11);
         assert_eq!(p.source, SOURCE.trim());
         assert_eq!(r.lines.len(), r.code.len());
         let block = r.code[p.row].unwrap();

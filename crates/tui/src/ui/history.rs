@@ -80,6 +80,12 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
     }
     tail_code.resize(tail.len(), None);
 
+    let estimated_top = (app.history_cache.lines.len() + tail.len())
+        .saturating_sub(usize::from(inner.height))
+        .saturating_sub(app.scroll);
+    app.interactive
+        .reflow(&mut app.history_cache, estimated_top, inner.height);
+
     let cache = &app.history_cache;
     let cached_lines = cache.lines.len();
     let total = cached_lines + tail.len();
@@ -325,7 +331,10 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
         top,
         &widgets,
         &app.theme,
-        app.popup == nexus_core::app::Popup::None,
+        matches!(
+            app.popup,
+            nexus_core::app::Popup::None | nexus_core::app::Popup::InteractiveUi
+        ),
     );
 
     // Scrollbar in the gutter, only when the conversation overflows. Hand-
