@@ -120,6 +120,7 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
     };
 
     let explicit_toggle = app.pin_viewport_top;
+    let clicked = app.tool_click_anchor.take();
     app.pin_viewport_top = false;
     // Pin only when the user has actually scrolled up, or just toggled a
     // display flag. While following the bottom (scroll == 0) the viewport
@@ -179,8 +180,16 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
         // absolute line index would instead land on content shifted by all
         // the growth above the viewport ("the view jumps way past the
         // messages").
-        let mut pinned: Option<usize> = None;
-        if let Some(owner) = app.sel.owner_at(prev_top) {
+        let mut pinned = clicked.and_then(|(owner, old_start)| {
+            cache
+                .owner
+                .iter()
+                .position(|o| *o == Some(owner))
+                .map(|new_start| (prev_top + new_start).saturating_sub(old_start))
+        });
+        if pinned.is_none()
+            && let Some(owner) = app.sel.owner_at(prev_top)
+        {
             // The top line's offset within its message block in the
             // previous render (walk up to the block start).
             let mut old_start = prev_top;
@@ -402,14 +411,24 @@ fn find_line(
 /// change, then wrap only messages not yet cached. Stored messages are
 /// append-only, so this is O(new messages) per frame instead of O(all).
 fn sync_cache(app: &mut AppView, width: usize) {
+    let session = app.session.as_ref().map(|s| s.id.clone());
+    if app.tool_session != session {
+        app.tool_session.clone_from(&session);
+        if !app.tool_open.is_empty() {
+            app.tool_open.clear();
+            app.tool_open_gen = app.tool_open_gen.wrapping_add(1);
+        }
+        app.tool_click_anchor = None;
+    }
     let key = (
-        app.session.as_ref().map(|s| s.id.clone()),
+        session,
         width,
         app.show_tool_detail,
         app.settings.show_reasoning,
         app.settings.hide_hints,
         app.settings.show_stats,
-        app.theme_gen,
+        // Both generations only advance; either change invalidates the key.
+        app.theme_gen.wrapping_add(app.tool_open_gen),
     );
     // Work on a detached cache: the wrap pass reads the domain half
     // (messages, settings, space) through the `AppView` deref, which borrows
@@ -497,7 +516,10 @@ fn sync_cache(app: &mut AppView, width: usize) {
             push_tool_call(
                 &mut c.lines,
                 &m.content,
-                app.show_tool_detail,
+                app.tool_open
+                    .get(&i)
+                    .copied()
+                    .unwrap_or(app.show_tool_detail),
                 &app.settings,
                 width,
                 &theme,
@@ -532,6 +554,37 @@ fn sync_cache(app: &mut AppView, width: usize) {
     }
     c.msg_count = app.messages.len();
     app.history_cache = cache;
+}
+
+/// Toggle only the tool card owning a rendered line, including its preamble.
+/// Keep its header in place on the next re-wrap when scrolled up.
+pub(crate) fn toggle_tool_at_line(app: &mut AppView, line: usize) {
+    let Some(owner) = app.sel.owner_at(line) else {
+        return;
+    };
+    if app
+        .messages
+        .get(owner)
+        .is_none_or(|m| m.role != "tool_call")
+    {
+        return;
+    }
+    let open = app
+        .tool_open
+        .get(&owner)
+        .copied()
+        .unwrap_or(app.show_tool_detail);
+    app.tool_open.insert(owner, !open);
+    app.tool_open_gen = app.tool_open_gen.wrapping_add(1);
+    app.tool_click_anchor = app
+        .history_cache
+        .owner
+        .iter()
+        .position(|o| *o == Some(owner))
+        .map(|start| (owner, start));
+    app.pin_viewport_top = true;
+    // A consumed card click must not turn its next click into word selection.
+    app.sel.clear();
 }
 
 /// A centered `── label ──` rule, used for day dividers and the welcome
@@ -1137,6 +1190,89 @@ mod tests {
             after.starts_with(&before[..before.len().min(24)]),
             "tool call landing above the viewport jumped: before={before:?} after={after:?}"
         );
+    }
+
+    #[test]
+    fn clicked_card_header_stays_on_its_screen_row_when_scrolled_up() {
+        let mut app = tall_tool_call_app();
+        for n in 0..40 {
+            app.messages.push(msg(
+                "assistant",
+                &format!("Later message {n} after the clicked card."),
+            ));
+        }
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_history(f, &mut app, f.area()))
+            .unwrap();
+        let header = app
+            .history_cache
+            .owner
+            .iter()
+            .position(|o| *o == Some(60))
+            .unwrap();
+        app.scroll = app.max_scroll - (header - 5);
+        terminal
+            .draw(|f| render_history(f, &mut app, f.area()))
+            .unwrap();
+        assert!(app.scroll > 0);
+        for open in [true, false] {
+            let line = app.sel.pos_at(3, 5).unwrap().0;
+            toggle_tool_at_line(&mut app, line);
+            terminal
+                .draw(|f| render_history(f, &mut app, f.area()))
+                .unwrap();
+            let row: String = (0..79)
+                .map(|x| terminal.backend().buffer()[(x, 5)].symbol())
+                .collect();
+            assert!(row.contains("search/web"), "{row}");
+            assert!(row.contains(if open { '▾' } else { '▸' }), "{row}");
+            assert!(app.scroll > 0);
+        }
+    }
+
+    #[test]
+    fn per_card_cache_generation_and_session_reset_do_not_leak_overrides() {
+        let mut app = tall_tool_call_app();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_history(f, &mut app, f.area()))
+            .unwrap();
+        let header = app
+            .history_cache
+            .owner
+            .iter()
+            .position(|o| *o == Some(60))
+            .unwrap();
+        let collapsed = app.history_cache.lines.len();
+        toggle_tool_at_line(&mut app, header);
+        terminal
+            .draw(|f| render_history(f, &mut app, f.area()))
+            .unwrap();
+        assert!(app.history_cache.lines.len() > collapsed);
+        assert_eq!(app.scroll, 0, "clicks at the bottom keep following it");
+        app.invalidate_history_cache();
+        terminal
+            .draw(|f| render_history(f, &mut app, f.area()))
+            .unwrap();
+        assert_eq!(app.tool_open.get(&60), Some(&true));
+        app.apply_event(&nexus_core::app::AppEvent::ViewportReset);
+        assert!(app.tool_open.is_empty());
+        terminal
+            .draw(|f| render_history(f, &mut app, f.area()))
+            .unwrap();
+        assert_eq!(app.history_cache.lines.len(), collapsed);
+        toggle_tool_at_line(&mut app, header);
+        let space = app.active_space.id.clone();
+        let session = app
+            .db
+            .create_session("other", "a/one", &space, "chat")
+            .unwrap();
+        app.session = Some(session);
+        sync_cache(&mut app, 79);
+        assert!(app.tool_open.is_empty());
     }
 
     #[test]

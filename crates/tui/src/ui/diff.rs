@@ -21,28 +21,36 @@ pub(super) fn escaped_rows(
     normal: Style,
     dim: Style,
 ) -> Vec<Line<'static>> {
-    let mut rows = vec![Line::default()];
+    styled_rows(&Line::from(Span::styled(text, normal)), width, dim)
+}
+
+/// Wrap styled text without losing styles, escaping controls in dim color.
+pub(super) fn styled_rows(line: &Line<'_>, width: usize, dim: Style) -> Vec<Line<'static>> {
+    let mut rows = vec![Line::default().style(line.style)];
     let mut used = 0;
-    for c in text.chars() {
-        let (text, style) = if c == '\t' {
-            ("    ".to_string(), normal)
-        } else if c.is_control() {
-            (c.escape_unicode().to_string(), dim)
-        } else {
-            (c.to_string(), normal)
-        };
-        for c in text.chars() {
-            let cells = c.width().unwrap_or(0);
-            if used + cells > width.max(1) && used > 0 {
-                rows.push(Line::default());
-                used = 0;
+    for span in &line.spans {
+        let normal = line.style.patch(span.style);
+        for c in span.content.chars() {
+            let (text, style) = if c == '\t' {
+                ("    ".to_string(), normal)
+            } else if c.is_control() {
+                (c.escape_unicode().to_string(), dim)
+            } else {
+                (c.to_string(), normal)
+            };
+            for c in text.chars() {
+                let cells = c.width().unwrap_or(0);
+                if used + cells > width.max(1) && used > 0 {
+                    rows.push(Line::default().style(line.style));
+                    used = 0;
+                }
+                let row = rows.last_mut().expect("escaped text has a row");
+                match row.spans.last_mut() {
+                    Some(span) if span.style == style => span.content.to_mut().push(c),
+                    _ => row.spans.push(Span::styled(c.to_string(), style)),
+                }
+                used += cells;
             }
-            let row = rows.last_mut().expect("escaped text has a row");
-            match row.spans.last_mut() {
-                Some(span) if span.style == style => span.content.to_mut().push(c),
-                _ => row.spans.push(Span::styled(c.to_string(), style)),
-            }
-            used += cells;
         }
     }
     rows
@@ -107,6 +115,31 @@ pub(super) fn render(
     theme: &Theme,
     options: Options<'_>,
 ) -> Vec<Line<'static>> {
+    render_rows(diff, width, theme, options, false)
+}
+
+/// Full, tinted detail; compact previews deliberately keep no backgrounds.
+pub(super) fn expanded(diff: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    render_rows(
+        diff,
+        width,
+        theme,
+        Options {
+            max_rows: None,
+            context: 3,
+            hint: "",
+        },
+        true,
+    )
+}
+
+fn render_rows(
+    diff: &str,
+    width: usize,
+    theme: &Theme,
+    options: Options<'_>,
+    tint: bool,
+) -> Vec<Line<'static>> {
     let rows = rows(diff);
     let digits = rows
         .iter()
@@ -162,7 +195,21 @@ pub(super) fn render(
                 vec![Span::styled(" ".repeat(prefix_width), dim)]
             };
             spans.append(&mut line.spans);
-            lines.push(Line::from(spans));
+            let mut line = Line::from(spans);
+            if tint && matches!(row.kind, '+' | '−') {
+                let bg = if row.kind == '+' {
+                    theme.diff_add_bg
+                } else {
+                    theme.diff_del_bg
+                };
+                line.spans
+                    .push(Span::raw(" ".repeat(width.saturating_sub(line.width()))));
+                line.style = Style::default().bg(bg);
+                for span in &mut line.spans {
+                    span.style = span.style.bg(bg);
+                }
+            }
+            lines.push(line);
         }
     }
     if let Some(max) = options.max_rows {

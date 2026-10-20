@@ -155,8 +155,7 @@ pub(super) fn push_user_card(
     image_at_line.push(None);
 }
 
-/// A tool call block: a dim `⚒ name summary` one-liner; when tool detail is
-/// on (Ctrl+T), the full arguments and result follow, reasoning-style.
+/// A foldable tool summary with type-specific detail behind a colored rail.
 pub(super) fn push_tool_call(
     out: &mut Vec<Line<'static>>,
     content: &str,
@@ -182,33 +181,31 @@ pub(super) fn push_tool_call(
         theme,
     );
     let view = nexus_core::app::tool_call_view(&name, &args, &result);
-    if !view.verb.is_empty() {
-        push_workspace_call(out, &view, &result, expanded, settings, width, theme);
-        return;
-    }
-    let summary = nexus_core::app::tool_call_summary(&name, &args, &result);
-    let hint = if expanded || settings.hide_hints {
-        ""
-    } else {
-        " — Ctrl+T for detail"
-    };
-    out.push(Line::from(vec![
-        Span::styled(
-            format!("{} ", glyph::TOOL),
-            Style::default().fg(theme.accent2),
-        ),
-        dim(format!("{summary}{hint}"), theme),
-    ]));
+    push_workspace_call(out, &view, expanded, settings, width, theme);
     if expanded {
-        for line in wrap_plain(&args, width.saturating_sub(2)) {
-            out.push(Line::from(dim(format!("┆ {line}"), theme)));
+        let args = serde_json::from_str(&args).unwrap_or_default();
+        let body_width = width.saturating_sub(2).max(1);
+        let body = expanded_tool_body(&name, &args, &view, &result, body_width, theme);
+        let mut body = body
+            .into_iter()
+            .flat_map(|row| {
+                super::diff::styled_rows(&row, body_width, Style::default().fg(theme.fg_dim))
+            })
+            .collect();
+        cap_tool_body(&mut body, body_width, theme);
+        let rail = Span::styled(
+            format!("{} ", glyph::RAIL),
+            Style::default().fg(if view.outcome == nexus_core::app::ToolOutcome::Ok {
+                theme.accent2
+            } else {
+                theme.error
+            }),
+        );
+        for mut row in body {
+            row.spans.insert(0, rail.clone());
+            out.push(row);
         }
-        for line in wrap_plain(&result, width.saturating_sub(2)) {
-            out.push(Line::from(dim(format!("│ {line}"), theme)));
-        }
-        // Expanded detail gets breathing room; collapsed calls stack into
-        // one compact block above the reply they fed.
-        out.push(Line::from(""));
+        out.push(Line::default());
     }
 }
 
@@ -275,7 +272,6 @@ fn push_round_preamble(
 fn push_workspace_call(
     out: &mut Vec<Line<'static>>,
     view: &nexus_core::app::ToolView,
-    result: &str,
     expanded: bool,
     settings: &nexus_core::app::Settings,
     width: usize,
@@ -294,9 +290,18 @@ fn push_workspace_call(
         }
     };
     append(
-        format!("{} {}", view.verb, view.target),
-        Style::default().fg(theme.fg),
+        format!("{} {}", view.verb, view.target)
+            .trim_start()
+            .to_string(),
+        if view.verb.is_empty() {
+            dim
+        } else {
+            Style::default().fg(theme.fg)
+        },
     );
+    if view.verb.is_empty() && !expanded && !settings.hide_hints {
+        append(" — Ctrl+T for detail".to_string(), dim);
+    }
     if let Some(added) = view.added {
         append(format!("  +{added}"), Style::default().fg(theme.success));
     }
@@ -316,7 +321,24 @@ fn push_workspace_call(
             },
         );
     }
-    out.push(Line::from(head));
+    let mut header = Line::from(head);
+    if header.width() + 2 <= width {
+        header
+            .spans
+            .push(Span::raw(" ".repeat(width - header.width() - 1)));
+        header.spans.push(Span::styled(
+            if expanded {
+                glyph::EXPANDED
+            } else {
+                glyph::SELECTED
+            },
+            dim,
+        ));
+    }
+    out.push(header);
+    if expanded {
+        return;
+    }
     let body_width = width.saturating_sub(3);
     let body = if let Some(diff) = &view.diff {
         super::diff::render(
@@ -324,8 +346,8 @@ fn push_workspace_call(
             body_width,
             theme,
             super::diff::Options {
-                max_rows: if expanded { None } else { Some(8) },
-                context: if expanded { 3 } else { 1 },
+                max_rows: Some(8),
+                context: 1,
                 hint: if settings.hide_hints {
                     ""
                 } else {
@@ -338,27 +360,12 @@ fn push_workspace_call(
             .split('\n')
             .flat_map(|line| super::diff::escaped_rows(line, body_width, dim, dim))
             .collect();
-        if expanded {
-            rows
-        } else if view.verb == "$" && failed {
-            rows.into_iter()
-                .rev()
-                .take(5)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect()
+        if view.verb == "$" && failed {
+            let skip = rows.len().saturating_sub(5);
+            rows.into_iter().skip(skip).collect()
         } else {
             Vec::new()
         }
-    } else if expanded {
-        // Reads, searches, listings, moves, sub-agent reports: Ctrl+T shows
-        // the result itself.
-        result
-            .trim_end()
-            .split('\n')
-            .flat_map(|line| super::diff::escaped_rows(line, body_width, dim, dim))
-            .collect()
     } else {
         Vec::new()
     };
@@ -366,8 +373,433 @@ fn push_workspace_call(
         row.spans.insert(0, Span::raw("   "));
         out.push(row);
     }
-    if expanded {
-        out.push(Line::default());
+}
+
+fn tool_rule(label: &str, width: usize, theme: &crate::theme::Theme) -> Vec<Line<'static>> {
+    let rule = Style::default().fg(theme.border_dim);
+    let dim = Style::default().fg(theme.fg_dim);
+    let mut rows = super::diff::escaped_rows(&format!("── {label} ──"), width, rule, dim);
+    if let Some(last) = rows.last_mut() {
+        last.spans.push(Span::styled(
+            "─".repeat(width.saturating_sub(last.width())),
+            rule,
+        ));
+    }
+    rows
+}
+
+#[allow(clippy::too_many_lines)] // one dispatch for the emitted tool formats
+fn expanded_tool_body(
+    name: &str,
+    args: &serde_json::Value,
+    view: &nexus_core::app::ToolView,
+    result: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(theme.fg_dim);
+    if let Some(diff) = &view.diff {
+        let mut rows = tool_rule("diff", width, theme);
+        rows.extend(super::diff::expanded(diff, width, theme));
+        return rows;
+    }
+    let tool = name.split('_').next().unwrap_or(name);
+    if matches!(tool, "shell" | "proc") && !view.verb.is_empty() {
+        return command_body(args, view, result, width, theme);
+    }
+    if tool == "fs" && view.verb == "read" {
+        return read_body(args["path"].as_str().unwrap_or(""), result, width, theme);
+    }
+    if tool == "fs" && view.verb == "grep" {
+        return grep_body(args["pattern"].as_str().unwrap_or(""), result, width, theme);
+    }
+    if tool == "fs" && matches!(view.verb.as_str(), "glob" | "list") {
+        return result
+            .split('\n')
+            .flat_map(|line| {
+                let style = if line.ends_with('/') {
+                    Style::default().fg(theme.accent)
+                } else {
+                    dim
+                };
+                super::diff::escaped_rows(line, width, style, dim)
+            })
+            .collect();
+    }
+    if name == "task" {
+        let report = if result.starts_with("sub-agent report (") {
+            result.split_once('\n').map_or("", |(_, report)| report)
+        } else {
+            result
+        };
+        return tool_markdown(report, width, theme);
+    }
+    let mut rows = Vec::new();
+    if let Some(args) = args.as_object() {
+        let keys: Vec<_> = args
+            .keys()
+            .map(|key| super::diff::escaped_rows(key, usize::MAX, dim, dim).remove(0))
+            .collect();
+        let key_width = keys.iter().map(Line::width).max().unwrap_or(0);
+        for ((_, value), mut key) in args.iter().zip(keys) {
+            let padding = key_width.saturating_sub(key.width()) + 2;
+            key.spans.push(Span::raw(" ".repeat(padding)));
+            let value = value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_string);
+            key.spans
+                .push(Span::styled(value, Style::default().fg(theme.fg)));
+            rows.extend(super::diff::styled_rows(&key, width, dim));
+        }
+    }
+    rows.extend(tool_rule("result", width, theme));
+    rows.extend(
+        result
+            .split('\n')
+            .flat_map(|line| super::diff::escaped_rows(line, width, dim, dim)),
+    );
+    rows
+}
+
+fn command_body(
+    args: &serde_json::Value,
+    view: &nexus_core::app::ToolView,
+    result: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(theme.fg_dim);
+    let command = args["cmd"].as_str().map_or_else(
+        || format!("{} {}", view.verb, view.target),
+        |cmd| format!("$ {cmd}"),
+    );
+    let mut rows = super::diff::escaped_rows(
+        &command,
+        width,
+        Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        dim,
+    );
+    if let Some(cwd) = args["cwd"].as_str() {
+        let dir = super::diff::escaped_rows(&format!("in {cwd}"), width, dim, dim);
+        let last = rows.last_mut().expect("command has a row");
+        if dir.len() == 1 && last.width() + dir[0].width() < width {
+            last.spans
+                .push(Span::raw(" ".repeat(width - last.width() - dir[0].width())));
+            last.spans.extend(dir[0].spans.clone());
+        } else {
+            rows.extend(dir);
+        }
+    }
+    let output = view
+        .output
+        .as_deref()
+        .unwrap_or(result)
+        .trim_end_matches('\n');
+    let count = if output.is_empty() {
+        0
+    } else {
+        output.split('\n').count()
+    };
+    rows.extend(tool_rule(
+        &format!("output{}{} lines", style::SEP, count),
+        width,
+        theme,
+    ));
+    if count > 0 {
+        for line in output.split('\n') {
+            let start = line.trim_start();
+            let color = if ["error", "fatal", "FAILED", "panicked"]
+                .iter()
+                .any(|s| start.starts_with(s))
+            {
+                theme.error
+            } else if start.starts_with("warning") {
+                theme.warning
+            } else {
+                theme.fg_dim
+            };
+            rows.extend(super::diff::escaped_rows(
+                line,
+                width,
+                Style::default().fg(color),
+                dim,
+            ));
+        }
+    }
+    rows
+}
+
+fn grep_body(
+    pattern: &str,
+    result: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(theme.fg_dim);
+    let matched = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let mut rows = Vec::new();
+    for line in result.trim_end().split('\n') {
+        if !line.starts_with(' ') && line.ends_with(':') {
+            rows.extend(super::diff::escaped_rows(
+                &line[..line.len() - 1],
+                width,
+                Style::default().fg(theme.accent),
+                dim,
+            ));
+        } else if let Some((number, text)) = line.trim_start().split_once(": ")
+            && number.parse::<usize>().is_ok()
+        {
+            let mut spans = vec![Span::styled(format!("{number:>4}  "), dim)];
+            let mut cursor = 0;
+            if !pattern.is_empty() {
+                for (index, found) in text.match_indices(pattern) {
+                    spans.push(Span::styled(text[cursor..index].to_string(), dim));
+                    spans.push(Span::styled(found.to_string(), matched));
+                    cursor = index + found.len();
+                }
+            }
+            spans.push(Span::styled(text[cursor..].to_string(), dim));
+            rows.extend(super::diff::styled_rows(&Line::from(spans), width, dim));
+        } else {
+            rows.extend(super::diff::escaped_rows(line, width, dim, dim));
+        }
+    }
+    rows
+}
+
+fn read_body(
+    path: &str,
+    result: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) -> Vec<Line<'static>> {
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("");
+    let lang = match extension {
+        "rs" => "rust",
+        "py" => "python",
+        "js" | "jsx" => "javascript",
+        "ts" | "tsx" => "typescript",
+        "sh" | "bash" => "bash",
+        "json" | "toml" | "yaml" | "yml" | "html" | "css" | "c" | "cpp" | "go" | "java" | "rb"
+        | "sql" | "md" => extension,
+        _ => "plain",
+    };
+    let mut rows = tool_rule(&format!("{path} ── {lang}"), width, theme);
+    if !result
+        .split('\n')
+        .next()
+        .unwrap_or_default()
+        .contains(" (lines ")
+    {
+        let dim = Style::default().fg(theme.fg_dim);
+        rows.extend(
+            result
+                .split('\n')
+                .flat_map(|line| super::diff::escaped_rows(line, width, dim, dim)),
+        );
+        return rows;
+    }
+    let entries: Vec<_> = result
+        .split('\n')
+        .skip(1)
+        .map(|line| {
+            if let Some((number, text)) = line.trim_start().split_once(':')
+                && number.parse::<usize>().is_ok()
+            {
+                let text = text
+                    .split_once('\t')
+                    .filter(|(hash, _)| {
+                        hash.len() == 8 && hash.chars().all(|c| c.is_ascii_hexdigit())
+                    })
+                    .map_or_else(|| text.strip_prefix(' ').unwrap_or(text), |(_, text)| text);
+                (number, text)
+            } else {
+                ("", line)
+            }
+        })
+        .collect();
+    let source = entries
+        .iter()
+        .map(|(_, text)| *text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let highlighted = highlight_read(&source, lang, theme);
+    let digits = entries.iter().map(|(n, _)| n.len()).max().unwrap_or(1);
+    let dim = Style::default().fg(theme.fg_dim);
+    for ((number, _), mut source) in entries.iter().zip(highlighted) {
+        dim_tool_escapes(std::slice::from_mut(&mut source), dim, theme.border_dim);
+        for (index, mut line) in
+            super::diff::styled_rows(&source, width.saturating_sub(digits + 2), dim)
+                .into_iter()
+                .enumerate()
+        {
+            line.spans.insert(
+                0,
+                Span::styled(
+                    if index == 0 {
+                        format!("{number:>digits$}: ")
+                    } else {
+                        " ".repeat(digits + 2)
+                    },
+                    dim,
+                ),
+            );
+            rows.extend(super::diff::styled_rows(&line, width, dim));
+        }
+    }
+    rows
+}
+
+/// Highlight the whole file slice before adding gutters or wrapping its rows.
+fn highlight_read(source: &str, lang: &str, theme: &crate::theme::Theme) -> Vec<Line<'static>> {
+    let safe = markdown_tool_text(source);
+    if lang == "plain" {
+        return safe
+            .split('\n')
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.fg),
+                ))
+            })
+            .collect();
+    }
+    let code_width = safe
+        .split('\n')
+        .map(unicode_width::UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    // A longer fence cannot be closed by backticks in the file itself.
+    let fence = "`".repeat(
+        safe.split(|c| c != '`')
+            .map(str::len)
+            .max()
+            .unwrap_or(0)
+            .max(3)
+            + 1,
+    );
+    let rendered = crate::ui::markdown::render(
+        &format!("{fence}{lang}\n{safe}\n{fence}"),
+        code_width + 4,
+        md_colors(theme),
+    );
+    // The existing fenced renderer supplies syntax spans inside its box.
+    rendered
+        .lines
+        .into_iter()
+        .skip(1)
+        .take(safe.split('\n').count())
+        .map(|line| {
+            let count = line.spans.len().saturating_sub(2);
+            Line::from(
+                line.spans
+                    .into_iter()
+                    .skip(1)
+                    .take(count)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
+/// Sanitize before Markdown parsing, which can otherwise discard controls.
+fn markdown_tool_text(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c == '\t' {
+                "    ".to_string()
+            } else if c.is_control() && c != '\n' {
+                c.escape_unicode().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// Highlighting and wrapping may split escapes across spans or rows. Ignore
+/// Markdown box/table chrome when locating their text, then dim every fragment.
+fn dim_tool_escapes(lines: &mut [Line<'static>], dim: Style, rule: ratatui::style::Color) {
+    let chrome = |span: &Span<'_>| {
+        span.style.fg == Some(rule) && span.content.chars().all(|c| " │┌┐└┘─├┤┬┴┼".contains(c))
+    };
+    let text: String = lines
+        .iter()
+        .flat_map(|line| line.spans.iter().filter(|span| !chrome(span)))
+        .map(|span| span.content.as_ref())
+        .collect();
+    let ranges: Vec<_> = text
+        .match_indices("\\u{")
+        .filter_map(|(start, _)| {
+            let end = text[start + 3..].find('}')? + start + 3;
+            text[start + 3..end]
+                .chars()
+                .all(|c| c.is_ascii_hexdigit())
+                .then_some(start..end + 1)
+        })
+        .collect();
+    if ranges.is_empty() {
+        return;
+    }
+    let mut offset = 0;
+    for line in lines {
+        let mut spans = Vec::new();
+        for span in std::mem::take(&mut line.spans) {
+            if chrome(&span) {
+                spans.push(span);
+                continue;
+            }
+            for c in span.content.chars() {
+                let style = if ranges.iter().any(|range| range.contains(&offset)) {
+                    dim
+                } else {
+                    line.style.patch(span.style)
+                };
+                spans.push(Span::styled(c.to_string(), style));
+                offset += c.len_utf8();
+            }
+        }
+        line.spans = spans;
+    }
+}
+
+fn tool_markdown(text: &str, width: usize, theme: &crate::theme::Theme) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(theme.fg_dim);
+    let mut lines =
+        crate::ui::markdown::render(&markdown_tool_text(text), width, md_colors(theme)).lines;
+    dim_tool_escapes(&mut lines, dim, theme.border_dim);
+    lines
+        .into_iter()
+        .flat_map(|line| super::diff::styled_rows(&line, width, dim))
+        .collect()
+}
+
+fn cap_tool_body(rows: &mut Vec<Line<'static>>, width: usize, theme: &crate::theme::Theme) {
+    const MAX_ROWS: usize = 400;
+    if rows.len() > MAX_ROWS {
+        let total = rows.len();
+        let dim = Style::default().fg(theme.fg_dim);
+        let mut keep = MAX_ROWS - 1;
+        loop {
+            let notice = super::diff::escaped_rows(
+                &format!("… {} more lines", total - keep),
+                width,
+                dim,
+                dim,
+            );
+            if keep + notice.len() <= MAX_ROWS {
+                rows.truncate(keep);
+                rows.extend(notice);
+                break;
+            }
+            keep = MAX_ROWS.saturating_sub(notice.len());
+        }
     }
 }
 
@@ -1038,6 +1470,314 @@ mod tool_card_tests {
     }
 
     #[test]
+    fn expanded_diff_tints_full_rows_but_not_previews() {
+        let result = "edited a (+1 −1)\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\x1b";
+        let args = json!({"action":"edit","path":"a"});
+        let theme = crate::theme::Theme::default();
+        let expanded = card("fs", args.clone(), result, true, false);
+        for (needle, bg) in [("− old", theme.diff_del_bg), ("+ new", theme.diff_add_bg)] {
+            let row = expanded
+                .iter()
+                .find(|row| row.to_string().contains(needle))
+                .unwrap();
+            assert_eq!(row.width(), 80);
+            assert_eq!(row.style.bg, Some(bg));
+            assert_eq!(row.spans[0].style.fg, Some(theme.accent2));
+            assert!(row.spans[1..].iter().all(|s| s.style.bg == Some(bg)));
+        }
+        assert!(card("fs", args, result, false, false).iter().all(|row| row.style.bg.is_none() && row.spans.iter().all(|s| s.style.bg.is_none())));
+    }
+
+    #[test]
+    fn expanded_commands_color_output_and_align_cwd() {
+        let theme = crate::theme::Theme::default();
+        let lines = card(
+            "shell",
+            json!({"action":"run","cmd":"cargo build","cwd":"sub/dir"}),
+            "exit 101 · 9.8s\nnormal\n  error[E0425]: missing\nwarning: unused\nfatal: broken\nFAILED test\npanicked here",
+            true,
+            false,
+        );
+        assert!(lines[1].to_string().starts_with("▎ $ cargo build"));
+        assert!(lines[1].to_string().ends_with("in sub/dir"));
+        assert_eq!(lines[1].width(), 80);
+        assert!(lines[2].to_string().contains("output · 6 lines"));
+        for line in &lines[1..lines.len() - 1] {
+            assert_eq!(line.spans[0].style.fg, Some(theme.error));
+        }
+        for (needle, color) in [
+            ("normal", theme.fg_dim),
+            ("error[E", theme.error),
+            ("warning:", theme.warning),
+            ("fatal:", theme.error),
+            ("FAILED", theme.error),
+            ("panicked", theme.error),
+        ] {
+            let row = lines
+                .iter()
+                .find(|l| l.to_string().contains(needle))
+                .unwrap();
+            assert!(row.spans[1..].iter().any(|s| s.style.fg == Some(color)));
+        }
+    }
+
+    #[test]
+    fn grep_highlights_literal_case_sensitive_matches_and_paths() {
+        let lines = card(
+            "fs",
+            json!({"action":"grep","path":"crates","pattern":"fn parse"}),
+            "crates/a.rs:\n  12: pub fn parse() { fn parse(); FN PARSE(); }",
+            true,
+            false,
+        );
+        let theme = crate::theme::Theme::default();
+        assert_eq!(lines[1].to_string(), "▎ crates/a.rs");
+        assert_eq!(lines[1].spans[1].style.fg, Some(theme.accent));
+        let matched: Vec<_> = lines[2]
+            .spans
+            .iter()
+            .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+            .collect();
+        assert_eq!(matched.len(), 2);
+        assert!(
+            matched
+                .iter()
+                .all(|s| s.content == "fn parse" && s.style.fg == Some(theme.accent))
+        );
+        assert!(lines[2].to_string().contains("  12  pub"));
+    }
+
+    #[test]
+    fn reads_highlight_code_with_dim_number_gutters_and_language() {
+        let lines = card(
+            "fs",
+            json!({"action":"read","path":"src/a.rs"}),
+            "src/a.rs (lines 40-42 of 42):\n   40:0123abcd\tlet value = 1;\n   41:abcdef01\t\n   42:abcdef02\tvalue + 2",
+            true,
+            false,
+        );
+        let theme = crate::theme::Theme::default();
+        assert!(lines[1].to_string().contains("── src/a.rs ── rust ──"));
+        assert!(
+            lines[2].to_string().contains("40: let value = 1;"),
+            "{:?}",
+            text(&lines)
+        );
+        assert!(!text(&lines).join("\n").contains("0123abcd"));
+        assert_eq!(lines[2].spans[1].style.fg, Some(theme.fg_dim));
+        assert!(
+            lines[2].spans[2..]
+                .iter()
+                .any(|s| s.style.fg.is_some_and(|c| c != theme.fg_dim))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.to_string().contains("42: value + 2"))
+        );
+    }
+
+    #[test]
+    fn read_wrapping_preserves_tabs_fences_and_later_line_numbers() {
+        let theme = crate::theme::Theme::default();
+        let rows = read_body(
+            "notes.txt",
+            "notes.txt (lines 1-3 of 3):\n1:     ````\n2: \tlong content that wraps\n3: end",
+            16,
+            &theme,
+        );
+        let shown = text(&rows).join("\n");
+        assert!(shown.contains("plain"));
+        assert!(shown.contains("1:     ````"), "{shown}");
+        assert!(shown.contains("2:     long"), "{shown}");
+        assert!(shown.contains("3: end"), "{shown}");
+        assert!(rows.iter().all(|row| row.width() <= 16));
+    }
+
+    #[test]
+    fn markdown_controls_stay_dim_even_when_the_escape_wraps() {
+        let theme = crate::theme::Theme::default();
+        for source in [
+            "xxxxxxxxxxxxxxxxxxxxxxxx\x1b",
+            "```text\nxxxxxxxxxxxxxxxxxxxxxxxx\x1b\n```",
+        ] {
+            let rows = tool_markdown(source, 10, &theme);
+            assert!(rows.iter().all(|row| row.width() <= 10));
+            let escapes: Vec<_> = rows
+                .iter()
+                .flat_map(|row| &row.spans)
+                .filter(|s| s.content.chars().any(|c| "\\u{1b}".contains(c)))
+                .collect();
+            assert!(!escapes.is_empty());
+            assert!(escapes.iter().all(|s| s.style.fg == Some(theme.fg_dim)));
+        }
+    }
+
+    #[test]
+    fn reports_use_markdown_and_generic_arguments_form_a_table() {
+        let report = card(
+            "task",
+            json!({"prompt":"report"}),
+            "sub-agent report (1 steps, 10 tokens):\n# Findings\n\n**important** text",
+            true,
+            false,
+        );
+        assert!(report.iter().any(|l| {
+            l.spans.iter().any(|s| {
+                s.content.contains("important") && s.style.add_modifier.contains(Modifier::BOLD)
+            })
+        }));
+        assert!(
+            !report[1..]
+                .iter()
+                .any(|l| l.to_string().contains("sub-agent report"))
+        );
+        let lines = card(
+            "search",
+            json!({"query":"needle","limit":3}),
+            "a result",
+            true,
+            false,
+        );
+        assert!(lines.iter().any(|l| l.to_string() == "▎ limit  3"));
+        assert!(lines.iter().any(|l| l.to_string() == "▎ query  needle"));
+        assert!(lines.iter().any(|l| l.to_string().contains("── result ──")));
+        for action in ["glob", "list"] {
+            let listing = card(
+                "fs",
+                json!({"action":action,"path":".","pattern":"*"}),
+                "dir/\nfile",
+                true,
+                false,
+            );
+            assert_eq!(
+                listing[1].spans[1].style.fg,
+                Some(crate::theme::Theme::default().accent)
+            );
+        }
+    }
+
+    #[test]
+    fn expanded_bodies_are_capped_and_controls_are_always_dim_escapes() {
+        let result = (0..450)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = card("search", json!({}), &result, true, false);
+        assert_eq!(lines.len(), 402); // header + 400 body rows + blank
+        assert_eq!(lines[400].to_string(), "▎ … 52 more lines");
+        let theme = crate::theme::Theme::default();
+        for (name, args, result) in [
+            (
+                "fs",
+                json!({"action":"edit","path":"a"}),
+                "edited a (+1 −0)\n--- a/a\n+++ b/a\n@@ -0,0 +1 @@\n+x\x1b",
+            ),
+            (
+                "shell",
+                json!({"action":"run","cmd":"x\x1b","cwd":"a\x07"}),
+                "exit 1\nerror: x\r",
+            ),
+            (
+                "proc",
+                json!({"action":"read","id":"x"}),
+                "x · exited 1\npanicked\x1b",
+            ),
+            (
+                "fs",
+                json!({"action":"read","path":"a.rs"}),
+                "a.rs (lines 1-1 of 1):\n1: let x = \"a\x1b\";\r",
+            ),
+            (
+                "fs",
+                json!({"action":"grep","pattern":"x","path":"."}),
+                "a\x07:\n  1: x\x1b",
+            ),
+            (
+                "fs",
+                json!({"action":"glob","pattern":"*","path":"."}),
+                "a\x1b/",
+            ),
+            ("fs", json!({"action":"list","path":"."}), "a\x1b/"),
+            (
+                "task",
+                json!({"prompt":"report"}),
+                "sub-agent report (1 steps, 1 tokens):\n**x\x1b**",
+            ),
+            ("search", json!({"query":"a\x07"}), "x\x1b"),
+        ] {
+            let lines = card(name, args, result, true, false);
+            let body = text(&lines[1..]).join("\n");
+            assert!(
+                !body.chars().any(|c| c.is_control() && c != '\n'),
+                "{name}: {body}"
+            );
+            assert!(body.contains("\\u{"), "{name}: {body}");
+            for row in lines.iter().skip(1).take(lines.len() - 2) {
+                assert!(row.to_string().starts_with("▎ "), "{name}: {row}");
+                assert!(row.width() <= 80, "{name}: {row}");
+                for span in &row.spans {
+                    if span.content.contains("\\u{") || span.content == "\\" {
+                        assert_eq!(span.style.fg, Some(theme.fg_dim), "{name}: {span:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_expanded_cards_wrap_gutters_without_losing_the_rail() {
+        let theme = crate::theme::Theme::default();
+        for (name, args, result) in [
+            (
+                "fs",
+                json!({"action":"edit","path":"a"}),
+                "edited a (+1 −1)\n--- a/a\n+++ b/a\n@@ -100 +100 @@\n-old\n+new",
+            ),
+            (
+                "fs",
+                json!({"action":"grep","path":".","pattern":"x"}),
+                "a:\n  100: xxxxx",
+            ),
+        ] {
+            let mut rows = Vec::new();
+            push_tool_call(
+                &mut rows,
+                &json!({"name":name,"arguments":args.to_string(),"result":result}).to_string(),
+                true,
+                &Settings::default(),
+                8,
+                &theme,
+            );
+            for row in &rows[1..rows.len() - 1] {
+                assert!(row.width() <= 8, "{row}");
+                assert_eq!(row.spans[0].content, "▎ ");
+            }
+        }
+    }
+
+    #[test]
+    fn fold_markers_fit_without_wrapping_long_headers() {
+        for expanded in [false, true] {
+            let short = card("search", json!({"query":"x"}), "ok", expanded, false);
+            assert_eq!(short[0].width(), 80);
+            assert!(short[0].to_string().ends_with(if expanded {
+                glyph::EXPANDED
+            } else {
+                glyph::SELECTED
+            }));
+            let long = card(
+                "shell",
+                json!({"action":"run","cmd":"x".repeat(100)}),
+                "exit 0",
+                expanded,
+                false,
+            );
+            assert!(!long[0].to_string().contains(['▸', '▾']));
+        }
+    }
+
+    #[test]
     fn round_thinking_and_interim_text_sit_above_the_first_call() {
         let row = json!({
             "name": "fs",
@@ -1111,7 +1851,10 @@ mod tool_card_tests {
         let args =
             json!({"action":"edit","path":"src/a","edits":[{"hash":"secret hash","new":"new"}]});
         let compact = card("fs", args.clone(), &result, false, false);
-        assert_eq!(compact[0].to_string(), "⚒ edit src/a  +20 −1");
+        assert_eq!(
+            compact[0].to_string().trim_end_matches([' ', '▸']),
+            "⚒ edit src/a  +20 −1"
+        );
         assert_eq!(compact.len(), 9);
         assert!(
             compact
@@ -1149,12 +1892,15 @@ mod tool_card_tests {
         let args = json!({"action":"run","cmd":"cargo build"});
         let result = "exit 101 · 9.8s\nfirst\nsecond\nthird\nfourth\nfifth\nsixth\nlast\x1b[2J";
         let compact = card("shell", args.clone(), result, false, false);
-        assert_eq!(compact[0].to_string(), "✗ $ cargo build · exit 101 · 9.8s");
+        assert_eq!(
+            compact[0].to_string().trim_end_matches([' ', '▸']),
+            "✗ $ cargo build · exit 101 · 9.8s"
+        );
         assert_eq!(compact.len(), 6);
         assert_eq!(compact[1].to_string(), "   third");
         assert!(compact[5].to_string().contains("last\\u{1b}[2J"));
         let expanded = card("shell", args, result, true, false);
-        assert!(expanded.iter().any(|line| line.to_string() == "   first"));
+        assert!(expanded.iter().any(|line| line.to_string() == "▎ first"));
         assert!(
             !expanded
                 .iter()

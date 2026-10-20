@@ -213,6 +213,14 @@ pub struct AppView {
     pub session_caches: HashMap<String, HistoryCache>,
     /// Whether tool-call blocks show full arguments/results (Ctrl+T).
     pub show_tool_detail: bool,
+    /// Per-message overrides of the global tool-detail flag.
+    pub tool_open: HashMap<usize, bool>,
+    /// Monotonic render generation for tool-card changes.
+    pub tool_open_gen: usize,
+    /// Session whose message indices the overrides refer to.
+    pub tool_session: Option<String>,
+    /// Clicked message and its previous block start, for in-place folding.
+    pub tool_click_anchor: Option<(usize, usize)>,
     pub notification_areas: Vec<(Rect, usize)>,
     /// The welcome screen's recent-session rows from the last frame, as
     /// (row rect, session id) — click targets, in `Alt+1…` order.
@@ -399,6 +407,10 @@ impl AppView {
             diagrams: crate::diagrams::DiagramCache::default(),
             session_caches: HashMap::new(),
             show_tool_detail: false,
+            tool_open: HashMap::new(),
+            tool_open_gen: 0,
+            tool_session: None,
+            tool_click_anchor: None,
             notification_areas: Vec::new(),
             welcome_targets: Vec::new(),
             banner: nexus_core::config::load_banner()
@@ -436,6 +448,9 @@ impl AppView {
                 self.max_scroll = 0;
                 self.prev_total = 0;
                 self.prev_tail.clear();
+                self.tool_open.clear();
+                self.tool_open_gen = self.tool_open_gen.wrapping_add(1);
+                self.tool_click_anchor = None;
                 self.diagrams.clear();
                 self.interactive.clear();
                 if self.popup == Popup::InteractiveUi {

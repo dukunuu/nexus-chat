@@ -108,6 +108,15 @@ impl HistorySel {
         Some((li, ((col - self.inner.x) as usize).min(max)))
     }
 
+    /// A real line under a cell, without the drag-selection clamp below content.
+    pub fn line_at_cell(&self, col: u16, row: u16) -> Option<usize> {
+        if !self.inner.contains(Position::new(col, row)) {
+            return None;
+        }
+        let line = self.top + usize::from(row - self.inner.y);
+        (line < self.lines.len()).then_some(line)
+    }
+
     /// The message index the active selection's anchor line belongs to, if
     /// any — used to resolve "the citation under the current selection" back
     /// to the message whose content holds the Sources list.
@@ -149,6 +158,15 @@ impl HistorySel {
             n if n >= 3 => self.line_extend(a, pos),
             _ => (a, pos),
         });
+    }
+
+    /// Whether release at `pos` is an unhandled, stationary single click.
+    pub fn is_plain_click(&self, pos: Option<Pos>) -> bool {
+        self.down_at.is_some()
+            && !self.moved
+            && !self.long_pressed
+            && self.click_count == 1
+            && pos == Some(self.down_pos)
     }
 
     /// Finish a press. `Action::Copy` for a drag-selection or double/triple
@@ -451,6 +469,29 @@ mod tests {
 
     fn with_owner(lines: &[&str], owner: &[Option<usize>]) -> HistorySel {
         build(lines, owner, &vec![None; lines.len()], &[])
+    }
+
+    #[test]
+    fn plain_click_excludes_drags_long_presses_and_multi_clicks() {
+        let mut s = sel_with(&["hello world"]);
+        s.on_down((0, 2));
+        assert!(s.is_plain_click(Some((0, 2))));
+        assert!(!s.is_plain_click(None));
+        assert!(!s.is_plain_click(Some((0, 3))));
+        assert_eq!(s.line_at_cell(2, 0), Some(0));
+        assert_eq!(s.line_at_cell(2, 1), None);
+        s.on_drag((0, 5));
+        assert!(!s.is_plain_click(Some((0, 5))));
+        s.clear();
+        s.on_down((0, 2));
+        s.down_at = Some(Instant::now() - LONG_PRESS);
+        s.check_long_press();
+        assert!(!s.is_plain_click(Some((0, 2))));
+        s.clear();
+        s.on_down((0, 2));
+        s.on_up(Some((0, 2)));
+        s.on_down((0, 2));
+        assert!(!s.is_plain_click(Some((0, 2))));
     }
 
     #[test]

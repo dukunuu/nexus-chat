@@ -85,6 +85,9 @@ pub struct Theme {
     pub success: Color,
     pub warning: Color,
     pub error: Color,
+    /// Expanded diff row backgrounds.
+    pub diff_add_bg: Color,
+    pub diff_del_bg: Color,
     pub user_msg: Color,
     pub assistant_msg: Color,
     pub tool_msg: Color,
@@ -113,6 +116,8 @@ impl Default for Theme {
             success: Color::Green,
             warning: Color::Yellow,
             error: Color::Red,
+            diff_add_bg: Color::Indexed(22),
+            diff_del_bg: Color::Indexed(52),
             user_msg: Color::Cyan,
             assistant_msg: Color::White,
             tool_msg: Color::Yellow,
@@ -182,6 +187,8 @@ impl Theme {
             success: hex_to_color(&n.green).unwrap_or(fallback.success),
             warning: hex_to_color(&n.yellow).unwrap_or(fallback.warning),
             error: hex_to_color(&n.red).unwrap_or(fallback.error),
+            diff_add_bg: fallback.diff_add_bg,
+            diff_del_bg: fallback.diff_del_bg,
             user_msg: hex_to_color(&n.cyan).unwrap_or(fallback.user_msg),
             assistant_msg: hex_to_color(&a.colors.primary.foreground)
                 .unwrap_or(fallback.assistant_msg),
@@ -205,6 +212,12 @@ impl Theme {
             self.raised_opaque = self.raised;
             self.border_dim = blend(self.bg, self.fg, 0.24);
             self.selection = selection.unwrap_or_else(|| blend(self.bg, self.accent, 0.35));
+        }
+        if let (Color::Rgb(..), Color::Rgb(..)) = (self.bg, self.success) {
+            self.diff_add_bg = blend(self.bg, self.success, 0.18);
+        }
+        if let (Color::Rgb(..), Color::Rgb(..)) = (self.bg, self.error) {
+            self.diff_del_bg = blend(self.bg, self.error, 0.18);
         }
         self
     }
@@ -343,6 +356,8 @@ impl Theme {
                 success: pal(2, fallback.success),
                 warning: yellow,
                 error: pal(1, fallback.error),
+                diff_add_bg: fallback.diff_add_bg,
+                diff_del_bg: fallback.diff_del_bg,
                 user_msg: cyan,
                 assistant_msg: fg,
                 tool_msg: yellow,
@@ -393,6 +408,21 @@ pub fn load() -> Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_backgrounds_follow_rgb_palettes_with_ansi_fallbacks() {
+        let theme = Theme::default();
+        assert_eq!(theme.diff_add_bg, Color::Indexed(22));
+        assert_eq!(theme.diff_del_bg, Color::Indexed(52));
+        let colors = ghostty_pairs(
+            "background = #101820\nforeground = #eeeeee\npalette = 2=#20d040\npalette = 1=#e02030",
+        )
+        .into_iter()
+        .collect();
+        let theme = Theme::from_ghostty(&colors).unwrap();
+        assert_eq!(theme.diff_add_bg, Color::Rgb(19, 57, 38));
+        assert_eq!(theme.diff_del_bg, Color::Rgb(53, 25, 35));
+    }
 
     #[test]
     fn parses_omarchy_alacritty_toml() {

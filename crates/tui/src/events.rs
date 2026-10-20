@@ -678,6 +678,9 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
         KeyCode::Char('r') if ctrl => app.toggle_reasoning_view()?,
         KeyCode::Char('t') if ctrl => {
             app.show_tool_detail = !app.show_tool_detail;
+            app.tool_open.clear();
+            app.tool_open_gen = app.tool_open_gen.wrapping_add(1);
+            app.tool_click_anchor = None;
             app.pin_viewport_top = true;
         }
         // Ctrl+N starts a regular session; Ctrl+Shift+N starts an incognito
@@ -836,6 +839,9 @@ fn handle_input_mouse(app: &mut AppView, m: MouseEvent) {
                             crate::selection::LongPress::Message(idx) => app.copy_message(idx),
                         }
                     }
+                    let plain_click = m.modifiers.is_empty()
+                        && app.sel.is_plain_click(p)
+                        && app.sel.line_at_cell(m.column, m.row).is_some();
                     match app.sel.on_up(p) {
                         Some(crate::selection::Action::Copy(text)) => app.copy_text(&text),
                         Some(crate::selection::Action::OpenUrl(url)) => {
@@ -844,6 +850,11 @@ fn handle_input_mouse(app: &mut AppView, m: MouseEvent) {
                         }
                         None if !long_press_handled
                             && p.is_some_and(|p| app.open_image_at_line(p.0)) => {}
+                        None if plain_click => {
+                            if let Some((line, _)) = p {
+                                ui::history::toggle_tool_at_line(app, line);
+                            }
+                        }
                         None => {}
                     }
                 }
@@ -1385,6 +1396,188 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         handle_mouse(app, m, Rect::new(0, 0, 100, 40)).unwrap();
+    }
+
+    fn tool_app() -> AppView {
+        let mut app = test_app();
+        app.popup = Popup::None;
+        app.clipboard = None;
+        for path in ["first.rs", "second.rs"] {
+            app.messages.push(nexus_core::db::Message {
+                role: "tool_call".into(),
+                content: serde_json::json!({
+                    "name":"fs",
+                    "arguments":serde_json::json!({"action":"read","path":path}).to_string(),
+                    "result":format!("{path} (lines 1-1 of 1):\n1: fn main() {{}}"),
+                    "assistant_content":format!("Inspect {path} first."),
+                })
+                .to_string(),
+                model: None,
+                reasoning: None,
+                tokens: None,
+                secs: None,
+                cost: None,
+                phrase: None,
+                persona: None,
+                created_at: None,
+            });
+        }
+        app
+    }
+
+    fn history_mouse(app: &mut AppView, kind: MouseEventKind, column: u16, row: u16) {
+        handle_input_mouse(
+            app,
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+    }
+
+    #[test]
+    fn tool_clicks_toggle_one_card_and_ctrl_t_resets_all_overrides() {
+        let mut app = tool_app();
+        let screen = draw(&mut app, 100, 40);
+        let row = u16::try_from(
+            screen
+                .iter()
+                .position(|l| l.contains("read first.rs"))
+                .unwrap(),
+        )
+        .unwrap();
+        for open in [true, false, true] {
+            history_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 4, row);
+            history_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 4, row);
+            assert_eq!(app.tool_open.get(&0), Some(&open));
+            assert!(!app.tool_open.contains_key(&1));
+            let screen = draw(&mut app, 100, 40);
+            assert!(screen[usize::from(row)].contains("read first.rs"));
+        }
+        handle_key(&mut app, ctrl('t')).unwrap();
+        assert!(app.show_tool_detail);
+        assert!(app.tool_open.is_empty());
+        let screen = draw(&mut app, 100, 40);
+        for path in ["first.rs", "second.rs"] {
+            assert!(
+                screen
+                    .iter()
+                    .any(|l| l.contains(&format!("read {path}")) && l.contains('▾'))
+            );
+        }
+        history_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 4, row);
+        history_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 4, row);
+        assert_eq!(app.tool_open.get(&0), Some(&false));
+        assert!(!app.tool_open.contains_key(&1));
+        handle_key(&mut app, ctrl('t')).unwrap();
+        assert!(!app.show_tool_detail);
+        assert!(app.tool_open.is_empty());
+    }
+
+    #[test]
+    fn preamble_clicks_toggle_their_card_but_drags_do_not() {
+        let mut app = tool_app();
+        let screen = draw(&mut app, 100, 40);
+        let row = u16::try_from(
+            screen
+                .iter()
+                .position(|l| l.contains("Inspect first.rs first."))
+                .unwrap(),
+        )
+        .unwrap();
+        history_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 2, row);
+        history_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 2, row);
+        assert_eq!(app.tool_open.get(&0), Some(&true));
+        draw(&mut app, 100, 40);
+        let generation = app.tool_open_gen;
+        history_mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            row + 1,
+        );
+        history_mouse(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            10,
+            row + 1,
+        );
+        history_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 10, row + 1);
+        assert!(app.sel.selected_text().is_some());
+        assert_eq!(app.tool_open_gen, generation);
+        assert_eq!(app.tool_open.get(&0), Some(&true));
+    }
+
+    #[test]
+    fn clicking_an_expanded_body_closes_only_its_card() {
+        let mut app = tool_app();
+        app.show_tool_detail = true;
+        let screen = draw(&mut app, 100, 40);
+        let row = u16::try_from(
+            screen
+                .iter()
+                .position(|l| l.contains("▎ 1: fn main()"))
+                .unwrap(),
+        )
+        .unwrap();
+        history_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 4, row);
+        history_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 4, row);
+        assert_eq!(app.tool_open.get(&0), Some(&false));
+        assert!(!app.tool_open.contains_key(&1));
+        let screen = draw(&mut app, 100, 40);
+        assert!(
+            screen
+                .iter()
+                .any(|l| l.contains("read second.rs") && l.contains('▾'))
+        );
+    }
+
+    #[test]
+    fn clicking_empty_history_below_cards_does_not_fold_the_last_card() {
+        let mut app = tool_app();
+        draw(&mut app, 100, 40);
+        assert!(app.sel.pos_at(3, 15).is_some());
+        assert_eq!(app.sel.line_at_cell(3, 15), None);
+        history_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 3, 15);
+        history_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 3, 15);
+        assert!(app.tool_open.is_empty());
+    }
+
+    #[test]
+    fn expanded_result_url_click_is_handled_before_card_folding() {
+        let mut app = tool_app();
+        app.messages[0].content = serde_json::json!({
+            "name":"fetch_url",
+            "arguments":r#"{"url":"https://example.test"}"#,
+            "result":"see https://example.test/report here",
+        })
+        .to_string();
+        app.show_tool_detail = true;
+        let screen = draw(&mut app, 100, 40);
+        let row = u16::try_from(
+            screen
+                .iter()
+                .position(|l| l.contains("▎ see https://example.test/report"))
+                .unwrap(),
+        )
+        .unwrap();
+        let prefix = screen[usize::from(row)].split("https://").next().unwrap();
+        let column = u16::try_from(prefix.chars().count() + 3).unwrap();
+        history_mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+        );
+        let pos = app.sel.pos_at(column, row);
+        // Inspect the release action without launching a real browser in tests.
+        assert!(app.sel.is_plain_click(pos));
+        assert!(
+            matches!(app.sel.on_up(pos), Some(crate::selection::Action::OpenUrl(url)) if url == "https://example.test/report")
+        );
+        assert!(app.tool_open.is_empty());
     }
 
     #[test]
