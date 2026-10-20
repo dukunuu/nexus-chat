@@ -657,18 +657,21 @@ mod tests {
     async fn failed_and_timed_out_startup_leave_no_snapshot() {
         let root = temp();
         let home = root.join("home");
-        for (rc, expected) in [
-            ("exit 9", "shell setup exited"),
-            ("/bin/sleep 30", "shell setup timed out"),
+        // Only the hanging case gets the short timeout: under a loaded
+        // parallel test run bash alone can take longer than 150 ms to start,
+        // which turned "exited 9" into a spurious "timed out".
+        for (rc, expected, timeout) in [
+            ("exit 9", "shell setup exited", Duration::from_secs(10)),
+            (
+                "/bin/sleep 30",
+                "shell setup timed out",
+                Duration::from_millis(150),
+            ),
         ] {
             std::fs::write(home.join(".bashrc"), rc).unwrap();
-            let setup = UserShell::build(
-                "/bin/bash".into(),
-                &root.join("data"),
-                Some(&home),
-                Duration::from_millis(150),
-            )
-            .await;
+            let setup =
+                UserShell::build("/bin/bash".into(), &root.join("data"), Some(&home), timeout)
+                    .await;
             assert!(setup.snapshot.is_none());
             assert!(setup.warning.unwrap().starts_with(expected));
             assert_eq!(std::fs::read_dir(root.join("data")).unwrap().count(), 0);
