@@ -68,6 +68,12 @@ pub struct AppView {
     pub recall_draft: String,
     /// `@` file autocomplete: (matches, selected, cursor byte offset of `@`).
     pub at_state: Option<(Vec<FileRow>, usize, usize)>,
+    /// User shell completion uses the same floating menu as slash and @ lists.
+    pub shell_state: Option<crate::composer::ShellCompletionState>,
+    pub shell_completion_rx:
+        Option<tokio::sync::oneshot::Receiver<crate::composer::ShellCompletionResult>>,
+    /// Stable shell-history traversal and its original draft.
+    pub shell_recall: Option<(Vec<String>, usize, String)>,
 
     // ── Popup chrome ──────────────────────────────────────────────────────
     /// Which modal popover, if any, is open.
@@ -303,6 +309,9 @@ impl AppView {
             recall: None,
             recall_draft: String::new(),
             at_state: None,
+            shell_state: None,
+            shell_completion_rx: None,
+            shell_recall: None,
             popup: Popup::None,
             approval_request: None,
             approval_displayed: 0,
@@ -420,6 +429,9 @@ impl AppView {
             AppEvent::ComposerSet(s) => self.set_input(s),
             AppEvent::ComposerClear => self.clear_input(),
             AppEvent::ViewportReset => {
+                self.shell_state = None;
+                self.shell_completion_rx = None;
+                self.shell_recall = None;
                 self.scroll = 0;
                 self.max_scroll = 0;
                 self.prev_total = 0;

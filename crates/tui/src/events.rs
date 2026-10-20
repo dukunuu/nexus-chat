@@ -53,18 +53,20 @@ fn system_prompt_edit_target(app: &AppView, key: &KeyEvent) -> Option<std::path:
     nexus_core::config::system_prompt_path().ok()
 }
 
-pub async fn run(
+pub fn run(
     mut app: AppView,
     terminal: &mut DefaultTerminal,
     selection_requests: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
-) -> Result<()> {
-    let result = Box::pin(run_loop(&mut app, terminal, selection_requests)).await;
-    app.cancel_chat_tasks();
-    app.procs.shutdown().await;
-    // Servers started with `/local start` are Nexus's to clean up; ones the
-    // user started elsewhere are untouched.
-    app.stop_local_servers().await;
-    result
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + '_>> {
+    Box::pin(async move {
+        let result = Box::pin(run_loop(&mut app, terminal, selection_requests)).await;
+        app.cancel_chat_tasks();
+        app.procs.shutdown().await;
+        // Servers started with `/local start` are Nexus's to clean up; ones the
+        // user started elsewhere are untouched.
+        app.stop_local_servers().await;
+        result
+    })
 }
 
 async fn next_selection_request(
@@ -72,6 +74,15 @@ async fn next_selection_request(
 ) -> Option<String> {
     match receiver {
         Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn next_shell_completion(
+    receiver: &mut Option<tokio::sync::oneshot::Receiver<crate::composer::ShellCompletionResult>>,
+) -> Option<crate::composer::ShellCompletionResult> {
+    match receiver {
+        Some(receiver) => receiver.await.ok(),
         None => std::future::pending().await,
     }
 }
@@ -145,6 +156,13 @@ async fn run_loop(
                     }
                 } else {
                     selection_requests = None;
+                }
+            }
+            completion = next_shell_completion(&mut app.shell_completion_rx) => {
+                if let Some(completion) = completion {
+                    app.finish_shell_completion(completion);
+                } else {
+                    app.shell_completion_rx = None;
                 }
             }
             completion = app.diagrams.next_completion() => {
@@ -313,7 +331,13 @@ fn on_key(app: &mut AppView, terminal: &mut DefaultTerminal, k: KeyEvent) -> Res
                 }
                 nexus_core::app::PendingEditor::UserCommand(cmd) => {
                     let cwd = app.user_command_cwd();
-                    let (exit, started) = run_interactive_command(terminal, &cmd, &cwd)?;
+                    let shell = std::sync::Arc::clone(&app.user_shell);
+                    let data = app.space.root.clone();
+                    let (exit, started, next_dir) =
+                        run_interactive_command(terminal, &cmd, &cwd, shell.get(), &data)?;
+                    if let Some(dir) = next_dir {
+                        app.core.user_command_dir = Some(dir);
+                    }
                     app.execute(AppCommand::RecordUserCommand { cmd, exit, started })?;
                 }
             }
@@ -452,16 +476,30 @@ fn with_terminal_suspended<T>(
 /// `ssh`, …) the way `$EDITOR` gets it: what the user types, passwords
 /// included, never passes through nexus. Its output stays on screen until
 /// the user presses Enter. Returns its exit code and whether it started.
+/// Run a `!` command on the real terminal, in the user's shell setup (when
+/// a captured `!` already loaded it) and the tracked `!` directory; returns
+/// the directory it ended in so `!sudo …`/`!ssh` keep the same cwd rules.
 fn run_interactive_command(
     terminal: &mut DefaultTerminal,
     cmd: &str,
     cwd: &std::path::Path,
-) -> Result<(Option<i32>, bool)> {
-    with_terminal_suspended(terminal, || {
-        let status = std::process::Command::new("sh")
-            .args(["-c", cmd])
-            .current_dir(cwd)
-            .status();
+    setup: Option<&nexus_core::usershell::UserShell>,
+    data: &std::path::Path,
+) -> Result<(Option<i32>, bool, Option<std::path::PathBuf>)> {
+    let cwd_file = data.join(format!("shell-cwd-{}", uuid::Uuid::new_v4()));
+    let result = with_terminal_suspended(terminal, || {
+        let mut command = if let Some(setup) = setup {
+            let mut command = std::process::Command::new(&setup.shell);
+            command
+                .args(["-c", &setup.wrapper(cmd, cwd)])
+                .env("NEXUS_CWD_FILE", &cwd_file);
+            command
+        } else {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", cmd]);
+            command
+        };
+        let status = command.current_dir(cwd).status();
         let started = status.is_ok();
         let exit = status.ok().and_then(|status| status.code());
         let outcome = nexus_core::app::user_command_outcome_label(exit, started);
@@ -469,7 +507,14 @@ fn run_interactive_command(
         let _ = std::io::Write::flush(&mut std::io::stdout());
         let _ = std::io::stdin().read_line(&mut String::new());
         (exit, started)
-    })
+    });
+    let next_dir = std::fs::read_to_string(&cwd_file)
+        .ok()
+        .map(|text| std::path::PathBuf::from(text.trim_end_matches('\n')))
+        .filter(|path| path.is_absolute() && path.is_dir());
+    let _ = std::fs::remove_file(&cwd_file);
+    let (exit, started) = result?;
+    Ok((exit, started, next_dir))
 }
 
 /// Suspend the TUI, open `path` in `$EDITOR` (falling back to `vi`), then
@@ -514,6 +559,37 @@ fn open_new_session(app: &mut AppView, incognito: bool) -> Result<()> {
 fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+    if app.shell_state.is_some() {
+        match key.code {
+            KeyCode::Up => {
+                app.move_shell_selection(-1);
+                return Ok(());
+            }
+            KeyCode::Down => {
+                app.move_shell_selection(1);
+                return Ok(());
+            }
+            KeyCode::Tab | KeyCode::Enter => {
+                app.accept_shell_match();
+                return Ok(());
+            }
+            KeyCode::Esc => {
+                app.shell_state = None;
+                return Ok(());
+            }
+            _ => app.shell_state = None,
+        }
+    }
+    if app.shell_completion_rx.is_some() {
+        app.shell_completion_rx = None;
+        if key.code == KeyCode::Esc {
+            return Ok(());
+        }
+    }
+    if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
+        app.shell_recall = None;
+    }
 
     // Slash-command autocomplete captures navigation while it's showing. Typing
     // (chars/backspace) still falls through so the list keeps filtering.
@@ -579,6 +655,7 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
                 .map(|workspace| workspace.root().to_string_lossy().into_owned());
             app.execute(AppCommand::SetWorkMode { mode, root })?;
         }
+        KeyCode::Tab if app.input_text().starts_with('!') => app.start_shell_completion(),
         KeyCode::Enter if shift || ctrl => app.input.insert_newline(),
         // A parked survey gate (survey answer or plan approval) intercepts
         // Enter — but only while the *viewed* session is the gated one, so a
@@ -639,6 +716,8 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
         // only once it's already at the top/bottom row do they scroll history.
         // Shift+Up/Down falls through to the default keymap instead, so it
         // extends the selection rather than being swallowed by this.
+        KeyCode::Up if !shift && !ctrl && app.shell_history_mode() => app.recall_prev(),
+        KeyCode::Down if !shift && !ctrl && app.shell_history_mode() => app.recall_next(),
         KeyCode::Up if !shift => {
             let before = app.input.cursor();
             app.input.move_cursor(CursorMove::Up);
@@ -1042,6 +1121,95 @@ mod tests {
             assert!(app.approval_request.is_none());
         }
         drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shell_dropdown_uses_tab_arrows_enter_and_escape_without_running() {
+        let mut app = test_app();
+        let root = app.space.root.clone();
+        let cwd = app.user_command_cwd();
+        for name in ["alpha", "alps"] {
+            std::fs::create_dir(cwd.join(name)).unwrap();
+        }
+        app.user_shell
+            .set(nexus_core::usershell::UserShell {
+                shell: "/bin/sh".into(),
+                snapshot: None,
+                path: String::new(),
+                names: Vec::new(),
+                warning: None,
+            })
+            .unwrap();
+        app.set_input("!cd al");
+        handle_normal(&mut app, KeyCode::Tab.into()).unwrap();
+        let completion = next_shell_completion(&mut app.shell_completion_rx)
+            .await
+            .unwrap();
+        app.finish_shell_completion(completion);
+        assert_eq!(app.input_text(), "!cd alp");
+        assert!(app.shell_state.is_some());
+        handle_normal(&mut app, KeyCode::Down.into()).unwrap();
+        assert_eq!(app.shell_state.as_ref().unwrap().selected, 1);
+        handle_normal(&mut app, KeyCode::Up.into()).unwrap();
+        assert_eq!(app.shell_state.as_ref().unwrap().selected, 0);
+        handle_normal(&mut app, KeyCode::Enter.into()).unwrap();
+        assert_eq!(app.input_text(), "!cd alpha/");
+        assert!(app.shell_state.is_none());
+        assert!(app.session.is_none());
+        app.set_input("!cd al");
+        handle_normal(&mut app, KeyCode::Tab.into()).unwrap();
+        let completion = next_shell_completion(&mut app.shell_completion_rx)
+            .await
+            .unwrap();
+        app.finish_shell_completion(completion);
+        handle_normal(&mut app, KeyCode::Down.into()).unwrap();
+        handle_normal(&mut app, KeyCode::Tab.into()).unwrap();
+        assert_eq!(app.input_text(), "!cd alps/");
+        assert!(app.shell_state.is_none());
+        assert!(app.session.is_none());
+        app.set_input("!cd al");
+        handle_normal(&mut app, KeyCode::Tab.into()).unwrap();
+        let completion = next_shell_completion(&mut app.shell_completion_rx)
+            .await
+            .unwrap();
+        app.finish_shell_completion(completion);
+        handle_normal(&mut app, KeyCode::Esc.into()).unwrap();
+        assert_eq!(app.input_text(), "!cd alp");
+        assert!(app.shell_state.is_none());
+        app.set_input("!ssh nowhere");
+        app.core.interactive_ui = true;
+        handle_normal(&mut app, KeyCode::Enter.into()).unwrap();
+        // Programs that need a terminal get it, rather than a captured run.
+        assert!(matches!(
+            app.pending_editor,
+            Some(nexus_core::app::PendingEditor::UserCommand(ref cmd)) if cmd == "ssh nowhere"
+        ));
+        assert!(app.session.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plain_arrows_recall_bang_commands_and_restore_empty_input() {
+        let mut app = test_app();
+        let root = app.space.root.clone();
+        let session = app
+            .db
+            .create_session("history", "a/one", &app.active_space.id, "chat")
+            .unwrap();
+        for cmd in ["first", "second"] {
+            app.db
+                .add_user_command_message(&session.id, &serde_json::json!({"cmd": cmd}).to_string())
+                .unwrap();
+        }
+        for expected in ["!second", "!first", "!first"] {
+            handle_normal(&mut app, KeyCode::Up.into()).unwrap();
+            assert_eq!(app.input_text(), expected);
+        }
+        for expected in ["!second", "", ""] {
+            handle_normal(&mut app, KeyCode::Down.into()).unwrap();
+            assert_eq!(app.input_text(), expected);
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

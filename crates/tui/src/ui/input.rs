@@ -58,6 +58,15 @@ pub(super) fn render_input(f: &mut Frame, app: &mut AppView, area: Rect) {
             .fg(if busy { border_color } else { app.theme.accent })
             .add_modifier(Modifier::BOLD),
     )];
+    if app.input_text().starts_with('!') {
+        title.push(Span::styled(
+            format!(
+                "{} ",
+                nexus_core::usershell::display_dir(&app.user_command_cwd())
+            ),
+            Style::default().fg(app.theme.fg_dim),
+        ));
+    }
     if let Some(activity) = activity {
         title.push(Span::styled(
             format!("{activity} "),
@@ -99,6 +108,27 @@ pub(super) fn render_input(f: &mut Frame, app: &mut AppView, area: Rect) {
 /// Slash-command autocomplete: a fuzzy-ranked list floating just above the
 /// input box: `/name` in the accent color, its description dimmed alongside.
 pub(super) fn render_command_popup(f: &mut Frame, app: &AppView, input_area: Rect) {
+    if let Some(state) = &app.shell_state {
+        let items = state
+            .candidates
+            .iter()
+            .map(|candidate| {
+                ListItem::new(Span::styled(
+                    candidate.clone(),
+                    Style::default().fg(app.theme.accent),
+                ))
+            })
+            .collect();
+        floating_menu(
+            f,
+            app,
+            input_area,
+            ("shell", "Tab/Enter insert · Esc cancel"),
+            items,
+            state.selected,
+        );
+        return;
+    }
     let matches = app.command_matches();
     if matches.is_empty() {
         return;

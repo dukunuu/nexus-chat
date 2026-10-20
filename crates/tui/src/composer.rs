@@ -30,7 +30,8 @@ enum UserCommand {
     Empty,
     /// Output captured into the conversation.
     Captured(String),
-    /// Gets the real terminal: `!tty <cmd>`, or a `sudo`/`doas`/`su`/`pkexec`/`ssh` command.
+    /// Gets the real terminal: `!tty <cmd>`, or a program that needs one
+    /// (`sudo`, `ssh`, `vim`, `less`, …; see `usershell::terminal_program`).
     Interactive(String),
 }
 
@@ -44,11 +45,27 @@ fn parse_user_command(text: &str) -> Option<UserCommand> {
         (Some(rest), _) if rest.trim().is_empty() => UserCommand::Empty,
         (Some(rest), _) => UserCommand::Interactive(rest.trim().to_string()),
         (None, None) => UserCommand::Empty,
-        (None, Some("sudo" | "doas" | "su" | "pkexec" | "ssh")) => {
+        (None, Some(_)) if nexus_core::usershell::terminal_program(cmd).is_some() => {
             UserCommand::Interactive(cmd.to_string())
         }
         (None, Some(_)) => UserCommand::Captured(cmd.to_string()),
     })
+}
+
+/// Visible shell candidates and the word they replace.
+pub struct ShellCompletionState {
+    pub candidates: Vec<String>,
+    pub selected: usize,
+    pub range: std::ops::Range<usize>,
+}
+
+/// A background result, tied to the exact draft and context that requested it.
+pub struct ShellCompletionResult {
+    pub text: String,
+    pub cursor: usize,
+    pub cwd: std::path::PathBuf,
+    pub session: Option<String>,
+    pub completion: nexus_core::usershell::Completion,
 }
 
 /// A composer `TextArea` with sane styling: no underlined cursor line, and a
@@ -102,6 +119,8 @@ impl AppView {
 
     /// Replace the composer contents, cursor at end.
     pub fn set_input(&mut self, text: &str) {
+        self.shell_state = None;
+        self.shell_completion_rx = None;
         let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
         let row = lines.len().saturating_sub(1);
         let col = lines.last().map_or(0, |l| l.chars().count());
@@ -109,6 +128,8 @@ impl AppView {
     }
 
     pub fn clear_input(&mut self) {
+        self.shell_state = None;
+        self.shell_completion_rx = None;
         self.input = new_textarea();
     }
 
@@ -355,6 +376,128 @@ impl AppView {
             .move_cursor(CursorMove::Jump(row as u16, col as u16));
     }
 
+    // --- user-shell completion ---
+
+    pub fn shell_history_mode(&self) -> bool {
+        let text = self.input_text();
+        text.is_empty() || text.starts_with('!')
+    }
+
+    fn cursor_byte(&self) -> usize {
+        let (row, col) = self.input.cursor();
+        self.input
+            .lines()
+            .iter()
+            .take(row)
+            .map(|line| line.len() + 1)
+            .sum::<usize>()
+            + self.input.lines()[row]
+                .char_indices()
+                .nth(col)
+                .map_or(self.input.lines()[row].len(), |(i, _)| i)
+    }
+
+    fn replace_shell_word(&mut self, range: std::ops::Range<usize>, replacement: &str) {
+        let mut text = self.input_text();
+        let end = range.start + replacement.len();
+        text.replace_range(range, replacement);
+        self.set_input(&text);
+        let before = &text[..end];
+        let row = before.bytes().filter(|b| *b == b'\n').count();
+        let col = before
+            .rsplit('\n')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .count();
+        self.jump_cursor((row, col));
+    }
+
+    pub fn start_shell_completion(&mut self) {
+        let text = self.input_text();
+        if !text.starts_with('!') {
+            return;
+        }
+        self.at_state = None;
+        let cursor = self.cursor_byte();
+        let cwd = self.user_command_cwd();
+        let session = self.session.as_ref().map(|s| s.id.clone());
+        let setup = std::sync::Arc::clone(&self.user_shell);
+        let data = self.space.root.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.shell_completion_rx = Some(rx);
+        tokio::spawn(async move {
+            let setup = setup
+                .get_or_init(|| nexus_core::usershell::UserShell::load(&data))
+                .await;
+            let completion = nexus_core::usershell::complete(setup, &text, cursor, &cwd).await;
+            let _ = tx.send(ShellCompletionResult {
+                text,
+                cursor,
+                cwd,
+                session,
+                completion,
+            });
+        });
+    }
+
+    pub fn finish_shell_completion(&mut self, result: ShellCompletionResult) {
+        self.shell_completion_rx = None;
+        self.report_user_shell_warning();
+        if self.input_text() != result.text
+            || self.cursor_byte() != result.cursor
+            || self.user_command_cwd() != result.cwd
+            || self.session.as_ref().map(|s| s.id.clone()) != result.session
+        {
+            return;
+        }
+        let completion = result.completion;
+        if completion.candidates.is_empty() {
+            return;
+        }
+        if completion.candidates.len() == 1 {
+            self.shell_state = Some(ShellCompletionState {
+                candidates: completion.candidates,
+                selected: 0,
+                range: completion.range,
+            });
+            self.accept_shell_match();
+            return;
+        }
+        let prefix = nexus_core::usershell::common_prefix(&completion.candidates);
+        let range = if prefix.is_empty() {
+            completion.range
+        } else {
+            let start = completion.range.start;
+            self.replace_shell_word(completion.range, &prefix);
+            start..start + prefix.len()
+        };
+        self.shell_state = Some(ShellCompletionState {
+            candidates: completion.candidates,
+            selected: 0,
+            range,
+        });
+    }
+
+    pub fn move_shell_selection(&mut self, delta: i32) {
+        if let Some(state) = &mut self.shell_state {
+            state.selected =
+                (state.selected as i32 + delta).rem_euclid(state.candidates.len() as i32) as usize;
+        }
+    }
+
+    pub fn accept_shell_match(&mut self) {
+        let Some(state) = self.shell_state.take() else {
+            return;
+        };
+        let mut candidate = state.candidates[state.selected].clone();
+        let text = self.input_text();
+        if !candidate.ends_with('/') && !text[state.range.end..].starts_with(char::is_whitespace) {
+            candidate.push(' ');
+        }
+        self.replace_shell_word(state.range, &candidate);
+    }
+
     // --- slash command autocomplete ---
 
     /// Fuzzy-ranked command suggestions for the current composer text. Empty
@@ -431,6 +574,10 @@ impl AppView {
     }
 
     pub fn refresh_at_matches(&mut self) {
+        if self.input_text().starts_with('!') {
+            self.at_state = None;
+            return;
+        }
         let Some((query, at_offset)) = self.at_query() else {
             self.at_state = None;
             return;
@@ -506,6 +653,10 @@ impl AppView {
     /// Alt+↑: replace the composer with the previous message this session
     /// sent, stashing the current draft on the first step.
     pub fn recall_prev(&mut self) {
+        if self.shell_history_mode() {
+            self.recall_shell_prev();
+            return;
+        }
         let sent: Vec<String> = self
             .core
             .messages
@@ -527,6 +678,15 @@ impl AppView {
     /// Alt+↓: step forward through recalled messages, back to the stashed
     /// draft past the newest one.
     pub fn recall_next(&mut self) {
+        if let Some((history, index, draft)) = self.shell_recall.take() {
+            if index == 0 {
+                self.set_input(&draft);
+            } else {
+                self.set_input(&history[index - 1]);
+                self.shell_recall = Some((history, index - 1, draft));
+            }
+            return;
+        }
         match self.recall {
             None => {}
             Some(0) => {
@@ -551,12 +711,46 @@ impl AppView {
         }
     }
 
+    fn recall_shell_prev(&mut self) {
+        if let Some((history, index, draft)) = self.shell_recall.take() {
+            let index = (index + 1).min(history.len() - 1);
+            self.set_input(&history[index]);
+            self.shell_recall = Some((history, index, draft));
+            return;
+        }
+        let mut history = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let session_commands = self
+            .messages
+            .iter()
+            .rev()
+            .filter(|m| m.role == "user_command")
+            .filter_map(|m| serde_json::from_str::<serde_json::Value>(&m.content).ok())
+            .filter_map(|row| row["cmd"].as_str().map(str::to_string));
+        for cmd in session_commands.chain(self.db.recent_user_commands().unwrap_or_default()) {
+            if !cmd.is_empty() && seen.insert(cmd.clone()) {
+                history.push(format!("!{cmd}"));
+                if history.len() == 200 {
+                    break;
+                }
+            }
+        }
+        if history.is_empty() {
+            return;
+        }
+        let draft = self.input_text();
+        self.set_input(&history[0]);
+        self.recall = None;
+        self.shell_recall = Some((history, 0, draft));
+    }
+
     /// Send the composer's current text (Enter): clear, then route through
     /// `run_command` for `/`-commands, the user-command path for `!cmd`, or
     /// `Send` for plain messages. Domain failure paths restore the text via
     /// `AppEvent::ComposerSet`.
     pub fn submit(&mut self) -> Result<()> {
         self.recall = None;
+        self.shell_recall = None;
         let text = self.input_text();
         self.clear_input();
         self.sel.clear(); // history line indices are about to shift
@@ -969,6 +1163,94 @@ mod tests {
         assert_eq!(a.input_text(), "half-typed");
     }
 
+    #[tokio::test]
+    async fn shell_completion_replaces_a_quoted_word_at_a_unicode_cursor() {
+        let mut app = test_app();
+        let root = app.space.root.clone();
+        let cwd = app.user_command_cwd();
+        std::fs::write(cwd.join("foo bar"), "").unwrap();
+        let text = "!echo é \"foo b\" tail";
+        app.set_input(text);
+        app.input.move_cursor(CursorMove::Jump(0, 14));
+        let cursor = app.cursor_byte();
+        let setup = nexus_core::usershell::UserShell {
+            shell: "/bin/sh".into(),
+            snapshot: None,
+            path: String::new(),
+            names: Vec::new(),
+            warning: None,
+        };
+        let completion = nexus_core::usershell::complete(&setup, text, cursor, &cwd).await;
+        app.finish_shell_completion(ShellCompletionResult {
+            text: text.into(),
+            cursor,
+            cwd,
+            session: None,
+            completion,
+        });
+        assert_eq!(app.input_text(), "!echo é foo\\ bar tail");
+        assert!(app.shell_state.is_none());
+        assert_eq!(app.input.cursor(), (0, 16));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shell_history_is_session_first_unique_and_restores_the_bang_draft() {
+        let mut app = test_app();
+        let current = app
+            .db
+            .create_session("current", "a/one", &app.active_space.id, "chat")
+            .unwrap();
+        for cmd in ["ls", "pwd", "ls"] {
+            app.db
+                .add_user_command_message(&current.id, &serde_json::json!({"cmd": cmd}).to_string())
+                .unwrap();
+        }
+        let other = app
+            .db
+            .create_session("other", "a/one", &app.active_space.id, "chat")
+            .unwrap();
+        for cmd in ["old", "ls", "recent"] {
+            app.db
+                .add_user_command_message(&other.id, &serde_json::json!({"cmd": cmd}).to_string())
+                .unwrap();
+        }
+        app.core.messages = app.db.load_messages(&current.id).unwrap();
+        app.set_input("!draft");
+        for expected in ["!ls", "!pwd", "!recent", "!old", "!old"] {
+            app.recall_prev();
+            assert_eq!(app.input_text(), expected);
+        }
+        for expected in ["!recent", "!pwd", "!ls", "!draft", "!draft"] {
+            app.recall_next();
+            assert_eq!(app.input_text(), expected);
+        }
+    }
+
+    #[test]
+    fn recent_shell_history_is_capped_at_two_hundred_unique_commands() {
+        let app = test_app();
+        let session = app
+            .db
+            .create_session("history", "a/one", &app.active_space.id, "chat")
+            .unwrap();
+        for i in 0..205 {
+            app.db
+                .add_user_command_message(
+                    &session.id,
+                    &serde_json::json!({"cmd": format!("echo {i}")}).to_string(),
+                )
+                .unwrap();
+        }
+        app.db
+            .add_user_command_message(&session.id, r#"{"cmd":"echo 204"}"#)
+            .unwrap();
+        let history = app.db.recent_user_commands().unwrap();
+        assert_eq!(history.len(), 200);
+        assert_eq!(history[0], "echo 204");
+        assert_eq!(history.last().unwrap(), "echo 5");
+    }
+
     #[test]
     fn bang_lines_parse_into_user_commands() {
         for (text, expected) in [
@@ -986,6 +1268,11 @@ mod tests {
                 "!ssh host",
                 Some(UserCommand::Interactive("ssh host".into())),
             ),
+            (
+                "!less log.txt",
+                Some(UserCommand::Interactive("less log.txt".into())),
+            ),
+            ("!sudoku", Some(UserCommand::Captured("sudoku".into()))),
             ("!ttyd", Some(UserCommand::Captured("ttyd".into()))),
             ("!", Some(UserCommand::Empty)),
             ("!tty ", Some(UserCommand::Empty)),

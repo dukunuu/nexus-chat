@@ -1594,6 +1594,19 @@ impl Db {
         Ok(messages)
     }
 
+    /// Recent user-typed shell commands across sessions, newest first and unique.
+    pub fn recent_user_commands(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT json_extract(content, '$.cmd') AS cmd FROM messages
+             WHERE role = 'user_command' AND json_valid(content)
+               AND json_type(content, '$.cmd') = 'text'
+             GROUP BY cmd ORDER BY MAX(created_at) DESC, MAX(rowid) DESC LIMIT 200",
+        )?;
+        Ok(stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Insert a user message (no model/reasoning/stats). Returns its id.
     pub fn add_user_message(&self, session_id: &str, content: &str) -> Result<String> {
         self.insert_message(

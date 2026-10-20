@@ -247,6 +247,14 @@ impl App {
     /// Where `!` commands run: the workspace root in agent mode, else the
     /// active space's directory (created if missing).
     pub fn user_command_cwd(&self) -> std::path::PathBuf {
+        if let Some(dir) = &self.user_command_dir {
+            return dir.clone();
+        }
+        let default = self.default_user_command_cwd();
+        default.canonicalize().unwrap_or(default)
+    }
+
+    fn default_user_command_cwd(&self) -> std::path::PathBuf {
         if let Some(workspace) = self
             .workspace
             .as_ref()
@@ -258,7 +266,38 @@ impl App {
         self.space.space_dir(&self.active_space.name)
     }
 
-    /// `!cmd`: run `sh -c <cmd>` as the user — full environment, no gate, no
+    pub(super) fn reset_user_command_dir(&mut self) {
+        self.user_command_dir = None;
+        self.user_command_context = None;
+        self.user_command_epoch += 1;
+    }
+
+    pub(super) fn user_command_context(&self) -> UserCommandContext {
+        UserCommandContext {
+            session: self.session.as_ref().map(|session| session.id.clone()),
+            space: self.active_space.id.clone(),
+            mode: self.work_mode,
+            root: self
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.root().to_path_buf()),
+        }
+    }
+
+    /// Report a cached startup failure only once, also when completion initializes it.
+    pub fn report_user_shell_warning(&mut self) {
+        if !self.user_shell_warning_shown
+            && let Some(reason) = self
+                .user_shell
+                .get()
+                .and_then(|setup| setup.warning.clone())
+        {
+            self.user_shell_warning_shown = true;
+            self.push_status(format!("! runs without your shell setup · {reason}"));
+        }
+    }
+
+    /// `!cmd`: run the user's shell as the user — full environment, no gate, no
     /// sandbox — on a background task. Its scrubbed, capped output becomes a
     /// `user_command` row the model sees next turn (`finish_user_command`).
     pub fn run_user_command(&mut self, cmd: String) -> Result<()> {
@@ -275,22 +314,41 @@ impl App {
             self.push_composer_set(format!("!{cmd}"));
             return Ok(());
         }
+        if let Some(word) = crate::usershell::terminal_program(&cmd) {
+            self.push_status(format!("!{word} needs a terminal · run it outside nexus"));
+            return Ok(());
+        }
         let cwd = self.user_command_cwd();
         let session_id =
             self.ensure_session(&cmd, self.current_model.clone().unwrap_or_default())?;
+        self.user_command_context = Some(self.user_command_context());
+        let epoch = self.user_command_epoch;
+        let setup = std::sync::Arc::clone(&self.user_shell);
+        let data = self.space.root.clone();
         let scrubber = crate::trace::Scrubber::new(self.saved_secrets());
         let incognito = self.incognito;
         let (tx, rx) = mpsc::unbounded_channel();
         self.user_command_rx = Some(rx);
         self.push_status(format!("running: {cmd}"));
         tokio::spawn(async move {
+            let setup = setup
+                .get_or_init(|| crate::usershell::UserShell::load(&data))
+                .await;
+            let cwd_file = data.join(format!("shell-cwd-{}", uuid::Uuid::new_v4()));
             let (exit, started, output) =
-                capture_user_command(&cmd, &cwd, USER_COMMAND_TIMEOUT).await;
+                capture_with_shell(&cmd, &cwd, USER_COMMAND_TIMEOUT, setup, &cwd_file).await;
+            let next_dir = std::fs::read_to_string(&cwd_file)
+                .ok()
+                .map(|text| std::path::PathBuf::from(text.trim_end_matches('\n')))
+                .filter(|path| path.is_absolute() && path.is_dir());
+            let _ = std::fs::remove_file(cwd_file);
             let _ = tx.send(UserCommandRun {
                 session_id,
                 incognito,
                 cmd,
-                cwd: cwd.display().to_string(),
+                cwd: crate::usershell::display_dir(&cwd),
+                next_dir,
+                epoch,
                 exit,
                 started,
                 output: crate::tools::cap_head_tail(&scrubber.scrub(&output), USER_COMMAND_CHARS),
@@ -301,6 +359,11 @@ impl App {
 
     /// Store a finished captured `!` command in the session it started in.
     pub(super) fn finish_user_command(&mut self, run: &UserCommandRun) -> Result<()> {
+        if run.epoch == self.user_command_epoch
+            && let Some(dir) = &run.next_dir
+        {
+            self.user_command_dir = Some(dir.clone());
+        }
         self.push_status(format!(
             "ran: {} · {}",
             run.cmd,
@@ -314,7 +377,9 @@ impl App {
             &run.output,
             false,
         );
-        self.store_user_command(&run.session_id, run.incognito, content)
+        self.store_user_command(&run.session_id, run.incognito, content)?;
+        self.report_user_shell_warning();
+        Ok(())
     }
 
     /// Record an interactive `!` command the terminal UI ran on the real
@@ -329,7 +394,7 @@ impl App {
             self.push_status("!commands run only in the terminal UI");
             return Ok(());
         }
-        let cwd = self.user_command_cwd().display().to_string();
+        let cwd = crate::usershell::display_dir(&self.user_command_cwd());
         let session_id =
             self.ensure_session(cmd, self.current_model.clone().unwrap_or_default())?;
         self.push_status(format!(
@@ -2032,12 +2097,22 @@ const USER_COMMAND_DRAIN: std::time::Duration = std::time::Duration::from_secs(2
 const USER_COMMAND_STREAM_OPEN_NOTE: &str =
     "(output stream still open — a background process kept it; not waited for)";
 
+#[derive(PartialEq, Eq)]
+pub(super) struct UserCommandContext {
+    session: Option<String>,
+    space: String,
+    mode: super::WorkMode,
+    root: Option<std::path::PathBuf>,
+}
+
 /// A finished captured `!` command, sent from its task to `next_event`.
 pub(crate) struct UserCommandRun {
     session_id: String,
     incognito: bool,
     cmd: String,
     cwd: String,
+    next_dir: Option<std::path::PathBuf>,
+    epoch: u64,
     exit: Option<i32>,
     started: bool,
     output: String,
@@ -2114,12 +2189,30 @@ fn user_command_replay(content: &str) -> String {
 /// its exit code, whether it started, and combined stdout+stderr. The process
 /// group is killed when the shell exits (no stray background jobs) or at
 /// `timeout`.
+#[cfg(test)]
 async fn capture_user_command(
     cmd: &str,
     cwd: &std::path::Path,
     timeout: std::time::Duration,
 ) -> (Option<i32>, bool, String) {
-    let (child, reader) = match spawn_captured(cmd, cwd) {
+    let setup = crate::usershell::UserShell {
+        shell: "/bin/sh".into(),
+        snapshot: None,
+        path: String::new(),
+        names: Vec::new(),
+        warning: None,
+    };
+    capture_with_shell(cmd, cwd, timeout, &setup, std::path::Path::new("/dev/null")).await
+}
+
+async fn capture_with_shell(
+    cmd: &str,
+    cwd: &std::path::Path,
+    timeout: std::time::Duration,
+    setup: &crate::usershell::UserShell,
+    cwd_file: &std::path::Path,
+) -> (Option<i32>, bool, String) {
+    let (child, reader) = match spawn_captured(cmd, cwd, setup, cwd_file) {
         Ok(spawned) => spawned,
         Err(error) => return (None, false, format!("could not run: {error}")),
     };
@@ -2132,12 +2225,15 @@ async fn capture_user_command(
 fn spawn_captured(
     cmd: &str,
     cwd: &std::path::Path,
+    setup: &crate::usershell::UserShell,
+    cwd_file: &std::path::Path,
 ) -> std::io::Result<(tokio::process::Child, std::io::PipeReader)> {
     // One pipe behind both descriptors keeps stdout and stderr in write order.
     let (reader, writer) = std::io::pipe()?;
-    let mut command = tokio::process::Command::new("sh");
+    let mut command = tokio::process::Command::new(&setup.shell);
     command
-        .args(["-c", cmd])
+        .args(["-c", &setup.wrapper(cmd, cwd)])
+        .env("NEXUS_CWD_FILE", cwd_file)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(writer.try_clone()?)

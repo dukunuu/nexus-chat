@@ -4096,6 +4096,16 @@ fn turn_cache_reports_the_turn_not_its_last_request() {
 fn user_command_app() -> App {
     let mut app = app_with_key();
     app.interactive_ui = true;
+    // Captured-command tests never read the developer's real shell startup.
+    app.user_shell
+        .set(crate::usershell::UserShell {
+            shell: "/bin/sh".into(),
+            snapshot: None,
+            path: std::env::var("PATH").unwrap_or_default(),
+            names: Vec::new(),
+            warning: None,
+        })
+        .unwrap();
     app
 }
 
@@ -4185,6 +4195,155 @@ async fn captured_user_command_stores_its_output_and_replays_as_a_user_message()
             "I ran `echo hello; echo oops >&2; exit 3` in {cwd} (exit 3):\n```\nhello\noops\n```"
         )
     );
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn user_command_directory_persists_and_session_switches_reset_it() {
+    let mut app = user_command_app();
+    let root = app.space.root.clone();
+    let default = app.user_command_cwd().canonicalize().unwrap();
+    std::fs::create_dir(default.join("sub")).unwrap();
+    app.run_user_command("cd sub".into()).unwrap();
+    finish_captured_command(&mut app).await;
+    assert_eq!(app.user_command_cwd(), default.join("sub"));
+    let first: serde_json::Value =
+        serde_json::from_str(&app.messages.last().unwrap().content).unwrap();
+    assert_eq!(first["cwd"], crate::usershell::display_dir(&default));
+    app.run_user_command("cd missing".into()).unwrap();
+    finish_captured_command(&mut app).await;
+    assert_eq!(app.user_command_cwd(), default.join("sub"));
+    app.run_user_command("pwd; exit 7".into()).unwrap();
+    finish_captured_command(&mut app).await;
+    let row: serde_json::Value =
+        serde_json::from_str(&app.messages.last().unwrap().content).unwrap();
+    assert_eq!(
+        row["output"],
+        format!("{}\n", default.join("sub").display())
+    );
+    assert_eq!(
+        row["cwd"],
+        crate::usershell::display_dir(&default.join("sub"))
+    );
+    assert_eq!(row["exit"], 7);
+    let session = app.session.as_ref().unwrap().id.clone();
+    app.new_session();
+    assert_eq!(app.user_command_cwd(), default);
+    app.switch_to_session_by_id(&session).unwrap();
+    assert_eq!(app.user_command_cwd(), default);
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn user_command_directory_resets_on_work_mode_workspace_and_space_changes() {
+    let mut app = user_command_app();
+    let root = app.space.root.clone();
+    let workspace = test_space().root;
+    std::fs::create_dir_all(workspace.join("sub")).unwrap();
+    app.execute(AppCommand::SetWorkMode {
+        mode: WorkMode::Agent,
+        root: Some(workspace.to_string_lossy().into_owned()),
+    })
+    .unwrap();
+    app.run_user_command("cd sub".into()).unwrap();
+    finish_captured_command(&mut app).await;
+    assert_eq!(
+        app.user_command_cwd(),
+        workspace.join("sub").canonicalize().unwrap()
+    );
+    assert_eq!(
+        app.workspace.as_ref().unwrap().root(),
+        workspace.canonicalize().unwrap()
+    );
+    app.execute(AppCommand::SetWorkMode {
+        mode: WorkMode::Chat,
+        root: None,
+    })
+    .unwrap();
+    assert!(app.user_command_dir.is_none());
+    app.execute(AppCommand::SetWorkMode {
+        mode: WorkMode::Agent,
+        root: Some(workspace.to_string_lossy().into_owned()),
+    })
+    .unwrap();
+    app.run_user_command("cd sub".into()).unwrap();
+    finish_captured_command(&mut app).await;
+    app.db.create_space("other").unwrap();
+    app.execute(AppCommand::SwitchSpace {
+        name: "other".into(),
+    })
+    .unwrap();
+    assert!(app.user_command_dir.is_none());
+    assert_eq!(
+        app.user_command_cwd(),
+        app.space.space_dir("other").canonicalize().unwrap()
+    );
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn a_finished_command_cannot_change_a_different_sessions_directory() {
+    let mut app = user_command_app();
+    let root = app.space.root.clone();
+    let default = app.user_command_cwd();
+    std::fs::create_dir(default.join("sub")).unwrap();
+    app.run_user_command("cd sub; sleep 0.1".into()).unwrap();
+    app.new_session();
+    finish_captured_command(&mut app).await;
+    assert_eq!(app.user_command_cwd(), default);
+    assert!(app.messages.is_empty());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn shell_setup_failure_is_reported_only_once_and_commands_still_run() {
+    let mut app = user_command_app();
+    let root = app.space.root.clone();
+    app.user_shell = std::sync::Arc::new(tokio::sync::OnceCell::new());
+    app.user_shell
+        .set(crate::usershell::UserShell {
+            shell: "/bin/sh".into(),
+            snapshot: None,
+            path: String::new(),
+            names: Vec::new(),
+            warning: Some("shell setup timed out".into()),
+        })
+        .unwrap();
+    app.run_user_command("echo first".into()).unwrap();
+    assert_eq!(
+        finish_captured_command(&mut app).await,
+        "! runs without your shell setup · shell setup timed out"
+    );
+    app.run_user_command("echo second".into()).unwrap();
+    assert_eq!(
+        finish_captured_command(&mut app).await,
+        "ran: echo second · exit 0"
+    );
+    assert_eq!(app.messages.len(), 2);
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn terminal_programs_are_not_started_or_recorded() {
+    let mut app = user_command_app();
+    let root = app.space.root.clone();
+    for word in [
+        "vim", "nvim", "nano", "less", "more", "top", "htop", "man", "ssh",
+    ] {
+        app.run_user_command(format!("{word} ignored")).unwrap();
+        assert_eq!(
+            app.last_status(),
+            format!("!{word} needs a terminal · run it outside nexus")
+        );
+        assert!(app.session.is_none());
+        assert!(app.user_command_rx.is_none());
+    }
     drop(app);
     std::fs::remove_dir_all(root).unwrap();
 }

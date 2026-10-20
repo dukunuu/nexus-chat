@@ -1094,6 +1094,13 @@ pub struct App {
     pub(crate) queued_workspace: Option<(ChatTaskId, String)>,
     /// The running captured `!` command's result, at most one at a time.
     user_command_rx: Option<mpsc::UnboundedReceiver<chat::UserCommandRun>>,
+    /// The user's terminal directory; never used by agent tools.
+    pub user_command_dir: Option<std::path::PathBuf>,
+    /// Lazy shell setup, shared by command execution and composer completion.
+    pub user_shell: Arc<tokio::sync::OnceCell<crate::usershell::UserShell>>,
+    user_shell_warning_shown: bool,
+    user_command_context: Option<chat::UserCommandContext>,
+    user_command_epoch: u64,
     /// Answer-length preference woven into the system prompt: "normal",
     /// "concise" (default), or "caveman".
     pub verbosity: String,
@@ -1468,6 +1475,11 @@ impl App {
             tui_app_renderer: None,
             queued_workspace: None,
             user_command_rx: None,
+            user_command_dir: None,
+            user_shell: Arc::new(tokio::sync::OnceCell::new()),
+            user_shell_warning_shown: false,
+            user_command_context: None,
+            user_command_epoch: 0,
             verbosity: "concise".to_string(),
             memory_rx: None,
             compact_rx: None,
@@ -1561,6 +1573,7 @@ impl App {
         }
         let workspace = crate::workspace::Workspace::open(&root, deny)?;
         workspace.resolve(".", crate::workspace::Access::Read)?;
+        self.reset_user_command_dir();
         self.workspace = Some(Arc::new(workspace));
         self.work_mode = mode;
         self.job_approver = Some(approver);
@@ -1635,6 +1648,7 @@ impl App {
         if !self.incognito {
             self.execute(AppCommand::Incognito { on: true })?;
         }
+        self.reset_user_command_dir();
         self.workspace = Some(Arc::new(workspace));
         self.work_mode = WorkMode::Agent;
         if self.eval_approver.is_none() {
@@ -1751,6 +1765,7 @@ impl App {
                     .set_session_workspace_mode(&session.id, mode.binding_mode())?;
             }
         }
+        self.reset_user_command_dir();
         self.work_mode = mode;
         self.workspace = workspace;
         self.refresh_toolbox();
@@ -2270,6 +2285,13 @@ impl App {
     /// baseline) — pushed wherever domain code switches sessions, starts a
     /// stream, or otherwise invalidates the rendered conversation.
     pub fn push_viewport_reset(&mut self) {
+        if self
+            .user_command_context
+            .as_ref()
+            .is_some_and(|context| *context != self.user_command_context())
+        {
+            self.reset_user_command_dir();
+        }
         self.pending_events.push_back(AppEvent::ViewportReset);
     }
 
