@@ -26,6 +26,7 @@ use nexus_core::host::{HostConfig, HostServer};
 use nexus_core::provider::Model;
 use nexus_core::provider::openrouter::OpenRouter;
 use nexus_core::space;
+use nexus_core::train;
 
 /// Local-first terminal chat for deep research and multi-agent work.
 #[derive(Parser)]
@@ -92,6 +93,11 @@ pub enum Command {
         /// Emit task results and totals as a JSON object.
         #[arg(long)]
         json: bool,
+    },
+    /// Export recorded traces as training data (offline; never runs training).
+    Train {
+        #[command(subcommand)]
+        cmd: TrainCmd,
     },
     /// Analyze text from the OS clipboard with one headless turn. The
     /// optional instruction is applied to the copied text; when omitted,
@@ -327,6 +333,33 @@ pub enum Command {
 }
 
 #[derive(Subcommand)]
+pub enum TrainCmd {
+    /// Filter, decontaminate and rescrub recorded turns into JSONL.
+    Export {
+        #[arg(long, value_parser = ["chat-jsonl", "sharegpt", "dpo"])]
+        format: String,
+        #[arg(long, default_value = "success", value_parser = ["success", "all"])]
+        filter: String,
+        /// Comma-separated model globs, qualified by backend when needed.
+        #[arg(long, default_value = "local:*,distillable", value_delimiter = ',')]
+        models: Vec<String>,
+        /// Inclusive UTC date (YYYY-MM-DD); complete turns are retained.
+        #[arg(long)]
+        since: Option<chrono::NaiveDate>,
+        /// Only this space; omitted means all spaces.
+        #[arg(long)]
+        space: Option<String>,
+        #[arg(long, default_value = "./evals")]
+        evals: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// Also write train.jsonl / valid.jsonl (90/10, chat-jsonl only).
+        #[arg(long)]
+        split: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum JobsCmd {
     /// List jobs, including read-only jobs owned by other devices.
     List,
@@ -457,6 +490,7 @@ pub async fn run(cmd: Command) -> Result<()> {
             )
             .await
         }
+        Command::Train { cmd } => train_export(cmd),
         Command::Clip {
             instruction,
             instruction_option,
@@ -3194,6 +3228,83 @@ fn open(reference: &str) -> Result<()> {
     Ok(())
 }
 
+fn train_export(cmd: TrainCmd) -> Result<()> {
+    let TrainCmd::Export {
+        format,
+        filter,
+        models,
+        since,
+        space: space_name,
+        evals,
+        out: output,
+        split,
+    } = cmd;
+    let space = space::Space::open()?;
+    let space_id = space_name
+        .map(|name| -> Result<String> {
+            let db = db::Db::open(&space.db_path())?;
+            db.list_spaces()?
+                .into_iter()
+                .find(|space| space.name == name)
+                .map(|space| space.id)
+                .with_context(|| format!("no space named {name:?} — `nexus spaces` lists them"))
+        })
+        .transpose()?;
+    let saved = config::load_creds_offline();
+    let mut secrets: Vec<_> = [
+        saved.openrouter_key,
+        saved.openai_key,
+        saved.opencode_key,
+        saved.host_token,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if let Some(codex) = saved.codex {
+        secrets.extend([codex.access, codex.refresh]);
+    }
+    // Also redact environment credentials when an on-disk key took precedence.
+    secrets.extend(
+        config::SECRET_ENV_VARS
+            .iter()
+            .filter_map(|key| std::env::var(key).ok()),
+    );
+    let scrubber = nexus_core::trace::Scrubber::new(secrets);
+    let store = nexus_core::trace::TraceStore::open(
+        &space.traces_dir(),
+        nexus_core::trace::Scrubber::new(Vec::new()),
+    )?;
+    let options = train::ExportOptions {
+        format: match format.as_str() {
+            "chat-jsonl" => train::Format::ChatJsonl,
+            "sharegpt" => train::Format::Sharegpt,
+            "dpo" => train::Format::Dpo,
+            _ => unreachable!("clap validates the format"),
+        },
+        filter: if filter == "success" {
+            train::Filter::Success
+        } else {
+            train::Filter::All
+        },
+        models,
+        since,
+        space_id,
+        evals,
+        out: output,
+        split,
+    };
+    // App.models is memory-only, with no persisted distillability metadata.
+    // Do not fetch a catalog or silently assume a license for an offline export.
+    let report = train::export(
+        &store,
+        &options,
+        &scrubber,
+        &std::collections::BTreeMap::new(),
+    )?;
+    out(serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
 // --- helpers ---
 
 /// Find a session by full id, kebab slug, or uuid prefix, across all
@@ -3674,6 +3785,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&dest);
         let _ = std::fs::remove_file(&zip_path);
+    }
+
+    #[test]
+    fn train_export_cli_parses_defaults_and_selection_flags() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "train",
+            "export",
+            "--format",
+            "chat-jsonl",
+            "--out",
+            "data",
+            "--models",
+            "local:*,openrouter:qwen/*",
+            "--since",
+            "2026-10-01",
+            "--space",
+            "work",
+            "--split",
+        ])
+        .unwrap();
+        let Some(Command::Train {
+            cmd:
+                TrainCmd::Export {
+                    format,
+                    filter,
+                    models,
+                    since,
+                    space,
+                    evals,
+                    out,
+                    split,
+                },
+        }) = cli.command
+        else {
+            panic!("expected train export");
+        };
+        assert_eq!(format, "chat-jsonl");
+        assert_eq!(filter, "success");
+        assert_eq!(models, ["local:*", "openrouter:qwen/*"]);
+        assert_eq!(since.unwrap().to_string(), "2026-10-01");
+        assert_eq!(space.as_deref(), Some("work"));
+        assert_eq!(evals, PathBuf::from("./evals"));
+        assert_eq!(out, PathBuf::from("data"));
+        assert!(split);
+        assert!(
+            Cli::try_parse_from([
+                "nexus", "train", "export", "--format", "unknown", "--out", "data",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

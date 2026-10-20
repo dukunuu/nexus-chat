@@ -32,6 +32,7 @@ pub mod space;
 pub mod sync;
 pub mod tools;
 pub mod trace;
+pub mod train;
 pub mod update;
 pub mod workspace;
 

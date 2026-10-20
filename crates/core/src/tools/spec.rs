@@ -226,6 +226,22 @@ pub(super) fn find(name: &str) -> Option<&'static ToolSpec> {
     all_tools().find(|tool| tool.name == name)
 }
 
+pub(super) fn current_tools() -> impl Iterator<Item = (&'static str, Vec<&'static str>)> {
+    all_tools().map(|tool| {
+        (
+            tool.name,
+            tool.actions.iter().map(|action| action.name).collect(),
+        )
+    })
+}
+
+pub(super) fn public_alias(name: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    all_tools().find_map(|tool| {
+        let action = tool.actions.iter().find(|action| action.internal == name)?;
+        Some((tool.name, tool.selector?, action.name))
+    })
+}
+
 pub(super) fn read_only(name: &str, args: &str) -> Option<bool> {
     if let Some(tool) = find(name) {
         let value = serde_json::from_str::<Value>(args).unwrap_or_default();
@@ -1399,6 +1415,25 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn retired_table_aliases_migrate_back_through_dispatch() {
+        for &(tool, args, internal) in ROUTES {
+            if tool == internal {
+                continue;
+            }
+            let (public, selector, mapped) =
+                crate::tools::migrate_tool_call(internal, serde_json::from_str(args).unwrap())
+                    .unwrap();
+            assert_eq!(public, tool);
+            assert_eq!(
+                mapped[selector],
+                serde_json::from_str::<Value>(args).unwrap()[selector]
+            );
+            let mapped = mapped.to_string();
+            assert_eq!(public_call(public, &mapped), Ok((internal.into(), mapped)));
         }
     }
 

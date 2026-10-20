@@ -297,12 +297,60 @@ fn required_array(v: &serde_json::Value, key: &str) -> Result<(), String> {
     }
 }
 
-// Long by design (tool dispatch).
-#[allow(clippy::too_many_lines)]
+const APP_ACTIONS: &[&str] = &[
+    "read",
+    "search",
+    "write",
+    "patch",
+    "diff",
+    "list",
+    "copy_file",
+    "copy_images",
+    "init",
+    "build",
+];
+
+/// All public names and actions, including tools hidden by runtime capabilities.
+pub(crate) fn current_tools() -> Vec<(&'static str, Vec<&'static str>)> {
+    spec::current_tools()
+        .chain([("app", APP_ACTIONS.to_vec()), ("batch", Vec::new())])
+        .collect()
+}
+
+/// Map a retired call to its public name, selector, and rewritten arguments.
+/// Action selection shares dispatch routing; required fields are not checked,
+/// so recorded definitions can be migrated using only their selector values.
+pub(crate) fn migrate_tool_call(
+    name: &str,
+    mut args: serde_json::Value,
+) -> Option<(&'static str, &'static str, serde_json::Value)> {
+    let (internal, _) = public_call_impl(name, &args.to_string(), false).ok()?;
+    if let Some((tool, selector, action)) = spec::public_alias(&internal) {
+        args.as_object_mut()?
+            .insert(selector.into(), serde_json::json!(action));
+        return Some((tool, selector, args));
+    }
+    for action in APP_ACTIONS {
+        let candidate = serde_json::json!({"action": action}).to_string();
+        if public_call_impl("app", &candidate, false).ok()?.0 == internal {
+            args.as_object_mut()?
+                .insert("action".into(), serde_json::json!(action));
+            return Some(("app", "action", args));
+        }
+    }
+    None
+}
+
 /// Normalize advertised consolidated calls onto the specialized implementations below.
 /// The retired names (`skill_admin`, `app_inspect`, `run_python`, …) are intentionally
 /// still accepted by `run()` for persisted/replayed calls, but never returned by `defs()`.
 fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
+    public_call_impl(name, args, true)
+}
+
+// Long by design (tool dispatch).
+#[allow(clippy::too_many_lines)]
+fn public_call_impl(name: &str, args: &str, validate: bool) -> Result<(String, String), String> {
     if let Some(tool) = spec::find(name) {
         let value: serde_json::Value =
             serde_json::from_str(args).map_err(|e| format!("invalid tool arguments: {e}"))?;
@@ -330,6 +378,20 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
             .and_then(|v| v.as_str())
             .filter(|v| !v.trim().is_empty())
             .ok_or_else(|| format!("missing required field: {key}"))
+    };
+    let required_arg = |value: &serde_json::Value, key: &str| {
+        if validate {
+            required_arg(value, key)
+        } else {
+            Ok(())
+        }
+    };
+    let required_array = |value: &serde_json::Value, key: &str| {
+        if validate {
+            required_array(value, key)
+        } else {
+            Ok(())
+        }
     };
     let mapped = match name {
         "skill_admin" => match action("action")? {
@@ -370,7 +432,7 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
             "diff" => {
                 required_arg(&value, "app")?;
                 required_arg(&value, "path")?;
-                if value.get("content").and_then(|v| v.as_str()).is_none() {
+                if validate && value.get("content").and_then(|v| v.as_str()).is_none() {
                     return Err("missing required field: content".to_string());
                 }
                 "diff_app"
@@ -425,7 +487,7 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
             "diff" => {
                 required_arg(&value, "app")?;
                 required_arg(&value, "path")?;
-                if value.get("content").and_then(|v| v.as_str()).is_none() {
+                if validate && value.get("content").and_then(|v| v.as_str()).is_none() {
                     return Err("missing required field: content".to_string());
                 }
                 "diff_app"
@@ -450,7 +512,7 @@ fn public_call(name: &str, args: &str) -> Result<(String, String), String> {
             "list" => "list_scripts",
             "write" => {
                 required_arg(&value, "path")?;
-                if value.get("content").and_then(|v| v.as_str()).is_none() {
+                if validate && value.get("content").and_then(|v| v.as_str()).is_none() {
                     return Err("missing required field: content".to_string());
                 }
                 "write_script"
@@ -1114,7 +1176,7 @@ impl ToolBox {
                 serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "enum": ["read", "search", "write", "patch", "diff", "list", "copy_file", "copy_images", "init", "build"] },
+                        "action": { "type": "string", "enum": APP_ACTIONS },
                         "app": { "type": "string", "description": "app name or UUID" },
                         "path": { "type": "string", "description": "file path within the app" },
                         "pattern": { "type": "string", "description": "case-insensitive search text for search" },

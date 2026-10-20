@@ -291,6 +291,25 @@ impl TraceStore {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Read export candidates in recording order, including complete turns when
+    /// any of their steps is on or after the inclusive RFC 3339 date boundary.
+    pub fn steps_for_export(
+        &self,
+        space_id: Option<&str>,
+        since: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id FROM steps
+             WHERE (?1 IS NULL OR space_id = ?1)
+               AND turn_id IN (SELECT turn_id FROM steps WHERE ?2 IS NULL OR at >= ?2)
+             ORDER BY at, rowid",
+        )?;
+        Ok(statement
+            .query_map(params![space_id, since], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Atomically delete a session's steps, tool results and labels, not blobs.
     pub fn delete_session(&self, session_id: &str) -> Result<()> {
         let mut connection = self.connection()?;
