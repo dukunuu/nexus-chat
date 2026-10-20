@@ -18,6 +18,7 @@ pub mod settings;
 pub mod skills;
 pub mod space;
 pub mod swarm;
+pub mod tui_app;
 pub mod usage;
 pub mod watches;
 

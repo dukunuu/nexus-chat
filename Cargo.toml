@@ -30,6 +30,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 mermaid-rs-renderer = { version = "0.3.1", default-features = false }
 qrcode = "0.14.1"
 rand = "0.10.2"
+rhai = { version = "=1.26.1", default-features = false, features = ["std", "sync", "serde", "no_module", "no_time"] }
 ratatui = "0.30.2"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 resvg = { version = "0.47.0", default-features = false, features = ["text", "system-fonts"] }

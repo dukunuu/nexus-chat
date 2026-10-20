@@ -15,6 +15,7 @@ pub(super) enum Kind {
     Bool,
     StrList,
     Edits,
+    Events,
     Enum(&'static [&'static str]),
 }
 
@@ -61,6 +62,14 @@ impl Param {
                     "required": ["hash"]
                 }
             }),
+            Kind::Events => json!({
+                "type": "array", "maxItems": 100,
+                "items": { "type": "object", "properties": {
+                    "type": { "type": "string", "enum": ["button", "key", "input", "tick"] },
+                    "action": { "type": "string" }, "key": { "type": "string" },
+                    "value": { "type": ["string", "boolean", "number"] }
+                }, "required": ["type"] }
+            }),
             Kind::Enum(values) => json!({ "type": "string", "enum": values }),
         };
         schema["description"] = json!(self.doc);
@@ -79,6 +88,7 @@ impl Param {
             Kind::Num => value.is_number(),
             Kind::Bool => value.is_boolean(),
             Kind::StrList | Kind::Edits => value.as_array().is_some_and(|a| !a.is_empty()),
+            Kind::Events => value.is_array(),
         }
     }
 }
@@ -316,6 +326,94 @@ pub(super) static SKILLS: ToolSpec = ToolSpec {
             optional: &[],
             read_only: false,
             internal: "install_skill",
+        },
+    ],
+};
+
+pub(super) static TUI_APP: ToolSpec = ToolSpec {
+    name: "tui_app",
+    purpose: "Sandboxed Rhai terminal apps in tui_apps/<name>/app.rhai. Export init()->map, update(state,event)->map, view(state)->#{title,view:[nexus-ui nodes or canvas]}. Canvas: #{type:canvas,rows:1-16,cells:[[x,y,char,tone]]}. state.tick_ms>=100 enables ticks. No host access. Preview before open; read gives hash-lines. Names: [a-z0-9-]{1,32}.",
+    selector: Some("action"),
+    params: &[
+        Param {
+            name: "name",
+            kind: Kind::Str,
+            doc: "space app name",
+        },
+        Param {
+            name: "content",
+            kind: Kind::StrOrEmpty,
+            doc: "complete Rhai script",
+        },
+        Param {
+            name: "edits",
+            kind: Kind::Edits,
+            doc: "hash-line edits from read",
+        },
+        Param {
+            name: "events",
+            kind: Kind::Events,
+            doc: "ordered button/action, key/key, input/key/value or tick events",
+        },
+        Param {
+            name: "width",
+            kind: Kind::Int,
+            doc: "preview columns, 1–160 (default 60)",
+        },
+        Param {
+            name: "height",
+            kind: Kind::Int,
+            doc: "preview rows, 1–60 (default 20)",
+        },
+    ],
+    actions: &[
+        ActionSpec {
+            name: "list",
+            summary: "List apps",
+            required: &[],
+            optional: &[],
+            read_only: true,
+            internal: "tui_app_list",
+        },
+        ActionSpec {
+            name: "read",
+            summary: "Read script",
+            required: &["name"],
+            optional: &[],
+            read_only: true,
+            internal: "tui_app_read",
+        },
+        ActionSpec {
+            name: "write",
+            summary: "Write script",
+            required: &["name", "content"],
+            optional: &[],
+            read_only: false,
+            internal: "tui_app_write",
+        },
+        ActionSpec {
+            name: "edit",
+            summary: "Edit script",
+            required: &["name", "edits"],
+            optional: &[],
+            read_only: false,
+            internal: "tui_app_edit",
+        },
+        ActionSpec {
+            name: "preview",
+            summary: "Render grid, log and errors",
+            required: &["name"],
+            optional: &["events", "width", "height"],
+            read_only: true,
+            internal: "tui_app_preview",
+        },
+        ActionSpec {
+            name: "open",
+            summary: "Open popup",
+            required: &["name"],
+            optional: &[],
+            read_only: false,
+            internal: "tui_app_open",
         },
     ],
 };
@@ -1182,6 +1280,7 @@ pub(super) static REQUEST_WORKSPACE: ToolSpec = ToolSpec {
 const TOOLS: &[&ToolSpec] = &[
     &SKILLS,
     &SCRIPTS,
+    &TUI_APP,
     &SEARCH,
     &FETCH_URL,
     &FS,
@@ -1274,6 +1373,24 @@ mod tests {
             r#"{"action":"install","source":"a/b/c"}"#,
             "install_skill",
         ),
+        ("tui_app", r#"{"action":"list"}"#, "tui_app_list"),
+        ("tui_app", r#"{"action":"read","name":"x"}"#, "tui_app_read"),
+        (
+            "tui_app",
+            r#"{"action":"write","name":"x","content":"x"}"#,
+            "tui_app_write",
+        ),
+        (
+            "tui_app",
+            r#"{"action":"edit","name":"x","edits":[{"hash":"h"}]}"#,
+            "tui_app_edit",
+        ),
+        (
+            "tui_app",
+            r#"{"action":"preview","name":"x"}"#,
+            "tui_app_preview",
+        ),
+        ("tui_app", r#"{"action":"open","name":"x"}"#, "tui_app_open"),
         ("scripts", r#"{"action":"list"}"#, "list_scripts"),
         ("scripts", r#"{"action":"read","path":"x"}"#, "read_script"),
         (
@@ -1498,6 +1615,9 @@ mod tests {
             "read_pdf_page",
             "read_script",
             "list_scripts",
+            "tui_app_list",
+            "tui_app_read",
+            "tui_app_preview",
             "list_references",
             "fs_list",
             "fs_glob",

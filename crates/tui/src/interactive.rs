@@ -206,17 +206,22 @@ impl Entry {
                 .style(Style::default().fg(theme.error))
                 .render(Rect::new(0, 1, width, 1), &mut buffer);
         }
-        let hits = self.nodes(session, theme, focused, can_send, &mut buffer);
+        let hits = render_nodes(
+            session,
+            theme,
+            focused.then_some(self.focus),
+            can_send,
+            &mut buffer,
+        );
         Paragraph::new("F2 interact · click controls · Esc back from focus")
             .style(Style::default().fg(theme.fg_dim))
             .render(Rect::new(0, height - 1, width, 1), &mut buffer);
         (buffer, hits)
     }
     fn nodes(
-        &self,
         session: &Session,
         theme: &Theme,
-        focused: bool,
+        focus: Option<usize>,
         can_send: bool,
         buffer: &mut Buffer,
     ) -> Vec<(Rect, usize)> {
@@ -266,7 +271,7 @@ impl Entry {
                             action: control + index,
                             label: &labels[index],
                             body: &bodies[index],
-                            selected: focused && self.focus == control + index,
+                            selected: focus == Some(control + index),
                             enabled: can_send || !session.document().sends(&button.action),
                         })
                         .collect();
@@ -274,7 +279,7 @@ impl Entry {
                     control += items.len();
                 }
                 Node::Input { key, label } => {
-                    let selected = focused && self.focus == control;
+                    let selected = focus == Some(control);
                     let block = chrome::popup_block_focused(
                         label.as_str(),
                         theme,
@@ -294,15 +299,8 @@ impl Entry {
                     control += 1;
                 }
                 _ => {
-                    let new_hits = render_component(
-                        node,
-                        session,
-                        region,
-                        theme,
-                        focused.then_some(self.focus),
-                        control,
-                        buffer,
-                    );
+                    let new_hits =
+                        render_component(node, session, region, theme, focus, control, buffer);
                     control += new_hits.len();
                     hits.extend(new_hits);
                 }
@@ -311,6 +309,16 @@ impl Entry {
         }
         hits
     }
+}
+/// Render validated nexus-ui nodes into a document buffer (nodes start at row 2).
+pub(crate) fn render_nodes(
+    session: &Session,
+    theme: &Theme,
+    focus: Option<usize>,
+    can_send: bool,
+    buffer: &mut Buffer,
+) -> Vec<(Rect, usize)> {
+    Entry::nodes(session, theme, focus, can_send, buffer)
 }
 fn display(session: &Session, template: &str) -> String {
     safe(&session.text(template).unwrap_or_default()).replace('\n', " ")
@@ -897,7 +905,7 @@ impl Widgets {
         }
     }
 }
-fn safe(text: &str) -> String {
+pub(crate) fn safe(text: &str) -> String {
     text.chars()
         .filter(|ch| *ch != '\u{FE0F}' && (!ch.is_control() || *ch == '\n'))
         .collect()

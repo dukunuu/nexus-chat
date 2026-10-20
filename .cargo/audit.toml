@@ -18,7 +18,8 @@
 #   that is out of scope right now. Drop these when zip is upgraded, and never
 #   add an extract() call before then.
 #
-# Unmaintained warnings (bincode/ttf-parser/yaml-rust) are informational —
+# Unmaintained warnings (bincode/ttf-parser/yaml-rust, and smartstring via
+# rhai for scripted terminal apps) are informational —
 # transitive, no known vulnerability, no maintained replacement upstream.
 [advisories]
 ignore = [

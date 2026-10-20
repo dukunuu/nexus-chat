@@ -183,6 +183,7 @@ impl AppView {
                 self.input.insert_str(text);
             }
             Popup::InteractiveUi => self.interactive.paste(text),
+            Popup::TuiApp => crate::ui::popups::tui_app::paste(self, text),
             Popup::Key => self.key_input.push_str(text),
             Popup::Jobs => {
                 if let Some(form) = &mut self.jobs_popup.form {
@@ -650,6 +651,7 @@ impl AppView {
                     self.open_apps_popup();
                 }
             }
+            AppCommand::OpenTuiApp(name) => crate::ui::popups::tui_app::open(self, &name),
             AppCommand::OpenJobs => crate::ui::popups::jobs::open(self, false)?,
             AppCommand::OpenJobForm => crate::ui::popups::jobs::open(self, true)?,
             AppCommand::OpenUsage => self.open_usage_popup(),

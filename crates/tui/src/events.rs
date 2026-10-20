@@ -91,6 +91,7 @@ async fn run_loop(
     loop {
         app.sync_approval_popup();
         take_proposed_command(app);
+        ui::popups::tui_app::take_pending(app);
         // Locally-queued UI feedback (status lines, composer restore,
         // viewport resets) applies before the draw so it lands on the same
         // frame as the action that caused it.
@@ -106,6 +107,7 @@ async fn run_loop(
         let long_deadline = app.sel.deadline();
         let welcome = app.is_welcome();
         let status_deadline = app.status_deadline();
+        let tui_app_deadline = ui::popups::tui_app::deadline(app);
         tokio::select! {
             maybe = reader.next() => match maybe {
                 Some(Ok(Event::Key(k))) if k.kind == KeyEventKind::Press => {
@@ -212,6 +214,12 @@ async fn run_loop(
                     std::future::pending::<()>().await;
                 }
             } => app.tick_spinner(),
+            () = async {
+                match tui_app_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => ui::popups::tui_app::tick(app),
             // Long-press (held, unmoved) copies the message, code block, or
             // link under the pointer.
             () = async {
@@ -346,6 +354,7 @@ fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
         Popup::Files => ui::popups::files::handle_key(app, key)?,
         Popup::Apps => ui::popups::apps::handle_key(app, key)?,
         Popup::InteractiveUi => crate::interactive::key(app, key),
+        Popup::TuiApp => ui::popups::tui_app::handle_key(app, key),
         Popup::Watch => ui::popups::watches::handle_key(app, key)?,
         Popup::ResearchLive => {
             ui::popups::research_live::handle_key(app, key);
@@ -850,6 +859,10 @@ fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
             return Ok(());
         }
         handle_input_mouse(app, m);
+        return Ok(());
+    }
+    if app.popup == Popup::TuiApp {
+        ui::popups::tui_app::mouse(app, m);
         return Ok(());
     }
     if app.popup == Popup::InteractiveUi {

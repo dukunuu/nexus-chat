@@ -33,6 +33,7 @@ pub mod sync;
 pub mod tools;
 pub mod trace;
 pub mod train;
+pub mod tui_apps;
 pub mod update;
 pub mod workspace;
 

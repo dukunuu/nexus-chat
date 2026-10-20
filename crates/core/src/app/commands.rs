@@ -130,6 +130,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["app", "webapps"],
     },
     Command {
+        name: "tuiapp",
+        desc: "run a scripted terminal app from this space",
+        aliases: &[],
+    },
+    Command {
         name: "research",
         desc: "deep multi-agent research (blank = scope topic from this chat)",
         aliases: &["deep-research"],
@@ -346,6 +351,8 @@ pub enum AppCommand {
     OpenFiles { tab: FilesTab },
     /// `/apps` — the apps popup.
     OpenApps,
+    /// Open a sandboxed space-local terminal app.
+    OpenTuiApp(String),
     /// `/research [topic]` — `gated: false` skips the plan-approval gate
     /// (`/research!`); an empty topic distills one from recent chat.
     RunResearch { topic: String, gated: bool },
@@ -467,6 +474,7 @@ impl App {
                 },
             }),
             "apps" => Ok(AppCommand::OpenApps),
+            "tuiapp" => Ok(AppCommand::OpenTuiApp(rest(cmd, token))),
             "research" => Ok(AppCommand::RunResearch {
                 topic: rest(cmd, token),
                 gated: true,
@@ -546,6 +554,7 @@ impl App {
             | AppCommand::OpenSkills
             | AppCommand::OpenFiles { .. }
             | AppCommand::OpenApps
+            | AppCommand::OpenTuiApp(_)
             | AppCommand::OpenUsage
             | AppCommand::OpenJobForm
             | AppCommand::OpenProcs

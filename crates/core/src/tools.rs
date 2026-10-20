@@ -193,6 +193,12 @@ pub struct ToolBox {
     pub approver: Option<Arc<dyn Approver>>,
     /// Offer `propose_command`: only a terminal UI has a composer to put it in.
     pub interactive_ui: bool,
+    /// Terminal renderer supplied only by the interactive frontend.
+    pub tui_app_renderer: Option<crate::tui_apps::PreviewRenderer>,
+    /// Open requests consumed by the terminal event loop.
+    pub pending_tui_app: crate::tui_apps::PendingOpen,
+    /// Space-local scripted terminal apps.
+    pub space_tui_apps_dir: PathBuf,
     /// App-managed destination for newly created or downloaded skills.
     pub skills_dir: PathBuf,
     /// Skill roots in precedence order. These include the app-managed root and
@@ -871,6 +877,9 @@ impl ToolBox {
             require_approval: false,
             approver: None,
             interactive_ui: false,
+            tui_app_renderer: None,
+            pending_tui_app: Arc::default(),
+            space_tui_apps_dir: PathBuf::new(),
             skill_dirs: vec![skills_dir.clone()],
             skills_dir,
             searxng_url,
@@ -1150,6 +1159,10 @@ impl ToolBox {
         }
         if self.interactive_ui {
             defs.push(def(&spec::PROPOSE_COMMAND, &["propose_command"]));
+            defs.push(def(
+                &spec::TUI_APP,
+                &["list", "read", "write", "edit", "preview", "open"],
+            ));
         }
         if self.workspace.is_none() && self.approver.is_some() {
             defs.push(def(&spec::REQUEST_WORKSPACE, &["request_workspace"]));
@@ -1717,6 +1730,23 @@ impl ToolBox {
             }
         }
         let (result, status) = match name {
+            "tui_app_list" | "tui_app_read" | "tui_app_write" | "tui_app_edit"
+            | "tui_app_preview" | "tui_app_open" => {
+                if !self.interactive_ui {
+                    return ("tui_app needs the terminal UI".into(), "blocked".into());
+                }
+                let args = serde_json::from_str(args).unwrap_or_default();
+                let action = name.strip_prefix("tui_app_").expect("app action");
+                let result = crate::tui_apps::tool(
+                    &self.space_tui_apps_dir,
+                    action,
+                    &args,
+                    self.tui_app_renderer,
+                    &self.pending_tui_app,
+                )
+                .unwrap_or_else(|error| format!("tui_app error: {error}"));
+                (result, format!("Terminal app {action}…"))
+            }
             "propose_command" => {
                 if !self.interactive_ui {
                     return (
@@ -4773,7 +4803,10 @@ fn valid_relative_path(path: &str) -> bool {
             .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
-fn confined_join(root: &std::path::Path, rel: &str) -> Result<std::path::PathBuf, String> {
+pub(crate) fn confined_join(
+    root: &std::path::Path,
+    rel: &str,
+) -> Result<std::path::PathBuf, String> {
     if !valid_relative_path(rel) {
         return Err(format!("invalid path: {rel:?}"));
     }
@@ -4901,7 +4934,7 @@ fn legacy_line_hash(line_no: usize, content: &str) -> String {
 
 /// `read_app_file`'s line prefix: `N:HASH<tab>content`, one hash per line so
 /// `edit_file` can target it without substring matching.
-fn number_lines_with_hash(slice: &[&str], start: usize) -> String {
+pub(crate) fn number_lines_with_hash(slice: &[&str], start: usize) -> String {
     slice
         .iter()
         .enumerate()
@@ -4921,7 +4954,7 @@ fn number_lines_with_hash(slice: &[&str], start: usize) -> String {
 /// against the current file and never silently land on a different line.
 /// Returns the new file content plus a git-diff-style summary of what changed,
 /// in the order edits were given.
-fn apply_hashline_edits(
+pub(crate) fn apply_hashline_edits(
     text: &str,
     edits: &[(String, Option<usize>, Option<String>)],
 ) -> Result<(String, String), String> {
