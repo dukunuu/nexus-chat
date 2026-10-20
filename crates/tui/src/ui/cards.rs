@@ -173,9 +173,17 @@ pub(super) fn push_tool_call(
             .to_string()
     };
     let (name, args, result) = (field("name"), field("arguments"), field("result"));
+    push_round_preamble(
+        out,
+        &[field("reasoning_content"), field("thinking")],
+        &field("assistant_content"),
+        settings,
+        width,
+        theme,
+    );
     let view = nexus_core::app::tool_call_view(&name, &args, &result);
     if !view.verb.is_empty() {
-        push_workspace_call(out, &view, expanded, settings, width, theme);
+        push_workspace_call(out, &view, &result, expanded, settings, width, theme);
         return;
     }
     let summary = nexus_core::app::tool_call_summary(&name, &args, &result);
@@ -204,9 +212,70 @@ pub(super) fn push_tool_call(
     }
 }
 
+/// What the model thought and said before a round of tool calls, drawn
+/// above the round's first call so a tool loop reads in order: thinking,
+/// calls, thinking, calls, answer. Reasoning folds like a reply's (Ctrl+R).
+fn push_round_preamble(
+    out: &mut Vec<Line<'static>>,
+    reasoning: &[String],
+    said: &str,
+    settings: &nexus_core::app::Settings,
+    width: usize,
+    theme: &crate::theme::Theme,
+) {
+    let reasoning = reasoning
+        .iter()
+        .map(|text| text.trim())
+        .find(|text| !text.is_empty());
+    if let Some(reasoning) = reasoning {
+        // The same rail as a reply's reasoning, so thinking that streamed
+        // live keeps its look when its round's calls land.
+        let rail = Span::styled(
+            format!("{} ", glyph::RAIL),
+            Style::default().fg(theme.border_dim),
+        );
+        if settings.show_reasoning {
+            out.push(Line::from(vec![
+                rail.clone(),
+                dim(format!("{} reasoning", glyph::EXPANDED), theme),
+            ]));
+            for line in wrap_plain(reasoning, width.saturating_sub(2)) {
+                out.push(Line::from(vec![rail.clone(), dim(line, theme)]));
+            }
+        } else {
+            let hint = if settings.hide_hints {
+                ""
+            } else {
+                " — Ctrl+R to expand"
+            };
+            out.push(Line::from(vec![
+                rail,
+                dim(
+                    format!(
+                        "{} reasoning ({} chars){hint}",
+                        glyph::SELECTED,
+                        reasoning.chars().count()
+                    ),
+                    theme,
+                ),
+            ]));
+        }
+    }
+    let said = said.trim();
+    if !said.is_empty() {
+        for line in wrap_plain(said, width) {
+            out.push(Line::from(Span::styled(
+                line,
+                Style::default().fg(theme.fg),
+            )));
+        }
+    }
+}
+
 fn push_workspace_call(
     out: &mut Vec<Line<'static>>,
     view: &nexus_core::app::ToolView,
+    result: &str,
     expanded: bool,
     settings: &nexus_core::app::Settings,
     width: usize,
@@ -282,6 +351,14 @@ fn push_workspace_call(
         } else {
             Vec::new()
         }
+    } else if expanded {
+        // Reads, searches, listings, moves, sub-agent reports: Ctrl+T shows
+        // the result itself.
+        result
+            .trim_end()
+            .split('\n')
+            .flat_map(|line| super::diff::escaped_rows(line, body_width, dim, dim))
+            .collect()
     } else {
         Vec::new()
     };
@@ -951,6 +1028,75 @@ mod tool_card_tests {
             &crate::theme::Theme::default(),
         );
         lines
+    }
+
+    fn text(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn round_thinking_and_interim_text_sit_above_the_first_call() {
+        let row = json!({
+            "name": "fs",
+            "arguments": json!({"action":"read","path":"src/a.rs"}).to_string(),
+            "result": "src/a.rs (lines 1-2 of 2):\n1: fn a() {}\n2: fn b() {}",
+            "reasoning_content": "check a first",
+            "assistant_content": "Let me read a.rs.",
+        })
+        .to_string();
+        for (show, expected) in [
+            (false, "▎ ▸ reasoning (13 chars) — Ctrl+R to expand"),
+            (true, "▎ ▾ reasoning"),
+        ] {
+            let mut lines = Vec::new();
+            let settings = Settings {
+                show_reasoning: show,
+                ..Settings::default()
+            };
+            push_tool_call(
+                &mut lines,
+                &row,
+                false,
+                &settings,
+                80,
+                &crate::theme::Theme::default(),
+            );
+            let lines = text(&lines);
+            assert_eq!(lines[0], expected);
+            let said = lines.iter().position(|l| l == "Let me read a.rs.").unwrap();
+            let call = lines
+                .iter()
+                .position(|l| l.contains("read src/a.rs"))
+                .unwrap();
+            assert!(said < call, "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn ctrl_t_shows_the_result_of_reads_and_searches() {
+        let result = "src/a.rs (lines 1-2 of 2):\n1: fn a() {}\n2: fn b() {}";
+        let collapsed = text(&card(
+            "fs",
+            json!({"action":"read","path":"src/a.rs"}),
+            result,
+            false,
+            false,
+        ));
+        assert_eq!(collapsed.len(), 1, "{collapsed:?}");
+        let expanded = text(&card(
+            "fs",
+            json!({"action":"read","path":"src/a.rs"}),
+            result,
+            true,
+            false,
+        ));
+        assert!(
+            expanded.iter().any(|l| l.contains("2: fn b() {}")),
+            "{expanded:?}"
+        );
     }
 
     #[test]

@@ -1072,12 +1072,23 @@ impl App {
                 {
                     self.reload_skills();
                 }
-                let Some(task) = self.chat_tasks.get(&task_id) else {
+                let Some(task) = self.chat_tasks.get_mut(&task_id) else {
                     return Ok(());
                 };
+                // What streamed before this round's calls now lives in the
+                // round's first tool row, so the transcript reads thinking →
+                // calls → thinking → answer, and the final reply carries only
+                // what came after the last round. A backend that streams
+                // reasoning without attaching it to the call keeps it as
+                // display-only `thinking` (never replayed to the model).
+                let streamed_thinking = std::mem::take(&mut task.thinking);
+                task.buffer.clear();
+                let thinking = (reasoning.is_none() && !streamed_thinking.trim().is_empty())
+                    .then_some(streamed_thinking);
                 let content = serde_json::json!({
                     "id": id,
                     "reasoning_content": reasoning,
+                    "thinking": thinking,
                     "assistant_content": assistant_content,
                     "name": name,
                     "arguments": arguments,

@@ -1773,6 +1773,62 @@ async fn background_finish_lands_in_origin_session_and_notifies() {
 }
 
 #[tokio::test]
+async fn each_tool_round_keeps_its_own_thinking_and_the_reply_only_the_last() {
+    use crate::provider::StreamEvent;
+    let mut a = app_with_key();
+    a.current_model = Some("a/one".into());
+    a.execute(AppCommand::Send {
+        text: "hello".to_string(),
+    })
+    .unwrap();
+    for event in [
+        StreamEvent::Reasoning("plan A".into()),
+        StreamEvent::Token("Let me look.".into()),
+        StreamEvent::ToolCall {
+            id: "call_0".into(),
+            reasoning: Some("plan A".into()),
+            assistant_content: Some("Let me look.".into()),
+            name: "web_search".into(),
+            arguments: "{}".into(),
+            result: "ok".into(),
+        },
+        // A backend that streams reasoning without attaching it to the call.
+        StreamEvent::Reasoning("plan B".into()),
+        StreamEvent::ToolCall {
+            id: "call_1".into(),
+            reasoning: None,
+            assistant_content: None,
+            name: "web_search".into(),
+            arguments: "{}".into(),
+            result: "ok".into(),
+        },
+        StreamEvent::Reasoning("final thoughts".into()),
+        StreamEvent::Token("the answer".into()),
+    ] {
+        a.on_stream_event(event).unwrap();
+    }
+    assert_eq!(a.active_streaming_text(), Some("the answer"));
+    assert_eq!(a.thinking_text(), Some("final thoughts"));
+    a.on_stream_event(StreamEvent::Done).unwrap();
+
+    let rows: Vec<serde_json::Value> = a
+        .messages
+        .iter()
+        .filter(|m| m.role == "tool_call")
+        .map(|m| serde_json::from_str(&m.content).unwrap())
+        .collect();
+    assert_eq!(rows[0]["reasoning_content"], "plan A");
+    assert_eq!(rows[0]["assistant_content"], "Let me look.");
+    assert!(rows[0]["thinking"].is_null());
+    assert!(rows[1]["reasoning_content"].is_null());
+    assert_eq!(rows[1]["thinking"], "plan B");
+    let reply = a.messages.last().unwrap();
+    assert_eq!(reply.role, "assistant");
+    assert_eq!(reply.content, "the answer");
+    assert_eq!(reply.reasoning.as_deref(), Some("final thoughts"));
+}
+
+#[tokio::test]
 async fn background_tool_call_persists_to_origin_session_only() {
     let mut a = app_with_key();
     a.current_model = Some("a/one".into());
