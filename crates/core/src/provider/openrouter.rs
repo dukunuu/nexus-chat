@@ -353,16 +353,16 @@ impl ProviderFlavor {
     /// `OpenAI` and `OpenCode` Zen/Go accept `prompt_cache_key` to keep one
     /// conversation's requests on a single cache lane. `OpenRouter` uses
     /// `session_id` for sticky upstream routing with a 10-minute inactivity
-    /// window. The Codex Responses body has no equivalent, so gets neither.
+    /// window. Codex carries it too: the Responses body keeps it, and the
+    /// request sends it as the `session-id` header the `ChatGPT` backend routes on.
     fn add_prompt_cache_key(self, obj: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
         match self {
             Self::OpenRouter => {
                 obj.insert("session_id".into(), serde_json::json!(key));
             }
-            Self::OpenAi | Self::OpencodeGo => {
+            Self::OpenAi | Self::OpencodeGo | Self::OpenAiCodex => {
                 obj.insert("prompt_cache_key".into(), serde_json::json!(key));
             }
-            Self::OpenAiCodex => {}
         }
     }
 
@@ -1264,10 +1264,11 @@ impl OpenRouter {
         }
         if self.flavor == ProviderFlavor::OpenAiCodex {
             let body = chat_body_to_codex_body(&body, false, &[]);
+            let key = body.get("prompt_cache_key").and_then(|key| key.as_str());
             let v = self
                 .client
                 .post(format!("{}/codex/responses", self.flavor.base()))
-                .headers(self.codex_headers(false)?)
+                .headers(codex_cache_headers(self.codex_headers(false)?, key, None))
                 .json(&body)
                 .send()
                 .await
@@ -2123,11 +2124,16 @@ impl OpenRouter {
         let response = self
             .client
             .post(format!("{}/codex/responses", self.flavor.base()))
-            .headers(self.codex_headers(true)?)
+            .headers(codex_cache_headers(
+                self.codex_headers(true)?,
+                params.prompt_cache_key.as_deref(),
+                params.codex_turn_state.get().map(String::as_str),
+            ))
             .json(&body)
             .send()
             .await
             .context("sending Codex request")?;
+        remember_turn_state(&response, params);
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -2947,6 +2953,41 @@ fn codex_tools(tools: &[ToolDef]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Sticky-routing token the `ChatGPT` backend returns and expects back within a turn.
+const CODEX_TURN_STATE: &str = "x-codex-turn-state";
+
+/// Keep the turn's sticky-routing token from the first response that sets it.
+fn remember_turn_state(response: &reqwest::Response, params: &ChatParams) {
+    if let Some(state) = response
+        .headers()
+        .get(CODEX_TURN_STATE)
+        .and_then(|value| value.to_str().ok())
+    {
+        let _ = params.codex_turn_state.set(state.to_string());
+    }
+}
+
+/// Cache affinity for the `ChatGPT` backend, as the Codex CLI sends it: the
+/// backend routes on the `session-id` header (the body's `prompt_cache_key`
+/// alone left gpt-6 requests on different workers with ~0% reuse), plus the
+/// turn's sticky-routing token once the first response has set it.
+fn codex_cache_headers(
+    mut headers: reqwest::header::HeaderMap,
+    key: Option<&str>,
+    turn_state: Option<&str>,
+) -> reqwest::header::HeaderMap {
+    if let Some(key) = key.and_then(|key| reqwest::header::HeaderValue::from_str(key).ok()) {
+        headers.insert("session-id", key.clone());
+        headers.insert("thread-id", key);
+    }
+    if let Some(state) =
+        turn_state.and_then(|state| reqwest::header::HeaderValue::from_str(state).ok())
+    {
+        headers.insert(CODEX_TURN_STATE, state);
+    }
+    headers
+}
+
 /// Convert an `OpenAI` Chat Completions request into the native Codex
 /// Responses request shape. `tools` is used by the in-process client; the
 /// host gateway reads the same definitions directly from the JSON body.
@@ -3049,6 +3090,9 @@ pub fn chat_body_to_codex_body(
         "text": { "verbosity": "low" },
     });
     let object = out.as_object_mut().expect("body is a JSON object");
+    if let Some(key) = body.get("prompt_cache_key").filter(|key| key.is_string()) {
+        object.insert("prompt_cache_key".into(), key.clone());
+    }
     if tools.is_empty() {
         if let Some(chat_tools) = body.get("tools").and_then(|v| v.as_array()) {
             let response_tools = chat_tools
@@ -4774,10 +4818,67 @@ mod tests {
             serde_json::Value::Object(body),
             serde_json::json!({ "session_id": "session-1" })
         );
-        // The Codex Responses body has no equivalent field.
+        // Codex keeps it in the body and sends it as the session-id header.
         let mut body = serde_json::Map::new();
         ProviderFlavor::OpenAiCodex.add_prompt_cache_key(&mut body, "session-1");
-        assert!(body.is_empty(), "Codex should not carry it");
+        assert_eq!(
+            body.get("prompt_cache_key"),
+            Some(&serde_json::json!("session-1"))
+        );
+    }
+
+    #[test]
+    fn codex_requests_carry_cache_affinity_headers_and_the_turn_state() {
+        let headers = codex_cache_headers(
+            reqwest::header::HeaderMap::new(),
+            Some("session-1:epoch-0"),
+            None,
+        );
+        assert_eq!(headers["session-id"], "session-1:epoch-0");
+        assert_eq!(headers["thread-id"], "session-1:epoch-0");
+        assert!(
+            !headers.contains_key(CODEX_TURN_STATE),
+            "none before the first response"
+        );
+        let headers = codex_cache_headers(
+            reqwest::header::HeaderMap::new(),
+            Some("session-1:epoch-0"),
+            Some("sticky-worker-7"),
+        );
+        assert_eq!(headers[CODEX_TURN_STATE], "sticky-worker-7");
+        // No key, no affinity headers (and a key that isn't a valid header value is dropped).
+        assert!(codex_cache_headers(reqwest::header::HeaderMap::new(), None, None).is_empty());
+        assert!(
+            codex_cache_headers(reqwest::header::HeaderMap::new(), Some("bad\nkey"), None)
+                .is_empty()
+        );
+        // The turn state is set once per turn and shared by its requests.
+        let params = ChatParams::default();
+        assert!(params.codex_turn_state.set("first".into()).is_ok());
+        assert!(
+            params
+                .clone()
+                .codex_turn_state
+                .set("second".into())
+                .is_err()
+        );
+        assert_eq!(
+            params.codex_turn_state.get().map(String::as_str),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn non_streaming_codex_bodies_keep_the_cache_key() {
+        let body = serde_json::json!({
+            "model": "gpt-6-luna",
+            "messages": [{"role": "user", "content": "summarize"}],
+            "prompt_cache_key": "compaction:session-1",
+        });
+        assert_eq!(
+            chat_body_to_codex_body(&body, false, &[])["prompt_cache_key"],
+            "compaction:session-1"
+        );
     }
 
     fn cache_ttl_messages() -> [ChatMessage; 3] {
