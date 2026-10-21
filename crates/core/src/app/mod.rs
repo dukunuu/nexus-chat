@@ -55,7 +55,7 @@ mod swarm;
 mod tests;
 mod tool_view;
 mod transcribe;
-pub use tool_view::{ToolOutcome, ToolView, tool_call_view};
+pub use tool_view::{Source, ToolOutcome, ToolView, tool_call_view};
 pub mod usage;
 mod watches;
 pub use backends::{Backends, composite_id};

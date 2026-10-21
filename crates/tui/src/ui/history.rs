@@ -1264,7 +1264,7 @@ mod tests {
             let row: String = (0..79)
                 .map(|x| terminal.backend().buffer()[(x, 5)].symbol())
                 .collect();
-            assert!(row.contains("search/web"), "{row}");
+            assert!(row.contains("search \"q\""), "{row}");
             assert!(row.contains(if open { '▾' } else { '▸' }), "{row}");
             assert!(app.scroll > 0);
         }

@@ -25,6 +25,19 @@ pub struct ToolView {
     pub outcome: ToolOutcome,
     pub diff: Option<String>,
     pub output: Option<String>,
+    /// Web search hits in result order, for a sources list.
+    pub sources: Vec<Source>,
+}
+
+/// One web search hit: what a reader scans for in a results list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Source {
+    pub title: String,
+    pub url: String,
+    /// The host, without `www.` (`en.wikipedia.org`).
+    pub domain: String,
+    /// The first few lines of the hit's text, joined.
+    pub snippet: String,
 }
 
 impl ToolView {
@@ -66,6 +79,7 @@ pub fn tool_call_view(name: &str, args: &str, result: &str) -> ToolView {
         outcome: outcome(result),
         diff: None,
         output: None,
+        sources: Vec::new(),
     })
 }
 
@@ -131,6 +145,7 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
         outcome: outcome(result),
         diff: None,
         output: None,
+        sources: Vec::new(),
     };
     let first = result.lines().next().unwrap_or_default();
     let (tool, action) = name
@@ -321,6 +336,40 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
                 return None;
             }
         }
+        "search" | "web_search" => {
+            let query = field("query")?;
+            view.verb = match field("mode") {
+                Some("news") => "news",
+                Some("academic") => "papers",
+                Some("discussion" | "discussions") => "discussions",
+                _ => "search",
+            }
+            .into();
+            view.target = format!("\"{}\"", query.replace('"', "\\\""));
+            view.sources = search_sources(result);
+            if view.sources.is_empty() {
+                if view.outcome == ToolOutcome::Ok {
+                    view.stats.push("no results".into());
+                }
+            } else {
+                let count = view.sources.len();
+                view.stats
+                    .push(format!("{count} result{}", if count == 1 { "" } else { "s" }));
+            }
+        }
+        "fetch_url" => {
+            let url = field("url")?;
+            view.verb = "fetch".into();
+            view.target = short_url(url);
+            if view.outcome == ToolOutcome::Ok {
+                let chars = result.chars().count();
+                view.stats.push(if chars >= 1000 {
+                    format!("{:.1}k chars", f64::from(u32::try_from(chars).unwrap_or(u32::MAX)) / 1000.0)
+                } else {
+                    format!("{chars} chars")
+                });
+            }
+        }
         "request_workspace" => {
             view.verb = "workspace".into();
             view.target = field("root")?.into();
@@ -342,8 +391,90 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
     Some(view)
 }
 
+/// Parse the search tools' `[N] Title` / indented URL / text blocks.
+fn search_sources(result: &str) -> Vec<Source> {
+    let mut sources: Vec<Source> = Vec::new();
+    let mut lines = result.lines().peekable();
+    while let Some(line) = lines.next() {
+        let Some(title) = line
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once("] "))
+            .filter(|(number, _)| number.parse::<usize>().is_ok())
+            .map(|(_, title)| title.trim())
+        else {
+            continue;
+        };
+        let url = lines
+            .next_if(|line| line.trim_start().starts_with("http"))
+            .map(str::trim)
+            .unwrap_or_default();
+        let mut snippet = String::new();
+        while let Some(text) = lines.next_if(|line| !line.starts_with('[')) {
+            let text = text.trim();
+            if text.is_empty() || text == title {
+                continue;
+            }
+            if snippet.chars().count() > 240 {
+                continue;
+            }
+            if !snippet.is_empty() {
+                snippet.push(' ');
+            }
+            snippet.push_str(text);
+        }
+        sources.push(Source {
+            title: title.to_string(),
+            url: url.to_string(),
+            domain: domain(url),
+            snippet,
+        });
+    }
+    sources
+}
+
+/// The host of `url`, without a `www.` prefix.
+fn domain(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    host.strip_prefix("www.").unwrap_or(host).to_string()
+}
+
+/// `host/path` for a header, without the scheme, `www.` or a long tail.
+fn short_url(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let rest = rest.strip_prefix("www.").unwrap_or(rest).trim_end_matches('/');
+    if rest.chars().count() > 60 {
+        format!("{}…", rest.chars().take(59).collect::<String>())
+    } else {
+        rest.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn web_searches_list_their_sources_and_fetches_name_the_page() {
+        let result = "[1] Mongolian Parliament Passes the 2026 Budget\n    https://mongolia.substack.com/p/budget\n    Mongolian Parliament Passes the 2026 Budget\n\nMongolia's 2026 budget passed on time.\n\n[2] World population\n    https://en.wikipedia.org/wiki/World_population\n    World population is the total number of people.";
+        let view = tool_call_view(
+            "search",
+            r#"{"mode":"web","query":"Mongolia budget"}"#,
+            result,
+        );
+        assert_eq!(view.summary(), "search \"Mongolia budget\" · 2 results");
+        assert_eq!(view.sources.len(), 2);
+        assert_eq!(view.sources[0].domain, "mongolia.substack.com");
+        assert_eq!(view.sources[0].snippet, "Mongolia's 2026 budget passed on time.");
+        assert_eq!(view.sources[1].domain, "en.wikipedia.org");
+        let none = tool_call_view("search", r#"{"mode":"news","query":"x"}"#, "no results for x");
+        assert_eq!(none.summary(), "news \"x\" · no results");
+        let page = tool_call_view(
+            "fetch_url",
+            r#"{"url":"https://www.example.com/docs/page/"}"#,
+            &"x".repeat(1500),
+        );
+        assert_eq!(page.summary(), "fetch example.com/docs/page · 1.5k chars");
+    }
+
     use super::*;
     use crate::app::tool_call_summary;
     use serde_json::json;

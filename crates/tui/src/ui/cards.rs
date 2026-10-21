@@ -280,8 +280,18 @@ fn push_workspace_call(
     use nexus_core::app::ToolOutcome;
     let failed = view.outcome != ToolOutcome::Ok;
     let dim = Style::default().fg(theme.fg_dim);
+    let web = is_web(view);
     let mut head = vec![Span::styled(
-        format!("{} ", if failed { glyph::FAIL } else { glyph::TOOL }),
+        format!(
+            "{} ",
+            if failed {
+                glyph::FAIL
+            } else if web {
+                glyph::WEB
+            } else {
+                glyph::TOOL
+            }
+        ),
         Style::default().fg(if failed { theme.error } else { theme.accent2 }),
     )];
     let mut append = |text: String, style: Style| {
@@ -366,6 +376,8 @@ fn push_workspace_call(
         } else {
             Vec::new()
         }
+    } else if !view.sources.is_empty() {
+        source_domains(view, body_width, theme)
     } else {
         Vec::new()
     };
@@ -373,6 +385,86 @@ fn push_workspace_call(
         row.spans.insert(0, Span::raw("   "));
         out.push(row);
     }
+}
+
+/// Web tools: searches of every mode and page fetches.
+fn is_web(view: &nexus_core::app::ToolView) -> bool {
+    matches!(
+        view.verb.as_str(),
+        "search" | "news" | "papers" | "discussions" | "fetch"
+    )
+}
+
+/// Collapsed search card: the distinct source domains, in result order.
+fn source_domains(
+    view: &nexus_core::app::ToolView,
+    width: usize,
+    theme: &crate::theme::Theme,
+) -> Vec<Line<'static>> {
+    let mut domains: Vec<&str> = Vec::new();
+    for source in &view.sources {
+        if !source.domain.is_empty() && !domains.contains(&source.domain.as_str()) {
+            domains.push(&source.domain);
+        }
+    }
+    let shown = domains.len().min(4);
+    let mut text = domains[..shown].join(style::SEP);
+    if domains.len() > shown {
+        text.push_str(&format!("{}+{}", style::SEP, domains.len() - shown));
+    }
+    let dim = Style::default().fg(theme.fg_dim);
+    let mut rows = super::diff::escaped_rows(&text, usize::MAX, dim, dim);
+    rows.truncate(1);
+    if let Some(row) = rows.first_mut() {
+        *row = super::popups::chrome::fit_line(row.clone(), width);
+    }
+    rows
+}
+
+/// Opened search card: each hit's title, domain and the start of its text.
+fn sources_body(
+    view: &nexus_core::app::ToolView,
+    width: usize,
+    theme: &crate::theme::Theme,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(theme.fg_dim);
+    let mut rows = tool_rule("results", width, theme);
+    let text_width = width.saturating_sub(5).max(1);
+    for (index, source) in view.sources.iter().enumerate() {
+        let number = format!("{:>3}  ", index + 1);
+        let pad = " ".repeat(number.chars().count());
+        for (row, line) in wrap_plain(&source.title, text_width).into_iter().enumerate() {
+            let lead = if row == 0 { number.clone() } else { pad.clone() };
+            let mut spans = vec![Span::styled(lead, dim)];
+            for part in super::diff::escaped_rows(&line, usize::MAX, Style::default().fg(theme.fg), dim) {
+                spans.extend(part.spans);
+            }
+            rows.push(Line::from(spans));
+        }
+        if !source.domain.is_empty() {
+            let mut spans = vec![Span::raw(pad.clone())];
+            for part in super::diff::escaped_rows(
+                &source.domain,
+                usize::MAX,
+                Style::default().fg(theme.accent2),
+                dim,
+            ) {
+                spans.extend(part.spans);
+            }
+            rows.push(Line::from(spans));
+        }
+        for line in wrap_plain(&source.snippet, text_width).into_iter().take(2) {
+            let mut spans = vec![Span::raw(pad.clone())];
+            for part in super::diff::escaped_rows(&line, usize::MAX, dim, dim) {
+                spans.extend(part.spans);
+            }
+            rows.push(Line::from(spans));
+        }
+        if index + 1 < view.sources.len() {
+            rows.push(Line::default());
+        }
+    }
+    rows
 }
 
 fn tool_rule(label: &str, width: usize, theme: &crate::theme::Theme) -> Vec<Line<'static>> {
@@ -402,6 +494,9 @@ fn expanded_tool_body(
         let mut rows = tool_rule("diff", width, theme);
         rows.extend(super::diff::expanded(diff, width, theme));
         return rows;
+    }
+    if !view.sources.is_empty() {
+        return sources_body(view, width, theme);
     }
     let tool = name.split('_').next().unwrap_or(name);
     if matches!(tool, "shell" | "proc") && !view.verb.is_empty() {
@@ -1837,6 +1932,19 @@ mod tool_card_tests {
             expanded.iter().any(|l| l.contains("2: fn b() {}")),
             "{expanded:?}"
         );
+    }
+
+    #[test]
+    fn web_searches_show_their_query_sources_and_results() {
+        let result = "[1] Budget passes\n    https://www.mongolia.substack.com/p/b\n    The 2026 budget passed on time.\n[2] World population\n    https://en.wikipedia.org/wiki/World_population\n    The total number of people.";
+        let args = json!({"mode":"web","query":"Mongolia budget"});
+        let collapsed = text(&card("search", args.clone(), result, false, false));
+        assert!(collapsed[0].starts_with("◎ search \"Mongolia budget\" · 2 results"), "{collapsed:?}");
+        assert_eq!(collapsed[1].trim(), "mongolia.substack.com · en.wikipedia.org");
+        let open = text(&card("search", args, result, true, false));
+        assert!(open.iter().any(|l| l.contains("1  Budget passes")), "{open:?}");
+        assert!(open.iter().any(|l| l.trim_start_matches(['▎', ' ']).starts_with("en.wikipedia.org")), "{open:?}");
+        assert!(open.iter().any(|l| l.contains("The total number of people.")), "{open:?}");
     }
 
     #[test]
