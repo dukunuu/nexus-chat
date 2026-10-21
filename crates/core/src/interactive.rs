@@ -306,6 +306,7 @@ pub enum Node {
         /// One to six header templates.
         columns: Vec<String>,
         /// Up to eight rows of cell templates.
+        #[serde(alias = "rows")]
         rows_data: Vec<Vec<String>>,
         /// Optional numeric state field holding the selected index.
         #[serde(default)]
@@ -578,7 +579,9 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
                 ("node", "buttons") => "items:button[] rows:u16",
                 ("node", "input" | "toggle") => "key:string label:string",
                 ("node", "kv") => "items:pair[]",
-                ("node", "table") => "columns:string[] rows_data:string[][] select:?string",
+                ("node", "table") => {
+                    "columns:string[] rows_data:string[][] rows:string[][] select:?string"
+                }
                 ("node", "progress") => "label:string value:value max:value",
                 ("node", "bars") => "items:bar[]",
                 ("node", "sparkline") => "values:value[] rows:u16",
@@ -672,7 +675,9 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
         _ => "",
     };
     for field in required.split_whitespace() {
-        if !object.contains_key(field) {
+        if !(object.contains_key(field)
+            || owner == "table" && field == "rows_data" && object.contains_key("rows"))
+        {
             check_result(
                 errors,
                 &format!("{path}.{field}"),
@@ -727,7 +732,7 @@ impl Document {
     /// # Errors
     /// Rejects unknown constructs, oversized data, cycles and invalid bindings.
     pub fn parse(source: &str) -> Result<Self> {
-        Self::check_source(source, false).map_err(|errors| {
+        Self::check(source).map_err(|errors| {
             anyhow::anyhow!(
                 errors
                     .iter()
@@ -740,13 +745,8 @@ impl Document {
 
     /// Check authored JSON, reporting up to ten located errors without executing actions.
     /// # Errors
-    /// Returns syntax, schema, binding or budget errors. Unlike legacy `parse`,
-    /// this flags extra fields on `answer` steps.
+    /// Returns syntax, schema, binding or budget errors.
     pub fn check(source: &str) -> std::result::Result<Self, Vec<CheckError>> {
-        Self::check_source(source, true)
-    }
-
-    fn check_source(source: &str, strict: bool) -> std::result::Result<Self, Vec<CheckError>> {
         let mut errors = Vec::new();
         check_result(
             &mut errors,
@@ -759,7 +759,11 @@ impl Document {
         if !errors.is_empty() {
             return Err(errors);
         }
-        let mut value: Value = match serde_json::from_str(source) {
+        let mut stream = serde_json::Deserializer::from_str(source).into_iter::<Value>();
+        let mut value = match stream
+            .next()
+            .unwrap_or_else(|| serde_json::from_str(source))
+        {
             Ok(value) => value,
             Err(error) => {
                 return Err(vec![CheckError {
@@ -768,7 +772,16 @@ impl Document {
                 }]);
             }
         };
-        if !strict && let Some(actions) = value.get_mut("actions").and_then(Value::as_object_mut) {
+        if !source[stream.byte_offset()..]
+            .chars()
+            .all(|ch| ch.is_whitespace() || matches!(ch, '}' | ']'))
+        {
+            return Err(vec![CheckError {
+                path: "$".into(),
+                message: "trailing characters after UI document".into(),
+            }]);
+        }
+        if let Some(actions) = value.get_mut("actions").and_then(Value::as_object_mut) {
             for steps in actions.values_mut().filter_map(Value::as_array_mut) {
                 for step in steps {
                     if step.get("op").and_then(Value::as_str) == Some("answer")
@@ -939,7 +952,7 @@ impl Document {
                                     doc.actions.keys().cloned().collect::<Vec<_>>().join(", ")
                                 );
                             }
-                            Step::Send { text } => doc.template_ok(text)?,
+                            Step::Send { text } => Self::template_ok(text)?,
                             Step::Answer { .. } => {}
                         }
                         Ok(())
@@ -1043,7 +1056,7 @@ impl Document {
         );
         let mut controls = 0;
         match node {
-            Node::Text { text, .. } => self.template_ok(text)?,
+            Node::Text { text, .. } => Self::template_ok(text)?,
             Node::Buttons { items, .. } => {
                 ensure!(
                     !items.is_empty() && items.len() <= 8,
@@ -1051,7 +1064,7 @@ impl Document {
                 );
                 for button in items {
                     line_ok(&button.label, 120)?;
-                    self.template_ok(&button.label)?;
+                    Self::template_ok(&button.label)?;
                     ensure!(
                         self.actions.contains_key(&button.action),
                         "unknown button action: {} — valid: {}",
@@ -1087,70 +1100,70 @@ impl Document {
         Ok(controls)
     }
 
-    fn validate_display(&self, node: &Node) -> Result<()> {
+    fn validate_display(node: &Node) -> Result<()> {
         match node {
             Node::Hero {
                 title,
                 subtitle,
                 badge,
             } => {
-                self.template_ok(title)?;
+                Self::template_ok(title)?;
                 for text in subtitle.iter().chain(badge) {
-                    self.template_ok(text)?;
+                    Self::template_ok(text)?;
                 }
             }
             Node::Columns { items } => {
                 item_count(items.len(), 2, 3)?;
                 for column in items {
-                    self.template_ok(&column.title)?;
+                    Self::template_ok(&column.title)?;
                     item_count(column.items.len(), 0, 8)?;
                     for item in &column.items {
-                        self.template_ok(&item.text)?;
+                        Self::template_ok(&item.text)?;
                     }
                 }
             }
             Node::Cards { items } => {
                 item_count(items.len(), 1, 6)?;
                 for item in items {
-                    self.template_ok(&item.title)?;
-                    self.template_ok(&item.text)?;
+                    Self::template_ok(&item.title)?;
+                    Self::template_ok(&item.text)?;
                     if let Some(badge) = &item.badge {
-                        self.template_ok(badge)?;
+                        Self::template_ok(badge)?;
                     }
                 }
             }
             Node::Stats { items } => {
                 item_count(items.len(), 1, 6)?;
                 for item in items {
-                    self.template_ok(&item.value)?;
-                    self.template_ok(&item.label)?;
+                    Self::template_ok(&item.value)?;
+                    Self::template_ok(&item.label)?;
                     if let Some(delta) = &item.delta {
-                        self.template_ok(delta)?;
+                        Self::template_ok(delta)?;
                     }
                 }
             }
             Node::Steps { items } => {
                 item_count(items.len(), 1, 8)?;
                 for item in items {
-                    self.template_ok(&item.title)?;
+                    Self::template_ok(&item.title)?;
                     if let Some(text) = &item.text {
-                        self.template_ok(text)?;
+                        Self::template_ok(text)?;
                     }
                 }
             }
             Node::Callout { title, text, .. } => {
-                self.template_ok(text)?;
+                Self::template_ok(text)?;
                 if let Some(title) = title {
-                    self.template_ok(title)?;
+                    Self::template_ok(title)?;
                 }
             }
             Node::Quote { text, by } => {
-                self.template_ok(text)?;
+                Self::template_ok(text)?;
                 if let Some(by) = by {
-                    self.template_ok(by)?;
+                    Self::template_ok(by)?;
                 }
             }
-            Node::Divider { label: Some(label) } => self.template_ok(label)?,
+            Node::Divider { label: Some(label) } => Self::template_ok(label)?,
             _ => {}
         }
         Ok(())
@@ -1158,7 +1171,7 @@ impl Document {
 
     fn validate_component(&self, node: &Node, budget: &mut usize) -> Result<usize> {
         if node.is_display() {
-            self.validate_display(node)?;
+            Self::validate_display(node)?;
             return Ok(0);
         }
         match node {
@@ -1166,7 +1179,7 @@ impl Document {
                 item_count(items.len(), 1, 8)?;
                 for pair in items {
                     for text in pair {
-                        self.template_ok(text)?;
+                        Self::template_ok(text)?;
                     }
                 }
             }
@@ -1178,12 +1191,12 @@ impl Document {
                 item_count(columns.len(), 1, 6)?;
                 item_count(rows_data.len(), 0, 8)?;
                 for header in columns {
-                    self.template_ok(header)?;
+                    Self::template_ok(header)?;
                 }
                 for row in rows_data {
                     ensure!(row.len() == columns.len(), "table row width mismatch");
                     for cell in row {
-                        self.template_ok(cell)?;
+                        Self::template_ok(cell)?;
                     }
                 }
                 if let Some(key) = select {
@@ -1192,14 +1205,14 @@ impl Document {
                 }
             }
             Node::Progress { label, value, max } => {
-                self.template_ok(label)?;
+                Self::template_ok(label)?;
                 self.numeric_ok(value, budget)?;
                 self.numeric_ok(max, budget)?;
             }
             Node::Bars { items } => {
                 item_count(items.len(), 1, 8)?;
                 for item in items {
-                    self.template_ok(&item.label)?;
+                    Self::template_ok(&item.label)?;
                     self.numeric_ok(&item.value, budget)?;
                 }
             }
@@ -1213,7 +1226,7 @@ impl Document {
             Node::Checklist { items } => {
                 item_count(items.len(), 1, 8)?;
                 for item in items {
-                    self.template_ok(&item.label)?;
+                    Self::template_ok(&item.label)?;
                     binding_ok(&self.state, &item.key, Value::is_boolean)?;
                 }
                 return Ok(items.len());
@@ -1223,11 +1236,11 @@ impl Document {
                 label,
                 options,
             } => {
-                self.template_ok(label)?;
+                Self::template_ok(label)?;
                 item_count(options.len(), 2, 8)?;
                 for option in options {
                     line_ok(option, 64)?;
-                    self.template_ok(option)?;
+                    Self::template_ok(option)?;
                 }
                 binding_ok(&self.state, key, |value| {
                     value
@@ -1237,7 +1250,7 @@ impl Document {
                 return Ok(1);
             }
             Node::Toggle { key, label } => {
-                self.template_ok(label)?;
+                Self::template_ok(label)?;
                 binding_ok(&self.state, key, Value::is_boolean)?;
                 return Ok(1);
             }
@@ -1255,19 +1268,13 @@ impl Document {
         Ok(())
     }
 
-    fn template_ok(&self, text: &str) -> Result<()> {
+    fn template_ok(text: &str) -> Result<()> {
         text_ok(text, MAX_TEXT)?;
         let mut rest = text;
         while let Some((_, tail)) = rest.split_once("{{") {
-            let (key, after) = tail
+            let (_, after) = tail
                 .split_once("}}")
                 .ok_or_else(|| anyhow::anyhow!("unclosed UI template"))?;
-            ensure!(
-                self.state.contains_key(key.trim()),
-                "unknown template field: {} — valid: {}",
-                key.trim(),
-                self.state.keys().cloned().collect::<Vec<_>>().join(", ")
-            );
             rest = after;
         }
         Ok(())
@@ -2052,11 +2059,10 @@ fn expand(template: &str, state: &Map<String, Value>) -> Result<String> {
         let (key, after) = tail
             .split_once("}}")
             .ok_or_else(|| anyhow::anyhow!("unclosed template"))?;
-        let value = state
-            .get(key.trim())
-            .ok_or_else(|| anyhow::anyhow!("unknown template field"))?;
         result.push_str(head);
-        result.push_str(&scalar_text(value));
+        if let Some(value) = state.get(key.trim()) {
+            result.push_str(&scalar_text(value));
+        }
         ensure!(result.len() <= MAX_TEXT, "expanded UI text exceeds budget");
         rest = after;
     }

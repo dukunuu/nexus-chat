@@ -1830,6 +1830,25 @@ impl Db {
         )
     }
 
+    /// Replace a repaired reply only while it is still the session's latest
+    /// user/assistant message. Bookkeeping and errors are not another turn.
+    pub(crate) fn update_ui_reply(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        original: &str,
+        content: &str,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE messages SET content = ?4
+             WHERE session_id = ?1 AND id = ?2 AND role = 'assistant' AND content = ?3
+             AND id = (SELECT id FROM messages WHERE session_id = ?1
+                       AND role IN ('user', 'user_command', 'assistant')
+                       ORDER BY created_at DESC, rowid DESC LIMIT 1)",
+            (session_id, message_id, original, content),
+        )? == 1)
+    }
+
     /// Insert a `/swarm` persona's round reply: an assistant message tagged
     /// with which persona (and its own model) produced it.
     pub fn add_persona_message(

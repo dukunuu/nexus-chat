@@ -10774,16 +10774,22 @@ mod tests {
             let args = json!({"source":format!("{fence}\n{source}\n{}", &fence[..3])}).to_string();
             assert_eq!(toolbox.run("ui_check", &args).await.0, result);
         }
+        let labeled = source.replace(r#"{"op":"answer"}"#, r#"{"op":"answer","label":"x"}"#);
+        assert_eq!(
+            toolbox
+                .run("ui_check", &json!({"source":labeled}).to_string())
+                .await
+                .0,
+            result
+        );
         let source = r#"{"version":1,"title":"Quiz","view":[{"type":"radio"},{"type":"text","text":"Hi","invented":true}],"actions":{"pick":[{"op":"answer","label":"x"}]}}"#;
         let (errors, _) = toolbox
             .run("ui_check", &json!({"source":source}).to_string())
             .await;
-        assert!(errors.starts_with("3 errors\n"), "{errors}");
+        assert!(errors.starts_with("2 errors\n"), "{errors}");
         for text in [
             "view[0]: unknown node type \"radio\"",
             "view[1]: unknown field \"invented\"",
-            "actions.pick[0]: unknown field \"label\"",
-            "answer takes no fields",
             "Valid node types:",
         ] {
             assert!(errors.contains(text), "{errors}");

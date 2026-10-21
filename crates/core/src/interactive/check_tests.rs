@@ -40,10 +40,6 @@ fn hallucinations_report_each_location_and_valid_alternatives() {
             &["maybe", "ok", "no", "dot", "none"],
         ),
         (
-            "actions.pick[0]",
-            &["unknown field \"label\"", "answer takes no fields"],
-        ),
-        (
             "actions.pick[1]",
             &[
                 "unknown action op \"invented\"",
@@ -62,7 +58,7 @@ fn hallucinations_report_each_location_and_valid_alternatives() {
             assert!(error.message.contains(word), "{error:?} lacks {word}");
         }
     }
-    assert_eq!(errors.len(), 8);
+    assert_eq!(errors.len(), 7);
 }
 
 #[test]
@@ -94,10 +90,12 @@ fn errors_are_bounded_and_semantic_failures_are_located() {
     assert_eq!(errors.len(), 10);
     assert_eq!(errors[9].path, "view[9]");
     let mut value = document(json!([{"type":"text","text":"{{missing}}"}]));
+    let ui = Session::new(Document::check(&value.to_string()).unwrap()).unwrap();
+    assert_eq!(ui.text("{{missing}}").unwrap(), "");
     value["state"]["count"] = json!([]);
     value["actions"]["pick"] = json!([{"op":"call","action":"missing"}]);
     let errors = Document::check(&value.to_string()).unwrap_err();
-    for path in ["state.count", "view[0]", "actions.pick[0]"] {
+    for path in ["state.count", "actions.pick[0]"] {
         assert!(errors.iter().any(|error| error.path == path), "{errors:?}");
     }
     assert!(
@@ -142,10 +140,70 @@ fn fixtures_and_all_prompt_examples_check_ok() {
 fn parse_still_ignores_answer_labels_and_collapses_repeated_answers() {
     let mut value = document(json!([{"type":"buttons","items":[{"label":"A","action":"pick"}]}]));
     value["actions"]["pick"] = json!([{"op":"answer","label":{"ignored":true}},{"op":"answer"}]);
-    assert!(Document::check(&value.to_string()).is_err());
+    let mut checked = Session::new(Document::check(&value.to_string()).unwrap()).unwrap();
+    assert_eq!(checked.activate_button(0, 0).unwrap(), Some("A".into()));
     let mut session = Session::new(Document::parse(&value.to_string()).unwrap()).unwrap();
     assert_eq!(session.activate_button(0, 0).unwrap(), Some("A".into()));
     value["actions"]["pick"][0] = json!({"op":"answer"});
     let mut session = Session::new(Document::check(&value.to_string()).unwrap()).unwrap();
     assert_eq!(session.activate_button(0, 0).unwrap(), Some("A".into()));
+}
+
+#[test]
+fn trailing_closers_are_forgiven_but_other_trailing_content_is_not() {
+    let source = r#"{"version":1,"title":"Fine","view":[{"type":"text","text":"OK"}]}"#;
+    for suffix in ["}", "]]", " \n } ]\t}"] {
+        assert!(Document::check(&format!("{source}{suffix}")).is_ok());
+        assert!(Document::parse(&format!("{source}{suffix}")).is_ok());
+    }
+    for suffix in [" extra", "{}", "} true", ",\"actions\":{}", "] garbage"] {
+        assert!(Document::check(&format!("{source}{suffix}")).is_err());
+        assert!(Document::parse(&format!("{source}{suffix}")).is_err());
+    }
+}
+
+#[test]
+fn table_rows_alias_renders_and_duplicate_spellings_are_rejected() {
+    let mut value = document(json!([{"type":"table","columns":["Name"],"rows":[["Ada"]]}]));
+    let checked = Document::check(&value.to_string()).unwrap();
+    assert!(checked.plain_text().contains("Ada"));
+    assert!(
+        Document::parse(&value.to_string())
+            .unwrap()
+            .plain_text()
+            .contains("Ada")
+    );
+    value["view"][0]["rows_data"] = json!([["Grace"]]);
+    assert!(Document::check(&value.to_string()).is_err());
+    assert!(Document::parse(&value.to_string()).is_err());
+}
+
+#[test]
+fn undefined_templates_render_empty_and_existing_keys_still_expand() {
+    let value = document(json!([
+        {"type":"text","text":"at {{datetime}} count {{ count }}!"},
+        {"type":"table","columns":["{{missing}}"],"rows":[["{{count}}"]]}
+    ]));
+    for doc in [
+        Document::check(&value.to_string()).unwrap(),
+        Document::parse(&value.to_string()).unwrap(),
+    ] {
+        let session = Session::new(doc).unwrap();
+        assert_eq!(
+            session.text("at {{datetime}} count {{ count }}!").unwrap(),
+            "at  count 0!"
+        );
+        assert_eq!(session.text("{{missing}}").unwrap(), "");
+    }
+    let value = document(json!([{"type":"text","text":"{{unclosed"}]));
+    assert!(Document::check(&value.to_string()).is_err());
+}
+
+#[test]
+fn checking_preserves_answer_label_and_repeated_answer_leniency() {
+    let mut value =
+        document(json!([{"type":"buttons","items":[{"label":"Pick","action":"pick"}]}]));
+    value["actions"]["pick"] = json!([{"op":"answer","label":"ignored"},{"op":"answer"}]);
+    let mut session = Session::new(Document::check(&value.to_string()).unwrap()).unwrap();
+    assert_eq!(session.activate_button(0, 0).unwrap(), Some("Pick".into()));
 }

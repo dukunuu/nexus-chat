@@ -67,7 +67,8 @@ fn unsupported_code_unknown_bindings_cycles_and_controls_are_rejected() {
     data["view"][0]["text"] = json!("\u{1b}[31munsafe");
     assert!(Document::parse(&data.to_string()).is_err());
     data["view"][0]["text"] = json!("{{missing}}");
-    assert!(Document::parse(&data.to_string()).is_err());
+    let ui = Session::new(Document::parse(&data.to_string()).unwrap()).unwrap();
+    assert_eq!(ui.text("{{missing}}").unwrap(), "");
     assert!(Document::parse(&"x".repeat(MAX_SOURCE + 1)).is_err());
 }
 

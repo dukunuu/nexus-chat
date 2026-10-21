@@ -27,6 +27,22 @@ pub const MERMAID_PREVIEW_EXAMPLES: &[&str] = &[
     "stateDiagram-v2\n[*] --> Idle",
 ];
 
+struct UiRepairTarget {
+    session_id: String,
+    message_id: String,
+    original: String,
+    incognito: bool,
+    model_id: String,
+    backend: crate::provider::BackendTag,
+    space_id: String,
+}
+
+pub(super) struct UiRepairResult {
+    target: UiRepairTarget,
+    result: std::result::Result<String, String>,
+    usage: Option<Usage>,
+}
+
 impl App {
     /// Send one chat message: validation, session auto-creation, persistence.
     #[allow(clippy::too_many_lines)] // validation, session creation, ordered skill/user persistence
@@ -91,6 +107,7 @@ impl App {
         if !self.incognito {
             self.db.add_user_message(&session_id, &text)?;
         }
+        self.ui_repair_messages.remove(&session_id);
         self.messages.push(Message {
             role: "user".to_string(),
             content: text,
@@ -430,6 +447,7 @@ impl App {
         if !incognito {
             self.db.add_user_command_message(session_id, &content)?;
         }
+        self.ui_repair_messages.remove(session_id);
         if self
             .session
             .as_ref()
@@ -736,6 +754,9 @@ impl App {
     /// Build history and fire one independently-routed streaming request.
     #[allow(clippy::too_many_lines)] // Request/profile setup and independent task registration.
     pub fn start_stream(&mut self) -> Result<()> {
+        if let Some(session) = &self.session {
+            self.ui_repair_messages.remove(&session.id);
+        }
         let Some(model) = self.current_model.clone() else {
             return Ok(());
         };
@@ -1323,7 +1344,7 @@ impl App {
         let phrase = Some(THINKING[task.thinking_idx].1.to_string());
         let created_at = Some(chrono::Utc::now().to_rfc3339());
 
-        if !task.incognito && !buf.is_empty() {
+        let message_id = if !task.incognito && !buf.is_empty() {
             self.db.add_assistant_message(
                 &task.session_id,
                 &buf,
@@ -1333,8 +1354,19 @@ impl App {
                 secs,
                 cost,
                 phrase.as_deref(),
-            )?;
-        }
+            )?
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        let repair = (viewing && self.interactive_ui).then(|| UiRepairTarget {
+            session_id: task.session_id.clone(),
+            message_id,
+            original: buf.clone(),
+            incognito: task.incognito,
+            model_id: task.model_id.clone(),
+            backend: task.backend,
+            space_id: task.space_id.clone(),
+        });
         if viewing && !buf.is_empty() {
             self.messages.push(Message {
                 role: "assistant".to_string(),
@@ -1421,7 +1453,125 @@ impl App {
                 });
             }
         }
+        if let Some(target) = repair {
+            self.start_ui_repair(target);
+        }
         Ok(())
+    }
+
+    fn start_ui_repair(&mut self, target: UiRepairTarget) {
+        let blocks = failing_ui_blocks(&target.original);
+        if blocks.is_empty() {
+            return;
+        }
+        let Some(provider) = self.backends.get(target.backend).cloned() else {
+            self.push_status("UI repair failed — model backend unavailable");
+            return;
+        };
+        let messages = ui_repair_history(&blocks);
+        self.ui_repair_messages
+            .insert(target.session_id.clone(), target.message_id.clone());
+        let tx = self.ui_repair_tx.clone();
+        self.push_status("fixing the UI…");
+        tokio::spawn(async move {
+            let completion = provider
+                .complete_with_params(&target.model_id, messages, &ChatParams::default())
+                .await;
+            let (result, usage) = match completion {
+                Ok(completion) => (
+                    repaired_ui_reply(&target.original, &blocks, &completion.text),
+                    completion.usage,
+                ),
+                Err(error) => (Err(error.to_string()), None),
+            };
+            let _ = tx.send(UiRepairResult {
+                target,
+                result,
+                usage,
+            });
+        });
+    }
+
+    pub(super) fn on_ui_repair_result(&mut self, repair: UiRepairResult) -> super::AppEvent {
+        let UiRepairResult {
+            target,
+            result,
+            usage,
+        } = repair;
+        if !target.incognito
+            && let Some(usage) = usage
+        {
+            let cost = usage.cost.or_else(|| {
+                self.db.request_cost(
+                    &target.model_id,
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    usage.cache_read_tokens,
+                    usage.cache_creation_tokens,
+                )
+            });
+            let _ = self.db.log_usage(
+                target.backend.name(),
+                &target.model_id,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+                usage.prompt_convention,
+                cost,
+                usage.cost.is_some(),
+                Some(&target.session_id),
+                Some(&target.space_id),
+            );
+        }
+        if self.ui_repair_messages.get(&target.session_id) != Some(&target.message_id) {
+            return super::AppEvent::Status(String::new());
+        }
+        self.ui_repair_messages.remove(&target.session_id);
+        let viewing = self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.id == target.session_id);
+        let index = viewing
+            .then(|| {
+                self.messages.iter().rposition(|message| {
+                    message.role == "assistant" && message.content == target.original
+                })
+            })
+            .flatten();
+        if (viewing && index.is_none()) || (target.incognito && !viewing) {
+            return super::AppEvent::Status(String::new());
+        }
+        let applied = result.and_then(|content| {
+            if !target.incognito
+                && !self
+                    .db
+                    .update_ui_reply(
+                        &target.session_id,
+                        &target.message_id,
+                        &target.original,
+                        &content,
+                    )
+                    .map_err(|error| error.to_string())?
+            {
+                return Ok(false);
+            }
+            if let Some(index) = index {
+                // Only the latest reply changed; the prefix before it is the
+                // same, so the prompt-cache lane (and its key) stays put.
+                self.messages[index].content = content;
+                self.push_history_invalidated();
+            }
+            Ok(true)
+        });
+        super::AppEvent::Status(match applied {
+            Ok(true) => "UI fixed".into(),
+            Ok(false) => String::new(),
+            Err(error) => format!(
+                "UI repair failed — {}",
+                error.lines().next().unwrap_or("invalid UI")
+            ),
+        })
     }
 
     /// After the first exchange of a session, ask the model for a short topic and
@@ -1960,14 +2110,24 @@ impl App {
     }
 }
 
+struct UiBlock {
+    range: std::ops::Range<usize>,
+    prefix: String,
+    source: String,
+    title: String,
+}
+
 // Only complete UI fences count. Track other fences too, so literal examples
-// inside longer Markdown fences never become replay diagnostics.
-fn ui_failure_notes(content: &str) -> String {
+// inside longer Markdown fences never become replay diagnostics or repairs.
+fn ui_blocks(content: &str) -> Vec<UiBlock> {
     let mut fence: Option<(char, usize, bool, usize)> = None;
     let mut source = String::new();
-    let mut notes = String::new();
-    let mut ordinal = 0;
-    for line in content.lines() {
+    let mut blocks = Vec::new();
+    let mut start = 0;
+    let mut offset = 0;
+    let mut prefix = String::new();
+    for raw in content.split_inclusive('\n') {
+        let line = raw.trim_end_matches('\n').trim_end_matches('\r');
         if let Some((marker, length, ui, quotes)) = fence {
             let mut body = line;
             for _ in 0..quotes {
@@ -1979,26 +2139,22 @@ fn ui_failure_notes(content: &str) -> String {
             let count = trimmed.chars().take_while(|ch| *ch == marker).count();
             if count >= length && trimmed[count..].trim().is_empty() {
                 if ui {
-                    ordinal += 1;
-                    if let Err(errors) = crate::interactive::Document::check(&source) {
-                        let title = serde_json::from_str::<serde_json::Value>(&source)
-                            .ok()
-                            .and_then(|value| {
-                                value
-                                    .get("title")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_string)
-                            })
-                            .filter(|title| !title.is_empty())
-                            .unwrap_or_else(|| format!("#{ordinal}"));
-                        let error = &errors[0];
-                        let message = error.message.lines().collect::<Vec<_>>().join(" ");
-                        let path = error.path.replace(['\n', '\r'], " ");
-                        let _ = write!(
-                            notes,
-                            "\n[nexus: the nexus-ui block {title:?} failed to render — {path}: {message}. Run ui_check and resend it if the user still needs it.]"
-                        );
-                    }
+                    let title = serde_json::from_str::<serde_json::Value>(&source)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("title")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or_else(|| format!("#{}", blocks.len() + 1));
+                    blocks.push(UiBlock {
+                        range: start..offset + line.len(),
+                        prefix: prefix.clone(),
+                        source: source.clone(),
+                        title,
+                    });
                 }
                 fence = None;
                 source.clear();
@@ -2009,6 +2165,7 @@ fn ui_failure_notes(content: &str) -> String {
             }
         } else {
             if line.starts_with("    ") || line.starts_with('\t') {
+                offset += raw.len();
                 continue;
             }
             let trimmed = line.trim_start_matches([' ', '\t', '>']);
@@ -2024,10 +2181,107 @@ fn ui_failure_notes(content: &str) -> String {
                     .filter(|ch| *ch == '>')
                     .count();
                 fence = Some((marker, length, ui, quotes));
+                start = offset;
+                prefix = line[..line.len() - trimmed.len()].into();
             }
         }
+        offset += raw.len();
+    }
+    blocks
+}
+
+fn failing_ui_blocks(content: &str) -> Vec<(UiBlock, Vec<crate::interactive::CheckError>)> {
+    ui_blocks(content)
+        .into_iter()
+        .filter_map(|block| {
+            crate::interactive::Document::check(&block.source)
+                .err()
+                .map(|errors| (block, errors))
+        })
+        .collect()
+}
+
+fn ui_failure_notes(content: &str) -> String {
+    let mut notes = String::new();
+    for (block, errors) in failing_ui_blocks(content) {
+        let title = block.title;
+        let error = &errors[0];
+        let message = error.message.lines().collect::<Vec<_>>().join(" ");
+        let path = error.path.replace(['\n', '\r'], " ");
+        let _ = write!(
+            notes,
+            "\n[nexus: the nexus-ui block {title:?} failed to render — {path}: {message}. Run ui_check and resend it if the user still needs it.]"
+        );
     }
     notes
+}
+
+fn ui_repair_history(
+    blocks: &[(UiBlock, Vec<crate::interactive::CheckError>)],
+) -> Vec<ChatMessage> {
+    let mut source = String::new();
+    let mut request = String::new();
+    for (block, errors) in blocks {
+        let _ = writeln!(source, "```nexus-ui\n{}```", block.source);
+        let diagnostics = errors
+            .iter()
+            .take(10)
+            .map(|error| {
+                format!(
+                    "{}: {}",
+                    error.path.replace(['\n', '\r'], " "),
+                    error.message.replace(['\n', '\r'], " ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = writeln!(
+            request,
+            "Your nexus-ui block {:?} failed validation:\n{diagnostics}\nReply with ONLY the corrected nexus-ui fenced block, nothing else.",
+            block.title,
+        );
+    }
+    vec![
+        ChatMessage::text(
+            "system",
+            format!(
+                "{}\nIf multiple blocks need repair, return one corrected fenced block per input block, in the same order.",
+                crate::interactive::INSTRUCTIONS,
+            ),
+        ),
+        ChatMessage::text("assistant", source),
+        ChatMessage::text("user", request),
+    ]
+}
+
+fn repaired_ui_reply(
+    original: &str,
+    failures: &[(UiBlock, Vec<crate::interactive::CheckError>)],
+    response: &str,
+) -> std::result::Result<String, String> {
+    let corrected = ui_blocks(response);
+    if corrected.len() != failures.len() {
+        return Err(format!(
+            "expected {} corrected nexus-ui block(s), got {}",
+            failures.len(),
+            corrected.len()
+        ));
+    }
+    for block in &corrected {
+        crate::interactive::Document::check(&block.source)
+            .map_err(|errors| format!("{}: {}", errors[0].path, errors[0].message))?;
+    }
+    let mut content = original.to_string();
+    for ((block, _), corrected) in failures.iter().zip(&corrected).rev() {
+        let fence = format!("```nexus-ui\n{}\n```", corrected.source.trim_end());
+        let replacement = fence
+            .lines()
+            .map(|line| format!("{}{line}", block.prefix))
+            .collect::<Vec<_>>()
+            .join("\n");
+        content.replace_range(block.range.clone(), &replacement);
+    }
+    Ok(content)
 }
 
 /// Each fenced code block in `md` as `(language, code)`.

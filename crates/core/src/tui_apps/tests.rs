@@ -32,9 +32,11 @@ fn contract_round_trip_and_scalar_bindings() {
     assert_eq!(view.session.text("Count {{count}}").unwrap(), "Count 1");
     assert_eq!(view.session.value("input"), "hello");
     assert!(runner.state.contains_key("internal"));
-    assert!(view.session.text("{{internal}}").is_err());
+    assert_eq!(view.session.text("{{internal}}").unwrap(), "");
+    let source = TINY.replace("Count {{count}}", "{{missing}}");
+    let view = Runner::new(&source).unwrap().view(60).unwrap();
+    assert_eq!(view.session.text("{{missing}}").unwrap(), "");
     for source in [
-        TINY.replace("Count {{count}}", "{{missing}}"),
         TINY.replace("key:\"active\"", "key:\"count\""),
         TINY.replace("type: \"text\"", "type: \"unknown\""),
     ] {

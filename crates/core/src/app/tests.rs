@@ -5012,3 +5012,319 @@ async fn approvals_whose_tool_call_went_away_are_skipped() {
     drop(app);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+const BROKEN_UI: &str =
+    "```nexus-ui\n{\"version\":1,\"title\":\"Choice\",\"view\":[{\"type\":\"radio\"}]}\n```";
+const FIXED_UI: &str = "```nexus-ui\n{\"version\":1,\"title\":\"Choice\",\"view\":[{\"type\":\"text\",\"text\":\"Fixed\"}]}\n```";
+
+async fn ui_repair_app(
+    response: &str,
+    status: u16,
+    incognito: bool,
+) -> (
+    App,
+    tokio::task::JoinHandle<Vec<(String, serde_json::Value)>>,
+) {
+    let body = serde_json::json!({
+        "choices":[{"message":{"content":response}}],
+        "usage":{"prompt_tokens":120,"completion_tokens":40,"cost":0.002}
+    });
+    let (provider, server) = crate::provider::openrouter::decider_mock::server(
+        status,
+        body.to_string(),
+        std::time::Duration::ZERO,
+        1,
+    )
+    .await;
+    let mut app = app_with_key();
+    app.backends.set(BackendTag::OpenRouter, provider);
+    app.interactive_ui = true;
+    app.incognito = incognito;
+    app.memory_model.clear();
+    app.settings.compact_threshold = 0;
+    // Repair must use the finished task's model, not a newly selected model.
+    app.current_model = Some("b/two".into());
+    let mut session = if incognito {
+        crate::db::Session {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: "private UI".into(),
+            model: "a/one".into(),
+            slug: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            compact_summary: None,
+            compact_through: 0,
+            web_mode: false,
+            swarm_mode: false,
+            kind: "chat".into(),
+            research_parent_id: None,
+        }
+    } else {
+        app.db
+            .create_session("UI", "a/one", &app.active_space.id, "chat")
+            .unwrap()
+    };
+    session.slug = Some("ui".into()); // no unrelated title request
+    insert_chat_task(&mut app, &session.id);
+    app.session = Some(session);
+    (app, server)
+}
+
+fn finish_ui_reply(app: &mut App, content: &str) {
+    app.on_chat_event(1, StreamEvent::Token(content.into()))
+        .unwrap();
+    app.on_chat_event(1, StreamEvent::Done).unwrap();
+}
+
+async fn ui_repair_event(app: &mut App) -> AppEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(5), app.next_event())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn ui_repair_replaces_only_the_failing_fence_and_logs_its_usage() {
+    let (mut app, server) =
+        ui_repair_app(&format!("Here is the fix:\n{FIXED_UI}\nDone."), 200, false).await;
+    let root = app.space.root.clone();
+    let sid = app.session.as_ref().unwrap().id.clone();
+    let original = format!("Before ✦\n{BROKEN_UI}\nAfter.\n{FIXED_UI}");
+    finish_ui_reply(&mut app, &original);
+    assert_eq!(app.last_status(), "fixing the UI…");
+    assert_eq!(app.messages.last().unwrap().content, original);
+    assert!(matches!(ui_repair_event(&mut app).await, AppEvent::Status(s) if s == "UI fixed"));
+    let expected = format!("Before ✦\n{FIXED_UI}\nAfter.\n{FIXED_UI}");
+    assert_eq!(app.messages.last().unwrap().content, expected);
+    assert_eq!(
+        app.db.load_messages(&sid).unwrap().last().unwrap().content,
+        expected
+    );
+    assert!(matches!(
+        app.pop_pending_event(),
+        Some(AppEvent::HistoryInvalidated)
+    ));
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0].1;
+    assert_eq!(request["model"], "a/one");
+    assert_eq!(request["stream"], false);
+    assert!(request.get("tools").is_none());
+    assert_eq!(request["messages"][0]["role"], "system");
+    assert!(
+        request["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("nexus-ui")
+    );
+    assert_eq!(request["messages"][1]["content"], format!("{BROKEN_UI}\n"));
+    let prompt = request["messages"][2]["content"].as_str().unwrap();
+    assert!(prompt.contains("Your nexus-ui block \"Choice\" failed validation:\nview[0]: unknown node type \"radio\""), "{prompt}");
+    assert!(prompt.contains("Reply with ONLY the corrected nexus-ui fenced block, nothing else."));
+    let usage = app.db.usage_recent(10, None).unwrap();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].model, "a/one");
+    assert_eq!(usage[0].prompt_tokens, 120);
+    assert_eq!(usage[0].completion_tokens, 40);
+    assert_eq!(usage[0].cost, Some(0.002));
+    app.on_chat_event(1, StreamEvent::Done).unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), app.next_event())
+            .await
+            .is_err()
+    );
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn ui_repair_failure_keeps_the_reply_and_never_retries() {
+    for (response, code, error) in [
+        (BROKEN_UI, 200, "view[0]: unknown node type"),
+        (
+            "no fenced block",
+            200,
+            "expected 1 corrected nexus-ui block",
+        ),
+        ("bad request", 400, ""),
+    ] {
+        let (mut app, server) = ui_repair_app(response, code, false).await;
+        let root = app.space.root.clone();
+        let sid = app.session.as_ref().unwrap().id.clone();
+        finish_ui_reply(&mut app, BROKEN_UI);
+        assert_eq!(app.last_status(), "fixing the UI…");
+        let AppEvent::Status(status) = ui_repair_event(&mut app).await else {
+            panic!("expected repair status");
+        };
+        assert!(status.starts_with("UI repair failed — "), "{status}");
+        assert!(status.contains(error), "{status}");
+        assert_eq!(app.messages.last().unwrap().content, BROKEN_UI);
+        assert_eq!(
+            app.db.load_messages(&sid).unwrap().last().unwrap().content,
+            BROKEN_UI
+        );
+        assert!(
+            app.build_history()
+                .last()
+                .unwrap()
+                .content
+                .contains("failed to render")
+        );
+        assert!(app.pop_pending_event().is_none());
+        assert_eq!(server.await.unwrap().len(), 1);
+        app.on_chat_event(1, StreamEvent::Done).unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), app.next_event())
+                .await
+                .is_err()
+        );
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn ui_repair_is_skipped_for_valid_disabled_open_or_unviewed_blocks() {
+    for (content, enabled, viewing) in [
+        (FIXED_UI, true, true),
+        (BROKEN_UI, false, true),
+        ("```nexus-ui\n{", true, true),
+        (BROKEN_UI, true, false),
+        ("````markdown\n```nexus-ui\n{\n```\n````", true, true),
+    ] {
+        let (mut app, server) = ui_repair_app(FIXED_UI, 200, false).await;
+        let root = app.space.root.clone();
+        app.interactive_ui = enabled;
+        if !viewing {
+            app.session = None;
+        }
+        finish_ui_reply(&mut app, content);
+        assert!(!app.last_status().contains("fixing"));
+        assert!(app.ui_repair_messages.is_empty());
+        assert!(app.db.usage_recent(10, None).unwrap().is_empty());
+        server.abort();
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn incognito_ui_repair_updates_memory_without_database_writes() {
+    let (mut app, server) = ui_repair_app(FIXED_UI, 200, true).await;
+    let root = app.space.root.clone();
+    let sid = app.session.as_ref().unwrap().id.clone();
+    finish_ui_reply(&mut app, BROKEN_UI);
+    assert_eq!(app.last_status(), "fixing the UI…");
+    assert!(matches!(ui_repair_event(&mut app).await, AppEvent::Status(s) if s == "UI fixed"));
+    assert_eq!(app.messages.last().unwrap().content, FIXED_UI);
+    assert!(app.db.load_messages(&sid).unwrap().is_empty());
+    assert!(app.db.get_session(&sid).unwrap().is_none());
+    assert!(app.db.usage_recent(10, None).unwrap().is_empty());
+    assert!(matches!(
+        app.pop_pending_event(),
+        Some(AppEvent::HistoryInvalidated)
+    ));
+    assert_eq!(server.await.unwrap().len(), 1);
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn a_new_user_turn_cancels_applying_the_old_ui_repair() {
+    for incognito in [false, true] {
+        let (mut app, server) = ui_repair_app(FIXED_UI, 200, incognito).await;
+        let root = app.space.root.clone();
+        let sid = app.session.as_ref().unwrap().id.clone();
+        finish_ui_reply(&mut app, BROKEN_UI);
+        assert_eq!(app.last_status(), "fixing the UI…");
+        // The result is ready, but has not yet been applied by next_event.
+        assert_eq!(server.await.unwrap().len(), 1);
+        app.next_chat_task_id = 2;
+        app.send_message("another turn".into()).unwrap();
+        app.stop_stream().unwrap();
+        while app.pop_pending_event().is_some() {}
+        loop {
+            if matches!(ui_repair_event(&mut app).await, AppEvent::Status(s) if s.is_empty()) {
+                break;
+            }
+        }
+        assert_eq!(app.messages[0].content, BROKEN_UI);
+        assert_eq!(app.messages[1].content, "another turn");
+        assert!(app.pop_pending_event().is_none());
+        let stored = app.db.load_messages(&sid).unwrap();
+        if incognito {
+            assert!(stored.is_empty());
+        } else {
+            assert_eq!(stored[0].content, BROKEN_UI);
+            assert_eq!(stored[1].content, "another turn");
+        }
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn several_failing_ui_blocks_are_repaired_in_one_request() {
+    let second = "~~~nexus-ui\n{\"version\":1,\"title\":\"Second\",\"view\":[{\"type\":\"text\",\"text\":42}]}\n~~~";
+    let fixed_second = "```nexus-ui\n{\"version\":1,\"title\":\"Second\",\"view\":[{\"type\":\"text\",\"text\":\"Second fix\"}]}\n```";
+    let (mut app, server) = ui_repair_app(&format!("{FIXED_UI}\n{fixed_second}"), 200, false).await;
+    let root = app.space.root.clone();
+    let quoted = BROKEN_UI
+        .lines()
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let quoted_fix = FIXED_UI
+        .lines()
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    finish_ui_reply(
+        &mut app,
+        &format!("Intro\n{quoted}\nBetween\n{FIXED_UI}\n{second}\nEnd"),
+    );
+    assert_eq!(app.last_status(), "fixing the UI…");
+    assert!(matches!(ui_repair_event(&mut app).await, AppEvent::Status(s) if s == "UI fixed"));
+    let expected = format!("Intro\n{quoted_fix}\nBetween\n{FIXED_UI}\n{fixed_second}\nEnd");
+    assert_eq!(app.messages.last().unwrap().content, expected);
+    let sid = &app.session.as_ref().unwrap().id;
+    assert_eq!(
+        app.db.load_messages(sid).unwrap().last().unwrap().content,
+        expected
+    );
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let prompt = requests[0].1["messages"][2]["content"].as_str().unwrap();
+    assert!(prompt.contains("block \"Choice\" failed validation"));
+    assert!(prompt.contains("block \"Second\" failed validation"));
+    assert!(prompt.contains("view[0].text:"), "{prompt}");
+    assert!(prompt.contains("expected a string"), "{prompt}");
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn ui_repair_matches_the_stored_message_id_after_reload_and_rejects_newer_turns() {
+    for moved_on in [false, true] {
+        let (mut app, server) = ui_repair_app(FIXED_UI, 200, false).await;
+        let root = app.space.root.clone();
+        let sid = app.session.as_ref().unwrap().id.clone();
+        finish_ui_reply(&mut app, BROKEN_UI);
+        assert_eq!(app.last_status(), "fixing the UI…");
+        if moved_on {
+            app.db
+                .add_user_message(&sid, "next turn from another caller")
+                .unwrap();
+        }
+        app.switch_to_session_by_id(&sid).unwrap();
+        while app.pop_pending_event().is_some() {}
+        let AppEvent::Status(status) = ui_repair_event(&mut app).await else {
+            panic!("expected repair status");
+        };
+        let expected = if moved_on { BROKEN_UI } else { FIXED_UI };
+        assert_eq!(status, if moved_on { "" } else { "UI fixed" });
+        assert_eq!(app.messages[0].content, expected);
+        assert_eq!(app.db.load_messages(&sid).unwrap()[0].content, expected);
+        assert_eq!(server.await.unwrap().len(), 1);
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

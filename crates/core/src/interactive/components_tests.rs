@@ -177,6 +177,13 @@ fn malformed_cells_options_expressions_and_templates_are_rejected() {
         json!({"type":"select","key":"mode","label":"A","options":["B","C"]}),
         json!({"type":"bars","items":[{"label":"A","value":1,"action":"bad"}]}),
         json!({"type":"checklist","items":[{"label":"A","key":"ready","action":"bad"}]}),
+    ] {
+        assert!(
+            parse(node.clone(), json!({"mode":"A","ready":true})).is_err(),
+            "{node}"
+        );
+    }
+    for node in [
         json!({"type":"toggle","key":"ready","label":"{{missing}}"}),
         json!({"type":"table","columns":["{{missing}}"],"rows_data":[]}),
         json!({"type":"table","columns":["A"],"rows_data":[["{{missing}}"]]}),
@@ -187,10 +194,9 @@ fn malformed_cells_options_expressions_and_templates_are_rejected() {
         json!({"type":"select","key":"mode","label":"{{missing}}","options":["A","B"]}),
         json!({"type":"checklist","items":[{"label":"{{missing}}","key":"ready"}]}),
     ] {
-        assert!(
-            parse(node.clone(), json!({"mode":"A","ready":true})).is_err(),
-            "{node}"
-        );
+        let doc = parse(node.clone(), json!({"mode":"A","ready":true})).unwrap();
+        let ui = Session::new(doc).unwrap();
+        assert_eq!(ui.text("{{missing}}").unwrap(), "", "{node}");
     }
     assert!(
         parse(

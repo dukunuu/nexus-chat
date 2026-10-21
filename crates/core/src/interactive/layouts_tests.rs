@@ -76,7 +76,13 @@ fn every_new_text_field_rejects_escapes_unknown_templates_and_oversize() {
                             };
                         }
                         *target = json!(text);
-                        assert!(Document::parse(&invalid.to_string()).is_err(), "{path:?}");
+                        let result = Document::parse(&invalid.to_string());
+                        if text == "{{missing}}" {
+                            let ui = Session::new(result.unwrap()).unwrap();
+                            assert_eq!(ui.text(&text).unwrap(), "", "{path:?}");
+                        } else {
+                            assert!(result.is_err(), "{path:?}");
+                        }
                     }
                 } else {
                     reject_text_fields(value, path, root);

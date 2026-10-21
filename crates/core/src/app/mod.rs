@@ -1121,6 +1121,11 @@ pub struct App {
     /// "concise" (default), or "caveman".
     pub verbosity: String,
     pub memory_rx: Option<mpsc::UnboundedReceiver<(String, Vec<MemoryOp>)>>,
+    /// Finished UI repairs share a channel so switching sessions cannot lose a result.
+    ui_repair_tx: mpsc::UnboundedSender<chat::UiRepairResult>,
+    ui_repair_rx: mpsc::UnboundedReceiver<chat::UiRepairResult>,
+    /// Session -> reply message id; a new turn disarms that session's repair.
+    ui_repair_messages: HashMap<String, String>,
     /// Background compaction result: (session id, digest, messages-covered, pre-compaction %).
     pub compact_rx: Option<mpsc::UnboundedReceiver<(String, String, i64, u64)>>,
     /// Session currently being compacted. Kept separately from `compact_rx` so
@@ -1382,6 +1387,7 @@ impl App {
         let skill_dirs = crate::skills::app_skill_roots(&space.root);
         let skills = crate::skills::load_skills_from_dirs(&skill_dirs);
         let (chat_event_tx, chat_event_rx) = mpsc::unbounded_channel();
+        let (ui_repair_tx, ui_repair_rx) = mpsc::unbounded_channel();
         let (decider_status_tx, decider_status_rx) = mpsc::unbounded_channel();
         // Built with search disabled; `load_settings()` below reads the
         // persisted config (if any) and rebuilds this via `refresh_toolbox`.
@@ -1501,6 +1507,9 @@ impl App {
             user_command_epoch: 0,
             verbosity: "concise".to_string(),
             memory_rx: None,
+            ui_repair_tx,
+            ui_repair_rx,
+            ui_repair_messages: HashMap::new(),
             compact_rx: None,
             compact_error: Arc::default(),
             compacting_session_id: None,
@@ -2405,6 +2414,7 @@ impl App {
                 AppEvent::Status("approval cancelled".to_string())
             },
             Some(status) = self.decider_status_rx.recv() => AppEvent::Status(status),
+            Some(repair) = self.ui_repair_rx.recv() => self.on_ui_repair_result(repair),
             ev = self.chat_event_rx.recv() => {
                 AppEvent::Stream(ev.map(|event| (event.task_id, event.event)))
             },
