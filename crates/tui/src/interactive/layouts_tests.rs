@@ -501,3 +501,26 @@ fn cards_in_a_row_share_one_height_and_badges_sit_on_the_title_row() {
         "badge on the title row: {speed}"
     );
 }
+
+#[test]
+fn first_hero_suppresses_only_a_matching_rendered_border_title() {
+    for title in ["Overview", "  oVeRvIeW  ", "{{heading}}"] {
+        let source = json!({
+            "version":1,"title":"Overview","state":{"heading":"OVERVIEW"},
+            "view":[{"type":"hero","title":title,"subtitle":"Details"}]
+        })
+        .to_string();
+        let (canvas, rows) = render_at(&source, 80);
+        assert_eq!(rows[0], format!("╭{}╮", "─".repeat(78)));
+        assert!(rows[2].to_lowercase().contains("overview"));
+        assert_eq!(canvas[(2, 2)].fg, Theme::default().accent2);
+        assert!(canvas[(2, 2)].modifier.contains(Modifier::BOLD));
+    }
+    for view in [
+        json!([{"type":"hero","title":"Other title"}]),
+        json!([{"type":"text","text":"Before"},{"type":"hero","title":"Overview"}]),
+    ] {
+        let rows = render(&doc("rounded", "accent", view));
+        assert!(rows[0].starts_with("╭─ Overview "));
+    }
+}

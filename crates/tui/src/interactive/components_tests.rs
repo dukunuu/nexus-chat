@@ -466,7 +466,6 @@ fn counter_card_snapshots_70_and_80_columns() {
     };
     let theme = Theme::default();
     for width in [70, 80] {
-        let actions_width = usize::from(width - 3);
         let expected = [
             top_border("Counter", width),
             card_row("", width),
@@ -476,15 +475,15 @@ fn counter_card_snapshots_70_and_80_columns() {
             card_row("", width),
             card_row(" Name", width),
             card_row("", width),
-            card_row(&format!("{:>actions_width$}", " Submit result ↵ "), width),
+            card_row("  Submit result ↵ ", width),
             card_row("", width),
             bottom_border(width),
         ];
         assert_card_snapshot(&entry, width, &expected);
         let (actual, _) = entry.canvas(width, &theme, false, true);
-        assert_eq!(actual[(width - 18, 8)].bg, theme.accent);
-        assert_eq!(actual[(width - 18, 8)].fg, theme.bg);
-        assert_eq!(actual[(3, 4)].bg, theme.raised);
+        assert_eq!(actual[(3, 8)].bg, theme.accent);
+        assert_eq!(actual[(3, 8)].fg, theme.bg);
+        assert_eq!(actual[(3, 4)].bg, theme.control);
         assert_eq!(actual[(2, 2)].fg, theme.fg);
     }
 }
@@ -640,4 +639,95 @@ fn focus_is_only_visible_on_the_focused_control() {
     entry.focus = 1;
     let (expanded, _) = entry.canvas(80, &theme, true, true);
     assert_eq!(expanded[(77, 0)].fg, theme.accent);
+}
+
+#[test]
+fn pills_use_contrasting_surfaces_and_distinct_primary_and_focus_styles() {
+    let entry = Entry {
+        session: Ok(Session::new(Document::parse(super::tests::COUNTER).unwrap()).unwrap()),
+        focus: 0,
+        error: String::new(),
+        scroll: 0,
+    };
+    let mut theme = Theme::default();
+    theme.raised = theme.bg;
+    let (quiet, _) = entry.canvas(80, &theme, false, true);
+    assert_eq!(quiet[(3, 4)].bg, theme.control);
+    assert_ne!(quiet[(3, 4)].bg, theme.bg);
+    assert_eq!(quiet[(3, 4)].fg, theme.fg);
+    assert_eq!(quiet[(3, 8)].bg, theme.accent);
+    assert_eq!(quiet[(3, 8)].fg, theme.bg);
+    assert!(quiet[(3, 8)].modifier.contains(Modifier::BOLD));
+    let (focused, _) = entry.canvas(80, &theme, true, true);
+    assert_eq!(focused[(3, 4)].fg, theme.accent);
+    assert!(focused[(3, 4)].modifier.contains(Modifier::UNDERLINED));
+    let mut entry = entry;
+    entry.focus = 3;
+    let (focused, _) = entry.canvas(80, &theme, true, true);
+    assert!(
+        focused[(3, 8)]
+            .modifier
+            .contains(Modifier::BOLD | Modifier::UNDERLINED | Modifier::REVERSED)
+    );
+    theme.set_background_mode(crate::theme::BackgroundMode::Transparent);
+    let (transparent, _) = entry.canvas(80, &theme, false, true);
+    assert_eq!(transparent[(3, 4)].bg, theme.control);
+    assert_eq!(transparent[(1, 4)].bg, Color::Reset);
+}
+
+#[test]
+fn only_a_single_review_send_in_a_fitting_mixed_group_is_right_aligned() {
+    let mut data: Value = serde_json::from_str(super::tests::COUNTER).unwrap();
+    data["view"] = json!([{"type":"buttons","items":[
+        {"label":"Add one","action":"add"},
+        {"label":"Reset","action":"reset"},
+        {"label":"Submit result","action":"submit"}
+    ]}]);
+    let make_entry = |data: &Value| Entry {
+        session: Ok(Session::new(Document::parse(&data.to_string()).unwrap()).unwrap()),
+        focus: 0,
+        error: String::new(),
+        scroll: 0,
+    };
+    let entry = make_entry(&data);
+    let (_, wide) = entry.canvas(80, &Theme::default(), false, true);
+    assert_eq!(wide[0].0, Rect::new(2, 2, 9, 1));
+    assert_eq!(wide[1].0, Rect::new(12, 2, 7, 1));
+    assert_eq!(wide[2].0, Rect::new(61, 2, 17, 1));
+    let (_, narrow) = entry.canvas(30, &Theme::default(), false, true);
+    assert_eq!(narrow[2].0, Rect::new(2, 3, 17, 1));
+    data["view"][0]["items"][0]["label"] = json!("A very long local action");
+    let (_, wrapped) = make_entry(&data).canvas(40, &Theme::default(), false, true);
+    assert_eq!(wrapped[2].0.x, 2);
+    assert_eq!(wrapped[2].0.y, 3);
+    data["view"][0]["items"][0]["label"] =
+        json!("An action long enough to occupy the entire first row");
+    let (_, wrapped) = make_entry(&data).canvas(40, &Theme::default(), false, true);
+    assert_eq!(wrapped[2].0, Rect::new(10, 3, 17, 1));
+    data["view"][0]["items"][0]["label"] = json!("Add one");
+    data["view"][0]["items"][1]["action"] = json!("submit");
+    let (_, multiple) = make_entry(&data).canvas(80, &Theme::default(), false, true);
+    assert!(multiple[2].0.right() < 78);
+}
+
+#[test]
+fn wrapped_secondary_pill_rows_and_mixed_answer_buttons_stay_left_aligned() {
+    let data = json!({
+        "version":1,"title":"Options","view":[{"type":"buttons","items":[
+            {"label":"First answer","action":"answer"},
+            {"label":"Local action","action":"local"},
+            {"label":"Last answer","action":"answer"}
+        ]}],
+        "actions":{"answer":[{"op":"answer"}],"local":[]}
+    });
+    let entry = Entry {
+        session: Ok(Session::new(Document::parse(&data.to_string()).unwrap()).unwrap()),
+        focus: 0,
+        error: String::new(),
+        scroll: 0,
+    };
+    let (_, hits) = entry.canvas(30, &Theme::default(), false, true);
+    assert_eq!(hits[0], (Rect::new(2, 2, 16, 1), 0));
+    assert_eq!(hits[1], (Rect::new(2, 3, 14, 1), 1));
+    assert_eq!(hits[2], (Rect::new(2, 4, 15, 1), 2));
 }

@@ -98,6 +98,8 @@ pub struct Theme {
     pub raised: Color,
     /// The opaque-mode `raised` shade, kept so switching modes can restore it.
     raised_opaque: Color,
+    /// Contrasting, opaque surface for compact controls and number chips.
+    pub control: Color,
     /// Text-selection highlight background.
     pub selection: Color,
 }
@@ -125,6 +127,7 @@ impl Default for Theme {
             // 256-color grays: the named ANSI palette has no in-between shade.
             raised: Color::Indexed(236),
             raised_opaque: Color::Indexed(236),
+            control: Color::Indexed(238),
             selection: Color::Indexed(239),
         }
     }
@@ -196,6 +199,7 @@ impl Theme {
             research_msg: hex_to_color(&n.magenta).unwrap_or(fallback.research_msg),
             raised: fallback.raised,
             raised_opaque: fallback.raised,
+            control: fallback.control,
             selection: fallback.selection,
         }
         .with_derived_shades(None)
@@ -208,6 +212,7 @@ impl Theme {
     #[must_use]
     fn with_derived_shades(mut self, selection: Option<Color>) -> Self {
         if let (Color::Rgb(..), Color::Rgb(..)) = (self.bg, self.fg) {
+            self.control = blend(self.bg, self.fg, 0.16);
             self.raised = blend(self.bg, self.fg, 0.07);
             self.raised_opaque = self.raised;
             self.border_dim = blend(self.bg, self.fg, 0.24);
@@ -364,6 +369,7 @@ impl Theme {
                 research_msg: magenta,
                 raised: fallback.raised,
                 raised_opaque: fallback.raised,
+                control: fallback.control,
                 selection: fallback.selection,
             }
             .with_derived_shades(get("selection-background")),
@@ -515,6 +521,51 @@ white = "#ddf7ff"
     fn ghostty_theme_needs_background_and_foreground() {
         let colors = ghostty_pairs("palette = 6=#7fa6a2").into_iter().collect();
         assert!(Theme::from_ghostty(&colors).is_none());
+    }
+
+    #[test]
+    fn control_surface_has_ansi_fallback_and_rgb_contrast_in_both_theme_sources() {
+        let fallback = Theme::default();
+        assert_eq!(fallback.control, Color::Indexed(238));
+        assert_ne!(fallback.control, fallback.bg);
+        let a: Alacritty = toml::from_str(
+            r##"
+[colors.primary]
+background = "#000000"
+foreground = "#ffffff"
+[colors.normal]
+black = "#000000"
+red = "#ff0000"
+green = "#00ff00"
+yellow = "#ffff00"
+magenta = "#ff00ff"
+cyan = "#00ffff"
+[colors.bright]
+black = "#808080"
+red = "#ff0000"
+green = "#00ff00"
+yellow = "#ffff00"
+magenta = "#ff00ff"
+cyan = "#00ffff"
+"##,
+        )
+        .unwrap();
+        let colors = ghostty_pairs("background = #ffffff\nforeground = #000000")
+            .into_iter()
+            .collect();
+        for (mut theme, control) in [
+            (Theme::from_alacritty(&a), Color::Rgb(41, 41, 41)),
+            (
+                Theme::from_ghostty(&colors).unwrap(),
+                Color::Rgb(214, 214, 214),
+            ),
+        ] {
+            assert_eq!(theme.control, control);
+            theme.set_background_mode(BackgroundMode::Transparent);
+            assert_eq!(theme.control, control);
+            theme.set_background_mode(BackgroundMode::Opaque);
+            assert_eq!(theme.control, control);
+        }
     }
 
     #[test]

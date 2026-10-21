@@ -197,12 +197,19 @@ pub fn render_buttons<A: Copy>(
                 .bg(if button.primary && button.enabled {
                     theme.accent
                 } else {
-                    theme.raised
+                    theme.control
                 });
+            if button.primary {
+                style = style.add_modifier(Modifier::BOLD);
+            }
             if button.selected {
-                style = style
-                    .add_modifier(Modifier::UNDERLINED)
-                    .underline_color(theme.accent);
+                style = if button.primary {
+                    style.add_modifier(Modifier::REVERSED)
+                } else {
+                    style.fg(theme.accent)
+                }
+                .add_modifier(Modifier::UNDERLINED)
+                .underline_color(theme.accent);
             }
             Paragraph::new(fit_line(
                 Line::from(format!(" {label} ")),

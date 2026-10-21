@@ -100,6 +100,24 @@ impl Entry {
             },
         )
     }
+    fn choices(&self) -> Vec<usize> {
+        let Ok(session) = &self.session else {
+            return Vec::new();
+        };
+        self.controls()
+            .iter()
+            .enumerate()
+            .filter_map(|(control, value)| {
+                let Control::Action((node, _)) = value else {
+                    return None;
+                };
+                let Node::Buttons { items, .. } = &session.document().nodes()[*node] else {
+                    return None;
+                };
+                choice_list(session.document(), items).then_some(control)
+            })
+            .collect()
+    }
     fn answering(&self) -> bool {
         let Some(Control::Action((node, item))) = self.controls().get(self.focus).cloned() else {
             return false;
@@ -210,14 +228,17 @@ impl Entry {
             .as_ref()
             .map_or_else(|_| Vec::new(), |session| node_regions(session, width));
         let height = self.session.as_ref().map_or(6, |_| card_height(&regions));
-        let hint = if focused {
-            "Tab next · Enter press · Esc done"
+        let choices = self.choices().len().min(9);
+        let hint = if choices > 0 {
+            format!("1–{choices} pick · F2 keyboard")
+        } else if focused {
+            "Tab next · Enter press · Esc done".into()
         } else {
-            "F2 keyboard"
+            "F2 keyboard".into()
         };
         let mut buffer = self.session.as_ref().map_or_else(
-            |_| card_buffer(width, height, "UI unavailable", theme, hint),
-            |session| document_buffer(width, height, session.document(), theme, hint),
+            |_| card_buffer(width, height, "UI unavailable", theme, &hint),
+            |session| document_buffer(width, height, session, theme, &hint),
         );
         let area = buffer.area;
         let hits = Vec::new();
@@ -271,7 +292,6 @@ impl Entry {
     ) -> Vec<(Rect, usize)> {
         let mut hits = Vec::new();
         let mut control = 0;
-        let primary = primary_button(session.document());
         for (index, (node, region)) in session.document().nodes().iter().zip(regions).enumerate() {
             let region = *region;
             match node {
@@ -288,28 +308,14 @@ impl Entry {
                         .render(region, buffer);
                 }
                 Node::Buttons { items, .. } => {
-                    for (item, rect) in button_regions(session, items, region) {
-                        let button = &items[item];
-                        let selected = focus == Some(control + item);
-                        let enabled = can_send
-                            || session.document().answers(&button.action)
-                            || !session.document().sends(&button.action);
-                        let label = button_label(session, button);
-                        let body: Vec<_> = button.body.iter().map(String::as_str).collect();
-                        hits.extend(chrome::render_buttons(
-                            buffer,
-                            rect,
-                            &[chrome::Button {
-                                action: control + item,
-                                label: &label,
-                                body: &body,
-                                selected,
-                                primary: primary == Some((index, item)),
-                                enabled,
-                            }],
-                            theme,
-                        ));
-                    }
+                    hits.extend(render_button_group(
+                        session,
+                        (index, items),
+                        region,
+                        theme,
+                        (focus, control, can_send),
+                        buffer,
+                    ));
                     control += items.len();
                 }
                 Node::Input { key, label } => {
@@ -443,9 +449,121 @@ fn button_label(session: &Session, button: &Button) -> String {
         }
     )
 }
+fn choice_list(document: &Document, items: &[Button]) -> bool {
+    !items.is_empty()
+        && items
+            .iter()
+            .all(|button| button.body.is_empty() && document.answers(&button.action))
+}
+fn render_button_group(
+    session: &Session,
+    (index, items): (usize, &[Button]),
+    area: Rect,
+    theme: &Theme,
+    (focus, control, can_send): (Option<usize>, usize, bool),
+    buffer: &mut Buffer,
+) -> Vec<(Rect, usize)> {
+    let mut hits = Vec::new();
+    let primary = primary_button(session.document());
+    let choices = choice_list(session.document(), items);
+    let choice: usize = session.document().nodes()[..index]
+        .iter()
+        .filter_map(|node| match node {
+            Node::Buttons { items, .. } if choice_list(session.document(), items) => {
+                Some(items.len())
+            }
+            _ => None,
+        })
+        .sum();
+    for (item, rect) in button_regions(session, items, area) {
+        let button = &items[item];
+        let selected = focus == Some(control + item);
+        if choices {
+            render_choice(
+                &display(session, &button.label),
+                choice + item + 1,
+                rect,
+                theme,
+                selected,
+                buffer,
+            );
+            hits.push((rect, control + item));
+            continue;
+        }
+        let enabled = can_send
+            || session.document().answers(&button.action)
+            || !session.document().sends(&button.action);
+        let label = button_label(session, button);
+        let body: Vec<_> = button.body.iter().map(String::as_str).collect();
+        hits.extend(chrome::render_buttons(
+            buffer,
+            rect,
+            &[chrome::Button {
+                action: control + item,
+                label: &label,
+                body: &body,
+                selected,
+                primary: primary == Some((index, item)),
+                enabled,
+            }],
+            theme,
+        ));
+    }
+    hits
+}
+fn choice_lines(label: &str, width: u16) -> Vec<Line<'static>> {
+    wrapped_text(label, width.saturating_sub(6), Style::default())
+}
+fn render_choice(
+    label: &str,
+    number: usize,
+    area: Rect,
+    theme: &Theme,
+    selected: bool,
+    buffer: &mut Buffer,
+) {
+    if area.is_empty() {
+        return;
+    }
+    let mut style = Style::default().fg(if selected { theme.accent } else { theme.fg });
+    if selected {
+        style = style.bg(theme.selection);
+    }
+    buffer.set_style(area, style);
+    let indent = area.width.min(4);
+    Paragraph::new(choice_lines(label, area.width))
+        .style(style)
+        .render(
+            Rect::new(
+                area.x + indent,
+                area.y,
+                area.width.saturating_sub(6),
+                area.height,
+            ),
+            buffer,
+        );
+    if number <= 9 {
+        Paragraph::new(format!(" {number} "))
+            .style(Style::default().fg(theme.fg).bg(theme.control))
+            .render(Rect::new(area.x, area.y, area.width.min(3), 1), buffer);
+    }
+    Paragraph::new("→")
+        .style(Style::default().fg(theme.fg_dim))
+        .render(Rect::new(area.right() - 1, area.y, 1, 1), buffer);
+}
 fn button_regions(session: &Session, items: &[Button], area: Rect) -> Vec<(usize, Rect)> {
     let mut regions = Vec::new();
-    if items.iter().any(|button| !button.body.is_empty()) {
+    if choice_list(session.document(), items) {
+        let mut y = area.y;
+        for (item, button) in items.iter().enumerate() {
+            let height =
+                u16::try_from(choice_lines(&display(session, &button.label), area.width).len())
+                    .unwrap_or(u16::MAX)
+                    .max(1);
+            regions.push((item, Rect::new(area.x, y, area.width, height)));
+            y = y.saturating_add(height);
+        }
+    } else if items.iter().any(|button| !button.body.is_empty()) {
         let content_width = items
             .iter()
             .flat_map(|button| {
@@ -478,9 +596,14 @@ fn button_regions(session: &Session, items: &[Button], area: Rect) -> Vec<(usize
     } else {
         let mut x = area.x;
         let mut y = area.y;
+        let review = |item: usize| {
+            session.document().sends(&items[item].action)
+                && !session.document().answers(&items[item].action)
+        };
+        let reviews = (0..items.len()).filter(|item| review(*item)).count();
         let order = (0..items.len())
-            .filter(|i| !session.document().sends(&items[*i].action))
-            .chain((0..items.len()).filter(|i| session.document().sends(&items[*i].action)));
+            .filter(|item| !review(*item))
+            .chain((0..items.len()).filter(|item| review(*item)));
         for item in order {
             let width = u16::try_from(
                 button_label(session, &items[item])
@@ -489,21 +612,13 @@ fn button_regions(session: &Session, items: &[Button], area: Rect) -> Vec<(usize
             )
             .unwrap_or(u16::MAX)
             .min(area.width);
-            if x > area.x && x.saturating_add(width) > area.right() {
+            let fits = x > area.x && x.saturating_add(width) <= area.right();
+            if x > area.x && !fits {
                 x = area.x;
                 y = y.saturating_add(1);
             }
-            if session.document().sends(&items[item].action) {
-                let remaining: u16 = items[item..]
-                    .iter()
-                    .filter(|b| session.document().sends(&b.action))
-                    .map(|b| {
-                        u16::try_from(button_label(session, b).width() + 3)
-                            .unwrap_or(u16::MAX)
-                            .min(area.width)
-                    })
-                    .fold(0, u16::saturating_add);
-                x = x.max(area.right().saturating_sub(remaining.saturating_sub(1)));
+            if review(item) && reviews == 1 && items.len() > 1 && fits && y == area.y {
+                x = area.right().saturating_sub(width);
             }
             regions.push((item, Rect::new(x, y, width, 1)));
             x = x.saturating_add(width).saturating_add(1);
@@ -616,7 +731,14 @@ fn tone_color(tone: Option<Tone>, accent: Color, theme: &Theme) -> Color {
         Some(Tone::Error) => theme.error,
     }
 }
-fn document_buffer(width: u16, height: u16, doc: &Document, theme: &Theme, hint: &str) -> Buffer {
+fn document_buffer(
+    width: u16,
+    height: u16,
+    session: &Session,
+    theme: &Theme,
+    hint: &str,
+) -> Buffer {
+    let doc = session.document();
     let area = Rect::new(0, 0, width, height);
     let mut buffer = Buffer::empty(area);
     buffer.set_style(area, theme.background_style());
@@ -636,8 +758,12 @@ fn document_buffer(width: u16, height: u16, doc: &Document, theme: &Theme, hint:
     let mut block = Block::default()
         .borders(if plain { Borders::TOP } else { Borders::ALL })
         .border_type(border_type)
-        .border_style(Style::default().fg(theme.border_dim))
-        .title_top(Line::from(Span::styled(
+        .border_style(Style::default().fg(theme.border_dim));
+    let duplicate = matches!(doc.nodes().first(), Some(Node::Hero { title, .. })
+        if safe(&session.text(title).unwrap_or_default()).trim().to_lowercase()
+            == safe(doc.title()).trim().to_lowercase());
+    if !duplicate {
+        block = block.title_top(Line::from(Span::styled(
             format!(
                 "{rule} {} ",
                 clipped(&safe(doc.title()), width.saturating_sub(12))
@@ -646,6 +772,7 @@ fn document_buffer(width: u16, height: u16, doc: &Document, theme: &Theme, hint:
                 .fg(accent_color(doc, theme))
                 .add_modifier(Modifier::BOLD),
         )));
+    }
     if !doc.is_static() {
         block = block
             .title_top(
@@ -1783,6 +1910,28 @@ impl Widgets {
         if entry.focus == controls.len() && matches!(key.code, KeyCode::Enter | KeyCode::Char(' '))
         {
             self.expanded = true;
+            return (false, None);
+        }
+        if let KeyCode::Char(ch @ '1'..='9') = key.code
+            && let Some(control) = entry.choices().get(ch as usize - '1' as usize)
+        {
+            return (
+                false,
+                entry.activate(*control, can_send, self.answer_blocked.is_none()),
+            );
+        }
+        if let Some(Control::Action((node, item))) = controls.get(entry.focus)
+            && matches!(key.code, KeyCode::Up | KeyCode::Down)
+            && let Ok(session) = &entry.session
+            && let Node::Buttons { items, .. } = &session.document().nodes()[*node]
+            && choice_list(session.document(), items)
+        {
+            let next = if key.code == KeyCode::Down {
+                (item + 1) % items.len()
+            } else {
+                (item + items.len() - 1) % items.len()
+            };
+            entry.focus = entry.focus - item + next;
             return (false, None);
         }
         if entry.navigate(key.code) {
