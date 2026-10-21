@@ -654,6 +654,12 @@ impl App {
             } else {
                 ChatMessage::text(m.role.clone(), m.content.clone())
             };
+            // On every assistant turn with a broken block, not just the
+            // latest: a note that vanished once the turn aged would change
+            // the replayed prefix and miss the prompt cache.
+            if m.role == "assistant" {
+                cm.content.push_str(&ui_failure_notes(&m.content));
+            }
             if m.role == "user" && vision {
                 let images_dir = self.space.files_dir(&self.active_space.name);
                 let mut images = Vec::new();
@@ -1954,6 +1960,76 @@ impl App {
     }
 }
 
+// Only complete UI fences count. Track other fences too, so literal examples
+// inside longer Markdown fences never become replay diagnostics.
+fn ui_failure_notes(content: &str) -> String {
+    let mut fence: Option<(char, usize, bool, usize)> = None;
+    let mut source = String::new();
+    let mut notes = String::new();
+    let mut ordinal = 0;
+    for line in content.lines() {
+        if let Some((marker, length, ui, quotes)) = fence {
+            let mut body = line;
+            for _ in 0..quotes {
+                if let Some(rest) = body.trim_start().strip_prefix('>') {
+                    body = rest.strip_prefix(' ').unwrap_or(rest);
+                }
+            }
+            let trimmed = body.trim_start();
+            let count = trimmed.chars().take_while(|ch| *ch == marker).count();
+            if count >= length && trimmed[count..].trim().is_empty() {
+                if ui {
+                    ordinal += 1;
+                    if let Err(errors) = crate::interactive::Document::check(&source) {
+                        let title = serde_json::from_str::<serde_json::Value>(&source)
+                            .ok()
+                            .and_then(|value| {
+                                value
+                                    .get("title")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_string)
+                            })
+                            .filter(|title| !title.is_empty())
+                            .unwrap_or_else(|| format!("#{ordinal}"));
+                        let error = &errors[0];
+                        let message = error.message.lines().collect::<Vec<_>>().join(" ");
+                        let path = error.path.replace(['\n', '\r'], " ");
+                        let _ = write!(
+                            notes,
+                            "\n[nexus: the nexus-ui block {title:?} failed to render — {path}: {message}. Run ui_check and resend it if the user still needs it.]"
+                        );
+                    }
+                }
+                fence = None;
+                source.clear();
+            } else if ui {
+                // Markdown removes blockquote prefixes before handing off JSON.
+                source.push_str(body);
+                source.push('\n');
+            }
+        } else {
+            if line.starts_with("    ") || line.starts_with('\t') {
+                continue;
+            }
+            let trimmed = line.trim_start_matches([' ', '\t', '>']);
+            let marker = trimmed.chars().next().unwrap_or_default();
+            let length = trimmed.chars().take_while(|ch| *ch == marker).count();
+            if matches!(marker, '`' | '~') && length >= 3 {
+                let ui = trimmed[length..]
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|lang| lang.eq_ignore_ascii_case("nexus-ui"));
+                let quotes = line[..line.len() - trimmed.len()]
+                    .chars()
+                    .filter(|ch| *ch == '>')
+                    .count();
+                fence = Some((marker, length, ui, quotes));
+            }
+        }
+    }
+    notes
+}
+
 /// Each fenced code block in `md` as `(language, code)`.
 pub fn code_blocks(md: &str) -> Vec<(Option<String>, String)> {
     let mut out = Vec::new();
@@ -2461,6 +2537,91 @@ pub fn split_inline_reasoning(text: &str) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_failures_are_replay_only_and_stable_across_turns() {
+        fn message(role: &str, content: &str) -> Message {
+            Message {
+                role: role.into(),
+                content: content.into(),
+                model: None,
+                reasoning: None,
+                tokens: None,
+                secs: None,
+                cost: None,
+                phrase: None,
+                persona: None,
+                created_at: None,
+            }
+        }
+        let bad =
+            "```nexus-ui\n{\"version\":1,\"title\":\"Quiz\",\"view\":[{\"type\":\"radio\"}]}\n```";
+        let good = "```nexus-ui\n{\"version\":1,\"title\":\"Quiz\",\"view\":[{\"type\":\"text\",\"text\":\"Hi\"}]}\n```";
+        let mut app = super::super::tests::app_with_key();
+        app.messages = vec![
+            message("assistant", bad),
+            message("user", "again"),
+            message("assistant", bad),
+            message("user", "fix it"),
+        ];
+        let history = app.build_history();
+        let assistants: Vec<_> = history
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .collect();
+        let noted = format!(
+            "{bad}\n[nexus: the nexus-ui block \"Quiz\" failed to render — view[0]: unknown node type \"radio\" — valid: {}. Run ui_check and resend it if the user still needs it.]",
+            crate::interactive::NODE_TYPES
+        );
+        // Every broken turn carries its note, so an older turn replays the
+        // same bytes it did when it was the latest (cache-stable prefix).
+        assert_eq!(assistants[0].content, noted);
+        assert_eq!(assistants[1].content, noted);
+        assert_eq!(app.messages[2].content, bad);
+        assert_eq!(
+            app.build_history()[history.len() - 2].content,
+            assistants[1].content
+        );
+        app.messages[0].content = good.into();
+        app.messages[2].content = good.into();
+        let history = app.build_history();
+        assert!(
+            history
+                .iter()
+                .all(|message| !message.content.contains("[nexus: the nexus-ui block"))
+        );
+        app.messages.push(message("assistant", "No UI needed."));
+        assert!(
+            app.build_history()
+                .iter()
+                .all(|message| !message.content.contains("failed to render"))
+        );
+    }
+
+    #[test]
+    fn ui_replay_notes_ignore_open_and_literal_fences_and_number_untitled_blocks() {
+        for source in [
+            "```nexus-ui\n{",
+            "~~~nexus-ui\n{",
+            "````markdown\n```nexus-ui\n{\n```\n````",
+            "    ```nexus-ui\n    {\n    ```",
+        ] {
+            assert!(ui_failure_notes(source).is_empty(), "{source}");
+        }
+        let source = "~~~NeXuS-Ui extra\n{\"version\":1,\"title\":\"Fine\",\"view\":[{\"type\":\"text\",\"text\":\"OK\"}]}\n~~~\n```nexus-ui\n{\n```";
+        let note = ui_failure_notes(source);
+        assert!(
+            note.contains("block \"#2\" failed to render — $:"),
+            "{note}"
+        );
+        assert_eq!(note.lines().count(), 2);
+        let note = ui_failure_notes(
+            "> ```nexus-ui\n> {\"version\":1,\"title\":\"Quoted\",\"view\":[{\"type\":\"radio\"}]}\n> ```",
+        );
+        assert!(note.contains("block \"Quoted\""), "{note}");
+        assert!(ui_failure_notes("> > ```nexus-ui\n> > {\"version\":1,\"title\":\"Fine\",\"view\":[{\"type\":\"text\",\"text\":\"OK\"}]}\n> > ```").is_empty());
+        assert!(!ui_failure_notes("```nexus-ui\n> {\"version\":1,\"title\":\"Fine\",\"view\":[{\"type\":\"text\",\"text\":\"OK\"}]}\n```" ).is_empty());
+    }
 
     #[test]
     fn chat_params_pass_the_cache_ttl_experiment() {

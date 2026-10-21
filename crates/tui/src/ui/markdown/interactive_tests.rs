@@ -1,6 +1,23 @@
 use super::*;
 
 const SOURCE: &str = include_str!("../../../../core/tests/fixtures/interactive/counter.json");
+#[test]
+fn fallback_shows_only_the_first_three_located_errors() {
+    let source = r#"{"version":1,"title":"Broken","view":[{"type":"radio"},{"type":"slider"},{"type":"canvas"},{"type":"tabs"}]}"#;
+    let rendered = render(&format!("```nexus-ui\n{source}\n```"), 240, colors());
+    assert!(rendered.widgets.is_empty());
+    let text = plain(&rendered);
+    for index in 0..3 {
+        assert!(
+            text.contains(&format!("view[{index}]: unknown node type")),
+            "{text}"
+        );
+    }
+    assert!(!text.contains("view[3]:"), "{text}");
+    assert!(text.contains("valid: hero, columns"), "{text}");
+    assert_eq!(rendered.blocks, vec![source]);
+}
+
 fn colors() -> MdColors {
     MdColors::default()
 }

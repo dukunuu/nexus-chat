@@ -16,6 +16,11 @@ most one secondary. Use button `body` tiles for 3–8 similar choices: short
 artwork, a short title, and the last body line as one line of detail. Games and
 quizzes may have more buttons. Keep tasks shallow: no tabs or deep navigation.
 
+Before emitting any `nexus-ui` block, call ui_check with its exact JSON.
+If it reports errors, fix every error and check again.
+Only emit a block that returned ok, byte-for-byte the checked source.
+Never invent node types, fields or ops; use only the ones listed here.
+
 Emit a closed `nexus-ui` fenced block containing one JSON object (spread it
 over several lines and check that every bracket closes):
 - `version`: 1; `title`: short title.

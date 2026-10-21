@@ -194,10 +194,10 @@ fn visible_controls(text: &str) -> String {
 }
 
 fn render_ui(r: &mut Rendered, source: &str, complete: bool, width: usize, colors: MdColors) {
-    let document = nexus_core::interactive::Document::parse(source);
+    let document = nexus_core::interactive::Document::check(source);
     let fallback = width < 8 || (complete && document.is_err());
     if fallback {
-        // A finished block that doesn't parse: say why in one line, then show
+        // A finished block that doesn't parse: show up to three errors, then show
         // the source as written — no card placeholder rows, and only control
         // characters escaped (escaping quotes made valid JSON look broken).
         let label = if width < 8 {
@@ -206,17 +206,19 @@ fn render_ui(r: &mut Rendered, source: &str, complete: bool, width: usize, color
             "interactive UI · couldn't be shown"
         };
         push_code_border(r, width, Some(label), colors.rule);
-        if let Err(error) = &document {
-            let reason = error.to_string();
-            push_code_content(
-                r,
-                &Line::from(Span::styled(
-                    visible_controls(&reason),
-                    Style::default().fg(colors.code),
-                )),
-                width,
-                colors.rule,
-            );
+        if let Err(errors) = &document {
+            for error in errors.iter().take(3) {
+                let reason = format!("{}: {}", error.path, error.message);
+                push_code_content(
+                    r,
+                    &Line::from(Span::styled(
+                        visible_controls(&reason),
+                        Style::default().fg(colors.code),
+                    )),
+                    width,
+                    colors.rule,
+                );
+            }
         }
         for line in source.lines() {
             push_code_content(r, &Line::from(visible_controls(line)), width, colors.rule);

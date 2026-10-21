@@ -451,7 +451,264 @@ struct Definition {
     actions: BTreeMap<String, Vec<Step>>,
 }
 
-/// A validated version-1 UI document. Construction is through `parse` only.
+/// A located problem in a model-authored UI document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckError {
+    /// JSON location, or `$` for the entire source.
+    pub path: String,
+    /// Explanation including valid alternatives for unknown constructs.
+    pub message: String,
+}
+
+/// Valid presentation node types, shared by validation and tool reports.
+pub const NODE_TYPES: &str = "hero, columns, cards, stats, steps, callout, quote, divider, text, buttons, input, kv, table, progress, bars, sparkline, checklist, select, toggle";
+const ACTION_OPS: &str = "set, call, send, answer";
+const EXPR_OPS: &str = "get, random, not, number, if, add, sub, mul, div, mod, eq, lt, gt, and, or";
+const MAX_ERRORS: usize = 10;
+
+fn check_result(errors: &mut Vec<CheckError>, path: &str, result: Result<()>) {
+    if let Err(error) = result
+        && errors.len() < MAX_ERRORS
+    {
+        errors.push(CheckError {
+            path: path.into(),
+            message: error.to_string(),
+        });
+    }
+}
+
+// Check fields independently so serde's first failure doesn't hide later ones.
+// Optional fields use `?`; their defaults/requiredness remain owned by serde.
+#[allow(clippy::too_many_lines)]
+fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckError>) {
+    if errors.len() >= MAX_ERRORS {
+        return;
+    }
+    if let Some(inner) = shape.strip_prefix('?') {
+        if !value.is_null() {
+            check_shape(value, path, inner, errors);
+        }
+        return;
+    }
+    if let Some(inner) = shape.strip_suffix("[]") {
+        if let Some(items) = value.as_array() {
+            for (index, item) in items.iter().enumerate() {
+                check_shape(item, &format!("{path}[{index}]"), inner, errors);
+            }
+        } else {
+            check_result(
+                errors,
+                path,
+                Err(anyhow::anyhow!("expected an array of {inner}")),
+            );
+        }
+        return;
+    }
+    macro_rules! typed {
+        ($ty:ty) => {{
+            check_result(
+                errors,
+                path,
+                serde_json::from_value::<$ty>(value.clone())
+                    .map(|_| ())
+                    .map_err(Into::into),
+            );
+            return;
+        }};
+    }
+    match shape {
+        "string" => typed!(String),
+        "bool" => typed!(bool),
+        "u8" => typed!(u8),
+        "u16" => typed!(u16),
+        "tone" => typed!(Tone),
+        "frame" => typed!(Frame),
+        "accent" => typed!(Accent),
+        "mark" => typed!(Mark),
+        "step_state" => typed!(StepState),
+        "callout_tone" => typed!(CalloutTone),
+        "pair" => typed!([String; 2]),
+        "value" => return,
+        _ => {}
+    }
+    let Some(object) = value.as_object() else {
+        check_result(errors, path, Err(anyhow::anyhow!("expected an object")));
+        return;
+    };
+    let (owner, fields) = match shape {
+        "document" => (
+            shape,
+            "version:u8 title:string frame:frame accent:accent state:state view:node[] actions:actions",
+        ),
+        "state" | "actions" => {
+            for (key, value) in object {
+                check_shape(
+                    value,
+                    &format!("{path}.{key}"),
+                    if shape == "state" { "value" } else { "step[]" },
+                    errors,
+                );
+            }
+            return;
+        }
+        "node" | "step" => {
+            let (tag, valid, kind) = if shape == "node" {
+                ("type", NODE_TYPES, "node type")
+            } else {
+                ("op", ACTION_OPS, "action op")
+            };
+            let Some(name) = object.get(tag).and_then(Value::as_str) else {
+                check_result(
+                    errors,
+                    &format!("{path}.{tag}"),
+                    Err(anyhow::anyhow!("expected {tag} string — valid: {valid}")),
+                );
+                return;
+            };
+            let fields = match (shape, name) {
+                ("node", "hero") => "title:string subtitle:?string badge:?string",
+                ("node", "columns") => "items:column[]",
+                ("node", "cards") => "items:card[]",
+                ("node", "stats") => "items:stat[]",
+                ("node", "steps") => "items:display_step[]",
+                ("node", "callout") => "tone:callout_tone title:?string text:string",
+                ("node", "quote") => "text:string by:?string",
+                ("node", "divider") => "label:?string",
+                ("node", "text") => "text:string tone:tone rows:u16",
+                ("node", "buttons") => "items:button[] rows:u16",
+                ("node", "input" | "toggle") => "key:string label:string",
+                ("node", "kv") => "items:pair[]",
+                ("node", "table") => "columns:string[] rows_data:string[][] select:?string",
+                ("node", "progress") => "label:string value:value max:value",
+                ("node", "bars") => "items:bar[]",
+                ("node", "sparkline") => "values:value[] rows:u16",
+                ("node", "checklist") => "items:check[]",
+                ("node", "select") => "key:string label:string options:string[]",
+                ("step", "set") => "key:string value:value",
+                ("step", "call") => "action:string",
+                ("step", "send") => "text:string",
+                ("step", "answer") => "",
+                _ => {
+                    check_result(
+                        errors,
+                        path,
+                        Err(anyhow::anyhow!("unknown {kind} {name:?} — valid: {valid}")),
+                    );
+                    return;
+                }
+            };
+            (name, fields)
+        }
+        "button" => (
+            shape,
+            "label:string action:string body:string[] primary:bool",
+        ),
+        "column" => (shape, "title:string items:column_item[]"),
+        "column_item" => (shape, "text:string mark:mark"),
+        "card" => (shape, "title:string text:string badge:?string tone:?tone"),
+        "stat" => (shape, "value:string label:string delta:?string tone:?tone"),
+        "display_step" => (shape, "title:string text:?string state:step_state"),
+        "bar" => (shape, "label:string value:value"),
+        "check" => (shape, "label:string key:string"),
+        _ => unreachable!("known schema shape"),
+    };
+    let fields: Vec<_> = fields
+        .split_whitespace()
+        .filter_map(|field| field.split_once(':'))
+        .collect();
+    for (key, value) in object {
+        if (shape == "node" && key == "type") || (shape == "step" && key == "op") {
+            continue;
+        }
+        if let Some((_, field_shape)) = fields.iter().find(|(name, _)| name == key) {
+            check_shape(value, &format!("{path}.{key}"), field_shape, errors);
+        } else {
+            let alternatives = if fields.is_empty() {
+                format!("{owner} takes no fields")
+            } else {
+                format!(
+                    "valid: {}",
+                    fields
+                        .iter()
+                        .map(|(name, _)| *name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            check_result(
+                errors,
+                path,
+                Err(anyhow::anyhow!(
+                    "unknown field {key:?} on {owner} — {alternatives}"
+                )),
+            );
+        }
+    }
+    let required = match owner {
+        "document" => "version title view",
+        "hero" | "column" => {
+            if owner == "hero" {
+                "title"
+            } else {
+                "title items"
+            }
+        }
+        "columns" | "cards" | "stats" | "steps" | "buttons" | "kv" | "bars" | "checklist" => {
+            "items"
+        }
+        "callout" => "tone text",
+        "quote" | "text" | "column_item" | "send" => "text",
+        "input" | "toggle" | "check" => "key label",
+        "table" => "columns rows_data",
+        "progress" | "bar" => "label value",
+        "sparkline" => "values",
+        "select" => "key label options",
+        "set" => "key value",
+        "call" => "action",
+        "button" => "label action",
+        "card" => "title text",
+        "stat" => "value label",
+        "display_step" => "title",
+        _ => "",
+    };
+    for field in required.split_whitespace() {
+        if !object.contains_key(field) {
+            check_result(
+                errors,
+                &format!("{path}.{field}"),
+                Err(anyhow::anyhow!("missing required field {field:?}")),
+            );
+        }
+    }
+    // Deserialize every node/step independently, preserving serde's schema as
+    // the authority if a future field is added without a diagnostic shape.
+    let result = match shape {
+        "document" => serde_json::from_value::<Definition>(value.clone()).map(|_| ()),
+        "node" => serde_json::from_value::<Node>(value.clone()).map(|_| ()),
+        "step" => serde_json::from_value::<Step>(value.clone()).map(|_| ()),
+        "button" => serde_json::from_value::<Button>(value.clone()).map(|_| ()),
+        "column" => serde_json::from_value::<Column>(value.clone()).map(|_| ()),
+        "column_item" => serde_json::from_value::<ColumnItem>(value.clone()).map(|_| ()),
+        "card" => serde_json::from_value::<Card>(value.clone()).map(|_| ()),
+        "stat" => serde_json::from_value::<Stat>(value.clone()).map(|_| ()),
+        "display_step" => serde_json::from_value::<DisplayStep>(value.clone()).map(|_| ()),
+        "bar" => serde_json::from_value::<BarItem>(value.clone()).map(|_| ()),
+        "check" => serde_json::from_value::<CheckItem>(value.clone()).map(|_| ()),
+        _ => return,
+    };
+    if let Err(error) = result {
+        let message = error.to_string();
+        if !errors.iter().any(|error| error.path.starts_with(path)) {
+            let location = message
+                .strip_prefix("missing field `")
+                .and_then(|s| s.strip_suffix('`'))
+                .map_or_else(|| path.to_string(), |field| format!("{path}.{field}"));
+            check_result(errors, &location, Err(error.into()));
+        }
+    }
+}
+
+/// A validated version-1 UI document. Construction is through `parse` or `check`.
 #[derive(Clone, Debug)]
 pub struct Document {
     version: u8,
@@ -470,7 +727,113 @@ impl Document {
     /// # Errors
     /// Rejects unknown constructs, oversized data, cycles and invalid bindings.
     pub fn parse(source: &str) -> Result<Self> {
-        ensure!(source.len() <= MAX_SOURCE, "UI document exceeds 16 KiB");
+        Self::check_source(source, false).map_err(|errors| {
+            anyhow::anyhow!(
+                errors
+                    .iter()
+                    .map(|error| format!("{}: {}", error.path, error.message))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        })
+    }
+
+    /// Check authored JSON, reporting up to ten located errors without executing actions.
+    /// # Errors
+    /// Returns syntax, schema, binding or budget errors. Unlike legacy `parse`,
+    /// this flags extra fields on `answer` steps.
+    pub fn check(source: &str) -> std::result::Result<Self, Vec<CheckError>> {
+        Self::check_source(source, true)
+    }
+
+    fn check_source(source: &str, strict: bool) -> std::result::Result<Self, Vec<CheckError>> {
+        let mut errors = Vec::new();
+        check_result(
+            &mut errors,
+            "$",
+            (|| {
+                ensure!(source.len() <= MAX_SOURCE, "UI document exceeds 16 KiB");
+                Ok(())
+            })(),
+        );
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        let mut value: Value = match serde_json::from_str(source) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(vec![CheckError {
+                    path: "$".into(),
+                    message: error.to_string(),
+                }]);
+            }
+        };
+        if !strict && let Some(actions) = value.get_mut("actions").and_then(Value::as_object_mut) {
+            for steps in actions.values_mut().filter_map(Value::as_array_mut) {
+                for step in steps {
+                    if step.get("op").and_then(Value::as_str) == Some("answer")
+                        && let Some(object) = step.as_object_mut()
+                    {
+                        object.remove("label");
+                    }
+                }
+            }
+        }
+        check_shape(&value, "$", "document", &mut errors);
+        // Top-level fields use their natural JSON paths, without a `$` prefix.
+        for error in &mut errors {
+            if let Some(path) = error.path.strip_prefix("$.") {
+                error.path = path.into();
+            }
+        }
+        // Keep valid elements available for semantic checks even when another
+        // element has a schema error. Neutral placeholders preserve JSON indices;
+        // they can never escape because the collected errors reject the document.
+        let definition =
+            serde_json::from_value::<Definition>(value.clone()).unwrap_or_else(|_| Definition {
+                version: serde_json::from_value(value["version"].clone()).unwrap_or(1),
+                title: serde_json::from_value(value["title"].clone())
+                    .unwrap_or_else(|_| "UI".into()),
+                frame: serde_json::from_value(value["frame"].clone()).unwrap_or_default(),
+                accent: serde_json::from_value(value["accent"].clone()).unwrap_or_default(),
+                state: serde_json::from_value(value["state"].clone()).unwrap_or_default(),
+                view: value["view"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|node| {
+                        serde_json::from_value(node.clone())
+                            .unwrap_or(Node::Divider { label: None })
+                    })
+                    .collect(),
+                actions: value["actions"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .map(|(name, steps)| {
+                        (
+                            name.clone(),
+                            steps
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .map(|step| {
+                                    serde_json::from_value(step.clone())
+                                        .unwrap_or(Step::Answer { label: None })
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            });
+        Self::check_definition(definition, errors)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn check_definition(
+        definition: Definition,
+        mut errors: Vec<CheckError>,
+    ) -> std::result::Result<Self, Vec<CheckError>> {
         let Definition {
             version,
             title,
@@ -478,19 +841,8 @@ impl Document {
             accent,
             state,
             view,
-            mut actions,
-        } = serde_json::from_str(source)?;
-        // A repeated `answer` in one action is a model slip, not a second
-        // message: keep the first.
-        for steps in actions.values_mut() {
-            let mut answered = false;
-            steps.retain(|step| {
-                let answer = matches!(step, Step::Answer { .. });
-                let keep = !(answer && answered);
-                answered |= answer;
-                keep
-            });
-        }
+            actions,
+        } = definition;
         let mut doc = Self {
             version,
             title,
@@ -502,44 +854,130 @@ impl Document {
             sending: BTreeSet::new(),
             answering: BTreeSet::new(),
         };
-        ensure!(doc.version == 1, "unsupported UI version");
-        line_ok(&doc.title, 120)?;
-        ensure!(!doc.title.is_empty(), "UI title is required");
-        ensure!(
-            doc.state.len() <= 32 && doc.actions.len() <= 32,
-            "too many UI state fields or actions"
+        check_result(
+            &mut errors,
+            "version",
+            (|| {
+                ensure!(doc.version == 1, "unsupported UI version — valid: 1");
+                Ok(())
+            })(),
+        );
+        check_result(
+            &mut errors,
+            "title",
+            (|| {
+                line_ok(&doc.title, 120)?;
+                ensure!(!doc.title.is_empty(), "UI title is required");
+                Ok(())
+            })(),
+        );
+        check_result(
+            &mut errors,
+            "state",
+            (|| {
+                ensure!(
+                    doc.state.len() <= 32,
+                    "too many UI state fields — maximum: 32"
+                );
+                Ok(())
+            })(),
+        );
+        check_result(
+            &mut errors,
+            "actions",
+            (|| {
+                ensure!(doc.actions.len() <= 32, "too many UI actions — maximum: 32");
+                Ok(())
+            })(),
         );
         let mut budget = 1024;
         for (key, value) in &doc.state {
-            identifier(key)?;
-            ensure!(
-                !value.is_object() || value.get("random").is_some(),
-                "initial state must be scalar or a random choice"
+            check_result(
+                &mut errors,
+                &format!("state.{key}"),
+                (|| {
+                    identifier(key)?;
+                    ensure!(
+                        !value.is_object() || value.get("random").is_some(),
+                        "initial state must be scalar or a random choice"
+                    );
+                    validate_expr(value, &doc.state, &mut budget, 0)
+                })(),
             );
-            validate_expr(value, &doc.state, &mut budget, 0)?;
         }
-        doc.validate_view()?;
+        doc.check_view(&mut errors);
         let mut steps = 0;
         for (name, action) in &doc.actions {
-            identifier(name)?;
-            steps += action.len();
-            for step in action {
-                match step {
-                    Step::Set { key, value } => {
-                        ensure!(doc.state.contains_key(key), "unknown state field: {key}");
-                        validate_expr(value, &doc.state, &mut budget, 0)?;
-                    }
-                    Step::Call { action } => {
-                        ensure!(doc.actions.contains_key(action), "unknown action: {action}");
-                    }
-                    Step::Send { text } => doc.template_ok(text)?,
-                    Step::Answer { .. } => {}
-                }
+            check_result(&mut errors, &format!("actions.{name}"), identifier(name));
+            steps += action
+                .iter()
+                .filter(|step| !matches!(step, Step::Answer { .. }))
+                .count()
+                + usize::from(
+                    action
+                        .iter()
+                        .any(|step| matches!(step, Step::Answer { .. })),
+                );
+            for (index, step) in action.iter().enumerate() {
+                check_result(
+                    &mut errors,
+                    &format!("actions.{name}[{index}]"),
+                    (|| {
+                        match step {
+                            Step::Set { key, value } => {
+                                ensure!(
+                                    doc.state.contains_key(key),
+                                    "unknown state field: {key} — valid: {}",
+                                    doc.state.keys().cloned().collect::<Vec<_>>().join(", ")
+                                );
+                                validate_expr(value, &doc.state, &mut budget, 0)?;
+                            }
+                            Step::Call { action } => {
+                                ensure!(
+                                    doc.actions.contains_key(action),
+                                    "unknown action: {action} — valid: {}",
+                                    doc.actions.keys().cloned().collect::<Vec<_>>().join(", ")
+                                );
+                            }
+                            Step::Send { text } => doc.template_ok(text)?,
+                            Step::Answer { .. } => {}
+                        }
+                        Ok(())
+                    })(),
+                );
             }
         }
-        ensure!(steps <= 128, "too many action steps");
+        check_result(
+            &mut errors,
+            "actions",
+            (|| {
+                ensure!(steps <= 128, "too many action steps — maximum: 128");
+                Ok(())
+            })(),
+        );
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        // A repeated `answer` in one action is a model slip, not a second
+        // message: keep the first, after checking the original JSON indices.
+        for steps in doc.actions.values_mut() {
+            let mut answered = false;
+            steps.retain(|step| {
+                let answer = matches!(step, Step::Answer { .. });
+                let keep = !(answer && answered);
+                answered |= answer;
+                keep
+            });
+        }
         for name in doc.actions.keys() {
-            let (sends, answers) = doc.action_sends(name, &mut BTreeSet::new(), 0, &mut budget)?;
+            let (sends, answers) =
+                match doc.action_sends(name, &mut BTreeSet::new(), 0, &mut budget) {
+                    Ok(flags) => flags,
+                    Err(error) => {
+                        check_result(&mut errors, &format!("actions.{name}"), Err(error));
+                        continue;
+                    }
+                };
             if sends {
                 doc.sending.insert(name.clone());
             }
@@ -547,78 +985,106 @@ impl Document {
                 doc.answering.insert(name.clone());
             }
         }
-        Ok(doc)
+        if errors.is_empty() {
+            Ok(doc)
+        } else {
+            Err(errors)
+        }
     }
 
-    fn validate_view(&self) -> Result<()> {
+    fn check_view(&self, errors: &mut Vec<CheckError>) {
+        if !errors.iter().any(|error| {
+            error.path == "view"
+                || error.path.starts_with("view[")
+                || error.path.starts_with("view.")
+        }) {
+            check_result(errors, "view", self.validate_view_budget());
+        }
+        let mut budget = 1024;
+        for (index, node) in self.view.iter().enumerate() {
+            check_result(
+                errors,
+                &format!("view[{index}]"),
+                self.validate_node(node, &mut budget).map(|_| ()),
+            );
+        }
+    }
+
+    fn validate_view_budget(&self) -> Result<()> {
         ensure!(
             !self.view.is_empty() && self.view.len() <= 16,
             "UI needs 1–16 view nodes"
         );
-        let mut rows = 0;
-        let mut controls = 0;
-        let mut budget = 1024;
-        for node in &self.view {
-            let max_rows = match node {
-                Node::Columns { .. } => 27,
-                Node::Cards { .. } => 24,
-                Node::Steps { .. } => 16,
-                Node::Table { .. } => 9,
-                _ => 8,
-            };
-            ensure!(
-                (1..=max_rows).contains(&node.rows()),
-                "node height exceeds its limit"
-            );
-            rows += node.rows();
-            match node {
-                Node::Text { text, .. } => self.template_ok(text)?,
-                Node::Buttons { items, .. } => {
-                    ensure!(
-                        !items.is_empty() && items.len() <= 8,
-                        "a button row needs 1–8 buttons"
-                    );
-                    for button in items {
-                        line_ok(&button.label, 120)?;
-                        self.template_ok(&button.label)?;
-                        ensure!(
-                            self.actions.contains_key(&button.action),
-                            "unknown button action: {}",
-                            button.action
-                        );
-                        ensure!(button.body.len() <= 8, "too many button artwork lines");
-                        for line in &button.body {
-                            line_ok(line, 120)?;
-                        }
-                    }
-                    controls += items.len();
-                }
-                Node::Input { key, label } => {
-                    ensure!(self.state.contains_key(key), "unknown input field: {key}");
-                    line_ok(label, 120)?;
-                    let value = &self.state[key];
-                    if let Some(values) = value.get("random").and_then(Value::as_array) {
-                        for value in values {
-                            input_ok(value)?;
-                        }
-                    } else {
-                        input_ok(value)?;
-                    }
-                    controls += 1;
-                }
-                _ => controls += self.validate_component(node, &mut budget)?,
-            }
-        }
+        let rows: u32 = self.view.iter().map(|node| u32::from(node.rows())).sum();
+        let controls = self.control_count();
         let cap = if self.view.iter().any(Node::is_display) {
             LAYOUT_ROWS
         } else {
             ROWS
         };
         ensure!(
-            rows <= cap - 3 && controls <= 32,
+            rows <= u32::from(cap - 3) && controls <= 32,
             "UI exceeds its fixed display budget"
         );
         Ok(())
+    }
+
+    fn validate_node(&self, node: &Node, budget: &mut usize) -> Result<usize> {
+        let max_rows = match node {
+            Node::Columns { .. } => 27,
+            Node::Cards { .. } => 24,
+            Node::Steps { .. } => 16,
+            Node::Table { .. } => 9,
+            _ => 8,
+        };
+        ensure!(
+            (1..=max_rows).contains(&node.rows()),
+            "node height exceeds its limit"
+        );
+        let mut controls = 0;
+        match node {
+            Node::Text { text, .. } => self.template_ok(text)?,
+            Node::Buttons { items, .. } => {
+                ensure!(
+                    !items.is_empty() && items.len() <= 8,
+                    "a button row needs 1–8 buttons"
+                );
+                for button in items {
+                    line_ok(&button.label, 120)?;
+                    self.template_ok(&button.label)?;
+                    ensure!(
+                        self.actions.contains_key(&button.action),
+                        "unknown button action: {} — valid: {}",
+                        button.action,
+                        self.actions.keys().cloned().collect::<Vec<_>>().join(", ")
+                    );
+                    ensure!(button.body.len() <= 8, "too many button artwork lines");
+                    for line in &button.body {
+                        line_ok(line, 120)?;
+                    }
+                }
+                controls += items.len();
+            }
+            Node::Input { key, label } => {
+                ensure!(
+                    self.state.contains_key(key),
+                    "unknown input field: {key} — valid: {}",
+                    self.state.keys().cloned().collect::<Vec<_>>().join(", ")
+                );
+                line_ok(label, 120)?;
+                let value = &self.state[key];
+                if let Some(values) = value.get("random").and_then(Value::as_array) {
+                    for value in values {
+                        input_ok(value)?;
+                    }
+                } else {
+                    input_ok(value)?;
+                }
+                controls += 1;
+            }
+            _ => controls += self.validate_component(node, budget)?,
+        }
+        Ok(controls)
     }
 
     fn validate_display(&self, node: &Node) -> Result<()> {
@@ -798,8 +1264,9 @@ impl Document {
                 .ok_or_else(|| anyhow::anyhow!("unclosed UI template"))?;
             ensure!(
                 self.state.contains_key(key.trim()),
-                "unknown template field: {}",
-                key.trim()
+                "unknown template field: {} — valid: {}",
+                key.trim(),
+                self.state.keys().cloned().collect::<Vec<_>>().join(", ")
             );
             rest = after;
         }
@@ -856,6 +1323,29 @@ impl Document {
     #[must_use]
     pub const fn accent(&self) -> Accent {
         self.accent
+    }
+    /// Number of independently focusable controls.
+    #[must_use]
+    pub fn control_count(&self) -> usize {
+        self.view
+            .iter()
+            .map(|node| match node {
+                Node::Buttons { items, .. } => items.len(),
+                Node::Checklist { items } => items.len(),
+                Node::Input { .. }
+                | Node::Select { .. }
+                | Node::Toggle { .. }
+                | Node::Table {
+                    select: Some(_), ..
+                } => 1,
+                _ => 0,
+            })
+            .sum()
+    }
+    /// Number of named actions.
+    #[must_use]
+    pub fn action_count(&self) -> usize {
+        self.actions.len()
     }
     /// Whether this is a display-only layout, with neither actions nor controls.
     #[must_use]
@@ -1308,9 +1798,12 @@ fn item_count(count: usize, min: usize, max: usize) -> Result<()> {
     Ok(())
 }
 fn binding_ok(state: &Map<String, Value>, key: &str, valid: impl Fn(&Value) -> bool) -> Result<()> {
-    let value = state
-        .get(key)
-        .ok_or_else(|| anyhow::anyhow!("unknown bound field: {key}"))?;
+    let value = state.get(key).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown bound field: {key} — valid: {}",
+            state.keys().cloned().collect::<Vec<_>>().join(", ")
+        )
+    })?;
     if let Some(values) = value.get("random").and_then(Value::as_array) {
         ensure!(
             values.iter().all(valid),
@@ -1421,7 +1914,8 @@ fn validate_expr(
     match op {
         "get" => ensure!(
             arg.as_str().is_some_and(|key| state.contains_key(key)),
-            "unknown expression field"
+            "unknown expression field — valid: {}",
+            state.keys().cloned().collect::<Vec<_>>().join(", ")
         ),
         "random" => {
             let values = arg
@@ -1448,7 +1942,7 @@ fn validate_expr(
                 validate_expr(value, state, budget, depth + 1)?;
             }
         }
-        _ => bail!("unsupported UI operator: {op}"),
+        _ => bail!("unsupported UI operator: {op} — valid: {EXPR_OPS}"),
     }
     Ok(())
 }
@@ -1571,6 +2065,8 @@ fn expand(template: &str, state: &Map<String, Value>) -> Result<String> {
     Ok(result)
 }
 
+#[cfg(test)]
+mod check_tests;
 #[cfg(test)]
 mod tests;
 

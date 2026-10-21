@@ -75,6 +75,30 @@ fn tui_prompt_snapshot() {
 }
 
 #[test]
+fn ui_check_tool_def_snapshot() {
+    let mut toolbox = crate::tools::ToolBox::new(
+        std::path::PathBuf::new(),
+        None,
+        None,
+        "auto".into(),
+        Vec::new(),
+        None,
+        None,
+        None,
+    );
+    toolbox.interactive_ui = true;
+    let definition = toolbox
+        .defs()
+        .into_iter()
+        .find(|tool| tool.name == "ui_check")
+        .unwrap();
+    assert_snapshot(
+        "ui-check-def.json",
+        &(serde_json::to_string_pretty(&definition).unwrap() + "\n"),
+    );
+}
+
+#[test]
 fn tool_defs_snapshot() {
     let a = fixture_app();
     let actual = serde_json::to_string_pretty(&a.toolbox.defs()).unwrap() + "\n";

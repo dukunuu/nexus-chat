@@ -153,6 +153,35 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
         .filter(|(tool, _)| matches!(*tool, "fs" | "shell" | "proc"))
         .unwrap_or((name, field("action").unwrap_or("")));
     match tool {
+        "ui_check" => {
+            view.verb = "ui check".into();
+            let source = crate::tools::ui_check_source(field("source")?);
+            let title = serde_json::from_str::<Value>(source)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+            view.target = format!("{:?}", title.as_deref().unwrap_or("UI"));
+            if first.starts_with("ok · ") {
+                view.stats.push("ok".into());
+            } else if let Some(count) = first
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+            {
+                view.stats.push(format!(
+                    "{count} error{}",
+                    if count == 1 { "" } else { "s" }
+                ));
+                view.outcome = ToolOutcome::Failed;
+            } else {
+                view.stats.push(first.into());
+            }
+            view.output = Some(result.into());
+        }
         "fs" => {
             if !matches!(
                 action,
@@ -388,7 +417,9 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
     match view.outcome {
         ToolOutcome::Denied => view.stats.push("denied".into()),
         ToolOutcome::Blocked => view.stats.push("blocked".into()),
-        ToolOutcome::Failed if !view.stats.iter().any(|stat| stat.starts_with("exit")) => {
+        ToolOutcome::Failed
+            if tool != "ui_check" && !view.stats.iter().any(|stat| stat.starts_with("exit")) =>
+        {
             view.stats.push("failed".into());
         }
         _ => {}
@@ -492,6 +523,32 @@ mod tests {
 
     use super::*;
     use crate::app::tool_call_summary;
+
+    #[test]
+    fn ui_check_cards_name_the_document_and_mark_errors_as_failed() {
+        let args = serde_json::json!({"source":"{\"title\":\"Quiz\"}"}).to_string();
+        for (result, summary, expected) in [
+            (
+                "ok · \"Quiz\" · 0 controls, 0 actions · static\npreview:\nQuiz",
+                "ui check \"Quiz\" · ok",
+                ToolOutcome::Ok,
+            ),
+            (
+                "2 errors\nview[0]: unknown node type",
+                "ui check \"Quiz\" · 2 errors",
+                ToolOutcome::Failed,
+            ),
+        ] {
+            let view = tool_call_view("ui_check", &args, result);
+            assert_eq!(view.summary(), summary);
+            assert_eq!(tool_call_summary("ui_check", &args, result), summary);
+            assert_eq!(view.outcome, expected);
+            assert!(!view.summary().contains('◇'));
+        }
+        let view = tool_call_view("ui_check", r#"{"source":"{"}"#, "1 error\n$: EOF");
+        assert_eq!(view.outcome, ToolOutcome::Failed);
+        assert_eq!(view.summary(), "ui check \"UI\" · 1 error");
+    }
     use serde_json::json;
 
     #[test]
