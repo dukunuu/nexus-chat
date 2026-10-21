@@ -353,8 +353,10 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
                 }
             } else {
                 let count = view.sources.len();
-                view.stats
-                    .push(format!("{count} result{}", if count == 1 { "" } else { "s" }));
+                view.stats.push(format!(
+                    "{count} result{}",
+                    if count == 1 { "" } else { "s" }
+                ));
             }
         }
         "fetch_url" => {
@@ -364,7 +366,10 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
             if view.outcome == ToolOutcome::Ok {
                 let chars = result.chars().count();
                 view.stats.push(if chars >= 1000 {
-                    format!("{:.1}k chars", f64::from(u32::try_from(chars).unwrap_or(u32::MAX)) / 1000.0)
+                    format!(
+                        "{:.1}k chars",
+                        f64::from(u32::try_from(chars).unwrap_or(u32::MAX)) / 1000.0
+                    )
                 } else {
                     format!("{chars} chars")
                 });
@@ -442,7 +447,10 @@ fn domain(url: &str) -> String {
 /// `host/path` for a header, without the scheme, `www.` or a long tail.
 fn short_url(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let rest = rest.strip_prefix("www.").unwrap_or(rest).trim_end_matches('/');
+    let rest = rest
+        .strip_prefix("www.")
+        .unwrap_or(rest)
+        .trim_end_matches('/');
     if rest.chars().count() > 60 {
         format!("{}…", rest.chars().take(59).collect::<String>())
     } else {
@@ -463,9 +471,16 @@ mod tests {
         assert_eq!(view.summary(), "search \"Mongolia budget\" · 2 results");
         assert_eq!(view.sources.len(), 2);
         assert_eq!(view.sources[0].domain, "mongolia.substack.com");
-        assert_eq!(view.sources[0].snippet, "Mongolia's 2026 budget passed on time.");
+        assert_eq!(
+            view.sources[0].snippet,
+            "Mongolia's 2026 budget passed on time."
+        );
         assert_eq!(view.sources[1].domain, "en.wikipedia.org");
-        let none = tool_call_view("search", r#"{"mode":"news","query":"x"}"#, "no results for x");
+        let none = tool_call_view(
+            "search",
+            r#"{"mode":"news","query":"x"}"#,
+            "no results for x",
+        );
         assert_eq!(none.summary(), "news \"x\" · no results");
         let page = tool_call_view(
             "fetch_url",

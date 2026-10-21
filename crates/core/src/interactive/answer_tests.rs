@@ -56,7 +56,13 @@ fn validation_counts_all_message_steps_including_called_actions() {
                     json!([first, second])
                 };
                 let answer_involved = first["op"] == "answer" || second["op"] == "answer";
-                if answer_involved {
+                let repeated_answer =
+                    !called && first["op"] == "answer" && second["op"] == "answer";
+                if repeated_answer {
+                    // A model slip: the duplicate collapses into one answer.
+                    let document = Document::parse(&data.to_string()).unwrap();
+                    assert!(document.answers("pick"));
+                } else if answer_involved {
                     assert!(Document::parse(&data.to_string()).is_err());
                 } else {
                     // Two sends predate answers: they still parse and fail
@@ -125,4 +131,26 @@ fn rendered_answers_are_single_pass_single_line_and_byte_bounded() {
         data["view"][0]["items"][0]["label"] = json!(label);
         assert!(Document::parse(&data.to_string()).is_err());
     }
+}
+
+#[test]
+fn a_label_on_answer_is_ignored_and_the_button_label_is_sent() {
+    // The shape a model actually wrote: a label on each answer, twice.
+    let source = json!({
+        "version": 1, "title": "Simple Quiz", "state": {},
+        "view": [{"type": "buttons", "items": [
+            {"label": "SQL Database", "action": "sql"},
+            {"label": "NoSQL DB", "action": "nosql"}
+        ]}],
+        "actions": {
+            "sql": [{"op": "answer", "label": "SQL Database"}, {"op": "answer", "label": "SQL Database"}],
+            "nosql": [{"op": "answer", "label": "something else"}]
+        }
+    });
+    let mut ui = Session::new(Document::parse(&source.to_string()).unwrap()).unwrap();
+    assert_eq!(
+        ui.activate_button(0, 0).unwrap(),
+        Some("SQL Database".into())
+    );
+    assert_eq!(ui.activate_button(0, 1).unwrap(), Some("NoSQL DB".into()));
 }

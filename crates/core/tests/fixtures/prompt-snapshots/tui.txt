@@ -38,7 +38,8 @@ most one secondary. Use button `body` tiles for 3–8 similar choices: short
 artwork, a short title, and the last body line as one line of detail. Games and
 quizzes may have more buttons. Keep tasks shallow: no tabs or deep navigation.
 
-Emit a closed `nexus-ui` fenced block containing a JSON object:
+Emit a closed `nexus-ui` fenced block containing one JSON object (spread it
+over several lines and check that every bracket closes):
 - `version`: 1; `title`: short title.
 - `state`: up to 32 named scalar fields (string, number, boolean or null).
   Initial values may also be `{"random":[scalar,...]}`; randomness is evaluated
@@ -74,8 +75,9 @@ Emit a closed `nexus-ui` fenced block containing a JSON object:
     the user reviews/edits it and presses Enter to actually send. Existing drafts
     are never overwritten. No requests occur on load, typing, rendering or local
     actions.
-  - `{"op":"answer"}` (buttons only): immediately send the clicked button's
-    rendered label verbatim, after the other steps. Marked `→`; no review Enter.
+  - `{"op":"answer"}` (buttons only, no other fields, once per action):
+    immediately send the clicked button's rendered label verbatim, after the
+    other steps. Marked `→`; no review Enter.
     Use for quiz answers, poll votes, multiple-choice and "next question". Write
     labels as the user's reply: "B — Paris", "Next question". Rendered labels
     must be single-line, at most 120 bytes, with no control characters. Use

@@ -181,15 +181,53 @@ fn render_normal(r: &mut Rendered, content: &str, width: usize, colors: MdColors
 #[cfg(test)]
 mod interactive_tests;
 
+/// Model-written text shown verbatim, with every control character made
+/// visible (`\u{1b}`) so nothing can drive the terminal; tabs become spaces.
+fn visible_controls(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            '\t' => "    ".to_string(),
+            ch if ch.is_control() => ch.escape_unicode().to_string(),
+            ch => ch.to_string(),
+        })
+        .collect()
+}
+
 fn render_ui(r: &mut Rendered, source: &str, complete: bool, width: usize, colors: MdColors) {
     let document = nexus_core::interactive::Document::parse(source);
     let fallback = width < 8 || (complete && document.is_err());
     if fallback {
-        push_code_border(r, width, Some("interactive UI"), colors.rule);
+        // A finished block that doesn't parse: say why in one line, then show
+        // the source as written — no card placeholder rows, and only control
+        // characters escaped (escaping quotes made valid JSON look broken).
+        let label = if width < 8 {
+            "interactive UI"
+        } else {
+            "interactive UI · couldn't be shown"
+        };
+        push_code_border(r, width, Some(label), colors.rule);
+        if let Err(error) = &document {
+            let reason = error.to_string();
+            push_code_content(
+                r,
+                &Line::from(Span::styled(
+                    visible_controls(&reason),
+                    Style::default().fg(colors.code),
+                )),
+                width,
+                colors.rule,
+            );
+        }
+        for line in source.lines() {
+            push_code_content(r, &Line::from(visible_controls(line)), width, colors.rule);
+        }
+        push_code_border(r, width, None, colors.rule);
+        r.blocks.push(source.into());
+        return;
     }
     let card_width = u16::try_from(width).unwrap_or(u16::MAX);
     let height = crate::interactive::source_height(source, card_width);
-    if width >= 8 {
+    {
         r.widgets.push(crate::interactive::Placement {
             row: r.lines.len(),
             width: card_width,
@@ -212,13 +250,6 @@ fn render_ui(r: &mut Rendered, source: &str, complete: bool, width: usize, color
             let text: String = text.chars().take(width).collect();
             r.push(Line::from(text), Some(r.blocks.len()));
         }
-    }
-    if fallback {
-        for line in source.lines() {
-            let safe: String = line.chars().flat_map(char::escape_default).collect();
-            push_code_content(r, &Line::from(safe), width, colors.rule);
-        }
-        push_code_border(r, width, None, colors.rule);
     }
     r.blocks.push(source.into());
 }

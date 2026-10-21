@@ -69,3 +69,30 @@ fn literal_fences_do_not_activate_and_bad_definitions_keep_safe_source() {
     assert!(narrow.widgets.is_empty());
     assert_eq!(narrow.blocks, vec![SOURCE.trim()]);
 }
+
+#[test]
+fn a_broken_block_shows_its_reason_and_readable_source_without_placeholder_rows() {
+    // Mismatched brackets, as a model wrote it.
+    let broken = r#"{"version":1,"title":"Quiz","view":[{"type":"buttons","items":[{"label":"A","action":"a"}]],"actions":{"a":[{"op":"answer"}]}}"#;
+    let r = render(&format!("```nexus-ui\n{broken}\n```"), 72, colors());
+    let text = plain(&r);
+    assert!(
+        r.widgets.is_empty(),
+        "no card is reserved for a broken block"
+    );
+    assert!(
+        text.contains("interactive UI · couldn't be shown"),
+        "{text}"
+    );
+    assert!(!text.contains("interactive output"), "{text}");
+    // Quotes are shown as written, not as \" escapes.
+    assert!(text.contains(r#"{"version":1"#), "{text}");
+    assert!(!text.contains(r#"\""#), "{text}");
+    // The reason line comes first inside the box.
+    let reason = r.lines[1]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(!reason.contains("version"), "{reason}");
+}

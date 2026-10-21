@@ -416,10 +416,23 @@ fn bounded_rows(count: usize) -> u16 {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Step {
-    Set { key: String, value: Value },
-    Call { action: String },
-    Send { text: String },
-    Answer {},
+    Set {
+        key: String,
+        value: Value,
+    },
+    Call {
+        action: String,
+    },
+    Send {
+        text: String,
+    },
+    /// Sends the clicked button's label. Models often add the label here
+    /// too; it is accepted and ignored — the button's label is what's sent.
+    Answer {
+        #[serde(default)]
+        #[allow(dead_code)]
+        label: Option<Value>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -465,8 +478,19 @@ impl Document {
             accent,
             state,
             view,
-            actions,
+            mut actions,
         } = serde_json::from_str(source)?;
+        // A repeated `answer` in one action is a model slip, not a second
+        // message: keep the first.
+        for steps in actions.values_mut() {
+            let mut answered = false;
+            steps.retain(|step| {
+                let answer = matches!(step, Step::Answer { .. });
+                let keep = !(answer && answered);
+                answered |= answer;
+                keep
+            });
+        }
         let mut doc = Self {
             version,
             title,
@@ -509,7 +533,7 @@ impl Document {
                         ensure!(doc.actions.contains_key(action), "unknown action: {action}");
                     }
                     Step::Send { text } => doc.template_ok(text)?,
-                    Step::Answer {} => {}
+                    Step::Answer { .. } => {}
                 }
             }
         }
@@ -800,7 +824,7 @@ impl Document {
             spend(budget)?;
             let (message, answer) = match step {
                 Step::Send { .. } => (true, false),
-                Step::Answer {} => (true, true),
+                Step::Answer { .. } => (true, true),
                 Step::Call { action } => self.action_sends(action, seen, depth + 1, budget)?,
                 Step::Set { .. } => (false, false),
             };
@@ -1223,7 +1247,7 @@ impl Session {
                     state.insert(key.clone(), value);
                 }
                 Step::Call { action } => self.run(action, state, message, budget)?,
-                Step::Answer {} => {}
+                Step::Answer { .. } => {}
                 Step::Send { text } => {
                     ensure!(message.is_none(), "an action may send only one message");
                     *message = Some(format!(
