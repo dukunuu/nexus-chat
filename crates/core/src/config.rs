@@ -239,7 +239,12 @@ pub struct SavedCreds {
 /// (commonly world-readable), so the mode is tightened the same way
 /// `host/cloudflare.rs` protects tunnel credentials.
 fn write_secret_file(path: &std::path::Path, body: &str) -> Result<()> {
-    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
+    // Written beside the target and renamed over it, so a crash mid-write
+    // can't leave a truncated file that loses every key.
+    let temp = path.with_extension(format!("toml.{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&temp, body).with_context(|| format!("writing {}", temp.display()))?;
+    restrict_to_owner(&temp);
+    std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
     restrict_to_owner(path);
     Ok(())
 }
@@ -840,62 +845,76 @@ fn write_config(
     codex: Option<&CodexCredentials>,
     local: Option<&crate::provider::local::LocalConfig>,
 ) -> Result<()> {
-    let path = config_path()?;
+    write_config_at(
+        &config_path()?,
+        openrouter_key,
+        openai_key,
+        opencode_key,
+        codex,
+        local,
+    )
+}
+
+/// Update the credential keys, the Codex login and `[local]` in place. Every
+/// other table and key (`[search]`, `[agent]`, `[host]`, `[studio]`, anything
+/// a newer build added) is kept; a file that doesn't parse is left alone
+/// rather than replaced.
+fn write_config_at(
+    path: &std::path::Path,
+    openrouter_key: &str,
+    openai_key: &str,
+    opencode_key: &str,
+    codex: Option<&CodexCredentials>,
+    local: Option<&crate::provider::local::LocalConfig>,
+) -> Result<()> {
+    use toml::Value;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let mut body = format!(
-        "[provider]\n\
-         # OpenRouter key (or set ${OPENROUTER_ENV_KEY})\nopenrouter_key = \"{}\"\n\
-         # OpenAI API key (or set ${OPENAI_ENV_KEY})\nopenai_key = \"{}\"\n\
-         # OpenCode Go key (or set ${OPENCODE_ENV_KEY})\nopencode_key = \"{}\"\n",
-        escape(openrouter_key),
-        escape(openai_key),
-        escape(opencode_key),
-    );
-    if let Ok(Some(token)) = load_host_token() {
-        let _ = writeln!(body, "host_token = \"{}\"", escape(&token));
+    let mut root = if path.exists() {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        toml::from_str::<toml::Table>(&text)
+            .with_context(|| format!("parsing {} (left unchanged)", path.display()))?
+    } else {
+        toml::Table::new()
+    };
+    let provider = root
+        .entry("provider".to_string())
+        .or_insert_with(|| Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .context("config provider is not a TOML table")?;
+    for (key, value) in [
+        ("openrouter_key", openrouter_key),
+        ("openai_key", openai_key),
+        ("opencode_key", opencode_key),
+    ] {
+        provider.insert(key.to_string(), Value::String(value.to_string()));
     }
-    if let Some(c) = codex {
-        body.push_str("\n[provider.openai_codex]\n");
-        let _ = writeln!(body, "access = \"{}\"", escape(&c.access));
-        let _ = writeln!(body, "refresh = \"{}\"", escape(&c.refresh));
-        let _ = writeln!(body, "expires = {}", c.expires);
-        let _ = writeln!(body, "account_id = \"{}\"", escape(&c.account_id));
-    }
-    if let Ok(Some(tunnel)) = load_named_tunnel() {
-        body.push_str("\n[host.named_tunnel]\n");
-        let _ = writeln!(body, "tunnel_id = \"{}\"", escape(&tunnel.tunnel_id));
-        let _ = writeln!(body, "hostname = \"{}\"", escape(&tunnel.hostname));
-        let _ = writeln!(
-            body,
-            "credentials_path = \"{}\"",
-            escape(&tunnel.credentials_path.display().to_string())
-        );
-        let _ = writeln!(
-            body,
-            "config_path = \"{}\"",
-            escape(&tunnel.config_path.display().to_string())
-        );
-    }
-    if let Some(local) = local {
-        body.push_str("\n[local]\n");
-        body.push_str(&toml::to_string(local).context("serializing local runtime configuration")?);
-    }
-    if path.exists() {
-        let text = std::fs::read_to_string(&path)?;
-        let config: toml::Value = toml::from_str(&text)?;
-        if let Some(experiments) = config.get("experiments") {
-            body.push_str("\n[experiments]\n");
-            body.push_str(&toml::to_string(experiments)?);
+    match codex {
+        Some(c) => {
+            provider.insert(
+                "openai_codex".to_string(),
+                Value::try_from(c).context("serializing Codex credentials")?,
+            );
         }
-        if let Some(studio) = config.get("studio") {
-            body.push_str("\n[studio]\n");
-            body.push_str(&toml::to_string(studio)?);
+        None => {
+            provider.remove("openai_codex");
         }
     }
-    write_secret_file(&path, &body)
+    match local {
+        Some(local) => {
+            root.insert(
+                "local".to_string(),
+                Value::try_from(local).context("serializing local runtime configuration")?,
+            );
+        }
+        None => {
+            root.remove("local");
+        }
+    }
+    let body = toml::to_string_pretty(&root).context("serializing config")?;
+    write_secret_file(path, &body)
 }
 
 #[cfg(test)]
@@ -1119,6 +1138,92 @@ mod tests {
             assert_eq!(decoded.context_length, context_length);
             assert_eq!(decoded.kv_cache_q8, kv_cache_q8);
         }
+    }
+
+    #[test]
+    fn credential_writes_keep_every_other_table_and_key() {
+        let dir = std::env::temp_dir().join(format!("nexus-config-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            "[provider]\nopenrouter_key = 'old'\nhost_token = 'tok'\nfuture_key = 'kept'\n\
+             [search]\nreddit_client_id = 'rid'\nreddit_client_secret = 'rsecret'\n\
+             [agent]\nsandbox = 'off'\n[studio]\nhost_url = 'http://127.0.0.1:9'\n\
+             [host.named_tunnel]\ntunnel_id = 't'\n[local]\nprovider = 'ollama'\n",
+        )
+        .unwrap();
+        let codex = CodexCredentials {
+            access: "a".into(),
+            refresh: "r".into(),
+            expires: 1,
+            account_id: "acct".into(),
+        };
+        let local = toml::from_str::<Config>("[local]\nprovider = 'ollama'\n")
+            .unwrap()
+            .local;
+        write_config_at(&path, "new", "", "", Some(&codex), local.as_ref()).unwrap();
+        let saved: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["provider"]["openrouter_key"].as_str(), Some("new"));
+        assert_eq!(saved["provider"]["host_token"].as_str(), Some("tok"));
+        assert_eq!(saved["provider"]["future_key"].as_str(), Some("kept"));
+        assert_eq!(
+            saved["provider"]["openai_codex"]["account_id"].as_str(),
+            Some("acct")
+        );
+        assert_eq!(
+            saved["search"]["reddit_client_secret"].as_str(),
+            Some("rsecret")
+        );
+        assert_eq!(saved["agent"]["sandbox"].as_str(), Some("off"));
+        assert_eq!(
+            saved["studio"]["host_url"].as_str(),
+            Some("http://127.0.0.1:9")
+        );
+        assert_eq!(
+            saved["host"]["named_tunnel"]["tunnel_id"].as_str(),
+            Some("t")
+        );
+        assert_eq!(saved["local"]["provider"].as_str(), Some("ollama"));
+        let codex: CodexCredentials = saved["provider"]["openai_codex"]
+            .clone()
+            .try_into()
+            .unwrap();
+        assert_eq!(codex.refresh, "r");
+
+        // Clearing the Codex login and [local] removes only those.
+        write_config_at(&path, "new", "", "", None, None).unwrap();
+        let saved: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved["provider"].get("openai_codex").is_none());
+        assert!(saved.get("local").is_none());
+        assert_eq!(saved["search"]["reddit_client_id"].as_str(), Some("rid"));
+
+        // A file that doesn't parse is never replaced.
+        std::fs::write(&path, "[provider\nopenrouter_key = 'precious'").unwrap();
+        assert!(write_config_at(&path, "x", "", "", None, None).is_err());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("precious"));
+        #[cfg(unix)]
+        {
+            write_config_at(&dir.join("fresh.toml"), "k", "", "", None, None).unwrap();
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir.join("fresh.toml"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .path()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
