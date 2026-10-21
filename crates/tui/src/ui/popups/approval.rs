@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use nexus_core::app::AppCommand;
 use nexus_core::tools::Decision;
 use ratatui::Frame;
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -289,22 +290,12 @@ fn shell_unread(app: &AppView) -> bool {
         && !app.approval_seen_end.get()
 }
 
-pub fn render(f: &mut Frame, app: &AppView) {
-    let Some(request) = &app.approval_request else {
-        return;
-    };
+/// The request's preview lines (explanation, header, diff or command) at
+/// the panel's inner `width`.
+fn content_lines(app: &AppView, width: usize) -> Option<Vec<Line<'static>>> {
+    let request = app.approval_request.as_ref()?;
     let text = request.detail.as_deref().unwrap_or(&request.summary);
-    let wave = request.tool == "wave";
-    let dim = Style::default().fg(app.theme.fg_dim);
-    // Measure at the normal size; a preview that doesn't fit gets a taller
-    // popup so a large write can be read, not just skimmed.
-    let normal = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::WIDE.1);
-    let width = usize::from(
-        chrome::popup_block_focused("", &app.theme, true, chrome::Tone::Normal)
-            .inner(normal)
-            .width,
-    );
-    let mut lines = if wave {
+    let mut lines = if request.tool == "wave" {
         wave_lines(text, width, &app.theme)
     } else {
         request_lines(
@@ -317,12 +308,59 @@ pub fn render(f: &mut Frame, app: &AppView) {
         )
     };
     insert_intro(&mut lines, request, text, width, &app.theme);
-    let area = if lines.len() + 4 > usize::from(normal.height) {
-        crate::ui::centered(f.area(), chrome::WIDE.0, 92)
-    } else {
-        normal
+    Some(lines)
+}
+
+fn panel_block(app: &AppView) -> ratatui::widgets::Block<'static> {
+    chrome::popup_block_focused("", &app.theme, true, chrome::Tone::Normal)
+}
+
+/// How tall the approval panel docked in the composer's place wants to be
+/// in `column`: the whole request when it fits, else about half the screen
+/// (the preview scrolls), never less than 8 rows.
+#[must_use]
+pub fn docked_height(app: &AppView, column: Rect) -> u16 {
+    let frame = panel_block(app).inner(Rect::new(0, 0, column.width, 100));
+    let chrome_rows = 100 - frame.height;
+    let Some(lines) = content_lines(app, usize::from(frame.width)) else {
+        return 0;
     };
-    let inner = chrome::popup_block_focused("", &app.theme, true, chrome::Tone::Normal).inner(area);
+    // Preview + a spacer + the key row + the border.
+    let wanted = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .saturating_add(chrome_rows);
+    let cap = (column.height.saturating_mul(55) / 100).max(8);
+    wanted.min(cap).min(column.height.saturating_sub(2)).max(4)
+}
+
+/// Draw the approval docked at the bottom of the reading column — the
+/// composer's place — as the main layout does (tests render it alone).
+#[cfg(test)]
+pub fn render(f: &mut Frame, app: &AppView) {
+    let column = crate::ui::reading_column(f.area());
+    let height = docked_height(app, column);
+    let area = Rect {
+        y: column.bottom().saturating_sub(height.saturating_add(1)),
+        height,
+        ..column
+    };
+    render_in(f, app, area);
+}
+
+/// Draw the approval panel in `area` (where the composer normally is).
+pub fn render_in(f: &mut Frame, app: &AppView, area: Rect) {
+    let Some(request) = &app.approval_request else {
+        return;
+    };
+    app.approval_area.set(Some(area));
+    let wave = request.tool == "wave";
+    let dim = Style::default().fg(app.theme.fg_dim);
+    let width = usize::from(panel_block(app).inner(area).width);
+    let Some(lines) = content_lines(app, width) else {
+        return;
+    };
+    let inner = panel_block(app).inner(area);
     // The bottom inner row is the key legend; the preview scrolls above it.
     let height = usize::from(inner.height).saturating_sub(2);
     let max_scroll = lines.len().saturating_sub(height);

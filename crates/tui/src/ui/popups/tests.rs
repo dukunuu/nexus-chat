@@ -540,8 +540,8 @@ fn approval_popup_combined_wave_snapshot() {
     assert_eq!(
         snapshot,
         [
-            " The agent wants to make these 3 calls together. Each is shown below; y approves all of",
-            " them, r lets you decide one by one.",
+            " The agent wants to make these 3 calls together. Each is shown below; y approves all of them, r lets you",
+            " decide one by one.",
             " ▍ 1  edit one  +1 −1",
             " 1 − old",
             " 1 + new",
@@ -577,9 +577,8 @@ fn approval_edit_at_80_columns_has_colored_diff_and_class_badge() {
     assert_eq!(
         snapshot,
         [
-            "edit src/app.rs  +2 −1                  write in workspace",
-            "The agent wants to change src/app.rs: 2 lines added, 1",
-            "line removed.",
+            "edit src/app.rs  +2 −1                                  write in workspace",
+            "The agent wants to change src/app.rs: 2 lines added, 1 line removed.",
             "41   let cfg = load()?;",
             "42 − let n = cfg.limit;",
             "42 + let n = cfg.limit.max(1);",

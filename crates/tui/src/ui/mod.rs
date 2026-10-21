@@ -56,7 +56,14 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     // border and its one-column padding on each side.
     let inner_w = column.width.saturating_sub(4);
     let content_rows = app.input.measure(inner_w).preferred_rows;
-    let input_h = content_rows.saturating_add(2);
+    // A pending approval takes the composer's place (Claude Code-style) and
+    // sizes it to the request, so the conversation stays readable above.
+    let approving = app.popup == Popup::Approval;
+    let input_h = if approving {
+        popups::approval::docked_height(app, column)
+    } else {
+        content_rows.saturating_add(2)
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -68,7 +75,11 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         .split(column);
 
     render_history(f, app, chunks[0]);
-    render_input(f, app, chunks[1]);
+    if approving {
+        popups::approval::render_in(f, app, chunks[1]);
+    } else {
+        render_input(f, app, chunks[1]);
+    }
     render_status(f, app, chunks[2]);
     // Autocomplete floats above the input; only when no modal popup is open.
     if app.popup == Popup::None {
@@ -82,7 +93,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     // Recede everything behind an open popup into the quiet border color, so
     // the modal reads as the focus even on a transparent terminal (every
     // popup clears its own rect first, so it stays at full strength).
-    if app.popup != Popup::None {
+    if app.popup != Popup::None && !approving {
         let area = f.area();
         f.buffer_mut().set_style(
             area,
@@ -96,7 +107,6 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         Popup::Model => popups::model::render(f, app),
         Popup::Session => popups::session::render(f, app),
         Popup::Copy => popups::copy::render(f, app),
-        Popup::Approval => popups::approval::render(f, app),
         Popup::Key => popups::key::render(f, app),
         Popup::Settings => popups::settings::render(f, app),
         Popup::Space => popups::space::render(f, app),
@@ -116,7 +126,8 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         Popup::Login => popups::login::render(f, app),
         Popup::Local => popups::local::render(f, app),
         Popup::Help => popups::help::render(f, app),
-        Popup::None => {}
+        // An approval is drawn in the composer's place above.
+        Popup::Approval | Popup::None => {}
     }
 }
 

@@ -87,6 +87,9 @@ pub struct AppView {
     pub approval_scroll: std::cell::Cell<usize>,
     pub approval_max_scroll: std::cell::Cell<usize>,
     pub approval_page_height: std::cell::Cell<usize>,
+    /// Where the docked approval panel was last drawn, so the wheel over it
+    /// scrolls the request and over the conversation scrolls the transcript.
+    pub approval_area: std::cell::Cell<Option<ratatui::layout::Rect>>,
     /// A shell command stays locked until its final wrapped row has been shown.
     pub approval_seen_end: std::cell::Cell<bool>,
     pub approval_opened_at: Option<std::time::Instant>,
@@ -324,6 +327,7 @@ impl AppView {
             approval_request: None,
             approval_displayed: 0,
             approval_scroll: std::cell::Cell::new(0),
+            approval_area: std::cell::Cell::new(None),
             approval_max_scroll: std::cell::Cell::new(0),
             approval_page_height: std::cell::Cell::new(1),
             approval_seen_end: std::cell::Cell::new(false),

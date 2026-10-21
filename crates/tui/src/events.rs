@@ -923,14 +923,29 @@ fn handle_popup_mouse(app: &mut AppView, m: MouseEvent) -> Result<()> {
 /// open popup.
 fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
     if app.popup == Popup::Approval {
-        // The wheel scrolls the preview; clicks never answer an approval.
-        let code = match m.kind {
-            MouseEventKind::ScrollUp => KeyCode::Up,
-            MouseEventKind::ScrollDown => KeyCode::Down,
-            _ => return Ok(()),
-        };
-        for _ in 0..3 {
-            ui::popups::approval::handle_key(app, KeyEvent::from(code))?;
+        // The approval sits in the composer's place: the wheel over it
+        // scrolls the request, over the conversation scrolls the transcript.
+        // Clicks never answer an approval.
+        let over_panel = app
+            .approval_area
+            .get()
+            .is_some_and(|area| area.contains(Position::new(m.column, m.row)));
+        match (m.kind, over_panel) {
+            (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown, true) => {
+                let code = if m.kind == MouseEventKind::ScrollUp {
+                    KeyCode::Up
+                } else {
+                    KeyCode::Down
+                };
+                for _ in 0..3 {
+                    ui::popups::approval::handle_key(app, KeyEvent::from(code))?;
+                }
+            }
+            (MouseEventKind::ScrollUp, false) => {
+                app.scroll = app.scroll.saturating_add(3).min(app.max_scroll);
+            }
+            (MouseEventKind::ScrollDown, false) => app.scroll = app.scroll.saturating_sub(3),
+            _ => {}
         }
         return Ok(());
     }
@@ -1399,6 +1414,70 @@ mod tests {
         (0..h)
             .map(|y| (0..w).map(|x| buffer[(x, y)].symbol()).collect())
             .collect()
+    }
+
+    #[test]
+    fn approval_docks_in_the_composer_and_leaves_the_conversation_readable() {
+        let mut app = test_app();
+        for n in 0..80 {
+            app.messages.push(nexus_core::db::Message {
+                role: "user".into(),
+                content: format!("conversation line {n}"),
+                model: None,
+                reasoning: None,
+                tokens: None,
+                secs: None,
+                cost: None,
+                phrase: None,
+                persona: None,
+                created_at: None,
+            });
+        }
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        app.pending_approval = Some(sender);
+        app.pending_approval_request = Some(nexus_core::tools::ApprovalRequest {
+            tool: "shell".into(),
+            class: Some("runs a command".into()),
+            detail: None,
+            action: "run".into(),
+            summary: "$ cargo test".into(),
+            allow_session: true,
+        });
+        app.sync_approval_popup();
+        assert_eq!(app.popup, Popup::Approval);
+        let screen = draw(&mut app, 100, 40);
+        let title = screen
+            .iter()
+            .position(|line| line.contains(" approve "))
+            .expect("approval panel drawn");
+        // Docked at the bottom (above the status row), conversation above it.
+        assert!(title > 20, "{screen:#?}");
+        assert!(
+            screen[..title]
+                .iter()
+                .any(|line| line.contains("conversation line"))
+        );
+        assert!(
+            screen[title..]
+                .iter()
+                .any(|line| line.contains("$ cargo test"))
+        );
+        // The wheel over the conversation scrolls the transcript.
+        let before = app.scroll;
+        let wheel = |kind, row| MouseEvent {
+            kind,
+            column: 10,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(
+            &mut app,
+            wheel(MouseEventKind::ScrollUp, 2),
+            Rect::new(0, 0, 100, 40),
+        )
+        .unwrap();
+        assert!(app.scroll > before, "transcript scrolled");
+        assert_eq!(app.popup, Popup::Approval, "still waiting for an answer");
     }
 
     fn click(app: &mut AppView, column: u16, row: u16) {
