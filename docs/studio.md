@@ -25,7 +25,7 @@ views.
 | Desktop app | `crates/studio` (package `nexus-studio`, binary `nexus-studio`, `publish = false` until S3) | `tao` window + `wry` webview; Rust backend owns files and the host connection |
 | Studio UI | `crates/studio/ui/` (HTML/CSS/vanilla JS modules, embedded with `include_str!`) | no Node build step, so `cargo install` works offline from the repo |
 | Launcher | `nexus studio [path]` in `crates/tui/src/cli.rs` | runs `nexus-studio` from PATH or beside the `nexus` binary; says how to install it when missing |
-| Suggestions | `nexus host`: `POST /api/studio/suggest` | studio talks to a local host on loopback with the existing host token; remote hosts need S5 pairing |
+| Feedback | `nexus host`: `POST /v1/studio/suggest` (`kind` thread/review/chat) | studio talks to a local host on loopback with the existing host token; remote hosts need S5 pairing |
 
 Why a webview rather than drawing natively: slides are layout plus type,
 and HTML/CSS does both well. The same renderer later produces thumbnails
@@ -103,24 +103,33 @@ suggestion fail cleanly instead of overwriting newer edits. Undo and redo
 in studio are inverse operations, and the file saved on disk is always a
 whole deck.
 
-## Suggestions (S2)
+## Feedback: comments and chat (S2, redesigned)
 
-1. In studio you select slides or blocks, or nothing for the whole deck,
-   and type an instruction ("tighten slide 3", "make this two columns").
-   You can also click "Suggest" for an open-ended review.
-2. Studio sends `{deck, revision, selection, instruction}` to the host.
-3. The host runs one model call with a compact deck-editing prompt and the
-   session's model. The model must reply with operations plus a one-line
-   `why` per group. The host validates them with `deck::apply` on a copy
-   and makes one automatic repair attempt with located errors, the same
-   loop as nexus-ui repair. It returns `{ops, why, preview_revision}`.
-4. Studio shows each suggestion as a ghost overlay with a before/after
-   toggle, and you accept or reject each one, or all at once. Accepting
-   applies the operations locally. A suggestion whose `base_hash` no
-   longer matches shows as outdated.
+The workspace follows Claude Design's model: chat on the left for broad
+changes, a large canvas on the right, and **comments** for targeted ones.
 
-The host never writes the deck: it only proposes changes. Studio keeps a
-history of the suggestions it received in `<deck>.suggestions.json`.
+- **Comment mode** (C): click the slide to drop a pin, anchored to the block
+  under it (or the slide plus grid coordinates). **Comment** saves a note;
+  **Ask nexus** sends it to the model. Each pin is a thread; replies re-ask
+  with the whole thread; threads resolve and reopen.
+- A model message may carry a **suggested edit**: Preview (ghost overlay,
+  B toggles before/after), Apply (one undo step), Dismiss. An edit whose
+  anchored block changed since shows as outdated.
+- **Review deck** returns up to 8 comments pinned to the blocks they're
+  about, each labelled `must`, `should` or `consider`.
+- **Chat** returns a reply plus optionally one change set or 2–3 options
+  shown as thumbnails.
+- One endpoint, `POST /v1/studio/suggest`, takes `kind` = `thread`,
+  `review` or `chat`. The host fills `base_hash` and ids itself, validates
+  anchors and operations against the deck, gives the model one repair round
+  with located errors, and drops what still fails with a note. It never
+  writes the deck.
+- The model follows the **commenting principles** in
+  `assets/prompts/deck-suggest.md`: anchored, one issue per comment with
+  why it matters, actionable (attach an edit when a fix exists), few and
+  prioritized with a severity, respectful of the author's intent and facts,
+  and answering the thread it's in.
+- Threads persist in `<deck>.comments.json`, chat in `<deck>.chat.json`.
 
 ## Phases
 
@@ -134,7 +143,7 @@ history of the suggestions it received in `<deck>.suggestions.json`.
   - A properties panel, speaker notes, undo/redo, and presenting full
     screen.
   - The `nexus studio [path]` launcher and CI WebKitGTK setup.
-- **S2, host suggestions.** The `/api/studio/suggest` endpoint, the
+- **S2, host feedback (done).** The `/v1/studio/suggest` endpoint, the
   deck-editing prompt and the repair loop, plus a connection indicator in
   studio. Studio starts a loopback host when none is running.
 - **S3, import and export.** `.pptx` import and export, and PDF.

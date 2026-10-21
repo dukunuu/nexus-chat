@@ -1,14 +1,7 @@
 use super::*;
 
-fn request() -> SuggestRequest {
-    let deck = Deck::new_from_layouts("Story");
-    SuggestRequest {
-        revision: deck.revision(),
-        deck,
-        selection: Selection::default(),
-        instruction: String::new(),
-        model: None,
-    }
+fn fixture() -> Deck {
+    Deck::classic_fixture("Story")
 }
 fn raw(ops: Value) -> RawSuggestion {
     RawSuggestion {
@@ -19,7 +12,7 @@ fn raw(ops: Value) -> RawSuggestion {
 
 #[test]
 fn supplies_and_overwrites_hashes_and_applies_independently() {
-    let deck = request().deck;
+    let deck = fixture();
     let edit = json!([{"op":"update_block","slide":"s1","id":"b1","fields":{"text":"Better"}}]);
     let mut forged = edit.clone();
     forged[0]["base_hash"] = json!("untrusted");
@@ -39,12 +32,12 @@ fn supplies_and_overwrites_hashes_and_applies_independently() {
             }
         );
     }
-    assert_eq!(deck, request().deck);
+    assert_eq!(deck, fixture());
 }
 
 #[test]
 fn fills_insertion_ids_and_reports_located_independent_errors() {
-    let deck = request().deck;
+    let deck = fixture();
     let (suggestions, errors) = prepare(
         &deck,
         vec![
@@ -73,17 +66,8 @@ fn fills_insertion_ids_and_reports_located_independent_errors() {
 }
 
 #[test]
-fn limits_and_asset_provenance() {
-    let mut req = request();
-    req.instruction = "é".repeat(2000);
-    assert!(req.check().is_ok());
-    req.instruction.push('x');
-    assert!(req.check().is_err());
-    req.instruction.clear();
-    req.deck.slides[0].blocks = vec![req.deck.slides[0].blocks[0].clone(); 41];
-    req.revision = req.deck.revision();
-    assert!(req.check().is_err());
-    let deck = request().deck;
+fn proposal_limits_and_asset_provenance() {
+    let deck = fixture();
     for items in [vec![], (0..6).map(|_| raw(json!([]))).collect()] {
         assert!(!prepare(&deck, items).1.is_empty());
     }
@@ -104,42 +88,17 @@ fn limits_and_asset_provenance() {
 }
 
 #[test]
-fn context_selection_small_whole_and_stable_order() {
-    let mut req = request();
-    req.selection.slides.push("s1".into());
-    let small: Value = serde_json::from_str(&prompt_context(&req)).unwrap();
-    assert!(small["slides"][1].get("blocks").is_some());
-    for i in 2..13 {
-        let mut slide = req.deck.slides[1].clone();
-        slide.id = format!("s{i}extra");
-        req.deck.slides.push(slide);
+fn selection_reports_unknown_slides_and_blocks() {
+    let deck = fixture();
+    let mut errors = Vec::new();
+    Selection {
+        slides: vec!["s1".into(), "missing".into()],
+        blocks: vec![("s1".into(), "b1".into()), ("s1".into(), "nope".into())],
     }
-    let context = prompt_context(&req);
-    assert_eq!(context, prompt_context(&req));
-    let selected: Value = serde_json::from_str(&context).unwrap();
-    assert!(selected["slides"][0].get("blocks").is_some());
-    assert!(selected["slides"][1].get("blocks").is_none());
-    assert_eq!(selected["slides"][1]["title"], "Your next big idea");
-    req.selection = Selection {
-        slides: vec![],
-        blocks: vec![("s2".into(), "b2".into())],
-    };
-    let blocks: Value = serde_json::from_str(&prompt_context(&req)).unwrap();
-    assert!(blocks["slides"][1].get("blocks").is_some());
-    req.selection = Selection::default();
-    let whole: Value = serde_json::from_str(&prompt_context(&req)).unwrap();
-    assert!(
-        whole["slides"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|s| s.get("blocks").is_some())
-    );
-}
-
-#[test]
-fn forgiving_json_is_still_structured() {
-    assert!(parse_reply("```json\n{\"suggestions\":[]}\n```\nDone.").is_ok());
-    assert!(parse_reply("{\"suggestions\":[]} trailing prose").is_ok());
-    assert!(parse_reply("not JSON").is_err());
+    .check(&deck, &mut errors);
+    let paths: Vec<_> = errors.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths, ["selection.slides[1]", "selection.blocks[1]"]);
+    let mut errors = Vec::new();
+    Selection::default().check(&deck, &mut errors);
+    assert!(errors.is_empty());
 }

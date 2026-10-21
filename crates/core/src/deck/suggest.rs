@@ -1,4 +1,4 @@
-//! Model-facing deck context and independently validated edit proposals.
+//! Independently validated edit proposals shared by the feedback flow.
 
 use std::collections::BTreeSet;
 
@@ -15,58 +15,22 @@ pub struct Selection {
     pub blocks: Vec<(String, String)>,
 }
 
-/// A complete, revision-bound request from studio.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SuggestRequest {
-    pub deck: Deck,
-    pub revision: String,
-    pub selection: Selection,
-    pub instruction: String,
-    pub model: Option<String>,
-}
-
-impl SuggestRequest {
-    /// Validate the instruction, selection, revision and S1 deck limits.
-    pub fn check(&self) -> Result<(), Vec<CheckError>> {
-        let mut errors = Vec::new();
-        if self.instruction.chars().count() > 2_000 {
-            super::issue(&mut errors, "instruction", "at most 2000 characters");
-        }
-        if self.revision != self.deck.revision() {
-            super::issue(&mut errors, "revision", "does not match deck");
-        }
-        let source = serde_json::to_string(&self.deck).expect("deck JSON");
-        if let Err(deck_errors) = Deck::check(&source) {
-            errors.extend(deck_errors);
-        }
-        for (i, id) in self.selection.slides.iter().enumerate() {
-            if !self.deck.slides.iter().any(|s| s.id == *id) {
-                super::issue(
-                    &mut errors,
-                    &format!("selection.slides[{i}]"),
-                    "unknown slide",
-                );
+impl Selection {
+    /// Report every slide or block that the deck does not contain.
+    pub fn check(&self, deck: &Deck, errors: &mut Vec<CheckError>) {
+        for (i, id) in self.slides.iter().enumerate() {
+            if !deck.slides.iter().any(|s| s.id == *id) {
+                super::issue(errors, &format!("selection.slides[{i}]"), "unknown slide");
             }
         }
-        for (i, (slide, block)) in self.selection.blocks.iter().enumerate() {
-            if !self
-                .deck
+        for (i, (slide, block)) in self.blocks.iter().enumerate() {
+            if !deck
                 .slides
                 .iter()
                 .any(|s| s.id == *slide && s.blocks.iter().any(|b| b.id == *block))
             {
-                super::issue(
-                    &mut errors,
-                    &format!("selection.blocks[{i}]"),
-                    "unknown block",
-                );
+                super::issue(errors, &format!("selection.blocks[{i}]"), "unknown block");
             }
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
         }
     }
 }
@@ -84,15 +48,6 @@ pub struct Suggestion {
     pub id: String,
     pub why: String,
     pub ops: Vec<Op>,
-}
-
-/// The host never writes the deck; these proposals are relative to `revision`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SuggestResponse {
-    pub suggestions: Vec<Suggestion>,
-    pub model: String,
-    pub revision: String,
-    pub notes: Vec<String>,
 }
 
 /// Fill trusted preconditions and ids, then apply each proposal to the base.
@@ -241,62 +196,6 @@ fn insertion_id(
         super::fill_id(value, stem, reserved, used);
     }
     Ok(())
-}
-
-/// Compact deterministic context: full selected slides, summaries elsewhere.
-#[must_use]
-pub fn prompt_context(req: &SuggestRequest) -> String {
-    let whole = req.selection.slides.is_empty() && req.selection.blocks.is_empty();
-    let small = req.deck.slides.len() <= 12
-        && serde_json::to_vec(&req.deck).expect("deck JSON").len() <= 24 * 1024;
-    let slides: Vec<_> = req
-        .deck
-        .slides
-        .iter()
-        .map(|s| {
-            if whole
-                || small
-                || req.selection.slides.contains(&s.id)
-                || req.selection.blocks.iter().any(|(slide, _)| *slide == s.id)
-            {
-                serde_json::to_value(s).expect("slide JSON")
-            } else {
-                let title = s
-                    .blocks
-                    .iter()
-                    .find_map(|b| {
-                        if let Content::Text { text } = &b.content {
-                            Some(text.lines().next().unwrap_or_default())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default();
-                json!({"id":s.id, "layout":s.layout, "title":title})
-            }
-        })
-        .collect();
-    json!({"title":req.deck.title, "theme":req.deck.theme, "slides":slides, "selection":req.selection}).to_string()
-}
-
-/// Tolerate a Markdown fence and trailing prose, not malformed JSON.
-pub fn parse_reply(reply: &str) -> Result<Vec<RawSuggestion>, String> {
-    #[derive(Deserialize)]
-    struct Reply {
-        suggestions: Vec<RawSuggestion>,
-    }
-    let source = reply.trim();
-    let source = if source.starts_with("```") {
-        source.split_once('\n').map_or(source, |(_, body)| body)
-    } else {
-        source
-    };
-    let mut stream = serde_json::Deserializer::from_str(source).into_iter::<Reply>();
-    stream
-        .next()
-        .and_then(Result::ok)
-        .map(|r| r.suggestions)
-        .ok_or_else(|| "reply: expected JSON object with suggestions".into())
 }
 
 #[cfg(test)]

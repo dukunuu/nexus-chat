@@ -7,7 +7,7 @@ export function canvasController(api) {
   const nodeFor = blockId => [...canvas.querySelectorAll('.block')].find(n => n.dataset.id === blockId);
   function decorate() {
     canvas.querySelectorAll('.resize-handle').forEach(n => n.remove());
-    if (api.state.preview) return;
+    if (api.state.preview || api.state.mode === 'comment') return;
     for (const node of canvas.querySelectorAll('.block')) node.classList.toggle('selected', api.state.selected.has(node.dataset.id));
     if (api.state.selected.size !== 1) return;
     const block = selectedBlocks()[0];
@@ -45,6 +45,13 @@ export function canvasController(api) {
   let drag;
   canvas.addEventListener('pointerdown', event => {
     if (api.state.preview || event.button !== 0 || event.target.closest('[contenteditable]')) return;
+    if (event.target.closest('.pin')) return;
+    if (api.state.mode === 'comment') {
+      const bounds = canvas.getBoundingClientRect();
+      const node = event.target.closest('.block');
+      api.commentAt({ slide: api.slide().id, block: node?.dataset.id || null, x: Math.max(0, Math.min(31, Math.floor((event.clientX - bounds.left) / bounds.width * 32))), y: Math.max(0, Math.min(17, Math.floor((event.clientY - bounds.top) / bounds.height * 18))) });
+      event.preventDefault(); return;
+    }
     api.state.scopeSlide = false;
     const handle = event.target.closest('.resize-handle');
     const blockNode = event.target.closest('.block');
@@ -98,7 +105,7 @@ export function canvasController(api) {
   canvas.addEventListener('pointerup', event => finish(event));
   canvas.addEventListener('pointercancel', event => finish(event, true));
   canvas.addEventListener('dblclick', event => {
-    if (api.state.preview) return;
+    if (api.state.preview || api.state.mode === 'comment') return;
     const node = event.target.closest('.block-text');
     if (!node || node.isContentEditable) return;
     const slideId = api.slide().id;

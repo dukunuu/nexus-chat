@@ -1,5 +1,6 @@
 //! Deck v1: bounded, UI-independent slide data and atomic editing operations.
 
+pub mod feedback;
 pub mod suggest;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,10 +48,10 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             colors: [
-                ("bg", "#0f1115"),
-                ("fg", "#e8e6e3"),
-                ("accent", "#7aa2f7"),
-                ("muted", "#8b8f98"),
+                ("bg", "#faf9f6"),
+                ("fg", "#282923"),
+                ("accent", "#ae593e"),
+                ("muted", "#76766b"),
             ]
             .map(|(k, v)| (k.into(), v.into()))
             .into(),
@@ -380,8 +381,25 @@ impl Deck {
         hash(self)
     }
 
-    /// A ready-to-edit title and content slide with the default dark theme.
+    /// A ready-to-edit title and content slide with a warm light theme.
     #[must_use]
+    /// A fixed two-slide deck for tests, independent of the starter design,
+    /// so restyling `new_from_layouts` never breaks unrelated expectations.
+    #[cfg(test)]
+    pub(crate) fn classic_fixture(title: &str) -> Self {
+        let mut deck = Self::check(include_str!("../tests/fixtures/deck/classic.deck.json"))
+            .expect("classic deck fixture");
+        deck.title = title.into();
+        if let Some(Content::Text { text }) = deck.slides[0]
+            .blocks
+            .first_mut()
+            .map(|block| &mut block.content)
+        {
+            *text = title.into();
+        }
+        deck
+    }
+
     pub fn new_from_layouts(title: &str) -> Self {
         Self {
             version: 1,
@@ -392,20 +410,68 @@ impl Deck {
                     id: "s1".into(),
                     layout: Layout::Title,
                     notes: String::new(),
-                    blocks: vec![text_block("b1", title, (2, 6, 28, 5), TextSize::Xxl)],
+                    blocks: vec![
+                        text_block("b1", title, (3, 6, 25, 5), TextSize::Xxl),
+                        Block {
+                            style: Style {
+                                color: Some("accent".into()),
+                                size: TextSize::S,
+                                ..Style::default()
+                            },
+                            ..text_block(
+                                "b_kicker",
+                                "A NEW PERSPECTIVE / 01",
+                                (3, 3, 26, 2),
+                                TextSize::S,
+                            )
+                        },
+                        Block {
+                            style: Style {
+                                color: Some("muted".into()),
+                                ..Style::default()
+                            },
+                            ..text_block(
+                                "b_subtitle",
+                                "A little clarity. A bigger possibility.",
+                                (3, 12, 26, 3),
+                                TextSize::M,
+                            )
+                        },
+                    ],
                 },
                 Slide {
                     id: "s2".into(),
                     layout: Layout::Content,
-                    notes: String::new(),
+                    notes: "Chart values are illustrative placeholders, not measured data.".into(),
                     blocks: vec![
-                        text_block("b2", "Your next big idea", (2, 2, 28, 3), TextSize::Xl),
+                        text_block(
+                            "b2",
+                            "Make room for what matters.",
+                            (3, 2, 26, 3),
+                            TextSize::Xl,
+                        ),
                         text_block(
                             "b3",
                             "- Start with the story\n- Make it memorable\n- Leave room to breathe",
-                            (2, 6, 28, 10),
-                            TextSize::L,
+                            (3, 7, 12, 8),
+                            TextSize::M,
                         ),
+                        Block {
+                            id: "b_chart".into(),
+                            x: 18,
+                            y: 7,
+                            w: 11,
+                            h: 8,
+                            style: Style::default(),
+                            content: Content::Chart {
+                                chart: Chart::Bar,
+                                labels: vec!["Start".into(), "Build".into(), "Grow".into()],
+                                series: vec![Series {
+                                    name: "Illustrative values".into(),
+                                    values: vec![3.0, 5.0, 8.0],
+                                }],
+                            },
+                        },
                     ],
                 },
             ],

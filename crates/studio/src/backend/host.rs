@@ -3,8 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail, ensure};
-use nexus_core::deck::suggest::{SuggestRequest, SuggestResponse};
+use anyhow::{Context as _, Result, ensure};
 use nexus_core::host::host_discovery_id;
 use reqwest::{Client, Url};
 use serde::Serialize;
@@ -128,7 +127,10 @@ impl Connection {
         }
     }
 
-    pub async fn suggest(&self, request: &SuggestRequest) -> Result<SuggestResponse> {
+    pub async fn feedback(
+        &self,
+        request: &nexus_core::deck::feedback::Request,
+    ) -> Result<nexus_core::deck::feedback::Response> {
         let status = self.discover().await;
         ensure!(status.state == "connected", "{}", status.message);
         let response = self
@@ -138,24 +140,14 @@ impl Connection {
             .json(request)
             .send()
             .await
-            .map_err(|_| anyhow::anyhow!("Host suggestion request failed"))?;
-        let code = response.status();
-        if code == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-            let reply = response
-                .json::<SuggestResponse>()
-                .await
-                .context("Invalid host response")?;
-            bail!("{}", reply.notes.join("; "));
-        }
+            .map_err(|_| anyhow::anyhow!("Host feedback request failed"))?;
         ensure!(
-            code.is_success(),
-            "Host suggestion failed ({})",
-            code.as_u16()
+            response.status().is_success(),
+            "Host feedback failed ({})",
+            response.status().as_u16()
         );
-        let reply = response
-            .json::<SuggestResponse>()
-            .await
-            .context("Invalid host response")?;
+        let reply: nexus_core::deck::feedback::Response =
+            response.json().await.context("Invalid host response")?;
         ensure!(
             reply.revision == request.revision,
             "Host returned a different revision"

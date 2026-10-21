@@ -3,21 +3,22 @@ import { element, renderSlide } from './render.js';
 
 export function stripController(api) {
   const strip = document.querySelector('#strip');
-  const menu = document.querySelector('#layout-dialog');
+  const menu = document.querySelector('#layout-menu');
   function addSlide(layout) {
     const slide = layoutSlide(layout);
     const after = api.slide()?.id || null;
     api.apply(() => [{ op: 'add_slide', after, slide }]);
     api.state.slideId = slide.id; api.state.selected.clear();
-    menu.close();
+    menu.hidden = true;
   }
   for (const layout of layouts) {
     const button = element('button', '', layout);
     button.onclick = () => addSlide(layout);
     document.querySelector('#layout-options').append(button);
   }
-  document.querySelector('#add-slide').onclick = () => menu.showModal();
-  document.querySelector('#cancel-layout').onclick = () => menu.close();
+  document.querySelector('#add-slide').onclick = () => { menu.hidden = !menu.hidden; };
+  document.querySelector('#empty-add').onclick = () => { menu.hidden = false; };
+  document.addEventListener('pointerdown', event => { if (!event.target.closest('#layout-menu, #add-slide, #empty-add')) menu.hidden = true; });
   function render() {
     strip.replaceChildren();
     api.state.deck.slides.forEach((slide, index) => {
@@ -27,10 +28,10 @@ export function stripController(api) {
       const thumb = element('div', 'slide thumbnail');
       thumb.tabIndex = 0; thumb.setAttribute('role', 'button'); thumb.setAttribute('aria-label', `Slide ${index + 1}`);
       renderSlide(thumb, slide, api.state.deck.theme, api.state.images);
-      const select = () => { api.state.slideId = slide.id; api.state.selected.clear(); api.state.scopeSlide = true; api.render(); };
+      const select = () => { api.clearPreview(); api.state.openThread = null; api.state.draftAnchor = null; api.state.slideId = slide.id; api.state.selected.clear(); api.state.scopeSlide = true; api.render(); };
       thumb.onclick = select; thumb.onkeydown = event => { if (event.key === 'Enter') select(); };
       const caption = element('div', 'slide-caption');
-      caption.append(element('span', '', `${index + 1} · ${slide.layout}`));
+      caption.append(element('span', '', `${String(index + 1).padStart(2, '0')}`));
       const actions = element('details', 'slide-actions');
       const summary = element('summary', '', '⋯'); summary.title = 'Slide actions';
       actions.append(summary);

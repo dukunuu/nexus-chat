@@ -14,11 +14,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+mod feedback;
 pub mod host;
-mod suggestions;
+mod jobs;
+pub use jobs::Completed;
+use jobs::{Job, Work};
 use nexus_core::deck::suggest::Selection;
-pub use suggestions::Completed;
-use suggestions::{History, Job, Work};
 
 /// All messages accepted from the presentation layer. `Open` and `ImportAsset`
 /// are explicit user-entered paths; deck content can only name safe assets.
@@ -43,23 +44,52 @@ pub enum Command {
     ImportAsset {
         path: PathBuf,
     },
+    ExportDeck {
+        path: PathBuf,
+    },
     HostStatus {},
     StartHost {},
-    Suggest {
-        instruction: String,
+    CommentCreate {
+        anchor: nexus_core::deck::feedback::Anchor,
+        text: String,
+        send: bool,
+    },
+    CommentReply {
+        thread: String,
+        text: String,
+        send: bool,
+    },
+    CommentResolve {
+        thread: String,
+    },
+    CommentReopen {
+        thread: String,
+    },
+    Review {
+        #[serde(default)]
         selection: Selection,
-        model: Option<String>,
     },
-    Preview {
-        suggestion_id: String,
+    Chat {
+        text: String,
+        #[serde(default)]
+        selection: Selection,
     },
-    Accept {
-        suggestion_id: String,
+    PreviewEdit {
+        owner: String,
+        edit: String,
     },
-    Reject {
-        id: String,
+    ApplyEdit {
+        owner: String,
+        edit: String,
     },
-    AcceptAll {},
+    DismissEdit {
+        owner: String,
+        edit: String,
+    },
+    ChooseOption {
+        message: String,
+        edit: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -73,24 +103,26 @@ pub enum Event {
         // reproduce Rust's canonical number serialization.
         hashes: BTreeMap<String, String>,
         images: BTreeMap<String, String>,
-        history: Vec<History>,
+        threads: Vec<feedback::Thread>,
+        chat: Vec<feedback::Message>,
+    },
+    Feedback {
+        threads: Vec<feedback::Thread>,
+        chat: Vec<feedback::Message>,
+        notes: Vec<String>,
     },
     HostChecking {},
     HostStatus {
         status: host::Status,
     },
     Suggesting {},
-    Suggestions {
-        history: Vec<History>,
-        model: String,
-        notes: Vec<String>,
-    },
     Preview {
         deck: Deck,
     },
     Asset {
         src: String,
     },
+    Exported {},
     Error {
         message: String,
     },
@@ -120,7 +152,7 @@ pub struct Backend {
     undo: Vec<Deck>,
     redo: Vec<Deck>,
     pub fetcher: Arc<Fetcher>,
-    history: Vec<History>,
+    feedback: feedback::State,
     host: Option<host::Connection>,
     work: Option<Work>,
     document: Uuid,
@@ -152,7 +184,7 @@ impl Backend {
             saved_revision: String::new(),
             undo: Vec::new(),
             redo: Vec::new(),
-            history: Vec::new(),
+            feedback: feedback::State::default(),
             host: None,
             work: None,
             document: Uuid::new_v4(),
@@ -163,13 +195,14 @@ impl Backend {
         }
         backend.saved_revision = backend.deck.revision();
         backend.remember()?;
-        backend.load_history()?;
+        backend.load_feedback()?;
         Ok(backend)
     }
 
     pub fn event(&self) -> Event {
         Event::Deck {
-            history: self.history.clone(),
+            threads: self.feedback.threads.clone(),
+            chat: self.feedback.chat.clone(),
             deck: self.deck.clone(),
             revision: self.deck.revision(),
             dirty: self.deck.revision() != self.saved_revision,
@@ -214,17 +247,28 @@ impl Backend {
 
     fn execute(&mut self, command: Command) -> Result<Event> {
         match command {
+            Command::CommentCreate { anchor, text, send } => {
+                return self.comment_create(anchor, text, send);
+            }
+            Command::CommentReply { thread, text, send } => {
+                return self.comment_reply(&thread, text, send);
+            }
+            Command::CommentResolve { thread } => return self.comment_resolve(&thread, true),
+            Command::CommentReopen { thread } => return self.comment_resolve(&thread, false),
+            Command::Review { selection } => {
+                return self.ask_feedback(
+                    nexus_core::deck::feedback::Kind::Review,
+                    None,
+                    selection,
+                );
+            }
+            Command::Chat { text, selection } => return self.chat(text, selection),
+            Command::PreviewEdit { owner, edit } => return self.preview_edit(&owner, &edit),
+            Command::ApplyEdit { owner, edit } => self.apply_edit(&owner, &edit)?,
+            Command::ChooseOption { message, edit } => self.apply_edit(&message, &edit)?,
+            Command::DismissEdit { owner, edit } => return self.dismiss_edit(&owner, &edit),
             Command::HostStatus {} => return self.request_host(Job::HostStatus),
             Command::StartHost {} => return self.request_host(Job::StartHost),
-            Command::Suggest {
-                instruction,
-                selection,
-                model,
-            } => return self.suggest(instruction, selection, model),
-            Command::Preview { suggestion_id } => return self.preview(&suggestion_id),
-            Command::Accept { suggestion_id } => self.accept(&suggestion_id)?,
-            Command::Reject { id } => self.reject(&id)?,
-            Command::AcceptAll {} => self.accept_all()?,
             Command::Load {} => {}
             Command::Apply { ops } => {
                 let next = deck::apply(&self.deck, &ops)?;
@@ -258,14 +302,18 @@ impl Backend {
                 let deck = read_deck(&path)?;
                 self.open_document(path, deck)?;
             }
+            Command::ExportDeck { path } => {
+                atomic_write(&absolute(&path)?, &serde_json::to_vec_pretty(&self.deck)?)?;
+                return Ok(Event::Exported {});
+            }
             Command::ImportAsset { path } => {
                 return Ok(Event::Asset {
                     src: self.import_asset(&path)?,
                 });
             }
         }
-        self.recheck();
-        self.persist_history()?;
+        self.recheck_feedback();
+        self.persist_feedback()?;
         Ok(self.event())
     }
 
@@ -294,7 +342,7 @@ impl Backend {
         self.undo.clear();
         self.redo.clear();
         self.document = Uuid::new_v4();
-        self.load_history()?;
+        self.load_feedback()?;
         Ok(())
     }
 
@@ -538,7 +586,8 @@ fn embedded(path: &str) -> Option<(&'static str, &'static str)> {
         "/panel.js" => ("text/javascript", include_str!("../ui/panel.js")),
         "/render.js" => ("text/javascript", include_str!("../ui/render.js")),
         "/helpers.js" => ("text/javascript", include_str!("../ui/helpers.js")),
-        "/suggest.js" => ("text/javascript", include_str!("../ui/suggest.js")),
+        "/icons.js" => ("text/javascript", include_str!("../ui/icons.js")),
+        "/feedback.js" => ("text/javascript", include_str!("../ui/feedback.js")),
         _ => return None,
     })
 }

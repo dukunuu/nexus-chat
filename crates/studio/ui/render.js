@@ -6,6 +6,27 @@ export function element(tag, className, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
+export function fontStack(name = '') {
+  const clean = name.replace(/["'\\;]/g, '');
+  if (/mono|code|consolas|menlo/i.test(clean)) return `"${clean}", ui-monospace, SFMono-Regular, Menlo, monospace`;
+  if (/serif|georgia|times|baskerville|garamond|new york/i.test(clean) && !/sans/i.test(clean)) return 'ui-serif, "New York", Georgia, serif';
+  return `"${clean}", system-ui, -apple-system, "Segoe UI", sans-serif`;
+}
+export function availableFont(stack) {
+  const context = document.createElement('canvas').getContext('2d');
+  const sample = 'mmmmmmmmmmWWWWWWiiiiii0123456789';
+  const generic = { 'system-ui':'System UI', '-apple-system':'System UI', 'ui-serif':'System serif', 'ui-monospace':'System mono', 'sans-serif':'Sans serif', serif:'Serif', monospace:'Monospace' };
+  for (const part of stack.match(/"[^"]+"|'[^']+'|[^,]+/g)) {
+    const family = part.trim().replace(/^["']|["']$/g, '');
+    if (generic[family]) return generic[family];
+    const available = ['monospace', 'serif', 'sans-serif'].some(fallback => {
+      context.font = `72px ${fallback}`; const width = context.measureText(sample).width;
+      context.font = `72px "${family}", ${fallback}`; return Math.abs(context.measureText(sample).width - width) > .01;
+    });
+    if (available) return family;
+  }
+  return 'System UI';
+}
 export const color = (value, theme) => theme.colors[value] || (/^#[0-9a-f]{3,8}$/i.test(value || '') ? value : theme.colors.fg);
 function markdown(text) {
   const fragment = document.createDocumentFragment();
@@ -70,10 +91,11 @@ function renderChart(block, theme) {
 export function renderBlock(block, theme, images = {}) {
   const node = element('div', `block block-${block.kind}`);
   node.dataset.id = block.id;
+  node.dataset.size = block.style.size || 'm';
   positionBlock(node, block);
   node.style.textAlign = block.style.align || 'left';
   node.style.color = color(block.style.color || 'fg', theme);
-  node.style.fontSize = `${({ s: 2, m: 2.6, l: 3.4, xl: 4.8, xxl: 6.4 })[block.style.size || 'm']}cqw`;
+  node.style.fontSize = `${({ s: 1.35, m: 2.2, l: 3, xl: 4.2, xxl: 6.2 })[block.style.size || 'm']}cqw`;
   if (block.kind === 'text') node.append(markdown(block.text));
   else if (block.kind === 'image') {
     const image = element('img');
@@ -98,7 +120,7 @@ export function renderBlock(block, theme, images = {}) {
     for (const row of block.rows) { const tr = element('tr'); for (const cell of row) tr.append(element('td', '', cell)); table.append(tr); }
     node.append(table);
   } else if (block.kind === 'code') {
-    const pre = element('pre'); pre.style.fontFamily = theme.fonts.mono;
+    const pre = element('pre'); pre.style.fontFamily = fontStack(theme.fonts.mono);
     pre.append(element('code', '', block.source)); node.append(pre);
   } else if (block.kind === 'chart') node.append(renderChart(block, theme));
   return node;
@@ -110,7 +132,7 @@ export function renderSlide(container, slide, theme, images) {
   container.replaceChildren();
   container.style.backgroundColor = theme.colors.bg;
   container.style.color = theme.colors.fg;
-  container.style.fontFamily = theme.fonts.body;
-  container.style.setProperty('--heading-font', theme.fonts.heading);
+  container.style.fontFamily = fontStack(theme.fonts.body);
+  container.style.setProperty('--heading-font', fontStack(theme.fonts.heading));
   if (slide) for (const block of slide.blocks) container.append(renderBlock(block, theme, images));
 }

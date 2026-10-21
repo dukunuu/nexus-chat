@@ -1,7 +1,7 @@
 use super::*;
 
 fn starter() -> Deck {
-    Deck::new_from_layouts("A better story")
+    Deck::classic_fixture("A better story")
 }
 fn check(value: &Value) -> std::result::Result<Deck, Vec<CheckError>> {
     Deck::check(&serde_json::to_string(value).unwrap())

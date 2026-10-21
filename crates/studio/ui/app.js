@@ -1,164 +1,136 @@
 import { canvasController } from './canvas.js';
 import { stripController } from './strip.js';
 import { panelController } from './panel.js';
-import { suggestController } from './suggest.js';
+import { feedbackController } from './feedback.js';
+import { hydrateIcons } from './icons.js';
 import { textBlock, id } from './helpers.js';
 import { renderSlide } from './render.js';
 
-const state = { deck: null, revision: '', hashes: {}, images: {}, dirty: false, slideId: null, selected: new Set(), scopeSlide: false, history: [], preview: null };
-const status = document.querySelector('#status');
-const queue = [];
-let pending = null;
+hydrateIcons();
+const $ = selector => document.querySelector(selector);
+const state = { deck:null, revision:'', hashes:{}, images:{}, dirty:false, slideId:null, selected:new Set(), scopeSlide:false, preview:null, threads:[], chat:[], mode:'edit', properties:false, comments:false, openThread:null, draftAnchor:null, drafts:{}, showResolved:false, zoom:1 };
+const queue = []; let pending = null, toastTimer;
+function toast(text) { const node = $('#status'); node.textContent = text; node.hidden = !text; clearTimeout(toastTimer); toastTimer = setTimeout(() => node.hidden = true, 6000); }
 function pump() {
   if (pending || !queue.length) return;
   pending = queue.shift();
   try { window.ipc.postMessage(JSON.stringify(pending.build())); }
-  catch (error) { status.textContent = error.message; pending = null; pump(); }
+  catch (error) { toast(error.message); pending = null; pump(); }
 }
-function command(build, complete) { queue.push({ build: typeof build === 'function' ? build : () => build, complete }); pump(); }
-function apply(build) { command(() => ({ command: 'Apply', ops: build() })); }
+function command(build, complete) { queue.push({ build:typeof build === 'function' ? build : () => build, complete }); pump(); }
+function apply(build) { command(() => ({ command:'Apply', ops:build() })); }
 const api = {
-  state, apply, command,
-  renderCanvas: () => { if (state.deck) canvas.render(); },
-  slide: () => state.deck?.slides.find(s => s.id === state.slideId),
-  updateMany(slide, updates) {
-    apply(() => updates.map(({ id, fields }) => ({ op: 'update_block', slide, id, fields, base_hash: state.hashes[id] || '' })));
-  },
-  selectionChanged() { canvas.decorate(); panel.render(); suggestions.scope(); },
-  render,
+  state, apply, command, toast, render,
+  slide:() => state.deck?.slides.find(s => s.id === state.slideId),
+  renderCanvas:() => { if (state.deck) { canvas.render(); panel.renderToolbar(); } },
+  updateMany(slide, updates) { apply(() => updates.map(({ id, fields }) => ({ op:'update_block', slide, id, fields, base_hash:state.hashes[id] || '' }))); },
+  selectionChanged() { canvas.decorate(); panel.render(); feedback.render(); },
+  duplicate:() => canvas.duplicate(), remove:() => canvas.remove(),
+  clearPreview:() => feedback.clearPreview(),
+  commentAt(anchor) { state.draftAnchor = anchor; state.openThread = null; state.selected.clear(); feedback.clearPreview(); render(); setTimeout(() => $('#thread-popover textarea')?.focus(), 0); },
 };
-const canvas = canvasController(api), strip = stripController(api), panel = panelController(api), suggestions = suggestController(api);
+const canvas = canvasController(api), strip = stripController(api), panel = panelController(api), feedback = feedbackController(api);
 function render() {
   if (!state.deck) return;
-  canvas.render(); strip.render(); panel.render(); suggestions.render();
-  document.querySelector('#deck-title').textContent = state.deck.title;
-  document.querySelector('#dirty').textContent = state.dirty ? '· unsaved' : '· saved';
-  const notes = document.querySelector('#speaker-notes');
-  notes.value = api.slide()?.notes || ''; notes.disabled = !api.slide();
+  $('#properties-panel').hidden = !state.properties; $('#comments-panel').hidden = !state.comments;
+  $('#workspace').classList.toggle('commenting', state.mode === 'comment');
+  feedback.render(); canvas.render(); strip.render(); panel.render();
+  $('#deck-title-label').textContent = state.deck.title;
+  $('#dirty').textContent = state.dirty ? 'Unsaved' : 'Saved';
+  $('#speaker-notes').value = api.slide()?.notes || ''; $('#speaker-notes').disabled = !api.slide();
+  $('#slide-label').textContent = api.slide() ? `Slide ${String(state.deck.slides.indexOf(api.slide()) + 1).padStart(2, '0')} / ${String(state.deck.slides.length).padStart(2, '0')}  ·  ${api.slide().layout.replaceAll('-', ' ')}` : 'Your canvas';
+  $('#slide-wrap').hidden = !api.slide(); $('#canvas-empty').hidden = Boolean(api.slide());
+  $('#slide-wrap').style.transform = `scale(${state.zoom})`; $('#zoom-fit').textContent = state.zoom === 1 ? 'Fit' : `${Math.round(state.zoom * 100)}%`;
+  for (const mode of ['edit','comment']) $(`#${mode}-mode`).setAttribute('aria-pressed', String(state.mode === mode));
   renderPresentation();
 }
 function handleEvent(event, reply) {
-  const finished = reply ? pending : null;
-  if (reply) pending = null;
-  suggestions.event(event);
+  const finished = reply ? pending : null; if (reply) pending = null;
   if (event.event === 'Deck') {
-    suggestions.clearPreview();
-    Object.assign(state, { deck: event.deck, revision: event.revision, hashes: event.hashes, images: event.images, dirty: event.dirty, history: event.history });
+    feedback.clearPreview(); Object.assign(state, { deck:event.deck, revision:event.revision, hashes:event.hashes, images:event.images, dirty:event.dirty, threads:event.threads || [], chat:event.chat || [] });
     if (!api.slide()) state.slideId = state.deck.slides[0]?.id || null;
-    const blocks = new Set(api.slide()?.blocks.map(b => b.id) || []);
-    state.selected = new Set([...state.selected].filter(id => blocks.has(id)));
-    status.textContent = 'Ready'; render();
-  } else if (event.event === 'Suggestions') {
-    state.history = event.history; suggestions.render(); status.textContent = event.notes.join('; ') || 'Suggestions ready';
-  } else if (event.event === 'Error') status.textContent = event.message;
-  finished?.complete?.(event);
-  pump();
+    const blocks = new Set(api.slide()?.blocks.map(b => b.id) || []); state.selected = new Set([...state.selected].filter(id => blocks.has(id)));
+    if (state.openNewest) { state.openThread = state.threads.at(-1)?.id; state.openNewest = false; }
+    render();
+  } else {
+    feedback.event(event);
+    if (event.event === 'Error') toast(event.message);
+    if (event.event === 'Exported') toast('Deck JSON exported. Keep the assets folder beside it when moving the deck.');
+  }
+  finished?.complete?.(event); pump();
 }
 window.studioEvent = event => handleEvent(event, true);
 window.studioAsyncEvent = event => handleEvent(event, false);
-function save() { command(() => ({ command: 'Save', deck: state.deck })); }
-document.querySelector('#save').onclick = save;
-document.querySelector('#undo').onclick = () => command({ command: 'Undo' });
-document.querySelector('#redo').onclick = () => command({ command: 'Redo' });
-const pathDialog = document.querySelector('#path-dialog');
-let pathAction;
+function save() { command(() => ({ command:'Save', deck:state.deck })); }
+$('#save').onclick = save; $('#undo').onclick = () => command({ command:'Undo' }); $('#redo').onclick = () => command({ command:'Redo' });
+function deckMenu(open) { $('#deck-menu').hidden = !open; $('#deck-title').setAttribute('aria-expanded', String(open)); }
+$('#deck-title').onclick = () => deckMenu($('#deck-menu').hidden);
+document.addEventListener('pointerdown', event => { if (!event.target.closest('.deck-menu')) deckMenu(false); });
+document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#deck-menu').hidden) { deckMenu(false); $('#deck-title').focus(); } });
+$('#toggle-chat').onclick = () => { document.body.classList.toggle('chat-closed'); requestAnimationFrame(() => panel.renderToolbar()); };
+function properties() { state.properties = !state.properties; if (state.properties) { state.comments = false; feedback.closeThread(); } render(); }
+$('#toggle-properties').onclick = properties; $('#close-properties').onclick = properties;
+function comments() { state.comments = !state.comments; if (state.comments) state.properties = false; render(); }
+$('#toggle-comments').onclick = comments; $('#close-comments').onclick = comments;
+for (const mode of ['edit','comment']) $(`#${mode}-mode`).onclick = () => { state.mode = mode; state.selected.clear(); render(); };
+function zoom(delta) { state.zoom = delta === 0 ? 1 : Math.max(.5, Math.min(2, state.zoom + delta)); render(); }
+$('#zoom-in').onclick = () => zoom(.1); $('#zoom-out').onclick = () => zoom(-.1); $('#zoom-fit').onclick = () => zoom(0);
+new ResizeObserver(() => panel.renderToolbar()).observe($('#slide-wrap'));
+const pathDialog = $('#path-dialog'); let pathAction;
 function ask(heading, label, hint, value, action) {
-  document.querySelector('#path-heading').textContent = heading;
-  document.querySelector('#path-label').textContent = label;
-  document.querySelector('#path-hint').textContent = hint;
-  document.querySelector('#path-confirm').textContent = heading;
-  document.querySelector('#path-input').value = value;
-  pathAction = action; pathDialog.showModal(); document.querySelector('#path-input').focus();
+  $('#path-heading').textContent = heading; $('#path-label').textContent = label; $('#path-hint').textContent = hint; $('#path-confirm').textContent = heading; $('#path-input').value = value;
+  pathAction = action; pathDialog.showModal(); $('#path-input').focus();
 }
-pathDialog.addEventListener('close', () => { if (pathDialog.returnValue === 'ok') pathAction(document.querySelector('#path-input').value); });
+pathDialog.addEventListener('close', () => { if (pathDialog.returnValue === 'ok') pathAction($('#path-input').value); });
 const canLeave = () => !state.dirty || window.confirm('Discard unsaved changes? Save first to keep them.');
-document.querySelector('#open-deck').onclick = () => {
-  if (canLeave()) ask('Open', 'Deck path', 'Enter a local .deck.json path.', '', path => command({ command: 'Open', path }));
-};
-document.querySelector('#new-deck').onclick = () => {
-  if (canLeave()) ask('New deck', 'Title', 'Created in your active space’s files/decks folder.', 'Untitled', title => command({ command: 'NewDeck', title }));
-};
+$('#rename-deck').onclick = () => { deckMenu(false); ask('Rename deck', 'Title', 'Give this project a name.', state.deck.title, value => { const title = value.trim(); if (title) command(() => ({ command:'Save', deck:{ ...state.deck, title } })); }); };
+$('#open-deck').onclick = () => { deckMenu(false); if (canLeave()) ask('Open', 'Deck path', 'Enter a local .deck.json path.', '', path => command({ command:'Open', path })); };
+$('#new-deck').onclick = () => { deckMenu(false); if (canLeave()) ask('New deck', 'Title', 'Created in your active space’s files/decks folder.', 'Untitled', title => command({ command:'NewDeck', title })); };
 function insert(block) {
-  const slide = api.slide();
-  if (!slide) { status.textContent = 'Add a slide first.'; return; }
-  state.selected = new Set([block.id]);
-  apply(() => [{ op: 'insert_block', slide: slide.id, block }]);
+  const slide = api.slide(); if (!slide) { toast('Add a slide first.'); return; }
+  state.selected = new Set([block.id]); state.mode = 'edit'; apply(() => [{ op:'insert_block', slide:slide.id, block }]); $('#insert-options').hidden = true;
 }
-document.querySelector('#add-text').onclick = () => insert(textBlock());
-document.querySelector('#add-shape').onclick = () => insert({ id: id('b'), kind: 'shape', x: 8, y: 5, w: 10, h: 7, shape: 'rect', fill: 'accent', stroke: 'accent', style: {} });
-document.querySelector('#add-image').onclick = () => {
-  if (!api.slide()) { status.textContent = 'Add a slide first.'; return; }
-  const slide = api.slide().id;
-  ask('Import image', 'Image path', 'PNG, JPEG or WebP. A sanitized copy stays in the deck’s assets folder.', '', path => {
-    command({ command: 'ImportAsset', path }, event => {
-      if (event.event !== 'Asset') return;
-      const block = { id: id('b'), kind: 'image', x: 4, y: 3, w: 20, h: 12, src: event.src, fit: 'contain', style: {} };
-      state.selected = new Set([block.id]);
-      apply(() => [{ op: 'insert_block', slide, block }]);
-    });
-  });
-};
-document.querySelector('#speaker-notes').onchange = event => {
-  const slide = api.slide(); const notes = event.target.value;
-  if (slide) apply(() => [{ op: 'set_notes', slide: slide.id, notes }]);
-};
+$('#insert-toggle').onclick = () => $('#insert-options').hidden = !$('#insert-options').hidden;
+$('#add-text').onclick = () => insert(textBlock());
+$('#add-shape').onclick = () => insert({ id:id('b'), kind:'shape', x:8,y:5,w:10,h:7,shape:'rect',fill:'accent',stroke:'accent',style:{} });
+$('#add-image').onclick = () => ask('Import image', 'Image path', 'PNG, JPEG or WebP. A sanitized copy stays with the deck.', '', path => command({ command:'ImportAsset', path }, event => { if (event.event === 'Asset') insert({ id:id('b'),kind:'image',x:4,y:3,w:20,h:12,src:event.src,fit:'contain',style:{} }); }));
+$('#speaker-notes').onchange = event => { const slide = api.slide(), notes = event.target.value; if (slide) apply(() => [{ op:'set_notes', slide:slide.id, notes }]); };
+$('#export').onclick = () => ask('Export deck', 'Destination path', 'Exports deck JSON. Keep the deck’s assets folder beside the exported file.', `${state.deck.title.replace(/[^\w-]+/g, '-')}.deck.json`, path => command({ command:'ExportDeck', path }));
 let presenting = false, presentIndex = 0;
-const presentation = document.querySelector('#presentation');
+const presentation = $('#presentation');
 function renderPresentation() {
   if (!presenting) return;
   presentIndex = Math.max(0, Math.min(state.deck.slides.length - 1, presentIndex));
-  renderSlide(document.querySelector('#present-slide'), state.deck.slides[presentIndex], state.deck.theme, state.images);
-  document.querySelector('#present-counter').textContent = `${state.deck.slides.length ? presentIndex + 1 : 0} / ${state.deck.slides.length}`;
+  renderSlide($('#present-slide'), state.deck.slides[presentIndex], state.deck.theme, state.images); $('#present-counter').textContent = `${presentIndex + 1} / ${state.deck.slides.length}`;
 }
 function present() {
   if (!state.deck?.slides.length) return;
-  presenting = true; presentIndex = Math.max(0, state.deck.slides.findIndex(s => s.id === state.slideId));
-  presentation.hidden = false; renderPresentation();
-  const request = presentation.requestFullscreen || presentation.webkitRequestFullscreen;
-  if (request) Promise.resolve(request.call(presentation)).catch(() => { status.textContent = 'Presenting in window; system full-screen is unavailable.'; });
+  presenting = true; presentIndex = Math.max(0, state.deck.slides.findIndex(s => s.id === state.slideId)); presentation.hidden = false; renderPresentation();
+  const request = presentation.requestFullscreen || presentation.webkitRequestFullscreen; if (request) Promise.resolve(request.call(presentation)).catch(() => toast('Presenting in window.'));
 }
-function exitPresent() {
-  presenting = false; presentation.hidden = true;
-  if (document.fullscreenElement) document.exitFullscreen();
-  else if (document.webkitFullscreenElement) document.webkitExitFullscreen();
-}
-document.querySelector('#present').onclick = present;
-document.querySelector('#exit-present').onclick = exitPresent;
+function exitPresent() { presenting = false; presentation.hidden = true; if (document.fullscreenElement) document.exitFullscreen(); else if (document.webkitFullscreenElement) document.webkitExitFullscreen(); }
+$('#present').onclick = present; $('#exit-present').onclick = exitPresent;
 presentation.onclick = event => { if (event.target.id !== 'exit-present') { presentIndex++; renderPresentation(); } };
-for (const name of ['fullscreenchange', 'webkitfullscreenchange']) document.addEventListener(name, () => {
-  if (!document.fullscreenElement && !document.webkitFullscreenElement && presenting) { presenting = false; presentation.hidden = true; }
-});
+for (const name of ['fullscreenchange','webkitfullscreenchange']) document.addEventListener(name, () => { if (!document.fullscreenElement && !document.webkitFullscreenElement && presenting) { presenting = false; presentation.hidden = true; } });
 document.addEventListener('keydown', event => {
   if (presenting) {
-    if (event.key === 'Escape') exitPresent();
-    else if (['ArrowRight', 'ArrowDown', ' '].includes(event.key)) { presentIndex++; renderPresentation(); }
-    else if (['ArrowLeft', 'ArrowUp'].includes(event.key)) { presentIndex--; renderPresentation(); }
+    if (event.key === 'Escape') exitPresent(); else if (['ArrowRight','ArrowDown',' '].includes(event.key)) { presentIndex++; renderPresentation(); } else if (['ArrowLeft','ArrowUp'].includes(event.key)) { presentIndex--; renderPresentation(); }
     event.preventDefault(); return;
   }
-  const editing = event.target.closest('input, textarea, select, [contenteditable]');
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-    event.preventDefault(); suggestions.focus(); return;
-  }
-  if (!editing && event.key.toLowerCase() === 'b' && state.preview) {
-    event.preventDefault(); suggestions.toggle(); return;
-  }
-  if (!editing && event.key === 'Escape') {
-    suggestions.clearPreview(); state.selected.clear(); state.scopeSlide = false; api.selectionChanged(); return;
-  }
-  if (event.key === 's' && (event.metaKey || event.ctrlKey)) {
-    event.preventDefault(); if (editing) event.target.blur(); save(); return;
-  }
+  const key = event.key.toLowerCase(), mod = event.metaKey || event.ctrlKey, editing = event.target.closest('input,textarea,select,[contenteditable]');
+  if (mod && key === '/') { event.preventDefault(); $('#toggle-chat').click(); return; }
+  if (mod && key === '\\') { event.preventDefault(); properties(); return; }
+  if (mod && ['=','+','-','0'].includes(key)) { event.preventDefault(); zoom(key === '0' ? 0 : key === '-' ? -.1 : .1); return; }
+  if (mod && key === 's') { event.preventDefault(); if (editing) event.target.blur(); save(); return; }
+  if (mod && key === 'k') { event.preventDefault(); document.body.classList.remove('chat-closed'); $('#chat-input').focus(); return; }
   if (editing || document.querySelector('dialog[open]')) return;
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
-    event.preventDefault(); command({ command: event.shiftKey ? 'Redo' : 'Undo' });
-  } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd') {
-    event.preventDefault(); canvas.duplicate();
-  } else if (event.key === 'Delete' || event.key === 'Backspace') {
-    event.preventDefault(); canvas.remove();
-  } else if (event.key.startsWith('Arrow')) {
-    event.preventDefault(); const step = event.shiftKey ? 4 : 1;
-    canvas.nudge(event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0, event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0);
-  } else if (event.key === 'F5') { event.preventDefault(); present(); }
+  if (key === 'b' && state.preview) { event.preventDefault(); feedback.togglePreview(); }
+  else if (event.key === 'Escape') { feedback.clearPreview(); state.openThread = null; state.draftAnchor = null; state.selected.clear(); render(); }
+  else if (key === 'c') { state.mode = state.mode === 'comment' ? 'edit' : 'comment'; state.selected.clear(); render(); }
+  else if (mod && key === 'z') { event.preventDefault(); command({ command:event.shiftKey ? 'Redo' : 'Undo' }); }
+  else if (mod && key === 'd') { event.preventDefault(); canvas.duplicate(); }
+  else if (['Delete','Backspace'].includes(event.key)) { event.preventDefault(); canvas.remove(); }
+  else if (event.key.startsWith('Arrow')) { event.preventDefault(); const step = event.shiftKey ? 4 : 1; canvas.nudge(event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0, event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0); }
+  else if (event.key === 'F5') { event.preventDefault(); present(); }
 });
-command({ command: 'Load' });
-command({ command: 'HostStatus' });
+command({ command:'Load' }); command({ command:'HostStatus' });

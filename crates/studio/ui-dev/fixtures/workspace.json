@@ -1,0 +1,44 @@
+{
+  "deck": {
+    "version": 1,
+    "title": "The space to do good work",
+    "theme": {"colors":{"bg":"#faf9f6","fg":"#30352d","accent":"#b06143","muted":"#7b8072"},"fonts":{"heading":"Inter","body":"Inter","mono":"JetBrains Mono"}},
+    "slides": [
+      {"id":"s1","layout":"title","notes":"Start with a pause. Good work begins with enough space to think.","blocks":[
+        {"id":"kicker","kind":"text","x":3,"y":3,"w":26,"h":1,"text":"FIELDNOTES   /   A BETTER WAY TO WORK","style":{"size":"s","color":"accent"}},
+        {"id":"b1","kind":"text","x":3,"y":6,"w":26,"h":6,"text":"A quieter kind\nof momentum.","style":{"size":"xxl","color":"fg"}},
+        {"id":"subtitle","kind":"text","x":3,"y":13,"w":24,"h":2,"text":"Less noise. More room for the work that matters.","style":{"size":"m","color":"muted"}}
+      ]},
+      {"id":"s2","layout":"content","notes":"These values are illustrative, not research data.","blocks":[
+        {"id":"b2","kind":"text","x":3,"y":2,"w":26,"h":3,"text":"Make space. Find your rhythm.","style":{"size":"xl"}},
+        {"id":"bullets","kind":"text","x":3,"y":7,"w":13,"h":9,"text":"- Start with one clear intention\n- Protect time for deep work\n- Let progress compound","style":{"size":"m"}},
+        {"id":"chart","kind":"chart","x":18,"y":7,"w":11,"h":8,"chart":"bar","labels":["Start","Build","Grow"],"series":[{"name":"Illustrative","values":[3,5,8]}],"style":{}}
+      ]},
+      {"id":"s3","layout":"quote","notes":"Invite the audience to name one thing they can simplify.","blocks":[
+        {"id":"quote","kind":"text","x":4,"y":5,"w":24,"h":7,"text":"“Clarity is what we\nchoose to leave in.”","style":{"size":"xl"}},
+        {"id":"end","kind":"text","x":4,"y":14,"w":24,"h":2,"text":"A SMALL THOUGHT TO TAKE WITH YOU","style":{"size":"s","color":"accent"}}
+      ]}
+    ]
+  },
+  "threads":[
+    {"id":"t1","anchor":{"slide":"s1","block":"subtitle","x":27,"y":13},"severity":"should","created":1791021600,"resolved":null,"messages":[
+      {"id":"u1","role":"you","text":"Can this line feel a little more purposeful?","created":1791021600,"edits":[]},
+      {"id":"m1","role":"model","text":"The supporting line could connect calm with an outcome, so the promise feels more tangible. This keeps your quiet, considered tone.","created":1791021660,"edits":[{"id":"e1","why":"Connect the feeling to a clearer promise","ops":[{"op":"update_block","slide":"s1","id":"subtitle","fields":{"text":"Find your focus. Make room for meaningful work."},"base_hash":"mock"}],"status":"pending","guards":{}}]}
+    ]},
+    {"id":"t2","anchor":{"slide":"s1","block":"kicker","x":29,"y":3},"severity":"consider","created":1791021700,"resolved":null,"messages":[
+      {"id":"m2","role":"model","text":"Consider shortening the kicker to give the headline a little more breathing room. It will make the hierarchy easier to scan.","created":1791021700,"edits":[]}
+    ]}
+  ],
+  "chat":[
+    {"id":"c1","role":"you","text":"I want this to feel calm and editorial, but not precious. Keep the story simple.","created":1791021000,"edits":[]},
+    {"id":"c2","role":"model","text":"A warm canvas, a generous headline, and just a touch of clay. I’ve left the content room to breathe.\n\nWe can refine a detail on the slide, or explore a different direction together.","created":1791021060,"edits":[]}
+  ],
+  "options":{"id":"c4","role":"model","text":"Two ways to tell the same story. The first is more direct; the second keeps a softer, editorial voice. Your facts stay exactly as they are.","created":1791021900,"edits":[
+    {"id":"o1","why":"01 · Clear and confident","status":"pending","guards":{},"ops":[{"op":"update_block","slide":"s1","id":"b1","fields":{"text":"Less noise.\nMore possibility."},"base_hash":"mock"}]},
+    {"id":"o2","why":"02 · Quietly optimistic","status":"pending","guards":{},"ops":[{"op":"update_block","slide":"s1","id":"b1","fields":{"text":"Good work\nstarts with space."},"base_hash":"mock"}]}
+  ]},
+  "review":[
+    {"id":"r1","anchor":{"slide":"s2","block":"chart","x":28,"y":8},"severity":"must","created":1791022000,"resolved":null,"messages":[{"id":"rm1","role":"model","text":"Label these values as illustrative so the audience does not mistake them for measured results. Decide whether a chart is needed to support this story.","created":1791022000,"edits":[]}]},
+    {"id":"r2","anchor":{"slide":"s3","block":"quote","x":28,"y":6},"severity":"should","created":1791022000,"resolved":null,"messages":[{"id":"rm2","role":"model","text":"Close with one concrete invitation, so the audience knows what to do next. Ask them to choose one thing to simplify this week.","created":1791022000,"edits":[]}]}
+  ]
+}

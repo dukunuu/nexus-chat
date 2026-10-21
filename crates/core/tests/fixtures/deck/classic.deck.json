@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "title": "A better story",
+  "theme": {
+    "colors": {
+      "accent": "#7aa2f7",
+      "bg": "#0f1115",
+      "fg": "#e8e6e3",
+      "muted": "#8b8f98"
+    },
+    "fonts": {
+      "body": "Inter",
+      "heading": "Inter",
+      "mono": "JetBrains Mono"
+    }
+  },
+  "slides": [
+    {
+      "id": "s1",
+      "layout": "title",
+      "blocks": [
+        {
+          "id": "b1",
+          "x": 2,
+          "y": 6,
+          "w": 28,
+          "h": 5,
+          "style": {
+            "align": "left",
+            "size": "xxl"
+          },
+          "kind": "text",
+          "text": "A better story"
+        }
+      ],
+      "notes": ""
+    },
+    {
+      "id": "s2",
+      "layout": "content",
+      "blocks": [
+        {
+          "id": "b2",
+          "x": 2,
+          "y": 2,
+          "w": 28,
+          "h": 3,
+          "style": {
+            "align": "left",
+            "size": "xl"
+          },
+          "kind": "text",
+          "text": "Your next big idea"
+        },
+        {
+          "id": "b3",
+          "x": 2,
+          "y": 6,
+          "w": 28,
+          "h": 10,
+          "style": {
+            "align": "left",
+            "size": "l"
+          },
+          "kind": "text",
+          "text": "- Start with the story\n- Make it memorable\n- Leave room to breathe"
+        }
+      ],
+      "notes": ""
+    }
+  ]
+}
