@@ -8,7 +8,7 @@ use crate::ui::style::glyph;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use nexus_core::app::Popup;
+use nexus_core::app::{AppCommand, MAX_CHAT_TASKS, Popup};
 use nexus_core::interactive::{
     Accent, Button, CalloutTone, Card, Column, Document, Frame as DocumentFrame, Mark, Node,
     Session, Stat, StepState, Tone,
@@ -50,7 +50,7 @@ impl Placement {
 }
 #[derive(Clone)]
 enum Control {
-    Action(String),
+    Action((usize, usize)),
     Input(String),
     Toggle(String),
     Select(usize),
@@ -81,7 +81,8 @@ impl Entry {
                     .flat_map(|(index, node)| match node {
                         Node::Buttons { items, .. } => items
                             .iter()
-                            .map(|button| Control::Action(button.action.clone()))
+                            .enumerate()
+                            .map(|(item, _)| Control::Action((index, item)))
                             .collect(),
                         Node::Input { key, .. } => vec![Control::Input(key.clone())],
                         Node::Toggle { key, .. } => vec![Control::Toggle(key.clone())],
@@ -99,21 +100,41 @@ impl Entry {
             },
         )
     }
-    fn activate(&mut self, control: usize, can_send: bool) -> Option<String> {
+    fn answering(&self) -> bool {
+        let Some(Control::Action((node, item))) = self.controls().get(self.focus).cloned() else {
+            return false;
+        };
+        self.session.as_ref().is_ok_and(|session| {
+            let Node::Buttons { items, .. } = &session.document().nodes()[node] else {
+                return false;
+            };
+            session.document().answers(&items[item].action)
+        })
+    }
+    fn activate(&mut self, control: usize, can_send: bool, can_answer: bool) -> Option<String> {
         self.focus = control;
         let control = self.controls().get(control).cloned()?;
         let Ok(session) = &mut self.session else {
             return None;
         };
         let result = match control {
-            Control::Action(action) => {
-                if session.document().sends(&action) && !can_send {
+            Control::Action((node, item)) => {
+                let Node::Buttons { items, .. } = &session.document().nodes()[node] else {
+                    return None;
+                };
+                let action = &items[item].action;
+                if session.document().answers(action) {
+                    if !can_answer {
+                        self.error = "wait for the reply to finish, then pick again".into();
+                        return None;
+                    }
+                } else if session.document().sends(action) && !can_send {
                     self.error =
                         "Finish the reply and clear your draft before reviewing a UI response."
                             .into();
                     return None;
                 }
-                session.activate(&action)
+                session.activate_button(node, item)
             }
             Control::Toggle(key) => session.toggle(&key).map(|()| None),
             Control::Select(node) => session.cycle(node, true).map(|()| None),
@@ -270,7 +291,9 @@ impl Entry {
                     for (item, rect) in button_regions(session, items, region) {
                         let button = &items[item];
                         let selected = focus == Some(control + item);
-                        let enabled = can_send || !session.document().sends(&button.action);
+                        let enabled = can_send
+                            || session.document().answers(&button.action)
+                            || !session.document().sends(&button.action);
                         let label = button_label(session, button);
                         let body: Vec<_> = button.body.iter().map(String::as_str).collect();
                         hits.extend(chrome::render_buttons(
@@ -374,16 +397,20 @@ fn primary_button(document: &Document) -> Option<(usize, usize)> {
                     Node::Buttons { items, .. } => items.as_slice(),
                     _ => &[],
                 };
+                let all_answers = items.iter().all(|button| document.answers(&button.action));
                 items
                     .iter()
                     .enumerate()
-                    .map(move |(item, button)| ((node, item), button))
+                    .map(move |(item, button)| ((node, item), button, all_answers))
             })
     };
     buttons()
-        .find(|(_, button)| button.primary)
-        .or_else(|| buttons().find(|(_, button)| document.sends(&button.action)))
-        .map(|(index, _)| index)
+        .find(|(_, button, _)| button.primary)
+        .or_else(|| {
+            buttons()
+                .find(|(_, button, all_answers)| !all_answers && document.sends(&button.action))
+        })
+        .map(|(index, _, _)| index)
 }
 fn session_controls(session: &Session) -> usize {
     session
@@ -407,7 +434,9 @@ fn button_label(session: &Session, button: &Button) -> String {
     format!(
         "{}{}",
         display(session, &button.label),
-        if session.document().sends(&button.action) {
+        if session.document().answers(&button.action) {
+            " →"
+        } else if session.document().sends(&button.action) {
             " ↵"
         } else {
             ""
@@ -1431,6 +1460,7 @@ pub struct Widgets {
     focused: Option<Key>,
     screen: Option<Rect>,
     send_ready: bool,
+    answer_blocked: Option<&'static str>,
     expanded: bool,
     pinned: bool,
     layout: Option<(Rect, usize, Vec<Placement>)>,
@@ -1682,7 +1712,10 @@ impl Widgets {
                 .cloned()
                 .map(|control| (index, control))
         }) {
-            Some((index, Control::Action(_))) => (true, entry.activate(index, can_send)),
+            Some((index, Control::Action(_))) => (
+                true,
+                entry.activate(index, can_send, self.answer_blocked.is_none()),
+            ),
             Some((index, Control::Input(_))) => {
                 entry.focus = index;
                 self.focused = Some(hit.key);
@@ -1704,7 +1737,10 @@ impl Widgets {
             }
             Some((index, Control::Toggle(_) | Control::Select(_))) => {
                 self.focused = Some(hit.key);
-                (true, entry.activate(index, can_send))
+                (
+                    true,
+                    entry.activate(index, can_send, self.answer_blocked.is_none()),
+                )
             }
             None => {
                 entry.focus = entry.controls().len();
@@ -1764,14 +1800,22 @@ impl Widgets {
                 if matches!(controls.get(entry.focus), Some(Control::Input(_))) {
                     entry.focus = (entry.focus + 1) % count;
                 } else {
-                    return (false, entry.activate(entry.focus, can_send));
+                    return (
+                        false,
+                        entry.activate(entry.focus, can_send, self.answer_blocked.is_none()),
+                    );
                 }
             }
             KeyCode::Char(ch) if matches!(controls.get(entry.focus), Some(Control::Input(_))) => {
                 entry.edit(&ch.to_string(), false);
             }
             KeyCode::Backspace => entry.edit("", true),
-            KeyCode::Char(' ') => return (false, entry.activate(entry.focus, can_send)),
+            KeyCode::Char(' ') => {
+                return (
+                    false,
+                    entry.activate(entry.focus, can_send, self.answer_blocked.is_none()),
+                );
+            }
             _ => {}
         }
         (false, None)
@@ -1834,6 +1878,17 @@ pub(crate) fn safe(text: &str) -> String {
         })
         .collect()
 }
+/// Why an answer button can't send right now: a reply is streaming or a
+/// `!` command's output is still on its way into the conversation.
+fn answer_block(app: &AppView) -> Option<&'static str> {
+    if app.viewing_stream() {
+        Some("wait for the reply to finish, then pick again")
+    } else if app.user_command_running() {
+        Some("wait for the command to finish, then pick again")
+    } else {
+        None
+    }
+}
 /// A proposed response must not race a reply or overwrite the user's draft.
 #[must_use]
 pub(crate) fn can_send(app: &AppView) -> bool {
@@ -1854,12 +1909,48 @@ fn review(app: &mut AppView, message: Option<String>) {
         );
     }
 }
+fn respond(app: &mut AppView, message: Option<String>) {
+    let entry = app
+        .interactive
+        .focused
+        .as_ref()
+        .and_then(|key| app.interactive.entries.get(key));
+    if !entry.is_some_and(Entry::answering) {
+        review(app, message);
+        return;
+    }
+    if let Some(reason) = app.interactive.answer_blocked {
+        app.push_status(reason);
+        return;
+    }
+    let Some(text) = message else {
+        return;
+    };
+    // Avoid the composer's send-failure restore events: answers never own a draft.
+    if app.chat_task_count() >= MAX_CHAT_TASKS {
+        app.push_status(format!("chat task limit reached ({MAX_CHAT_TASKS})"));
+        return;
+    }
+    if !app.backends.any() {
+        app.push_status("set your API key first with /login");
+        return;
+    }
+    if app.current_model.is_none() {
+        app.push_status("pick a model first with /model");
+        return;
+    }
+    app.popup = Popup::None;
+    app.interactive.unfocus();
+    if let Err(error) = app.execute(AppCommand::Send { text: safe(&text) }) {
+        app.push_status(format!("UI answer failed: {error}"));
+    }
+}
 /// Focus the newest visible model-authored output, without a slash command.
 pub fn focus(app: &mut AppView) {
     if app.interactive.focus_latest() {
         app.popup = Popup::InteractiveUi;
         app.sel.clear();
-        app.push_status("UI send actions prepare a message in the composer for review");
+        app.push_status("UI send actions prepare a message for review; answer buttons send now");
     } else {
         app.push_status("no interactive output in view");
     }
@@ -1888,17 +1979,20 @@ pub fn mouse(app: &mut AppView, event: MouseEvent, screen: Rect) -> bool {
             _ => {}
         }
     }
+    app.interactive.answer_blocked = answer_block(app);
     let (handled, message) = app.interactive.click(event, screen, can_send(app));
     if app.interactive.focused.is_some() {
         if handled && app.popup != Popup::InteractiveUi {
-            app.push_status("UI send actions prepare a message in the composer for review");
+            app.push_status(
+                "UI send actions prepare a message for review; answer buttons send now",
+            );
         }
         app.popup = Popup::InteractiveUi;
     }
     if handled {
         app.sel.clear();
     }
-    review(app, message);
+    respond(app, message);
     handled
 }
 /// Focused keyboard events stay inside the selected document.
@@ -1922,11 +2016,12 @@ pub fn key(app: &mut AppView, event: KeyEvent) {
         }
         _ => {}
     }
+    app.interactive.answer_blocked = answer_block(app);
     let (closed, message) = app.interactive.key(event, can_send(app));
     if closed {
         app.popup = Popup::None;
     }
-    review(app, message);
+    respond(app, message);
 }
 /// Render a keyboard-accessible enlarged view of the same inline state.
 pub fn render_popup(f: &mut Frame, app: &mut AppView) {
@@ -1947,6 +2042,10 @@ pub fn render_popup(f: &mut Frame, app: &mut AppView) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "interactive/answer_tests.rs"]
+mod answer_tests;
 
 #[cfg(test)]
 #[path = "interactive/components_tests.rs"]

@@ -48,8 +48,9 @@ Emit a closed `nexus-ui` fenced block containing a JSON object:
     Tone: normal, muted, accent, success, warning or error. Default rows: 1.
   - `{"type":"buttons","rows":3,"items":[{"label":"Add","action":"add"}]}`
     1–8 buttons per group, as wrapping one-row pills. Optional `"primary":true`
-    marks the primary button; otherwise the first sending button is primary,
-    or none if there is no sending button. Optional `body`: an array of up to
+    marks the primary button; otherwise the first send/answer button is primary.
+    All-answer groups have no implicit primary, so quiz options look equal.
+    Optional `body`: an array of up to
     8 plain-text artwork/description lines; these become bordered carousel
     tiles, with the label after the art and the last body line as dim metadata.
     Default declared rows: 3.
@@ -72,9 +73,16 @@ Emit a closed `nexus-ui` fenced block containing a JSON object:
     such as "Submit answer". Clicking prepares the response in an empty composer;
     the user reviews/edits it and presses Enter to actually send. Existing drafts
     are never overwritten. No requests occur on load, typing, rendering or local
-    actions. An action may propose at most one message. Wait for your reply to
-    finish before submission. Newly generated panels activate after your reply
-    finishes; previously completed panels remain usable during streaming.
+    actions.
+  - `{"op":"answer"}` (buttons only): immediately send the clicked button's
+    rendered label verbatim, after the other steps. Marked `→`; no review Enter.
+    Use for quiz answers, poll votes, multiple-choice and "next question". Write
+    labels as the user's reply: "B — Paris", "Next question". Rendered labels
+    must be single-line, at most 120 bytes, with no control characters. Use
+    send (review) for composed or computed text.
+  An action may contain at most one message step (send or answer), including
+  calls. Wait for your reply to finish before submission. Newly generated panels
+  activate after your reply finishes; older local controls work during streaming.
 
 Templates are single-pass `{{key}}` substitutions, never markup or expressions.
 Expressions are scalar literals or an object with exactly one operator:
@@ -100,8 +108,9 @@ Example (this is a general UI, not a built-in counter command):
 ```
 
 Games are documents you author using state, conditions, random choices and
-buttons, not built-in game identifiers. Use Markdown alongside the UI for rules
-or explanation. Unsupported applications may still need scripts or web apps;
+buttons, not built-in game identifiers. For quizzes, use equal answer buttons
+with reply-shaped labels, not a local choice plus a separate submit button.
+Use Markdown alongside the UI for rules or explanation. Unsupported applications may still need scripts or web apps;
 explain that limitation instead of pretending unsupported UI features work.
 
 

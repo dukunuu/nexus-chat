@@ -419,6 +419,7 @@ enum Step {
     Set { key: String, value: Value },
     Call { action: String },
     Send { text: String },
+    Answer {},
 }
 
 #[derive(Deserialize)]
@@ -448,6 +449,7 @@ pub struct Document {
     view: Vec<Node>,
     actions: BTreeMap<String, Vec<Step>>,
     sending: BTreeSet<String>,
+    answering: BTreeSet<String>,
 }
 
 impl Document {
@@ -474,6 +476,7 @@ impl Document {
             view,
             actions,
             sending: BTreeSet::new(),
+            answering: BTreeSet::new(),
         };
         ensure!(doc.version == 1, "unsupported UI version");
         line_ok(&doc.title, 120)?;
@@ -506,13 +509,18 @@ impl Document {
                         ensure!(doc.actions.contains_key(action), "unknown action: {action}");
                     }
                     Step::Send { text } => doc.template_ok(text)?,
+                    Step::Answer {} => {}
                 }
             }
         }
         ensure!(steps <= 128, "too many action steps");
         for name in doc.actions.keys() {
-            if doc.action_sends(name, &mut BTreeSet::new(), 0, &mut budget)? {
+            let (sends, answers) = doc.action_sends(name, &mut BTreeSet::new(), 0, &mut budget)?;
+            if sends {
                 doc.sending.insert(name.clone());
+            }
+            if answers {
+                doc.answering.insert(name.clone());
             }
         }
         Ok(doc)
@@ -780,25 +788,34 @@ impl Document {
         seen: &mut BTreeSet<String>,
         depth: usize,
         budget: &mut usize,
-    ) -> Result<bool> {
+    ) -> Result<(bool, bool)> {
         spend(budget)?;
         ensure!(
             depth < 8 && seen.insert(action.into()),
             "cyclic or deeply nested UI action"
         );
         let mut sends = false;
+        let mut answers = false;
         for step in &self.actions[action] {
             spend(budget)?;
-            match step {
-                Step::Send { .. } => sends = true,
-                Step::Call { action } => {
-                    sends |= self.action_sends(action, seen, depth + 1, budget)?;
-                }
-                Step::Set { .. } => {}
-            }
+            let (message, answer) = match step {
+                Step::Send { .. } => (true, false),
+                Step::Answer {} => (true, true),
+                Step::Call { action } => self.action_sends(action, seen, depth + 1, budget)?,
+                Step::Set { .. } => (false, false),
+            };
+            // An answer can't be combined with another message. Two `send`s
+            // stay a runtime error (documents written before answers parse
+            // unchanged).
+            ensure!(
+                !(sends && message && (answers || answer)),
+                "an action may send only one message"
+            );
+            sends |= message;
+            answers |= answer;
         }
         seen.remove(action);
-        Ok(sends)
+        Ok((sends, answers))
     }
 
     /// Document title.
@@ -861,6 +878,11 @@ impl Document {
     #[must_use]
     pub fn sends(&self, action: &str) -> bool {
         self.sending.contains(action)
+    }
+    /// Whether activation immediately answers with the clicked button's label.
+    #[must_use]
+    pub fn answers(&self, action: &str) -> bool {
+        self.answering.contains(action)
     }
 }
 
@@ -1149,6 +1171,35 @@ impl Session {
     /// # Errors
     /// Bad arithmetic, excessive work or invalid resulting state rolls back.
     pub fn activate(&mut self, action: &str) -> Result<Option<String>> {
+        ensure!(
+            !self.document.answers(action),
+            "answer actions require a button"
+        );
+        self.activate_action(action)
+    }
+    /// Activate a button, capturing its rendered label before any state changes.
+    /// Answer messages are single-line labels, without the review-message prefix.
+    /// # Errors
+    /// Rejects non-buttons, invalid rendered answer labels or failed actions.
+    pub fn activate_button(&mut self, node: usize, item: usize) -> Result<Option<String>> {
+        let Some(Node::Buttons { items, .. }) = self.document.view.get(node) else {
+            bail!("answer actions require a button");
+        };
+        let button = items
+            .get(item)
+            .ok_or_else(|| anyhow::anyhow!("unknown button"))?;
+        let action = button.action.clone();
+        let answer = if self.document.answers(&action) {
+            let label = self.text(&button.label)?;
+            line_ok(&label, 120)?;
+            Some(label)
+        } else {
+            None
+        };
+        let message = self.activate_action(&action)?;
+        Ok(answer.or(message))
+    }
+    fn activate_action(&mut self, action: &str) -> Result<Option<String>> {
         ensure!(self.document.actions.contains_key(action), "unknown action");
         let mut next = self.state.clone();
         let mut message = None;
@@ -1172,6 +1223,7 @@ impl Session {
                     state.insert(key.clone(), value);
                 }
                 Step::Call { action } => self.run(action, state, message, budget)?,
+                Step::Answer {} => {}
                 Step::Send { text } => {
                     ensure!(message.is_none(), "an action may send only one message");
                     *message = Some(format!(
@@ -1497,6 +1549,10 @@ fn expand(template: &str, state: &Map<String, Value>) -> Result<String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "interactive/answer_tests.rs"]
+mod answer_tests;
 
 #[cfg(test)]
 #[path = "interactive/layouts_tests.rs"]

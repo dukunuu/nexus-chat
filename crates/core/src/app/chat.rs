@@ -244,6 +244,13 @@ impl App {
         Ok(())
     }
 
+    /// Whether a `!` command is still running (its output becomes the next
+    /// user turn, so nothing else may send until it lands).
+    #[must_use]
+    pub fn user_command_running(&self) -> bool {
+        self.user_command_rx.is_some()
+    }
+
     /// Where `!` commands run: the workspace root in agent mode, else the
     /// active space's directory (created if missing).
     pub fn user_command_cwd(&self) -> std::path::PathBuf {
