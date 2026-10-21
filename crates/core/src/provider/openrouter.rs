@@ -628,6 +628,29 @@ mod local_tests {
     }
 }
 
+/// `OpenRouter` app attribution (openrouter.ai/docs/app-attribution): every
+/// request names the app so its usage is registered under nexus-chat.
+/// `HTTP-Referer` is the required identifier; the title (current header plus
+/// the legacy `X-Title`) names it and the category files it. Sent only to
+/// `OpenRouter`, never to `OpenAI`, Codex or local servers.
+pub(crate) const OPENROUTER_ATTRIBUTION: [(&str, &str); 4] = [
+    ("HTTP-Referer", env!("CARGO_PKG_REPOSITORY")),
+    ("X-OpenRouter-Title", "nexus-chat"),
+    ("X-Title", "nexus-chat"),
+    ("X-OpenRouter-Categories", "cli-agent"),
+];
+
+fn openrouter_client() -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (name, value) in OPENROUTER_ATTRIBUTION {
+        headers.insert(name, reqwest::header::HeaderValue::from_static(value));
+    }
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .unwrap_or_default()
+}
+
 impl OpenRouter {
     pub fn from_key_auto(key: String) -> Self {
         if looks_like_openrouter_key(&key) {
@@ -641,7 +664,7 @@ impl OpenRouter {
 
     pub fn openrouter_flavor(key: String) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: openrouter_client(),
             key,
             flavor: ProviderFlavor::OpenRouter,
             endpoint: None,
@@ -3949,6 +3972,84 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn openrouter_requests_carry_app_attribution_and_others_do_not() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        async fn headers_of(provider: OpenRouter) -> Vec<String> {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut headers = Vec::new();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    stream.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                    headers.push(line.trim_end().to_ascii_lowercase());
+                }
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).await.unwrap();
+                let reply = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                stream
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .await
+                    .unwrap();
+                headers
+            });
+            let mut provider = provider;
+            provider.endpoint = Some(endpoint);
+            let _ = provider
+                .complete_with_params(
+                    "test-model",
+                    vec![ChatMessage::text("user", "hi")],
+                    &ChatParams::default(),
+                )
+                .await;
+            server.await.unwrap()
+        }
+
+        let headers = headers_of(OpenRouter::openrouter_flavor("sk-or-test".into())).await;
+        for (name, value) in OPENROUTER_ATTRIBUTION {
+            let line = format!(
+                "{}: {}",
+                name.to_ascii_lowercase(),
+                value.to_ascii_lowercase()
+            );
+            assert!(headers.contains(&line), "missing {line} in {headers:?}");
+        }
+        assert!(
+            headers
+                .iter()
+                .any(|line| line.starts_with("http-referer: https://")),
+            "{headers:?}"
+        );
+        // Other backends never get OpenRouter's attribution headers.
+        let headers = headers_of(OpenRouter::openai("sk-test".into())).await;
+        assert!(
+            !headers
+                .iter()
+                .any(|line| line.starts_with("http-referer") || line.contains("x-openrouter")),
+            "{headers:?}"
+        );
     }
 
     async fn fake_chat_server(
