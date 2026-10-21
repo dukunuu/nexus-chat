@@ -657,7 +657,9 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
                 .map(|workspace| workspace.root().to_string_lossy().into_owned());
             app.execute(AppCommand::SetWorkMode { mode, root })?;
         }
-        KeyCode::Tab if app.input_text().starts_with('!') => app.start_shell_completion(),
+        KeyCode::Tab if crate::composer::is_shell_draft(&app.input_text()) => {
+            app.start_shell_completion();
+        }
         KeyCode::Enter if shift || ctrl => app.input.insert_newline(),
         // A parked survey gate (survey answer or plan approval) intercepts
         // Enter — but only while the *viewed* session is the gated one, so a

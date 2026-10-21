@@ -36,8 +36,25 @@ enum UserCommand {
 }
 
 /// Parse a `!` line; `None` means an ordinary message.
+/// Whether a draft is a `!` shell line. A draft that opens with a Markdown
+/// image (`![alt](path)`, which is how a pasted image lands) is a message.
+pub fn is_shell_draft(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix('!') else {
+        return false;
+    };
+    let markdown_image = rest
+        .strip_prefix('[')
+        .and_then(|alt| alt.find(']').map(|end| &alt[end + 1..]))
+        .is_some_and(|after| after.starts_with('('));
+    !markdown_image
+}
+
 fn parse_user_command(text: &str) -> Option<UserCommand> {
-    let cmd = text.trim().strip_prefix('!')?.trim();
+    let text = text.trim();
+    if !is_shell_draft(text) {
+        return None;
+    }
+    let cmd = text[1..].trim();
     let tty = cmd
         .strip_prefix("tty")
         .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
@@ -380,7 +397,7 @@ impl AppView {
 
     pub fn shell_history_mode(&self) -> bool {
         let text = self.input_text();
-        text.is_empty() || text.starts_with('!')
+        text.is_empty() || is_shell_draft(&text)
     }
 
     fn cursor_byte(&self) -> usize {
@@ -415,7 +432,7 @@ impl AppView {
 
     pub fn start_shell_completion(&mut self) {
         let text = self.input_text();
-        if !text.starts_with('!') {
+        if !is_shell_draft(&text) {
             return;
         }
         self.at_state = None;
@@ -574,7 +591,7 @@ impl AppView {
     }
 
     pub fn refresh_at_matches(&mut self) {
-        if self.input_text().starts_with('!') {
+        if is_shell_draft(&self.input_text()) {
             self.at_state = None;
             return;
         }
@@ -1277,6 +1294,12 @@ mod tests {
             ("!", Some(UserCommand::Empty)),
             ("!tty ", Some(UserCommand::Empty)),
             ("hello !x", None),
+            ("![pasted image](pasted-1.png)", None),
+            ("![pasted image](a.png) what is this?", None),
+            (
+                "![ -f x ] && echo y",
+                Some(UserCommand::Captured("[ -f x ] && echo y".into())),
+            ),
         ] {
             assert_eq!(parse_user_command(text), expected, "{text:?}");
         }
@@ -1299,5 +1322,19 @@ mod tests {
         ));
         assert!(a.session.is_none());
         assert!(a.input_text().is_empty());
+    }
+
+    #[test]
+    fn a_pasted_image_draft_is_a_message_not_a_shell_line() {
+        let mut a = test_app();
+        a.set_input("![pasted image](pasted-1.png) what is this?");
+        assert!(!a.shell_history_mode());
+        a.start_shell_completion();
+        assert!(
+            a.shell_completion_rx.is_none(),
+            "Tab does not complete it as a command"
+        );
+        a.set_input("!ls");
+        assert!(a.shell_history_mode());
     }
 }
