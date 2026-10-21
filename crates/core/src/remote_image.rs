@@ -914,14 +914,23 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_decodes_downscales_and_reuses_the_cache() {
-        let mock = serve(Duration::ZERO, |path| match path {
-            "/big.png" => Reply::ok("image/png; charset=binary", png(3200, 800)),
+        // The big picture is encoded once, not per request, and this fetcher
+        // gets a generous deadline: a debug build decoding and resizing it on
+        // a machine busy with the whole suite can overrun the real 6 s.
+        let big = png(3200, 800);
+        let mock = serve(Duration::ZERO, move |path| match path {
+            "/big.png" => Reply::ok("image/png; charset=binary", big.clone()),
             "/photo.jpg" => Reply::ok("IMAGE/JPEG", jpeg()),
             _ => Reply::ok("text/plain", Vec::new()),
         })
         .await;
         let root = dir();
-        let fetcher = Arc::new(Fetcher::build(&root, system_lookup(), true));
+        let patient = || {
+            let mut fetcher = Fetcher::build(&root, system_lookup(), true);
+            fetcher.timeout = Duration::from_secs(120);
+            Arc::new(fetcher)
+        };
+        let fetcher = patient();
         let path = fetcher.download(&mock.url("/big.png")).await.unwrap();
         assert!(path.starts_with(root.join("images")));
         let decoded = image::open(&path).unwrap();
@@ -934,7 +943,7 @@ mod tests {
         let url = mock.url("/big.png");
         assert_eq!(settled(&fetcher, &url).await, Status::Ready(path.clone()));
         let hits = mock.hits().len();
-        let second = Arc::new(Fetcher::build(&root, system_lookup(), true));
+        let second = patient();
         assert_eq!(second.request(&url), Status::Ready(path));
         assert_eq!(mock.hits().len(), hits, "cache hit must not refetch");
     }
