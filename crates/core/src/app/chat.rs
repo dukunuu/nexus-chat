@@ -1749,8 +1749,15 @@ impl App {
             return None;
         }
         let mut guidance = crate::interactive::LAYOUTS.to_string();
-        if self.settings.reply_style == "rich" {
-            guidance.push_str("\nPrefer a layout for most substantive answers.\n");
+        match self.settings.reply_style.as_str() {
+            "rich" => guidance.push_str("\nPrefer a layout for most substantive answers.\n"),
+            // Coding replies stay Markdown: in agent mode the interactive
+            // style falls back to auto.
+            "interactive" if !self.work_mode.is_agent() => {
+                guidance.push('\n');
+                guidance.push_str(crate::interactive::INTERACTIVE_FIRST);
+            }
+            _ => {}
         }
         Some(guidance)
     }

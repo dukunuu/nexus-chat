@@ -108,7 +108,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "style",
-        desc: "reply layouts: /style auto|rich|plain",
+        desc: "reply layouts: /style interactive|auto|rich|plain",
         aliases: &[],
     },
     Command {
@@ -439,7 +439,7 @@ impl App {
                 value: value.into(),
             })
         } else {
-            Err("usage: /style auto|rich|plain".into())
+            Err("usage: /style interactive|auto|rich|plain".into())
         }
     }
 

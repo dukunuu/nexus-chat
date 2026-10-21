@@ -12,6 +12,9 @@ use serde_json::{Map, Value, json};
 pub const INSTRUCTIONS: &str = include_str!("../assets/prompts/interactive-ui.md");
 /// Display-only layout guidance, advertised according to reply style.
 pub const LAYOUTS: &str = include_str!("../assets/prompts/layouts.md");
+/// The `interactive` reply style: a card for nearly every reply, with
+/// follow-up answer buttons.
+pub const INTERACTIVE_FIRST: &str = include_str!("../assets/prompts/interactive-first.md");
 
 /// Maximum serialized UI document size.
 pub const MAX_SOURCE: usize = 16 * 1024;

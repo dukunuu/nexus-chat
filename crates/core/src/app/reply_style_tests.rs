@@ -12,9 +12,9 @@ fn prompt(a: &mut App, style: &str) -> String {
 }
 
 #[test]
-fn style_command_parses_the_three_modes_and_rejects_others() {
+fn style_command_parses_the_four_modes_and_rejects_others() {
     let a = app_with_key();
-    for style in ["auto", "rich", "plain"] {
+    for style in ["interactive", "auto", "rich", "plain"] {
         assert_eq!(
             a.parse_command(&format!("style {style}")).unwrap(),
             AppCommand::SetSetting {
@@ -29,9 +29,9 @@ fn style_command_parses_the_three_modes_and_rejects_others() {
 }
 
 #[test]
-fn reply_style_defaults_to_auto_and_round_trips_through_the_db() {
+fn reply_style_defaults_to_interactive_and_round_trips_through_the_db() {
     let mut a = app_with_key();
-    assert_eq!(a.settings.reply_style, "auto");
+    assert_eq!(a.settings.reply_style, "interactive");
     a.run_command("style rich").unwrap();
     assert_eq!(a.settings.reply_style, "rich");
     assert!(
@@ -57,7 +57,7 @@ fn reply_style_defaults_to_auto_and_round_trips_through_the_db() {
         })
         .is_err()
     );
-    assert_eq!(b.settings.reply_style, "auto");
+    assert_eq!(b.settings.reply_style, "interactive");
 }
 
 #[test]
@@ -102,4 +102,20 @@ fn context_estimate_counts_layout_guidance_only_when_it_is_sent() {
     assert!(auto > plain, "{auto} vs {plain}");
     a.interactive_ui = false;
     assert!(a.context_breakdown().system_tokens < plain);
+}
+
+#[test]
+fn interactive_style_asks_for_a_card_in_chat_but_not_in_agent_mode() {
+    let mut a = app_with_key();
+    let interactive = prompt(&mut a, "interactive");
+    assert!(interactive.contains(crate::interactive::LAYOUTS));
+    assert!(interactive.contains(crate::interactive::INTERACTIVE_FIRST));
+    for style in ["auto", "rich", "plain"] {
+        assert!(!prompt(&mut a, style).contains("## Interactive-first replies"));
+    }
+    // Coding replies stay Markdown: agent mode falls back to auto.
+    a.work_mode = WorkMode::Agent;
+    a.settings.reply_style = "interactive".into();
+    let agent = a.layout_guidance().unwrap();
+    assert_eq!(agent, crate::interactive::LAYOUTS);
 }

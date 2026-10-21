@@ -129,7 +129,11 @@ fn fixtures_and_all_prompt_examples_check_ok() {
         assert_eq!(checked.title(), parsed.title());
         assert_eq!(checked.rows(), parsed.rows());
     }
-    for prompt in [INSTRUCTIONS, LAYOUTS] {
+    for prompt in [INSTRUCTIONS, LAYOUTS, INTERACTIVE_FIRST] {
+        assert!(
+            prompt.contains("```nexus-ui\n"),
+            "every prompt carries an example"
+        );
         for example in prompt.split("```nexus-ui\n").skip(1) {
             Document::check(example.split("\n```").next().unwrap()).unwrap();
         }

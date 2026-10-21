@@ -383,13 +383,16 @@ mod tests {
             .iter()
             .position(|row| matches!(row, SettingsRow::Field(SettingsField::ReplyStyle)))
             .unwrap();
+        assert_eq!(a.core.settings.reply_style, "interactive");
+        a.toggle_settings_field();
         assert_eq!(a.core.settings.reply_style, "auto");
         a.toggle_settings_field();
         assert_eq!(a.core.settings.reply_style, "rich");
         a.toggle_settings_field();
         assert_eq!(a.core.settings.reply_style, "plain");
         a.toggle_settings_field();
-        assert_eq!(a.core.settings.reply_style, "auto");
+        assert_eq!(a.core.settings.reply_style, "interactive");
+        a.toggle_settings_field();
         a.toggle_settings_field();
         assert!(
             a.core

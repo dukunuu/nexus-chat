@@ -585,7 +585,7 @@ impl SettingsField {
     pub const fn label(self) -> &'static str {
         match self {
             Self::RemoteImages => "remote images (Space toggles on/off)",
-            Self::ReplyStyle => "reply style (Space cycles auto/rich/plain)",
+            Self::ReplyStyle => "reply style (Space cycles interactive/auto/rich/plain)",
             Self::ColumnWidth => {
                 "column width (Space cycles auto/full/100/140/180/220; or drag the column edge)"
             }
@@ -698,7 +698,7 @@ pub enum SettingsRow {
     Field(SettingsField),
 }
 
-pub const REPLY_STYLES: [&str; 3] = ["auto", "rich", "plain"];
+pub const REPLY_STYLES: [&str; 4] = ["interactive", "auto", "rich", "plain"];
 pub const VERBOSITY_LEVELS: [&str; 3] = ["normal", "concise", "caveman"];
 pub const OCR_ENGINES: [&str; 4] = ["auto", "tesseract", "vlm", "local"];
 pub const SEARCH_PROVIDERS: [&str; 4] = ["auto", "langsearch", "searxng", "duckduckgo"];
@@ -737,7 +737,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             remote_images: true,
-            reply_style: "auto".into(),
+            reply_style: "interactive".into(),
             show_stats: false,
             show_reasoning: false,
             hide_hints: false,
