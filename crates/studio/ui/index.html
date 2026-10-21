@@ -9,24 +9,16 @@
 </head>
 <body>
   <header id="topbar">
-    <button id="toggle-chat" class="icon-button" data-icon="panel" title="Toggle chat (⌘/Ctrl+/)" aria-label="Toggle chat"></button>
     <div class="brand">nexus <span>studio</span></div><span class="divider"></span>
     <div class="deck-menu"><button id="deck-title" aria-label="Project menu" aria-haspopup="true" aria-expanded="false"><span id="deck-title-label">Untitled</span><span data-icon="chevron"></span></button><div id="deck-menu" class="popover" hidden><button id="rename-deck">Rename</button><button id="new-deck">New deck</button><button id="open-deck">Open…</button></div></div>
-    <button id="save" class="save-state" title="Save (⌘/Ctrl+S)"><span id="dirty">Opening…</span></button>
+    <span id="save" class="save-state" title="Every change is saved to the deck file as you make it"><span id="dirty">Opening…</span></span>
     <span class="spacer"></span>
-    <button id="host-status" class="host-pill" title="Check host connection">Connecting</button><button id="start-host" hidden>Start host</button>
+    <span id="link-status" class="link-pill">not linked</span>
     <button id="toggle-comments" data-icon="comment">Comments <span id="comment-count" class="count">0</span></button>
     <span class="divider"></span><button id="undo" class="icon-button" data-icon="undo" aria-label="Undo" title="Undo (⌘/Ctrl+Z)"></button><button id="redo" class="icon-button" data-icon="redo" aria-label="Redo" title="Redo (⇧⌘/Ctrl+Z)"></button>
     <button id="present" data-icon="play">Present</button><button id="export" class="primary" data-icon="export">Export</button>
   </header>
   <main>
-    <aside id="chat-pane">
-      <div class="chat-heading">Chat</div>
-      <div id="chat-messages" aria-live="polite"></div>
-      <div id="chat-bottom"><div class="quick-actions"><button id="review" data-icon="sparkle">Review deck</button><button id="ask-options">Explore options</button></div>
-        <form id="chat-form" class="composer"><textarea id="chat-input" maxlength="2000" rows="3" aria-label="Ask for changes" placeholder="Ask for changes…"></textarea><div class="composer-bottom"><span id="chat-scope">Whole deck</span><button id="chat-send" class="primary icon-button" data-icon="send" aria-label="Send message" title="Send message"></button></div></form>
-      </div>
-    </aside>
     <section id="workspace">
       <aside id="strip-pane"><div class="rail-heading" data-icon="layers"></div><div id="strip"></div><button id="add-slide" class="add-slide" data-icon="plus" title="Add a slide" aria-label="Add a slide"></button><div id="layout-menu" class="popover" hidden><div class="eyebrow">START WITH A LAYOUT</div><div id="layout-options"></div></div></aside>
       <section id="canvas-space">
@@ -37,7 +29,7 @@
         <div id="thread-popover" class="thread-popover" hidden></div><div id="status" role="status" hidden></div>
       </section>
       <aside id="properties-panel" class="side-panel" hidden><div class="side-heading"><strong>Design</strong><button id="close-properties" class="icon-button" data-icon="x" aria-label="Close properties"></button></div><div id="properties"></div></aside>
-      <aside id="comments-panel" class="side-panel" hidden><div class="side-heading"><strong>Comments <span id="review-count" class="count"></span></strong><button id="close-comments" class="icon-button" data-icon="x" aria-label="Close comments"></button></div><div class="comment-filters"><button id="filter-open" aria-pressed="true">Open</button><button id="filter-resolved" aria-pressed="false">Resolved</button></div><label class="resolved-toggle"><input id="show-resolved" type="checkbox"> Show resolved pins</label><div id="comments-list"></div><button id="review-panel" data-icon="sparkle">Review deck</button></aside>
+      <aside id="comments-panel" class="side-panel" hidden><div class="side-heading"><strong>Comments <span id="review-count" class="count"></span></strong><button id="close-comments" class="icon-button" data-icon="x" aria-label="Close comments"></button></div><div class="comment-filters"><button id="filter-open" aria-pressed="true">Open</button><button id="filter-resolved" aria-pressed="false">Resolved</button></div><label class="resolved-toggle"><input id="show-resolved" type="checkbox"> Show resolved pins</label><div id="comments-list"></div></aside>
     </section>
   </main>
   <dialog id="path-dialog"><form method="dialog"><h2 id="path-heading">Open deck</h2><label id="path-label" for="path-input">Path</label><input id="path-input" required autocomplete="off"><p id="path-hint"></p><div class="dialog-actions"><button value="cancel" formnovalidate>Cancel</button><button id="path-confirm" class="primary" value="ok">Open</button></div></form></dialog>

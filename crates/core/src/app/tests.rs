@@ -3882,6 +3882,16 @@ fn parse_command_maps_the_slash_catalog_into_the_seam() {
         }
     );
     assert_eq!(
+        a.parse_command("studio").unwrap(),
+        AppCommand::OpenStudio { deck: None }
+    );
+    assert_eq!(
+        a.parse_command("deck decks/talk.deck.json").unwrap(),
+        AppCommand::OpenStudio {
+            deck: Some("decks/talk.deck.json".into())
+        }
+    );
+    assert_eq!(
         a.parse_command("watch").unwrap(),
         AppCommand::Watch { topic: None }
     );

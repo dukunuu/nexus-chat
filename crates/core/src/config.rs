@@ -45,8 +45,6 @@ struct Config {
     #[serde(default)]
     host: Option<HostSettings>,
     #[serde(default)]
-    studio: StudioSettings,
-    #[serde(default)]
     local: Option<crate::provider::local::LocalConfig>,
     #[serde(default)]
     experiments: Experiments,
@@ -186,25 +184,6 @@ pub struct NamedTunnelConfig {
     pub hostname: String,
     pub credentials_path: PathBuf,
     pub config_path: PathBuf,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct StudioSettings {
-    host_url: Option<String>,
-}
-
-/// Studio's configured host origin, or the standard loopback listener.
-pub fn load_studio_host_url() -> Result<String> {
-    let path = config_path()?;
-    let config = if path.exists() {
-        toml::from_str::<Config>(&std::fs::read_to_string(path)?)?
-    } else {
-        Config::default()
-    };
-    Ok(config
-        .studio
-        .host_url
-        .unwrap_or_else(|| "http://127.0.0.1:8643".into()))
 }
 
 #[derive(Debug, Default, Deserialize)]

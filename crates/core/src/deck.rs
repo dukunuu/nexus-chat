@@ -1,6 +1,8 @@
 //! Deck v1: bounded, UI-independent slide data and atomic editing operations.
 
 pub mod feedback;
+pub mod link;
+pub mod render;
 pub mod suggest;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -650,6 +652,39 @@ pub fn safe_asset_path(path: &str) -> bool {
         && !path.starts_with('/')
         && !path.contains(['\\', ':', '%', '\0'])
         && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
+}
+
+/// Whether two paths name one file, through symlinks and `..`.
+#[must_use]
+pub fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+}
+
+/// Write `bytes` next to `path` and rename over it, so a reader (studio, the
+/// model's tools, a sync) never sees a half-written file. Refuses to write
+/// through a symlink.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("missing parent folder"))?;
+    std::fs::create_dir_all(parent)?;
+    ensure!(!path.is_symlink(), "refusing to overwrite a symlink");
+    let temporary = parent.join(format!(".deck-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn hash(value: &impl Serialize) -> String {

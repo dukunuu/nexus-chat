@@ -3,6 +3,7 @@
 //! `research_lookup`, `files`, `app`, `media`) that dispatch onto a larger
 //! set of specialized implementations below, behind the `ToolExecutor` seam.
 
+mod deck;
 mod effect;
 #[cfg(test)]
 mod image_tests;
@@ -211,6 +212,8 @@ pub struct ToolBox {
     pub tui_app_renderer: Option<crate::tui_apps::PreviewRenderer>,
     /// Open requests consumed by the terminal event loop.
     pub pending_tui_app: crate::tui_apps::PendingOpen,
+    /// Session-local studio focus and pending tool edit notifications.
+    pub deck_link: Arc<Mutex<crate::deck::link::Context>>,
     /// Space-local scripted terminal apps.
     pub space_tui_apps_dir: PathBuf,
     /// App-managed destination for newly created or downloaded skills.
@@ -922,6 +925,7 @@ impl ToolBox {
             interactive_ui: false,
             tui_app_renderer: None,
             pending_tui_app: Arc::default(),
+            deck_link: Arc::default(),
             space_tui_apps_dir: PathBuf::new(),
             skill_dirs: vec![skills_dir.clone()],
             skills_dir,
@@ -977,6 +981,7 @@ impl ToolBox {
             interactive_ui: self.interactive_ui,
             tui_app_renderer: self.tui_app_renderer,
             pending_tui_app: self.pending_tui_app.clone(),
+            deck_link: self.deck_link.clone(),
             space_tui_apps_dir: self.space_tui_apps_dir.clone(),
             skills_dir: self.skills_dir.clone(),
             skill_dirs: self.skill_dirs.clone(),
@@ -1279,6 +1284,10 @@ impl ToolBox {
         defs.push(def(
             &spec::SCRIPTS,
             &["list", "read", "write", "edit", "run", "python", "install"],
+        ));
+        defs.push(def(
+            &spec::DECK,
+            &["create", "read", "view", "edit", "comment", "resolve"],
         ));
         defs.push(def(
             &spec::SEARCH,
@@ -1935,6 +1944,17 @@ impl ToolBox {
             }
         }
         let (result, status) = match name {
+            "deck_create" | "deck_read" | "deck_view" | "deck_edit" | "deck_comment"
+            | "deck_resolve" => {
+                let value = serde_json::from_str(args).expect("validated deck arguments");
+                match self.deck_action(name, &value) {
+                    Ok(result) => (result, "done".into()),
+                    Err(error) => (
+                        format!("deck failed: {error:#}"),
+                        "invalid arguments".into(),
+                    ),
+                }
+            }
             "task" => {
                 let Some(context) = &self.subagents else {
                     return ("task needs an agent turn".into(), "blocked".into());

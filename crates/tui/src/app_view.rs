@@ -385,6 +385,8 @@ pub struct AppView {
     pub tool_open: HashMap<usize, bool>,
     /// Monotonic render generation for tool-card changes.
     pub tool_open_gen: usize,
+    /// The linked studio window and the comments it sent (`crate::studio`).
+    pub studio: crate::studio::Studio,
     /// Session whose message indices the overrides refer to.
     pub tool_session: Option<String>,
     /// Clicked message and its previous block start, for in-place folding.
@@ -588,6 +590,7 @@ impl AppView {
             show_tool_detail: false,
             tool_open: HashMap::new(),
             tool_open_gen: 0,
+            studio: crate::studio::Studio::default(),
             tool_session: None,
             tool_click_anchor: None,
             notification_areas: Vec::new(),

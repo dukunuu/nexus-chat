@@ -8,8 +8,14 @@ import { renderSlide } from './render.js';
 
 hydrateIcons();
 const $ = selector => document.querySelector(selector);
-const state = { deck:null, revision:'', hashes:{}, images:{}, dirty:false, slideId:null, selected:new Set(), scopeSlide:false, preview:null, threads:[], chat:[], mode:'edit', properties:false, comments:false, openThread:null, draftAnchor:null, drafts:{}, showResolved:false, zoom:1 };
-const queue = []; let pending = null, toastTimer;
+const state = { deck:null, revision:'', hashes:{}, images:{}, slideId:null, selected:new Set(), scopeSlide:false, preview:null, threads:[], linked:false, flash:[], mode:'edit', properties:false, comments:false, openThread:null, draftAnchor:null, drafts:{}, showResolved:false, zoom:1 };
+const queue = []; let pending = null, toastTimer, focusTimer, lastFocus = '', flashTimer;
+function focusChanged() {
+  const key = JSON.stringify([state.slideId, [...state.selected]]);
+  if (!state.linked || key === lastFocus) return;
+  lastFocus = key; clearTimeout(focusTimer);
+  focusTimer = setTimeout(() => command({ command:'Focus', slide:state.slideId, blocks:[...state.selected] }), 300);
+}
 function toast(text) { const node = $('#status'); node.textContent = text; node.hidden = !text; clearTimeout(toastTimer); toastTimer = setTimeout(() => node.hidden = true, 6000); }
 function pump() {
   if (pending || !queue.length) return;
@@ -24,7 +30,7 @@ const api = {
   slide:() => state.deck?.slides.find(s => s.id === state.slideId),
   renderCanvas:() => { if (state.deck) { canvas.render(); panel.renderToolbar(); } },
   updateMany(slide, updates) { apply(() => updates.map(({ id, fields }) => ({ op:'update_block', slide, id, fields, base_hash:state.hashes[id] || '' }))); },
-  selectionChanged() { canvas.decorate(); panel.render(); feedback.render(); },
+  selectionChanged() { canvas.decorate(); panel.render(); feedback.render(); focusChanged(); },
   duplicate:() => canvas.duplicate(), remove:() => canvas.remove(),
   clearPreview:() => feedback.clearPreview(),
   commentAt(anchor) { state.draftAnchor = anchor; state.openThread = null; state.selected.clear(); feedback.clearPreview(); render(); setTimeout(() => $('#thread-popover textarea')?.focus(), 0); },
@@ -36,22 +42,29 @@ function render() {
   $('#workspace').classList.toggle('commenting', state.mode === 'comment');
   feedback.render(); canvas.render(); strip.render(); panel.render();
   $('#deck-title-label').textContent = state.deck.title;
-  $('#dirty').textContent = state.dirty ? 'Unsaved' : 'Saved';
+  $('#dirty').textContent = 'Saved';
   $('#speaker-notes').value = api.slide()?.notes || ''; $('#speaker-notes').disabled = !api.slide();
   $('#slide-label').textContent = api.slide() ? `Slide ${String(state.deck.slides.indexOf(api.slide()) + 1).padStart(2, '0')} / ${String(state.deck.slides.length).padStart(2, '0')}  ·  ${api.slide().layout.replaceAll('-', ' ')}` : 'Your canvas';
   $('#slide-wrap').hidden = !api.slide(); $('#canvas-empty').hidden = Boolean(api.slide());
   $('#slide-wrap').style.transform = `scale(${state.zoom})`; $('#zoom-fit').textContent = state.zoom === 1 ? 'Fit' : `${Math.round(state.zoom * 100)}%`;
   for (const mode of ['edit','comment']) $(`#${mode}-mode`).setAttribute('aria-pressed', String(state.mode === mode));
-  renderPresentation();
+  for (const node of document.querySelectorAll('#canvas .block')) node.classList.toggle('external-flash', state.flash.includes(node.dataset.id));
+  const pill = $('#link-status'); pill.textContent = state.linked ? 'linked to nexus' : 'not linked'; pill.classList.toggle('connected', state.linked);
+  pill.title = state.linked ? 'Comments go to your nexus conversation' : 'Not linked to a conversation — open it from nexus with /studio';
+  focusChanged(); renderPresentation();
 }
 function handleEvent(event, reply) {
   const finished = reply ? pending : null; if (reply) pending = null;
   if (event.event === 'Deck') {
-    feedback.clearPreview(); Object.assign(state, { deck:event.deck, revision:event.revision, hashes:event.hashes, images:event.images, dirty:event.dirty, threads:event.threads || [], chat:event.chat || [] });
+    feedback.clearPreview(); Object.assign(state, { deck:event.deck, revision:event.revision, hashes:event.hashes, images:event.images, threads:event.threads || [], linked:event.linked, flash:event.changed || [] });
     if (!api.slide()) state.slideId = state.deck.slides[0]?.id || null;
     const blocks = new Set(api.slide()?.blocks.map(b => b.id) || []); state.selected = new Set([...state.selected].filter(id => blocks.has(id)));
     if (state.openNewest) { state.openThread = state.threads.at(-1)?.id; state.openNewest = false; }
     render();
+    if (event.notice) toast(event.notice);
+    if (state.flash.length) { clearTimeout(flashTimer); flashTimer = setTimeout(() => { state.flash = []; document.querySelectorAll('.external-flash').forEach(n => n.classList.remove('external-flash')); }, 1800); }
+  } else if (event.event === 'Focus') {
+    if (state.deck.slides.some(s => s.id === event.slide)) { state.slideId = event.slide; state.selected.clear(); render(); }
   } else {
     feedback.event(event);
     if (event.event === 'Error') toast(event.message);
@@ -61,13 +74,11 @@ function handleEvent(event, reply) {
 }
 window.studioEvent = event => handleEvent(event, true);
 window.studioAsyncEvent = event => handleEvent(event, false);
-function save() { command(() => ({ command:'Save', deck:state.deck })); }
-$('#save').onclick = save; $('#undo').onclick = () => command({ command:'Undo' }); $('#redo').onclick = () => command({ command:'Redo' });
+$('#undo').onclick = () => command({ command:'Undo' }); $('#redo').onclick = () => command({ command:'Redo' });
 function deckMenu(open) { $('#deck-menu').hidden = !open; $('#deck-title').setAttribute('aria-expanded', String(open)); }
 $('#deck-title').onclick = () => deckMenu($('#deck-menu').hidden);
 document.addEventListener('pointerdown', event => { if (!event.target.closest('.deck-menu')) deckMenu(false); });
 document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#deck-menu').hidden) { deckMenu(false); $('#deck-title').focus(); } });
-$('#toggle-chat').onclick = () => { document.body.classList.toggle('chat-closed'); requestAnimationFrame(() => panel.renderToolbar()); };
 function properties() { state.properties = !state.properties; if (state.properties) { state.comments = false; feedback.closeThread(); } render(); }
 $('#toggle-properties').onclick = properties; $('#close-properties').onclick = properties;
 function comments() { state.comments = !state.comments; if (state.comments) state.properties = false; render(); }
@@ -82,10 +93,9 @@ function ask(heading, label, hint, value, action) {
   pathAction = action; pathDialog.showModal(); $('#path-input').focus();
 }
 pathDialog.addEventListener('close', () => { if (pathDialog.returnValue === 'ok') pathAction($('#path-input').value); });
-const canLeave = () => !state.dirty || window.confirm('Discard unsaved changes? Save first to keep them.');
 $('#rename-deck').onclick = () => { deckMenu(false); ask('Rename deck', 'Title', 'Give this project a name.', state.deck.title, value => { const title = value.trim(); if (title) command(() => ({ command:'Save', deck:{ ...state.deck, title } })); }); };
-$('#open-deck').onclick = () => { deckMenu(false); if (canLeave()) ask('Open', 'Deck path', 'Enter a local .deck.json path.', '', path => command({ command:'Open', path })); };
-$('#new-deck').onclick = () => { deckMenu(false); if (canLeave()) ask('New deck', 'Title', 'Created in your active space’s files/decks folder.', 'Untitled', title => command({ command:'NewDeck', title })); };
+$('#open-deck').onclick = () => { deckMenu(false); ask('Open', 'Deck path', 'Enter a local .deck.json path.', '', path => command({ command:'Open', path })); };
+$('#new-deck').onclick = () => { deckMenu(false); ask('New deck', 'Title', 'Created in your active space’s files/decks folder.', 'Untitled', title => command({ command:'NewDeck', title })); };
 function insert(block) {
   const slide = api.slide(); if (!slide) { toast('Add a slide first.'); return; }
   state.selected = new Set([block.id]); state.mode = 'edit'; apply(() => [{ op:'insert_block', slide:slide.id, block }]); $('#insert-options').hidden = true;
@@ -118,11 +128,9 @@ document.addEventListener('keydown', event => {
     event.preventDefault(); return;
   }
   const key = event.key.toLowerCase(), mod = event.metaKey || event.ctrlKey, editing = event.target.closest('input,textarea,select,[contenteditable]');
-  if (mod && key === '/') { event.preventDefault(); $('#toggle-chat').click(); return; }
   if (mod && key === '\\') { event.preventDefault(); properties(); return; }
   if (mod && ['=','+','-','0'].includes(key)) { event.preventDefault(); zoom(key === '0' ? 0 : key === '-' ? -.1 : .1); return; }
-  if (mod && key === 's') { event.preventDefault(); if (editing) event.target.blur(); save(); return; }
-  if (mod && key === 'k') { event.preventDefault(); document.body.classList.remove('chat-closed'); $('#chat-input').focus(); return; }
+  if (mod && key === 's') { event.preventDefault(); if (editing) event.target.blur(); toast('Every change is saved to the deck file as you make it.'); return; }
   if (editing || document.querySelector('dialog[open]')) return;
   if (key === 'b' && state.preview) { event.preventDefault(); feedback.togglePreview(); }
   else if (event.key === 'Escape') { feedback.clearPreview(); state.openThread = null; state.draftAnchor = null; state.selected.clear(); render(); }
@@ -133,4 +141,4 @@ document.addEventListener('keydown', event => {
   else if (event.key.startsWith('Arrow')) { event.preventDefault(); const step = event.shiftKey ? 4 : 1; canvas.nudge(event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0, event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0); }
   else if (event.key === 'F5') { event.preventDefault(); present(); }
 });
-command({ command:'Load' }); command({ command:'HostStatus' });
+command({ command:'Load' });

@@ -791,7 +791,8 @@ impl AppView {
                 }
             }
         } else {
-            self.core.send_message(text.to_string())?;
+            let text = self.with_studio_context(text.to_string());
+            self.core.send_message(text)?;
         }
         Ok(())
     }
@@ -863,6 +864,11 @@ impl AppView {
                 }
             }
             AppCommand::OpenTuiApp(name) => crate::ui::popups::tui_app::open(self, &name),
+            AppCommand::OpenStudio { deck } => {
+                if let Err(error) = self.open_studio(deck.as_deref()) {
+                    self.push_status(format!("{error:#}"));
+                }
+            }
             AppCommand::OpenJobs => crate::ui::popups::jobs::open(self, false)?,
             AppCommand::OpenJobForm => crate::ui::popups::jobs::open(self, true)?,
             AppCommand::OpenUsage => self.open_usage_popup(),

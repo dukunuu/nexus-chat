@@ -30,9 +30,6 @@ use crate::tools::ToolExecutor;
 
 use super::wire::{WireBackendTag, WireEvent, WireModel, public_model_id};
 
-#[path = "studio.rs"]
-mod studio;
-
 const MAX_HEADER_BYTES: usize = 32 * 1024;
 const MAX_API_BODY_BYTES: usize = 10 * 1024 * 1024;
 const MAX_GATEWAY_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -519,9 +516,6 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<HostState>) -> io::
         )
         .await;
     }
-    if path == "/v1/studio/suggest" && head.content_length > 4 * 1024 * 1024 {
-        return respond_text(&mut stream, 413, "request entity too large").await;
-    }
     if head.content_length > MAX_GATEWAY_BODY_BYTES {
         return respond_text(&mut stream, 413, "request entity too large").await;
     }
@@ -672,9 +666,6 @@ async fn handle_api_route(
     path: &str,
     state: &HostState,
 ) -> io::Result<()> {
-    if path == "/v1/studio/suggest" && request.method == "POST" {
-        return studio::handle(stream, request, state).await;
-    }
     if path == "/v1/media/action" && request.method == "POST" {
         let value = serde_json::from_slice::<serde_json::Value>(&request.body).unwrap_or_default();
         if value["action"] == "run_script" {
@@ -2254,9 +2245,6 @@ fn handle_actor_request(app: &mut App, admin: &mut super::admin::State, request:
             };
             let _ = reply.send(result);
         }
-        HostRequest::StudioModel { model, reply } => {
-            let _ = reply.send(studio::select_model(app, model.as_deref()));
-        }
         HostRequest::GatewayRoute {
             model,
             override_tag,
@@ -2411,10 +2399,6 @@ fn gateway_route(
 }
 
 enum HostRequest {
-    StudioModel {
-        model: Option<String>,
-        reply: oneshot::Sender<Result<studio::ModelCall, String>>,
-    },
     ScriptJob {
         space_id: String,
         name: String,

@@ -156,6 +156,77 @@
     }
   },
   {
+    "name": "deck",
+    "description": "Build and edit slide decks in space files decks/*.deck.json. The user sees them live in studio (/studio) and can undo your edits; you see slides as images. Edit directly when asked for a change; comment when reviewing or unsure. View after layout-affecting edits. Never invent data, sources or images. Canvas is 32x18 integer units. Block: id,x,y,w,h,style{align,size:s|m|l|xl|xxl,color} plus kind text{text Markdown}|image{src already in the deck,fit}|shape{shape,fill,stroke}|table{rows}|code{language,source}|chart{chart:bar|line|pie,labels,series:[{name,values}]}. Ops: add_slide{after?,slide} delete_slide{id} move_slide{id,to} set_layout{slide,layout} set_notes{slide,notes} insert_block{slide,block} update_block{slide,id,fields} delete_block{slide,id} restyle{target,style} set_theme{theme}. ids and base_hash are filled in; one bad op writes nothing. Commenting principles: anchor to a slide and block; one issue in at most two sentences, with why it matters; attach ops when a fix exists; few, most important first (max 8 per review), severity must|should|consider; respect the author's intent and facts; answer the thread you are in.\n- action=create (needs title)\n- action=read (needs path)\n- action=view (needs path)\n- action=edit (needs path, ops)\n- action=comment (needs path, text)\n- action=resolve (needs path, thread)",
+    "parameters": {
+      "properties": {
+        "action": {
+          "enum": [
+            "create",
+            "read",
+            "view",
+            "edit",
+            "comment",
+            "resolve"
+          ],
+          "type": "string"
+        },
+        "block": {
+          "type": "string"
+        },
+        "ops": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "path": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "must",
+            "should",
+            "consider"
+          ],
+          "type": "string"
+        },
+        "slide": {
+          "type": "string"
+        },
+        "slides": {
+          "items": {
+            "oneOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "type": "array"
+        },
+        "text": {
+          "type": "string"
+        },
+        "thread": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "search",
     "description": "Search general web sources, recent reporting (web with recency), papers, or Reddit and Hacker News threads. Use discussion for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments.\n- mode=web (needs query)\n- mode=academic (needs query)\n- mode=discussion (needs query)\n- mode=images (needs query)",
     "parameters": {

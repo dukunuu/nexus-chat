@@ -156,6 +156,15 @@ pub(super) fn push_user_card(
 }
 
 /// A foldable tool summary with type-specific detail behind a colored rail.
+/// What a tool card needs beyond its text: where result images live and
+/// whether a studio window is attached.
+pub(super) struct CardEnv<'a> {
+    pub files_dir: &'a std::path::Path,
+    pub studio_linked: bool,
+    pub image_at_line: &'a mut Vec<Option<String>>,
+    pub image_cache: &'a mut HashMap<(String, usize), Vec<Line<'static>>>,
+}
+
 pub(super) fn push_tool_call(
     out: &mut Vec<Line<'static>>,
     content: &str,
@@ -163,6 +172,7 @@ pub(super) fn push_tool_call(
     settings: &nexus_core::app::Settings,
     width: usize,
     theme: &crate::theme::Theme,
+    env: CardEnv<'_>,
 ) {
     let v: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
     let field = |k: &str| {
@@ -205,7 +215,50 @@ pub(super) fn push_tool_call(
             row.spans.insert(0, rail.clone());
             out.push(row);
         }
+        push_slide_thumbnails(out, &view, width, theme, &rail, env);
         out.push(Line::default());
+    } else if is_deck_change(&view) && !env.studio_linked && !settings.hide_hints {
+        out.push(Line::from(Span::styled(
+            "   open in studio · /studio",
+            Style::default().fg(theme.fg_dim),
+        )));
+    }
+}
+
+/// A deck card that created or edited slides, successfully.
+fn is_deck_change(view: &nexus_core::app::ToolView) -> bool {
+    view.outcome == nexus_core::app::ToolOutcome::Ok
+        && (view.verb.starts_with("created deck") || view.verb.starts_with("edited "))
+}
+
+/// The slides a `deck` call rendered, drawn inline in the opened card.
+fn push_slide_thumbnails(
+    out: &mut Vec<Line<'static>>,
+    view: &nexus_core::app::ToolView,
+    width: usize,
+    theme: &crate::theme::Theme,
+    rail: &Span<'static>,
+    env: CardEnv<'_>,
+) {
+    let CardEnv {
+        files_dir,
+        image_at_line,
+        image_cache,
+        ..
+    } = env;
+    for (alt, file) in &view.images {
+        // Contact sheets hold several slides; give them more columns.
+        let columns = if alt.ends_with(" slides") { 60 } else { 40 };
+        render_markdown_images(
+            out,
+            &format!("![{alt}]({file})"),
+            width.saturating_sub(2).clamp(8, columns),
+            theme,
+            files_dir,
+            image_at_line,
+            image_cache,
+            Some(rail),
+        );
     }
 }
 
@@ -540,6 +593,15 @@ fn expanded_tool_body(
         return sources_body(view, width, theme);
     }
     let tool = name.split('_').next().unwrap_or(name);
+    if tool == "deck" && !view.verb.is_empty() {
+        return view
+            .output
+            .as_deref()
+            .unwrap_or_default()
+            .split('\n')
+            .flat_map(|line| super::diff::escaped_rows(line, width, dim, dim))
+            .collect();
+    }
     if matches!(tool, "shell" | "proc") && !view.verb.is_empty() {
         return command_body(args, view, result, width, theme);
     }
@@ -1603,6 +1665,33 @@ mod tool_card_tests {
     use nexus_core::app::Settings;
     use serde_json::json;
 
+    /// `push_tool_call` with no studio window and no image files.
+    fn push_card(
+        out: &mut Vec<Line<'static>>,
+        content: &str,
+        expanded: bool,
+        settings: &Settings,
+        width: usize,
+        theme: &crate::theme::Theme,
+    ) {
+        let mut at_line = Vec::new();
+        let mut cache = HashMap::new();
+        push_tool_call(
+            out,
+            content,
+            expanded,
+            settings,
+            width,
+            theme,
+            CardEnv {
+                files_dir: std::path::Path::new("."),
+                studio_linked: false,
+                image_at_line: &mut at_line,
+                image_cache: &mut cache,
+            },
+        );
+    }
+
     fn card(
         name: &str,
         args: serde_json::Value,
@@ -1615,7 +1704,7 @@ mod tool_card_tests {
             hide_hints,
             ..Settings::default()
         };
-        push_tool_call(
+        push_card(
             &mut lines,
             &json!({"name":name,"arguments":args.to_string(),"result":result}).to_string(),
             expanded,
@@ -1631,6 +1720,89 @@ mod tool_card_tests {
             .iter()
             .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect()
+    }
+
+    #[test]
+    fn deck_cards_name_the_change_hint_at_studio_and_show_slides_when_opened() {
+        let files = std::env::temp_dir().join(format!("nexus-deck-card-{}", uuid::Uuid::new_v4()));
+        let deck = nexus_core::deck::Deck::new_from_layouts("Card");
+        std::fs::create_dir_all(files.join("decks/.renders/a")).unwrap();
+        let png = nexus_core::deck::render::render_slide(&deck, "s1", 400).unwrap();
+        std::fs::write(files.join("decks/.renders/a/s1.png"), png).unwrap();
+        let result = "edited slide 1 · decks/a.deck.json · revision 0123456789ab\n- update_block b1 on slide 1: text\n![slide 1](decks/.renders/a/s1.png)";
+        let content = json!({
+            "name": "deck",
+            "arguments": json!({"action": "edit", "path": "decks/a.deck.json", "ops": []}).to_string(),
+            "result": result,
+        })
+        .to_string();
+        let theme = crate::theme::Theme::default();
+        let render = |expanded: bool, linked: bool, hide_hints: bool| {
+            let mut rows = Vec::new();
+            let mut at_line = Vec::new();
+            let mut cache = HashMap::new();
+            push_tool_call(
+                &mut rows,
+                &content,
+                expanded,
+                &Settings {
+                    hide_hints,
+                    ..Settings::default()
+                },
+                60,
+                &theme,
+                CardEnv {
+                    files_dir: &files,
+                    studio_linked: linked,
+                    image_at_line: &mut at_line,
+                    image_cache: &mut cache,
+                },
+            );
+            (text(&rows), at_line)
+        };
+
+        let (collapsed, _) = render(false, false, false);
+        assert!(
+            collapsed[0].contains("edited slide 1") && collapsed[0].contains("decks/a.deck.json"),
+            "{collapsed:?}"
+        );
+        assert!(
+            collapsed
+                .iter()
+                .any(|row| row.contains("open in studio · /studio")),
+            "{collapsed:?}"
+        );
+        assert!(
+            !render(false, true, false)
+                .0
+                .iter()
+                .any(|row| row.contains("open in studio")),
+            "linked"
+        );
+        assert!(
+            !render(false, false, true)
+                .0
+                .iter()
+                .any(|row| row.contains("open in studio")),
+            "hints off"
+        );
+
+        let (opened, at_line) = render(true, true, false);
+        assert!(
+            opened
+                .iter()
+                .any(|row| row.contains("update_block b1 on slide 1: text")),
+            "{opened:?}"
+        );
+        assert!(
+            opened.iter().any(|row| row.contains('▀')),
+            "the slide is drawn inline"
+        );
+        assert!(
+            at_line.iter().any(Option::is_some),
+            "the slide is clickable"
+        );
+        std::fs::remove_dir_all(files).unwrap();
     }
 
     #[test]
@@ -1905,7 +2077,7 @@ mod tool_card_tests {
             ),
         ] {
             let mut rows = Vec::new();
-            push_tool_call(
+            push_card(
                 &mut rows,
                 &json!({"name":name,"arguments":args.to_string(),"result":result}).to_string(),
                 true,
@@ -1960,7 +2132,7 @@ mod tool_card_tests {
                 show_reasoning: show,
                 ..Settings::default()
             };
-            push_tool_call(
+            push_card(
                 &mut lines,
                 &row,
                 false,

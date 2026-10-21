@@ -142,17 +142,17 @@ fn assets_reject_escaping_symlinks() {
 }
 
 #[test]
-fn save_is_atomic_and_reloads_exactly() {
+fn autosave_and_save_are_atomic_and_reload_exactly() {
     let temp = Temp::new();
     let mut backend = temp.backend();
     success(send(
         &mut backend,
         json!({"command":"Apply", "ops":[{"op":"set_notes", "slide":"s1", "notes":"A speaker note"}]}),
     ));
-    assert!(matches!(backend.event(), Event::Deck { dirty: true, .. }));
+    // Autosave: the edit is in the file before anyone asks to save.
+    assert_eq!(read_deck(&backend.path).unwrap(), backend.deck);
     let deck = backend.deck.clone();
     success(send(&mut backend, json!({"command":"Save", "deck":deck})));
-    assert!(matches!(backend.event(), Event::Deck { dirty: false, .. }));
     assert_eq!(read_deck(&backend.path).unwrap(), deck);
     assert!(
         fs::read_dir(backend.path.parent().unwrap())
@@ -184,7 +184,7 @@ fn save_is_atomic_and_reloads_exactly() {
 }
 
 #[test]
-fn undo_redo_is_exact_across_mixed_transactions_and_save() {
+fn undo_redo_is_exact_across_mixed_transactions_and_autosaved() {
     let temp = Temp::new();
     let mut backend = temp.backend();
     let original = backend.deck.clone();
@@ -207,13 +207,17 @@ fn undo_redo_is_exact_across_mixed_transactions_and_save() {
     for expected in [&middle, &original] {
         success(send(&mut backend, json!({"command":"Undo"})));
         assert_eq!(&backend.deck, expected);
+        assert_eq!(
+            &read_deck(&backend.path).unwrap(),
+            expected,
+            "undo is autosaved too"
+        );
     }
-    assert!(matches!(backend.event(), Event::Deck { dirty: true, .. }));
     for expected in [&middle, &last] {
         success(send(&mut backend, json!({"command":"Redo"})));
         assert_eq!(&backend.deck, expected);
+        assert_eq!(&read_deck(&backend.path).unwrap(), expected);
     }
-    assert!(matches!(backend.event(), Event::Deck { dirty: false, .. }));
     success(send(&mut backend, json!({"command":"Undo"})));
     success(send(
         &mut backend,
@@ -332,4 +336,494 @@ fn event_scripts_escape_untrusted_strings() {
         .unwrap();
     let value: serde_json::Value = serde_json::from_str(payload).unwrap();
     assert_eq!(value["message"], "</script>\"\\\n\u{2028}alert(1)");
+}
+
+// -- the file is the single source of truth, shared with the model's `deck` tool --
+
+use nexus_core::deck::feedback::{
+    self, Anchor, Edit, EditStatus, Message as Note, Role, Severity, Thread,
+};
+use nexus_core::deck::link::Message as Link;
+use nexus_core::deck::suggest::{self, RawSuggestion};
+
+/// Another writer (the model's `deck` tool) changes the deck file.
+fn external_edit(backend: &Backend, ops: serde_json::Value) -> Deck {
+    let ops: Vec<Op> = serde_json::from_value(ops).unwrap();
+    let next = deck::apply(&read_deck(&backend.path).unwrap(), &ops).unwrap();
+    atomic_write(&backend.path, &serde_json::to_vec_pretty(&next).unwrap()).unwrap();
+    next
+}
+
+/// A model comment pinned on `b1` of `s1`, carrying one suggested edit.
+fn model_thread(backend: &Backend, text: &str) -> Thread {
+    let deck = backend.deck.clone();
+    let hash = deck.slides[0].blocks[0].hash();
+    let raw = RawSuggestion {
+        why: "Shorter headline".into(),
+        ops: vec![
+            json!({"op":"update_block","slide":"s1","id":"b1","fields":{"text":"A sharper headline"},"base_hash":hash}),
+        ],
+    };
+    let (mut valid, errors) = suggest::prepare(&deck, vec![raw]);
+    assert!(errors.is_empty(), "{errors:?}");
+    let anchor = Anchor {
+        slide: "s1".into(),
+        block: Some("b1".into()),
+        x: 3,
+        y: 6,
+    };
+    let edit = Edit::new(&deck, valid.pop().unwrap(), &anchor);
+    Thread {
+        id: "model-thread".into(),
+        anchor,
+        severity: Severity::Should,
+        created: feedback::now(),
+        resolved: None,
+        messages: vec![Note::new(Role::Model, text.into(), vec![edit])],
+    }
+}
+
+#[test]
+fn every_applied_edit_reaches_the_file_at_once() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    let start = backend.deck.clone();
+    success(send(
+        &mut backend,
+        json!({"command":"Apply","ops":[{"op":"set_notes","slide":"s1","notes":"One"}]}),
+    ));
+    assert_eq!(read_deck(&backend.path).unwrap(), backend.deck);
+    assert_ne!(backend.deck, start);
+    assert!(matches!(
+        backend.dispatch(r#"{"command":"Apply","ops":[{"op":"delete_slide","id":"nope"}]}"#),
+        Event::Error { .. }
+    ));
+    assert_eq!(
+        read_deck(&backend.path).unwrap(),
+        backend.deck,
+        "a failed edit leaves the file alone"
+    );
+}
+
+#[test]
+fn an_external_deck_edit_reloads_as_one_undo_step_and_flashes_the_changed_blocks() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    let original = backend.deck.clone();
+    assert!(backend.poll().unwrap().is_none(), "nothing changed yet");
+    // One model edit touching two blocks and a note, written in one rename.
+    let external = external_edit(
+        &backend,
+        json!([
+            {"op":"update_block","slide":"s1","id":"b1","fields":{"text":"Written by the model"},"base_hash":original.slides[0].blocks[0].hash()},
+            {"op":"update_block","slide":"s1","id":"b_subtitle","fields":{"text":"Also changed"},"base_hash":original.slides[0].blocks[2].hash()},
+            {"op":"set_notes","slide":"s1","notes":"Model notes"}
+        ]),
+    );
+    let Some(Event::Deck {
+        deck,
+        changed,
+        notice,
+        ..
+    }) = backend.poll().unwrap()
+    else {
+        panic!("the external edit was not noticed");
+    };
+    assert_eq!(deck, external);
+    assert_eq!(
+        changed,
+        ["b1", "b_subtitle"],
+        "only the changed blocks flash"
+    );
+    assert!(notice.is_some_and(|n| n.contains("reloaded")));
+    assert_eq!(backend.undo.len(), 1, "the whole edit is one undo step");
+    assert!(
+        backend.poll().unwrap().is_none(),
+        "and is not reloaded twice"
+    );
+
+    // Cmd+Z takes the model's edit back, in the file as well; redo restores it.
+    success(send(&mut backend, json!({"command":"Undo"})));
+    assert_eq!(backend.deck, original);
+    assert_eq!(read_deck(&backend.path).unwrap(), original);
+    assert!(
+        backend.poll().unwrap().is_none(),
+        "our own undo is not mistaken for an external edit"
+    );
+    success(send(&mut backend, json!({"command":"Redo"})));
+    assert_eq!(read_deck(&backend.path).unwrap(), external);
+}
+
+#[test]
+fn a_local_action_against_a_deck_that_changed_on_disk_loses_to_the_file() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    let external = external_edit(
+        &backend,
+        json!([{"op":"set_notes","slide":"s1","notes":"From the model"}]),
+    );
+    let event = send(
+        &mut backend,
+        json!({"command":"Apply","ops":[{"op":"set_notes","slide":"s1","notes":"From me"}]}),
+    );
+    let Event::Deck { notice, deck, .. } = event else {
+        panic!("{event:?}")
+    };
+    assert!(
+        notice.is_some_and(|n| n.contains("not applied")),
+        "the toast says the file won"
+    );
+    assert_eq!(deck, external);
+    assert_eq!(read_deck(&backend.path).unwrap(), external);
+}
+
+#[test]
+fn an_unreadable_external_file_is_reported_once() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    fs::write(&backend.path, "{ not a deck").unwrap();
+    assert!(backend.poll().is_err());
+    assert!(
+        backend.poll().unwrap().is_none(),
+        "no error storm every 500 ms"
+    );
+    assert!(
+        matches!(
+            backend.dispatch(r#"{"command":"Load"}"#),
+            Event::Deck { .. }
+        ),
+        "the page keeps the last good deck"
+    );
+}
+
+#[test]
+fn model_comments_arrive_by_file_and_do_not_drop_local_commands() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    feedback::save(
+        &backend.path,
+        &[model_thread(&backend, "Make the headline sharper.")],
+    )
+    .unwrap();
+    let Some(Event::Deck {
+        threads, changed, ..
+    }) = backend.poll().unwrap()
+    else {
+        panic!("the sidecar change was not noticed");
+    };
+    assert_eq!(threads.len(), 1);
+    assert!(changed.is_empty());
+    assert_eq!(backend.undo.len(), 0, "comments never touch the undo stack");
+
+    // A local note while the model's comment exists keeps both, in the shared file.
+    let anchor = json!({"slide":"s1","block":null,"x":2,"y":2});
+    success_or_feedback(send(
+        &mut backend,
+        json!({"command":"CommentCreate","anchor":anchor,"text":"My own note","send":false}),
+    ));
+    let saved = feedback::load(&backend.path).unwrap();
+    assert_eq!(saved.len(), 2);
+    assert!(
+        saved.iter().any(|t| t.id == "model-thread")
+            && saved
+                .iter()
+                .any(|t| matches!(t.messages[0].role, Role::You))
+    );
+    // A model comment added meanwhile is picked up before the next local write.
+    let mut more = saved;
+    more.push(Thread {
+        id: "second".into(),
+        ..model_thread(&backend, "Another point.")
+    });
+    feedback::save(&backend.path, &more).unwrap();
+    success_or_feedback(send(
+        &mut backend,
+        json!({"command":"CommentResolve","thread":"model-thread"}),
+    ));
+    let saved = feedback::load(&backend.path).unwrap();
+    assert_eq!(saved.len(), 3);
+    assert!(
+        saved
+            .iter()
+            .find(|t| t.id == "model-thread")
+            .unwrap()
+            .resolved
+            .is_some()
+    );
+}
+
+fn success_or_feedback(event: Event) {
+    assert!(
+        matches!(event, Event::Deck { .. } | Event::Feedback { .. }),
+        "{event:?}"
+    );
+}
+
+#[test]
+fn a_suggested_edit_previews_applies_as_one_undo_step_and_persists_its_status() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    let original = backend.deck.clone();
+    let thread = model_thread(&backend, "Make the headline sharper.");
+    let edit_id = thread.messages[0].edits[0].proposal.id.clone();
+    feedback::save(&backend.path, &[thread]).unwrap();
+    backend.poll().unwrap();
+
+    let Event::Preview { deck } = send(
+        &mut backend,
+        json!({"command":"PreviewEdit","owner":"model-thread","edit":edit_id}),
+    ) else {
+        panic!("expected a preview");
+    };
+    assert_ne!(deck, original);
+    assert_eq!(backend.deck, original, "previewing changes nothing");
+    assert_eq!(read_deck(&backend.path).unwrap(), original);
+
+    success(send(
+        &mut backend,
+        json!({"command":"ApplyEdit","owner":"model-thread","edit":edit_id}),
+    ));
+    assert_eq!(
+        read_deck(&backend.path).unwrap(),
+        backend.deck,
+        "applying is autosaved"
+    );
+    assert_eq!(backend.undo.len(), 1);
+    assert_eq!(
+        feedback::load(&backend.path).unwrap()[0].messages[0].edits[0].status,
+        EditStatus::Applied
+    );
+    // An applied edit cannot be applied twice.
+    assert!(matches!(
+        send(
+            &mut backend,
+            json!({"command":"ApplyEdit","owner":"model-thread","edit":edit_id})
+        ),
+        Event::Error { .. }
+    ));
+    success(send(&mut backend, json!({"command":"Undo"})));
+    assert_eq!(backend.deck, original);
+    assert_eq!(read_deck(&backend.path).unwrap(), original);
+}
+
+#[test]
+fn dismissed_and_outdated_edits_are_not_applicable() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    let thread = model_thread(&backend, "Make the headline sharper.");
+    let edit_id = thread.messages[0].edits[0].proposal.id.clone();
+    feedback::save(&backend.path, &[thread]).unwrap();
+    backend.poll().unwrap();
+    // The block the edit guards changes in the file: the edit goes stale.
+    external_edit(
+        &backend,
+        json!([{"op":"update_block","slide":"s1","id":"b1","fields":{"text":"Changed meanwhile"},"base_hash":backend.deck.slides[0].blocks[0].hash()}]),
+    );
+    backend.poll().unwrap();
+    assert_eq!(
+        feedback::load(&backend.path).unwrap()[0].messages[0].edits[0].status,
+        EditStatus::Pending,
+        "status is only persisted with the next write"
+    );
+    assert!(
+        matches!(send(&mut backend, json!({"command":"PreviewEdit","owner":"model-thread","edit":edit_id})), Event::Error { message } if message.contains("Outdated"))
+    );
+    assert!(matches!(
+        send(
+            &mut backend,
+            json!({"command":"ApplyEdit","owner":"model-thread","edit":edit_id})
+        ),
+        Event::Error { .. }
+    ));
+    success_or_feedback(send(
+        &mut backend,
+        json!({"command":"DismissEdit","owner":"model-thread","edit":edit_id}),
+    ));
+    assert_eq!(
+        feedback::load(&backend.path).unwrap()[0].messages[0].edits[0].status,
+        EditStatus::Dismissed
+    );
+}
+
+#[test]
+fn comments_go_to_nexus_only_over_the_link_and_only_when_linked() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    let anchor = json!({"slide":"s1","block":"b1","x":3,"y":6});
+    // Standalone: a note is kept; sending is refused with the way to link.
+    success_or_feedback(send(
+        &mut backend,
+        json!({"command":"CommentCreate","anchor":anchor,"text":"Local note","send":false}),
+    ));
+    let Event::Error { message } = send(
+        &mut backend,
+        json!({"command":"CommentCreate","anchor":anchor,"text":"Send me","send":true}),
+    ) else {
+        panic!("sending while unlinked must fail");
+    };
+    assert!(message.contains("/studio"), "{message}");
+    assert!(backend.outgoing.is_empty());
+    assert_eq!(
+        feedback::load(&backend.path).unwrap().len(),
+        1,
+        "the refused comment was not saved"
+    );
+
+    backend.linked = true;
+    backend.hello();
+    success_or_feedback(send(
+        &mut backend,
+        json!({"command":"CommentCreate","anchor":anchor,"text":"Send me","send":true}),
+    ));
+    let thread = feedback::load(&backend.path).unwrap().pop().unwrap();
+    let thread_id = thread.id.clone();
+    success_or_feedback(send(
+        &mut backend,
+        json!({"command":"CommentReply","thread":thread_id,"text":"And this","send":true}),
+    ));
+    success_or_feedback(send(
+        &mut backend,
+        json!({"command":"CommentReply","thread":thread_id,"text":"Not this","send":false}),
+    ));
+    success_or_feedback(send(
+        &mut backend,
+        json!({"command":"Focus","slide":"s2","blocks":["b3"]}),
+    ));
+    let sent = std::mem::take(&mut backend.outgoing);
+    assert!(matches!(&sent[0], Link::Hello { .. }));
+    assert!(
+        matches!(&sent[1], Link::Comment { thread_id: id, slide, block, point: (3, 6), text, .. } if *id == thread_id && slide == "s1" && block.as_deref() == Some("b1") && text == "Send me")
+    );
+    assert!(matches!(&sent[2], Link::Reply { text, .. } if text == "And this"));
+    assert!(
+        matches!(&sent[3], Link::Focus { slide, blocks, .. } if slide == "s2" && blocks == &["b3".to_string()])
+    );
+    assert_eq!(sent.len(), 4, "notes stay local");
+}
+
+#[test]
+fn link_messages_open_focus_and_close_without_losing_history() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    backend.linked = true;
+    success(send(
+        &mut backend,
+        json!({"command":"Apply","ops":[{"op":"set_notes","slide":"s1","notes":"Edit"}]}),
+    ));
+    let here = backend.path.clone();
+    // Opening the deck that is already open (even by another spelling) keeps undo.
+    let spelled = here
+        .parent()
+        .unwrap()
+        .join("../decks")
+        .join(here.file_name().unwrap());
+    backend
+        .receive_link(Link::Open { deck_path: spelled })
+        .unwrap();
+    assert_eq!(backend.undo.len(), 1);
+    assert!(
+        matches!(backend.receive_link(Link::Focus { deck_path: here.clone(), slide: "s2".into(), blocks: vec![] }).unwrap(), Event::Focus { slide } if slide == "s2")
+    );
+    // A focus for another deck is ignored.
+    assert!(matches!(
+        backend
+            .receive_link(Link::Focus {
+                deck_path: temp.0.join("other.deck.json"),
+                slide: "s2".into(),
+                blocks: vec![]
+            })
+            .unwrap(),
+        Event::Deck { .. }
+    ));
+    // Opening another deck switches to it, with a fresh history.
+    let other = temp.0.join("files/decks/other.deck.json");
+    atomic_write(
+        &other,
+        &serde_json::to_vec(&Deck::new_from_layouts("Other")).unwrap(),
+    )
+    .unwrap();
+    backend.outgoing.clear();
+    backend
+        .receive_link(Link::Open {
+            deck_path: other.clone(),
+        })
+        .unwrap();
+    assert_eq!(backend.deck.title, "Other");
+    assert!(backend.undo.is_empty());
+    assert!(matches!(&backend.outgoing[..], [Link::Hello { deck_path }] if *deck_path == other));
+    backend.receive_link(Link::Bye).unwrap();
+    assert!(!backend.linked);
+}
+
+#[test]
+fn the_html_renderer_uses_the_shared_layout_numbers() {
+    use nexus_core::deck::render::LAYOUT;
+    let css = include_str!("../../ui/studio.css");
+    let js = include_str!("../../ui/render.js");
+    // CSS writes lengths without a leading zero: `.3em`.
+    let n = |value: f64| format!("{value}").trim_start_matches('0').to_string();
+    let sizes = LAYOUT.size_percent.map(|p| format!("{p}"));
+    let wanted = format!(
+        "{{ s: {}, m: {}, l: {}, xl: {}, xxl: {} }}",
+        sizes[0], sizes[1], sizes[2], sizes[3], sizes[4]
+    );
+    assert!(js.contains(&wanted), "render.js sizes: {wanted}");
+    for needle in [
+        format!("line-height:{}", LAYOUT.line_height),
+        format!(".block p {{ margin:0 0 {}em", n(LAYOUT.paragraph_gap)),
+        format!("line-height:{}", LAYOUT.large_line_height),
+        format!(
+            "line-height:{}; margin:0 0 {}em; font-weight:{}",
+            LAYOUT.heading_line_height,
+            n(LAYOUT.heading_gap),
+            LAYOUT.heading_weight
+        ),
+        format!(".block h1 {{ font-size:{}em", LAYOUT.heading_scale[0]),
+        format!(".block h2 {{ font-size:{}em", LAYOUT.heading_scale[1]),
+        format!(".block h3 {{ font-size:{}em", LAYOUT.heading_scale[2]),
+        format!("padding-left:{}em", LAYOUT.list_indent),
+        format!("padding:{}em 0", n(LAYOUT.list_item_padding)),
+        format!(
+            "padding:{}em {}em",
+            n(LAYOUT.cell_padding_y),
+            n(LAYOUT.cell_padding_x)
+        ),
+        format!(
+            ".block pre {{ margin:0; padding:{}em",
+            n(LAYOUT.code_padding)
+        ),
+        format!("padding:0 {}em", n(LAYOUT.inline_code_padding)),
+    ] {
+        assert!(css.contains(&needle), "studio.css is missing `{needle}`");
+    }
+    assert!(js.contains(&format!(
+        "viewBox: '0 0 {} {}'",
+        LAYOUT.chart_width, LAYOUT.chart_height
+    )));
+    assert!(
+        css.contains("overflow:visible"),
+        "overflowing text stays visible past its box"
+    );
+}
+
+/// `NEXUS_RENDER_OUT=<dir> cargo test -p nexus-studio write_core_renders_of_the_dev_deck`
+/// draws the dev-harness deck with the core renderer, to compare with the HTML
+/// screenshots from `ui-dev/shot.mjs`. Does nothing unless the variable is set.
+#[test]
+fn write_core_renders_of_the_dev_deck() {
+    let Some(out) = std::env::var_os("NEXUS_RENDER_OUT") else {
+        return;
+    };
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../ui-dev/fixtures/workspace.json")).unwrap();
+    let deck = Deck::check(&fixture["deck"].to_string()).unwrap();
+    fs::create_dir_all(&out).unwrap();
+    for (id, name) in [("s1", "title"), ("s2", "content-chart"), ("s3", "quote")] {
+        let png = deck::render::render_slide(&deck, id, 1440).unwrap();
+        fs::write(
+            Path::new(&out).join(format!("core-workspace-{name}.png")),
+            png,
+        )
+        .unwrap();
+    }
 }

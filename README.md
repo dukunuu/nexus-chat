@@ -388,6 +388,7 @@ Type `/` in the composer for autocomplete. Aliases in parentheses.
 | `/swarm` (`panel`) | multi-persona roundtable |
 | `/files` (`images`, `scripts`, …) | browse space files / images / scripts |
 | `/apps` (`webapps`) | view model-created web apps |
+| `/studio [deck]` (`deck`, `slides`) | open the slide canvas linked to this conversation (see `docs/studio.md`) |
 | `/skills` | manage skills (app + project/user/global Agent Skills) |
 | `/usage` (`analytics`, `costs`) | token/cache/cost analytics by backend & model (←/→ for 24h/7d/30d/all windows) |
 | `/compact` (`summarize`) | summarize old messages into a digest |

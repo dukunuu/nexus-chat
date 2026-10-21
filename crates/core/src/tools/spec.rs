@@ -16,6 +16,8 @@ pub(super) enum Kind {
     StrList,
     Edits,
     Events,
+    Objects,
+    Slides,
     Enum(&'static [&'static str]),
 }
 
@@ -62,6 +64,10 @@ impl Param {
                     "required": ["hash"]
                 }
             }),
+            Kind::Objects => json!({ "type": "array", "items": { "type": "object" } }),
+            Kind::Slides => {
+                json!({ "type": "array", "items": { "oneOf": [{"type":"object"}, {"type":"string"}] } })
+            }
             Kind::Events => json!({
                 "type": "array", "maxItems": 100,
                 "items": { "type": "object", "properties": {
@@ -88,7 +94,7 @@ impl Param {
             Kind::Num => value.is_number(),
             Kind::Bool => value.is_boolean(),
             Kind::StrList | Kind::Edits => value.as_array().is_some_and(|a| !a.is_empty()),
-            Kind::Events => value.is_array(),
+            Kind::Events | Kind::Objects | Kind::Slides => value.is_array(),
         }
     }
 }
@@ -1363,7 +1369,120 @@ pub(super) static TASK: ToolSpec = ToolSpec {
     }],
 };
 
+pub(super) static DECK: ToolSpec = ToolSpec {
+    name: "deck",
+    purpose: "Build and edit slide decks in space files decks/*.deck.json. The user sees them live in studio (/studio) and can undo your edits; you see slides as images. \
+Edit directly when asked for a change; comment when reviewing or unsure. View after layout-affecting edits. Never invent data, sources or images. \
+Canvas is 32x18 integer units. Block: id,x,y,w,h,style{align,size:s|m|l|xl|xxl,color} plus kind text{text Markdown}|image{src already in the deck,fit}|shape{shape,fill,stroke}|table{rows}|code{language,source}|chart{chart:bar|line|pie,labels,series:[{name,values}]}. \
+Ops: add_slide{after?,slide} delete_slide{id} move_slide{id,to} set_layout{slide,layout} set_notes{slide,notes} insert_block{slide,block} update_block{slide,id,fields} delete_block{slide,id} restyle{target,style} set_theme{theme}. ids and base_hash are filled in; one bad op writes nothing. \
+Commenting principles: anchor to a slide and block; one issue in at most two sentences, with why it matters; attach ops when a fix exists; few, most important first (max 8 per review), severity must|should|consider; respect the author's intent and facts; answer the thread you are in.",
+    selector: Some("action"),
+    params: &[
+        Param {
+            name: "title",
+            kind: Kind::Str,
+            doc: "deck title",
+        },
+        Param {
+            name: "path",
+            kind: Kind::Str,
+            doc: "decks/name.deck.json",
+        },
+        Param {
+            name: "slides",
+            kind: Kind::Slides,
+            doc: "create: slide objects; view: slide ids",
+        },
+        Param {
+            name: "ops",
+            kind: Kind::Objects,
+            doc: "operations, applied atomically",
+        },
+        Param {
+            name: "revision",
+            kind: Kind::Str,
+            doc: "from read; a stale one is refused",
+        },
+        Param {
+            name: "slide",
+            kind: Kind::Str,
+            doc: "slide id",
+        },
+        Param {
+            name: "block",
+            kind: Kind::Str,
+            doc: "block id",
+        },
+        Param {
+            name: "text",
+            kind: Kind::Str,
+            doc: "the comment",
+        },
+        Param {
+            name: "severity",
+            kind: Kind::Enum(&["must", "should", "consider"]),
+            doc: "priority of a new comment",
+        },
+        Param {
+            name: "thread",
+            kind: Kind::Str,
+            doc: "thread id from read",
+        },
+    ],
+    actions: &[
+        ActionSpec {
+            name: "create",
+            summary: "New deck, shown as a contact sheet",
+            required: &["title"],
+            optional: &["path", "slides"],
+            read_only: false,
+            internal: "deck_create",
+        },
+        ActionSpec {
+            name: "read",
+            summary: "Ids, rectangles, text, revision, threads",
+            required: &["path"],
+            optional: &[],
+            read_only: true,
+            internal: "deck_read",
+        },
+        ActionSpec {
+            name: "view",
+            summary: "See slides; default is the slide open in studio, else a contact sheet",
+            required: &["path"],
+            optional: &["slides"],
+            read_only: true,
+            internal: "deck_view",
+        },
+        ActionSpec {
+            name: "edit",
+            summary: "Apply ops live and see the changed slides",
+            required: &["path", "ops"],
+            optional: &["revision"],
+            read_only: false,
+            internal: "deck_edit",
+        },
+        ActionSpec {
+            name: "comment",
+            summary: "Pin a comment, optionally with suggested ops, or reply in a thread",
+            required: &["path", "text"],
+            optional: &["slide", "block", "severity", "ops", "thread"],
+            read_only: false,
+            internal: "deck_comment",
+        },
+        ActionSpec {
+            name: "resolve",
+            summary: "Resolve a comment thread",
+            required: &["path", "thread"],
+            optional: &[],
+            read_only: false,
+            internal: "deck_resolve",
+        },
+    ],
+};
+
 const TOOLS: &[&ToolSpec] = &[
+    &DECK,
     &TASK,
     &SKILLS,
     &SCRIPTS,
@@ -1450,6 +1569,32 @@ mod tests {
 
     // Explicit legacy routing expectations, with each action's required arguments.
     const ROUTES: &[(&str, &str, &str)] = &[
+        ("deck", r#"{"action":"create","title":"x"}"#, "deck_create"),
+        (
+            "deck",
+            r#"{"action":"read","path":"decks/x.deck.json"}"#,
+            "deck_read",
+        ),
+        (
+            "deck",
+            r#"{"action":"view","path":"decks/x.deck.json"}"#,
+            "deck_view",
+        ),
+        (
+            "deck",
+            r#"{"action":"edit","path":"decks/x.deck.json","ops":[]}"#,
+            "deck_edit",
+        ),
+        (
+            "deck",
+            r#"{"action":"comment","path":"decks/x.deck.json","slide":"s1","text":"x","severity":"should"}"#,
+            "deck_comment",
+        ),
+        (
+            "deck",
+            r#"{"action":"resolve","path":"decks/x.deck.json","thread":"t"}"#,
+            "deck_resolve",
+        ),
         ("task", r#"{"prompt":"x"}"#, "task"),
         ("ui_check", r#"{"source":"{}"}"#, "ui_check"),
         ("skills", r#"{"action":"load","name":"x"}"#, "skill"),
@@ -1694,6 +1839,8 @@ mod tests {
     #[test]
     fn read_only_classification_is_unchanged() {
         let read_only = [
+            "deck_read",
+            "deck_view",
             "task",
             "skill",
             "web_search",

@@ -559,6 +559,12 @@ fn sync_cache(app: &mut AppView, width: usize) {
                 &app.settings,
                 width,
                 &theme,
+                super::cards::CardEnv {
+                    files_dir: &app.space.files_dir(&app.active_space.name),
+                    studio_linked: app.studio.linked(),
+                    image_at_line: &mut c.image_at_line,
+                    image_cache: &mut c.image_cache,
+                },
             );
         } else {
             push_assistant_stored(

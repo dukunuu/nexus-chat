@@ -120,8 +120,7 @@ export function renderBlock(block, theme, images = {}) {
     for (const row of block.rows) { const tr = element('tr'); for (const cell of row) tr.append(element('td', '', cell)); table.append(tr); }
     node.append(table);
   } else if (block.kind === 'code') {
-    const pre = element('pre'); pre.style.fontFamily = fontStack(theme.fonts.mono);
-    pre.append(element('code', '', block.source)); node.append(pre);
+    const pre = element('pre'); pre.append(element('code', '', block.source)); node.append(pre);
   } else if (block.kind === 'chart') node.append(renderChart(block, theme));
   return node;
 }
@@ -134,5 +133,6 @@ export function renderSlide(container, slide, theme, images) {
   container.style.color = theme.colors.fg;
   container.style.fontFamily = fontStack(theme.fonts.body);
   container.style.setProperty('--heading-font', fontStack(theme.fonts.heading));
+  container.style.setProperty('--mono-font', /mono|code|consolas|menlo/i.test(theme.fonts.mono) ? fontStack(theme.fonts.mono) : '"Menlo", SFMono-Regular, monospace');
   if (slide) for (const block of slide.blocks) container.append(renderBlock(block, theme, images));
 }

@@ -120,8 +120,20 @@ async fn run_loop(
         let status_deadline = app.status_deadline();
         let tui_app_deadline = ui::popups::tui_app::deadline(app);
         let images = std::sync::Arc::clone(&app.remote_images);
+        let studio_wake = app.studio_wake();
+        let studio_retry = app.studio.has_queued();
         tokio::select! {
             () = images.changed() => {}
+            // Studio spoke, closed, or the model changed a deck.
+            () = studio_wake.notified() => app.poll_studio(),
+            // A waiting studio comment re-checks for a free composer.
+            () = async {
+                if studio_retry {
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => app.poll_studio(),
             maybe = reader.next() => match maybe {
                 Some(Ok(Event::Key(k))) if k.kind == KeyEventKind::Press => {
                     // A failed action is reported, never fatal: one bad db

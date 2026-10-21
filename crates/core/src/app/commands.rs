@@ -135,6 +135,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["app", "webapps"],
     },
     Command {
+        name: "studio",
+        desc: "open the slide canvas for this conversation",
+        aliases: &["deck", "slides"],
+    },
+    Command {
         name: "tuiapp",
         desc: "run a scripted terminal app from this space",
         aliases: &[],
@@ -363,6 +368,8 @@ pub enum AppCommand {
     OpenApps,
     /// Open a sandboxed space-local terminal app.
     OpenTuiApp(String),
+    /// `/studio [deck]` — open or focus the linked slide canvas (view-owned).
+    OpenStudio { deck: Option<String> },
     /// `/research [topic]` — `gated: false` skips the plan-approval gate
     /// (`/research!`); an empty topic distills one from recent chat.
     RunResearch { topic: String, gated: bool },
@@ -500,6 +507,9 @@ impl App {
                 },
             }),
             "apps" => Ok(AppCommand::OpenApps),
+            "studio" => Ok(AppCommand::OpenStudio {
+                deck: Some(rest(cmd, token)).filter(|deck| !deck.is_empty()),
+            }),
             "tuiapp" => Ok(AppCommand::OpenTuiApp(rest(cmd, token))),
             "research" => Ok(AppCommand::RunResearch {
                 topic: rest(cmd, token),
@@ -582,6 +592,7 @@ impl App {
             | AppCommand::OpenFiles { .. }
             | AppCommand::OpenApps
             | AppCommand::OpenTuiApp(_)
+            | AppCommand::OpenStudio { .. }
             | AppCommand::OpenUsage
             | AppCommand::OpenJobForm
             | AppCommand::OpenProcs

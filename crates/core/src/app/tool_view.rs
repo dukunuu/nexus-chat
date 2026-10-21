@@ -27,6 +27,8 @@ pub struct ToolView {
     pub output: Option<String>,
     /// Web search hits in result order, for a sources list.
     pub sources: Vec<Source>,
+    /// Rendered slides the result refers to, as `(alt, path under the space files)`.
+    pub images: Vec<(String, String)>,
 }
 
 /// One web search hit: what a reader scans for in a results list.
@@ -82,6 +84,7 @@ pub fn tool_call_view(name: &str, args: &str, result: &str) -> ToolView {
         diff: None,
         output: None,
         sources: Vec::new(),
+        images: Vec::new(),
     })
 }
 
@@ -148,6 +151,7 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
         diff: None,
         output: None,
         sources: Vec::new(),
+        images: Vec::new(),
     };
     let first = result.lines().next().unwrap_or_default();
     let (tool, action) = name
@@ -407,6 +411,7 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
                 });
             }
         }
+        "deck" => deck_view(&mut view, field("action")?, field("path"), result)?,
         "request_workspace" => {
             view.verb = "workspace".into();
             view.target = field("root")?.into();
@@ -428,6 +433,58 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
         _ => {}
     }
     Some(view)
+}
+
+/// The `deck` tool: `created deck`, `edited slide 3`, `viewed 4 slides`,
+/// `commented on slide 2`, with the rendered slides the result shows.
+fn deck_view(view: &mut ToolView, action: &str, path: Option<&str>, result: &str) -> Option<()> {
+    let first = result.lines().next().unwrap_or_default();
+    let lead = first.split(" · ").next().unwrap_or_default();
+    view.target = path.unwrap_or_default().into();
+    if view.outcome != ToolOutcome::Ok {
+        view.verb = match action {
+            "create" => "create deck",
+            "read" => "read deck",
+            "view" | "edit" | "comment" | "resolve" => action,
+            _ => return None,
+        }
+        .into();
+        view.output = Some(result.into());
+        return Some(());
+    }
+    view.verb = match action {
+        "read" => "read deck".into(),
+        "resolve" => "resolved thread".into(),
+        "comment" if lead.starts_with("replied in thread") => "replied in thread".into(),
+        "create" | "view" | "edit" | "comment" => lead.into(),
+        _ => return None,
+    };
+    if matches!(action, "create" | "read")
+        && let Some(count) = first.split(" · ").find(|part| {
+            part.split_once(' ').is_some_and(|(n, unit)| {
+                n.parse::<usize>().is_ok() && matches!(unit, "slide" | "slides")
+            })
+        })
+    {
+        view.stats.push(count.into());
+    }
+    let mut notes = Vec::new();
+    for line in result.lines().skip(1) {
+        match line
+            .strip_prefix("![")
+            .and_then(|inner| inner.split_once("]("))
+            .and_then(|(alt, file)| Some((alt, file.strip_suffix(')')?)))
+        {
+            Some((alt, file)) => view.images.push((alt.into(), file.into())),
+            None => notes.push(line),
+        }
+    }
+    view.output = if action == "read" {
+        Some(result.into())
+    } else {
+        (!notes.is_empty()).then(|| notes.join("\n"))
+    };
+    Some(())
 }
 
 /// Parse the search tools' `[N] Title` / indented URL / text blocks.
@@ -502,6 +559,98 @@ fn short_url(url: &str) -> String {
         format!("{}…", rest.chars().take(59).collect::<String>())
     } else {
         rest.to_string()
+    }
+}
+
+#[cfg(test)]
+mod deck_tests {
+    use super::*;
+
+    fn view(action: &str, result: &str) -> ToolView {
+        tool_call_view(
+            "deck",
+            &format!(r#"{{"action":"{action}","path":"decks/a.deck.json"}}"#),
+            result,
+        )
+    }
+
+    #[test]
+    fn deck_calls_read_as_verbs_with_their_slides() {
+        let created = view(
+            "create",
+            "created deck · decks/a.deck.json · 2 slides · revision abc\n![2 slides](decks/.renders/a/x.png)",
+        );
+        assert_eq!(
+            created.summary(),
+            "created deck decks/a.deck.json · 2 slides"
+        );
+        assert_eq!(
+            created.images,
+            [("2 slides".to_string(), "decks/.renders/a/x.png".to_string())]
+        );
+
+        let edited = view(
+            "edit",
+            "edited slide 3 · decks/a.deck.json · revision abc\n- update_block b1 on slide 3: text\n![slide 3](decks/.renders/a/y.png)",
+        );
+        assert_eq!(edited.verb, "edited slide 3");
+        assert_eq!(
+            edited.output.as_deref(),
+            Some("- update_block b1 on slide 3: text")
+        );
+        assert_eq!(edited.images.len(), 1);
+        assert_eq!(edited.outcome, ToolOutcome::Ok);
+
+        assert_eq!(
+            view(
+                "view",
+                "viewed 4 slides · decks/a.deck.json · revision abc\n![4 slides](x.png)"
+            )
+            .verb,
+            "viewed 4 slides"
+        );
+        assert_eq!(
+            view(
+                "comment",
+                "commented on slide 2 · decks/a.deck.json\nthread t"
+            )
+            .verb,
+            "commented on slide 2"
+        );
+        assert_eq!(
+            view("comment", "replied in thread t · decks/a.deck.json").verb,
+            "replied in thread"
+        );
+        assert_eq!(
+            view("resolve", "resolved thread t · decks/a.deck.json").verb,
+            "resolved thread"
+        );
+        let read = view(
+            "read",
+            "decks/a.deck.json · \"A\" · 1 slide · revision abc\nslide 1",
+        );
+        assert_eq!(
+            (read.verb.as_str(), read.stats.as_slice()),
+            ("read deck", ["1 slide".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn failed_deck_calls_keep_their_error_and_show_no_slides() {
+        let failed = view(
+            "edit",
+            "deck failed: ops[0]: no block \"x\". Nothing was written; read the deck and correct that operation.",
+        );
+        assert_eq!(failed.outcome, ToolOutcome::Failed);
+        assert_eq!(failed.verb, "edit");
+        assert!(failed.stats.contains(&"failed".to_string()));
+        assert!(failed.images.is_empty());
+        assert!(
+            failed
+                .output
+                .as_deref()
+                .is_some_and(|o| o.contains("Nothing was written"))
+        );
     }
 }
 

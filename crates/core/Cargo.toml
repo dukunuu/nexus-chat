@@ -43,6 +43,7 @@ pdf-extract = { workspace = true }
 png = { workspace = true }
 rand = { workspace = true }
 rhai = { workspace = true }
+resvg = { workspace = true }
 reqwest = { workspace = true }
 reqwest-eventsource = { workspace = true }
 rusqlite = { workspace = true }

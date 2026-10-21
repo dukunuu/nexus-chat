@@ -180,6 +180,87 @@
     }
   },
   {
+    "name": "deck",
+    "description": "Build and edit slide decks in space files decks/*.deck.json. The user sees them live in studio (/studio) and can undo your edits; you see slides as images. Edit directly when asked for a change; comment when reviewing or unsure. View after layout-affecting edits. Never invent data, sources or images. Canvas is 32x18 integer units. Block: id,x,y,w,h,style{align,size:s|m|l|xl|xxl,color} plus kind text{text Markdown}|image{src already in the deck,fit}|shape{shape,fill,stroke}|table{rows}|code{language,source}|chart{chart:bar|line|pie,labels,series:[{name,values}]}. Ops: add_slide{after?,slide} delete_slide{id} move_slide{id,to} set_layout{slide,layout} set_notes{slide,notes} insert_block{slide,block} update_block{slide,id,fields} delete_block{slide,id} restyle{target,style} set_theme{theme}. ids and base_hash are filled in; one bad op writes nothing. Commenting principles: anchor to a slide and block; one issue in at most two sentences, with why it matters; attach ops when a fix exists; few, most important first (max 8 per review), severity must|should|consider; respect the author's intent and facts; answer the thread you are in.\n- action=create: New deck, shown as a contact sheet. Needs title; optional path, slides.\n- action=read: Ids, rectangles, text, revision, threads. Needs path.\n- action=view: See slides; default is the slide open in studio, else a contact sheet. Needs path; optional slides.\n- action=edit: Apply ops live and see the changed slides. Needs path, ops; optional revision.\n- action=comment: Pin a comment, optionally with suggested ops, or reply in a thread. Needs path, text; optional slide, block, severity, ops, thread.\n- action=resolve: Resolve a comment thread. Needs path, thread.",
+    "parameters": {
+      "properties": {
+        "action": {
+          "enum": [
+            "create",
+            "read",
+            "view",
+            "edit",
+            "comment",
+            "resolve"
+          ],
+          "type": "string"
+        },
+        "block": {
+          "description": "block id",
+          "type": "string"
+        },
+        "ops": {
+          "description": "operations, applied atomically",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "path": {
+          "description": "decks/name.deck.json",
+          "type": "string"
+        },
+        "revision": {
+          "description": "from read; a stale one is refused",
+          "type": "string"
+        },
+        "severity": {
+          "description": "priority of a new comment",
+          "enum": [
+            "must",
+            "should",
+            "consider"
+          ],
+          "type": "string"
+        },
+        "slide": {
+          "description": "slide id",
+          "type": "string"
+        },
+        "slides": {
+          "description": "create: slide objects; view: slide ids",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "type": "array"
+        },
+        "text": {
+          "description": "the comment",
+          "type": "string"
+        },
+        "thread": {
+          "description": "thread id from read",
+          "type": "string"
+        },
+        "title": {
+          "description": "deck title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "search",
     "description": "Search general web sources, recent reporting (web with recency), papers, or Reddit and Hacker News threads. Use discussion for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments.\n- mode=web: Search general sources; use recency for recent news reporting. Needs query; optional recency, include_domains, exclude_domains.\n- mode=academic: Search academic papers with Semantic Scholar, preserving scholarly metadata. Needs query; optional limit.\n- mode=discussion: Search Reddit and Hacker News threads for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments. Needs query.\n- mode=images: Direct picture URLs for cards and replies; copy one exactly into image/src. Needs query.",
     "parameters": {

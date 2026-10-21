@@ -1132,6 +1132,8 @@ pub struct App {
     pub proposed_command: Option<String>,
     /// Tool-to-view open request, shared across toolbox refreshes.
     pub pending_tui_app: crate::tui_apps::PendingOpen,
+    /// Session-local canvas focus and deck edit notifications, shared with tools.
+    pub deck_link: Arc<std::sync::Mutex<crate::deck::link::Context>>,
     /// Interactive frontend's `TestBackend` renderer.
     pub tui_app_renderer: Option<crate::tui_apps::PreviewRenderer>,
     /// An approved `request_workspace` root, applied when its chat task finishes.
@@ -1529,6 +1531,7 @@ impl App {
             approval_rx: None,
             proposed_command: None,
             pending_tui_app: Arc::default(),
+            deck_link: Arc::default(),
             tui_app_renderer: None,
             queued_workspace: None,
             user_command_rx: None,
@@ -2138,6 +2141,7 @@ impl App {
         toolbox.remote_images = Some(Arc::clone(&self.image_fetcher));
         toolbox.interactive_ui = self.interactive_ui;
         toolbox.pending_tui_app = Arc::clone(&self.pending_tui_app);
+        toolbox.deck_link = Arc::clone(&self.deck_link);
         toolbox.tui_app_renderer = self.tui_app_renderer;
         toolbox.space_tui_apps_dir = self
             .space

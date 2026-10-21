@@ -9,6 +9,7 @@ mod history_cache;
 mod interactive;
 mod resize;
 mod selection;
+mod studio;
 mod theme;
 mod ui;
 

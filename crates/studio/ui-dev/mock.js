@@ -1,12 +1,15 @@
 // Dev-only IPC fixture. Injected by shot.mjs, never embedded or loaded by studio.
+// It plays the backend's part: the deck is the single source of truth, every
+// edit is saved at once, and the model (the `deck` tool) can change the deck
+// from outside, which arrives as one undo step with the changed blocks flashing.
 (() => {
   const fixture = structuredClone(window.__studioFixture);
-  let deck = fixture.deck, threads = fixture.threads, chat = fixture.chat, sequence = 0;
-  const undo = [], redo = [];
+  let deck = fixture.deck, threads = fixture.threads, sequence = 0;
+  const undo = [], redo = [], sent = [];
   const emit = event => window.studioEvent(event);
-  const feedback = () => ({ event:'Feedback', threads, chat, notes:[] });
-  function current() {
-    return { event:'Deck', deck, revision:`r${sequence}`, hashes:Object.fromEntries(deck.slides.flatMap(s => s.blocks.map(b => [b.id, 'mock']))), dirty:undo.length > 0, images:{}, threads, chat };
+  const feedback = () => ({ event:'Feedback', threads, notes:[] });
+  function current(extra = {}) {
+    return { event:'Deck', deck, revision:`r${sequence}`, hashes:Object.fromEntries(deck.slides.flatMap(s => s.blocks.map(b => [b.id, 'mock']))), images:{}, threads, linked:true, changed:[], notice:null, ...extra };
   }
   function apply(ops) {
     const next = structuredClone(deck);
@@ -25,38 +28,43 @@
     }
     return next;
   }
-  const edits = () => [...threads.flatMap(t => t.messages), ...chat].flatMap(m => m.edits);
+  const edits = () => threads.flatMap(t => t.messages).flatMap(m => m.edits);
+  // What the model does from outside: change the deck file. One undo step.
+  window.__mock = {
+    sent,
+    emitCurrent: extra => window.studioAsyncEvent(current(extra)),
+    externalEdit(ops, focusSlide) {
+      const before = deck, next = apply(ops);
+      const old = before.slides.flatMap(s => s.blocks);
+      const changed = next.slides.flatMap(s => s.blocks).filter(b => !old.some(o => JSON.stringify(o) === JSON.stringify(b))).map(b => b.id);
+      undo.push(before); redo.length = 0; deck = next; sequence++;
+      window.studioAsyncEvent(current({ changed, notice:'The deck changed on disk and was reloaded. Undo takes the change back.' }));
+      if (focusSlide) window.studioAsyncEvent({ event:'Focus', slide:focusSlide });
+    },
+  };
   window.ipc = { postMessage(source) {
     const m = JSON.parse(source);
     setTimeout(() => {
-      if (m.command === 'HostStatus' || m.command === 'StartHost') return emit({ event:'HostStatus', status:{ state:'connected', model:'local / nexus', can_start:false, message:'Connected to your local host' } });
+      if (m.command === 'Focus') { sent.push({ type:'Focus', slide:m.slide, blocks:m.blocks }); return emit(feedback()); }
       if (m.command === 'PreviewEdit') return emit({ event:'Preview', deck:apply(edits().find(e => e.id === m.edit).ops) });
       if (m.command === 'DismissEdit') { edits().find(e => e.id === m.edit).status = 'dismissed'; return emit(feedback()); }
-      if (m.command === 'ApplyEdit' || m.command === 'ChooseOption') {
-        const edit = edits().find(e => e.id === m.edit); undo.push(deck); deck = apply(edit.ops); edit.status = 'applied'; sequence++; return emit(current());
+      if (m.command === 'ApplyEdit') {
+        const edit = edits().find(e => e.id === m.edit); undo.push(deck); redo.length = 0; deck = apply(edit.ops); edit.status = 'applied'; sequence++; return emit(current());
       }
       if (m.command === 'CommentResolve' || m.command === 'CommentReopen') { threads.find(t => t.id === m.thread).resolved = m.command === 'CommentResolve' ? Date.now()/1000 : null; return emit(feedback()); }
       if (m.command === 'CommentCreate') {
         threads.push({ id:`new-${++sequence}`, anchor:m.anchor, severity:'consider', resolved:null, created:Date.now()/1000, messages:[{ id:`msg-${sequence}`, role:'you', text:m.text, created:Date.now()/1000, edits:[] }] });
-        if (!m.send) return emit(feedback());
+        if (m.send) sent.push({ type:'Comment', text:m.text, slide:m.anchor.slide, block:m.anchor.block });
+        return emit(feedback());
       }
       if (m.command === 'CommentReply') {
         threads.find(t => t.id === m.thread).messages.push({ id:`msg-${++sequence}`, role:'you', text:m.text, created:Date.now()/1000, edits:[] });
-        if (!m.send) return emit(feedback());
+        if (m.send) sent.push({ type:'Reply', text:m.text, thread:m.thread });
+        return emit(feedback());
       }
-      if (['Review','Chat','CommentCreate','CommentReply'].includes(m.command)) {
-        if (m.command === 'Chat') chat.push({ id:`user-${++sequence}`, role:'you', text:m.text, created:Date.now()/1000, edits:[] });
-        emit({ event:'Suggesting' });
-        setTimeout(() => {
-          if (m.command === 'Review') { threads.push(...structuredClone(fixture.review).filter(t => !threads.some(old => old.id === t.id))); chat.push({ id:`review-${++sequence}`, role:'model', text:'The visual direction is cohesive. I’ve left two focused comments on clarity and the closing invitation, in priority order.', created:Date.now()/1000, edits:[] }); }
-          else if (m.command === 'Chat') chat.push(structuredClone(fixture.options));
-          else { const thread = m.thread ? threads.find(t => t.id === m.thread) : threads.at(-1); thread.messages.push({ id:`model-${++sequence}`, role:'model', text:'Let’s keep the quiet tone and make this one detail clearer. What should the audience take away from this part?', created:Date.now()/1000, edits:[] }); }
-          window.studioAsyncEvent(feedback());
-        }, 150); return;
-      }
-      if (m.command === 'Undo' && undo.length) { redo.push(deck); deck = undo.pop(); }
-      else if (m.command === 'Redo' && redo.length) { undo.push(deck); deck = redo.pop(); }
-      else if (m.command === 'Apply') { undo.push(deck); deck = apply(m.ops); sequence++; }
+      if (m.command === 'Undo' && undo.length) { redo.push(deck); deck = undo.pop(); sequence++; }
+      else if (m.command === 'Redo' && redo.length) { undo.push(deck); deck = redo.pop(); sequence++; }
+      else if (m.command === 'Apply') { undo.push(deck); redo.length = 0; deck = apply(m.ops); sequence++; }
       else if (m.command === 'Save') deck = m.deck;
       emit(current());
     }, 15);

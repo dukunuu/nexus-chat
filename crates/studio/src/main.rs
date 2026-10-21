@@ -7,8 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use backend::{Backend, Completed};
+use backend::Backend;
+use nexus_core::deck::link::{Line, Message as LinkMessage};
 use nexus_core::{db, remote_image, space};
+use std::io::{BufRead as _, Write as _};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
@@ -23,13 +25,17 @@ const HOME: &str = "nexus://localhost/index.html";
 
 enum Message {
     Command(String),
-    Completed(Completed),
+    Link(LinkMessage),
+    Poll,
 }
 
 fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let _runtime = runtime.enter();
-    let path = std::env::args_os().nth(1).map(PathBuf::from);
+    let mut args = std::env::args_os().skip(1);
+    let first = args.next();
+    let attached = first.as_deref() == Some(std::ffi::OsStr::new("--attach"));
+    let path = if attached { args.next() } else { first }.map(PathBuf::from);
     let space = space::Space::open()?;
     let db = db::Db::open(&space.db_path())?;
     let default_id = db.default_space_id()?;
@@ -43,7 +49,12 @@ fn main() -> Result<()> {
         &space.files_dir(&active.name),
         &space.root,
     )?));
-    configure_host(&backend)?;
+    {
+        let mut backend = backend.lock().expect("backend lock");
+        backend.linked = attached;
+        backend.hello();
+        flush_link(&mut backend)?;
+    }
     let event_loop = EventLoopBuilder::<Message>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title(format!(
@@ -54,7 +65,7 @@ fn main() -> Result<()> {
         .with_min_inner_size(LogicalSize::new(900.0, 600.0))
         .build(&event_loop)?;
     let proxy = event_loop.create_proxy();
-    let result_proxy = proxy.clone();
+    start_threads(&proxy, attached);
     let protocol_backend = Arc::clone(&backend);
     let handle = runtime.handle().clone();
     let builder = WebViewBuilder::new()
@@ -62,34 +73,7 @@ fn main() -> Result<()> {
         .with_asynchronous_custom_protocol("nexus".into(), move |_, request, responder| {
             let uri = request.uri().to_string();
             let backend = Arc::clone(&protocol_backend);
-            handle.spawn(async move {
-                let remote = backend.lock().expect("backend lock").remote_image(&uri);
-                let result = if let Ok((fetcher, src)) = remote {
-                    remote_bytes(&backend, &fetcher, &src).await
-                } else {
-                    backend.lock().expect("backend lock").serve(&uri)
-                };
-                let (status, mime, bytes) = match result {
-                    Ok((mime, bytes)) => (200, mime, bytes),
-                    Err(_) => (
-                        404,
-                        "text/plain; charset=utf-8",
-                        b"Resource unavailable".to_vec(),
-                    ),
-                };
-                let response = Response::builder()
-                    .status(status)
-                    .header("Content-Type", mime)
-                    // WebKit custom schemes can have an opaque origin. Only
-                    // embedded pages may navigate here; allow their ES modules.
-                    .header("Access-Control-Allow-Origin", "*")
-                    .header("Content-Security-Policy", csp())
-                    .header("X-Content-Type-Options", "nosniff")
-                    .header("Cache-Control", "no-store")
-                    .body(bytes)
-                    .expect("static response headers");
-                responder.respond(response);
-            });
+            handle.spawn(async move { responder.respond(respond(&backend, &uri).await) });
         })
         .with_navigation_handler(|url| url == HOME || url == HOME.replace("/index.html", "/"))
         .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
@@ -109,15 +93,23 @@ fn main() -> Result<()> {
         use wry::WebViewBuilderExtUnix as _;
         builder.build_gtk(window.default_vbox().context("missing GTK container")?)?
     };
-    let jobs = runtime.handle().clone();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(message) => {
-                let (title, script) = handle_message(message, &backend, &jobs, &result_proxy);
-                window.set_title(&title);
-                if let Err(error) = webview.evaluate_script(&script) {
-                    eprintln!("studio: {error}");
+                if matches!(message, Message::Link(LinkMessage::Bye)) {
+                    *control_flow = ControlFlow::Exit;
+                    return;
+                }
+                if matches!(message, Message::Link(LinkMessage::Open { .. })) {
+                    window.set_focus();
+                }
+                let (title, script) = handle_message(message, &backend);
+                if !script.is_empty() {
+                    window.set_title(&title);
+                    if let Err(error) = webview.evaluate_script(&script) {
+                        eprintln!("studio: {error}");
+                    }
                 }
             }
             Event::WindowEvent {
@@ -129,43 +121,99 @@ fn main() -> Result<()> {
     });
 }
 
-fn configure_host(backend: &Mutex<Backend>) -> Result<()> {
-    let host_url = nexus_core::config::load_studio_host_url()
-        .map_err(|_| anyhow::anyhow!("Invalid studio host configuration"))?;
-    let token = nexus_core::config::ensure_host_token()
-        .map_err(|_| anyhow::anyhow!("Could not load the local host token"))?;
-    backend
-        .lock()
-        .expect("backend lock")
-        .configure_host(backend::host::Connection::new(&host_url, token)?);
+/// The link's reader (nexus → studio on stdin, only when attached) and the
+/// 500 ms tick that notices changes the model makes to the deck file.
+fn start_threads(proxy: &EventLoopProxy<Message>, attached: bool) {
+    if attached {
+        let link_proxy = proxy.clone();
+        std::thread::spawn(move || {
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                if let Ok(message) = Line::decode(&line)
+                    && link_proxy.send_event(Message::Link(message)).is_err()
+                {
+                    return;
+                }
+            }
+            let _ = link_proxy.send_event(Message::Link(LinkMessage::Bye));
+        });
+    }
+    let poll_proxy = proxy.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(500));
+            if poll_proxy.send_event(Message::Poll).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// One `nexus://` request: embedded UI, deck assets, or a vetted remote image.
+async fn respond(backend: &Arc<Mutex<Backend>>, uri: &str) -> Response<Vec<u8>> {
+    let remote = backend.lock().expect("backend lock").remote_image(uri);
+    let result = if let Ok((fetcher, src)) = remote {
+        remote_bytes(backend, &fetcher, &src).await
+    } else {
+        backend.lock().expect("backend lock").serve(uri)
+    };
+    let (status, mime, bytes) = match result {
+        Ok((mime, bytes)) => (200, mime, bytes),
+        Err(_) => (
+            404,
+            "text/plain; charset=utf-8",
+            b"Resource unavailable".to_vec(),
+        ),
+    };
+    Response::builder()
+        .status(status)
+        .header("Content-Type", mime)
+        // WebKit custom schemes can have an opaque origin. Only
+        // embedded pages may navigate here; allow their ES modules.
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Content-Security-Policy", csp())
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Cache-Control", "no-store")
+        .body(bytes)
+        .expect("static response headers")
+}
+
+fn flush_link(backend: &mut Backend) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    for message in backend.outgoing.drain(..) {
+        stdout.write_all(Line::encode(message)?.as_bytes())?;
+    }
+    stdout.flush()?;
     Ok(())
 }
 
-fn handle_message(
-    message: Message,
-    backend: &Mutex<Backend>,
-    jobs: &tokio::runtime::Handle,
-    proxy: &EventLoopProxy<Message>,
-) -> (String, String) {
+fn handle_message(message: Message, backend: &Mutex<Backend>) -> (String, String) {
     let mut backend = backend.lock().expect("backend lock");
-    let asynchronous = matches!(message, Message::Completed(_));
-    let event = match message {
-        Message::Command(source) => backend.dispatch(&source),
-        Message::Completed(result) => backend.complete(result),
+    let asynchronous = !matches!(message, Message::Command(_));
+    let result = match message {
+        Message::Command(source) => Ok(Some(backend.dispatch(&source))),
+        Message::Link(message) => backend.receive_link(message).map(Some),
+        Message::Poll => backend.poll(),
     };
-    if let Some(work) = backend.take_work() {
-        let proxy = proxy.clone();
-        jobs.spawn(async move {
-            let _ = proxy.send_event(Message::Completed(work.run().await));
-        });
+    let event = result.unwrap_or_else(|error| {
+        Some(backend::Event::Error {
+            message: error.to_string(),
+        })
+    });
+    if let Err(error) = flush_link(&mut backend) {
+        eprintln!("studio link: {error}");
+        backend.linked = false;
     }
-    let script = if asynchronous {
-        event
-            .script()
-            .replacen("window.studioEvent(", "window.studioAsyncEvent(", 1)
-    } else {
-        event.script()
-    };
+    let script = event.map_or_else(String::new, |event| {
+        let script = event.script();
+        if asynchronous {
+            script.replacen("window.studioEvent(", "window.studioAsyncEvent(", 1)
+        } else {
+            script
+        }
+    });
     (format!("nexus studio — {}", backend.deck.title), script)
 }
 

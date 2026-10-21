@@ -161,6 +161,16 @@ impl Fetcher {
         self.changes.load(Ordering::Relaxed)
     }
 
+    /// Return only an already vetted cache file, without scheduling network work.
+    #[must_use]
+    pub fn cached(&self, url: &str) -> Option<PathBuf> {
+        if !self.enabled() || validate_url_with(url, self.allow_loopback).is_err() {
+            return None;
+        }
+        let path = self.path(url);
+        path.is_file().then_some(path)
+    }
+
     /// Look up a URL and, if needed, enqueue one bounded background download.
     #[must_use]
     pub fn request(self: &Arc<Self>, url: &str) -> Status {

@@ -2,24 +2,21 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
-use std::io::{Read as _, Write as _};
+use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail, ensure};
-use nexus_core::deck::{self, Content, Deck, Op};
+use nexus_core::deck::{self, Content, Deck, Op, same_file};
 use nexus_core::remote_image::Fetcher;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 mod feedback;
-pub mod host;
-mod jobs;
-pub use jobs::Completed;
-use jobs::{Job, Work};
-use nexus_core::deck::suggest::Selection;
+use nexus_core::deck::link::Message as LinkMessage;
+use std::time::SystemTime;
 
 /// All messages accepted from the presentation layer. `Open` and `ImportAsset`
 /// are explicit user-entered paths; deck content can only name safe assets.
@@ -47,8 +44,10 @@ pub enum Command {
     ExportDeck {
         path: PathBuf,
     },
-    HostStatus {},
-    StartHost {},
+    Focus {
+        slide: String,
+        blocks: Vec<String>,
+    },
     CommentCreate {
         anchor: nexus_core::deck::feedback::Anchor,
         text: String,
@@ -65,15 +64,6 @@ pub enum Command {
     CommentReopen {
         thread: String,
     },
-    Review {
-        #[serde(default)]
-        selection: Selection,
-    },
-    Chat {
-        text: String,
-        #[serde(default)]
-        selection: Selection,
-    },
     PreviewEdit {
         owner: String,
         edit: String,
@@ -86,10 +76,6 @@ pub enum Command {
         owner: String,
         edit: String,
     },
-    ChooseOption {
-        message: String,
-        edit: String,
-    },
 }
 
 #[derive(Debug, Serialize)]
@@ -98,24 +84,22 @@ pub enum Event {
     Deck {
         deck: Deck,
         revision: String,
-        dirty: bool,
         // The backend supplies preconditions rather than asking JS to
         // reproduce Rust's canonical number serialization.
         hashes: BTreeMap<String, String>,
         images: BTreeMap<String, String>,
-        threads: Vec<feedback::Thread>,
-        chat: Vec<feedback::Message>,
+        threads: Vec<nexus_core::deck::feedback::Thread>,
+        linked: bool,
+        changed: Vec<String>,
+        notice: Option<String>,
     },
     Feedback {
-        threads: Vec<feedback::Thread>,
-        chat: Vec<feedback::Message>,
+        threads: Vec<nexus_core::deck::feedback::Thread>,
         notes: Vec<String>,
     },
-    HostChecking {},
-    HostStatus {
-        status: host::Status,
+    Focus {
+        slide: String,
     },
-    Suggesting {},
     Preview {
         deck: Deck,
     },
@@ -148,16 +132,20 @@ pub struct Backend {
     path: PathBuf,
     files_dir: PathBuf,
     recent: PathBuf,
-    saved_revision: String,
+    /// Revision of the deck as last written to, or read from, the file.
+    known_revision: String,
     undo: Vec<Deck>,
     redo: Vec<Deck>,
     pub fetcher: Arc<Fetcher>,
-    feedback: feedback::State,
-    host: Option<host::Connection>,
-    work: Option<Work>,
-    document: Uuid,
-    suggesting: bool,
+    feedback: Vec<nexus_core::deck::feedback::Thread>,
+    pub linked: bool,
+    pub outgoing: Vec<LinkMessage>,
+    deck_stamp: Option<Stamp>,
+    comments_stamp: Option<Stamp>,
 }
+
+/// Modified time and length: enough to notice another writer within one mtime tick.
+type Stamp = (SystemTime, u64);
 
 impl Backend {
     pub fn start(path: Option<&Path>, files_dir: &Path, data_dir: &Path) -> Result<Self> {
@@ -181,31 +169,33 @@ impl Backend {
             path,
             files_dir: files_dir.into(),
             recent,
-            saved_revision: String::new(),
+            known_revision: String::new(),
             undo: Vec::new(),
             redo: Vec::new(),
-            feedback: feedback::State::default(),
-            host: None,
-            work: None,
-            document: Uuid::new_v4(),
-            suggesting: false,
+            feedback: Vec::new(),
+            linked: false,
+            outgoing: Vec::new(),
+            deck_stamp: None,
+            comments_stamp: None,
         };
         if !backend.path.exists() {
             backend.save()?;
         }
-        backend.saved_revision = backend.deck.revision();
+        backend.known_revision = backend.deck.revision();
         backend.remember()?;
         backend.load_feedback()?;
+        backend.deck_stamp = stamp(&backend.path);
         Ok(backend)
     }
 
     pub fn event(&self) -> Event {
         Event::Deck {
-            threads: self.feedback.threads.clone(),
-            chat: self.feedback.chat.clone(),
+            threads: self.feedback.clone(),
+            linked: self.linked,
+            changed: Vec::new(),
+            notice: None,
             deck: self.deck.clone(),
             revision: self.deck.revision(),
-            dirty: self.deck.revision() != self.saved_revision,
             hashes: self
                 .deck
                 .slides
@@ -238,6 +228,16 @@ impl Backend {
                 "command too large"
             );
             let command: Command = serde_json::from_str(source).context("invalid command")?;
+            // The file wins: when the deck changed under the page, show that
+            // instead of applying an edit made against the old one.
+            if let (Some(mut event), true) = self.sync()? {
+                if let (Event::Deck { notice, .. }, false) =
+                    (&mut event, matches!(command, Command::Load {}))
+                {
+                    *notice = Some("The deck changed on disk first, so your last action was not applied. Undo takes the change back.".into());
+                }
+                return Ok(event);
+            }
             self.execute(command)
         })();
         result.unwrap_or_else(|e| Event::Error {
@@ -255,40 +255,47 @@ impl Backend {
             }
             Command::CommentResolve { thread } => return self.comment_resolve(&thread, true),
             Command::CommentReopen { thread } => return self.comment_resolve(&thread, false),
-            Command::Review { selection } => {
-                return self.ask_feedback(
-                    nexus_core::deck::feedback::Kind::Review,
-                    None,
-                    selection,
-                );
+            Command::Focus { slide, blocks } => {
+                if self.linked {
+                    self.outgoing.push(LinkMessage::Focus {
+                        deck_path: self.path.clone(),
+                        slide,
+                        blocks,
+                    });
+                }
+                return Ok(self.feedback_event(vec![]));
             }
-            Command::Chat { text, selection } => return self.chat(text, selection),
             Command::PreviewEdit { owner, edit } => return self.preview_edit(&owner, &edit),
             Command::ApplyEdit { owner, edit } => self.apply_edit(&owner, &edit)?,
-            Command::ChooseOption { message, edit } => self.apply_edit(&message, &edit)?,
             Command::DismissEdit { owner, edit } => return self.dismiss_edit(&owner, &edit),
-            Command::HostStatus {} => return self.request_host(Job::HostStatus),
-            Command::StartHost {} => return self.request_host(Job::StartHost),
             Command::Load {} => {}
             Command::Apply { ops } => {
                 let next = deck::apply(&self.deck, &ops)?;
-                self.replace(next);
+                self.replace(next)?;
             }
             Command::Save { deck } => {
                 let next = checked(&deck)?;
                 // A failed save must not change the authoritative document.
                 atomic_write(&self.path, &serde_json::to_vec_pretty(&next)?)?;
-                self.replace(next);
-                self.saved_revision = self.deck.revision();
+                self.replace(next)?;
+                self.known_revision = self.deck.revision();
             }
             Command::Undo {} => {
-                if let Some(previous) = self.undo.pop() {
-                    self.redo.push(std::mem::replace(&mut self.deck, previous));
+                if let Some(previous) = self.undo.last() {
+                    atomic_write(&self.path, &serde_json::to_vec_pretty(previous)?)?;
+                    self.redo.push(std::mem::replace(
+                        &mut self.deck,
+                        self.undo.pop().expect("undo"),
+                    ));
                 }
             }
             Command::Redo {} => {
-                if let Some(next) = self.redo.pop() {
-                    self.undo.push(std::mem::replace(&mut self.deck, next));
+                if let Some(next) = self.redo.last() {
+                    atomic_write(&self.path, &serde_json::to_vec_pretty(next)?)?;
+                    self.undo.push(std::mem::replace(
+                        &mut self.deck,
+                        self.redo.pop().expect("redo"),
+                    ));
                 }
             }
             Command::NewDeck { title } => {
@@ -312,15 +319,100 @@ impl Backend {
                 });
             }
         }
+        self.known_revision = self.deck.revision();
+        self.deck_stamp = stamp(&self.path);
         self.recheck_feedback();
         self.persist_feedback()?;
         Ok(self.event())
     }
 
-    fn replace(&mut self, next: Deck) {
+    fn replace(&mut self, next: Deck) -> Result<()> {
         if self.deck != next {
+            atomic_write(&self.path, &serde_json::to_vec_pretty(&next)?)?;
             self.undo.push(std::mem::replace(&mut self.deck, next));
             self.redo.clear();
+        }
+        Ok(())
+    }
+
+    /// Notice another writer of the deck or its comments file. One external
+    /// change of the deck is one undo step, so Cmd+Z takes back the model's edit.
+    pub fn poll(&mut self) -> Result<Option<Event>> {
+        Ok(self.sync()?.0)
+    }
+
+    /// The event for what changed on disk, and whether the deck itself was reloaded.
+    fn sync(&mut self) -> Result<(Option<Event>, bool)> {
+        let deck_stamp = stamp(&self.path);
+        let comments_stamp = stamp(&nexus_core::deck::feedback::sidecar(&self.path));
+        let mut changed = Vec::new();
+        let mut reloaded = false;
+        if deck_stamp != self.deck_stamp {
+            // Remember the stamp first: an unreadable file is reported once,
+            // not on every tick.
+            self.deck_stamp = deck_stamp;
+            let next = read_deck(&self.path)?;
+            if next.revision() != self.known_revision {
+                changed = changed_blocks(&self.deck, &next);
+                self.undo.push(std::mem::replace(&mut self.deck, next));
+                self.redo.clear();
+                self.known_revision = self.deck.revision();
+                reloaded = true;
+            }
+        }
+        let comments_changed = comments_stamp != self.comments_stamp;
+        if comments_changed {
+            self.comments_stamp = comments_stamp;
+            self.load_feedback()?;
+        }
+        self.recheck_feedback();
+        if !reloaded && !comments_changed {
+            return Ok((None, false));
+        }
+        let mut event = self.event();
+        if let Event::Deck {
+            changed: flash,
+            notice,
+            ..
+        } = &mut event
+        {
+            *flash = changed;
+            if reloaded {
+                *notice = Some(
+                    "The deck changed on disk and was reloaded. Undo takes the change back.".into(),
+                );
+            }
+        }
+        Ok((Some(event), reloaded))
+    }
+
+    pub fn receive_link(&mut self, message: LinkMessage) -> Result<Event> {
+        match message {
+            LinkMessage::Open { deck_path } => {
+                // Opening the deck that is already open must not drop its undo history.
+                if !same_file(&deck_path, &self.path) {
+                    let path = absolute(&deck_path)?;
+                    let deck = read_deck(&path)?;
+                    self.open_document(path, deck)?;
+                }
+                Ok(self.event())
+            }
+            LinkMessage::Focus {
+                deck_path, slide, ..
+            } if same_file(&deck_path, &self.path) => Ok(Event::Focus { slide }),
+            LinkMessage::Bye => {
+                self.linked = false;
+                Ok(self.event())
+            }
+            _ => Ok(self.event()),
+        }
+    }
+
+    pub fn hello(&mut self) {
+        if self.linked {
+            self.outgoing.push(LinkMessage::Hello {
+                deck_path: self.path.clone(),
+            });
         }
     }
 
@@ -338,11 +430,12 @@ impl Backend {
         self.path = path;
         self.deck = deck;
         self.fetcher = Fetcher::new(root);
-        self.saved_revision = self.deck.revision();
+        self.known_revision = self.deck.revision();
         self.undo.clear();
         self.redo.clear();
-        self.document = Uuid::new_v4();
+        self.deck_stamp = stamp(&self.path);
         self.load_feedback()?;
+        self.hello();
         Ok(())
     }
 
@@ -421,6 +514,22 @@ impl Backend {
         asset_root(&self.path)?;
         Ok((Arc::clone(&self.fetcher), src))
     }
+}
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
+/// Blocks that are new or different in `next`; every block when the theme changed.
+fn changed_blocks(before: &Deck, next: &Deck) -> Vec<String> {
+    let old: Vec<_> = before.slides.iter().flat_map(|s| &s.blocks).collect();
+    next.slides
+        .iter()
+        .flat_map(|s| &s.blocks)
+        .filter(|b| before.theme != next.theme || !old.iter().any(|o| o == b))
+        .map(|b| b.id.clone())
+        .collect()
 }
 
 fn checked(deck: &Deck) -> Result<Deck> {
@@ -511,24 +620,7 @@ fn asset_root(path: &Path) -> Result<PathBuf> {
 
 /// Sibling temporary file + rename: no partially written deck is observable.
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().context("missing parent folder")?;
-    fs::create_dir_all(parent)?;
-    ensure!(!path.is_symlink(), "refusing to overwrite a symlink");
-    let temporary = parent.join(format!(".studio-{}.tmp", Uuid::new_v4()));
-    let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    deck::write_atomic(path, bytes)
 }
 
 fn image_hash(src: &str) -> String {
