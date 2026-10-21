@@ -103,6 +103,11 @@ pub fn help_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
         }
         lines.push(Line::from(""));
     }
+    lines.push(Line::from(Span::styled(
+        "  drag a popup's border to resize it · drag the column edge to widen the conversation",
+        Style::default().fg(theme.fg_dim),
+    )));
+    lines.push(Line::from(""));
     lines.push(heading("commands"));
     let cmd_w = COMMANDS
         .iter()
@@ -117,7 +122,7 @@ pub fn help_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
 
 pub fn render(f: &mut Frame, app: &mut AppView) {
     // Wide: the key column alone is ~28 cells.
-    let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::TALL.1);
+    let area = chrome::popup_area(app, f.area(), "help", (chrome::WIDE.0, chrome::TALL.1));
     let title = chrome::popup_title(app, "help");
     let inner = chrome::render_hinted(
         f,

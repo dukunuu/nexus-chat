@@ -12,7 +12,7 @@ use nexus_core::app::Popup;
 use super::chrome;
 
 pub fn render(f: &mut Frame, app: &AppView) {
-    let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::WIDE.1);
+    let area = chrome::popup_area(app, f.area(), "procs", chrome::WIDE);
     let inner = chrome::render_hinted(
         f,
         area,

@@ -29,6 +29,50 @@ pub const STANDARD: (u16, u16) = (64, 60);
 pub const TALL: (u16, u16) = (64, 74);
 pub const WIDE: (u16, u16) = (78, 66);
 
+/// Where a centered popup was drawn last frame: its rect, its id in
+/// `popup_sizes`, and the default percentages it falls back to. Mouse
+/// resizing hit-tests against this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PopupHit {
+    pub rect: Rect,
+    pub id: &'static str,
+    pub default: (u16, u16),
+}
+
+/// Smallest a resized popup gets, in cells (or the whole screen if smaller).
+pub const MIN_POPUP_W: u16 = 40;
+pub const MIN_POPUP_H: u16 = 10;
+
+/// The rect popup `id` occupies on `screen`: its persisted size if the user
+/// dragged one, else the `default` percentages. Pure, so mouse hit-testing
+/// can ask where a popup is without drawing it.
+pub fn popup_rect(app: &AppView, screen: Rect, id: &str, default: (u16, u16)) -> Rect {
+    let custom = nexus_core::app::popup_size(&app.settings.popup_sizes, id);
+    let (pct_w, pct_h) = custom.unwrap_or(default);
+    let rect = crate::ui::centered(screen, pct_w, pct_h);
+    if custom.is_none() {
+        return rect;
+    }
+    // A saved percentage must stay usable on a small terminal: never below
+    // the minimum, never off the screen.
+    let w = rect.width.max(MIN_POPUP_W.min(screen.width));
+    let h = rect.height.max(MIN_POPUP_H.min(screen.height));
+    Rect {
+        x: screen.x + (screen.width - w) / 2,
+        y: screen.y + (screen.height - h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+/// [`popup_rect`] for a popup that is about to draw: also records the rect so
+/// a border press can start a resize. Every centered popup gets its area here.
+pub fn popup_area(app: &AppView, screen: Rect, id: &'static str, default: (u16, u16)) -> Rect {
+    let rect = popup_rect(app, screen, id, default);
+    app.popup_hit.set(Some(PopupHit { rect, id, default }));
+    rect
+}
+
 /// Horizontal padding inside every popup frame, in cells per side. Row-width
 /// math that starts from a popup's outer width subtracts `2 * PAD`.
 pub const PAD: u16 = 1;

@@ -9,7 +9,7 @@ use crate::app_view::AppView;
 use super::chrome;
 
 pub fn render(f: &mut Frame, app: &AppView) {
-    let area = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
+    let area = chrome::popup_area(app, f.area(), "copy", chrome::SMALL);
     let hint = if app.copy_options.is_empty() {
         "Esc close".to_string()
     } else {

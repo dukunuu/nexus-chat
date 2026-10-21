@@ -77,7 +77,7 @@ impl App {
 
 /// Every key `set_setting` accepts — the same keys `apply_setting` (and the
 /// `blocked_domains` special case) can actually apply.
-const SETTING_KEYS: [&str; 23] = [
+const SETTING_KEYS: [&str; 25] = [
     "remote_images",
     "show_stats",
     "show_reasoning",
@@ -101,7 +101,101 @@ const SETTING_KEYS: [&str; 23] = [
     "langsearch_key",
     "search_provider",
     "blocked_domains",
+    "column_width",
+    "popup_sizes",
 ];
+
+/// Narrowest and widest the conversation column can be set to, in cells.
+pub const COLUMN_WIDTH_MIN: u16 = 60;
+pub const COLUMN_WIDTH_MAX: u16 = 400;
+
+/// Smallest and largest a popup dimension can be, as a percentage of the
+/// screen.
+pub const POPUP_SIZE_MIN: u16 = 20;
+pub const POPUP_SIZE_MAX: u16 = 100;
+
+/// Every popup whose size can be overridden — the ids `popup_sizes` accepts.
+pub const POPUP_IDS: [&str; 20] = [
+    "model", "session", "copy", "key", "settings", "space", "skills", "files", "apps", "terminal",
+    "watches", "research", "swarm", "usage", "jobs", "harness", "procs", "login", "local", "help",
+];
+
+/// `auto`, `full`, or a plain cell count in range.
+pub(super) fn valid_column_width(value: &str) -> bool {
+    matches!(value, "auto" | "full")
+        || (!value.is_empty()
+            && value.bytes().all(|b| b.is_ascii_digit())
+            && value
+                .parse::<u16>()
+                .is_ok_and(|n| (COLUMN_WIDTH_MIN..=COLUMN_WIDTH_MAX).contains(&n)))
+}
+
+/// One `id:WWxHH` entry, if it names a known popup with in-range percentages.
+fn parse_popup_entry(entry: &str) -> Option<(&'static str, u16, u16)> {
+    let (id, dims) = entry.trim().split_once(':')?;
+    let id = POPUP_IDS.iter().copied().find(|known| *known == id)?;
+    let (w, h) = dims.split_once('x')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(w) || !digits(h) {
+        return None;
+    }
+    let range = POPUP_SIZE_MIN..=POPUP_SIZE_MAX;
+    let (w, h) = (w.parse::<u16>().ok()?, h.parse::<u16>().ok()?);
+    (range.contains(&w) && range.contains(&h)).then_some((id, w, h))
+}
+
+/// The valid entries of a `popup_sizes` string; the last entry for an id wins.
+fn popup_entries(sizes: &str) -> Vec<(&'static str, u16, u16)> {
+    let mut entries: Vec<(&'static str, u16, u16)> = Vec::new();
+    for (id, w, h) in sizes.split(',').filter_map(parse_popup_entry) {
+        entries.retain(|(known, ..)| *known != id);
+        entries.push((id, w, h));
+    }
+    entries
+}
+
+fn join_popup_entries(entries: &[(&'static str, u16, u16)]) -> String {
+    entries
+        .iter()
+        .map(|(id, w, h)| format!("{id}:{w}x{h}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The persisted (width %, height %) for popup `id`, if it has an override.
+#[must_use]
+pub fn popup_size(sizes: &str, id: &str) -> Option<(u16, u16)> {
+    popup_entries(sizes)
+        .into_iter()
+        .find(|(known, ..)| *known == id)
+        .map(|(_, w, h)| (w, h))
+}
+
+/// `sizes` with popup `id` set to `size` (percentages, clamped into range), or
+/// its override removed for `None`. Invalid entries are dropped on the way.
+#[must_use]
+pub fn with_popup_size(sizes: &str, id: &str, size: Option<(u16, u16)>) -> String {
+    let mut entries = popup_entries(sizes);
+    entries.retain(|(known, ..)| *known != id);
+    if let (Some((w, h)), Some(id)) = (size, POPUP_IDS.iter().copied().find(|k| *k == id)) {
+        let clamp = |n: u16| n.clamp(POPUP_SIZE_MIN, POPUP_SIZE_MAX);
+        entries.push((id, clamp(w), clamp(h)));
+    }
+    join_popup_entries(&entries)
+}
+
+/// A loaded `popup_sizes` value with unknown or invalid entries dropped.
+pub(super) fn sanitize_popup_sizes(value: &str) -> String {
+    join_popup_entries(&popup_entries(value))
+}
+
+/// Strict check for `set_setting`: every entry must be valid (empty is fine).
+fn valid_popup_sizes(value: &str) -> bool {
+    value.is_empty()
+        || value
+            .split(',')
+            .all(|entry| parse_popup_entry(entry).is_some())
+}
 
 /// Whether `value` is one `apply_setting` will actually apply for `key` —
 /// constrained keys must carry valid values, so a typo'd value can't be
@@ -131,6 +225,8 @@ fn valid_setting_value(key: &str, value: &str) -> bool {
         "verbosity" => VERBOSITY_LEVELS.contains(&value),
         "reply_style" => super::REPLY_STYLES.contains(&value),
         "search_provider" => SEARCH_PROVIDERS.contains(&value),
+        "column_width" => valid_column_width(value),
+        "popup_sizes" => valid_popup_sizes(value),
         _ => true, // free-form strings
     }
 }

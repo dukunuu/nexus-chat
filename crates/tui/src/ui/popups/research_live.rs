@@ -15,7 +15,7 @@ use crate::ui::style::glyph;
 /// isolated into their own view plus a steer input line and a queued-steers
 /// section (steers not yet picked up at a round boundary).
 pub fn render(f: &mut Frame, app: &AppView) {
-    let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::WIDE.1);
+    let area = chrome::popup_area(app, f.area(), "research", chrome::WIDE);
 
     let dim = Style::default().fg(app.theme.fg_dim);
     // The stage rows come from the job-level mirror (`research_stage_rows`),

@@ -13,7 +13,9 @@ use nexus_core::app::{ModelPanel, Popup};
 use nexus_core::provider::Model;
 
 pub fn render(f: &mut Frame, app: &mut AppView) {
-    let (fav_outer, avail_outer) = model_popup_areas(f.area());
+    let (fav_outer, avail_outer) = model_popup_areas(app, f.area());
+    // The two columns resize as one popup: record the combined rect.
+    chrome::popup_area(app, f.area(), "model", MODEL_SIZE);
 
     let fav_focused = app.model_focus == ModelPanel::Favorites;
     // Short title + the pick target as a footer hint, so the model picker
@@ -181,10 +183,13 @@ fn model_items(
         .collect()
 }
 
+/// The model picker's default size, in percent of the screen.
+const MODEL_SIZE: (u16, u16) = (82, 74);
+
 /// Outer rects of the model picker's two columns (Favorites, Available).
 /// Shared by the renderer and the mouse hit-tester so they always agree.
-pub fn model_popup_areas(screen: Rect) -> (Rect, Rect) {
-    let outer = crate::ui::centered(screen, 82, 74);
+pub fn model_popup_areas(app: &AppView, screen: Rect) -> (Rect, Rect) {
+    let outer = chrome::popup_rect(app, screen, "model", MODEL_SIZE);
     let cols =
         Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(outer);
     (cols[0], cols[1])

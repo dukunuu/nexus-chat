@@ -338,7 +338,7 @@ pub fn docked_height(app: &AppView, column: Rect) -> u16 {
 /// composer's place — as the main layout does (tests render it alone).
 #[cfg(test)]
 pub fn render(f: &mut Frame, app: &AppView) {
-    let column = crate::ui::reading_column(f.area());
+    let column = crate::ui::reading_column(f.area(), &app.settings.column_width);
     let height = docked_height(app, column);
     let area = Rect {
         y: column.bottom().saturating_sub(height.saturating_add(1)),

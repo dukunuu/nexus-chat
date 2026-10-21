@@ -13,7 +13,7 @@ use crate::ui::style::glyph;
 #[allow(clippy::too_many_lines)] // row design + preview strip
 pub fn render(f: &mut Frame, app: &mut AppView) {
     use nexus_core::app::SessionMode;
-    let area = crate::ui::centered(f.area(), chrome::TALL.0, chrome::TALL.1);
+    let area = chrome::popup_area(app, f.area(), "session", chrome::TALL);
 
     // Preview strip: the selected session's last exchange, so the picker
     // tells you what a session is about before you open it. Re-queried only

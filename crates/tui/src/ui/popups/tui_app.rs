@@ -445,7 +445,12 @@ pub fn preview(view: &View, width: u16, height: u16) -> Result<String> {
 
 /// Render a validated view, or a nonfatal error panel in the shared popup chrome.
 pub fn render(frame: &mut Frame, app: &mut AppView) {
-    let area = crate::ui::centered(frame.area(), chrome::WIDE.0, chrome::TALL.1);
+    let area = chrome::popup_area(
+        app,
+        frame.area(),
+        "terminal",
+        (chrome::WIDE.0, chrome::TALL.1),
+    );
     let inner = chrome::render_hinted(
         frame,
         area,

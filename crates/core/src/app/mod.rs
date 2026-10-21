@@ -47,6 +47,10 @@ mod research;
 mod scripts;
 mod sessions;
 mod settings;
+pub use settings::{
+    COLUMN_WIDTH_MAX, COLUMN_WIDTH_MIN, POPUP_IDS, POPUP_SIZE_MAX, POPUP_SIZE_MIN, popup_size,
+    with_popup_size,
+};
 mod skills_popup;
 mod snapshot;
 mod spaces;
@@ -549,10 +553,11 @@ pub enum SettingsField {
     ImageGenModel,
     VideoGenModel,
     ReplyStyle,
+    ColumnWidth,
 }
 
 impl SettingsField {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::RemoteImages,
         Self::ShowStats,
         Self::ShowReasoning,
@@ -574,12 +579,16 @@ impl SettingsField {
         Self::ImageGenModel,
         Self::VideoGenModel,
         Self::ReplyStyle,
+        Self::ColumnWidth,
     ];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::RemoteImages => "remote images (Space toggles on/off)",
             Self::ReplyStyle => "reply style (Space cycles auto/rich/plain)",
+            Self::ColumnWidth => {
+                "column width (Space cycles auto/full/100/140/180/220; or drag the column edge)"
+            }
             Self::ShowStats => "show stats (model · TPS footer)",
             Self::ShowReasoning => "expand reasoning (Ctrl+R)",
             Self::HideHints => "hide hints (keybind labels)",
@@ -673,7 +682,11 @@ pub const SETTINGS_GROUPS: &[SettingsGroup] = &[
     },
     SettingsGroup {
         name: "Reply Layouts",
-        fields: &[SettingsField::ReplyStyle, SettingsField::RemoteImages],
+        fields: &[
+            SettingsField::ReplyStyle,
+            SettingsField::RemoteImages,
+            SettingsField::ColumnWidth,
+        ],
     },
 ];
 
@@ -711,6 +724,13 @@ pub struct Settings {
     /// Auto-compact once context usage crosses this percent of the model's
     /// context window. 0 disables auto-compaction.
     pub compact_threshold: u8,
+    /// Width of the conversation column: `auto`, `full`, or a cell count.
+    /// Only the terminal frontend reads it; it lives here because it persists
+    /// with the other display settings.
+    pub column_width: String,
+    /// Per-popup size overrides (`id:WWxHH` percentages of the screen,
+    /// comma-separated), written by dragging a popup's border.
+    pub popup_sizes: String,
 }
 
 impl Default for Settings {
@@ -725,6 +745,8 @@ impl Default for Settings {
             top_p: None,
             max_tokens: None,
             compact_threshold: 60,
+            column_width: "auto".into(),
+            popup_sizes: String::new(),
         }
     }
 }
@@ -1951,6 +1973,12 @@ impl App {
                 }
             }
             "searxng_url" => self.searxng_url = v.to_string(),
+            "column_width" if settings::valid_column_width(v) => {
+                self.settings.column_width = v.trim().to_string();
+            }
+            // Unknown ids and out-of-range entries are dropped, not fatal: a
+            // row written by a newer build must not break an older one.
+            "popup_sizes" => self.settings.popup_sizes = settings::sanitize_popup_sizes(v),
             "reply_style" if REPLY_STYLES.contains(&v) => {
                 if self.settings.reply_style != v {
                     self.settings.reply_style = v.to_string();

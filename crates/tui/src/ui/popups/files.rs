@@ -60,7 +60,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
 #[allow(clippy::too_many_lines)] // tabs + picker + browse rows
 fn render_files(f: &mut Frame, app: &AppView) {
     use nexus_core::app::FilesMode;
-    let area = crate::ui::centered(f.area(), 64, 60);
+    let area = chrome::popup_area(app, f.area(), "files", chrome::STANDARD);
 
     if app.files_mode == FilesMode::Pick {
         let entries = app.filtered_picker_entries();
@@ -177,7 +177,7 @@ fn render_files(f: &mut Frame, app: &AppView) {
 }
 
 fn render_images(f: &mut Frame, app: &AppView) {
-    let area = crate::ui::centered(f.area(), 64, 60);
+    let area = chrome::popup_area(app, f.area(), "files", chrome::STANDARD);
     let dim = Style::default().fg(app.theme.fg_dim);
 
     let items: Vec<ListItem> = if app.images_cache.is_empty() {
@@ -238,7 +238,7 @@ fn render_images(f: &mut Frame, app: &AppView) {
 }
 
 fn render_scripts(f: &mut Frame, app: &AppView) {
-    let area = crate::ui::centered(f.area(), 64, 60);
+    let area = chrome::popup_area(app, f.area(), "files", chrome::STANDARD);
     let dim = Style::default().fg(app.theme.fg_dim);
 
     if app.scripts_mode == ScriptsMode::Create {

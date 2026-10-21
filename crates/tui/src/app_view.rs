@@ -340,6 +340,13 @@ pub struct AppView {
     /// The popup list drawn last frame (set by `chrome::render_list`,
     /// cleared at the start of each frame) — maps mouse clicks to rows.
     pub list_hit: std::cell::Cell<Option<crate::ui::popups::chrome::ListHit>>,
+    /// The centered popup drawn last frame (set by `chrome::popup_area`,
+    /// cleared at the start of each frame) — where a border press resizes it.
+    pub popup_hit: std::cell::Cell<Option<crate::ui::popups::chrome::PopupHit>>,
+    /// A column or popup-border drag in progress, and the last border press
+    /// (for double-click-to-reset).
+    pub drag: Option<crate::resize::Drag>,
+    pub edge_click: Option<(std::time::Instant, crate::resize::Grip)>,
     /// Total rendered lines from the previous render frame, used during streaming
     /// to keep the viewport pinned when the user has scrolled up.
     pub prev_total: usize,
@@ -565,6 +572,9 @@ impl AppView {
             max_scroll: 0,
             history_height: 0,
             list_hit: std::cell::Cell::new(None),
+            popup_hit: std::cell::Cell::new(None),
+            drag: None,
+            edge_click: None,
             prev_total: 0,
             prev_tail: Vec::new(),
             pin_viewport_top: false,
@@ -793,7 +803,8 @@ impl AppView {
             | SettingsField::OcrEngine
             | SettingsField::ImageGenModel
             | SettingsField::VideoGenModel
-            | SettingsField::ReplyStyle => None,
+            | SettingsField::ReplyStyle
+            | SettingsField::ColumnWidth => None,
             SettingsField::Temperature => Some(0),
             SettingsField::TopP => Some(1),
             SettingsField::MaxTokens => Some(2),

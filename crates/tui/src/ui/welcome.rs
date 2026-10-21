@@ -19,6 +19,9 @@ use super::history::rule_line;
 use super::style::glyph;
 use crate::app_view::AppView;
 
+/// Widest the start screen's panel gets (it never exceeds the column).
+const WELCOME_MAX: u16 = 110;
+
 /// The empty start screen: a rounded panel holding the gradient banner, a
 /// random greeting, a live clock, quick-start chips, and the most recent
 /// sessions.
@@ -76,7 +79,7 @@ pub(super) fn render_welcome(f: &mut Frame, app: &mut AppView, area: Rect) {
     }
     let recent_rows = push_recent(&mut lines, app, area);
 
-    let panel_w = area.width.min(86);
+    let panel_w = area.width.min(WELCOME_MAX);
     let panel_h = (lines.len() + 2).min(area.height as usize) as u16;
     let panel = Rect {
         x: area.x + area.width.saturating_sub(panel_w) / 2,
@@ -140,9 +143,9 @@ fn push_recent(lines: &mut Vec<Line<'static>>, app: &AppView, area: Rect) -> Vec
         let recent: Vec<_> = sessions.into_iter().take(4).collect();
         if !recent.is_empty() {
             lines.push(Line::from(""));
-            // The panel is at most 86 wide; the rule spans the table below
+            // The panel is at most `WELCOME_MAX` wide; the rule spans the table below
             // it, so both center on the same axis.
-            let inner_w = area.width.min(86).saturating_sub(4) as usize;
+            let inner_w = area.width.min(WELCOME_MAX).saturating_sub(4) as usize;
             // One fixed-width table, centered as a block: numbers, titles,
             // and right-aligned dates line up instead of zigzagging.
             let row_w = inner_w.min(60);

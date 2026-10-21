@@ -16,7 +16,7 @@ use super::chrome;
 pub fn render(f: &mut Frame, app: &AppView) {
     let empty = HarnessSummary::default();
     let summary = app.harness.as_ref().unwrap_or(&empty);
-    let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::WIDE.1);
+    let area = chrome::popup_area(app, f.area(), "harness", chrome::WIDE);
     let inner = chrome::render_hinted(
         f,
         area,

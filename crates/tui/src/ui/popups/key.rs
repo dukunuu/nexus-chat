@@ -12,7 +12,7 @@ use super::chrome;
 /// API-key entry: a centered masked value under the input title, with the
 /// paste hint in the frame footer — same chrome family as every other popup.
 pub fn render(f: &mut Frame, app: &AppView) {
-    let outer = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
+    let outer = chrome::popup_area(app, f.area(), "key", chrome::SMALL);
     let masked = "*".repeat(app.key_input.chars().count());
     let title = chrome::input_title(
         app,

@@ -146,9 +146,26 @@ impl AppView {
                 SettingsField::OcrEngine => {
                     let _ = self.core.cycle_ocr_engine();
                 }
+                SettingsField::ColumnWidth => {
+                    let _ = self.cycle_column_width(1);
+                }
                 _ => {}
             },
         }
+    }
+
+    /// Step the conversation column through `auto → full → 100 → 140 → 180 →
+    /// 220 → auto` (`dir` -1 steps back), persisted. A width that isn't one of
+    /// the stops (the user dragged it) steps to `auto`.
+    pub fn cycle_column_width(&mut self, dir: i32) -> Result<()> {
+        const STOPS: [&str; 6] = ["auto", "full", "100", "140", "180", "220"];
+        let next = STOPS
+            .iter()
+            .position(|stop| *stop == self.core.settings.column_width)
+            .map_or(0, |i| {
+                (i as i32 + dir.signum()).rem_euclid(STOPS.len() as i32) as usize
+            });
+        self.core.set_setting("column_width", STOPS[next])
     }
 
     /// Expand/collapse stored reasoning traces (Ctrl+R), persisted.

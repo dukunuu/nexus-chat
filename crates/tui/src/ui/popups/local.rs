@@ -80,7 +80,7 @@ fn server_line(status: Option<&RuntimeStatus>, endpoint: &str) -> (String, bool)
 }
 
 pub fn render(f: &mut Frame, app: &AppView) {
-    let area = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
+    let area = chrome::popup_area(app, f.area(), "local", chrome::SMALL);
     let inner = chrome::render_hinted(
         f,
         area,

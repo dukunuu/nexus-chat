@@ -21,7 +21,7 @@ const ROWS: [(&str, &str); 5] = [
 ];
 
 pub fn render(f: &mut Frame, app: &AppView) {
-    let area = crate::ui::centered(f.area(), chrome::SMALL.0, chrome::SMALL.1);
+    let area = chrome::popup_area(app, f.area(), "login", chrome::SMALL);
     let inner = chrome::render_hinted(
         f,
         area,

@@ -11,7 +11,7 @@ use nexus_core::app::SwarmPopupMode;
 use super::chrome;
 
 pub fn render(f: &mut Frame, app: &AppView) {
-    let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::WIDE.1);
+    let area = chrome::popup_area(app, f.area(), "swarm", chrome::WIDE);
 
     let dim = Style::default().fg(app.theme.fg_dim);
     let items: Vec<ListItem> = if app.swarm_cache.is_empty() {

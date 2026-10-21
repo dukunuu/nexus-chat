@@ -951,6 +951,11 @@ fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
         }
         return Ok(());
     }
+    // The column edge and popup borders resize before anything else sees the
+    // press; a press that misses them falls through unchanged.
+    if crate::resize::mouse(app, m, screen) {
+        return Ok(());
+    }
     if app.popup == Popup::None {
         if m.kind == MouseEventKind::Down(MouseButton::Left) {
             let pos = Position::new(m.column, m.row);
@@ -988,7 +993,7 @@ fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
     if app.popup != Popup::Model {
         return handle_popup_mouse(app, m);
     }
-    let (fav_outer, avail_outer) = ui::popups::model::model_popup_areas(screen);
+    let (fav_outer, avail_outer) = ui::popups::model::model_popup_areas(app, screen);
     let fav_inner = ui::popups::model::list_inner(fav_outer);
     let avail_inner = ui::popups::model::list_inner(avail_outer);
     let pos = Position::new(m.column, m.row);
@@ -1788,5 +1793,102 @@ mod tests {
         app.quit_armed_at = Some(std::time::Instant::now() - QUIT_CONFIRM_WINDOW);
         handle_key(&mut app, ctrl('c')).unwrap();
         assert!(!app.should_quit, "a stale arm doesn't count");
+    }
+
+    fn mouse_at(app: &mut AppView, kind: MouseEventKind, column: u16, row: u16) {
+        let m = MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(app, m, Rect::new(0, 0, 100, 40)).unwrap();
+    }
+
+    #[test]
+    fn dragging_a_popup_border_resizes_it_and_rows_still_select_afterwards() {
+        let mut app = test_app();
+        let space = app.core.active_space.id.clone();
+        for title in ["alpha", "bravo", "charlie"] {
+            app.core
+                .db
+                .create_session(title, "a/one", &space, "chat")
+                .unwrap();
+        }
+        app.open_session_picker().unwrap();
+        draw(&mut app, 100, 40);
+        let rect = app.popup_hit.get().unwrap().rect;
+        assert_eq!(rect, ui::centered(Rect::new(0, 0, 100, 40), 64, 74));
+
+        // Grab the left border and pull it out: only the width changes.
+        let down = MouseEventKind::Down(MouseButton::Left);
+        mouse_at(&mut app, down, rect.x, rect.y + 8);
+        assert!(app.drag.is_some());
+        mouse_at(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            10,
+            rect.y + 8,
+        );
+        mouse_at(
+            &mut app,
+            MouseEventKind::Up(MouseButton::Left),
+            10,
+            rect.y + 8,
+        );
+        assert_eq!(app.settings.popup_sizes, "session:80x74");
+        let screen = draw(&mut app, 100, 40);
+        assert_eq!(app.popup_hit.get().unwrap().rect.width, 80);
+
+        // The wheel and row clicks inside the border behave as before.
+        let target = app.filtered_sessions()[2].title.clone();
+        let row = screen
+            .iter()
+            .position(|l| l.contains(&format!(" {target} ")))
+            .unwrap();
+        click(&mut app, 50, u16::try_from(row).unwrap());
+        assert_eq!(app.session_selected, 2, "a click inside still selects");
+        assert!(app.drag.is_none());
+    }
+
+    #[test]
+    fn the_model_popup_picks_by_click_at_its_resized_position() {
+        let mut app = test_app();
+        app.core.models = ["a/alpha", "b/bravo", "c/charlie"]
+            .iter()
+            .map(|id| nexus_core::provider::Model {
+                id: (*id).into(),
+                name: (*id).into(),
+                reasoning_efforts: Vec::new(),
+                context_length: None,
+                supports_images: false,
+                supports_image_generation: false,
+                supports_video_generation: false,
+                backend: nexus_core::provider::BackendTag::OpenRouter,
+                pricing: None,
+            })
+            .collect();
+        app.core.set_setting("popup_sizes", "model:60x50").unwrap();
+        app.open_model_picker();
+        let screen = draw(&mut app, 100, 40);
+        let row = screen
+            .iter()
+            .position(|l| l.contains("b/bravo"))
+            .expect("bravo is listed");
+        let col = u16::try_from(screen[row].find("b/bravo").unwrap()).unwrap();
+        let (_, avail) = ui::popups::model::model_popup_areas(&app, Rect::new(0, 0, 100, 40));
+        assert!(
+            avail.x < col,
+            "the click lands in the resized available panel"
+        );
+        click(&mut app, col + 1, u16::try_from(row).unwrap());
+        assert!(app.popup == Popup::None, "the pick closed the picker");
+        assert!(
+            app.current_model
+                .as_deref()
+                .is_some_and(|m| m.ends_with("b/bravo")),
+            "{:?}",
+            app.current_model
+        );
     }
 }

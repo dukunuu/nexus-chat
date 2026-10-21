@@ -115,7 +115,7 @@ fn refresh(app: &mut AppView) -> Result<()> {
 }
 
 pub fn render(frame: &mut Frame, app: &AppView) {
-    let area = crate::ui::centered(frame.area(), chrome::WIDE.0, chrome::WIDE.1);
+    let area = chrome::popup_area(app, frame.area(), "jobs", chrome::WIDE);
     let creating = app.jobs_popup.form.is_some();
     let inner = chrome::render_hinted(
         frame,

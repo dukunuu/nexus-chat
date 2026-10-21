@@ -12,7 +12,7 @@ use super::chrome;
 
 #[allow(clippy::too_many_lines)] // two-line rows + due/scheduled status
 pub fn render(f: &mut Frame, app: &AppView) {
-    let area = crate::ui::centered(f.area(), chrome::STANDARD.0, chrome::STANDARD.1);
+    let area = chrome::popup_area(app, f.area(), "watches", chrome::STANDARD);
     let dim = Style::default().fg(app.theme.fg_dim);
     let items: Vec<ListItem> = if app.watches_cache.is_empty() {
         vec![chrome::empty_placeholder(

@@ -12,7 +12,7 @@ use nexus_core::app::AppsMode;
 use super::chrome;
 
 pub fn render(f: &mut Frame, app: &AppView) {
-    let area = crate::ui::centered(f.area(), 64, 60);
+    let area = chrome::popup_area(app, f.area(), "apps", chrome::STANDARD);
     let dim = Style::default().fg(app.theme.fg_dim);
 
     if app.apps_mode == AppsMode::EditFile {

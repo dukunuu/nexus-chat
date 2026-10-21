@@ -12,7 +12,7 @@ use super::chrome;
 pub fn render(f: &mut Frame, app: &AppView) {
     use nexus_core::app::SpaceMode;
     use nexus_core::db::DEFAULT_SPACE;
-    let area = crate::ui::centered(f.area(), chrome::STANDARD.0, chrome::STANDARD.1);
+    let area = chrome::popup_area(app, f.area(), "space", chrome::STANDARD);
 
     let dim = Style::default().fg(app.theme.fg_dim);
     let spaces = app.filtered_spaces();

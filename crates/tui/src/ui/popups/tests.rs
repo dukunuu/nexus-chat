@@ -520,6 +520,8 @@ fn approval_popup_combined_wave_snapshot() {
         "2 edits, 1 command\n1. fs edit\n  edit one\n  --- a/one\n  +++ b/one\n  @@ -1 +1 @@\n  -old\n  +new\n2. fs write\n  write two\n3. shell run\n  $ cargo test".into(),
     );
     let root = app.space.root.clone();
+    // The snapshot wraps at the old fixed 112-cell column; `auto` is wider now.
+    app.settings.column_width = "112".into();
     app.pending_approval_request.as_mut().unwrap().action = "3 calls".into();
     app.sync_approval_popup();
     let screen = render_to_string(120, 40, |f| super::approval::render(f, &app));
@@ -1589,7 +1591,7 @@ fn model_picker_click_row_maps_to_the_row_drawn_there() {
     let mut app = picker_app(&ids);
     let screen = render_to_string(150, 40, |f| super::model::render(f, &mut app));
     let (_, avail_outer) =
-        super::model::model_popup_areas(ratatui::layout::Rect::new(0, 0, 150, 40));
+        super::model::model_popup_areas(&app, ratatui::layout::Rect::new(0, 0, 150, 40));
     let inner = super::model::list_inner(avail_outer);
     let available = app.available_models();
     for id in ids {
@@ -1928,7 +1930,7 @@ fn notification_toasts_hug_their_content() {
         "toast sized to its text, got {}",
         rect.width
     );
-    let col = crate::ui::reading_column(ratatui::layout::Rect::new(0, 0, 120, 30));
+    let col = crate::ui::reading_column(ratatui::layout::Rect::new(0, 0, 120, 30), "auto");
     assert_eq!(
         rect.x + rect.width,
         col.right() - 1,
@@ -1999,4 +2001,161 @@ fn large_write_preview_scrolls_through_the_whole_detail() {
     assert!(app.approval_scroll.get() > 1, "space pages down");
     drop(app);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+fn select_settings_field(app: &mut AppView, field: SettingsField) {
+    app.open_settings();
+    let rows = app.settings_rows();
+    app.settings_selected = rows
+        .iter()
+        .position(|r| matches!(r, SettingsRow::Field(f) if *f == field))
+        .unwrap();
+}
+
+fn press(app: &mut AppView, code: crossterm::event::KeyCode) {
+    super::settings::handle_key(app, crossterm::event::KeyEvent::from(code)).unwrap();
+}
+
+#[test]
+fn settings_column_width_row_cycles_and_persists() {
+    use crossterm::event::KeyCode;
+    let mut app = test_app();
+    select_settings_field(&mut app, SettingsField::ColumnWidth);
+    let screen = render_to_string(100, 30, |f| super::settings::render(f, &app));
+    assert!(screen.contains("column width"), "{screen}");
+    assert!(screen.contains("auto"), "{screen}");
+
+    // Enter, Space and → step forward; ← steps back. Esc is the only save/close.
+    let mut seen = vec![app.settings.column_width.clone()];
+    for code in [
+        KeyCode::Enter,
+        KeyCode::Char(' '),
+        KeyCode::Right,
+        KeyCode::Enter,
+        KeyCode::Char(' '),
+        KeyCode::Right,
+    ] {
+        press(&mut app, code);
+        seen.push(app.settings.column_width.clone());
+    }
+    assert_eq!(
+        seen,
+        ["auto", "full", "100", "140", "180", "220", "auto"],
+        "the cycle wraps"
+    );
+    assert!(
+        app.popup == nexus_core::app::Popup::Settings,
+        "Enter cycles, it does not close"
+    );
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.settings.column_width, "220");
+    let stored = app.db.load_settings().unwrap();
+    assert!(
+        stored
+            .iter()
+            .any(|(k, v)| k == "column_width" && v == "220")
+    );
+
+    // Saving the popup leaves the width alone.
+    press(&mut app, KeyCode::Esc);
+    assert!(app.popup == nexus_core::app::Popup::None);
+    assert_eq!(app.settings.column_width, "220");
+}
+
+#[test]
+fn settings_column_width_row_shows_a_dragged_number_and_steps_off_it_to_auto() {
+    use crossterm::event::KeyCode;
+    let mut app = test_app();
+    app.core.set_setting("column_width", "157").unwrap();
+    select_settings_field(&mut app, SettingsField::ColumnWidth);
+    let screen = render_to_string(100, 30, |f| super::settings::render(f, &app));
+    assert!(screen.contains("157"), "{screen}");
+    press(&mut app, KeyCode::Char(' '));
+    assert_eq!(app.settings.column_width, "auto");
+    app.core.set_setting("column_width", "157").unwrap();
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.settings.column_width, "auto");
+}
+
+#[test]
+fn the_model_popup_hit_test_follows_its_resized_rect() {
+    let ids = ["a/alpha", "b/bravo", "c/charlie"];
+    let screen_rect = ratatui::layout::Rect::new(0, 0, 150, 40);
+    let mut app = picker_app(&ids);
+    app.core.set_setting("popup_sizes", "model:60x50").unwrap();
+    let (fav, avail) = super::model::model_popup_areas(&app, screen_rect);
+    let outer = fav.union(avail);
+    assert_eq!(outer, crate::ui::centered(screen_rect, 60, 50));
+    assert_ne!(outer, crate::ui::centered(screen_rect, 82, 74));
+
+    let screen = render_to_string(150, 40, |f| super::model::render(f, &mut app));
+    assert_eq!(app.popup_hit.get().map(|hit| hit.rect), Some(outer));
+    let inner = super::model::list_inner(avail);
+    let available = app.available_models();
+    for id in ids {
+        let row = screen
+            .lines()
+            .position(|l| l.contains(id))
+            .unwrap_or_else(|| panic!("{id} not drawn:\n{screen}"));
+        let index = app.avail_offset + (row - inner.y as usize);
+        assert_eq!(available[index].id, id, "clicking {id} picks another row");
+    }
+}
+
+#[test]
+fn every_popup_renders_at_the_minimum_resize_size_without_panicking() {
+    use nexus_core::app::Popup;
+    // 40x10 is the floor a drag can reach (a smaller terminal gets the same).
+    for (w, h) in [(40, 10), (30, 8), (60, 14)] {
+        for popup in [
+            Popup::Model,
+            Popup::Session,
+            Popup::Copy,
+            Popup::Key,
+            Popup::Settings,
+            Popup::Space,
+            Popup::Context,
+            Popup::Skills,
+            Popup::Files,
+            Popup::Apps,
+            Popup::TuiApp,
+            Popup::Watch,
+            Popup::ResearchLive,
+            Popup::Swarm,
+            Popup::Usage,
+            Popup::Jobs,
+            Popup::Harness,
+            Popup::Procs,
+            Popup::Login,
+            Popup::Local,
+            Popup::Help,
+        ] {
+            let mut app = test_app();
+            app.core
+                .set_setting(
+                    "popup_sizes",
+                    "model:20x20,session:20x20,copy:20x20,key:20x20,settings:20x20,space:20x20,\
+                     skills:20x20,files:20x20,apps:20x20,terminal:20x20,watches:20x20,\
+                     research:20x20,swarm:20x20,usage:20x20,jobs:20x20,harness:20x20,\
+                     procs:20x20,login:20x20,local:20x20,help:20x20",
+                )
+                .unwrap();
+            app.popup = popup;
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        }
+    }
+}
+
+#[test]
+fn help_popup_tells_you_the_borders_and_column_edge_can_be_dragged() {
+    let mut app = test_app();
+    app.execute(nexus_core::app::AppCommand::OpenHelp).unwrap();
+    let screen = render_to_string(140, 120, |f| super::help::render(f, &mut app));
+    assert!(
+        screen.contains(
+            "drag a popup's border to resize it · drag the column edge to widen the conversation"
+        ),
+        "{screen}"
+    );
 }

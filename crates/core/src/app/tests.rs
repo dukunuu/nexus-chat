@@ -4014,6 +4014,103 @@ fn remote_images_setting_defaults_on_validates_and_persists() {
     assert!(a.settings.remote_images);
 }
 
+#[test]
+fn column_width_setting_defaults_auto_validates_and_persists() {
+    let mut a = app_with_key();
+    assert_eq!(a.settings.column_width, "auto");
+    for good in ["full", "auto", "60", "140", "400"] {
+        a.set_setting("column_width", good).unwrap();
+        assert_eq!(a.settings.column_width, good);
+    }
+    for bad in [
+        "", "59", "401", "wide", "-100", "+100", "1e2", "140 ", "100.5",
+    ] {
+        assert!(a.set_setting("column_width", bad).is_err(), "{bad:?}");
+    }
+    assert_eq!(
+        a.settings.column_width, "400",
+        "rejected values change nothing"
+    );
+    assert!(
+        a.db.load_settings()
+            .unwrap()
+            .iter()
+            .any(|(k, v)| k == "column_width" && v == "400")
+    );
+}
+
+#[test]
+fn popup_sizes_setting_validates_strictly_and_loads_leniently() {
+    let mut a = app_with_key();
+    assert_eq!(a.settings.popup_sizes, "");
+    a.set_setting("popup_sizes", "settings:80x75,help:90x85")
+        .unwrap();
+    assert_eq!(a.settings.popup_sizes, "settings:80x75,help:90x85");
+    a.set_setting("popup_sizes", "").unwrap();
+    for bad in [
+        "nope:80x75",
+        "settings:19x75",
+        "settings:80x101",
+        "settings:80",
+        "settings:80x",
+        "settings:-80x75",
+        "settings:80x75,",
+        "settings:80x75,bogus:50x50",
+    ] {
+        assert!(a.set_setting("popup_sizes", bad).is_err(), "{bad:?}");
+    }
+    assert_eq!(a.settings.popup_sizes, "", "rejected values change nothing");
+
+    // A stored row with bad entries loads without them instead of failing.
+    a.db.set_setting(
+        "popup_sizes",
+        "settings:80x75,nope:50x50,help:5x50,help:90x85",
+    )
+    .unwrap();
+    a.db.set_setting("column_width", "wide").unwrap();
+    a.load_settings();
+    assert_eq!(a.settings.popup_sizes, "settings:80x75,help:90x85");
+    assert_eq!(
+        a.settings.column_width, "auto",
+        "an invalid width is ignored"
+    );
+}
+
+#[test]
+fn popup_size_helpers_read_replace_and_remove_entries() {
+    use super::{popup_size, with_popup_size};
+    let sizes = with_popup_size("", "settings", Some((80, 75)));
+    let sizes = with_popup_size(&sizes, "help", Some((90, 85)));
+    assert_eq!(sizes, "settings:80x75,help:90x85");
+    assert_eq!(popup_size(&sizes, "help"), Some((90, 85)));
+    assert_eq!(popup_size(&sizes, "usage"), None);
+    // Replacing keeps one entry per id; out-of-range percentages clamp.
+    let sizes = with_popup_size(&sizes, "settings", Some((10, 200)));
+    assert_eq!(sizes, "help:90x85,settings:20x100");
+    // Removing, and unknown ids, leave the rest alone.
+    assert_eq!(with_popup_size(&sizes, "help", None), "settings:20x100");
+    assert_eq!(with_popup_size(&sizes, "nope", Some((50, 50))), sizes);
+}
+
+#[test]
+fn popup_and_column_sizes_survive_a_restart() {
+    let root = std::env::temp_dir().join(format!("nexus-sizes-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("spaces")).unwrap();
+    let path = root.join("nexus.db");
+    let mut a = App::new(Db::open(&path).unwrap(), None, Space { root: root.clone() });
+    a.set_setting("column_width", "157").unwrap();
+    a.set_setting("popup_sizes", "settings:80x75").unwrap();
+    drop(a);
+    let b = App::new(Db::open(&path).unwrap(), None, Space { root: root.clone() });
+    assert_eq!(b.settings.column_width, "157");
+    assert_eq!(
+        super::popup_size(&b.settings.popup_sizes, "settings"),
+        Some((80, 75))
+    );
+    drop(b);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn gate_in_another_session_never_swallows_typing_and_the_event_carries_its_session() {
     let mut a = app_with_key();

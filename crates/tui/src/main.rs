@@ -7,6 +7,7 @@ mod filter_input;
 mod flows;
 mod history_cache;
 mod interactive;
+mod resize;
 mod selection;
 mod theme;
 mod ui;

@@ -36,6 +36,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     // Popups re-record their list geometry as they draw; a frame without a
     // list must not leave a stale hit area behind.
     app.list_hit.set(None);
+    app.popup_hit.set(None);
     let send_ready = crate::interactive::can_send(app);
     app.interactive.begin_frame(send_ready);
     if app.popup != Popup::InteractiveUi {
@@ -49,7 +50,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     );
 
     // Transcript, composer, and status share one reading column.
-    let column = reading_column(f.area());
+    let column = reading_column(f.area(), &app.settings.column_width);
 
     // Grow the input box with its wrapped content (1–20 rows) plus 2 for the
     // border. `measure` wants the width the widget renders at: inside the
@@ -75,6 +76,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         .split(column);
 
     render_history(f, app, chunks[0]);
+    crate::resize::paint_column_handles(f, app, column);
     if approving {
         popups::approval::render_in(f, app, chunks[1]);
     } else {
@@ -129,29 +131,41 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         // An approval is drawn in the composer's place above.
         Popup::Approval | Popup::None => {}
     }
+    crate::resize::paint_popup_resize(f, app);
 }
 
-/// Widest the reading column gets. Past this, lines get too long to read
-/// comfortably, so wide terminals center the column instead of stretching.
-const COLUMN_MAX: u16 = 112;
+/// Widest the `auto` column grows, and the narrowest it shrinks to once the
+/// terminal is wide enough to center it.
+const AUTO_COLUMN_MIN: u16 = 112;
+const AUTO_COLUMN_MAX: u16 = 180;
+/// Terminals up to this wide use the whole width in `auto` mode.
+const AUTO_FULL_UNTIL: u16 = 120;
 
-/// The centered column the conversation lives in: `COLUMN_MAX` wide on big
-/// terminals, else the full width minus a one-column margin each side.
-pub(crate) fn reading_column(area: Rect) -> Rect {
-    if area.width > COLUMN_MAX + 2 {
-        Rect {
-            x: area.x + (area.width - COLUMN_MAX) / 2,
-            width: COLUMN_MAX,
-            ..area
-        }
-    } else if area.width > 40 {
-        Rect {
-            x: area.x + 1,
-            width: area.width - 2,
-            ..area
-        }
+/// The centered column the conversation lives in, sized by the
+/// `column_width` setting: `full` (the width minus a one-cell margin each
+/// side), a cell count (capped to the screen), or `auto` — full width on
+/// ordinary terminals, and 85% of the width (112..=180 cells) on wide ones, so
+/// a big screen isn't mostly empty gutter and lines still read comfortably.
+pub(crate) fn reading_column(area: Rect, setting: &str) -> Rect {
+    if area.width <= 40 {
+        return area;
+    }
+    let full = area.width - 2;
+    let auto = if area.width <= AUTO_FULL_UNTIL {
+        full
     } else {
-        area
+        let wide = u32::from(area.width) * 85 / 100;
+        (wide as u16).clamp(AUTO_COLUMN_MIN, AUTO_COLUMN_MAX)
+    };
+    let width = match setting {
+        "full" => full,
+        "auto" => auto,
+        n => n.parse::<u16>().map_or(auto, |n| n.min(full)),
+    };
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        width,
+        ..area
     }
 }
 
@@ -228,4 +242,111 @@ pub(crate) fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
         ])
         .split(v[1]);
     h[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_view::AppView;
+
+    /// (x, width) of the column for a `width`-wide, 30-row screen.
+    fn column(width: u16, setting: &str) -> (u16, u16) {
+        let c = reading_column(Rect::new(0, 0, width, 30), setting);
+        (c.x, c.width)
+    }
+
+    #[test]
+    fn auto_uses_the_full_width_up_to_120_then_grows_to_85_percent() {
+        // Up to 120 cells: the whole width minus a one-cell margin each side.
+        assert_eq!(column(80, "auto"), (1, 78));
+        assert_eq!(column(114, "auto"), (1, 112));
+        assert_eq!(column(120, "auto"), (1, 118));
+        // Wider: 85% of the screen, never under 112 or over 180, centered.
+        assert_eq!(column(121, "auto"), (4, 112));
+        assert_eq!(column(160, "auto"), (12, 136));
+        assert_eq!(column(200, "auto"), (15, 170));
+        assert_eq!(column(300, "auto"), (60, 180));
+        assert_eq!(column(1000, "auto"), (410, 180));
+    }
+
+    #[test]
+    fn full_and_numbers_follow_the_setting_and_clamp_to_the_screen() {
+        assert_eq!(column(200, "full"), (1, 198));
+        assert_eq!(column(200, "100"), (50, 100));
+        assert_eq!(column(200, "140"), (30, 140));
+        // A number past the screen fills it (minus the margins) instead.
+        assert_eq!(column(120, "220"), (1, 118));
+        assert_eq!(column(200, "400"), (1, 198));
+        // Garbage falls back to auto rather than collapsing the layout.
+        assert_eq!(column(200, "wide"), column(200, "auto"));
+        assert_eq!(column(200, ""), column(200, "auto"));
+    }
+
+    #[test]
+    fn tiny_screens_use_the_whole_area_for_every_setting() {
+        for setting in ["auto", "full", "100"] {
+            assert_eq!(column(40, setting), (0, 40), "{setting}");
+            assert_eq!(column(20, setting), (0, 20), "{setting}");
+        }
+    }
+
+    #[test]
+    fn column_keeps_the_area_origin_and_height() {
+        let area = Rect::new(3, 2, 200, 30);
+        let c = reading_column(area, "auto");
+        assert_eq!((c.y, c.height), (2, 30));
+        assert_eq!(c.x, 3 + 15);
+    }
+
+    fn message(role: &str, content: &str) -> nexus_core::db::Message {
+        nexus_core::db::Message {
+            role: role.into(),
+            content: content.into(),
+            model: None,
+            reasoning: None,
+            tokens: None,
+            secs: None,
+            cost: None,
+            phrase: None,
+            persona: None,
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn a_wide_screen_lays_the_conversation_out_in_the_auto_column() {
+        use nexus_core::app::App;
+        let root = std::env::temp_dir().join(format!("nexus-wide-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("spaces")).unwrap();
+        let db = nexus_core::db::Db::open_in_memory().unwrap();
+        let mut app = AppView::new(App::new(db, Some("k"), nexus_core::space::Space { root }));
+        app.messages
+            .push(message("user", "How wide should this column be?"));
+        app.messages.push(message(
+            "assistant",
+            &"A wide terminal should not leave most of the screen empty, so the column grows with it. "
+                .repeat(4),
+        ));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 16)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..16)
+            .map(|y| (0..200).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        // Everything lives in cells 15..185, with the long reply wrapped at
+        // the column rather than at the old 112.
+        let widest = rows
+            .iter()
+            .map(|r| r.trim_end().chars().count())
+            .max()
+            .unwrap();
+        assert!(
+            widest > 15 + 112 && widest <= 185,
+            "{widest}\n{}",
+            rows.join("\n")
+        );
+        assert!(rows.iter().all(|r| r.chars().take(15).all(|c| c == ' ')));
+        println!("{}", rows.join("\n"));
+    }
 }

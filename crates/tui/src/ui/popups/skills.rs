@@ -10,7 +10,7 @@ use super::chrome;
 
 pub fn render(f: &mut Frame, app: &AppView) {
     use nexus_core::app::SkillsMode;
-    let area = crate::ui::centered(f.area(), chrome::STANDARD.0, chrome::STANDARD.1);
+    let area = chrome::popup_area(app, f.area(), "skills", chrome::STANDARD);
 
     let items: Vec<ListItem> = if app.skills.is_empty() {
         vec![chrome::empty_placeholder(

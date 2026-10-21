@@ -23,7 +23,7 @@ fn split_label(label: &'static str) -> (String, String) {
 #[allow(clippy::too_many_lines)]
 pub fn render(f: &mut Frame, app: &AppView) {
     use nexus_core::app::{SETTINGS_GROUPS, SettingsField};
-    let area = crate::ui::centered(f.area(), 64, 60);
+    let area = chrome::popup_area(app, f.area(), "settings", chrome::STANDARD);
 
     let dim = Style::default().fg(app.theme.fg_dim);
     let name_w = SettingsField::ALL
@@ -53,6 +53,10 @@ pub fn render(f: &mut Frame, app: &AppView) {
         match field {
             SettingsField::ReplyStyle => Span::styled(
                 app.settings.reply_style.clone(),
+                Style::default().fg(app.theme.accent),
+            ),
+            SettingsField::ColumnWidth => Span::styled(
+                app.settings.column_width.clone(),
                 Style::default().fg(app.theme.accent),
             ),
             SettingsField::RemoteImages => Span::styled(
@@ -116,7 +120,8 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 let (name, _) = split_label(field.label());
                 let name = chrome::truncate(&name, name_w.max(1));
                 let v = value(*field);
-                let v_max = (area.width.saturating_sub(8 + 2 * chrome::PAD)) as usize - name_w - 3; // border + scrollbar + highlight + label column
+                let v_max = (area.width.saturating_sub(8 + 2 * chrome::PAD) as usize)
+                    .saturating_sub(name_w + 3); // border + scrollbar + highlight + label column
                 let v_span = Span::styled(chrome::truncate(&v.content, v_max.max(1)), v.style);
                 ListItem::new(Line::from(vec![
                     Span::raw(format!("  {name:<name_w$}")),
@@ -196,6 +201,15 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
             _ => {}
         }
         return Ok(());
+    }
+    // The column width has no text to type: Enter, Space and the arrows
+    // cycle it (← goes back), and it saves as it changes.
+    if app.settings_field() == Some(SettingsField::ColumnWidth) {
+        match key.code {
+            KeyCode::Enter | KeyCode::Right => return app.cycle_column_width(1),
+            KeyCode::Left => return app.cycle_column_width(-1),
+            _ => {}
+        }
     }
     match key.code {
         // Enter on a group header toggles it; on a field it's a no-op here

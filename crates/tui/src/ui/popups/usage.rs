@@ -18,7 +18,7 @@ use super::chrome;
 
 #[allow(clippy::too_many_lines)] // usage popup: window header, tables per section
 pub fn render(f: &mut Frame, app: &AppView) {
-    let area = crate::ui::centered(f.area(), chrome::WIDE.0, chrome::WIDE.1);
+    let area = chrome::popup_area(app, f.area(), "usage", chrome::WIDE);
     let Some(data) = &app.usage_data else {
         return;
     };
