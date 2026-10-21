@@ -14,19 +14,52 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+pub mod host;
+mod suggestions;
+use nexus_core::deck::suggest::Selection;
+pub use suggestions::Completed;
+use suggestions::{History, Job, Work};
+
 /// All messages accepted from the presentation layer. `Open` and `ImportAsset`
 /// are explicit user-entered paths; deck content can only name safe assets.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", deny_unknown_fields)]
 pub enum Command {
     Load {},
-    Save { deck: Deck },
-    Apply { ops: Vec<Op> },
+    Save {
+        deck: Deck,
+    },
+    Apply {
+        ops: Vec<Op>,
+    },
     Undo {},
     Redo {},
-    NewDeck { title: String },
-    Open { path: PathBuf },
-    ImportAsset { path: PathBuf },
+    NewDeck {
+        title: String,
+    },
+    Open {
+        path: PathBuf,
+    },
+    ImportAsset {
+        path: PathBuf,
+    },
+    HostStatus {},
+    StartHost {},
+    Suggest {
+        instruction: String,
+        selection: Selection,
+        model: Option<String>,
+    },
+    Preview {
+        suggestion_id: String,
+    },
+    Accept {
+        suggestion_id: String,
+    },
+    Reject {
+        id: String,
+    },
+    AcceptAll {},
 }
 
 #[derive(Debug, Serialize)]
@@ -40,6 +73,20 @@ pub enum Event {
         // reproduce Rust's canonical number serialization.
         hashes: BTreeMap<String, String>,
         images: BTreeMap<String, String>,
+        history: Vec<History>,
+    },
+    HostChecking {},
+    HostStatus {
+        status: host::Status,
+    },
+    Suggesting {},
+    Suggestions {
+        history: Vec<History>,
+        model: String,
+        notes: Vec<String>,
+    },
+    Preview {
+        deck: Deck,
     },
     Asset {
         src: String,
@@ -73,6 +120,11 @@ pub struct Backend {
     undo: Vec<Deck>,
     redo: Vec<Deck>,
     pub fetcher: Arc<Fetcher>,
+    history: Vec<History>,
+    host: Option<host::Connection>,
+    work: Option<Work>,
+    document: Uuid,
+    suggesting: bool,
 }
 
 impl Backend {
@@ -100,17 +152,24 @@ impl Backend {
             saved_revision: String::new(),
             undo: Vec::new(),
             redo: Vec::new(),
+            history: Vec::new(),
+            host: None,
+            work: None,
+            document: Uuid::new_v4(),
+            suggesting: false,
         };
         if !backend.path.exists() {
             backend.save()?;
         }
         backend.saved_revision = backend.deck.revision();
         backend.remember()?;
+        backend.load_history()?;
         Ok(backend)
     }
 
     pub fn event(&self) -> Event {
         Event::Deck {
+            history: self.history.clone(),
             deck: self.deck.clone(),
             revision: self.deck.revision(),
             dirty: self.deck.revision() != self.saved_revision,
@@ -155,6 +214,17 @@ impl Backend {
 
     fn execute(&mut self, command: Command) -> Result<Event> {
         match command {
+            Command::HostStatus {} => return self.request_host(Job::HostStatus),
+            Command::StartHost {} => return self.request_host(Job::StartHost),
+            Command::Suggest {
+                instruction,
+                selection,
+                model,
+            } => return self.suggest(instruction, selection, model),
+            Command::Preview { suggestion_id } => return self.preview(&suggestion_id),
+            Command::Accept { suggestion_id } => self.accept(&suggestion_id)?,
+            Command::Reject { id } => self.reject(&id)?,
+            Command::AcceptAll {} => self.accept_all()?,
             Command::Load {} => {}
             Command::Apply { ops } => {
                 let next = deck::apply(&self.deck, &ops)?;
@@ -194,6 +264,8 @@ impl Backend {
                 });
             }
         }
+        self.recheck();
+        self.persist_history()?;
         Ok(self.event())
     }
 
@@ -221,6 +293,8 @@ impl Backend {
         self.saved_revision = self.deck.revision();
         self.undo.clear();
         self.redo.clear();
+        self.document = Uuid::new_v4();
+        self.load_history()?;
         Ok(())
     }
 
@@ -464,6 +538,7 @@ fn embedded(path: &str) -> Option<(&'static str, &'static str)> {
         "/panel.js" => ("text/javascript", include_str!("../ui/panel.js")),
         "/render.js" => ("text/javascript", include_str!("../ui/render.js")),
         "/helpers.js" => ("text/javascript", include_str!("../ui/helpers.js")),
+        "/suggest.js" => ("text/javascript", include_str!("../ui/suggest.js")),
         _ => return None,
     })
 }

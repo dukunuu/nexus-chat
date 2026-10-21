@@ -1,5 +1,7 @@
 //! Deck v1: bounded, UI-independent slide data and atomic editing operations.
 
+pub mod suggest;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 

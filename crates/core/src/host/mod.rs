@@ -14,7 +14,7 @@ pub mod cloudflare;
 pub mod process;
 pub mod wire;
 
-pub use api::{HostConfig, HostServer};
+pub use api::{HostConfig, HostServer, host_discovery_id};
 
 mod management;
 

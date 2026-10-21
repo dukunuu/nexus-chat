@@ -1,5 +1,5 @@
 import { snap, clampRect, id } from './helpers.js';
-import { renderSlide, positionBlock, element } from './render.js';
+import { renderSlide, renderBlock, positionBlock, element } from './render.js';
 
 export function canvasController(api) {
   const canvas = document.querySelector('#canvas');
@@ -7,6 +7,7 @@ export function canvasController(api) {
   const nodeFor = blockId => [...canvas.querySelectorAll('.block')].find(n => n.dataset.id === blockId);
   function decorate() {
     canvas.querySelectorAll('.resize-handle').forEach(n => n.remove());
+    if (api.state.preview) return;
     for (const node of canvas.querySelectorAll('.block')) node.classList.toggle('selected', api.state.selected.has(node.dataset.id));
     if (api.state.selected.size !== 1) return;
     const block = selectedBlocks()[0];
@@ -21,12 +22,30 @@ export function canvasController(api) {
     }
   }
   function render() {
-    renderSlide(canvas, api.slide(), api.state.deck.theme, api.state.images);
+    const preview = api.state.preview;
+    canvas.classList.toggle('previewing', Boolean(preview));
+    if (preview) {
+      const before = api.state.deck.slides.find(s => s.id === preview.slideId);
+      const after = preview.deck.slides.find(s => s.id === preview.slideId);
+      const deck = preview.before ? api.state.deck : preview.deck;
+      renderSlide(canvas, preview.before ? before : after, deck.theme, api.state.images);
+      if (!preview.before) {
+        for (const node of canvas.querySelectorAll('.block')) {
+          const old = before?.blocks.find(b => b.id === node.dataset.id);
+          const block = after?.blocks.find(b => b.id === node.dataset.id);
+          if (JSON.stringify(old) !== JSON.stringify(block) || JSON.stringify(api.state.deck.theme) !== JSON.stringify(deck.theme)) node.classList.add('ghost-changed');
+        }
+        for (const block of before?.blocks || []) if (!after?.blocks.some(b => b.id === block.id)) {
+          const node = renderBlock(block, api.state.deck.theme, api.state.images); node.classList.add('ghost-removed'); canvas.append(node);
+        }
+      }
+    } else renderSlide(canvas, api.slide(), api.state.deck.theme, api.state.images);
     decorate();
   }
   let drag;
   canvas.addEventListener('pointerdown', event => {
-    if (event.button !== 0 || event.target.closest('[contenteditable]')) return;
+    if (api.state.preview || event.button !== 0 || event.target.closest('[contenteditable]')) return;
+    api.state.scopeSlide = false;
     const handle = event.target.closest('.resize-handle');
     const blockNode = event.target.closest('.block');
     const blockId = handle?.dataset.target || blockNode?.dataset.id;
@@ -79,6 +98,7 @@ export function canvasController(api) {
   canvas.addEventListener('pointerup', event => finish(event));
   canvas.addEventListener('pointercancel', event => finish(event, true));
   canvas.addEventListener('dblclick', event => {
+    if (api.state.preview) return;
     const node = event.target.closest('.block-text');
     if (!node || node.isContentEditable) return;
     const slideId = api.slide().id;
@@ -100,6 +120,7 @@ export function canvasController(api) {
     }, { once: true });
   });
   function nudge(dx, dy) {
+    if (api.state.preview) return;
     const slide = api.slide();
     const ids = new Set(selectedBlocks().map(b => b.id));
     if (!slide || !ids.size) return;
@@ -114,11 +135,13 @@ export function canvasController(api) {
     });
   }
   function remove() {
+    if (api.state.preview) return;
     const slide = api.slide();
     const ids = selectedBlocks().map(b => b.id);
     if (slide) api.apply(() => ids.map(id => ({ op: 'delete_block', slide: slide.id, id })));
   }
   function duplicate() {
+    if (api.state.preview) return;
     const slide = api.slide();
     if (!slide) return;
     const blocks = selectedBlocks().map(b => ({ ...structuredClone(b), id: id('b'), ...clampRect({ ...b, x: b.x + 1, y: b.y + 1 }) }));

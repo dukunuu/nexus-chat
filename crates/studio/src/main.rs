@@ -7,11 +7,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use backend::Backend;
+use backend::{Backend, Completed};
 use nexus_core::{db, remote_image, space};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
-use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tao::window::WindowBuilder;
 use wry::http::Response;
 use wry::{NewWindowResponse, WebViewBuilder};
@@ -20,6 +20,11 @@ use wry::{NewWindowResponse, WebViewBuilder};
 const HOME: &str = "http://nexus.localhost/index.html";
 #[cfg(not(target_os = "windows"))]
 const HOME: &str = "nexus://localhost/index.html";
+
+enum Message {
+    Command(String),
+    Completed(Completed),
+}
 
 fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
@@ -38,7 +43,8 @@ fn main() -> Result<()> {
         &space.files_dir(&active.name),
         &space.root,
     )?));
-    let event_loop = EventLoopBuilder::<String>::with_user_event().build();
+    configure_host(&backend)?;
+    let event_loop = EventLoopBuilder::<Message>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title(format!(
             "nexus studio — {}",
@@ -48,6 +54,7 @@ fn main() -> Result<()> {
         .with_min_inner_size(LogicalSize::new(900.0, 600.0))
         .build(&event_loop)?;
     let proxy = event_loop.create_proxy();
+    let result_proxy = proxy.clone();
     let protocol_backend = Arc::clone(&backend);
     let handle = runtime.handle().clone();
     let builder = WebViewBuilder::new()
@@ -90,7 +97,7 @@ fn main() -> Result<()> {
             if backend::protocol_path(&request.uri().to_string())
                 .is_ok_and(|path| matches!(path.as_str(), "/" | "/index.html"))
             {
-                let _ = proxy.send_event(request.body().clone());
+                let _ = proxy.send_event(Message::Command(request.body().clone()));
             }
         })
         .with_url(HOME);
@@ -102,14 +109,14 @@ fn main() -> Result<()> {
         use wry::WebViewBuilderExtUnix as _;
         builder.build_gtk(window.default_vbox().context("missing GTK container")?)?
     };
+    let jobs = runtime.handle().clone();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
-            Event::UserEvent(source) => {
-                let mut backend = backend.lock().expect("backend lock");
-                let event = backend.dispatch(&source);
-                window.set_title(&format!("nexus studio — {}", backend.deck.title));
-                if let Err(error) = webview.evaluate_script(&event.script()) {
+            Event::UserEvent(message) => {
+                let (title, script) = handle_message(message, &backend, &jobs, &result_proxy);
+                window.set_title(&title);
+                if let Err(error) = webview.evaluate_script(&script) {
                     eprintln!("studio: {error}");
                 }
             }
@@ -120,6 +127,46 @@ fn main() -> Result<()> {
             _ => {}
         }
     });
+}
+
+fn configure_host(backend: &Mutex<Backend>) -> Result<()> {
+    let host_url = nexus_core::config::load_studio_host_url()
+        .map_err(|_| anyhow::anyhow!("Invalid studio host configuration"))?;
+    let token = nexus_core::config::ensure_host_token()
+        .map_err(|_| anyhow::anyhow!("Could not load the local host token"))?;
+    backend
+        .lock()
+        .expect("backend lock")
+        .configure_host(backend::host::Connection::new(&host_url, token)?);
+    Ok(())
+}
+
+fn handle_message(
+    message: Message,
+    backend: &Mutex<Backend>,
+    jobs: &tokio::runtime::Handle,
+    proxy: &EventLoopProxy<Message>,
+) -> (String, String) {
+    let mut backend = backend.lock().expect("backend lock");
+    let asynchronous = matches!(message, Message::Completed(_));
+    let event = match message {
+        Message::Command(source) => backend.dispatch(&source),
+        Message::Completed(result) => backend.complete(result),
+    };
+    if let Some(work) = backend.take_work() {
+        let proxy = proxy.clone();
+        jobs.spawn(async move {
+            let _ = proxy.send_event(Message::Completed(work.run().await));
+        });
+    }
+    let script = if asynchronous {
+        event
+            .script()
+            .replacen("window.studioEvent(", "window.studioAsyncEvent(", 1)
+    } else {
+        event.script()
+    };
+    (format!("nexus studio — {}", backend.deck.title), script)
 }
 
 async fn remote_bytes(

@@ -2572,16 +2572,19 @@ async fn host(options: HostOptions) -> Result<()> {
     let enrollment_host = public_host.as_deref().unwrap_or(&local_url);
     let enrollment = format!("nexus://host={enrollment_host}&token={token}");
     out(format!("host listening at {local_url}"));
-    out(format!("enrollment: {enrollment}"));
-    match qrcode::QrCode::new(enrollment.as_bytes()) {
-        Ok(code) => {
-            let qr = code
-                .render::<qrcode::render::unicode::Dense1x2>()
-                .quiet_zone(true)
-                .build();
-            out(qr);
+    // Detached studio/service logs must not contain the bearer capability.
+    if std::io::stdout().is_terminal() {
+        out(format!("enrollment: {enrollment}"));
+        match qrcode::QrCode::new(enrollment.as_bytes()) {
+            Ok(code) => {
+                let qr = code
+                    .render::<qrcode::render::unicode::Dense1x2>()
+                    .quiet_zone(true)
+                    .build();
+                out(qr);
+            }
+            Err(error) => out(format!("could not render enrollment QR: {error}")),
         }
-        Err(error) => out(format!("could not render enrollment QR: {error}")),
     }
 
     let mut sleep_guard = if no_sleep_guard {

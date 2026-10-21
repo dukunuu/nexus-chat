@@ -1,10 +1,11 @@
 import { canvasController } from './canvas.js';
 import { stripController } from './strip.js';
 import { panelController } from './panel.js';
+import { suggestController } from './suggest.js';
 import { textBlock, id } from './helpers.js';
 import { renderSlide } from './render.js';
 
-const state = { deck: null, revision: '', hashes: {}, images: {}, dirty: false, slideId: null, selected: new Set() };
+const state = { deck: null, revision: '', hashes: {}, images: {}, dirty: false, slideId: null, selected: new Set(), scopeSlide: false, history: [], preview: null };
 const status = document.querySelector('#status');
 const queue = [];
 let pending = null;
@@ -17,36 +18,44 @@ function pump() {
 function command(build, complete) { queue.push({ build: typeof build === 'function' ? build : () => build, complete }); pump(); }
 function apply(build) { command(() => ({ command: 'Apply', ops: build() })); }
 const api = {
-  state, apply,
+  state, apply, command,
+  renderCanvas: () => { if (state.deck) canvas.render(); },
   slide: () => state.deck?.slides.find(s => s.id === state.slideId),
   updateMany(slide, updates) {
     apply(() => updates.map(({ id, fields }) => ({ op: 'update_block', slide, id, fields, base_hash: state.hashes[id] || '' })));
   },
-  selectionChanged() { canvas.decorate(); panel.render(); },
+  selectionChanged() { canvas.decorate(); panel.render(); suggestions.scope(); },
   render,
 };
-const canvas = canvasController(api), strip = stripController(api), panel = panelController(api);
+const canvas = canvasController(api), strip = stripController(api), panel = panelController(api), suggestions = suggestController(api);
 function render() {
   if (!state.deck) return;
-  canvas.render(); strip.render(); panel.render();
+  canvas.render(); strip.render(); panel.render(); suggestions.render();
   document.querySelector('#deck-title').textContent = state.deck.title;
   document.querySelector('#dirty').textContent = state.dirty ? '· unsaved' : '· saved';
   const notes = document.querySelector('#speaker-notes');
   notes.value = api.slide()?.notes || ''; notes.disabled = !api.slide();
   renderPresentation();
 }
-window.studioEvent = event => {
-  const finished = pending; pending = null;
+function handleEvent(event, reply) {
+  const finished = reply ? pending : null;
+  if (reply) pending = null;
+  suggestions.event(event);
   if (event.event === 'Deck') {
-    Object.assign(state, { deck: event.deck, revision: event.revision, hashes: event.hashes, images: event.images, dirty: event.dirty });
+    suggestions.clearPreview();
+    Object.assign(state, { deck: event.deck, revision: event.revision, hashes: event.hashes, images: event.images, dirty: event.dirty, history: event.history });
     if (!api.slide()) state.slideId = state.deck.slides[0]?.id || null;
     const blocks = new Set(api.slide()?.blocks.map(b => b.id) || []);
     state.selected = new Set([...state.selected].filter(id => blocks.has(id)));
     status.textContent = 'Ready'; render();
+  } else if (event.event === 'Suggestions') {
+    state.history = event.history; suggestions.render(); status.textContent = event.notes.join('; ') || 'Suggestions ready';
   } else if (event.event === 'Error') status.textContent = event.message;
   finished?.complete?.(event);
   pump();
-};
+}
+window.studioEvent = event => handleEvent(event, true);
+window.studioAsyncEvent = event => handleEvent(event, false);
 function save() { command(() => ({ command: 'Save', deck: state.deck })); }
 document.querySelector('#save').onclick = save;
 document.querySelector('#undo').onclick = () => command({ command: 'Undo' });
@@ -127,6 +136,15 @@ document.addEventListener('keydown', event => {
     event.preventDefault(); return;
   }
   const editing = event.target.closest('input, textarea, select, [contenteditable]');
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault(); suggestions.focus(); return;
+  }
+  if (!editing && event.key.toLowerCase() === 'b' && state.preview) {
+    event.preventDefault(); suggestions.toggle(); return;
+  }
+  if (!editing && event.key === 'Escape') {
+    suggestions.clearPreview(); state.selected.clear(); state.scopeSlide = false; api.selectionChanged(); return;
+  }
   if (event.key === 's' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault(); if (editing) event.target.blur(); save(); return;
   }
@@ -143,3 +161,4 @@ document.addEventListener('keydown', event => {
   } else if (event.key === 'F5') { event.preventDefault(); present(); }
 });
 command({ command: 'Load' });
+command({ command: 'HostStatus' });

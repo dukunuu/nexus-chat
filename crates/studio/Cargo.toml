@@ -10,6 +10,7 @@ publish = false
 nexus-chat-core = { path = "../core" }
 anyhow = { workspace = true }
 image = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

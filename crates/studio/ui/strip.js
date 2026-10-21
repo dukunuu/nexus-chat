@@ -27,7 +27,7 @@ export function stripController(api) {
       const thumb = element('div', 'slide thumbnail');
       thumb.tabIndex = 0; thumb.setAttribute('role', 'button'); thumb.setAttribute('aria-label', `Slide ${index + 1}`);
       renderSlide(thumb, slide, api.state.deck.theme, api.state.images);
-      const select = () => { api.state.slideId = slide.id; api.state.selected.clear(); api.render(); };
+      const select = () => { api.state.slideId = slide.id; api.state.selected.clear(); api.state.scopeSlide = true; api.render(); };
       thumb.onclick = select; thumb.onkeydown = event => { if (event.key === 'Enter') select(); };
       const caption = element('div', 'slide-caption');
       caption.append(element('span', '', `${index + 1} · ${slide.layout}`));

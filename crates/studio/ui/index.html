@@ -18,12 +18,22 @@
   <main>
     <aside id="strip-pane"><div class="pane-title">SLIDES <button id="add-slide" title="Add slide">+</button></div><div id="strip"></div></aside>
     <section id="workspace">
-      <nav id="toolbar"><button id="add-text">+ text</button><button id="add-image">+ image</button><button id="add-shape">+ shape</button><span class="spacer"></span><button id="present">▶ Present</button></nav>
+      <nav id="toolbar"><button id="add-text">+ text</button><button id="add-image">+ image</button><button id="add-shape">+ shape</button><span class="spacer"></span><button id="host-status" class="offline" title="Check host connection">host · checking</button><button id="start-host" hidden>Start host</button><button id="preview-toggle" hidden>After · B for Before</button><button id="close-preview" hidden title="Close preview (Esc)">Close preview</button><button id="present">▶ Present</button></nav>
       <div id="stage"><div id="canvas" class="slide" tabindex="0" aria-label="Slide canvas"></div></div>
       <details id="notes"><summary>Speaker notes</summary><textarea id="speaker-notes" aria-label="Speaker notes" placeholder="Notes for this slide…"></textarea></details>
       <footer><span id="status" role="status">Ready</span><span>32 × 18 · 16:9</span></footer>
     </section>
-    <aside id="panel"><div class="pane-title">PROPERTIES</div><div id="properties"></div></aside>
+    <aside id="panel">
+      <div class="panel-tabs" role="tablist"><button id="properties-tab" role="tab" aria-selected="true">Properties</button><button id="suggest-tab" role="tab" aria-selected="false">Suggest</button></div>
+      <div id="properties"></div>
+      <section id="suggestions-panel" hidden>
+        <p id="host-explanation" role="status"></p><span id="suggest-scope" class="scope-chip">whole deck</span>
+        <label for="instruction">Instruction</label><textarea id="instruction" maxlength="2000" placeholder="What would make this deck better?"></textarea>
+        <div id="quick-prompts"></div><button id="suggest">Suggest</button>
+        <div class="results-heading"><h3>Suggestions</h3><button id="accept-all" disabled>Accept all</button></div>
+        <div id="suggestion-results"></div>
+      </section>
+    </aside>
   </main>
   <dialog id="path-dialog"><form method="dialog"><h2 id="path-heading">Open deck</h2><label id="path-label" for="path-input">Path</label><input id="path-input" required autocomplete="off"><p id="path-hint"></p><div class="dialog-actions"><button value="cancel" formnovalidate>Cancel</button><button id="path-confirm" value="ok">Open</button></div></form></dialog>
   <dialog id="layout-dialog"><h2>Add a slide</h2><div id="layout-options"></div><button id="cancel-layout">Cancel</button></dialog>
