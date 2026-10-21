@@ -48,11 +48,12 @@ jobs:
           fi
           new="$(printf '%s' "$manifest" | awk -F. '{print $1"."$2"."($3+1)}')"
           sed -i "s/^version = \".*\"$/version = \"$new\"/" Cargo.toml
-          # Lockfile: workspace versions live in [workspace.package]; both
+          # Lockfile: workspace versions live in [workspace.package]; all
           # member packages ride the same bump (a full re-resolve would
           # churn every dependency).
           sed -i '/^name = "nexus-chat"$/{n;s/^version = ".*"/version = "'"$new"'"/;}' Cargo.lock
           sed -i '/^name = "nexus-chat-core"$/{n;s/^version = ".*"/version = "'"$new"'"/;}' Cargo.lock
+          sed -i '/^name = "nexus-studio"$/{n;s/^version = ".*"/version = "'"$new"'"/;}' Cargo.lock
           # The TUI pins nexus-chat-core exactly (a caret let fresh installs
           # resolve an older core); move the pin with the bump.
           sed -i 's|nexus-chat-core = { path = "../core", version = "=[^"]*"|nexus-chat-core = { path = "../core", version = "='"$new"'"|' crates/tui/Cargo.toml

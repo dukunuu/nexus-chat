@@ -297,6 +297,11 @@ pub enum Command {
         /// Session id, slug, or id prefix.
         session: String,
     },
+    /// Open the local slide editor in a separate desktop window.
+    Studio {
+        /// Deck to open (otherwise the most recent deck).
+        path: Option<PathBuf>,
+    },
     /// Update to the latest release from crates.io — runs
     /// `cargo install nexus-chat` when a newer version exists.
     Update,
@@ -584,10 +589,52 @@ pub async fn run(cmd: Command) -> Result<()> {
             })
             .await
         }
+        Command::Studio { path } => launch_studio(path.as_deref()),
         Command::Update => update().await,
         Command::Status => status(),
         Command::Doctor { network } => doctor(network).await,
     }
+}
+
+fn launch_studio(path: Option<&Path>) -> Result<()> {
+    let name = if cfg!(windows) {
+        "nexus-studio.exe"
+    } else {
+        "nexus-studio"
+    };
+    let beside = std::env::current_exe()?.with_file_name(name);
+    for executable in [beside, PathBuf::from(name)] {
+        let mut command = std::process::Command::new(executable);
+        if let Some(path) = path {
+            command.arg(path);
+        }
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            command.creation_flags(0x0000_0008 | 0x0000_0200);
+        }
+        match command.spawn() {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    eprintln!("nexus studio isn't installed — cargo install --path crates/studio");
+    Ok(())
 }
 
 // --- app-booting commands (ask / chat / research / watch run) ---

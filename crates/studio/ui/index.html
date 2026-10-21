@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nexus studio</title>
+  <link rel="stylesheet" href="/studio.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header>
+    <strong>nexus <span>studio</span></strong>
+    <span id="deck-title">Untitled</span><span id="dirty"></span>
+    <button id="new-deck">New</button><button id="open-deck">Open</button>
+    <button id="save">Save</button><button id="undo" title="Undo (⌘/Ctrl+Z)">Undo</button>
+    <button id="redo" title="Redo (Shift+⌘/Ctrl+Z)">Redo</button>
+  </header>
+  <main>
+    <aside id="strip-pane"><div class="pane-title">SLIDES <button id="add-slide" title="Add slide">+</button></div><div id="strip"></div></aside>
+    <section id="workspace">
+      <nav id="toolbar"><button id="add-text">+ text</button><button id="add-image">+ image</button><button id="add-shape">+ shape</button><span class="spacer"></span><button id="present">▶ Present</button></nav>
+      <div id="stage"><div id="canvas" class="slide" tabindex="0" aria-label="Slide canvas"></div></div>
+      <details id="notes"><summary>Speaker notes</summary><textarea id="speaker-notes" aria-label="Speaker notes" placeholder="Notes for this slide…"></textarea></details>
+      <footer><span id="status" role="status">Ready</span><span>32 × 18 · 16:9</span></footer>
+    </section>
+    <aside id="panel"><div class="pane-title">PROPERTIES</div><div id="properties"></div></aside>
+  </main>
+  <dialog id="path-dialog"><form method="dialog"><h2 id="path-heading">Open deck</h2><label id="path-label" for="path-input">Path</label><input id="path-input" required autocomplete="off"><p id="path-hint"></p><div class="dialog-actions"><button value="cancel" formnovalidate>Cancel</button><button id="path-confirm" value="ok">Open</button></div></form></dialog>
+  <dialog id="layout-dialog"><h2>Add a slide</h2><div id="layout-options"></div><button id="cancel-layout">Cancel</button></dialog>
+  <div id="presentation" hidden><div id="present-slide" class="slide"></div><span id="present-counter"></span><button id="exit-present">Exit · Esc</button></div>
+</body>
+</html>

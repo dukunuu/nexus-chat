@@ -1,0 +1,19 @@
+[package]
+name = "nexus-studio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+nexus-chat-core = { path = "../core" }
+anyhow = { workspace = true }
+image = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tao = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+wry = { workspace = true }
