@@ -15,7 +15,9 @@ use ratatui::{Frame, Terminal, backend::TestBackend};
 use serde_json::{Value, json};
 
 use crate::app_view::AppView;
-use crate::interactive::{card_buffer, card_height, node_regions, render_nodes, safe};
+use crate::interactive::{
+    card_buffer, card_height, node_regions, render_nodes, safe, stepper_arrows,
+};
 use crate::theme::Theme;
 
 use super::chrome;
@@ -38,6 +40,7 @@ enum Control {
     Input(String),
     Toggle(String),
     Select(usize, String),
+    Stepper(usize, String),
     Table(usize, String),
 }
 
@@ -121,6 +124,7 @@ impl TuiApp {
                     .map(|item| Control::Toggle(item.key.clone()))
                     .collect(),
                 Node::Select { key, .. } => vec![Control::Select(index, key.clone())],
+                Node::Stepper { key, .. } => vec![Control::Stepper(index, key.clone())],
                 Node::Table {
                     select: Some(key), ..
                 } => vec![Control::Table(index, key.clone())],
@@ -165,6 +169,15 @@ impl TuiApp {
             {
                 session.cycle(index, code != KeyCode::Left).map(|()| {
                     event = Some(json!({"type":"input", "key":key, "value":session.value(&key)}));
+                })
+            }
+            Control::Stepper(index, key) if matches!(code, KeyCode::Left | KeyCode::Right) => {
+                session.step(index, code == KeyCode::Right).and_then(|()| {
+                    event = Some(json!({
+                        "type":"input", "key":key,
+                        "value":session.number(&json!({"get":key}))?
+                    }));
+                    Ok(())
                 })
             }
             Control::Table(index, key) if matches!(code, KeyCode::Up | KeyCode::Down) => {
@@ -319,13 +332,33 @@ pub fn mouse(app: &mut AppView, event: MouseEvent) {
         return;
     };
     if event.kind == MouseEventKind::Down(MouseButton::Left)
-        && let Some((_, control)) = instance
+        && let Some((rect, control)) = instance
             .hits
             .iter()
             .find(|(rect, _)| rect.contains(Position::new(event.column, event.row)))
     {
         instance.focus = *control;
-        instance.activate(KeyCode::Enter);
+        let code = if let Some(Control::Stepper(node, _)) = instance.controls().get(*control) {
+            let session = &instance.view.as_ref().expect("stepper view").session;
+            let Some(arrows) = stepper_arrows(&session.document().nodes()[*node], session, *rect)
+            else {
+                return;
+            };
+            let Some(direction) = arrows
+                .iter()
+                .position(|rect| rect.contains(Position::new(event.column, event.row)))
+            else {
+                return;
+            };
+            if direction == 0 {
+                KeyCode::Left
+            } else {
+                KeyCode::Right
+            }
+        } else {
+            KeyCode::Enter
+        };
+        instance.activate(code);
     }
 }
 
@@ -451,3 +484,7 @@ pub fn render(frame: &mut Frame, app: &mut AppView) {
 #[cfg(test)]
 #[path = "tui_app/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tui_app/stepper_tests.rs"]
+mod stepper_tests;

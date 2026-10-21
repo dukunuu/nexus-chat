@@ -54,6 +54,7 @@ enum Control {
     Input(String),
     Toggle(String),
     Select(usize),
+    Stepper(usize),
     Table(usize, String),
 }
 struct Entry {
@@ -91,6 +92,7 @@ impl Entry {
                             .map(|item| Control::Toggle(item.key.clone()))
                             .collect(),
                         Node::Select { .. } => vec![Control::Select(index)],
+                        Node::Stepper { .. } => vec![Control::Stepper(index)],
                         Node::Table {
                             select: Some(key), ..
                         } => vec![Control::Table(index, key.clone())],
@@ -156,7 +158,7 @@ impl Entry {
             }
             Control::Toggle(key) => session.toggle(&key).map(|()| None),
             Control::Select(node) => session.cycle(node, true).map(|()| None),
-            Control::Input(_) | Control::Table(..) => return None,
+            Control::Input(_) | Control::Stepper(_) | Control::Table(..) => return None,
         };
         match result {
             Ok(message) => {
@@ -179,6 +181,9 @@ impl Entry {
         let result = match (control, code) {
             (Control::Select(node), KeyCode::Left | KeyCode::Right) => {
                 session.cycle(node, code == KeyCode::Right)
+            }
+            (Control::Stepper(node), KeyCode::Left | KeyCode::Right) => {
+                session.step(node, code == KeyCode::Right)
             }
             (Control::Table(node, key), KeyCode::Up | KeyCode::Down) => {
                 let row = session.selected_row(&key);
@@ -429,6 +434,7 @@ fn session_controls(session: &Session) -> usize {
             Node::Input { .. }
             | Node::Toggle { .. }
             | Node::Select { .. }
+            | Node::Stepper { .. }
             | Node::Table {
                 select: Some(_), ..
             } => 1,
@@ -1285,6 +1291,72 @@ fn render_toggle(
         .style(style)
         .render(area, buffer);
 }
+/// Arrow hit regions for a stepper, shared by inline and scripted apps.
+pub(crate) fn stepper_arrows(node: &Node, session: &Session, area: Rect) -> Option<[Rect; 2]> {
+    let Node::Stepper { key, label, .. } = node else {
+        return None;
+    };
+    let value_width = u16::try_from(session.value(key).width()).unwrap_or(u16::MAX);
+    if area.width < value_width.saturating_add(4) {
+        return None;
+    }
+    let label = clipped(
+        &display(session, label),
+        area.width.saturating_sub(value_width.saturating_add(6)),
+    );
+    let offset = if label.is_empty() {
+        0
+    } else {
+        u16::try_from(label.width()).unwrap_or(0) + 2
+    };
+    Some([
+        Rect::new(area.x + offset, area.y, 1, 1),
+        Rect::new(area.x + offset + value_width + 3, area.y, 1, 1),
+    ])
+}
+fn render_stepper(
+    node: &Node,
+    session: &Session,
+    region: Rect,
+    theme: &Theme,
+    selected: bool,
+    buffer: &mut Buffer,
+) {
+    let Node::Stepper {
+        key,
+        label,
+        min,
+        max,
+        ..
+    } = node
+    else {
+        return;
+    };
+    let style = control_style(theme, selected);
+    let value = session.value(key);
+    if let Some([left, _]) = stepper_arrows(node, session, region) {
+        let label = clipped(
+            &display(session, label),
+            left.x.saturating_sub(region.x).saturating_sub(2),
+        );
+        let gap = if label.is_empty() { "" } else { "  " };
+        let number = value.parse::<f64>().unwrap_or_default();
+        let dim = Style::default().fg(theme.fg_dim);
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{label}{gap}"), dim),
+            Span::styled("◀", if number <= *min { dim } else { style }),
+            Span::raw(" "),
+            Span::styled(value, style.add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled("▶", if number >= *max { dim } else { style }),
+        ]))
+        .render(region, buffer);
+    } else {
+        Paragraph::new(value)
+            .style(style.add_modifier(Modifier::BOLD))
+            .render(region, buffer);
+    }
+}
 fn render_component(
     node: &Node,
     session: &Session,
@@ -1335,6 +1407,10 @@ fn render_component(
             ))
             .style(control_style(theme, focus == Some(control)))
             .render(region, buffer);
+            hits.push((region, control));
+        }
+        Node::Stepper { .. } => {
+            render_stepper(node, session, region, theme, focus == Some(control), buffer);
             hits.push((region, control));
         }
         Node::Table { select, .. } => {
@@ -1848,6 +1924,21 @@ impl Widgets {
                 self.focused = Some(hit.key);
                 (true, None)
             }
+            Some((index, Control::Stepper(node))) => {
+                entry.focus = index;
+                if let Ok(session) = &entry.session
+                    && let Some(arrows) =
+                        stepper_arrows(&session.document().nodes()[node], session, hit.rect)
+                    && let Some(direction) = arrows.iter().position(|rect| rect.contains(pos))
+                {
+                    entry.navigate(if direction == 0 {
+                        KeyCode::Left
+                    } else {
+                        KeyCode::Right
+                    });
+                }
+                (true, None)
+            }
             Some((index, Control::Table(node, _))) => {
                 entry.focus = index;
                 self.focused = Some(hit.key);
@@ -2203,3 +2294,7 @@ mod components_tests;
 #[cfg(test)]
 #[path = "interactive/layouts_tests.rs"]
 mod layouts_tests;
+
+#[cfg(test)]
+#[path = "interactive/stepper_tests.rs"]
+mod stepper_tests;

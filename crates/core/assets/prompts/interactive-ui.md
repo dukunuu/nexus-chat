@@ -9,6 +9,13 @@ send users to a browser or invent app/game-specific slash commands for these.
 Ordinary answers still use Markdown. This is a bounded declarative UI runtime,
 not HTML, JavaScript, Python, a shell or a general program execution engine.
 
+When asked for an interactive UI, app, tool, planner, calculator, tracker or
+game, build a small app: named state → controls → derived displays → actions.
+Use at least two kinds of controls (stepper/select/toggle/checklist/input),
+and compute displays from state (text templates, progress, bars, stats or kv).
+Answer-only button lists are for quizzes, polls and "pick one" replies,
+not substitutes for apps.
+
 Put the `nexus-ui` block first, followed by one or two sentences that do not
 repeat the card. Order the card as headline, supporting content, then actions.
 Simple cards get one primary action (mark its button `"primary":true`) and at
@@ -48,6 +55,7 @@ over several lines and check that every bracket closes):
   - `{"type":"sparkline","values":[1,3,2],"rows":1}`: 1–64 numeric expressions, height 1–3 (default 1); negatives display as zero.
   - `{"type":"checklist","items":[{"label":"Ready","key":"ready"}]}`: 1–8 rows bound to booleans; Enter/Space or click toggles each item locally.
   - `{"type":"select","key":"mode","label":"Mode","options":["Fast","Full"]}`: one row; string field must stay in 2–8 options (each ≤64 bytes); Left/Right or click cycles locally.
+  - `{"type":"stepper","key":"days","label":"Days","min":1,"max":30,"step":1}`: one row, numeric field; finite min < max, step > 0; value clamped on load and changes. Left/Right or click ◀/▶ adjusts locally; arrows dim at bounds.
   - `{"type":"toggle","key":"ready","label":"Ready"}`: one row bound to a boolean; Enter/Space or click flips locally. New labels, headers and cells are templates. Tab moves between controls; local changes run no actions.
 - `actions`: map of names to sequential action steps:
   - `{"op":"set","key":"count","value":{"add":[{"get":"count"},1]}}`
@@ -87,9 +95,9 @@ Labels/titles/art lines are at most 120 bytes, and there are at most 32 controls
 are transactional and bounded. Local state is temporary, reset on session/space
 changes or reopening the app. Only explicit submitted messages enter chat history.
 
-Example (this is a general UI, not a built-in counter command):
+Example app (state → controls → computed progress → reviewed plan):
 ```nexus-ui
-{"version":1,"title":"Experiment","state":{"count":0,"name":""},"view":[{"type":"text","text":"Count: {{count}}"},{"type":"input","key":"name","label":"Name"},{"type":"buttons","items":[{"label":"Add one","action":"plus","primary":true},{"label":"Submit result","action":"submit"}]}],"actions":{"plus":[{"op":"set","key":"count","value":{"add":[{"get":"count"},1]}}],"submit":[{"op":"send","text":"{{name}} chose {{count}}"}]}}
+{"version":1,"title":"Trip planner","state":{"days":5,"beach":true,"hiking":false},"view":[{"type":"stepper","key":"days","label":"Days","min":1,"max":30,"step":1},{"type":"checklist","items":[{"label":"Beach (2 days)","key":"beach"},{"label":"Hiking (3 days)","key":"hiking"}]},{"type":"progress","label":"Planned days","value":{"add":[{"if":[{"get":"beach"},2,0]},{"if":[{"get":"hiking"},3,0]}]},"max":{"get":"days"}},{"type":"buttons","items":[{"label":"Save plan","action":"save","primary":true}]}],"actions":{"save":[{"op":"send","text":"Plan {{days}} days: beach={{beach}}, hiking={{hiking}}"}]}}
 ```
 
 Games are documents you author using state, conditions, random choices and

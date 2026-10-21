@@ -349,6 +349,19 @@ pub enum Node {
         /// Two to eight allowed string values.
         options: Vec<String>,
     },
+    /// A locally adjusted numeric field, clamped to a fixed range.
+    Stepper {
+        /// Bound numeric state field.
+        key: String,
+        /// Plain-text label template.
+        label: String,
+        /// Inclusive lower bound.
+        min: f64,
+        /// Inclusive upper bound.
+        max: f64,
+        /// Positive increment or decrement.
+        step: f64,
+    },
     /// A locally toggleable boolean field.
     Toggle {
         /// Bound boolean state field.
@@ -405,6 +418,7 @@ impl Node {
             Self::Divider { .. }
             | Self::Progress { .. }
             | Self::Select { .. }
+            | Self::Stepper { .. }
             | Self::Toggle { .. } => 1,
         }
     }
@@ -462,7 +476,7 @@ pub struct CheckError {
 }
 
 /// Valid presentation node types, shared by validation and tool reports.
-pub const NODE_TYPES: &str = "hero, columns, cards, stats, steps, callout, quote, divider, text, buttons, input, kv, table, progress, bars, sparkline, checklist, select, toggle";
+pub const NODE_TYPES: &str = "hero, columns, cards, stats, steps, callout, quote, divider, text, buttons, input, kv, table, progress, bars, sparkline, checklist, select, stepper, toggle";
 const ACTION_OPS: &str = "set, call, send, answer";
 const EXPR_OPS: &str = "get, random, not, number, if, add, sub, mul, div, mod, eq, lt, gt, and, or";
 const MAX_ERRORS: usize = 10;
@@ -522,6 +536,7 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
         "bool" => typed!(bool),
         "u8" => typed!(u8),
         "u16" => typed!(u16),
+        "number" => typed!(f64),
         "tone" => typed!(Tone),
         "frame" => typed!(Frame),
         "accent" => typed!(Accent),
@@ -587,6 +602,7 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
                 ("node", "sparkline") => "values:value[] rows:u16",
                 ("node", "checklist") => "items:check[]",
                 ("node", "select") => "key:string label:string options:string[]",
+                ("node", "stepper") => "key:string label:string min:number max:number step:number",
                 ("step", "set") => "key:string value:value",
                 ("step", "call") => "action:string",
                 ("step", "send") => "text:string",
@@ -666,6 +682,7 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
         "progress" | "bar" => "label value",
         "sparkline" => "values",
         "select" => "key label options",
+        "stepper" => "key label min max step",
         "set" => "key value",
         "call" => "action",
         "button" => "label action",
@@ -1078,6 +1095,23 @@ impl Document {
                 }
                 controls += items.len();
             }
+            Node::Stepper {
+                key,
+                label,
+                min,
+                max,
+                step,
+            } => {
+                Self::template_ok(label)?;
+                for value in [min, max, step] {
+                    ensure!(value.is_finite(), "stepper bounds and step must be finite");
+                    scalar_ok(&json!(value))?;
+                }
+                ensure!(min < max, "stepper min must be less than max");
+                ensure!(*step > 0.0, "stepper step must be positive");
+                binding_ok(&self.state, key, Value::is_number)?;
+                controls += 1;
+            }
             Node::Input { key, label } => {
                 ensure!(
                     self.state.contains_key(key),
@@ -1341,6 +1375,7 @@ impl Document {
                 Node::Checklist { items } => items.len(),
                 Node::Input { .. }
                 | Node::Select { .. }
+                | Node::Stepper { .. }
                 | Node::Toggle { .. }
                 | Node::Table {
                     select: Some(_), ..
@@ -1365,6 +1400,7 @@ impl Document {
                         | Node::Input { .. }
                         | Node::Checklist { .. }
                         | Node::Select { .. }
+                        | Node::Stepper { .. }
                         | Node::Toggle { .. }
                         | Node::Table {
                             select: Some(_),
@@ -1511,6 +1547,7 @@ impl Session {
                 .collect(),
             Node::Input { key, label }
             | Node::Select { key, label, .. }
+            | Node::Stepper { key, label, .. }
             | Node::Toggle { key, label } => {
                 vec![format!("{}: {}", text(label), self.value(key))]
             }
@@ -1657,6 +1694,27 @@ impl Session {
         self.state = next;
         Ok(())
     }
+    /// Adjust one stepper locally by its step, clamping at either bound.
+    /// # Errors
+    /// Rejects non-stepper nodes or invalid resulting bindings.
+    pub fn step(&mut self, node: usize, forward: bool) -> Result<()> {
+        let Some(Node::Stepper {
+            key,
+            min,
+            max,
+            step,
+            ..
+        }) = self.document.view.get(node)
+        else {
+            bail!("not a stepper control");
+        };
+        let value = number(&self.state[key])? + if forward { *step } else { -*step };
+        let mut next = self.state.clone();
+        next.insert(key.clone(), json!(value.clamp(*min, *max)));
+        self.bindings_ok(&mut next)?;
+        self.state = next;
+        Ok(())
+    }
     /// Current normalized table index (zero for an empty table).
     #[must_use]
     pub fn selected_row(&self, key: &str) -> usize {
@@ -1776,6 +1834,10 @@ impl Session {
                             .is_some_and(|s| options.iter().any(|o| o == s)),
                         "select value must be an option"
                     );
+                }
+                Node::Stepper { key, min, max, .. } => {
+                    let value = number(&state[key])?.clamp(*min, *max);
+                    state.insert(key.clone(), json!(value));
                 }
                 Node::Table {
                     select: Some(key),
@@ -2087,3 +2149,7 @@ mod layouts_tests;
 #[cfg(test)]
 #[path = "interactive/components_tests.rs"]
 mod components_tests;
+
+#[cfg(test)]
+#[path = "interactive/stepper_tests.rs"]
+mod stepper_tests;
