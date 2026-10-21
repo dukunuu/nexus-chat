@@ -1343,6 +1343,17 @@ impl App {
         let reasoning = (!reasoning.is_empty()).then_some(reasoning);
         let phrase = Some(THINKING[task.thinking_idx].1.to_string());
         let created_at = Some(chrono::Utc::now().to_rfc3339());
+        let stored_messages = if task.incognito {
+            Vec::new()
+        } else {
+            self.db.load_messages(&task.session_id)?
+        };
+        let tool_messages = if task.incognito && viewing {
+            &self.messages
+        } else {
+            &stored_messages
+        };
+        let (buf, fixed_images) = repair_image_links(&buf, tool_messages);
 
         let message_id = if !task.incognito && !buf.is_empty() {
             self.db.add_assistant_message(
@@ -1453,6 +1464,12 @@ impl App {
                 });
             }
         }
+        if fixed_images > 0 {
+            self.push_status(format!(
+                "fixed {fixed_images} image link{}",
+                if fixed_images == 1 { "" } else { "s" }
+            ));
+        }
         if let Some(target) = repair {
             self.start_ui_repair(target);
         }
@@ -1542,7 +1559,24 @@ impl App {
         if (viewing && index.is_none()) || (target.incognito && !viewing) {
             return super::AppEvent::Status(String::new());
         }
+        let mut fixed_images = 0;
         let applied = result.and_then(|content| {
+            let stored = if target.incognito {
+                Vec::new()
+            } else {
+                self.db
+                    .load_messages(&target.session_id)
+                    .map_err(|error| error.to_string())?
+            };
+            let (content, fixed) = repair_image_links(
+                &content,
+                if target.incognito {
+                    &self.messages
+                } else {
+                    &stored
+                },
+            );
+            fixed_images = fixed;
             if !target.incognito
                 && !self
                     .db
@@ -1565,6 +1599,10 @@ impl App {
             Ok(true)
         });
         super::AppEvent::Status(match applied {
+            Ok(true) if fixed_images > 0 => format!(
+                "UI fixed · fixed {fixed_images} image link{}",
+                if fixed_images == 1 { "" } else { "s" }
+            ),
             Ok(true) => "UI fixed".into(),
             Ok(false) => String::new(),
             Err(error) => format!(
@@ -2197,6 +2235,208 @@ fn ui_blocks(content: &str) -> Vec<UiBlock> {
     blocks
 }
 
+fn image_distance(left: &str, right: &str) -> usize {
+    let left = left.split('?').next().unwrap_or(left).as_bytes();
+    let right = right.split('?').next().unwrap_or(right).as_bytes();
+    if left.len().abs_diff(right.len()) > 4 {
+        return 5;
+    }
+    let mut row: Vec<_> = (0..=right.len()).collect();
+    for (i, a) in left.iter().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, b) in right.iter().enumerate() {
+            let old = row[j + 1];
+            row[j + 1] = (diagonal + usize::from(a != b))
+                .min(row[j] + 1)
+                .min(old + 1);
+            diagonal = old;
+        }
+        if row.iter().copied().min().unwrap_or(5) > 4 {
+            return 5;
+        }
+    }
+    row[right.len()]
+}
+
+fn result_urls(result: &str) -> Vec<&str> {
+    result
+        .match_indices("https://")
+        .map(|(start, _)| {
+            result[start..]
+                .split(|ch: char| {
+                    ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>' | '\\' | '`')
+                })
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches(['.', ',', ';', ')', ']', '}'])
+        })
+        .collect()
+}
+
+fn markdown_image_ranges(content: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    let mut fence = None;
+    for line in content.split_inclusive('\n') {
+        let trimmed = line.trim_start_matches([' ', '>']);
+        let marker = trimmed.chars().next().unwrap_or_default();
+        let count = trimmed.chars().take_while(|ch| *ch == marker).count();
+        if matches!(marker, '`' | '~') && count >= 3 {
+            if fence.is_none() {
+                fence = Some((marker, count));
+            } else if fence.is_some_and(|(open, length)| open == marker && count >= length) {
+                fence = None;
+            }
+        } else if fence.is_none() && !line.starts_with("    ") {
+            let mut rest = line;
+            let mut consumed = 0;
+            while let Some(start) = rest.find("![") {
+                let Some(close) = rest[start + 2..].find("](") else {
+                    break;
+                };
+                let begin = start + 2 + close + 2;
+                // Inline code is literal, not a rendered image.
+                let prefix = &line[..consumed + start];
+                if prefix.chars().filter(|ch| *ch == '`').count() % 2 == 0
+                    && prefix.chars().rev().take_while(|ch| *ch == '\\').count() % 2 == 0
+                {
+                    let tail = &rest[begin..];
+                    let angle = tail.starts_with('<');
+                    let mut depth = 0usize;
+                    let end = tail.char_indices().find_map(|(index, ch)| {
+                        if angle {
+                            return (ch == '>').then_some(index);
+                        }
+                        match ch {
+                            '(' => depth += 1,
+                            ')' if depth > 0 => depth -= 1,
+                            ')' => return Some(index),
+                            ch if ch.is_whitespace() => return Some(index),
+                            _ => {}
+                        }
+                        None
+                    });
+                    if let Some(end) = end {
+                        ranges.push(
+                            offset + consumed + begin + usize::from(angle)
+                                ..offset + consumed + begin + end,
+                        );
+                    }
+                }
+                consumed += begin;
+                rest = &rest[begin..];
+            }
+        }
+        offset += line.len();
+    }
+    ranges
+}
+
+fn repair_image_links(content: &str, messages: &[Message]) -> (String, usize) {
+    let mut results = Vec::new();
+    for message in messages {
+        if message.role == "tool" {
+            results.push((message.content.clone(), false));
+        } else if message.role == "tool_call"
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content)
+            && let Some(result) = value["result"].as_str()
+        {
+            let images = value["name"] == "image_search"
+                || (value["name"] == "search"
+                    && value["arguments"]
+                        .as_str()
+                        .and_then(|args| serde_json::from_str::<serde_json::Value>(args).ok())
+                        .is_some_and(|args| args["mode"] == "images"))
+                || result.contains("\n    image · ");
+            results.push((result.into(), images));
+        }
+    }
+    let mut candidates = std::collections::BTreeSet::new();
+    for (result, images) in &results {
+        for url in result_urls(result) {
+            let lower = url.to_ascii_lowercase();
+            if *images
+                || [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+                    .iter()
+                    .any(|ext| lower.contains(ext))
+            {
+                candidates.insert(url);
+            }
+        }
+    }
+    let replacement = |url: &str| -> Option<&str> {
+        if results.iter().any(|(result, _)| result.contains(url)) {
+            return None;
+        }
+        let parsed = crate::remote_image::validate_url(url).ok()?;
+        let matches: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                crate::remote_image::validate_url(candidate)
+                    .is_ok_and(|candidate| candidate.host_str() == parsed.host_str())
+                    && image_distance(url, candidate) <= 4
+            })
+            .collect();
+        (matches.len() == 1).then(|| matches[0])
+    };
+    let mut edits = Vec::new();
+    for range in markdown_image_ranges(content) {
+        if let Some(url) = replacement(&content[range.clone()]) {
+            edits.push((range, url.to_string()));
+        }
+    }
+    for block in ui_blocks(content) {
+        // Read the image fields even when another node needs schema repair.
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&block.source) else {
+            continue;
+        };
+        for node in value["view"].as_array().into_iter().flatten() {
+            let mut urls = Vec::new();
+            match node["type"].as_str() {
+                Some("image") => urls.extend(node["src"].as_str()),
+                Some("hero") => urls.extend(node["image"].as_str()),
+                Some("cards" | "buttons") => {
+                    urls.extend(
+                        node["items"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|item| item["image"].as_str()),
+                    );
+                }
+                _ => {}
+            }
+            for url in urls {
+                if let Some(candidate) = replacement(url) {
+                    let encoded = serde_json::to_string(url).expect("image URL string");
+                    let fixed = serde_json::to_string(candidate).expect("image URL string");
+                    for (index, _) in content[block.range.clone()].match_indices(&encoded) {
+                        let prefix =
+                            content[block.range.start..block.range.start + index].trim_end();
+                        let key = prefix.strip_suffix(':').unwrap_or_default().trim_end();
+                        if !key.ends_with("\"image\"") && !key.ends_with("\"src\"") {
+                            continue;
+                        }
+                        edits.push((
+                            block.range.start + index..block.range.start + index + encoded.len(),
+                            fixed.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    edits.sort_by_key(|(range, _)| (range.start, range.end));
+    edits.dedup_by(|left, right| left.0 == right.0);
+    let mut repaired = content.to_string();
+    for (range, url) in edits.iter().rev() {
+        repaired.replace_range(range.clone(), url);
+    }
+    (repaired, edits.len())
+}
+
 fn failing_ui_blocks(content: &str) -> Vec<(UiBlock, Vec<crate::interactive::CheckError>)> {
     ui_blocks(content)
         .into_iter()
@@ -2794,6 +3034,10 @@ pub fn split_inline_reasoning(text: &str) -> (String, Option<String>) {
     let content = content.trim().to_string();
     (content, (!reasoning.is_empty()).then_some(reasoning))
 }
+
+#[cfg(test)]
+#[path = "chat/image_tests.rs"]
+mod image_source_tests;
 
 #[cfg(test)]
 mod tests {

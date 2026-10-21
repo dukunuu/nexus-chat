@@ -22,6 +22,41 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Sparkline, 
 use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
 
+/// Fixed image reservation with a visible, centered failure placeholder.
+pub(crate) fn image_lines(
+    url: &str,
+    alt: &str,
+    width: u16,
+    rows: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = crate::app_view::image_lines(url, alt, width, rows, theme);
+    if matches!(
+        crate::app_view::remote_image(url),
+        nexus_core::remote_image::Status::Failed
+    ) && !lines.is_empty()
+    {
+        let failure = crate::app_view::image_placeholder(
+            url,
+            alt,
+            &nexus_core::remote_image::Status::Failed,
+            theme,
+            usize::from(width),
+        );
+        let pattern = format!("{} ", glyph::MEDIA).repeat(usize::from(width).div_ceil(2));
+        let pattern: String = pattern.chars().take(usize::from(width)).collect();
+        lines.fill(Line::styled(
+            pattern,
+            Style::default()
+                .fg(theme.fg_dim)
+                .add_modifier(Modifier::DIM),
+        ));
+        let center = lines.len() / 2;
+        lines[center] = failure.centered();
+    }
+    lines
+}
+
 /// Stable reserved region in a message's line-based layout.
 #[derive(Clone, Debug)]
 pub struct Placement {
@@ -522,7 +557,7 @@ fn render_button_group(
         ));
         if let Some(image) = &button.image {
             let area = Rect::new(rect.x + 1, rect.y + 1, rect.width.saturating_sub(2), 6);
-            Paragraph::new(crate::app_view::image_lines(
+            Paragraph::new(image_lines(
                 image,
                 button.alt.as_deref().unwrap_or_default(),
                 area.width,
@@ -1010,7 +1045,7 @@ fn card_lines(
         }
     }
     if let Some(image) = &item.image {
-        content.extend(crate::app_view::image_lines(
+        content.extend(image_lines(
             image,
             item.alt.as_deref().unwrap_or_default(),
             inner,
@@ -1222,9 +1257,7 @@ fn layout_lines(
 ) -> Option<Vec<Line<'static>>> {
     let accent = accent_color(session.document(), theme);
     let lines = match node {
-        Node::Image { src, alt, rows } => {
-            crate::app_view::image_lines(src, alt, width, *rows, theme)
-        }
+        Node::Image { src, alt, rows } => image_lines(src, alt, width, *rows, theme),
         Node::Hero {
             title,
             subtitle,
@@ -1234,7 +1267,7 @@ fn layout_lines(
         } => {
             let mut lines = Vec::new();
             if let Some(image) = image {
-                lines.extend(crate::app_view::image_lines(
+                lines.extend(image_lines(
                     image,
                     alt.as_deref().unwrap_or_default(),
                     width,
@@ -2354,6 +2387,38 @@ mod layouts_tests;
 #[cfg(test)]
 #[path = "interactive/stepper_tests.rs"]
 mod stepper_tests;
+
+#[cfg(test)]
+mod failure_band_tests {
+    use super::*;
+
+    #[test]
+    fn failed_band_keeps_height_and_centers_the_failure_line() {
+        let fetcher = nexus_core::remote_image::Fetcher::new(
+            std::env::temp_dir().join(format!("nexus-failure-{}", uuid::Uuid::new_v4())),
+        );
+        crate::app_view::use_fetcher_for_tests(&fetcher);
+        let url = "https://img.example.invalid/player.jpg";
+        let theme = Theme::default();
+        let loading = image_lines(url, "Player", 70, 6, &theme);
+        fetcher.seed_failure(url);
+        let failed = image_lines(url, "Player", 70, 6, &theme);
+        assert_eq!(failed.len(), loading.len());
+        assert_eq!(
+            failed
+                .iter()
+                .position(|line| line.to_string().contains("couldn't load")),
+            Some(3)
+        );
+        for (index, line) in failed.iter().enumerate() {
+            if index != 3 {
+                assert!(line.to_string().contains(glyph::MEDIA));
+                assert_eq!(line.width(), 70);
+                assert!(line.style.add_modifier.contains(Modifier::DIM));
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 #[path = "interactive/image_tests.rs"]

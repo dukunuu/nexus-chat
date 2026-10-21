@@ -373,6 +373,7 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
                 Some("news") => "news",
                 Some("academic") => "papers",
                 Some("discussion" | "discussions") => "discussions",
+                Some("images") => "images",
                 _ => "search",
             }
             .into();
@@ -454,6 +455,9 @@ fn search_sources(result: &str) -> Vec<Source> {
                 image = Some(url.to_string());
                 continue;
             }
+            if text.starts_with("image · ") {
+                image = Some(url.to_string());
+            }
             if text.is_empty()
                 || text == title
                 || text == "discussions:"
@@ -498,6 +502,31 @@ fn short_url(url: &str) -> String {
         format!("{}…", rest.chars().take(59).collect::<String>())
     } else {
         rest.to_string()
+    }
+}
+
+#[cfg(test)]
+mod image_source_tests {
+    use super::*;
+
+    #[test]
+    fn image_search_results_are_thumbnail_sources() {
+        let result = "[1] LeBron James\n    https://upload.wikimedia.org/lebron.jpg\n    image · en.wikipedia.org · page https://en.wikipedia.org/wiki/LeBron_James";
+        let view = tool_call_view(
+            "search",
+            r#"{"mode":"images","query":"LeBron James"}"#,
+            result,
+        );
+        assert_eq!(view.sources.len(), 1);
+        assert_eq!(
+            view.sources[0].image.as_deref(),
+            Some("https://upload.wikimedia.org/lebron.jpg")
+        );
+        assert_eq!(
+            view.sources[0].url,
+            "https://upload.wikimedia.org/lebron.jpg"
+        );
+        assert!(view.sources[0].snippet.contains("en.wikipedia.org"));
     }
 }
 

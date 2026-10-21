@@ -52,6 +52,7 @@ pub enum Status {
 }
 
 struct Entry {
+    reason: Option<String>,
     status: Status,
     since: Instant,
 }
@@ -173,7 +174,10 @@ impl Fetcher {
             return entry.status.clone();
         }
         let path = self.path(url);
-        let status = if validate_url_with(url, self.allow_loopback).is_err() {
+        let reason = validate_url_with(url, self.allow_loopback)
+            .err()
+            .map(|error| error.to_string());
+        let status = if reason.is_some() {
             Status::Failed
         } else if path.is_file() {
             Status::Ready(path)
@@ -184,6 +188,7 @@ impl Fetcher {
             entries.insert(
                 url.into(),
                 Entry {
+                    reason,
                     status: status.clone(),
                     since: Instant::now(),
                 },
@@ -197,6 +202,7 @@ impl Fetcher {
         entries.insert(
             url.into(),
             Entry {
+                reason: None,
                 status: Status::Loading,
                 since: Instant::now(),
             },
@@ -217,10 +223,12 @@ impl Fetcher {
                     entries.remove(&url);
                 }
                 Some(result) => {
+                    let reason = result.as_ref().err().map(|error| format!("{error:#}"));
                     let status = result.map_or(Status::Failed, Status::Ready);
                     entries.insert(
                         url,
                         Entry {
+                            reason,
                             status,
                             since: Instant::now(),
                         },
@@ -234,6 +242,34 @@ impl Fetcher {
         Status::Loading
     }
 
+    /// Wait for the same vetted, cached download used by nonblocking previews.
+    /// # Errors
+    /// Returns the download's actual failure reason (including timeouts).
+    pub async fn fetch(self: &Arc<Self>, url: &str) -> Result<Status> {
+        loop {
+            match self.request(url) {
+                Status::Loading => tokio::time::sleep(Duration::from_millis(20)).await,
+                Status::Failed => {
+                    let entries = self.entries.lock().expect("image cache lock");
+                    bail!(
+                        "{}",
+                        entries
+                            .get(url)
+                            .and_then(|entry| entry.reason.as_deref())
+                            .unwrap_or("image unavailable")
+                    );
+                }
+                status => return Ok(status),
+            }
+        }
+    }
+
+    /// Loopback HTTP is available only to hermetic unit tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(directory: &std::path::Path) -> Arc<Self> {
+        Arc::new(Self::build(directory, system_lookup(), true))
+    }
+
     /// Test hook: pretend `url` finished downloading with these PNG bytes.
     /// # Errors
     /// Fails when the cache file cannot be written.
@@ -245,6 +281,7 @@ impl Fetcher {
         self.entries.lock().expect("image cache lock").insert(
             url.into(),
             Entry {
+                reason: None,
                 status: Status::Ready(path),
                 since: Instant::now(),
             },
@@ -259,6 +296,7 @@ impl Fetcher {
         self.entries.lock().expect("image cache lock").insert(
             url.into(),
             Entry {
+                reason: Some("image unavailable".into()),
                 status: Status::Failed,
                 since: Instant::now(),
             },

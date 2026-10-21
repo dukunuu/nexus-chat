@@ -66,10 +66,10 @@ over several lines and check that every bracket closes):
     Optional `body`: an array of up to
     8 plain-text artwork/description lines; these become bordered carousel
     tiles, with the label after the art and the last body line as dim metadata.
-    Default declared rows: 3. Optional image (plain https URL to a picture you
-    know exists, no templates) and alt put a fixed 6-row picture at the top of
+    Default declared rows: 3. Optional image (plain https URL copied exactly from
+    search mode "images" or a tool result, no templates) and alt put a fixed 6-row picture at the top of
     the tile and add 6 declared rows; every carousel tile can have one.
-  - `{"type":"image","src":"https://…","alt":"A cat","rows":6}`: a remote picture, 4–12 rows (default 6); no templates in the URL; never guess URLs. It may load late or fail; keep the meaning in text.
+  - `{"type":"image","src":"https://…","alt":"A cat","rows":6}`: a remote picture, 4–12 rows (default 6); copy URLs exactly from search mode "images" or tool results, no templates; ui_check loads them. Keep the meaning in text.
   - `{"type":"input","key":"name","label":"Your name"}` displays in one row
     (3 declared rows toward the validation budget);
     its state field must remain a single-line string. Never solicit passwords/API keys.
@@ -145,7 +145,7 @@ Display nodes (text fields are templates; mix freely with text, kv, table, progr
 - steps: items [{title, text?, state?: done|current|todo}]; 1-8
 - callout: tone info|tip|warning|danger, title?, text
 - quote: text, by?; divider: label?
-Images: an image/src value is a plain https URL (no templates) you already know is a direct picture, such as one from a search result; never guess or invent one. Always give alt text. Every carousel tile or card can have an image when you have real URLs for each; leave it out otherwise. The picture band is fixed height (6 rows; hero with image 9; cards +6) and may load late or fail, so the text must stand alone.
+Images: use search mode "images" or a picture URL in a tool result; copy it character for character into image/src (plain https, no templates). Never invent URLs; ui_check loads them. Always give alt text. Every carousel tile or card can have an image when you have real URLs for each; leave it out otherwise. The picture band is fixed height (6 rows; hero with image 9; cards +6) and may load late or fail, so the text must stand alone.
 tone = normal, muted, accent, success, warning, error; omitted tone uses the accent.
 Limits: 16 nodes, 45 declared rows total (columns: items+1 per column; cards 4 each; steps 2 each; hero and stats 3 (hero with image 9; cards with any image +6); callout and quote 2; divider 1); source 16 KiB.
 

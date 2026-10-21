@@ -11,7 +11,7 @@ Display nodes (text fields are templates; mix freely with text, kv, table, progr
 - steps: items [{title, text?, state?: done|current|todo}]; 1-8
 - callout: tone info|tip|warning|danger, title?, text
 - quote: text, by?; divider: label?
-Images: an image/src value is a plain https URL (no templates) you already know is a direct picture, such as one from a search result; never guess or invent one. Always give alt text. Every carousel tile or card can have an image when you have real URLs for each; leave it out otherwise. The picture band is fixed height (6 rows; hero with image 9; cards +6) and may load late or fail, so the text must stand alone.
+Images: use search mode "images" or a picture URL in a tool result; copy it character for character into image/src (plain https, no templates). Never invent URLs; ui_check loads them. Always give alt text. Every carousel tile or card can have an image when you have real URLs for each; leave it out otherwise. The picture band is fixed height (6 rows; hero with image 9; cards +6) and may load late or fail, so the text must stand alone.
 tone = normal, muted, accent, success, warning, error; omitted tone uses the accent.
 Limits: 16 nodes, 45 declared rows total (columns: items+1 per column; cards 4 each; steps 2 each; hero and stats 3 (hero with image 9; cards with any image +6); callout and quote 2; divider 1); source 16 KiB.
 

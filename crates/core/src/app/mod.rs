@@ -1217,6 +1217,7 @@ pub struct App {
     /// Composer buffer for the live research-activity view's steer input.
     pub research_live_input: String,
     pub toolbox: std::sync::Arc<dyn crate::tools::ToolExecutor>,
+    image_fetcher: Arc<crate::remote_image::Fetcher>,
     /// Background commands survive session switches, but not app exit.
     pub procs: Arc<crate::workspace::procs::Procs>,
     /// Local static server for model-created apps (None if it failed to bind).
@@ -1419,6 +1420,8 @@ impl App {
         let (decider_status_tx, decider_status_rx) = mpsc::unbounded_channel();
         // Built with search disabled; `load_settings()` below reads the
         // persisted config (if any) and rebuilds this via `refresh_toolbox`.
+        let image_fetcher =
+            crate::remote_image::Fetcher::new(space.db_path().with_file_name("cache"));
         let toolbox = std::sync::Arc::new(
             crate::tools::ToolBox::new(
                 skills_dir,
@@ -1472,6 +1475,7 @@ impl App {
             research_topic_rx: None,
             research_live_input: String::new(),
             toolbox,
+            image_fetcher,
             procs: Arc::default(),
             app_server: None,
             skills_rx: None,
@@ -1938,7 +1942,10 @@ impl App {
     /// `load_settings` and the `SetSetting` command.
     fn apply_setting(&mut self, k: &str, v: &str) {
         match k {
-            "remote_images" => self.settings.remote_images = v == "on",
+            "remote_images" => {
+                self.settings.remote_images = v == "on";
+                self.image_fetcher.set_enabled(self.settings.remote_images);
+            }
             "show_stats" => self.settings.show_stats = v == "1",
             "show_reasoning" => self.settings.show_reasoning = v == "1",
             "hide_hints" => self.settings.hide_hints = v == "1",
@@ -2128,6 +2135,7 @@ impl App {
         toolbox.supports_images = self.current_model_supports_images();
         toolbox.record_events = !self.incognito;
         self.configure_auto_policy(&mut toolbox);
+        toolbox.remote_images = Some(Arc::clone(&self.image_fetcher));
         toolbox.interactive_ui = self.interactive_ui;
         toolbox.pending_tui_app = Arc::clone(&self.pending_tui_app);
         toolbox.tui_app_renderer = self.tui_app_renderer;

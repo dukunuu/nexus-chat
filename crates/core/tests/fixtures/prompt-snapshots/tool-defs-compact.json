@@ -157,7 +157,7 @@
   },
   {
     "name": "search",
-    "description": "Search general web sources, recent reporting (web with recency), papers, or Reddit and Hacker News threads. Use discussion for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments.\n- mode=web (needs query)\n- mode=academic (needs query)\n- mode=discussion (needs query)",
+    "description": "Search general web sources, recent reporting (web with recency), papers, or Reddit and Hacker News threads. Use discussion for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments.\n- mode=web (needs query)\n- mode=academic (needs query)\n- mode=discussion (needs query)\n- mode=images (needs query)",
     "parameters": {
       "properties": {
         "exclude_domains": {
@@ -179,7 +179,8 @@
           "enum": [
             "web",
             "academic",
-            "discussion"
+            "discussion",
+            "images"
           ],
           "type": "string"
         },

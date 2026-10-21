@@ -5,6 +5,8 @@
 
 mod effect;
 #[cfg(test)]
+mod image_tests;
+#[cfg(test)]
 mod search_tests;
 mod spec;
 
@@ -244,6 +246,9 @@ pub struct ToolBox {
     research_session_id: Option<String>,
     client: reqwest::Client,
     discussions: Arc<DiscussionSearch>,
+    image_search: ImageSearch,
+    /// Safe image verifier, sharing the device-local preview cache.
+    pub remote_images: Option<Arc<crate::remote_image::Fetcher>>,
     files: Option<FilesCtx>,
     apps: Option<AppsCtx>,
     /// Whether the current model supports image inputs. When false, tool
@@ -930,6 +935,8 @@ impl ToolBox {
             research_session_id: None,
             client: reqwest::Client::new(),
             discussions: Arc::new(DiscussionSearch::default()),
+            image_search: ImageSearch::default(),
+            remote_images: None,
             files,
             apps,
             cache_only: false,
@@ -983,6 +990,8 @@ impl ToolBox {
             research_session_id: self.research_session_id.clone(),
             client: self.client.clone(),
             discussions: self.discussions.clone(),
+            image_search: self.image_search.clone(),
+            remote_images: self.remote_images.clone(),
             files: self.files.clone(),
             apps: self.apps.clone(),
             supports_images: self.supports_images,
@@ -1271,7 +1280,10 @@ impl ToolBox {
             &spec::SCRIPTS,
             &["list", "read", "write", "edit", "run", "python", "install"],
         ));
-        defs.push(def(&spec::SEARCH, &["web", "academic", "discussion"]));
+        defs.push(def(
+            &spec::SEARCH,
+            &["web", "academic", "discussion", "images"],
+        ));
         defs.push(def(&spec::FETCH_URL, &["fetch_url"]));
         if self.workspace.is_some() {
             defs.push(def(
@@ -1798,7 +1810,12 @@ impl ToolBox {
         if self.research_only
             && !matches!(
                 name,
-                "search" | "fetch_url" | "web_search" | "academic_search" | "discussion_search"
+                "search"
+                    | "fetch_url"
+                    | "web_search"
+                    | "academic_search"
+                    | "discussion_search"
+                    | "image_search"
             )
         {
             return (
@@ -1968,10 +1985,28 @@ impl ToolBox {
                 let value: serde_json::Value =
                     serde_json::from_str(args).expect("validated ui_check arguments");
                 let source = ui_check_source(value["source"].as_str().expect("validated source"));
-                match crate::interactive::Document::check(source) {
+                let mut image_note = String::new();
+                let checked = match crate::interactive::Document::check(source) {
+                    Ok(document) => {
+                        let (errors, note) = check_ui_images(
+                            document.images(),
+                            self.remote_images.as_ref(),
+                            Duration::from_secs(8),
+                        )
+                        .await;
+                        image_note = note;
+                        if errors.is_empty() {
+                            Ok(document)
+                        } else {
+                            Err(errors)
+                        }
+                    }
+                    Err(errors) => Err(errors),
+                };
+                match checked {
                     Ok(document) => (
                         format!(
-                            "ok · {:?} · {} controls, {} actions · {}\npreview:\n{}",
+                            "ok · {:?} · {} controls, {} actions · {}{image_note}\npreview:\n{}",
                             document.title(),
                             document.control_count(),
                             document.action_count(),
@@ -1986,7 +2021,7 @@ impl ToolBox {
                     ),
                     Err(errors) => (
                         format!(
-                            "{} error{}\n{}\nValid node types: {}",
+                            "{} error{}\n{}\nValid node types: {}{image_note}",
                             errors.len(),
                             if errors.len() == 1 { "" } else { "s" },
                             errors
@@ -2678,6 +2713,21 @@ impl ToolBox {
                     Err(e) => format!("fetch failed: {e}"),
                 };
                 (result, status)
+            }
+            "image_search" => {
+                let value = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+                let query = value["query"].as_str().unwrap_or_default();
+                let hits = image_search(
+                    &self.client,
+                    query,
+                    &self.image_search,
+                    self.searxng_url.as_deref(),
+                )
+                .await;
+                (
+                    format_image_results(query, &hits),
+                    "Searching images…".into(),
+                )
             }
             "academic_search" => {
                 let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
@@ -6903,6 +6953,282 @@ async fn discussion_search(
         .into_iter()
         .cloned()
         .collect()
+}
+
+#[derive(Clone)]
+struct ImageSearch {
+    wikipedia: String,
+    commons: String,
+    openverse: String,
+}
+
+impl Default for ImageSearch {
+    fn default() -> Self {
+        #[cfg(not(test))]
+        let endpoints = [
+            "https://en.wikipedia.org/w/api.php",
+            "https://commons.wikimedia.org/w/api.php",
+            "https://api.openverse.org/v1/images/",
+        ];
+        #[cfg(test)]
+        let endpoints = ["http://127.0.0.1:1"; 3];
+        Self {
+            wikipedia: endpoints[0].into(),
+            commons: endpoints[1].into(),
+            openverse: endpoints[2].into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ImageHit {
+    title: String,
+    url: String,
+    page: String,
+    license: String,
+    source: String,
+}
+
+fn parse_image_hits(value: &serde_json::Value, provider: usize) -> Vec<ImageHit> {
+    use serde_json::Value;
+    let mut pages: Vec<_> = value["query"]["pages"]
+        .as_object()
+        .into_iter()
+        .flat_map(|pages| pages.values())
+        .collect();
+    pages.sort_by_key(|page| page["index"].as_i64().unwrap_or(0));
+    let results: Vec<_> = if provider < 2 {
+        pages
+    } else {
+        value["results"].as_array().into_iter().flatten().collect()
+    };
+    results
+        .into_iter()
+        .filter_map(|item| {
+            let text = |key: &str| item[key].as_str().unwrap_or_default();
+            let info = &item["imageinfo"][0];
+            if provider == 1
+                && !matches!(
+                    info["mime"].as_str(),
+                    Some("image/png" | "image/jpeg" | "image/webp" | "image/gif")
+                )
+            {
+                return None;
+            }
+            let urls = match provider {
+                0 => [&item["thumbnail"]["source"], &Value::Null],
+                1 => [&info["thumburl"], &info["url"]],
+                2 => [&item["url"], &item["thumbnail"]],
+                _ => [&item["img_src"], &item["thumbnail_src"]],
+            };
+            let url = urls
+                .into_iter()
+                .filter_map(Value::as_str)
+                .find(|url| crate::remote_image::validate_url(url).is_ok())?;
+            let (page, license) = match provider {
+                0 => (text("fullurl"), ""),
+                1 => (
+                    info["descriptionurl"].as_str().unwrap_or_default(),
+                    info["extmetadata"]["LicenseShortName"]["value"]
+                        .as_str()
+                        .unwrap_or_default(),
+                ),
+                2 => (text("foreign_landing_url"), text("license")),
+                _ => (text("url"), ""),
+            };
+            Some(ImageHit {
+                title: text("title").into(),
+                url: url.into(),
+                page: page.into(),
+                license: license.into(),
+                source: if provider == 2 {
+                    text("source").into()
+                } else {
+                    String::new()
+                },
+            })
+        })
+        .collect()
+}
+
+async fn image_provider(
+    client: &reqwest::Client,
+    endpoint: &str,
+    query: &str,
+    provider: usize,
+) -> anyhow::Result<Vec<ImageHit>> {
+    let request = client.get(endpoint).header(
+        reqwest::header::USER_AGENT,
+        concat!(
+            "nexus-chat/",
+            env!("CARGO_PKG_VERSION"),
+            " (+",
+            env!("CARGO_PKG_REPOSITORY"),
+            ")"
+        ),
+    );
+    let request = match provider {
+        0 | 1 => {
+            let request = request.query(&[
+                ("action", "query"),
+                ("format", "json"),
+                ("generator", "search"),
+                ("gsrsearch", query),
+                ("gsrlimit", if provider == 0 { "4" } else { "6" }),
+            ]);
+            if provider == 0 {
+                request.query(&[
+                    ("prop", "pageimages|info"),
+                    ("inprop", "url"),
+                    ("piprop", "thumbnail"),
+                    ("pithumbsize", "800"),
+                ])
+            } else {
+                request.query(&[
+                    ("gsrnamespace", "6"),
+                    ("prop", "imageinfo"),
+                    ("iiprop", "url|size|mime|extmetadata"),
+                    ("iiurlwidth", "800"),
+                ])
+            }
+        }
+        2 => request.query(&[("q", query), ("page_size", "6")]),
+        _ => request.query(&[("q", query), ("format", "json"), ("categories", "images")]),
+    };
+    let value = send_and_parse::<serde_json::Value>(request).await?;
+    Ok(parse_image_hits(&value, provider))
+}
+
+fn merge_image_hits(providers: &[Vec<ImageHit>]) -> Vec<ImageHit> {
+    let mut seen = std::collections::HashSet::new();
+    let mut hits = Vec::new();
+    for rank in 0..providers.iter().map(Vec::len).max().unwrap_or(0) {
+        for provider in providers {
+            if let Some(hit) = provider.get(rank)
+                && seen.insert(hit.url.clone())
+            {
+                hits.push(hit.clone());
+                if hits.len() == 8 {
+                    return hits;
+                }
+            }
+        }
+    }
+    hits
+}
+
+async fn image_search(
+    client: &reqwest::Client,
+    query: &str,
+    search: &ImageSearch,
+    searxng: Option<&str>,
+) -> Vec<ImageHit> {
+    let searxng = searxng.map(|base| format!("{}/search", base.trim_end_matches('/')));
+    let endpoints = [
+        Some(search.wikipedia.as_str()),
+        Some(search.commons.as_str()),
+        Some(search.openverse.as_str()),
+        searxng.as_deref(),
+    ];
+    let providers = futures_util::future::join_all(endpoints.into_iter().enumerate().map(
+        |(provider, endpoint)| async move {
+            let Some(endpoint) = endpoint else {
+                return Vec::new();
+            };
+            tokio::time::timeout(
+                SEARCH_TIMEOUT,
+                image_provider(client, endpoint, query, provider),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default()
+        },
+    ))
+    .await;
+    merge_image_hits(&providers)
+}
+
+fn format_image_results(query: &str, hits: &[ImageHit]) -> String {
+    if hits.is_empty() {
+        return format!("no images found for \"{query}\" · try a more specific name");
+    }
+    hits.iter()
+        .enumerate()
+        .map(|(index, hit)| {
+            let domain = reqwest::Url::parse(&hit.page)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_string))
+                .unwrap_or_default();
+            let mut meta = format!("image · {domain}");
+            for field in [&hit.source, &hit.license] {
+                if !field.is_empty() {
+                    let _ = write!(meta, " · {field}");
+                }
+            }
+            format!(
+                "[{}] {}\n    {}\n    {meta} · page {}",
+                index + 1,
+                hit.title,
+                hit.url,
+                hit.page
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+async fn check_ui_images(
+    images: Vec<(String, &str)>,
+    fetcher: Option<&Arc<crate::remote_image::Fetcher>>,
+    budget: Duration,
+) -> (Vec<crate::interactive::CheckError>, String) {
+    use futures_util::StreamExt as _;
+    if images.is_empty() {
+        return (Vec::new(), String::new());
+    }
+    let Some(fetcher) = fetcher.filter(|fetcher| fetcher.enabled()) else {
+        return (Vec::new(), "\nimages skipped · remote_images off".into());
+    };
+    let mut seen = std::collections::HashSet::new();
+    let images: Vec<_> = images
+        .into_iter()
+        .filter(|(_, url)| seen.insert(*url))
+        .collect();
+    let mut note = if images.len() > 8 {
+        "\nwarning · only the first 8 images were checked".into()
+    } else {
+        String::new()
+    };
+    let mut pending: futures_util::stream::FuturesUnordered<_> = images
+        .into_iter()
+        .take(8)
+        .map(|(path, url)| async move { (path, fetcher.fetch(url).await) })
+        .collect();
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut errors = Vec::new();
+    loop {
+        match tokio::time::timeout_at(deadline, pending.next()).await {
+            Ok(Some((path, Err(error)))) => {
+                let reason = error.to_string();
+                if reason.contains("elapsed") || reason.contains("deadline") {
+                    let _ = write!(note, "\nwarning · {path}: image check timed out");
+                } else {
+                    errors.push(crate::interactive::CheckError {
+                        path,
+                        message: format!("image did not load ({reason}) — copy the URL exactly from a search result, use search mode \"images\", or remove the image"),
+                    });
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => {
+                note.push_str("\nwarning · image check timed out");
+                break;
+            }
+        }
+    }
+    (errors, note)
 }
 
 /// Normalize a source URL for dedup: lowercase the host only (path/query

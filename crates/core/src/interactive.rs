@@ -834,6 +834,39 @@ impl Document {
         })
     }
 
+    /// Image URLs with their authored JSON paths, in document order.
+    #[must_use]
+    pub fn images(&self) -> Vec<(String, &str)> {
+        let mut images = Vec::new();
+        for (index, node) in self.view.iter().enumerate() {
+            let path = format!("view[{index}]");
+            match node {
+                Node::Image { src, .. } => images.push((format!("{path}.src"), src.as_str())),
+                Node::Hero {
+                    image: Some(src), ..
+                } => {
+                    images.push((format!("{path}.image"), src.as_str()));
+                }
+                Node::Cards { items } => {
+                    for (index, item) in items.iter().enumerate() {
+                        if let Some(src) = &item.image {
+                            images.push((format!("{path}.items[{index}].image"), src.as_str()));
+                        }
+                    }
+                }
+                Node::Buttons { items, .. } => {
+                    for (index, item) in items.iter().enumerate() {
+                        if let Some(src) = &item.image {
+                            images.push((format!("{path}.items[{index}].image"), src.as_str()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        images
+    }
+
     /// Check authored JSON, reporting up to ten located errors without executing actions.
     /// # Errors
     /// Returns syntax, schema, binding or budget errors.

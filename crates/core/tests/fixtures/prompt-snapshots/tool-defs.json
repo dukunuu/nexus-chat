@@ -181,7 +181,7 @@
   },
   {
     "name": "search",
-    "description": "Search general web sources, recent reporting (web with recency), papers, or Reddit and Hacker News threads. Use discussion for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments.\n- mode=web: Search general sources; use recency for recent news reporting. Needs query; optional recency, include_domains, exclude_domains.\n- mode=academic: Search academic papers with Semantic Scholar, preserving scholarly metadata. Needs query; optional limit.\n- mode=discussion: Search Reddit and Hacker News threads for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments. Needs query.",
+    "description": "Search general web sources, recent reporting (web with recency), papers, or Reddit and Hacker News threads. Use discussion for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments.\n- mode=web: Search general sources; use recency for recent news reporting. Needs query; optional recency, include_domains, exclude_domains.\n- mode=academic: Search academic papers with Semantic Scholar, preserving scholarly metadata. Needs query; optional limit.\n- mode=discussion: Search Reddit and Hacker News threads for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments. Needs query.\n- mode=images: Direct picture URLs for cards and replies; copy one exactly into image/src. Needs query.",
     "parameters": {
       "properties": {
         "exclude_domains": {
@@ -206,7 +206,8 @@
           "enum": [
             "web",
             "academic",
-            "discussion"
+            "discussion",
+            "images"
           ],
           "type": "string"
         },

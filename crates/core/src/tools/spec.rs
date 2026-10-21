@@ -652,6 +652,14 @@ pub(super) static SEARCH: ToolSpec = ToolSpec {
             read_only: true,
             internal: "discussion_search",
         },
+        ActionSpec {
+            name: "images",
+            summary: "Direct picture URLs for cards and replies; copy one exactly into image/src",
+            required: &["query"],
+            optional: &[],
+            read_only: true,
+            internal: "image_search",
+        },
     ],
 };
 
@@ -1497,6 +1505,7 @@ mod tests {
             "install_packages",
         ),
         ("search", r#"{"mode":"web","query":"x"}"#, "web_search"),
+        ("search", r#"{"mode":"images","query":"x"}"#, "image_search"),
         (
             "search",
             r#"{"mode":"academic","query":"x"}"#,
@@ -1690,6 +1699,7 @@ mod tests {
             "web_search",
             "academic_search",
             "discussion_search",
+            "image_search",
             "fetch_url",
             "search_sources",
             "list_citations",
@@ -1796,7 +1806,7 @@ mod tests {
             (
                 "search",
                 r#"{"mode":"nope"}"#,
-                "invalid mode for search: \"nope\" · valid: web, academic, discussion",
+                "invalid mode for search: \"nope\" · valid: web, academic, discussion, images",
             ),
             (
                 "research_lookup",

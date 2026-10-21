@@ -392,7 +392,7 @@ fn call_glyph(view: &nexus_core::app::ToolView, failed: bool) -> &'static str {
 fn is_web(view: &nexus_core::app::ToolView) -> bool {
     matches!(
         view.verb.as_str(),
-        "search" | "news" | "papers" | "discussions" | "fetch"
+        "search" | "news" | "papers" | "discussions" | "images" | "fetch"
     )
 }
 
@@ -485,7 +485,8 @@ fn sources_body(
             rows.push(Line::from(spans));
         }
         if let Some(image) = &source.image {
-            let thumbnails = crate::app_view::image_lines(image, "", thumb_width as u16, 3, theme);
+            let thumbnails =
+                crate::interactive::image_lines(image, "", thumb_width as u16, 3, theme);
             rows.resize(rows.len().max(start + 3), Line::default());
             for (row, line) in rows[start..].iter_mut().enumerate() {
                 let mut thumbnail = thumbnails.get(row).cloned().unwrap_or_default();
