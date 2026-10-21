@@ -5615,6 +5615,8 @@ struct SearchHit {
     title: String,
     url: String,
     snippet: String,
+    /// Thumbnail the provider itself returned; never discovered by fetching.
+    image: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -5625,6 +5627,8 @@ struct SearxngResponse {
 
 #[derive(Deserialize)]
 struct SearxngResult {
+    thumbnail: Option<String>,
+    img_src: Option<String>,
     title: String,
     url: String,
     #[serde(default)]
@@ -5670,6 +5674,7 @@ async fn searxng_search(
             title: r.title,
             url: r.url,
             snippet: r.content,
+            image: thumbnail_url(r.thumbnail.as_deref().or(r.img_src.as_deref())),
         })
         .collect())
 }
@@ -5734,6 +5739,7 @@ async fn langsearch_search(
             title: r.name,
             url: r.url,
             snippet: r.snippet,
+            image: None,
         })
         .collect())
 }
@@ -5940,6 +5946,7 @@ fn parse_ddg_html(html: &str) -> Vec<SearchHit> {
                 title,
                 url,
                 snippet,
+                image: None,
             });
         }
     }
@@ -6002,6 +6009,7 @@ fn parse_brave_html(html: &str) -> Vec<SearchHit> {
             title,
             url,
             snippet,
+            image: None,
         });
         pos = title_end;
     }
@@ -6536,13 +6544,14 @@ async fn reddit_search(
                 entry.subreddit,
                 entry.updated,
                 entry.author,
-                one_line(&entry.content, 240)
+                thumbnail_text(one_line(&entry.content, 240), entry.image.as_deref())
             ),
         })
         .collect())
 }
 
 struct RedditEntry {
+    image: Option<String>,
     title: String,
     url: String,
     subreddit: String,
@@ -6678,6 +6687,32 @@ fn atom_text(mut text: &str) -> String {
     out
 }
 
+fn first_html_image(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.find("<img ")?;
+    let end = html[start..].find('>')? + start;
+    atom_attr(&html[start..=end], "src")
+}
+
+/// A provider-supplied thumbnail worth showing: an `https` URL with no
+/// credentials, templates or whitespace. Anything else is dropped here so the
+/// card never shows a "couldn't load" box for an address it would never fetch.
+fn thumbnail_url(candidate: Option<&str>) -> Option<String> {
+    let url = candidate?.trim();
+    (url.len() <= 2_000
+        && !url.contains(char::is_whitespace)
+        && crate::remote_image::validate_url(url).is_ok())
+    .then(|| url.to_string())
+}
+
+/// Append the `image:` line the result cards read back.
+fn thumbnail_text(text: String, image: Option<&str>) -> String {
+    match thumbnail_url(image) {
+        Some(url) => format!("{text}\n    image: {url}"),
+        None => text,
+    }
+}
+
 fn parse_reddit_atom(xml: &str) -> Vec<RedditEntry> {
     atom_elements(xml, "entry")
         .into_iter()
@@ -6717,6 +6752,7 @@ fn parse_reddit_atom(xml: &str) -> Vec<RedditEntry> {
                     && atom_attr(tag, "href").is_some_and(|url| reddit_comment_id(&url).is_some())
             });
             Some(RedditEntry {
+                image: first_html_image(&content),
                 title: one_line(&field("title").unwrap_or_else(|| "(untitled)".into()), 300),
                 url,
                 subreddit,
@@ -7135,7 +7171,19 @@ fn format_web_results(
 fn format_results(hits: &[SearchHit]) -> String {
     hits.iter()
         .enumerate()
-        .map(|(i, h)| format!("[{}] {}\n    {}\n    {}", i + 1, h.title, h.url, h.snippet))
+        .map(|(i, h)| {
+            let image = h
+                .image
+                .as_ref()
+                .map_or_else(String::new, |url| format!("\n    image: {url}"));
+            format!(
+                "[{}] {}\n    {}\n    {}{image}",
+                i + 1,
+                h.title,
+                h.url,
+                h.snippet
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -9641,11 +9689,13 @@ mod tests {
                 title: "Rust 1.90".into(),
                 url: "https://a".into(),
                 snippet: "release notes".into(),
+                image: None,
             },
             SearchHit {
                 title: "Rust blog".into(),
                 url: "https://b".into(),
                 snippet: "announcement".into(),
+                image: None,
             },
         ];
         let out = format_results(&hits);
@@ -9670,6 +9720,87 @@ mod tests {
         let resp: SearxngResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.results.len(), 2);
         assert_eq!(resp.results[0].title, "A");
+    }
+
+    #[test]
+    fn searxng_thumbnails_are_kept_only_when_safe_to_fetch() {
+        let json = r#"{"results":[
+            {"title":"A","url":"https://a","content":"d1","thumbnail":"https://cdn.example/a.jpg"},
+            {"title":"B","url":"https://b","content":"d2","img_src":"https://cdn.example/b.jpg"},
+            {"title":"C","url":"https://c","content":"d3","thumbnail":"http://cdn.example/c.jpg"},
+            {"title":"D","url":"https://d","content":"d4","thumbnail":"//cdn.example/d.jpg"},
+            {"title":"E","url":"https://e","content":"d5","thumbnail":"data:image/png;base64,AAAA"},
+            {"title":"F","url":"https://f","content":"d6","thumbnail":"https://u:p@cdn.example/f.jpg"},
+            {"title":"G","url":"https://g","content":"d7"}
+        ]}"#;
+        let resp: SearxngResponse = serde_json::from_str(json).unwrap();
+        let images: Vec<_> = resp
+            .results
+            .iter()
+            .map(|r| thumbnail_url(r.thumbnail.as_deref().or(r.img_src.as_deref())))
+            .collect();
+        assert_eq!(images[0].as_deref(), Some("https://cdn.example/a.jpg"));
+        assert_eq!(images[1].as_deref(), Some("https://cdn.example/b.jpg"));
+        assert!(images[2..].iter().all(Option::is_none), "{images:?}");
+    }
+
+    #[test]
+    fn reddit_entries_carry_their_first_inline_image() {
+        let xml = r#"<feed><entry>
+            <author><name>/u/someone</name></author>
+            <category term="rust" label="r/rust"/>
+            <content type="html">&lt;div&gt;&lt;p&gt;Look at this&lt;/p&gt;&lt;img src="https://preview.redd.it/a.jpg?w=1&amp;amp;s=x" alt="pic"&gt;&lt;img src="https://preview.redd.it/second.jpg"&gt;&lt;/div&gt;</content>
+            <id>t3_abc</id>
+            <link href="https://www.reddit.com/r/rust/comments/abc/title/"/>
+            <updated>2026-01-02T03:04:05+00:00</updated>
+            <title>A post</title>
+        </entry><entry>
+            <author><name>/u/other</name></author>
+            <category term="rust" label="r/rust"/>
+            <content type="html">&lt;p&gt;text only&lt;/p&gt;</content>
+            <link href="https://www.reddit.com/r/rust/comments/def/other/"/>
+            <updated>2026-01-02T03:04:05+00:00</updated>
+            <title>No picture</title>
+        </entry></feed>"#;
+        let entries = parse_reddit_atom(xml);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].image.as_deref(),
+            Some("https://preview.redd.it/a.jpg?w=1&s=x")
+        );
+        assert!(entries[1].image.is_none());
+        let text = thumbnail_text("body".into(), entries[0].image.as_deref());
+        assert_eq!(
+            text,
+            "body\n    image: https://preview.redd.it/a.jpg?w=1&s=x"
+        );
+        assert_eq!(thumbnail_text("body".into(), None), "body");
+        assert_eq!(
+            thumbnail_text("body".into(), Some("http://x/y.png")),
+            "body"
+        );
+    }
+
+    #[test]
+    fn search_results_list_a_provider_thumbnail_on_its_own_line() {
+        let hits = vec![
+            SearchHit {
+                title: "With".into(),
+                url: "https://a".into(),
+                snippet: "s".into(),
+                image: Some("https://cdn.example/a.jpg".into()),
+            },
+            SearchHit {
+                title: "Without".into(),
+                url: "https://b".into(),
+                snippet: "t".into(),
+                image: None,
+            },
+        ];
+        assert_eq!(
+            format_results(&hits),
+            "[1] With\n    https://a\n    s\n    image: https://cdn.example/a.jpg\n\n[2] Without\n    https://b\n    t"
+        );
     }
 
     #[test]

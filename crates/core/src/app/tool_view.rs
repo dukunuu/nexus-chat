@@ -32,6 +32,8 @@ pub struct ToolView {
 /// One web search hit: what a reader scans for in a results list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Source {
+    /// Provider-supplied thumbnail; never discovered by fetching the page.
+    pub image: Option<String>,
     pub title: String,
     pub url: String,
     /// The host, without `www.` (`en.wikipedia.org`).
@@ -445,8 +447,13 @@ fn search_sources(result: &str) -> Vec<Source> {
             .map(str::trim)
             .unwrap_or_default();
         let mut snippet = String::new();
+        let mut image = None;
         while let Some(text) = lines.next_if(|line| !line.starts_with('[')) {
             let text = text.trim();
+            if let Some(url) = text.strip_prefix("image: ") {
+                image = Some(url.to_string());
+                continue;
+            }
             if text.is_empty()
                 || text == title
                 || text == "discussions:"
@@ -463,6 +470,7 @@ fn search_sources(result: &str) -> Vec<Source> {
             snippet.push_str(text);
         }
         sources.push(Source {
+            image,
             title: title.to_string(),
             url: url.to_string(),
             domain: domain(url),
@@ -523,6 +531,25 @@ mod tests {
             &"x".repeat(1500),
         );
         assert_eq!(page.summary(), "fetch example.com/docs/page · 1.5k chars");
+    }
+
+    #[test]
+    fn search_sources_pick_up_thumbnail_lines_without_leaking_them_into_snippets() {
+        let result = "[1] With picture\n    https://a.example/post\n    The snippet.\n    image: https://cdn.example/a.jpg\n\n[2] Plain\n    https://b.example/post\n    Another snippet.\n\ndiscussions:\n[3] Thread\n    https://www.reddit.com/r/rust/comments/abc/t/\n    r/rust · 2026-01-02 · u/x\n    Chat about it\n    image: https://preview.redd.it/p.jpg";
+        let view = tool_call_view("search", r#"{"mode":"web","query":"q"}"#, result);
+        assert_eq!(view.sources.len(), 3, "{:?}", view.sources);
+        assert_eq!(
+            view.sources[0].image.as_deref(),
+            Some("https://cdn.example/a.jpg")
+        );
+        assert_eq!(view.sources[0].snippet, "The snippet.");
+        assert!(view.sources[1].image.is_none());
+        assert_eq!(view.sources[1].snippet, "Another snippet.");
+        assert_eq!(
+            view.sources[2].image.as_deref(),
+            Some("https://preview.redd.it/p.jpg")
+        );
+        assert!(!view.sources[2].snippet.contains("image:"));
     }
 
     use super::*;

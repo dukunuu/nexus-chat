@@ -10,6 +10,8 @@ use ratatui::text::Line;
 pub struct HistoryCache {
     pub key: (Option<String>, usize, bool, bool, bool, bool, usize),
     pub msg_count: usize,
+    /// Last completion/preference generation rendered in this cache.
+    pub image_generation: usize,
     pub lines: Vec<Line<'static>>,
     pub owner: Vec<Option<usize>>,
     pub code: Vec<Option<usize>>,

@@ -27,6 +27,7 @@ pub mod jobs;
 pub mod markdown;
 pub mod prompts;
 pub mod provider;
+pub mod remote_image;
 pub mod skills;
 pub mod space;
 pub mod subagent;

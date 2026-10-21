@@ -55,6 +55,14 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 app.settings.reply_style.clone(),
                 Style::default().fg(app.theme.accent),
             ),
+            SettingsField::RemoteImages => Span::styled(
+                if app.settings.remote_images {
+                    "on"
+                } else {
+                    "off"
+                },
+                Style::default().fg(app.theme.fg),
+            ),
             SettingsField::ShowStats => toggle(app.settings.show_stats),
             SettingsField::ShowReasoning => toggle(app.settings.show_reasoning),
             SettingsField::HideHints => toggle(app.settings.hide_hints),

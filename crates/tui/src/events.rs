@@ -119,7 +119,9 @@ async fn run_loop(
         let welcome = app.is_welcome();
         let status_deadline = app.status_deadline();
         let tui_app_deadline = ui::popups::tui_app::deadline(app);
+        let images = std::sync::Arc::clone(&app.remote_images);
         tokio::select! {
+            () = images.changed() => {}
             maybe = reader.next() => match maybe {
                 Some(Ok(Event::Key(k))) if k.kind == KeyEventKind::Press => {
                     // A failed action is reported, never fatal: one bad db

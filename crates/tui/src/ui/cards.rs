@@ -433,8 +433,19 @@ fn sources_body(
 ) -> Vec<Line<'static>> {
     let dim = Style::default().fg(theme.fg_dim);
     let mut rows = tool_rule("results", width, theme);
-    let text_width = width.saturating_sub(5).max(1);
     for (index, source) in view.sources.iter().enumerate() {
+        let start = rows.len();
+        let thumb_width = if source.image.is_some() {
+            width.saturating_sub(6).min(12)
+        } else {
+            0
+        };
+        let gutter = if source.image.is_some() {
+            thumb_width + 2
+        } else {
+            0
+        };
+        let text_width = width.saturating_sub(5 + gutter).max(1);
         let number = format!("{:>3}  ", index + 1);
         let pad = " ".repeat(number.chars().count());
         for (row, line) in wrap_plain(&source.title, text_width)
@@ -472,6 +483,22 @@ fn sources_body(
                 spans.extend(part.spans);
             }
             rows.push(Line::from(spans));
+        }
+        if let Some(image) = &source.image {
+            let thumbnails = crate::app_view::image_lines(image, "", thumb_width as u16, 3, theme);
+            rows.resize(rows.len().max(start + 3), Line::default());
+            for (row, line) in rows[start..].iter_mut().enumerate() {
+                let mut thumbnail = thumbnails.get(row).cloned().unwrap_or_default();
+                // Text markers can be longer than a thumbnail. Clip before
+                // joining so they cannot push the result out of its column.
+                if thumbnail.width() > thumb_width {
+                    thumbnail = Line::from(glyph::MEDIA);
+                }
+                let padding = gutter.saturating_sub(thumbnail.width());
+                thumbnail.spans.push(Span::raw(" ".repeat(padding)));
+                thumbnail.spans.append(&mut line.spans);
+                *line = thumbnail;
+            }
         }
         if index + 1 < view.sources.len() {
             rows.push(Line::default());
@@ -1331,6 +1358,16 @@ pub(super) fn push_assistant_streaming(
     }
 
     let buf = app.active_streaming_text().unwrap_or("");
+    render_markdown_images(
+        out,
+        buf,
+        width.saturating_sub(3),
+        &app.theme,
+        &app.space.files_dir(&app.active_space.name),
+        &mut Vec::new(),
+        &mut app.stream_image_cache.borrow_mut(),
+        Some(&rail),
+    );
     let mut rendered = crate::ui::markdown::render(
         &strip_markdown_images(buf),
         width.saturating_sub(3),
@@ -1396,8 +1433,26 @@ pub(super) fn render_markdown_images(
 ) {
     image_at_line.resize(out.len(), None);
     for (_, file, alt) in markdown_images(content) {
-        let path = images_dir.join(file);
+        let remote = file.contains("://");
+        let path = if remote {
+            match crate::app_view::remote_image(&file) {
+                nexus_core::remote_image::Status::Ready(path) => path,
+                status => {
+                    let mut line =
+                        crate::app_view::image_placeholder(&file, &alt, &status, theme, width);
+                    if let Some(p) = prefix {
+                        line.spans.insert(0, p.clone());
+                    }
+                    out.push(line);
+                    image_at_line.push(Some(file));
+                    continue;
+                }
+            }
+        } else {
+            images_dir.join(&file)
+        };
         let path_str = path.to_string_lossy().to_string();
+        let open_target = if remote { file } else { path_str.clone() };
         let key = (path_str.clone(), width);
         let half = image_cache
             .entry(key)
@@ -1414,7 +1469,7 @@ pub(super) fn render_markdown_images(
                 line.spans.insert(0, p.clone());
             }
             out.push(line);
-            image_at_line.push(Some(path_str));
+            image_at_line.push(Some(open_target));
         } else {
             let img_start = out.len();
             for l in half.clone() {
@@ -1431,7 +1486,7 @@ pub(super) fn render_markdown_images(
             }
             out.push(blank);
             for _ in img_start..img_end {
-                image_at_line.push(Some(path_str.clone()));
+                image_at_line.push(Some(open_target.clone()));
             }
             image_at_line.push(None);
         }
@@ -1440,7 +1495,7 @@ pub(super) fn render_markdown_images(
 
 /// Max cell-rows a rendered image occupies (click-to-open encourages viewing
 /// full size in an external viewer instead of eating the whole terminal).
-const MAX_IMAGE_ROWS: usize = 20;
+pub(crate) const MAX_IMAGE_ROWS: usize = 20;
 
 /// Render a PNG image as half-block ratatui lines for inline display in the
 /// terminal. Falls back to a text marker if the image can't be loaded.
@@ -1455,12 +1510,12 @@ pub(super) fn image_to_halfblock_lines(path: &str, max_width: usize) -> Vec<Line
     }
     let mut cell_w = max_width.min(img.width() as usize);
     let aspect = f64::from(img.width()) / f64::from(img.height());
-    let mut cell_h = (cell_w as f64 / aspect).round().max(1.0) as usize;
+    let mut cell_h = (cell_w as f64 / aspect / 2.0).round().max(1.0) as usize;
     let truncated = cell_h > MAX_IMAGE_ROWS;
     if truncated {
-        cell_h = MAX_IMAGE_ROWS;
+        cell_h = MAX_IMAGE_ROWS - 1;
         // Recalculate width from capped height to maintain aspect
-        let capped_w = (cell_h as f64 * aspect).round().max(1.0) as usize;
+        let capped_w = (cell_h as f64 * 2.0 * aspect).round().max(1.0) as usize;
         cell_w = cell_w.min(capped_w);
     }
     let pixel_w = cell_w;
@@ -1976,6 +2031,62 @@ mod tool_card_tests {
                 .any(|l| l.contains("The total number of people.")),
             "{open:?}"
         );
+    }
+
+    fn thumbnail_png() -> Vec<u8> {
+        let image = image::RgbImage::from_pixel(24, 24, image::Rgb([20, 200, 90]));
+        let mut out = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn opened_search_card_shows_a_thumbnail_only_beside_results_that_have_one() {
+        let url = "https://cdn.example.invalid/thumb.png";
+        let plain = "[1] First\n    https://a.example/p\n    Text one.\n\n[2] Second\n    https://b.example/p\n    Text two.";
+        let with = format!(
+            "[1] First\n    https://a.example/p\n    Text one.\n    image: {url}\n\n[2] Second\n    https://b.example/p\n    Text two."
+        );
+        let args = json!({"mode":"web","query":"q"});
+        let fetcher = nexus_core::remote_image::Fetcher::new(
+            std::env::temp_dir().join(format!("nexus-card-{}", uuid::Uuid::new_v4())),
+        );
+        crate::app_view::use_fetcher_for_tests(&fetcher);
+        let baseline = text(&card("search", args.clone(), plain, true, false));
+
+        // Not fetched yet (and no runtime in this test): a compact marker.
+        let loading = text(&card("search", args.clone(), &with, true, false));
+        assert!(
+            loading
+                .iter()
+                .any(|l| l.contains("1  First") && l.contains(glyph::MEDIA)),
+            "{loading:?}"
+        );
+
+        fetcher.seed(url, &thumbnail_png()).unwrap();
+        let ready = card("search", args.clone(), &with, true, false);
+        let ready_text = text(&ready);
+        let pixel_rows = ready_text.iter().filter(|l| l.contains('▀')).count();
+        assert_eq!(pixel_rows, 3, "{ready_text:?}");
+        // Same rows as a result list without images (the text is 3 rows tall
+        // already); the second, image-less result is untouched.
+        assert_eq!(ready_text.len(), baseline.len(), "{ready_text:?}");
+        assert!(
+            ready_text
+                .iter()
+                .any(|l| l.trim_end().ends_with("Second") && !l.contains('▀'))
+        );
+        assert!(ready.iter().all(|l| l.width() <= 80));
+
+        // Collapsed card is unchanged by thumbnails.
+        let collapsed_with = text(&card("search", args.clone(), &with, false, false));
+        let collapsed_plain = text(&card("search", args, plain, false, false));
+        assert_eq!(collapsed_with, collapsed_plain);
+        crate::app_view::use_fetcher_for_tests(&nexus_core::remote_image::Fetcher::new(
+            std::env::temp_dir(),
+        ));
     }
 
     #[test]

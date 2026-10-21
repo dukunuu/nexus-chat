@@ -466,6 +466,7 @@ async fn factual_queries_do_not_search_discussions_and_discussion_failures_prese
                 title: hit.title,
                 url: hit.url,
                 snippet: hit.content,
+                image: None,
             })
             .collect();
         assert_eq!(result, format_results(&hits));
@@ -607,6 +608,7 @@ fn relevance_fixture() -> Vec<SearchHit> {
         title: title.into(),
         url: url.into(),
         snippet: snippet.into(),
+        image: None,
     })
     .collect()
 }

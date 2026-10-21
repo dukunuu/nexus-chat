@@ -457,9 +457,9 @@ fn button_label(session: &Session, button: &Button) -> String {
 }
 fn choice_list(document: &Document, items: &[Button]) -> bool {
     !items.is_empty()
-        && items
-            .iter()
-            .all(|button| button.body.is_empty() && document.answers(&button.action))
+        && items.iter().all(|button| {
+            button.body.is_empty() && button.image.is_none() && document.answers(&button.action)
+        })
 }
 fn render_button_group(
     session: &Session,
@@ -500,7 +500,13 @@ fn render_button_group(
             || session.document().answers(&button.action)
             || !session.document().sends(&button.action);
         let label = button_label(session, button);
-        let body: Vec<_> = button.body.iter().map(String::as_str).collect();
+        let mut body: Vec<_> = button.body.iter().map(String::as_str).collect();
+        if button.image.is_some() {
+            if body.is_empty() {
+                body.push("");
+            }
+            body.splice(0..0, [""; 6]);
+        }
         hits.extend(chrome::render_buttons(
             buffer,
             rect,
@@ -514,6 +520,17 @@ fn render_button_group(
             }],
             theme,
         ));
+        if let Some(image) = &button.image {
+            let area = Rect::new(rect.x + 1, rect.y + 1, rect.width.saturating_sub(2), 6);
+            Paragraph::new(crate::app_view::image_lines(
+                image,
+                button.alt.as_deref().unwrap_or_default(),
+                area.width,
+                area.height,
+                theme,
+            ))
+            .render(area, buffer);
+        }
     }
     hits
 }
@@ -569,7 +586,10 @@ fn button_regions(session: &Session, items: &[Button], area: Rect) -> Vec<(usize
             regions.push((item, Rect::new(area.x, y, area.width, height)));
             y = y.saturating_add(height);
         }
-    } else if items.iter().any(|button| !button.body.is_empty()) {
+    } else if items
+        .iter()
+        .any(|button| !button.body.is_empty() || button.image.is_some())
+    {
         let content_width = items
             .iter()
             .flat_map(|button| {
@@ -580,7 +600,12 @@ fn button_regions(session: &Session, items: &[Button], area: Rect) -> Vec<(usize
             .unwrap_or(0);
         let minimum_width = u16::try_from(content_width)
             .unwrap_or(u16::MAX)
-            .saturating_add(4);
+            .saturating_add(4)
+            .max(if items.iter().any(|button| button.image.is_some()) {
+                20
+            } else {
+                0
+            });
         let columns =
             usize::from((area.width.saturating_add(2) / minimum_width.saturating_add(2)).max(1))
                 .min(items.len());
@@ -590,7 +615,11 @@ fn button_regions(session: &Session, items: &[Button], area: Rect) -> Vec<(usize
         for (row, chunk) in items.chunks(columns).enumerate() {
             let height = chunk
                 .iter()
-                .map(|button| u16::try_from(button.body.len()).unwrap_or(0) + 3)
+                .map(|button| {
+                    u16::try_from(button.body.len()).unwrap_or(0)
+                        + 3
+                        + if button.image.is_some() { 6 } else { 0 }
+                })
                 .max()
                 .unwrap_or(3);
             for item in 0..chunk.len() {
@@ -980,6 +1009,15 @@ fn card_lines(
             _ => content.extend(wrapped_text(&badge, inner, Style::default().fg(color))),
         }
     }
+    if let Some(image) = &item.image {
+        content.extend(crate::app_view::image_lines(
+            image,
+            item.alt.as_deref().unwrap_or_default(),
+            inner,
+            6,
+            theme,
+        ));
+    }
     content.extend(styled_text(
         session,
         &item.text,
@@ -1184,18 +1222,36 @@ fn layout_lines(
 ) -> Option<Vec<Line<'static>>> {
     let accent = accent_color(session.document(), theme);
     let lines = match node {
+        Node::Image { src, alt, rows } => {
+            crate::app_view::image_lines(src, alt, width, *rows, theme)
+        }
         Node::Hero {
             title,
             subtitle,
             badge,
-        } => hero_lines(
-            title,
-            subtitle.as_deref(),
-            badge.as_deref(),
-            session,
-            width,
-            theme,
-        ),
+            image,
+            alt,
+        } => {
+            let mut lines = Vec::new();
+            if let Some(image) = image {
+                lines.extend(crate::app_view::image_lines(
+                    image,
+                    alt.as_deref().unwrap_or_default(),
+                    width,
+                    6,
+                    theme,
+                ));
+            }
+            lines.extend(hero_lines(
+                title,
+                subtitle.as_deref(),
+                badge.as_deref(),
+                session,
+                width,
+                theme,
+            ));
+            lines
+        }
         Node::Columns { items } => columns_lines(items, session, width, theme),
         Node::Cards { items } => cards_lines(items, session, width, theme),
         Node::Stats { items } => stats_lines(items, session, width, theme),
@@ -2298,3 +2354,7 @@ mod layouts_tests;
 #[cfg(test)]
 #[path = "interactive/stepper_tests.rs"]
 mod stepper_tests;
+
+#[cfg(test)]
+#[path = "interactive/image_tests.rs"]
+mod image_tests;

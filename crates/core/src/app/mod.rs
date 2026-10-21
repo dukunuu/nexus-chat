@@ -528,6 +528,7 @@ pub enum ModelPickTarget {
 /// Editable rows in the nerd-config popup.
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum SettingsField {
+    RemoteImages,
     ShowStats,
     ShowReasoning,
     HideHints,
@@ -551,7 +552,8 @@ pub enum SettingsField {
 }
 
 impl SettingsField {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
+        Self::RemoteImages,
         Self::ShowStats,
         Self::ShowReasoning,
         Self::HideHints,
@@ -576,6 +578,7 @@ impl SettingsField {
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::RemoteImages => "remote images (Space toggles on/off)",
             Self::ReplyStyle => "reply style (Space cycles auto/rich/plain)",
             Self::ShowStats => "show stats (model · TPS footer)",
             Self::ShowReasoning => "expand reasoning (Ctrl+R)",
@@ -670,7 +673,7 @@ pub const SETTINGS_GROUPS: &[SettingsGroup] = &[
     },
     SettingsGroup {
         name: "Reply Layouts",
-        fields: &[SettingsField::ReplyStyle],
+        fields: &[SettingsField::ReplyStyle, SettingsField::RemoteImages],
     },
 ];
 
@@ -692,6 +695,8 @@ pub const SEARCH_PROVIDERS: [&str; 4] = ["auto", "langsearch", "searxng", "duckd
 // A settings struct is inherently many booleans; grouped by feature in the popup.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Settings {
+    /// Fetch untrusted remote images through the safe, device-local cache.
+    pub remote_images: bool,
     /// Model-selected layouts, preferred layouts, or no layout guidance.
     pub reply_style: String,
     /// Show the per-message model · TPS footer.
@@ -711,6 +716,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            remote_images: true,
             reply_style: "auto".into(),
             show_stats: false,
             show_reasoning: false,
@@ -1910,6 +1916,7 @@ impl App {
     /// `load_settings` and the `SetSetting` command.
     fn apply_setting(&mut self, k: &str, v: &str) {
         match k {
+            "remote_images" => self.settings.remote_images = v == "on",
             "show_stats" => self.settings.show_stats = v == "1",
             "show_reasoning" => self.settings.show_reasoning = v == "1",
             "hide_hints" => self.settings.hide_hints = v == "1",

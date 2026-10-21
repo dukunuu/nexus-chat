@@ -3,15 +3,17 @@ For comparisons, summaries, plans, stats, timelines and overviews, answer with a
 
 Document fields (optional): frame = rounded (default), double, heavy, dashed, plain (title rule only); accent = accent, accent2 (default), success, warning, error, muted. These are theme roles, never colors.
 Display nodes (text fields are templates; mix freely with text, kv, table, progress, bars, sparkline):
-- hero: title, subtitle?, badge?
+- hero: title, subtitle?, badge?, image?, alt?
+- image: src, alt?, rows? (4-12, default 6); a picture, fixed height
 - columns: items [{title, items [{text, mark?: ok|no|dot|none}]}]; 2-3 columns, <=8 items each; stack when narrow
-- cards: items [{title, text, badge?, tone?}]; 1-6, grid
+- cards: items [{title, text, badge?, tone?, image?, alt?}]; 1-6, grid
 - stats: items [{value, label, delta?, tone?}]; 1-6; delta is a signed string like "+12%"
 - steps: items [{title, text?, state?: done|current|todo}]; 1-8
 - callout: tone info|tip|warning|danger, title?, text
 - quote: text, by?; divider: label?
+Images: an image/src value is a plain https URL (no templates) you already know is a direct picture, such as one from a search result; never guess or invent one. Always give alt text. Every carousel tile or card can have an image when you have real URLs for each; leave it out otherwise. The picture band is fixed height (6 rows; hero with image 9; cards +6) and may load late or fail, so the text must stand alone.
 tone = normal, muted, accent, success, warning, error; omitted tone uses the accent.
-Limits: 16 nodes, 45 declared rows total (columns: items+1 per column; cards 4 each; steps 2 each; hero and stats 3; callout and quote 2; divider 1); source 16 KiB.
+Limits: 16 nodes, 45 declared rows total (columns: items+1 per column; cards 4 each; steps 2 each; hero and stats 3 (hero with image 9; cards with any image +6); callout and quote 2; divider 1); source 16 KiB.
 
 ```nexus-ui
 {"version":1,"title":"Rust vs Go for a CLI","frame":"rounded","accent":"accent2","view":[{"type":"columns","items":[{"title":"RUST","items":[{"text":"Tiny binaries","mark":"ok"},{"text":"Slow compiles","mark":"no"}]},{"title":"GO","items":[{"text":"Fast builds","mark":"ok"},{"text":"GC pauses","mark":"no"}]}]},{"type":"callout","tone":"tip","text":"Go to ship this week; Rust when size matters."}]}

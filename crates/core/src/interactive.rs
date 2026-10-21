@@ -116,6 +116,10 @@ pub struct Column {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Card {
+    /// Optional remote picture; never a template.
+    pub image: Option<String>,
+    /// Plain-text image description.
+    pub alt: Option<String>,
     /// Title template.
     pub title: String,
     /// Body template.
@@ -184,6 +188,10 @@ pub enum CalloutTone {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Button {
+    /// Optional picture above this tile's label.
+    pub image: Option<String>,
+    /// Plain-text image description.
+    pub alt: Option<String>,
     /// Visible label (a sending action gets an additional frontend badge).
     pub label: String,
     /// Identifier in the document's actions map.
@@ -220,8 +228,23 @@ pub struct CheckItem {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Node {
+    /// A fixed-height remote image.
+    Image {
+        /// HTTPS URL, never a template.
+        src: String,
+        /// Plain-text description.
+        #[serde(default)]
+        alt: String,
+        /// Reserved terminal rows, four to twelve.
+        #[serde(default = "six")]
+        rows: u16,
+    },
     /// A prominent title, optional dim subtitle and badge.
     Hero {
+        /// Optional remote picture.
+        image: Option<String>,
+        /// Plain-text image description.
+        alt: Option<String>,
         /// Title template.
         title: String,
         /// Subtitle template.
@@ -379,11 +402,29 @@ const fn one() -> u16 {
 const fn three() -> u16 {
     3
 }
+const fn six() -> u16 {
+    6
+}
+
+fn image_ok(src: Option<&str>, alt: Option<&str>) -> Result<()> {
+    if let Some(src) = src {
+        crate::remote_image::validate_url(src)?;
+    }
+    if let Some(alt) = alt {
+        line_ok(alt, 120)?;
+        ensure!(
+            !alt.contains(['{', '}']),
+            "image descriptions cannot contain templates"
+        );
+    }
+    Ok(())
+}
 impl Node {
     fn is_display(&self) -> bool {
         matches!(
             self,
             Self::Hero { .. }
+                | Self::Image { .. }
                 | Self::Columns { .. }
                 | Self::Cards { .. }
                 | Self::Stats { .. }
@@ -402,13 +443,36 @@ impl Node {
                 .iter()
                 .map(|item| bounded_rows(item.items.len() + 1))
                 .sum(),
-            Self::Cards { items } => bounded_rows(items.len().saturating_mul(4)),
+            Self::Cards { items } => {
+                bounded_rows(items.len().saturating_mul(4))
+                    + if items.iter().any(|item| item.image.is_some()) {
+                        6
+                    } else {
+                        0
+                    }
+            }
             Self::Steps { items } => bounded_rows(items.len().saturating_mul(2)),
             Self::Callout { .. } | Self::Quote { .. } => 2,
-            Self::Text { rows, .. } | Self::Buttons { rows, .. } | Self::Sparkline { rows, .. } => {
+            Self::Buttons { rows, items } => {
+                // A tile picture adds a fixed six-row band to its tile row.
+                *rows
+                    + if items.iter().any(|item| item.image.is_some()) {
+                        6
+                    } else {
+                        0
+                    }
+            }
+            Self::Image { rows, .. } | Self::Text { rows, .. } | Self::Sparkline { rows, .. } => {
                 *rows
             }
-            Self::Hero { .. } | Self::Stats { .. } | Self::Input { .. } => 3,
+            Self::Hero { image, .. } => {
+                if image.is_some() {
+                    9
+                } else {
+                    3
+                }
+            }
+            Self::Stats { .. } | Self::Input { .. } => 3,
             Self::Kv { items } => u16::try_from(items.len()).unwrap_or(u16::MAX),
             Self::Table { rows_data, .. } => {
                 u16::try_from(rows_data.len().saturating_add(1)).unwrap_or(u16::MAX)
@@ -476,7 +540,7 @@ pub struct CheckError {
 }
 
 /// Valid presentation node types, shared by validation and tool reports.
-pub const NODE_TYPES: &str = "hero, columns, cards, stats, steps, callout, quote, divider, text, buttons, input, kv, table, progress, bars, sparkline, checklist, select, stepper, toggle";
+pub const NODE_TYPES: &str = "hero, image, columns, cards, stats, steps, callout, quote, divider, text, buttons, input, kv, table, progress, bars, sparkline, checklist, select, stepper, toggle";
 const ACTION_OPS: &str = "set, call, send, answer";
 const EXPR_OPS: &str = "get, random, not, number, if, add, sub, mul, div, mod, eq, lt, gt, and, or";
 const MAX_ERRORS: usize = 10;
@@ -582,7 +646,10 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
                 return;
             };
             let fields = match (shape, name) {
-                ("node", "hero") => "title:string subtitle:?string badge:?string",
+                ("node", "hero") => {
+                    "title:string subtitle:?string badge:?string image:?string alt:?string"
+                }
+                ("node", "image") => "src:string alt:?string rows:u16",
                 ("node", "columns") => "items:column[]",
                 ("node", "cards") => "items:card[]",
                 ("node", "stats") => "items:stat[]",
@@ -620,11 +687,14 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
         }
         "button" => (
             shape,
-            "label:string action:string body:string[] primary:bool",
+            "label:string action:string body:string[] primary:bool image:?string alt:?string",
         ),
         "column" => (shape, "title:string items:column_item[]"),
         "column_item" => (shape, "text:string mark:mark"),
-        "card" => (shape, "title:string text:string badge:?string tone:?tone"),
+        "card" => (
+            shape,
+            "title:string text:string badge:?string tone:?tone image:?string alt:?string",
+        ),
         "stat" => (shape, "value:string label:string delta:?string tone:?tone"),
         "display_step" => (shape, "title:string text:?string state:step_state"),
         "bar" => (shape, "label:string value:value"),
@@ -676,6 +746,7 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
             "items"
         }
         "callout" => "tone text",
+        "image" => "src",
         "quote" | "text" | "column_item" | "send" => "text",
         "input" | "toggle" | "check" => "key label",
         "table" => "columns rows_data",
@@ -1062,9 +1133,11 @@ impl Document {
     fn validate_node(&self, node: &Node, budget: &mut usize) -> Result<usize> {
         let max_rows = match node {
             Node::Columns { .. } => 27,
-            Node::Cards { .. } => 24,
+            Node::Cards { .. } => 30,
+            Node::Image { .. } => 12,
+            Node::Buttons { .. } => 14,
             Node::Steps { .. } => 16,
-            Node::Table { .. } => 9,
+            Node::Hero { .. } | Node::Table { .. } => 9,
             _ => 8,
         };
         ensure!(
@@ -1080,6 +1153,7 @@ impl Document {
                     "a button row needs 1–8 buttons"
                 );
                 for button in items {
+                    image_ok(button.image.as_deref(), button.alt.as_deref())?;
                     line_ok(&button.label, 120)?;
                     Self::template_ok(&button.label)?;
                     ensure!(
@@ -1136,11 +1210,18 @@ impl Document {
 
     fn validate_display(node: &Node) -> Result<()> {
         match node {
+            Node::Image { src, alt, rows } => {
+                image_ok(Some(src), Some(alt))?;
+                ensure!((4..=12).contains(rows), "image rows must be 4–12");
+            }
             Node::Hero {
                 title,
                 subtitle,
                 badge,
+                image,
+                alt,
             } => {
+                image_ok(image.as_deref(), alt.as_deref())?;
                 Self::template_ok(title)?;
                 for text in subtitle.iter().chain(badge) {
                     Self::template_ok(text)?;
@@ -1159,6 +1240,7 @@ impl Document {
             Node::Cards { items } => {
                 item_count(items.len(), 1, 6)?;
                 for item in items {
+                    image_ok(item.image.as_deref(), item.alt.as_deref())?;
                     Self::template_ok(&item.title)?;
                     Self::template_ok(&item.text)?;
                     if let Some(badge) = &item.badge {
@@ -1467,11 +1549,19 @@ impl Session {
     fn plain_node(&self, node: &Node) -> Vec<String> {
         let text = |s: &str| self.text(s).unwrap_or_default();
         match node {
+            Node::Image { alt, .. } => vec![format!("[image: {alt}]")],
             Node::Hero {
                 title,
                 subtitle,
                 badge,
+                image,
+                alt,
             } => std::iter::once(text(title))
+                .chain(
+                    image
+                        .iter()
+                        .map(|_| format!("[image: {}]", alt.as_deref().unwrap_or_default())),
+                )
                 .chain(subtitle.iter().chain(badge).map(|s| text(s)))
                 .collect(),
             Node::Columns { items } => items
@@ -1494,6 +1584,9 @@ impl Session {
                     std::iter::once(text(&item.title))
                         .chain(item.badge.iter().map(|s| text(s)))
                         .chain(std::iter::once(text(&item.text)))
+                        .chain(item.image.iter().map(|_| {
+                            format!("[image: {}]", item.alt.as_deref().unwrap_or_default())
+                        }))
                 })
                 .collect(),
             Node::Stats { items } => items
@@ -1542,7 +1635,11 @@ impl Session {
             Node::Buttons { items, .. } => items
                 .iter()
                 .flat_map(|item| {
-                    std::iter::once(text(&item.label)).chain(item.body.iter().map(|s| text(s)))
+                    std::iter::once(text(&item.label))
+                        .chain(item.body.iter().map(|s| text(s)))
+                        .chain(item.image.iter().map(|_| {
+                            format!("[image: {}]", item.alt.as_deref().unwrap_or_default())
+                        }))
                 })
                 .collect(),
             Node::Input { key, label }
@@ -2145,6 +2242,10 @@ mod answer_tests;
 #[cfg(test)]
 #[path = "interactive/layouts_tests.rs"]
 mod layouts_tests;
+
+#[cfg(test)]
+#[path = "interactive/image_tests.rs"]
+mod image_tests;
 
 #[cfg(test)]
 #[path = "interactive/components_tests.rs"]

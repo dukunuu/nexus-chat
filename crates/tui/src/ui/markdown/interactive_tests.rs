@@ -14,7 +14,7 @@ fn fallback_shows_only_the_first_three_located_errors() {
         );
     }
     assert!(!text.contains("view[3]:"), "{text}");
-    assert!(text.contains("valid: hero, columns"), "{text}");
+    assert!(text.contains("valid: hero, image, columns"), "{text}");
     assert_eq!(rendered.blocks, vec![source]);
 }
 

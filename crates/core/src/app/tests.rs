@@ -3995,6 +3995,25 @@ fn set_setting_fails_fast_on_unknown_keys_and_invalid_values() {
     assert_eq!(a.verbosity, "concise"); // untouched by the rejected values
 }
 
+#[test]
+fn remote_images_setting_defaults_on_validates_and_persists() {
+    let mut a = app_with_key();
+    assert!(a.settings.remote_images);
+    a.set_setting("remote_images", "off").unwrap();
+    assert!(!a.settings.remote_images);
+    assert!(
+        a.db.load_settings()
+            .unwrap()
+            .iter()
+            .any(|(k, v)| k == "remote_images" && v == "off")
+    );
+    assert!(a.set_setting("remote_images", "maybe").is_err());
+    assert!(a.set_setting("remote_images", "1").is_err());
+    assert!(!a.settings.remote_images, "rejected values change nothing");
+    a.set_setting("remote_images", "on").unwrap();
+    assert!(a.settings.remote_images);
+}
+
 #[tokio::test]
 async fn gate_in_another_session_never_swallows_typing_and_the_event_carries_its_session() {
     let mut a = app_with_key();

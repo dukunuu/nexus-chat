@@ -44,7 +44,10 @@ over several lines and check that every bracket closes):
     Optional `body`: an array of up to
     8 plain-text artwork/description lines; these become bordered carousel
     tiles, with the label after the art and the last body line as dim metadata.
-    Default declared rows: 3.
+    Default declared rows: 3. Optional image (plain https URL to a picture you
+    know exists, no templates) and alt put a fixed 6-row picture at the top of
+    the tile and add 6 declared rows; every carousel tile can have one.
+  - `{"type":"image","src":"https://…","alt":"A cat","rows":6}`: a remote picture, 4–12 rows (default 6); no templates in the URL; never guess URLs. It may load late or fail; keep the meaning in text.
   - `{"type":"input","key":"name","label":"Your name"}` displays in one row
     (3 declared rows toward the validation budget);
     its state field must remain a single-line string. Never solicit passwords/API keys.

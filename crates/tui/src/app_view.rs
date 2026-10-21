@@ -25,6 +25,158 @@ use crate::flows::files::PickerEntry;
 use crate::history_cache::HistoryCache;
 use crate::selection::HistorySel;
 use crate::theme::{BackgroundMode, Theme};
+use nexus_core::remote_image::{Fetcher, Status as ImageStatus};
+use std::sync::{Arc, Weak};
+
+thread_local! {
+    // The terminal renders on one thread. A weak context lets all measured
+    // layout helpers use this view's fetcher without retaining a closed view.
+    static IMAGE_CONTEXT: std::cell::RefCell<Weak<Fetcher>> = const { std::cell::RefCell::new(Weak::new()) };
+}
+
+/// Test hook: render on this thread against `fetcher`.
+#[cfg(test)]
+pub(crate) fn use_fetcher_for_tests(fetcher: &Arc<Fetcher>) {
+    IMAGE_CONTEXT.with_borrow_mut(|context| *context = Arc::downgrade(fetcher));
+}
+
+pub(crate) fn remote_image(url: &str) -> ImageStatus {
+    IMAGE_CONTEXT.with_borrow(|context| {
+        context
+            .upgrade()
+            .map_or(ImageStatus::Off, |fetcher| fetcher.request(url))
+    })
+}
+
+/// One row standing in for an image that is not on screen: `▣ alt · loading`,
+/// `▣ alt · host (couldn't load)`, or `▣ alt · host` when images are off. It
+/// never exceeds `max_width`: the host goes first, then the alt text is cut.
+pub(crate) fn image_placeholder(
+    url: &str,
+    alt: &str,
+    status: &ImageStatus,
+    theme: &Theme,
+    max_width: usize,
+) -> ratatui::text::Line<'static> {
+    use ratatui::text::{Line, Span};
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_default();
+    let alt = crate::ui::markdown::terminal_safe(alt).into_owned();
+    let lead = format!("{} ", crate::ui::style::glyph::MEDIA);
+    let full = match status {
+        ImageStatus::Loading => " \u{b7} loading".to_string(),
+        ImageStatus::Failed => format!(" \u{b7} {host} (couldn't load)"),
+        _ => format!(" \u{b7} {host}"),
+    };
+    let short = match status {
+        ImageStatus::Loading => full.clone(),
+        ImageStatus::Failed => " \u{b7} couldn't load".to_string(),
+        _ => String::new(),
+    };
+    let count = |text: &str| text.chars().count();
+    let room = |suffix: &str| max_width.saturating_sub(count(&lead) + count(suffix));
+    let suffix = if count(&alt) <= room(&full) || room(&full) >= 8 {
+        full
+    } else {
+        short
+    };
+    let budget = room(&suffix);
+    let alt = if count(&alt) > budget {
+        let keep = budget.saturating_sub(1);
+        format!("{}\u{2026}", alt.chars().take(keep).collect::<String>())
+    } else {
+        alt
+    };
+    let alt = if budget == 0 { String::new() } else { alt };
+    Line::from(vec![
+        Span::raw(format!("{lead}{alt}")),
+        Span::styled(suffix, ratatui::style::Style::default().fg(theme.fg_dim)),
+    ])
+}
+
+thread_local! {
+    static PIXELS: std::cell::RefCell<HashMap<(std::path::PathBuf, u16, u16), Vec<ratatui::text::Line<'static>>>> =
+        std::cell::RefCell::default();
+}
+
+/// Half-block rows for a cached PNG, memoized so a layout does not decode the
+/// file on every frame.
+fn pixel_lines(
+    path: &std::path::Path,
+    width: u16,
+    rows: u16,
+) -> Option<Vec<ratatui::text::Line<'static>>> {
+    use ratatui::style::{Color, Style};
+    use ratatui::text::{Line, Span};
+    let key = (path.to_path_buf(), width, rows);
+    if let Some(hit) = PIXELS.with_borrow(|cache| cache.get(&key).cloned()) {
+        return Some(hit);
+    }
+    let image = image::open(path).ok()?;
+    let pixels = image
+        .thumbnail(u32::from(width), u32::from(rows) * 2)
+        .to_rgb8();
+    let lines: Vec<_> = (0..pixels.height())
+        .step_by(2)
+        .map(|y| {
+            Line::from(
+                (0..pixels.width())
+                    .map(|x| {
+                        let top = pixels.get_pixel(x, y).0;
+                        let bottom = pixels.get_pixel(x, (y + 1).min(pixels.height() - 1)).0;
+                        Span::styled(
+                            "\u{2580}",
+                            Style::default()
+                                .fg(Color::Rgb(top[0], top[1], top[2]))
+                                .bg(Color::Rgb(bottom[0], bottom[1], bottom[2])),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    PIXELS.with_borrow_mut(|cache| {
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert(key, lines.clone());
+    });
+    Some(lines)
+}
+
+/// Fixed-height, cell-sized previews for tiles and thumbnails. Loading, failure
+/// and disabled states occupy the exact same reservation as decoded pixels.
+pub(crate) fn image_lines(
+    url: &str,
+    alt: &str,
+    width: u16,
+    rows: u16,
+    theme: &Theme,
+) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::text::Line;
+    let rows = rows.min(20);
+    let status = remote_image(url);
+    let mut lines = Vec::new();
+    if let ImageStatus::Ready(path) = &status
+        && width > 0
+        && rows > 0
+        && let Some(pixels) = pixel_lines(path, width, rows)
+    {
+        lines = pixels;
+    } else {
+        lines.push(image_placeholder(
+            url,
+            alt,
+            &status,
+            theme,
+            usize::from(width),
+        ));
+    }
+    lines.resize(usize::from(rows), Line::default());
+    lines
+}
 
 /// Built-in start-screen banner (override with `~/.config/nexus-chat/banner.txt`).
 const BANNER: &str = r"
@@ -209,6 +361,12 @@ pub struct AppView {
     /// Wrapped-line cache for the transcript, so redraws don't re-render
     /// markdown for the whole conversation every frame.
     pub history_cache: HistoryCache,
+    /// Shared across replies, layouts and search cards; never synced.
+    pub remote_images: Arc<Fetcher>,
+    /// Decoded half-block rows for images in the reply that is still streaming,
+    /// so they are not re-decoded every frame.
+    pub stream_image_cache:
+        std::cell::RefCell<HashMap<(String, usize), Vec<ratatui::text::Line<'static>>>>,
     /// Disposable, background-rendered TUI diagram previews.
     pub diagrams: crate::diagrams::DiagramCache,
     /// Per-session history caches preserved across session switches so
@@ -305,6 +463,11 @@ impl AppView {
                 _ => String::new(),
             })
             .unwrap_or_default();
+        let remote_images = Fetcher::new(core.space.db_path().with_file_name("cache"));
+        // Tests stay hermetic: the default fetcher never downloads; image tests
+        // install their own seeded fetcher with `use_fetcher_for_tests`.
+        #[cfg(test)]
+        remote_images.set_enabled(false);
         let background_mode = load_background_mode(&core);
         let mut theme = crate::theme::load();
         theme.set_background_mode(background_mode);
@@ -408,6 +571,8 @@ impl AppView {
             sel: HistorySel::default(),
             mouse_target: MouseTarget::None,
             history_cache: HistoryCache::default(),
+            remote_images,
+            stream_image_cache: std::cell::RefCell::default(),
             diagrams: crate::diagrams::DiagramCache::default(),
             session_caches: HashMap::new(),
             show_tool_detail: false,
@@ -527,6 +692,13 @@ impl AppView {
 
     /// Force a full history cache rebuild on the next frame. Used when
     /// in-place message edits would otherwise leave stale wrapped content.
+    pub(crate) fn activate_image_context(&self) -> usize {
+        self.remote_images
+            .set_enabled(self.core.settings.remote_images);
+        IMAGE_CONTEXT.with_borrow_mut(|context| *context = Arc::downgrade(&self.remote_images));
+        self.remote_images.generation()
+    }
+
     pub fn invalidate_history_cache(&mut self) {
         if let Some(sid) = self.core.session.as_ref().map(|s| s.id.clone()) {
             self.session_caches.remove(&sid);
@@ -539,6 +711,9 @@ impl AppView {
     /// opens the sibling `.mp4` instead.
     pub fn open_image_at_line(&self, line: usize) -> bool {
         if let Some(Some(path)) = self.history_cache.image_at_line.get(line) {
+            if path.starts_with("https://") {
+                return open::that(path).is_ok();
+            }
             let p = std::path::Path::new(path);
             let open_path = if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
                 // Check for sibling video: abc123_first.png → abc123.mp4 or _stitch_abc123.mp4
@@ -606,7 +781,8 @@ impl AppView {
     /// selected.
     pub fn text_index(&self) -> Option<usize> {
         match self.settings_field()? {
-            SettingsField::ShowStats
+            SettingsField::RemoteImages
+            | SettingsField::ShowStats
             | SettingsField::ShowReasoning
             | SettingsField::HideHints
             | SettingsField::MemoryModel

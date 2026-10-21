@@ -99,6 +99,14 @@ impl AppView {
                 }
             }
             SettingsRow::Field(field) => match field {
+                SettingsField::RemoteImages => {
+                    let value = if self.core.settings.remote_images {
+                        "off"
+                    } else {
+                        "on"
+                    };
+                    let _ = self.core.set_setting("remote_images", value);
+                }
                 SettingsField::ShowStats => {
                     self.core.settings.show_stats = !self.core.settings.show_stats;
                 }

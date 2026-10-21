@@ -53,7 +53,9 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
     }
     app.welcome_targets.clear();
     let width = inner.width.max(1) as usize;
+    let old_image_generation = app.history_cache.image_generation;
     sync_cache(app, width);
+    let images_changed = old_image_generation != app.history_cache.image_generation;
 
     // The in-progress reply changes every frame (spinner, tokens); render it
     // fresh and splice it after the cached prefix.
@@ -193,6 +195,19 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
                 .position(|o| *o == Some(owner))
                 .map(|new_start| (prev_top + new_start).saturating_sub(old_start))
         });
+        if pinned.is_none() && images_changed {
+            // Images can grow inside the same message, above its answer.
+            // Prefer surviving text over the old offset within that message.
+            for offset in 0..6 {
+                if let Some(text) = app.sel.line_at(prev_top + offset)
+                    && text.chars().count() >= 12
+                    && let Some(hit) = find_line(&cache.lines, &tail, |line| line == text)
+                {
+                    pinned = Some(hit.saturating_sub(offset));
+                    break;
+                }
+            }
+        }
         if pinned.is_none()
             && let Some(owner) = app.sel.owner_at(prev_top)
         {
@@ -420,6 +435,13 @@ fn find_line(
 /// change, then wrap only messages not yet cached. Stored messages are
 /// append-only, so this is O(new messages) per frame instead of O(all).
 fn sync_cache(app: &mut AppView, width: usize) {
+    let image_generation = app.activate_image_context();
+    if app.history_cache.msg_count != app.messages.len() {
+        app.stream_image_cache.borrow_mut().clear();
+    }
+    if app.history_cache.msg_count > 0 && app.history_cache.image_generation != image_generation {
+        app.pin_viewport_top = true;
+    }
     let session = app.session.as_ref().map(|s| s.id.clone());
     if app.tool_session != session {
         app.tool_session.clone_from(&session);
@@ -437,7 +459,9 @@ fn sync_cache(app: &mut AppView, width: usize) {
         app.settings.hide_hints,
         app.settings.show_stats,
         // Both generations only advance; either change invalidates the key.
-        app.theme_gen.wrapping_add(app.tool_open_gen),
+        app.theme_gen
+            .wrapping_add(app.tool_open_gen)
+            .wrapping_add(image_generation),
     );
     // Work on a detached cache: the wrap pass reads the domain half
     // (messages, settings, space) through the `AppView` deref, which borrows
@@ -564,6 +588,7 @@ fn sync_cache(app: &mut AppView, width: usize) {
         let new_plain: Vec<String> = c.lines[start..].iter().map(line_text).collect();
         c.plain.extend(new_plain);
     }
+    c.image_generation = image_generation;
     c.msg_count = app.messages.len();
     app.history_cache = cache;
 }
@@ -1611,6 +1636,147 @@ mod tests {
             bottom_row.trim().is_empty(),
             "the message's trailing blank row must sit at the pane bottom, got: {bottom_row:?}"
         );
+    }
+
+    // ---- remote images in replies ----
+
+    const PIC: &str = "https://img.example.invalid/pic.png";
+
+    fn tiny_png(size: u32) -> Vec<u8> {
+        let image = image::RgbImage::from_fn(size, size, |x, y| {
+            image::Rgb([x as u8 * 6, y as u8 * 6, 80])
+        });
+        let mut out = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    fn screen(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> Vec<String> {
+        let buf = terminal.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// 40 question/answer pairs; the answer at pair 10 carries a remote image.
+    fn remote_image_app() -> AppView {
+        let mut a = test_app();
+        for i in 0..40 {
+            a.messages.push(msg(
+                "user",
+                &format!("question number {i} with some body text"),
+            ));
+            let body = if i == 10 {
+                format!(
+                    "answer number {i} with a decent amount of text\n\n![the diagram]({PIC})\n\nmore words after the picture"
+                )
+            } else {
+                format!("answer number {i} with a decent amount of body text")
+            };
+            let mut m = msg("assistant", &body);
+            m.model = Some("a/one".into());
+            m.phrase = Some("working".into());
+            a.messages.push(m);
+        }
+        a
+    }
+
+    fn history_text(a: &AppView) -> String {
+        a.history_cache
+            .lines
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn remote_image_placeholder_swaps_for_pixels_without_moving_the_viewport() {
+        let mut a = remote_image_app();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let text = history_text(&a);
+        assert!(
+            text.contains("\u{25a3} the diagram \u{b7} loading"),
+            "{text}"
+        );
+        let before_lines = a.history_cache.lines.len();
+
+        // Scrolled up, below the picture: its rows arrive above the viewport.
+        a.scroll = 25;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let before = visible_snapshot(&terminal);
+        let before_screen = screen(&terminal);
+        assert!(before.contains("answer number"), "{before}");
+
+        a.remote_images.seed(PIC, &tiny_png(40)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        assert!(
+            a.history_cache.lines.len() > before_lines + 5,
+            "the image should add rows once it is known"
+        );
+        assert!(!history_text(&a).contains("loading"));
+        assert_eq!(
+            screen(&terminal),
+            before_screen,
+            "late image rows must not move the viewport"
+        );
+
+        // Following the bottom stays at the bottom.
+        a.scroll = 0;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let bottom = screen(&terminal);
+        a.remote_images.seed_failure(PIC);
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        assert_eq!(a.scroll, 0);
+        assert_eq!(screen(&terminal), bottom);
+    }
+
+    #[test]
+    fn remote_image_shows_failure_and_disabled_text() {
+        let mut a = remote_image_app();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        a.remote_images.seed_failure(PIC);
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let text = history_text(&a);
+        assert!(
+            text.contains("\u{25a3} the diagram \u{b7} img.example.invalid (couldn't load)"),
+            "{text}"
+        );
+
+        // Turning remote images off: alt text with the host, nothing fetched.
+        a.core.settings.remote_images = false;
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let text = history_text(&a);
+        assert!(
+            text.contains("\u{25a3} the diagram \u{b7} img.example.invalid"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("couldn't load") && !text.contains("loading"),
+            "{text}"
+        );
+        assert!(!a.remote_images.enabled());
+    }
+
+    #[test]
+    fn clicking_a_remote_image_row_targets_its_url() {
+        let mut a = remote_image_app();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        a.remote_images.seed(PIC, &tiny_png(40)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut a)).unwrap();
+        let opened: Vec<_> = a.history_cache.image_at_line.iter().flatten().collect();
+        assert!(opened.len() > 3);
+        assert!(opened.iter().all(|target| target.as_str() == PIC));
     }
 }
 

@@ -77,7 +77,8 @@ impl App {
 
 /// Every key `set_setting` accepts — the same keys `apply_setting` (and the
 /// `blocked_domains` special case) can actually apply.
-const SETTING_KEYS: [&str; 22] = [
+const SETTING_KEYS: [&str; 23] = [
+    "remote_images",
     "show_stats",
     "show_reasoning",
     "hide_hints",
@@ -107,6 +108,7 @@ const SETTING_KEYS: [&str; 22] = [
 /// persisted as a no-op while reporting success.
 fn valid_setting_value(key: &str, value: &str) -> bool {
     match key {
+        "remote_images" => matches!(value, "on" | "off"),
         "show_stats" | "show_reasoning" | "hide_hints" => matches!(value, "0" | "1"),
         "temperature" => {
             value.is_empty()
