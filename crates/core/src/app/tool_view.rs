@@ -447,7 +447,11 @@ fn search_sources(result: &str) -> Vec<Source> {
         let mut snippet = String::new();
         while let Some(text) = lines.next_if(|line| !line.starts_with('[')) {
             let text = text.trim();
-            if text.is_empty() || text == title {
+            if text.is_empty()
+                || text == title
+                || text == "discussions:"
+                || (text.starts_with("(dropped ") && text.ends_with(" off-topic results)"))
+            {
                 continue;
             }
             if snippet.chars().count() > 240 {

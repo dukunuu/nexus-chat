@@ -4,6 +4,8 @@
 //! set of specialized implementations below, behind the `ToolExecutor` seam.
 
 mod effect;
+#[cfg(test)]
+mod search_tests;
 mod spec;
 
 pub use effect::{Effect, plan_waves};
@@ -241,6 +243,7 @@ pub struct ToolBox {
     /// `research_lookup(scope=session_sources)` over that session's gathered source bundle.
     research_session_id: Option<String>,
     client: reqwest::Client,
+    discussions: Arc<DiscussionSearch>,
     files: Option<FilesCtx>,
     apps: Option<AppsCtx>,
     /// Whether the current model supports image inputs. When false, tool
@@ -926,6 +929,7 @@ impl ToolBox {
             record_events: false,
             research_session_id: None,
             client: reqwest::Client::new(),
+            discussions: Arc::new(DiscussionSearch::default()),
             files,
             apps,
             cache_only: false,
@@ -978,6 +982,7 @@ impl ToolBox {
             record_events: self.record_events,
             research_session_id: self.research_session_id.clone(),
             client: self.client.clone(),
+            discussions: self.discussions.clone(),
             files: self.files.clone(),
             apps: self.apps.clone(),
             supports_images: self.supports_images,
@@ -1180,7 +1185,8 @@ impl ToolBox {
         } else {
             fetch_url_text(&self.client, url).await?
         };
-        if let Some(db_path) = &self.db_path
+        if text != REDDIT_RATE_LIMIT
+            && let Some(db_path) = &self.db_path
             && let Ok(conn) = crate::db::open_attached(db_path)
         {
             let _ = crate::db::cache_put(&conn, &url_norm, url, None, &text);
@@ -2609,13 +2615,22 @@ impl ToolBox {
                 let mut exclude = str_list("exclude_domains");
                 exclude.extend(self.blocked_domains.iter().cloned());
                 let status = "Searching the web…".to_string();
-                let result = match self
-                    .search(&query, recency.as_deref(), &include, &exclude)
-                    .await
-                {
-                    Ok(hits) if hits.is_empty() => "no results".to_string(),
-                    Ok(hits) => format_results(&hits),
-                    Err(e) => format!("search failed: {e}"),
+                let web = tokio::time::timeout(
+                    SEARCH_TIMEOUT,
+                    self.search(&query, recency.as_deref(), &include, &exclude),
+                );
+                let discussions = async {
+                    if is_opinion_query(&query) {
+                        discussion_search(&self.client, &query, &self.discussions).await
+                    } else {
+                        Vec::new()
+                    }
+                };
+                let (web, discussions) = tokio::join!(web, discussions);
+                let result = match web {
+                    Ok(Ok(hits)) => format_web_results(&query, hits, &discussions),
+                    Ok(Err(e)) => format!("search failed: {e}"),
+                    Err(_) => "search failed: timed out after 30 seconds".to_string(),
                 };
                 (result, status)
             }
@@ -2718,8 +2733,13 @@ impl ToolBox {
                 let result = if let Some(cached_text) = cached {
                     cached_text
                 } else {
-                    let text = discussion_search(&self.client, &query).await;
-                    if text != "no results"
+                    let hits = discussion_search(&self.client, &query, &self.discussions).await;
+                    let text = if hits.is_empty() {
+                        format!("no discussions found for \"{query}\" · try different words")
+                    } else {
+                        format_discussion_hits(&hits, &[])
+                    };
+                    if !hits.is_empty()
                         && let Some(db_path) = &self.db_path
                         && let Ok(conn) = crate::db::open_attached(db_path)
                     {
@@ -5723,12 +5743,19 @@ async fn langsearch_search(
 /// LM Studio/Open `WebUI`'s built-in `DuckDuckGo` tools do. Unofficial — `DuckDuckGo`
 /// can change this markup or rate-limit it at any time; `SearXNG` is the more
 /// durable option if this stops working for you.
+/// `DuckDuckGo`'s HTML endpoint; tests point it at a dead local port so the
+/// `auto` fallback never reaches the network from a test.
+#[cfg(not(test))]
+const DUCKDUCKGO_HTML: &str = "https://html.duckduckgo.com/html/";
+#[cfg(test)]
+const DUCKDUCKGO_HTML: &str = "http://127.0.0.1:1/html/";
+
 async fn duckduckgo_search(
     client: &reqwest::Client,
     query: &str,
 ) -> anyhow::Result<Vec<SearchHit>> {
     let html = client
-        .get("https://html.duckduckgo.com/html/")
+        .get(DUCKDUCKGO_HTML)
         .header("User-Agent", "Mozilla/5.0 (compatible; nexus-chat)")
         .query(&[("q", query)])
         .send()
@@ -5790,6 +5817,9 @@ fn extract_pdf_or_html(bytes: &[u8], content_type: &str) -> String {
 /// 30s timeout — a research searcher agent shouldn't be able to wedge on a
 /// pathological page.
 async fn fetch_url_text(client: &reqwest::Client, url: &str) -> anyhow::Result<String> {
+    if let Some(feed_url) = reddit_thread_feed_url(url) {
+        return fetch_reddit_thread(client, feed_url.as_str()).await;
+    }
     let resp = client
         .get(url)
         .header("User-Agent", "Mozilla/5.0 (compatible; nexus-chat)")
@@ -6285,8 +6315,56 @@ fn format_papers(papers: &[Paper]) -> String {
         .join("\n\n")
 }
 
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
+const REDDIT_USER_AGENT: &str = concat!(
+    "nexus-chat/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/dukunuu/nexus-chat)"
+);
+const REDDIT_RATE_LIMIT: &str = "Reddit is rate-limiting right now · try again in a minute";
+
+struct RedditToken {
+    access_token: String,
+    expires: Instant,
+}
+
+struct DiscussionSearch {
+    reddit_base: String,
+    oauth_base: String,
+    hn_url: String,
+    credentials: Option<(String, String)>,
+    token: tokio::sync::Mutex<Option<RedditToken>>,
+}
+
+impl Default for DiscussionSearch {
+    #[cfg(not(test))]
+    fn default() -> Self {
+        Self {
+            reddit_base: "https://www.reddit.com".into(),
+            oauth_base: "https://oauth.reddit.com".into(),
+            hn_url: "https://hn.algolia.com/api/v1/search".into(),
+            credentials: crate::config::load_reddit_credentials(),
+            token: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Tests stay hermetic: a dead local port instead of Reddit and Hacker
+    /// News, and never the developer's real Reddit credentials.
+    #[cfg(test)]
+    fn default() -> Self {
+        Self {
+            reddit_base: "http://127.0.0.1:1".into(),
+            oauth_base: "http://127.0.0.1:1".into(),
+            hn_url: "http://127.0.0.1:1/api/v1/search".into(),
+            credentials: None,
+            token: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
 /// One discussion-forum hit (Hacker News story or Reddit post), flattened
 /// to what the model needs to decide whether to `fetch_url` it.
+#[derive(Clone)]
 struct DiscussionHit {
     title: String,
     url: String,
@@ -6302,7 +6380,6 @@ struct HnSearchResponse {
 #[derive(Deserialize)]
 struct HnHit {
     title: Option<String>,
-    url: Option<String>,
     #[serde(rename = "objectID")]
     object_id: String,
     #[serde(default)]
@@ -6311,24 +6388,23 @@ struct HnHit {
     num_comments: i64,
 }
 
-async fn hn_search(client: &reqwest::Client, query: &str) -> anyhow::Result<Vec<DiscussionHit>> {
+async fn hn_search(
+    client: &reqwest::Client,
+    query: &str,
+    endpoint: &str,
+) -> anyhow::Result<Vec<DiscussionHit>> {
     let req = client
-        .get("https://hn.algolia.com/api/v1/search")
+        .get(endpoint)
         .query(&[("query", query), ("tags", "story")]);
     let resp = send_and_parse::<HnSearchResponse>(req).await?;
     Ok(resp
         .hits
         .into_iter()
         .take(8)
-        .map(|h| {
-            let url = h
-                .url
-                .unwrap_or_else(|| format!("https://news.ycombinator.com/item?id={}", h.object_id));
-            DiscussionHit {
-                title: h.title.unwrap_or_else(|| "(untitled)".to_string()),
-                url,
-                meta: format!("{} points, {} comments", h.points, h.num_comments),
-            }
+        .map(|h| DiscussionHit {
+            title: h.title.unwrap_or_else(|| "(untitled)".to_string()),
+            url: format!("https://news.ycombinator.com/item?id={}", h.object_id),
+            meta: format!("HN · {} points · {} comments", h.points, h.num_comments),
         })
         .collect())
 }
@@ -6356,27 +6432,391 @@ struct RedditPost {
     subreddit: String,
     #[serde(default)]
     score: i64,
+    #[serde(default)]
+    num_comments: i64,
+    #[serde(default)]
+    selftext: String,
+}
+
+#[derive(Deserialize)]
+struct RedditAccessToken {
+    access_token: String,
+    expires_in: u64,
+}
+
+async fn reddit_oauth_search(
+    client: &reqwest::Client,
+    query: &str,
+    search: &DiscussionSearch,
+    credentials: &(String, String),
+) -> anyhow::Result<Vec<DiscussionHit>> {
+    let mut cached = search.token.lock().await;
+    if cached
+        .as_ref()
+        .is_none_or(|token| token.expires <= Instant::now())
+    {
+        let token: RedditAccessToken = send_and_parse(
+            client
+                .post(format!("{}/api/v1/access_token", search.reddit_base))
+                .header("User-Agent", REDDIT_USER_AGENT)
+                .basic_auth(&credentials.0, Some(&credentials.1))
+                .form(&[("grant_type", "client_credentials")]),
+        )
+        .await?;
+        anyhow::ensure!(
+            !token.access_token.is_empty(),
+            "missing Reddit access token"
+        );
+        *cached = Some(RedditToken {
+            access_token: token.access_token,
+            expires: Instant::now() + Duration::from_secs(token.expires_in),
+        });
+    }
+    let token = cached
+        .as_ref()
+        .expect("token was acquired")
+        .access_token
+        .clone();
+    drop(cached);
+    let resp: RedditSearchResponse = send_and_parse(
+        client
+            .get(format!("{}/search", search.oauth_base))
+            .header("User-Agent", REDDIT_USER_AGENT)
+            .bearer_auth(token)
+            .query(&[("q", query), ("sort", "relevance"), ("limit", "10")]),
+    )
+    .await?;
+    Ok(resp
+        .data
+        .children
+        .into_iter()
+        .take(10)
+        .map(|c| DiscussionHit {
+            title: c.data.title,
+            url: format!("https://www.reddit.com{}", c.data.permalink),
+            meta: format!(
+                "r/{} · {} points · {} comments\n    {}",
+                c.data.subreddit,
+                c.data.score,
+                c.data.num_comments,
+                one_line(&c.data.selftext, 240)
+            ),
+        })
+        .collect())
 }
 
 async fn reddit_search(
     client: &reqwest::Client,
     query: &str,
+    search: &DiscussionSearch,
 ) -> anyhow::Result<Vec<DiscussionHit>> {
-    let req = client
-        .get("https://www.reddit.com/search.json")
-        .header("User-Agent", "Mozilla/5.0 (compatible; nexus-chat)")
-        .query(&[("q", query), ("sort", "relevance"), ("limit", "8")]);
-    let resp = send_and_parse::<RedditSearchResponse>(req).await?;
-    Ok(resp
-        .data
-        .children
+    if let Some(credentials) = &search.credentials {
+        if let Ok(hits) = reddit_oauth_search(client, query, search, credentials).await {
+            return Ok(hits);
+        }
+        *search.token.lock().await = None;
+    }
+    let xml = client
+        .get(format!("{}/search.rss", search.reddit_base))
+        .header("User-Agent", REDDIT_USER_AGENT)
+        .query(&[("q", query), ("sort", "relevance"), ("limit", "10")])
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    Ok(parse_reddit_atom(&xml)
         .into_iter()
-        .map(|c| DiscussionHit {
-            title: c.data.title,
-            url: format!("https://reddit.com{}", c.data.permalink),
-            meta: format!("r/{}, {} upvotes", c.data.subreddit, c.data.score),
+        .take(10)
+        .map(|entry| DiscussionHit {
+            title: entry.title,
+            url: entry.url,
+            meta: format!(
+                "{} · {} · {}\n    {}",
+                entry.subreddit,
+                entry.updated,
+                entry.author,
+                one_line(&entry.content, 240)
+            ),
         })
         .collect())
+}
+
+struct RedditEntry {
+    title: String,
+    url: String,
+    subreddit: String,
+    author: String,
+    updated: String,
+    content: String,
+    reply: bool,
+}
+
+/// The feed uses only a small Atom subset. Skip comments/CDATA while scanning
+/// tags, and respect quoted attributes so embedded markup cannot become entries.
+fn atom_elements<'a>(xml: &'a str, name: &str) -> Vec<(&'a str, &'a str)> {
+    let mut elements = Vec::new();
+    let mut pos = 0;
+    let mut open = None;
+    let mut depth = 0;
+    while let Some(start) = xml[pos..].find('<').map(|offset| pos + offset) {
+        let tail = &xml[start..];
+        let special = if tail.starts_with("<![CDATA[") {
+            Some("]]>")
+        } else if tail.starts_with("<!--") {
+            Some("-->")
+        } else {
+            None
+        };
+        if let Some(end) = special {
+            let Some(offset) = tail.find(end) else { break };
+            pos = start + offset + end.len();
+            continue;
+        }
+        let mut quote = None;
+        let end = tail.char_indices().skip(1).find_map(|(offset, c)| {
+            if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+            } else if matches!(c, '\'' | '"') {
+                quote = Some(c);
+            } else if c == '>' {
+                return Some(start + offset);
+            }
+            None
+        });
+        let Some(end) = end else { break };
+        let tag = xml[start + 1..end].trim();
+        pos = end + 1;
+        if tag.strip_prefix('/').map(str::trim) == Some(name) && depth > 0 {
+            depth -= 1;
+            if depth == 0 {
+                let (header, body) = open.take().expect("matching opening tag");
+                elements.push((header, &xml[body..start]));
+            }
+        } else if tag.split([' ', '\t', '\r', '\n', '/']).next() == Some(name) {
+            if tag.ends_with('/') {
+                if depth == 0 {
+                    elements.push((tag, ""));
+                }
+            } else {
+                if depth == 0 {
+                    open = Some((tag, pos));
+                }
+                depth += 1;
+            }
+        }
+    }
+    elements
+}
+
+fn atom_attr(tag: &str, name: &str) -> Option<String> {
+    let (_, mut rest) = tag.split_once(char::is_whitespace)?;
+    loop {
+        rest = rest.trim_start();
+        let end = rest.find(|c: char| c.is_whitespace() || c == '=')?;
+        let key = &rest[..end];
+        rest = rest[end..].trim_start().strip_prefix('=')?.trim_start();
+        let quote = rest.chars().next()?;
+        if !matches!(quote, '\'' | '"') {
+            return None;
+        }
+        rest = &rest[1..];
+        let end = rest.find(quote)?;
+        if key == name {
+            return Some(atom_unescape(&rest[..end]));
+        }
+        rest = &rest[end + 1..];
+    }
+}
+
+fn atom_unescape(mut text: &str) -> String {
+    let mut out = String::new();
+    while let Some(start) = text.find('&') {
+        out.push_str(&text[..start]);
+        text = &text[start..];
+        let Some(end) = text.find(';') else { break };
+        let entity = &text[1..end];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" | "#39" => Some('\''),
+            "nbsp" => Some(' '),
+            _ => entity
+                .strip_prefix("#x")
+                .or_else(|| entity.strip_prefix("#X"))
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .or_else(|| entity.strip_prefix('#')?.parse().ok())
+                .and_then(char::from_u32),
+        };
+        if let Some(c) = decoded {
+            out.push(c);
+        } else {
+            out.push_str(&text[..=end]);
+        }
+        text = &text[end + 1..];
+    }
+    out.push_str(text);
+    out
+}
+
+fn atom_text(mut text: &str) -> String {
+    let mut out = String::new();
+    while let Some(start) = text.find("<![CDATA[") {
+        out.push_str(&atom_unescape(&text[..start]));
+        text = &text[start + 9..];
+        let Some(end) = text.find("]]>") else {
+            return out;
+        };
+        out.push_str(&text[..end]);
+        text = &text[end + 3..];
+    }
+    out.push_str(&atom_unescape(text));
+    out
+}
+
+fn parse_reddit_atom(xml: &str) -> Vec<RedditEntry> {
+    atom_elements(xml, "entry")
+        .into_iter()
+        .filter_map(|(_, body)| {
+            let field = |name| {
+                atom_elements(body, name)
+                    .first()
+                    .map(|(_, text)| atom_text(text))
+            };
+            let url = atom_elements(body, "link")
+                .into_iter()
+                .find_map(|(tag, _)| {
+                    let rel = atom_attr(tag, "rel");
+                    (rel.is_none() || rel.as_deref() == Some("alternate"))
+                        .then(|| atom_attr(tag, "href"))
+                        .flatten()
+                        .filter(|url| is_reddit_url(url))
+                })?;
+            let author = field("author")
+                .and_then(|author| {
+                    atom_elements(&author, "name")
+                        .first()
+                        .map(|(_, name)| atom_text(name))
+                })
+                .unwrap_or_else(|| "[deleted]".into());
+            let subreddit = atom_elements(body, "category")
+                .into_iter()
+                .find_map(|(tag, _)| {
+                    atom_attr(tag, "label")
+                        .filter(|label| label.starts_with("r/"))
+                        .or_else(|| atom_attr(tag, "term").map(|sub| format!("r/{sub}")))
+                })
+                .unwrap_or_else(|| "r/unknown".into());
+            let content = field("content").unwrap_or_default();
+            let reply = atom_elements(&content, "a").into_iter().any(|(tag, text)| {
+                text.contains("[parent]")
+                    && atom_attr(tag, "href").is_some_and(|url| reddit_comment_id(&url).is_some())
+            });
+            Some(RedditEntry {
+                title: one_line(&field("title").unwrap_or_else(|| "(untitled)".into()), 300),
+                url,
+                subreddit,
+                author: format!(
+                    "u/{}",
+                    author
+                        .trim()
+                        .trim_start_matches("/u/")
+                        .trim_start_matches("u/")
+                ),
+                updated: field("updated")
+                    .unwrap_or_default()
+                    .chars()
+                    .take(10)
+                    .collect(),
+                content: atom_unescape(&strip_html_to_text(&content)),
+                reply,
+            })
+        })
+        .collect()
+}
+
+fn one_line(text: &str, limit: usize) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(limit)
+        .collect()
+}
+
+fn reddit_comment_id(url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url).ok()?;
+    let segments: Vec<_> = url
+        .path_segments()?
+        .filter(|part| !part.is_empty())
+        .collect();
+    let comments = segments.iter().position(|part| *part == "comments")?;
+    segments.get(comments + 3).map(|id| (*id).to_string())
+}
+
+fn reddit_thread_feed_url(url: &str) -> Option<reqwest::Url> {
+    if !is_reddit_url(url) {
+        return None;
+    }
+    let mut url = reqwest::Url::parse(url).ok()?;
+    let segments: Vec<_> = url
+        .path_segments()?
+        .filter(|part| !part.is_empty())
+        .collect();
+    let comments = segments.iter().position(|part| *part == "comments")?;
+    segments.get(comments + 1)?;
+    let path = format!(
+        "/{}/.rss",
+        segments[..segments.len().min(comments + 3)].join("/")
+    );
+    url.set_path(&path);
+    url.set_query(Some("limit=20"));
+    url.set_fragment(None);
+    Some(url)
+}
+
+async fn fetch_reddit_thread(client: &reqwest::Client, feed_url: &str) -> anyhow::Result<String> {
+    for attempt in 0..2 {
+        let response = client
+            .get(feed_url)
+            .header("User-Agent", REDDIT_USER_AGENT)
+            .timeout(SEARCH_TIMEOUT)
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            if attempt == 0 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            return Ok(REDDIT_RATE_LIMIT.into());
+        }
+        let xml = response.error_for_status()?.text().await?;
+        let entries = parse_reddit_atom(&xml);
+        let Some(post) = entries.first() else {
+            return Ok("no readable Reddit thread found".into());
+        };
+        let mut out = format!(
+            "{} · {} · {}\n\n{}",
+            post.title,
+            post.subreddit,
+            post.author,
+            one_line(&post.content, 3_000)
+        );
+        for comment in entries.iter().skip(1).filter(|entry| !entry.reply).take(15) {
+            let _ = write!(
+                out,
+                "\n\n{}: {}",
+                comment.author,
+                one_line(&comment.content, 500)
+            );
+        }
+        return Ok(cap_tool_result(out));
+    }
+    unreachable!("the second request returns a result")
 }
 
 fn is_reddit_url(url: &str) -> bool {
@@ -6386,48 +6826,47 @@ fn is_reddit_url(url: &str) -> bool {
         .is_some_and(|host| host == "reddit.com" || host.ends_with(".reddit.com"))
 }
 
-/// Numbered discussion results, HN first then Reddit — same `[n]` citation
-/// convention as `format_results`/`format_papers`.
+fn interleave_discussions<'a>(
+    hn: &'a [DiscussionHit],
+    reddit: &'a [DiscussionHit],
+) -> Vec<&'a DiscussionHit> {
+    let mut seen = std::collections::HashSet::new();
+    (0..hn.len().max(reddit.len()))
+        .flat_map(|rank| [hn.get(rank), reddit.get(rank)])
+        .flatten()
+        .filter(|hit| seen.insert(normalize_url(&hit.url)))
+        .collect()
+}
+
+/// Interleaved, deduplicated discussions using the source card's URL-first format.
 fn format_discussion_hits(hn: &[DiscussionHit], reddit: &[DiscussionHit]) -> String {
-    hn.iter()
-        .chain(reddit.iter())
+    format_discussion_list(&interleave_discussions(hn, reddit), 1)
+}
+
+fn format_discussion_list(hits: &[&DiscussionHit], start: usize) -> String {
+    hits.iter()
         .enumerate()
-        .map(|(i, h)| format!("[{}] {}\n    {}\n    {}", i + 1, h.title, h.meta, h.url))
+        .map(|(i, h)| format!("[{}] {}\n    {}\n    {}", start + i, h.title, h.url, h.meta))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-/// HN (Algolia) + Reddit search run concurrently; either backend failing
-/// independently still returns the other's hits. If both APIs are blocked,
-/// use Brave's HTML index for Reddit links rather than silently reporting no
-/// results.
-async fn discussion_search(client: &reqwest::Client, query: &str) -> String {
-    let (hn, reddit) = tokio::join!(hn_search(client, query), reddit_search(client, query));
-    let hn = hn.unwrap_or_default();
-    let reddit = reddit.unwrap_or_default();
-    if !hn.is_empty() || !reddit.is_empty() {
-        return format_discussion_hits(&hn, &reddit);
-    }
-
-    let fallback_query = format!("site:reddit.com {query}");
-    let fallback = brave_search(client, &fallback_query)
-        .await
-        .unwrap_or_default();
-    let reddit: Vec<DiscussionHit> = fallback
+/// Each backend has the same deadline as web search; one failing never hides the other.
+async fn discussion_search(
+    client: &reqwest::Client,
+    query: &str,
+    search: &DiscussionSearch,
+) -> Vec<DiscussionHit> {
+    let (hn, reddit) = tokio::join!(
+        tokio::time::timeout(SEARCH_TIMEOUT, hn_search(client, query, &search.hn_url)),
+        tokio::time::timeout(SEARCH_TIMEOUT, reddit_search(client, query, search)),
+    );
+    let hn = hn.ok().and_then(Result::ok).unwrap_or_default();
+    let reddit = reddit.ok().and_then(Result::ok).unwrap_or_default();
+    interleave_discussions(&hn, &reddit)
         .into_iter()
-        .filter(|hit| is_reddit_url(&hit.url))
-        .take(8)
-        .map(|hit| DiscussionHit {
-            title: hit.title,
-            url: hit.url,
-            meta: "Reddit web result (API unavailable)".to_string(),
-        })
-        .collect();
-    if reddit.is_empty() {
-        "no results".to_string()
-    } else {
-        format_discussion_hits(&[], &reddit)
-    }
+        .cloned()
+        .collect()
 }
 
 /// Normalize a source URL for dedup: lowercase the host only (path/query
@@ -6536,6 +6975,160 @@ pub fn rewrite_query_with_domains(query: &str, include: &[String], exclude: &[St
         let _ = write!(q, " -site:{d}");
     }
     q
+}
+
+fn is_opinion_query(query: &str) -> bool {
+    let lower = query.to_lowercase();
+    let words: Vec<_> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+    words.iter().any(|word| {
+        matches!(
+            *word,
+            "best"
+                | "vs"
+                | "versus"
+                | "worth"
+                | "recommend"
+                | "recommendation"
+                | "review"
+                | "reviews"
+                | "experience"
+                | "opinion"
+                | "alternative"
+                | "alternatives"
+                | "reddit"
+                | "hn"
+                | "which"
+        )
+    }) || words
+        .windows(2)
+        .any(|pair| pair == ["should", "i"] || pair == ["is", "it"])
+}
+
+fn relevance_tokens(text: &str) -> Vec<String> {
+    let folded: String = text
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => 'a',
+            'ç' | 'ć' | 'č' => 'c',
+            'ď' | 'đ' => 'd',
+            'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ė' | 'ę' | 'ě' => 'e',
+            'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ı' => 'i',
+            'ł' => 'l',
+            'ñ' | 'ń' | 'ň' => 'n',
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' => 'o',
+            'ř' => 'r',
+            'ś' | 'š' | 'ş' => 's',
+            'ť' => 't',
+            'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ů' => 'u',
+            'ý' | 'ÿ' => 'y',
+            'ź' | 'ż' | 'ž' => 'z',
+            _ => c,
+        })
+        .collect();
+    folded
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| {
+            token.chars().count() >= 3
+                && !matches!(
+                    *token,
+                    "the"
+                        | "and"
+                        | "for"
+                        | "with"
+                        | "from"
+                        | "that"
+                        | "this"
+                        | "what"
+                        | "how"
+                        | "are"
+                        | "was"
+                        | "were"
+                        | "has"
+                        | "have"
+                        | "does"
+                        | "can"
+                        | "about"
+                        | "into"
+                        | "not"
+                        | "but"
+                        | "you"
+                        | "your"
+                )
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn filter_web_hits(query: &str, hits: &mut Vec<SearchHit>) -> usize {
+    let tokens = relevance_tokens(query);
+    if tokens.is_empty() {
+        return 0;
+    }
+    let mut ranked: Vec<_> = hits
+        .iter()
+        .enumerate()
+        .map(|(index, hit)| {
+            let text =
+                relevance_tokens(&format!("{} {} {}", hit.title, hit.url, hit.snippet)).join(" ");
+            (
+                index,
+                tokens
+                    .iter()
+                    .filter(|token| text.contains(token.as_str()))
+                    .count(),
+            )
+        })
+        .collect();
+    ranked.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
+    let mut keep = vec![false; hits.len()];
+    for (rank, (index, score)) in ranked.into_iter().enumerate() {
+        keep[index] = score > 0 || rank < 3;
+    }
+    let before = hits.len();
+    let mut index = 0;
+    hits.retain(|_| {
+        let retain = keep[index];
+        index += 1;
+        retain
+    });
+    before - hits.len()
+}
+
+fn format_web_results(
+    query: &str,
+    mut hits: Vec<SearchHit>,
+    discussions: &[DiscussionHit],
+) -> String {
+    let dropped = filter_web_hits(query, &mut hits);
+    let mut out = if hits.is_empty() {
+        "no results".into()
+    } else {
+        format_results(&hits)
+    };
+    if dropped > 0 {
+        let _ = write!(out, "\n\n(dropped {dropped} off-topic results)");
+    }
+    let discussions: Vec<_> = discussions
+        .iter()
+        .filter(|hit| {
+            !hits
+                .iter()
+                .any(|web| normalize_url(&web.url) == normalize_url(&hit.url))
+        })
+        .take(3)
+        .collect();
+    if !discussions.is_empty() {
+        let _ = write!(
+            out,
+            "\n\ndiscussions:\n{}",
+            format_discussion_list(&discussions, hits.len() + 1)
+        );
+    }
+    out
 }
 
 /// Perplexity-style numbered results the model cites inline as `[n]`.

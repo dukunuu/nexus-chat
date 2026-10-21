@@ -17,6 +17,8 @@ pub const SECRET_ENV_VARS: &[&str] = &[
     OPENAI_ENV_KEY,
     OPENCODE_ENV_KEY,
     "CF_API_TOKEN",
+    "REDDIT_CLIENT_ID",
+    "REDDIT_CLIENT_SECRET",
 ];
 
 /// Bundled base instructions, always used directly from the binary.
@@ -346,6 +348,35 @@ pub async fn load_all_providers() -> Result<SavedCreds> {
         saved.codex = Some(creds);
     }
     Ok(saved)
+}
+
+pub(crate) fn load_reddit_credentials() -> Option<(String, String)> {
+    let text = config_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    reddit_credentials(&text, |key| std::env::var(key).ok())
+}
+
+fn reddit_credentials(
+    text: &str,
+    env: impl Fn(&str) -> Option<String>,
+) -> Option<(String, String)> {
+    let config = toml::from_str::<toml::Value>(text).ok();
+    let read = |key: &str, env_key: &str| {
+        config
+            .as_ref()
+            .and_then(|config| config.get("search")?.get(key)?.as_str())
+            .map(str::to_string)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| env(env_key))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    Some((
+        read("reddit_client_id", "REDDIT_CLIENT_ID")?,
+        read("reddit_client_secret", "REDDIT_CLIENT_SECRET")?,
+    ))
 }
 
 fn load_agent_config() -> Result<AgentConfig> {
@@ -840,6 +871,46 @@ fn write_config(
         }
     }
     write_secret_file(&path, &body)
+}
+
+#[cfg(test)]
+mod reddit_tests {
+    use super::reddit_credentials;
+
+    #[test]
+    fn credentials_use_config_then_env_and_require_both_fields() {
+        let env = |key: &str| match key {
+            "REDDIT_CLIENT_ID" => Some("env-id".into()),
+            "REDDIT_CLIENT_SECRET" => Some("env-secret".into()),
+            _ => None,
+        };
+        assert_eq!(
+            reddit_credentials(
+                "[search]\nreddit_client_id='config-id'\nreddit_client_secret='config-secret'",
+                env
+            ),
+            Some(("config-id".into(), "config-secret".into()))
+        );
+        assert_eq!(
+            reddit_credentials("", env),
+            Some(("env-id".into(), "env-secret".into()))
+        );
+        assert_eq!(
+            reddit_credentials("[search]\nreddit_client_id='config-id'", env),
+            Some(("config-id".into(), "env-secret".into()))
+        );
+        assert_eq!(
+            reddit_credentials("[search]\nreddit_client_id='config-id'", |_| None),
+            None
+        );
+        assert_eq!(
+            reddit_credentials(
+                "[search]\nreddit_client_id=' '\nreddit_client_secret=' '",
+                |_| None
+            ),
+            None
+        );
+    }
 }
 
 #[cfg(test)]

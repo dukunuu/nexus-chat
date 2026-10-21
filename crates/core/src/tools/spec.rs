@@ -598,7 +598,7 @@ pub(super) static SCRIPTS: ToolSpec = ToolSpec {
 
 pub(super) static SEARCH: ToolSpec = ToolSpec {
     name: "search",
-    purpose: "Search the web, scholarly literature, or HN/Reddit discussions.",
+    purpose: "Search general web sources, recent reporting (web with recency), papers, or Reddit and Hacker News threads. Use discussion for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments.",
     selector: Some("mode"),
     params: &[
         Param {
@@ -630,7 +630,7 @@ pub(super) static SEARCH: ToolSpec = ToolSpec {
     actions: &[
         ActionSpec {
             name: "web",
-            summary: "Search using the configured web backend",
+            summary: "Search general sources; use recency for recent news reporting",
             required: &["query"],
             optional: &["recency", "include_domains", "exclude_domains"],
             read_only: true,
@@ -638,7 +638,7 @@ pub(super) static SEARCH: ToolSpec = ToolSpec {
         },
         ActionSpec {
             name: "academic",
-            summary: "Search Semantic Scholar, preserving scholarly metadata",
+            summary: "Search academic papers with Semantic Scholar, preserving scholarly metadata",
             required: &["query"],
             optional: &["limit"],
             read_only: true,
@@ -646,7 +646,7 @@ pub(super) static SEARCH: ToolSpec = ToolSpec {
         },
         ActionSpec {
             name: "discussion",
-            summary: "Search HN and Reddit, preserving engagement metadata",
+            summary: "Search Reddit and Hacker News threads for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments",
             required: &["query"],
             optional: &[],
             read_only: true,
