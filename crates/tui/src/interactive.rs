@@ -9,13 +9,16 @@ use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use nexus_core::app::Popup;
-use nexus_core::interactive::{Button, Document, Node, Session, Tone};
+use nexus_core::interactive::{
+    Accent, Button, CalloutTone, Card, Column, Document, Frame as DocumentFrame, Mark, Node,
+    Session, Stat, StepState, Tone,
+};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph, Sparkline, Widget, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Sparkline, Widget, Wrap};
 use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
 
@@ -60,6 +63,12 @@ struct Entry {
     scroll: u16,
 }
 impl Entry {
+    /// Layouts are display-only: never focusable, pinned or counted as panels.
+    fn is_interactive(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_ok_and(|s| !s.document().is_static())
+    }
     fn controls(&self) -> Vec<Control> {
         self.session.as_ref().map_or_else(
             |_| Vec::new(),
@@ -180,18 +189,14 @@ impl Entry {
             .as_ref()
             .map_or_else(|_| Vec::new(), |session| node_regions(session, width));
         let height = self.session.as_ref().map_or(6, |_| card_height(&regions));
-        let mut buffer = card_buffer(
-            width,
-            height,
-            self.session
-                .as_ref()
-                .map_or("UI unavailable", |s| s.document().title()),
-            theme,
-            if focused {
-                "Tab next · Enter press · Esc done"
-            } else {
-                "F2 keyboard"
-            },
+        let hint = if focused {
+            "Tab next · Enter press · Esc done"
+        } else {
+            "F2 keyboard"
+        };
+        let mut buffer = self.session.as_ref().map_or_else(
+            |_| card_buffer(width, height, "UI unavailable", theme, hint),
+            |session| document_buffer(width, height, session.document(), theme, hint),
         );
         let area = buffer.area;
         let hits = Vec::new();
@@ -220,7 +225,7 @@ impl Entry {
             can_send,
             &mut buffer,
         );
-        if width >= 8 {
+        if width >= 8 && !session.document().is_static() {
             let expand = Rect::new(width - 4, 0, 3, 1);
             if focused && self.focus == session_controls(session) {
                 Paragraph::new(" ⤢ ")
@@ -505,7 +510,10 @@ pub(crate) fn node_regions(session: &Session, width: u16) -> Vec<Rect> {
                         .unwrap_or(1)
                 }
                 Node::Input { .. } => 1,
-                _ => node.rows(),
+                _ => layout_lines(node, session, width, &Theme::default()).map_or_else(
+                    || node.rows(),
+                    |lines| u16::try_from(lines.len()).unwrap_or(u16::MAX).max(1),
+                ),
             };
             let region = Rect::new(
                 2,
@@ -557,6 +565,541 @@ pub(crate) fn card_buffer(
     )
     .render(area, &mut buffer);
     buffer
+}
+fn accent_color(document: &Document, theme: &Theme) -> Color {
+    match document.accent() {
+        Accent::Accent => theme.accent,
+        Accent::Accent2 => theme.accent2,
+        Accent::Success => theme.success,
+        Accent::Warning => theme.warning,
+        Accent::Error => theme.error,
+        Accent::Muted => theme.fg_dim,
+    }
+}
+fn tone_color(tone: Option<Tone>, accent: Color, theme: &Theme) -> Color {
+    match tone {
+        None => accent,
+        Some(Tone::Normal) => theme.fg,
+        Some(Tone::Muted) => theme.fg_dim,
+        Some(Tone::Accent) => theme.accent,
+        Some(Tone::Success) => theme.success,
+        Some(Tone::Warning) => theme.warning,
+        Some(Tone::Error) => theme.error,
+    }
+}
+fn document_buffer(width: u16, height: u16, doc: &Document, theme: &Theme, hint: &str) -> Buffer {
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    buffer.set_style(area, theme.background_style());
+    let plain = matches!(doc.frame(), DocumentFrame::Plain);
+    let border_type = match doc.frame() {
+        DocumentFrame::Rounded | DocumentFrame::Plain => BorderType::Rounded,
+        DocumentFrame::Double => BorderType::Double,
+        DocumentFrame::Heavy => BorderType::Thick,
+        DocumentFrame::Dashed => BorderType::LightDoubleDashed,
+    };
+    let rule = match doc.frame() {
+        DocumentFrame::Double => "═",
+        DocumentFrame::Heavy => "━",
+        DocumentFrame::Dashed => "╌",
+        _ => "─",
+    };
+    let mut block = Block::default()
+        .borders(if plain { Borders::TOP } else { Borders::ALL })
+        .border_type(border_type)
+        .border_style(Style::default().fg(theme.border_dim))
+        .title_top(Line::from(Span::styled(
+            format!(
+                "{rule} {} ",
+                clipped(&safe(doc.title()), width.saturating_sub(12))
+            ),
+            Style::default()
+                .fg(accent_color(doc, theme))
+                .add_modifier(Modifier::BOLD),
+        )));
+    if !doc.is_static() {
+        block = block
+            .title_top(
+                Line::from(Span::styled(" ⤢ ", Style::default().fg(theme.fg_dim))).right_aligned(),
+            )
+            .title_bottom(
+                Line::from(Span::styled(
+                    format!(" {} ", clipped(hint, width.saturating_sub(6))),
+                    Style::default().fg(theme.fg_dim),
+                ))
+                .right_aligned(),
+            );
+    }
+    block.render(area, &mut buffer);
+    buffer
+}
+fn wrapped_text(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
+    safe(text)
+        .split('\n')
+        .flat_map(|line| {
+            crate::ui::markdown::wrap_styled_line(&Line::from(line), usize::from(width.max(1)))
+        })
+        .map(|line| line.style(style))
+        .collect()
+}
+fn styled_text(session: &Session, text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
+    wrapped_text(&session.text(text).unwrap_or_default(), width, style)
+}
+fn join_columns(columns: &[Vec<Line<'static>>], widths: &[u16], gap: u16) -> Vec<Line<'static>> {
+    let height = columns.iter().map(Vec::len).max().unwrap_or(0);
+    (0..height)
+        .map(|row| {
+            let mut spans = Vec::new();
+            for (index, column) in columns.iter().enumerate() {
+                let line = column.get(row).cloned().unwrap_or_default();
+                let used = line.width();
+                let style = line.style;
+                spans.extend(line.spans.into_iter().map(|span| span.patch_style(style)));
+                if index + 1 < columns.len() {
+                    let cell = usize::from(widths.get(index).copied().unwrap_or(0) + gap);
+                    spans.push(Span::raw(" ".repeat(cell.saturating_sub(used))));
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+fn prefixed(lines: Vec<Line<'static>>, prefix: &str, style: Style) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|line| {
+            let line_style = line.style;
+            let mut spans = vec![Span::styled(prefix.to_string(), style)];
+            spans.extend(
+                line.spans
+                    .into_iter()
+                    .map(|span| span.patch_style(line_style)),
+            );
+            Line::from(spans)
+        })
+        .collect()
+}
+fn columns_lines(
+    items: &[Column],
+    session: &Session,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let stacked = width < 56;
+    let count = u16::try_from(items.len()).unwrap_or(1);
+    let cell = if stacked {
+        width
+    } else {
+        width.saturating_sub(3 * (count - 1)) / count
+    };
+    let accent = accent_color(session.document(), theme);
+    let columns: Vec<_> = items
+        .iter()
+        .map(|column| {
+            let mut lines = styled_text(
+                session,
+                &column.title,
+                cell,
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            );
+            for item in &column.items {
+                let (mark, color) = match item.mark {
+                    Mark::Ok => ("✓ ", theme.success),
+                    Mark::No => ("✗ ", theme.error),
+                    Mark::Dot => ("● ", accent),
+                    Mark::None => ("", theme.fg),
+                };
+                let body = styled_text(
+                    session,
+                    &item.text,
+                    cell.saturating_sub(u16::try_from(mark.width()).unwrap_or(0)),
+                    Style::default().fg(theme.fg),
+                );
+                for (index, line) in body.into_iter().enumerate() {
+                    let prefix = if index == 0 {
+                        mark.to_string()
+                    } else {
+                        " ".repeat(mark.width())
+                    };
+                    lines.extend(prefixed(vec![line], &prefix, Style::default().fg(color)));
+                }
+            }
+            lines
+        })
+        .collect();
+    if stacked {
+        let mut lines = Vec::new();
+        for column in columns {
+            if !lines.is_empty() {
+                lines.push(Line::default());
+            }
+            lines.extend(column);
+        }
+        lines
+    } else {
+        join_columns(&columns, &vec![cell; columns.len()], 3)
+    }
+}
+fn hero_lines(
+    title: &str,
+    subtitle: Option<&str>,
+    badge: Option<&str>,
+    session: &Session,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let accent = accent_color(session.document(), theme);
+    let badge = badge.map(|s| format!("[ {} ]", display(session, s)));
+    let badge_width = badge
+        .as_ref()
+        .map_or(0, |s| u16::try_from(s.width()).unwrap_or(u16::MAX));
+    let title_width = width
+        .saturating_sub(badge_width.saturating_add(u16::from(badge.is_some())))
+        .max(1);
+    let mut lines = styled_text(
+        session,
+        title,
+        title_width,
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    );
+    if let Some(badge) = badge {
+        let first = &mut lines[0];
+        let padding = usize::from(width).saturating_sub(first.width() + badge.width());
+        first.spans.push(Span::raw(" ".repeat(padding)));
+        first.spans.push(Span::styled(
+            clipped(&badge, width),
+            Style::default().fg(accent),
+        ));
+    }
+    if let Some(subtitle) = subtitle {
+        lines.extend(styled_text(
+            session,
+            subtitle,
+            width,
+            Style::default().fg(theme.fg_dim),
+        ));
+    }
+    lines
+}
+/// One bordered card, padded to at least `rows` content rows so cards
+/// sharing a grid row line up.
+fn card_lines(
+    item: &Card,
+    session: &Session,
+    width: u16,
+    theme: &Theme,
+    rows: usize,
+) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(4);
+    let accent = accent_color(session.document(), theme);
+    let color = tone_color(item.tone, accent, theme);
+    let mut content = styled_text(
+        session,
+        &item.title,
+        inner,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    );
+    if let Some(badge) = &item.badge {
+        let badge = format!("[ {} ]", display(session, badge));
+        let badge_width = u16::try_from(badge.width()).unwrap_or(u16::MAX);
+        // On the title row when both fit, so a badge costs no height.
+        let single_title = content.len() == 1;
+        match content.first_mut() {
+            Some(title)
+                if single_title
+                    && title.width() + usize::from(badge_width) < usize::from(inner) =>
+            {
+                let gap = usize::from(inner) - title.width() - usize::from(badge_width);
+                title.spans.push(Span::raw(" ".repeat(gap)));
+                title
+                    .spans
+                    .push(Span::styled(badge, Style::default().fg(color)));
+            }
+            _ => content.extend(wrapped_text(&badge, inner, Style::default().fg(color))),
+        }
+    }
+    content.extend(styled_text(
+        session,
+        &item.text,
+        inner,
+        Style::default().fg(theme.fg),
+    ));
+    content.resize(content.len().max(rows), Line::default());
+    let border = Style::default().fg(theme.border_dim);
+    let mut lines = vec![Line::from(Span::styled(
+        format!("┌{}┐", "─".repeat(usize::from(width.saturating_sub(2)))),
+        border,
+    ))];
+    for line in content {
+        let padding = usize::from(inner).saturating_sub(line.width()) + 1;
+        let mut row = prefixed(vec![line], "│ ", border).remove(0);
+        row.spans.push(Span::raw(" ".repeat(padding)));
+        row.spans.push(Span::styled("│", border));
+        lines.push(row);
+    }
+    lines.push(Line::from(Span::styled(
+        format!("└{}┘", "─".repeat(usize::from(width.saturating_sub(2)))),
+        border,
+    )));
+    lines
+}
+fn cards_lines(items: &[Card], session: &Session, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    let fit = usize::from((width.saturating_add(2) / 26).clamp(1, 3)).min(items.len());
+    // Balance the rows: four cards form 2x2 rather than 3 + 1.
+    let count = items.len().div_ceil(items.len().div_ceil(fit));
+    let columns = u16::try_from(count).unwrap_or(1);
+    let cell = width.saturating_sub(2 * (columns - 1)) / columns;
+    let mut lines = Vec::new();
+    for chunk in items.chunks(count) {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        // Cards in a row share the tallest card's height; empty cells keep a
+        // short last grid row left-aligned at the same width.
+        let rows = chunk
+            .iter()
+            .map(|item| {
+                card_lines(item, session, cell, theme, 0)
+                    .len()
+                    .saturating_sub(2)
+            })
+            .max()
+            .unwrap_or(0);
+        let mut cards: Vec<_> = chunk
+            .iter()
+            .map(|item| card_lines(item, session, cell, theme, rows))
+            .collect();
+        cards.resize(count, Vec::new());
+        lines.extend(join_columns(&cards, &vec![cell; count], 2));
+    }
+    lines
+}
+fn stat_lines(item: &Stat, session: &Session, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    let color = tone_color(item.tone, accent_color(session.document(), theme), theme);
+    let mut lines = styled_text(
+        session,
+        &item.value,
+        width,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    );
+    lines.extend(styled_text(
+        session,
+        &item.label,
+        width,
+        Style::default().fg(theme.fg_dim),
+    ));
+    if let Some(delta) = &item.delta {
+        let delta = display(session, delta);
+        let negative = delta.trim_start().starts_with('-');
+        let arrow = if negative { "▼" } else { "▲" };
+        lines.extend(wrapped_text(
+            &format!("{arrow} {}", delta.trim_start_matches(['+', '-'])),
+            width,
+            Style::default().fg(if negative { theme.error } else { theme.success }),
+        ));
+    }
+    lines
+}
+fn stats_lines(items: &[Stat], session: &Session, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    const GAP: u16 = 4;
+    // Size each metric to its content when they all fit on one row; otherwise
+    // fall back to an equal-width grid that wraps onto further rows.
+    let natural: Vec<_> = items
+        .iter()
+        .map(|item| stat_lines(item, session, width, theme))
+        .collect();
+    let widths: Vec<_> = natural
+        .iter()
+        .map(|lines| {
+            u16::try_from(lines.iter().map(Line::width).max().unwrap_or(0)).unwrap_or(u16::MAX)
+        })
+        .collect();
+    let total = widths
+        .iter()
+        .fold(0u16, |sum, w| sum.saturating_add(*w))
+        .saturating_add(GAP * u16::try_from(items.len().saturating_sub(1)).unwrap_or(0));
+    if total <= width {
+        return join_columns(&natural, &widths, GAP);
+    }
+    let count = usize::from((width.saturating_add(3) / 15).max(1)).min(items.len());
+    let columns = u16::try_from(count).unwrap_or(1);
+    let cell = width.saturating_sub(3 * (columns - 1)) / columns;
+    let mut lines = Vec::new();
+    for chunk in items.chunks(count) {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        let mut stats: Vec<_> = chunk
+            .iter()
+            .map(|item| stat_lines(item, session, cell, theme))
+            .collect();
+        stats.resize(count, Vec::new());
+        lines.extend(join_columns(&stats, &vec![cell; count], 3));
+    }
+    lines
+}
+fn steps_lines(
+    items: &[nexus_core::interactive::DisplayStep],
+    session: &Session,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let accent = accent_color(session.document(), theme);
+    let marker = |state| match state {
+        StepState::Done => ("●", theme.success),
+        StepState::Current => ("◉", accent),
+        StepState::Todo => ("○", theme.fg_dim),
+    };
+    let mut horizontal = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            horizontal.push(Span::raw("   "));
+        }
+        let (mark, color) = marker(item.state);
+        horizontal.push(Span::styled(format!("{mark} "), Style::default().fg(color)));
+        horizontal.push(Span::styled(
+            display(session, &item.title),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ));
+        if let Some(text) = &item.text {
+            horizontal.push(Span::styled(
+                format!(" — {}", display(session, text)),
+                Style::default().fg(theme.fg_dim),
+            ));
+        }
+    }
+    let horizontal = Line::from(horizontal);
+    if horizontal.width() <= usize::from(width) {
+        return vec![horizontal];
+    }
+    let mut lines = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let (mark, color) = marker(item.state);
+        let titles = styled_text(
+            session,
+            &item.title,
+            width.saturating_sub(2),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        );
+        for (row, title) in titles.into_iter().enumerate() {
+            lines.extend(prefixed(
+                vec![title],
+                &format!("{} ", if row == 0 { mark } else { "│" }),
+                Style::default().fg(color),
+            ));
+        }
+        if let Some(text) = &item.text {
+            let body = styled_text(
+                session,
+                text,
+                width.saturating_sub(2),
+                Style::default().fg(theme.fg_dim),
+            );
+            lines.extend(prefixed(
+                body,
+                if index + 1 < items.len() {
+                    "│ "
+                } else {
+                    "  "
+                },
+                Style::default().fg(theme.border_dim),
+            ));
+        }
+        if index + 1 < items.len() {
+            lines.push(Line::from(Span::styled(
+                "│",
+                Style::default().fg(theme.border_dim),
+            )));
+        }
+    }
+    lines
+}
+fn layout_lines(
+    node: &Node,
+    session: &Session,
+    width: u16,
+    theme: &Theme,
+) -> Option<Vec<Line<'static>>> {
+    let accent = accent_color(session.document(), theme);
+    let lines = match node {
+        Node::Hero {
+            title,
+            subtitle,
+            badge,
+        } => hero_lines(
+            title,
+            subtitle.as_deref(),
+            badge.as_deref(),
+            session,
+            width,
+            theme,
+        ),
+        Node::Columns { items } => columns_lines(items, session, width, theme),
+        Node::Cards { items } => cards_lines(items, session, width, theme),
+        Node::Stats { items } => stats_lines(items, session, width, theme),
+        Node::Steps { items } => steps_lines(items, session, width, theme),
+        Node::Callout { tone, title, text } => {
+            let color = match tone {
+                CalloutTone::Info => theme.accent,
+                CalloutTone::Tip => accent,
+                CalloutTone::Warning => theme.warning,
+                CalloutTone::Danger => theme.error,
+            };
+            let mut lines = Vec::new();
+            if let Some(title) = title {
+                lines.extend(styled_text(
+                    session,
+                    title,
+                    width.saturating_sub(2),
+                    Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                ));
+            }
+            lines.extend(styled_text(
+                session,
+                text,
+                width.saturating_sub(2),
+                Style::default().fg(theme.fg),
+            ));
+            prefixed(lines, "▌ ", Style::default().fg(color))
+        }
+        Node::Quote { text, by } => {
+            let mut lines = prefixed(
+                styled_text(
+                    session,
+                    text,
+                    width.saturating_sub(2),
+                    Style::default().fg(theme.fg).add_modifier(Modifier::ITALIC),
+                ),
+                "│ ",
+                Style::default().fg(theme.border_dim),
+            );
+            if let Some(by) = by {
+                lines.extend(wrapped_text(
+                    &format!("— {}", display(session, by)),
+                    width,
+                    Style::default().fg(theme.fg_dim),
+                ));
+            }
+            lines
+        }
+        Node::Divider { label } => {
+            let label = label
+                .as_ref()
+                .map_or_else(String::new, |s| format!(" {} ", display(session, s)));
+            let label = clipped(&label, width);
+            let remaining = usize::from(width).saturating_sub(label.width());
+            vec![Line::from(Span::styled(
+                format!(
+                    "{}{label}{}",
+                    "─".repeat(remaining / 2),
+                    "─".repeat(remaining.div_ceil(2))
+                ),
+                Style::default().fg(theme.border_dim),
+            ))]
+        }
+        _ => return None,
+    };
+    Some(lines)
 }
 fn display(session: &Session, template: &str) -> String {
     safe(&session.text(template).unwrap_or_default()).replace('\n', " ")
@@ -651,7 +1194,13 @@ fn render_component(
                 hits.push((region, control));
             }
         }
-        _ => render_data(node, session, region, theme, buffer),
+        _ => {
+            if let Some(lines) = layout_lines(node, session, region.width, theme) {
+                Paragraph::new(lines).render(region, buffer);
+            } else {
+                render_data(node, session, region, theme, buffer);
+            }
+        }
     }
     hits
 }
@@ -911,12 +1460,28 @@ impl Widgets {
         self.focused.is_some()
     }
     fn register(&mut self, key: &Key) {
-        if self.entries.contains_key(key) || self.entries.len() >= 64 {
+        if self.entries.contains_key(key) {
             return;
         }
         let session = Document::parse(&key.source)
             .and_then(Session::new)
             .map_err(|error| error.to_string());
+        // Layouts are inert, so they do not count against the interactive-panel limit.
+        let is_static = session.as_ref().is_ok_and(|s| s.document().is_static());
+        let count = self
+            .entries
+            .values()
+            .filter(|entry| {
+                entry
+                    .session
+                    .as_ref()
+                    .is_ok_and(|s| s.document().is_static())
+                    == is_static
+            })
+            .count();
+        if count >= if is_static { 512 } else { 64 } {
+            return;
+        }
         self.entries.insert(
             key.clone(),
             Entry {
@@ -1036,7 +1601,9 @@ impl Widgets {
                 );
                 continue;
             };
-            self.visible.push(key.clone());
+            if entry.is_interactive() {
+                self.visible.push(key.clone());
+            }
             let focused = self.focused.as_ref() == Some(&key);
             let (mut canvas, hits) = entry.canvas(width, theme, focused, self.send_ready);
             let end = end.min(usize::from(canvas.area.height));
@@ -1384,3 +1951,7 @@ mod tests;
 #[cfg(test)]
 #[path = "interactive/components_tests.rs"]
 mod components_tests;
+
+#[cfg(test)]
+#[path = "interactive/layouts_tests.rs"]
+mod layouts_tests;

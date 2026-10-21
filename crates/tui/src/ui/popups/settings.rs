@@ -51,6 +51,10 @@ pub fn render(f: &mut Frame, app: &AppView) {
     };
     let value = |field: SettingsField| -> Span<'static> {
         match field {
+            SettingsField::ReplyStyle => Span::styled(
+                app.settings.reply_style.clone(),
+                Style::default().fg(app.theme.accent),
+            ),
             SettingsField::ShowStats => toggle(app.settings.show_stats),
             SettingsField::ShowReasoning => toggle(app.settings.show_reasoning),
             SettingsField::HideHints => toggle(app.settings.hide_hints),

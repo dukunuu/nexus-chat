@@ -129,7 +129,8 @@ fn plain_table(rows: &[Vec<String>], aligns: &[TableAlign]) -> String {
 /// Plain text of `content` with markdown markers stripped (for clipboard
 /// copy). Tables are reconstructed as clean GFM markdown rather than mangled.
 pub fn to_plain(content: &str) -> String {
-    split_tables(content)
+    let content = ui_fences_to_plain(content);
+    split_tables(&content)
         .into_iter()
         .map(|seg| match seg {
             TableSegment::Table(rows, aligns) => plain_table(&rows, &aligns),
@@ -137,6 +138,40 @@ pub fn to_plain(content: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Replace each complete, valid `nexus-ui` block with its readable text
+/// (title, then each node), so copying a designed reply or a card gives
+/// words rather than its JSON source. Invalid or unclosed blocks are kept.
+fn ui_fences_to_plain(content: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut lines = content.lines();
+    while let Some(line) = lines.next() {
+        if line.trim_start().strip_prefix("```").map(str::trim) != Some("nexus-ui") {
+            out.push(line.to_string());
+            continue;
+        }
+        let mut body = Vec::new();
+        let mut closed = false;
+        for inner in lines.by_ref() {
+            if inner.trim_start().starts_with("```") {
+                closed = true;
+                break;
+            }
+            body.push(inner);
+        }
+        match crate::interactive::Document::parse(&body.join("\n")) {
+            Ok(document) if closed => out.push(document.plain_text()),
+            _ => {
+                out.push(line.to_string());
+                out.extend(body.iter().map(|line| (*line).to_string()));
+                if closed {
+                    out.push("```".to_string());
+                }
+            }
+        }
+    }
+    out.join("\n")
 }
 
 fn plain_text_segment(content: &str) -> String {
@@ -299,6 +334,20 @@ fn emphasis_run(chars: &[char], i: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod to_plain_tests {
+    #[test]
+    fn copying_a_designed_reply_gives_its_text_not_its_json() {
+        let reply = "```nexus-ui\n{\"version\":1,\"title\":\"Rust vs Go\",\"view\":[{\"type\":\"callout\",\"tone\":\"tip\",\"text\":\"Go ships faster.\"}]}\n```\nBoth are **fine**.";
+        let plain = to_plain(reply);
+        assert!(plain.contains("Rust vs Go"), "{plain}");
+        assert!(plain.contains("Go ships faster."), "{plain}");
+        assert!(plain.contains("Both are fine."), "{plain}");
+        assert!(!plain.contains("\"version\""), "{plain}");
+        // Invalid or unclosed blocks are copied as they are.
+        let broken = "```nexus-ui\n{not json}\n```";
+        assert!(to_plain(broken).contains("{not json}"));
+        assert!(to_plain("```nexus-ui\n{\"version\":1").contains("\"version\":1"));
+    }
+
     use super::*;
 
     const TABLE: &str = "| Name | Age |\n| --- | ---: |\n| Alice | 30 |\n| Bob | 7 |";

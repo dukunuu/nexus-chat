@@ -1486,6 +1486,9 @@ impl App {
         if self.interactive_ui {
             parts.push(Self::rendering_section());
             parts.push(crate::interactive::INSTRUCTIONS.to_string());
+            if let Some(layouts) = self.layout_guidance() {
+                parts.push(layouts);
+            }
         }
         parts.push(self.environment_section());
         if self.work_mode.is_agent() {
@@ -1576,6 +1579,17 @@ impl App {
             );
         }
         section
+    }
+
+    pub(super) fn layout_guidance(&self) -> Option<String> {
+        if self.settings.reply_style == "plain" {
+            return None;
+        }
+        let mut guidance = crate::interactive::LAYOUTS.to_string();
+        if self.settings.reply_style == "rich" {
+            guidance.push_str("\nPrefer a layout for most substantive answers.\n");
+        }
+        Some(guidance)
     }
 
     pub(super) fn rendering_section() -> String {

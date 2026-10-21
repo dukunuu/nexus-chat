@@ -107,6 +107,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["settings", "stats", "nerd", "params"],
     },
     Command {
+        name: "style",
+        desc: "reply layouts: /style auto|rich|plain",
+        aliases: &[],
+    },
+    Command {
         name: "theme",
         desc: "set UI background",
         aliases: &["appearance", "colors"],
@@ -427,10 +432,23 @@ impl App {
         Ok(job)
     }
 
+    fn parse_style(value: &str) -> std::result::Result<AppCommand, String> {
+        if super::REPLY_STYLES.contains(&value) {
+            Ok(AppCommand::SetSetting {
+                key: "reply_style".into(),
+                value: value.into(),
+            })
+        } else {
+            Err("usage: /style auto|rich|plain".into())
+        }
+    }
+
     /// Parse a `/`-command line (without the leading slash) into the command
     /// seam. Resolves aliases via the `COMMANDS` catalog and recognizes
     /// `/<skill-name>` arms. `Err` carries a status-line message for unknown
     /// commands — the TUI shows it without failing the key handler.
+    // One flat arm per catalog command; splitting it would only hide the table.
+    #[allow(clippy::too_many_lines)]
     pub fn parse_command(&self, cmd: &str) -> std::result::Result<AppCommand, String> {
         // `/research! <topic>` = research without the plan-approval gate.
         // Handled before command lookup: the `!` makes the token miss COMMANDS.
@@ -464,6 +482,7 @@ impl App {
             })),
             "swarm" => Ok(AppCommand::OpenSwarm),
             "config" => Ok(AppCommand::OpenSettings),
+            "style" => Self::parse_style(&rest(cmd, token)),
             "theme" => Ok(AppCommand::SetTheme {
                 mode: rest(cmd, token),
             }),

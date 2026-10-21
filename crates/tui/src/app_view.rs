@@ -612,7 +612,8 @@ impl AppView {
             | SettingsField::OcrModel
             | SettingsField::OcrEngine
             | SettingsField::ImageGenModel
-            | SettingsField::VideoGenModel => None,
+            | SettingsField::VideoGenModel
+            | SettingsField::ReplyStyle => None,
             SettingsField::Temperature => Some(0),
             SettingsField::TopP => Some(1),
             SettingsField::MaxTokens => Some(2),

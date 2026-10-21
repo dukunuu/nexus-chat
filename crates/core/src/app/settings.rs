@@ -77,7 +77,7 @@ impl App {
 
 /// Every key `set_setting` accepts — the same keys `apply_setting` (and the
 /// `blocked_domains` special case) can actually apply.
-const SETTING_KEYS: [&str; 21] = [
+const SETTING_KEYS: [&str; 22] = [
     "show_stats",
     "show_reasoning",
     "hide_hints",
@@ -96,6 +96,7 @@ const SETTING_KEYS: [&str; 21] = [
     "compact_threshold",
     "searxng_url",
     "verbosity",
+    "reply_style",
     "langsearch_key",
     "search_provider",
     "blocked_domains",
@@ -126,6 +127,7 @@ fn valid_setting_value(key: &str, value: &str) -> bool {
             .any(|r| r.key() == value),
         "ocr_engine" => OCR_ENGINES.contains(&value),
         "verbosity" => VERBOSITY_LEVELS.contains(&value),
+        "reply_style" => super::REPLY_STYLES.contains(&value),
         "search_provider" => SEARCH_PROVIDERS.contains(&value),
         _ => true, // free-form strings
     }

@@ -109,6 +109,16 @@ impl AppView {
                 SettingsField::HideHints => {
                     self.core.settings.hide_hints = !self.core.settings.hide_hints;
                 }
+                SettingsField::ReplyStyle => {
+                    let styles = nexus_core::app::REPLY_STYLES;
+                    let i = styles
+                        .iter()
+                        .position(|&s| s == self.core.settings.reply_style)
+                        .unwrap_or(0);
+                    let _ = self
+                        .core
+                        .set_setting("reply_style", styles[(i + 1) % styles.len()]);
+                }
                 SettingsField::Verbosity => {
                     let i = VERBOSITY_LEVELS
                         .iter()
@@ -336,6 +346,33 @@ mod tests {
             reloaded
                 .iter()
                 .any(|(k, v)| k == "verbosity" && v == "caveman")
+        );
+    }
+
+    #[test]
+    fn reply_style_cycles_in_settings_and_persists() {
+        let mut a = test_app();
+        a.popup = Popup::Settings;
+        a.settings_selected = a
+            .settings_rows()
+            .iter()
+            .position(|row| matches!(row, SettingsRow::Field(SettingsField::ReplyStyle)))
+            .unwrap();
+        assert_eq!(a.core.settings.reply_style, "auto");
+        a.toggle_settings_field();
+        assert_eq!(a.core.settings.reply_style, "rich");
+        a.toggle_settings_field();
+        assert_eq!(a.core.settings.reply_style, "plain");
+        a.toggle_settings_field();
+        assert_eq!(a.core.settings.reply_style, "auto");
+        a.toggle_settings_field();
+        assert!(
+            a.core
+                .db
+                .load_settings()
+                .unwrap()
+                .iter()
+                .any(|(k, v)| k == "reply_style" && v == "rich")
         );
     }
 

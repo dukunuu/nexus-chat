@@ -10,11 +10,14 @@ use serde_json::{Map, Value, json};
 
 /// Model instructions advertised only by clients with an interactive renderer.
 pub const INSTRUCTIONS: &str = include_str!("../assets/prompts/interactive-ui.md");
+/// Display-only layout guidance, advertised according to reply style.
+pub const LAYOUTS: &str = include_str!("../assets/prompts/layouts.md");
 
 /// Maximum serialized UI document size.
 pub const MAX_SOURCE: usize = 16 * 1024;
 /// Validation row budget, including title and interaction hint.
 pub const ROWS: u16 = 24;
+const LAYOUT_ROWS: u16 = 48;
 const MAX_TEXT: usize = 4096;
 const MAX_VALUE: usize = 1024;
 
@@ -35,6 +38,146 @@ pub enum Tone {
     Warning,
     /// Negative result or error.
     Error,
+}
+
+/// Optional document border style.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Frame {
+    /// Rounded corners (the legacy default).
+    #[default]
+    Rounded,
+    /// Double-line border.
+    Double,
+    /// Heavy border.
+    Heavy,
+    /// Dashed border.
+    Dashed,
+    /// Title rule without an enclosing border.
+    Plain,
+}
+
+/// Theme role for document highlights; never an arbitrary color.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Accent {
+    /// Primary theme accent.
+    Accent,
+    /// Assistant accent (the default).
+    #[default]
+    Accent2,
+    /// Positive emphasis.
+    Success,
+    /// Caution.
+    Warning,
+    /// Negative emphasis.
+    Error,
+    /// Subdued emphasis.
+    Muted,
+}
+
+/// Semantic marker on a comparison item.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mark {
+    /// Positive item.
+    Ok,
+    /// Negative item.
+    No,
+    /// Neutral bullet.
+    Dot,
+    /// No marker.
+    #[default]
+    None,
+}
+
+/// A comparison item, with plain-text template content.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ColumnItem {
+    /// Item text.
+    pub text: String,
+    /// Optional semantic marker.
+    #[serde(default)]
+    pub mark: Mark,
+}
+
+/// One comparison column.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Column {
+    /// Column title template.
+    pub title: String,
+    /// Up to eight items.
+    pub items: Vec<ColumnItem>,
+}
+
+/// A bordered display card.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Card {
+    /// Title template.
+    pub title: String,
+    /// Body template.
+    pub text: String,
+    /// Optional badge template.
+    pub badge: Option<String>,
+    /// Title emphasis; absent uses the document accent.
+    pub tone: Option<Tone>,
+}
+
+/// A labelled metric.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stat {
+    /// Value template.
+    pub value: String,
+    /// Dim label template.
+    pub label: String,
+    /// Signed delta template, for example "+12%".
+    pub delta: Option<String>,
+    /// Value emphasis; absent uses the document accent.
+    pub tone: Option<Tone>,
+}
+
+/// Progress along a display-only timeline.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepState {
+    /// Completed step.
+    Done,
+    /// Active step.
+    Current,
+    /// Future step.
+    #[default]
+    Todo,
+}
+
+/// One display-only timeline step (not an executable action).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayStep {
+    /// Title template.
+    pub title: String,
+    /// Optional description template.
+    pub text: Option<String>,
+    /// Completion state.
+    #[serde(default)]
+    pub state: StepState,
+}
+
+/// Semantic color for a callout rail.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalloutTone {
+    /// Informational theme accent.
+    Info,
+    /// Tip in the document accent.
+    Tip,
+    /// Warning theme role.
+    Warning,
+    /// Error theme role.
+    Danger,
 }
 
 /// An action control; labels are templates, never markup.
@@ -77,6 +220,56 @@ pub struct CheckItem {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Node {
+    /// A prominent title, optional dim subtitle and badge.
+    Hero {
+        /// Title template.
+        title: String,
+        /// Subtitle template.
+        subtitle: Option<String>,
+        /// Badge template.
+        badge: Option<String>,
+    },
+    /// Two or three comparison columns, stacked on narrow terminals.
+    Columns {
+        /// Columns with up to eight items each.
+        items: Vec<Column>,
+    },
+    /// One to six bordered sub-cards in a responsive grid.
+    Cards {
+        /// Display cards.
+        items: Vec<Card>,
+    },
+    /// One to six labelled metrics.
+    Stats {
+        /// Display metrics.
+        items: Vec<Stat>,
+    },
+    /// One to eight steps in a row or connected timeline.
+    Steps {
+        /// Display steps, not executable actions.
+        items: Vec<DisplayStep>,
+    },
+    /// A semantic rail alongside short text.
+    Callout {
+        /// Rail emphasis.
+        tone: CalloutTone,
+        /// Optional title template.
+        title: Option<String>,
+        /// Body template.
+        text: String,
+    },
+    /// A quotation with optional attribution.
+    Quote {
+        /// Quoted text template.
+        text: String,
+        /// Attribution template.
+        by: Option<String>,
+    },
+    /// A separator rule, optionally labelled.
+    Divider {
+        /// Label template.
+        label: Option<String>,
+    },
     /// Plain text with `{{state_key}}` substitutions.
     Text {
         /// Plain-text template.
@@ -173,23 +366,51 @@ const fn three() -> u16 {
     3
 }
 impl Node {
+    fn is_display(&self) -> bool {
+        matches!(
+            self,
+            Self::Hero { .. }
+                | Self::Columns { .. }
+                | Self::Cards { .. }
+                | Self::Stats { .. }
+                | Self::Steps { .. }
+                | Self::Callout { .. }
+                | Self::Quote { .. }
+                | Self::Divider { .. }
+        )
+    }
+
     /// Declared validation budget, independent of frontend layout.
     #[must_use]
     pub fn rows(&self) -> u16 {
         match self {
+            Self::Columns { items } => items
+                .iter()
+                .map(|item| bounded_rows(item.items.len() + 1))
+                .sum(),
+            Self::Cards { items } => bounded_rows(items.len().saturating_mul(4)),
+            Self::Steps { items } => bounded_rows(items.len().saturating_mul(2)),
+            Self::Callout { .. } | Self::Quote { .. } => 2,
             Self::Text { rows, .. } | Self::Buttons { rows, .. } | Self::Sparkline { rows, .. } => {
                 *rows
             }
-            Self::Input { .. } => 3,
+            Self::Hero { .. } | Self::Stats { .. } | Self::Input { .. } => 3,
             Self::Kv { items } => u16::try_from(items.len()).unwrap_or(u16::MAX),
             Self::Table { rows_data, .. } => {
                 u16::try_from(rows_data.len().saturating_add(1)).unwrap_or(u16::MAX)
             }
             Self::Bars { items } => u16::try_from(items.len()).unwrap_or(u16::MAX),
             Self::Checklist { items } => u16::try_from(items.len()).unwrap_or(u16::MAX),
-            Self::Progress { .. } | Self::Select { .. } | Self::Toggle { .. } => 1,
+            Self::Divider { .. }
+            | Self::Progress { .. }
+            | Self::Select { .. }
+            | Self::Toggle { .. } => 1,
         }
     }
+}
+
+fn bounded_rows(count: usize) -> u16 {
+    u16::try_from(count).unwrap_or(u16::MAX)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -205,8 +426,14 @@ enum Step {
 struct Definition {
     version: u8,
     title: String,
+    #[serde(default)]
+    frame: Frame,
+    #[serde(default)]
+    accent: Accent,
+    #[serde(default)]
     state: Map<String, Value>,
     view: Vec<Node>,
+    #[serde(default)]
     actions: BTreeMap<String, Vec<Step>>,
 }
 
@@ -215,6 +442,8 @@ struct Definition {
 pub struct Document {
     version: u8,
     title: String,
+    frame: Frame,
+    accent: Accent,
     state: Map<String, Value>,
     view: Vec<Node>,
     actions: BTreeMap<String, Vec<Step>>,
@@ -230,6 +459,8 @@ impl Document {
         let Definition {
             version,
             title,
+            frame,
+            accent,
             state,
             view,
             actions,
@@ -237,6 +468,8 @@ impl Document {
         let mut doc = Self {
             version,
             title,
+            frame,
+            accent,
             state,
             view,
             actions,
@@ -294,10 +527,12 @@ impl Document {
         let mut controls = 0;
         let mut budget = 1024;
         for node in &self.view {
-            let max_rows = if matches!(node, Node::Table { .. }) {
-                9
-            } else {
-                8
+            let max_rows = match node {
+                Node::Columns { .. } => 27,
+                Node::Cards { .. } => 24,
+                Node::Steps { .. } => 16,
+                Node::Table { .. } => 9,
+                _ => 8,
             };
             ensure!(
                 (1..=max_rows).contains(&node.rows()),
@@ -342,14 +577,92 @@ impl Document {
                 _ => controls += self.validate_component(node, &mut budget)?,
             }
         }
+        let cap = if self.view.iter().any(Node::is_display) {
+            LAYOUT_ROWS
+        } else {
+            ROWS
+        };
         ensure!(
-            rows <= ROWS - 3 && controls <= 32,
+            rows <= cap - 3 && controls <= 32,
             "UI exceeds its fixed display budget"
         );
         Ok(())
     }
 
+    fn validate_display(&self, node: &Node) -> Result<()> {
+        match node {
+            Node::Hero {
+                title,
+                subtitle,
+                badge,
+            } => {
+                self.template_ok(title)?;
+                for text in subtitle.iter().chain(badge) {
+                    self.template_ok(text)?;
+                }
+            }
+            Node::Columns { items } => {
+                item_count(items.len(), 2, 3)?;
+                for column in items {
+                    self.template_ok(&column.title)?;
+                    item_count(column.items.len(), 0, 8)?;
+                    for item in &column.items {
+                        self.template_ok(&item.text)?;
+                    }
+                }
+            }
+            Node::Cards { items } => {
+                item_count(items.len(), 1, 6)?;
+                for item in items {
+                    self.template_ok(&item.title)?;
+                    self.template_ok(&item.text)?;
+                    if let Some(badge) = &item.badge {
+                        self.template_ok(badge)?;
+                    }
+                }
+            }
+            Node::Stats { items } => {
+                item_count(items.len(), 1, 6)?;
+                for item in items {
+                    self.template_ok(&item.value)?;
+                    self.template_ok(&item.label)?;
+                    if let Some(delta) = &item.delta {
+                        self.template_ok(delta)?;
+                    }
+                }
+            }
+            Node::Steps { items } => {
+                item_count(items.len(), 1, 8)?;
+                for item in items {
+                    self.template_ok(&item.title)?;
+                    if let Some(text) = &item.text {
+                        self.template_ok(text)?;
+                    }
+                }
+            }
+            Node::Callout { title, text, .. } => {
+                self.template_ok(text)?;
+                if let Some(title) = title {
+                    self.template_ok(title)?;
+                }
+            }
+            Node::Quote { text, by } => {
+                self.template_ok(text)?;
+                if let Some(by) = by {
+                    self.template_ok(by)?;
+                }
+            }
+            Node::Divider { label: Some(label) } => self.template_ok(label)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn validate_component(&self, node: &Node, budget: &mut usize) -> Result<usize> {
+        if node.is_display() {
+            self.validate_display(node)?;
+            return Ok(0);
+        }
         match node {
             Node::Kv { items } => {
                 item_count(items.len(), 1, 8)?;
@@ -430,7 +743,7 @@ impl Document {
                 binding_ok(&self.state, key, Value::is_boolean)?;
                 return Ok(1);
             }
-            Node::Text { .. } | Node::Buttons { .. } | Node::Input { .. } => {}
+            _ => {}
         }
         Ok(0)
     }
@@ -493,6 +806,47 @@ impl Document {
     pub fn title(&self) -> &str {
         &self.title
     }
+    /// Document frame style.
+    #[must_use]
+    pub const fn frame(&self) -> Frame {
+        self.frame
+    }
+    /// Theme role for highlights.
+    #[must_use]
+    pub const fn accent(&self) -> Accent {
+        self.accent
+    }
+    /// Whether this is a display-only layout, with neither actions nor controls.
+    #[must_use]
+    pub fn is_static(&self) -> bool {
+        self.actions.is_empty()
+            && !self.view.iter().any(|node| {
+                matches!(
+                    node,
+                    Node::Buttons { .. }
+                        | Node::Input { .. }
+                        | Node::Checklist { .. }
+                        | Node::Select { .. }
+                        | Node::Toggle { .. }
+                        | Node::Table {
+                            select: Some(_),
+                            ..
+                        }
+                )
+            })
+    }
+    /// Readable plain rendering using initial state, without JSON or markup.
+    #[must_use]
+    pub fn plain_text(&self) -> String {
+        let Ok(session) = Session::new(self.clone()) else {
+            return self.title.clone();
+        };
+        let mut lines = vec![self.title.clone()];
+        for node in &self.view {
+            lines.extend(session.plain_node(node));
+        }
+        lines.join("\n")
+    }
     /// Immutable, validated presentation nodes.
     #[must_use]
     pub fn nodes(&self) -> &[Node] {
@@ -531,6 +885,141 @@ impl Session {
         session.state = state;
         Ok(session)
     }
+    fn plain_node(&self, node: &Node) -> Vec<String> {
+        let text = |s: &str| self.text(s).unwrap_or_default();
+        match node {
+            Node::Hero {
+                title,
+                subtitle,
+                badge,
+            } => std::iter::once(text(title))
+                .chain(subtitle.iter().chain(badge).map(|s| text(s)))
+                .collect(),
+            Node::Columns { items } => items
+                .iter()
+                .flat_map(|column| {
+                    std::iter::once(text(&column.title)).chain(column.items.iter().map(|item| {
+                        let mark = match item.mark {
+                            Mark::Ok => "✓ ",
+                            Mark::No => "✗ ",
+                            Mark::Dot => "● ",
+                            Mark::None => "",
+                        };
+                        format!("{mark}{}", text(&item.text))
+                    }))
+                })
+                .collect(),
+            Node::Cards { items } => items
+                .iter()
+                .flat_map(|item| {
+                    std::iter::once(text(&item.title))
+                        .chain(item.badge.iter().map(|s| text(s)))
+                        .chain(std::iter::once(text(&item.text)))
+                })
+                .collect(),
+            Node::Stats { items } => items
+                .iter()
+                .map(|item| {
+                    let delta = item
+                        .delta
+                        .as_ref()
+                        .map_or_else(String::new, |s| format!(" ({})", text(s)));
+                    format!("{}: {}{delta}", text(&item.label), text(&item.value))
+                })
+                .collect(),
+            Node::Steps { items } => items
+                .iter()
+                .flat_map(|item| {
+                    let mark = match item.state {
+                        StepState::Done => "●",
+                        StepState::Current => "◉",
+                        StepState::Todo => "○",
+                    };
+                    std::iter::once(format!("{mark} {}", text(&item.title)))
+                        .chain(item.text.iter().map(|s| text(s)))
+                })
+                .collect(),
+            Node::Callout {
+                title, text: body, ..
+            } => title
+                .iter()
+                .map(|s| text(s))
+                .chain(std::iter::once(text(body)))
+                .collect(),
+            Node::Quote { text: body, by } => std::iter::once(format!("\"{}\"", text(body)))
+                .chain(by.iter().map(|s| format!("— {}", text(s))))
+                .collect(),
+            Node::Divider { label } => {
+                vec![label.as_ref().map_or_else(|| "---".into(), |s| text(s))]
+            }
+            _ => self.plain_component(node),
+        }
+    }
+
+    fn plain_component(&self, node: &Node) -> Vec<String> {
+        let text = |s: &str| self.text(s).unwrap_or_default();
+        match node {
+            Node::Text { text: body, .. } => vec![text(body)],
+            Node::Buttons { items, .. } => items
+                .iter()
+                .flat_map(|item| {
+                    std::iter::once(text(&item.label)).chain(item.body.iter().map(|s| text(s)))
+                })
+                .collect(),
+            Node::Input { key, label }
+            | Node::Select { key, label, .. }
+            | Node::Toggle { key, label } => {
+                vec![format!("{}: {}", text(label), self.value(key))]
+            }
+            Node::Kv { items } => items
+                .iter()
+                .map(|pair| format!("{}: {}", text(&pair[0]), text(&pair[1])))
+                .collect(),
+            Node::Table {
+                columns, rows_data, ..
+            } => std::iter::once(columns)
+                .chain(rows_data)
+                .map(|row| row.iter().map(|s| text(s)).collect::<Vec<_>>().join(" | "))
+                .collect(),
+            Node::Progress { label, value, max } => {
+                let (value, max) = self.progress(value, max).unwrap_or_default();
+                vec![format!("{}: {value}/{max}", text(label))]
+            }
+            Node::Bars { items } => items
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{}: {}",
+                        text(&item.label),
+                        self.number(&item.value).unwrap_or_default()
+                    )
+                })
+                .collect(),
+            Node::Sparkline { values, .. } => vec![
+                values
+                    .iter()
+                    .map(|v| self.number(v).unwrap_or_default().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ],
+            Node::Checklist { items } => items
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{} {}",
+                        if self.value(&item.key) == "true" {
+                            "✓"
+                        } else {
+                            "○"
+                        },
+                        text(&item.label)
+                    )
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Validated view description.
     #[must_use]
     pub const fn document(&self) -> &Document {
@@ -1008,6 +1497,10 @@ fn expand(template: &str, state: &Map<String, Value>) -> Result<String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "interactive/layouts_tests.rs"]
+mod layouts_tests;
 
 #[cfg(test)]
 #[path = "interactive/components_tests.rs"]

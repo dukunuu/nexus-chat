@@ -41,6 +41,8 @@ mod memory;
 mod models;
 #[cfg(test)]
 mod prompt_snapshots;
+#[cfg(test)]
+mod reply_style_tests;
 mod research;
 mod scripts;
 mod sessions;
@@ -545,10 +547,11 @@ pub enum SettingsField {
     BlockedDomains,
     ImageGenModel,
     VideoGenModel,
+    ReplyStyle,
 }
 
 impl SettingsField {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::ShowStats,
         Self::ShowReasoning,
         Self::HideHints,
@@ -568,10 +571,12 @@ impl SettingsField {
         Self::BlockedDomains,
         Self::ImageGenModel,
         Self::VideoGenModel,
+        Self::ReplyStyle,
     ];
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::ReplyStyle => "reply style (Space cycles auto/rich/plain)",
             Self::ShowStats => "show stats (model · TPS footer)",
             Self::ShowReasoning => "expand reasoning (Ctrl+R)",
             Self::HideHints => "hide hints (keybind labels)",
@@ -663,6 +668,10 @@ pub const SETTINGS_GROUPS: &[SettingsGroup] = &[
         name: "Video Generation",
         fields: &[SettingsField::VideoGenModel],
     },
+    SettingsGroup {
+        name: "Reply Layouts",
+        fields: &[SettingsField::ReplyStyle],
+    },
 ];
 
 /// One visible row in the settings popup: a collapsible group header, or a
@@ -673,6 +682,7 @@ pub enum SettingsRow {
     Field(SettingsField),
 }
 
+pub const REPLY_STYLES: [&str; 3] = ["auto", "rich", "plain"];
 pub const VERBOSITY_LEVELS: [&str; 3] = ["normal", "concise", "caveman"];
 pub const OCR_ENGINES: [&str; 4] = ["auto", "tesseract", "vlm", "local"];
 pub const SEARCH_PROVIDERS: [&str; 4] = ["auto", "langsearch", "searxng", "duckduckgo"];
@@ -682,6 +692,8 @@ pub const SEARCH_PROVIDERS: [&str; 4] = ["auto", "langsearch", "searxng", "duckd
 // A settings struct is inherently many booleans; grouped by feature in the popup.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Settings {
+    /// Model-selected layouts, preferred layouts, or no layout guidance.
+    pub reply_style: String,
     /// Show the per-message model · TPS footer.
     pub show_stats: bool,
     /// Expand stored reasoning traces (vs. a collapsed one-liner).
@@ -699,6 +711,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            reply_style: "auto".into(),
             show_stats: false,
             show_reasoning: false,
             hide_hints: false,
@@ -1922,6 +1935,12 @@ impl App {
                 }
             }
             "searxng_url" => self.searxng_url = v.to_string(),
+            "reply_style" if REPLY_STYLES.contains(&v) => {
+                if self.settings.reply_style != v {
+                    self.settings.reply_style = v.to_string();
+                    self.bump_cache_epoch();
+                }
+            }
             "verbosity" if VERBOSITY_LEVELS.contains(&v) => {
                 if self.verbosity != v {
                     self.verbosity = v.to_string();
