@@ -294,6 +294,7 @@ async fn run_loop(
                     app.theme.set_background_mode(mode);
                     app.theme_link = target;
                     app.theme_gen = app.theme_gen.wrapping_add(1);
+                    app.send_studio_theme();
                 }
             }
         }

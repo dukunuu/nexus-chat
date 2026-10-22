@@ -15,7 +15,7 @@ pub struct Line {
     pub message: Message,
 }
 
-/// Studio sends Hello/Comment/Reply/Focus; nexus sends Open/Focus/Bye.
+/// Studio sends Hello/Comment/Reply/Focus; nexus sends Open/Focus/Theme/Bye.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Message {
@@ -43,6 +43,9 @@ pub enum Message {
     },
     Open {
         deck_path: PathBuf,
+    },
+    Theme {
+        colors: crate::theme_colors::ThemeColors,
     },
     Bye,
 }

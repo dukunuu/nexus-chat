@@ -1,0 +1,15 @@
+{
+  "bg": "#000000",
+  "fg": "#ffffff",
+  "fg_dim": "#7f7f7f",
+  "accent": "#00cdcd",
+  "accent2": "#cd00cd",
+  "border": "#00cdcd",
+  "border_dim": "#7f7f7f",
+  "success": "#00cd00",
+  "warning": "#cdcd00",
+  "error": "#cd0000",
+  "selection": "#4e4e4e",
+  "raised": "#303030",
+  "control": "#444444"
+}

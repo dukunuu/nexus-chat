@@ -1,14 +1,16 @@
 //! Semantic color roles, sourced from the user's active omarchy theme
 //! (`~/.config/omarchy/current/theme/alacritty.toml`) when present, falling
 //! back to the app's original hardcoded ANSI palette otherwise. `events.rs`
-//! polls `current_link_target()` and calls `load()` again when the omarchy
+//! polls `source_stamp()` and calls `load()` again when the omarchy
 //! theme symlink changes, so switching themes in omarchy updates the running
 //! app without a restart.
 
-use std::path::PathBuf;
-
+use nexus_core::theme_colors::{Palette, ThemeColors};
 use ratatui::style::{Color, Style};
-use serde::Deserialize;
+
+pub use nexus_core::theme_colors::source_stamp;
+#[cfg(test)]
+use nexus_core::theme_colors::{Alacritty, ghostty_pairs};
 
 /// How the TUI paints its general background.
 ///
@@ -133,98 +135,69 @@ impl Default for Theme {
     }
 }
 
-#[derive(Deserialize)]
-struct Alacritty {
-    colors: ColorsSection,
-}
-
-#[derive(Deserialize)]
-struct ColorsSection {
-    primary: Primary,
-    normal: Palette,
-    bright: Palette,
-}
-
-#[derive(Deserialize)]
-struct Primary {
-    background: String,
-    foreground: String,
-}
-
-#[derive(Deserialize)]
-struct Palette {
-    black: String,
-    red: String,
-    green: String,
-    yellow: String,
-    magenta: String,
-    cyan: String,
-}
-
-fn hex_to_color(s: &str) -> Option<Color> {
-    let s = s.trim_start_matches('#');
-    if s.len() != 6 {
-        return None;
-    }
-    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-    Some(Color::Rgb(r, g, b))
-}
-
 impl Theme {
-    fn from_alacritty(a: &Alacritty) -> Self {
-        let fallback = Self::default();
-        let n = &a.colors.normal;
-        let b = &a.colors.bright;
-        let bg = hex_to_color(&a.colors.primary.background).unwrap_or(fallback.bg);
-        Self {
-            bg,
-            surface: bg,
-            fg: hex_to_color(&a.colors.primary.foreground).unwrap_or(fallback.fg),
-            fg_dim: hex_to_color(&b.black).unwrap_or(fallback.fg_dim),
-            accent: hex_to_color(&n.cyan).unwrap_or(fallback.accent),
-            accent2: hex_to_color(&n.magenta).unwrap_or(fallback.accent2),
-            border: hex_to_color(&n.cyan).unwrap_or(fallback.border),
-            border_dim: hex_to_color(&b.black).unwrap_or(fallback.border_dim),
-            success: hex_to_color(&n.green).unwrap_or(fallback.success),
-            warning: hex_to_color(&n.yellow).unwrap_or(fallback.warning),
-            error: hex_to_color(&n.red).unwrap_or(fallback.error),
-            diff_add_bg: fallback.diff_add_bg,
-            diff_del_bg: fallback.diff_del_bg,
-            user_msg: hex_to_color(&n.cyan).unwrap_or(fallback.user_msg),
-            assistant_msg: hex_to_color(&a.colors.primary.foreground)
-                .unwrap_or(fallback.assistant_msg),
-            tool_msg: hex_to_color(&n.yellow).unwrap_or(fallback.tool_msg),
-            research_msg: hex_to_color(&n.magenta).unwrap_or(fallback.research_msg),
-            raised: fallback.raised,
-            raised_opaque: fallback.raised,
-            control: fallback.control,
-            selection: fallback.selection,
+    fn from_palette(palette: &Palette) -> Self {
+        let mut theme = Self::default();
+        for (role, field) in [
+            ("bg", &mut theme.bg),
+            ("fg", &mut theme.fg),
+            ("fg_dim", &mut theme.fg_dim),
+            ("accent", &mut theme.accent),
+            ("accent2", &mut theme.accent2),
+            ("border", &mut theme.border),
+            ("border_dim", &mut theme.border_dim),
+            ("success", &mut theme.success),
+            ("warning", &mut theme.warning),
+            ("error", &mut theme.error),
+            ("diff_add_bg", &mut theme.diff_add_bg),
+            ("diff_del_bg", &mut theme.diff_del_bg),
+            ("user_msg", &mut theme.user_msg),
+            ("assistant_msg", &mut theme.assistant_msg),
+            ("tool_msg", &mut theme.tool_msg),
+            ("research_msg", &mut theme.research_msg),
+            ("raised", &mut theme.raised),
+            ("control", &mut theme.control),
+            ("selection", &mut theme.selection),
+        ] {
+            if let Some([r, g, b]) = palette.rgb(role) {
+                *field = Color::Rgb(r, g, b);
+            }
         }
-        .with_derived_shades(None)
+        theme.surface = theme.bg;
+        theme.raised_opaque = theme.raised;
+        theme
     }
 
-    /// Fill the in-between shades from the real background/foreground when
-    /// both are RGB: `raised` a small step toward the foreground, borders a
-    /// quiet quarter step, and the selection from the theme when it names
-    /// one. ANSI palettes keep their 256-color fallbacks.
+    #[cfg(test)]
+    fn from_alacritty(a: &Alacritty) -> Self {
+        Self::from_palette(&Palette::from_alacritty(a))
+    }
+
+    #[cfg(test)]
+    fn from_ghostty(colors: &std::collections::HashMap<String, String>) -> Option<Self> {
+        Palette::from_ghostty(colors).map(|palette| Self::from_palette(&palette))
+    }
+
+    /// The opaque palette for studio; terminal transparency is not a deck color.
     #[must_use]
-    fn with_derived_shades(mut self, selection: Option<Color>) -> Self {
-        if let (Color::Rgb(..), Color::Rgb(..)) = (self.bg, self.fg) {
-            self.control = blend(self.bg, self.fg, 0.16);
-            self.raised = blend(self.bg, self.fg, 0.07);
-            self.raised_opaque = self.raised;
-            self.border_dim = blend(self.bg, self.fg, 0.24);
-            self.selection = selection.unwrap_or_else(|| blend(self.bg, self.accent, 0.35));
-        }
-        if let (Color::Rgb(..), Color::Rgb(..)) = (self.bg, self.success) {
-            self.diff_add_bg = blend(self.bg, self.success, 0.18);
-        }
-        if let (Color::Rgb(..), Color::Rgb(..)) = (self.bg, self.error) {
-            self.diff_del_bg = blend(self.bg, self.error, 0.18);
-        }
-        self
+    pub fn colors(&self) -> ThemeColors {
+        [
+            ("bg", self.bg),
+            ("fg", self.fg),
+            ("fg_dim", self.fg_dim),
+            ("accent", self.accent),
+            ("accent2", self.accent2),
+            ("border", self.border),
+            ("border_dim", self.border_dim),
+            ("success", self.success),
+            ("warning", self.warning),
+            ("error", self.error),
+            ("raised", self.raised_opaque),
+            ("control", self.control),
+            ("selection", self.selection),
+        ]
+        .map(|(role, color)| (role.into(), color_hex(color)))
+        .into()
     }
 
     /// Apply a UI background mode without changing the palette colors.
@@ -241,174 +214,33 @@ impl Theme {
     }
 }
 
-/// `t` of the way from `a` to `b` (RGB only; anything else returns `a`).
-fn blend(a: Color, b: Color, t: f32) -> Color {
-    match (a, b) {
-        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let mix =
-                |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
-            Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
-        }
-        _ => a,
+fn color_hex(color: Color) -> String {
+    use nexus_core::theme_colors::indexed_hex;
+    match color {
+        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+        Color::Indexed(index) => indexed_hex(index),
+        Color::Black | Color::Reset => indexed_hex(0),
+        Color::Red => indexed_hex(1),
+        Color::Green => indexed_hex(2),
+        Color::Yellow => indexed_hex(3),
+        Color::Blue => indexed_hex(4),
+        Color::Magenta => indexed_hex(5),
+        Color::Cyan => indexed_hex(6),
+        Color::Gray => indexed_hex(7),
+        Color::White => indexed_hex(15),
+        Color::DarkGray => indexed_hex(8),
+        Color::LightRed => indexed_hex(9),
+        Color::LightGreen => indexed_hex(10),
+        Color::LightYellow => indexed_hex(11),
+        Color::LightBlue => indexed_hex(12),
+        Color::LightMagenta => indexed_hex(13),
+        Color::LightCyan => indexed_hex(14),
     }
 }
 
-// ── Ghostty ───────────────────────────────────────────────────────────────
-
-/// Ghostty config files, lowest precedence first (later keys win).
-fn ghostty_config_paths() -> Vec<PathBuf> {
-    let Some(home) = std::env::home_dir() else {
-        return Vec::new();
-    };
-    let xdg = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| home.join(".config"));
-    let mac = home.join("Library/Application Support/com.mitchellh.ghostty");
-    [
-        xdg.join("ghostty/config"),
-        xdg.join("ghostty/config.ghostty"),
-        mac.join("config"),
-        mac.join("config.ghostty"),
-    ]
-    .into_iter()
-    .filter(|p| p.is_file())
-    .collect()
-}
-
-/// `key = value` lines; `palette = N=#hex` becomes key `palette.N`.
-fn ghostty_pairs(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .filter_map(|l| l.split_once('='))
-        .map(|(k, v)| {
-            let (k, v) = (k.trim(), v.trim().trim_matches('"'));
-            match (k, v.split_once('=')) {
-                ("palette", Some((n, hex))) => (format!("palette.{}", n.trim()), hex.trim().into()),
-                _ => (k.to_string(), v.to_string()),
-            }
-        })
-        .collect()
-}
-
-/// Where Ghostty keeps a theme named `name` (user dir, then bundled ones).
-fn ghostty_theme_file(name: &str) -> Option<PathBuf> {
-    let name = name.trim();
-    if std::path::Path::new(name).is_absolute() {
-        return Some(PathBuf::from(name));
-    }
-    let home = std::env::home_dir()?;
-    [
-        home.join(".config/ghostty/themes"),
-        PathBuf::from("/Applications/Ghostty.app/Contents/Resources/ghostty/themes"),
-        PathBuf::from("/usr/share/ghostty/themes"),
-        PathBuf::from("/usr/local/share/ghostty/themes"),
-    ]
-    .into_iter()
-    .map(|dir| dir.join(name))
-    .find(|p| p.is_file())
-}
-
-/// The theme Ghostty is showing: its `theme` file with the config's inline
-/// colors layered on top. `light:X,dark:Y` picks the dark variant.
-fn ghostty_theme() -> Option<Theme> {
-    let mut config = Vec::new();
-    for path in ghostty_config_paths() {
-        config.extend(ghostty_pairs(&std::fs::read_to_string(path).ok()?));
-    }
-    let name = config
-        .iter()
-        .rev()
-        .find(|(k, _)| k == "theme")
-        .map(|(_, v)| {
-            v.split(',')
-                .find_map(|part| part.trim().strip_prefix("dark:"))
-                .unwrap_or_else(|| v.split(',').next().unwrap_or(v))
-                .trim()
-                .to_string()
-        });
-    let mut colors: std::collections::HashMap<String, String> = name
-        .and_then(|n| ghostty_theme_file(&n))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|t| ghostty_pairs(&t).into_iter().collect())
-        .unwrap_or_default();
-    colors.extend(config);
-    Theme::from_ghostty(&colors)
-}
-
-impl Theme {
-    fn from_ghostty(c: &std::collections::HashMap<String, String>) -> Option<Self> {
-        let get = |k: &str| c.get(k).and_then(|v| hex_to_color(v));
-        let bg = get("background")?;
-        let fg = get("foreground")?;
-        let fallback = Self::default();
-        let pal = |n: u8, or: Color| get(&format!("palette.{n}")).unwrap_or(or);
-        let cyan = pal(6, fallback.accent);
-        let magenta = pal(5, fallback.accent2);
-        let yellow = pal(3, fallback.warning);
-        Some(
-            Self {
-                bg,
-                surface: bg,
-                fg,
-                fg_dim: pal(8, fallback.fg_dim),
-                accent: cyan,
-                accent2: magenta,
-                border: cyan,
-                border_dim: pal(8, fallback.border_dim),
-                success: pal(2, fallback.success),
-                warning: yellow,
-                error: pal(1, fallback.error),
-                diff_add_bg: fallback.diff_add_bg,
-                diff_del_bg: fallback.diff_del_bg,
-                user_msg: cyan,
-                assistant_msg: fg,
-                tool_msg: yellow,
-                research_msg: magenta,
-                raised: fallback.raised,
-                raised_opaque: fallback.raised,
-                control: fallback.control,
-                selection: fallback.selection,
-            }
-            .with_derived_shades(get("selection-background")),
-        )
-    }
-}
-
-/// Modification time of a file, as a comparable token.
-fn mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
-}
-
-fn omarchy_current_dir() -> Option<PathBuf> {
-    Some(std::env::home_dir()?.join(".config/omarchy/current"))
-}
-
-/// The omarchy theme symlink's current target (e.g. `.../themes/retropc`), or
-/// `None` off-omarchy. Together with the Ghostty config's mtime it forms the
-/// stamp the event loop polls to pick up a theme switch live.
-pub fn current_link_target() -> Option<PathBuf> {
-    std::fs::read_link(omarchy_current_dir()?).ok()
-}
-
-/// A token that changes whenever the active theme source does.
-pub fn source_stamp() -> String {
-    let ghostty: Vec<_> = ghostty_config_paths().iter().map(|p| mtime(p)).collect();
-    format!("{:?}|{ghostty:?}", current_link_target())
-}
-
-/// The active theme: omarchy's, else Ghostty's, else the built-in ANSI
-/// palette (which the terminal maps onto its own colors).
+/// The shared terminal palette, converted without losing ANSI fallbacks.
 pub fn load() -> Theme {
-    omarchy_current_dir()
-        .map(|d| d.join("theme/alacritty.toml"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| toml::from_str::<Alacritty>(&s).ok())
-        .map(|a| Theme::from_alacritty(&a))
-        .or_else(ghostty_theme)
-        .unwrap_or_default()
+    Theme::from_palette(&nexus_core::theme_colors::load())
 }
 
 #[cfg(test)]

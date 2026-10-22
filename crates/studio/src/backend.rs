@@ -10,6 +10,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, bail, ensure};
 use nexus_core::deck::{self, Content, Deck, Op, same_file};
 use nexus_core::remote_image::Fetcher;
+use nexus_core::theme_colors::{self, ThemeColors};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -83,6 +84,7 @@ pub enum Command {
 pub enum Event {
     Deck {
         deck: Deck,
+        colors: ThemeColors,
         revision: String,
         // The backend supplies preconditions rather than asking JS to
         // reproduce Rust's canonical number serialization.
@@ -99,6 +101,9 @@ pub enum Event {
     },
     Focus {
         slide: String,
+    },
+    Theme {
+        colors: ThemeColors,
     },
     Preview {
         deck: Deck,
@@ -142,6 +147,8 @@ pub struct Backend {
     pub outgoing: Vec<LinkMessage>,
     deck_stamp: Option<Stamp>,
     comments_stamp: Option<Stamp>,
+    colors: ThemeColors,
+    theme_stamp: String,
 }
 
 /// Modified time and length: enough to notice another writer within one mtime tick.
@@ -177,6 +184,8 @@ impl Backend {
             outgoing: Vec::new(),
             deck_stamp: None,
             comments_stamp: None,
+            colors: theme_colors::load().colors,
+            theme_stamp: theme_colors::source_stamp(),
         };
         if !backend.path.exists() {
             backend.save()?;
@@ -195,6 +204,7 @@ impl Backend {
             changed: Vec::new(),
             notice: None,
             deck: self.deck.clone(),
+            colors: self.colors.clone(),
             revision: self.deck.revision(),
             hashes: self
                 .deck
@@ -338,7 +348,18 @@ impl Backend {
     /// Notice another writer of the deck or its comments file. One external
     /// change of the deck is one undo step, so Cmd+Z takes back the model's edit.
     pub fn poll(&mut self) -> Result<Option<Event>> {
-        Ok(self.sync()?.0)
+        let mut theme_event = None;
+        if !self.linked {
+            let stamp = theme_colors::source_stamp();
+            if stamp != self.theme_stamp {
+                self.theme_stamp = stamp;
+                self.colors = theme_colors::load().colors;
+                theme_event = Some(Event::Theme {
+                    colors: self.colors.clone(),
+                });
+            }
+        }
+        Ok(self.sync()?.0.or(theme_event))
     }
 
     /// The event for what changed on disk, and whether the deck itself was reloaded.
@@ -388,6 +409,12 @@ impl Backend {
 
     pub fn receive_link(&mut self, message: LinkMessage) -> Result<Event> {
         match message {
+            LinkMessage::Theme { colors } => {
+                self.colors = colors;
+                Ok(Event::Theme {
+                    colors: self.colors.clone(),
+                })
+            }
             LinkMessage::Open { deck_path } => {
                 // Opening the deck that is already open must not drop its undo history.
                 if !same_file(&deck_path, &self.path) {
@@ -686,3 +713,5 @@ fn embedded(path: &str) -> Option<(&'static str, &'static str)> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod theme_tests;

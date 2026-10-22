@@ -8,8 +8,14 @@ import { renderSlide } from './render.js';
 
 hydrateIcons();
 const $ = selector => document.querySelector(selector);
-const state = { deck:null, revision:'', hashes:{}, images:{}, slideId:null, selected:new Set(), scopeSlide:false, preview:null, threads:[], linked:false, flash:[], mode:'edit', properties:false, comments:false, openThread:null, draftAnchor:null, drafts:{}, showResolved:false, zoom:1 };
+const state = { deck:null, revision:'', hashes:{}, images:{}, slideId:null, selected:new Set(), scopeSlide:false, preview:null, threads:[], linked:false, flash:[], mode:'edit', properties:false, comments:false, openThread:null, draftAnchor:null, drafts:{}, showResolved:false, zoom:null, panX:0, panY:0, spacePan:false };
 const queue = []; let pending = null, toastTimer, focusTimer, lastFocus = '', flashTimer;
+function applyTheme(colors) {
+  const roles = { bg:'bg', surface:'bg', raised:'raised', control:'control', hairline:'border_dim', text:'fg', muted:'fg_dim', faint:'fg_dim', accent:'accent', accent2:'accent2', 'accent-soft':'selection', success:'success', warning:'warning', danger:'error', canvas:'bg', 'on-accent':'bg', code:'raised', present:'bg' };
+  for (const [token, role] of Object.entries(roles)) if (/^#[0-9a-f]{6}$/i.test(colors[role] || '')) document.documentElement.style.setProperty(`--${token}`, colors[role]);
+  const bg = colors.bg?.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  if (bg) document.documentElement.style.colorScheme = parseInt(bg[1], 16) * .2126 + parseInt(bg[2], 16) * .7152 + parseInt(bg[3], 16) * .0722 > 140 ? 'light' : 'dark';
+}
 function focusChanged() {
   const key = JSON.stringify([state.slideId, [...state.selected]]);
   if (!state.linked || key === lastFocus) return;
@@ -46,16 +52,17 @@ function render() {
   $('#speaker-notes').value = api.slide()?.notes || ''; $('#speaker-notes').disabled = !api.slide();
   $('#slide-label').textContent = api.slide() ? `Slide ${String(state.deck.slides.indexOf(api.slide()) + 1).padStart(2, '0')} / ${String(state.deck.slides.length).padStart(2, '0')}  ·  ${api.slide().layout.replaceAll('-', ' ')}` : 'Your canvas';
   $('#slide-wrap').hidden = !api.slide(); $('#canvas-empty').hidden = Boolean(api.slide());
-  $('#slide-wrap').style.transform = `scale(${state.zoom})`; $('#zoom-fit').textContent = state.zoom === 1 ? 'Fit' : `${Math.round(state.zoom * 100)}%`;
+  applyViewport();
   for (const mode of ['edit','comment']) $(`#${mode}-mode`).setAttribute('aria-pressed', String(state.mode === mode));
   for (const node of document.querySelectorAll('#canvas .block')) node.classList.toggle('external-flash', state.flash.includes(node.dataset.id));
   const pill = $('#link-status'); pill.textContent = state.linked ? 'linked to nexus' : 'not linked'; pill.classList.toggle('connected', state.linked);
   pill.title = state.linked ? 'Comments go to your nexus conversation' : 'Not linked to a conversation — open it from nexus with /studio';
-  focusChanged(); renderPresentation();
+  feedback.renderPins(); focusChanged(); renderPresentation();
 }
 function handleEvent(event, reply) {
   const finished = reply ? pending : null; if (reply) pending = null;
   if (event.event === 'Deck') {
+    if (event.colors) applyTheme(event.colors);
     feedback.clearPreview(); Object.assign(state, { deck:event.deck, revision:event.revision, hashes:event.hashes, images:event.images, threads:event.threads || [], linked:event.linked, flash:event.changed || [] });
     if (!api.slide()) state.slideId = state.deck.slides[0]?.id || null;
     const blocks = new Set(api.slide()?.blocks.map(b => b.id) || []); state.selected = new Set([...state.selected].filter(id => blocks.has(id)));
@@ -63,6 +70,8 @@ function handleEvent(event, reply) {
     render();
     if (event.notice) toast(event.notice);
     if (state.flash.length) { clearTimeout(flashTimer); flashTimer = setTimeout(() => { state.flash = []; document.querySelectorAll('.external-flash').forEach(n => n.classList.remove('external-flash')); }, 1800); }
+  } else if (event.event === 'Theme') {
+    applyTheme(event.colors);
   } else if (event.event === 'Focus') {
     if (state.deck.slides.some(s => s.id === event.slide)) { state.slideId = event.slide; state.selected.clear(); render(); }
   } else {
@@ -84,9 +93,58 @@ $('#toggle-properties').onclick = properties; $('#close-properties').onclick = p
 function comments() { state.comments = !state.comments; if (state.comments) state.properties = false; render(); }
 $('#toggle-comments').onclick = comments; $('#close-comments').onclick = comments;
 for (const mode of ['edit','comment']) $(`#${mode}-mode`).onclick = () => { state.mode = mode; state.selected.clear(); render(); };
-function zoom(delta) { state.zoom = delta === 0 ? 1 : Math.max(.5, Math.min(2, state.zoom + delta)); render(); }
+// Version-one slides have a native 1600 px renderer width. Fit is responsive;
+// numeric zoom is screen pixels per native slide pixel, not a multiple of fit.
+const nativeWidth = 1600, stage = $('#stage'), wrap = $('#slide-wrap');
+function applyViewport() {
+  const scale = state.zoom === null ? 1 : state.zoom * nativeWidth / Math.max(1, parseFloat(getComputedStyle(wrap).width));
+  wrap.style.transform = `translate(${state.panX}px,${state.panY}px) scale(${scale})`;
+  $('#zoom-fit').textContent = state.zoom === null ? 'Fit' : `${Math.round(state.zoom * 100)}%`;
+}
+function zoomTo(value, point) {
+  const bounds = wrap.getBoundingClientRect();
+  if (!bounds.width) return;
+  const next = Math.max(.05, Math.min(8, value)), ratio = next / (bounds.width / nativeWidth);
+  if (point) {
+    state.panX += (point.x - bounds.left - bounds.width / 2) * (1 - ratio);
+    state.panY += (point.y - bounds.top - bounds.height / 2) * (1 - ratio);
+  }
+  state.zoom = next; applyViewport(); feedback.renderPins();
+}
+function zoom(delta) {
+  if (delta === 0) { state.zoom = null; state.panX = 0; state.panY = 0; applyViewport(); feedback.renderPins(); }
+  else zoomTo(wrap.getBoundingClientRect().width / nativeWidth + delta);
+}
 $('#zoom-in').onclick = () => zoom(.1); $('#zoom-out').onclick = () => zoom(-.1); $('#zoom-fit').onclick = () => zoom(0);
-new ResizeObserver(() => panel.renderToolbar()).observe($('#slide-wrap'));
+new ResizeObserver(() => { applyViewport(); panel.renderToolbar(); feedback.renderPins(); }).observe(wrap);
+stage.addEventListener('wheel', event => {
+  event.preventDefault();
+  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? stage.clientHeight : 1;
+  if (event.ctrlKey || event.metaKey) zoomTo(wrap.getBoundingClientRect().width / nativeWidth * Math.exp(-event.deltaY * unit * .01), { x:event.clientX, y:event.clientY });
+  else { state.panX -= event.deltaX * unit; state.panY -= event.deltaY * unit; applyViewport(); }
+}, { passive:false });
+let pan, gestureZoom;
+stage.addEventListener('pointerdown', event => {
+  if (!(state.spacePan && event.button === 0) && event.button !== 1) return;
+  event.preventDefault(); event.stopImmediatePropagation();
+  pan = { id:event.pointerId, x:event.clientX, y:event.clientY, panX:state.panX, panY:state.panY };
+  stage.setPointerCapture(event.pointerId); stage.classList.add('panning');
+}, true);
+stage.addEventListener('pointermove', event => {
+  if (!pan) return;
+  state.panX = pan.panX + event.clientX - pan.x; state.panY = pan.panY + event.clientY - pan.y; applyViewport();
+});
+function finishPan() {
+  if (pan && stage.hasPointerCapture(pan.id)) stage.releasePointerCapture(pan.id);
+  pan = null; stage.classList.remove('panning');
+}
+for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) stage.addEventListener(name, finishPan);
+function releaseSpace() { state.spacePan = false; stage.classList.remove('pan-ready'); }
+document.addEventListener('keyup', event => { if (event.code === 'Space') releaseSpace(); });
+window.addEventListener('blur', () => { releaseSpace(); finishPan(); });
+// WKWebView reports native pinch gestures here; Chromium uses ctrl+wheel.
+stage.addEventListener('gesturestart', event => { event.preventDefault(); gestureZoom = wrap.getBoundingClientRect().width / nativeWidth; }, { passive:false });
+stage.addEventListener('gesturechange', event => { event.preventDefault(); zoomTo(gestureZoom * event.scale, { x:event.clientX, y:event.clientY }); }, { passive:false });
 const pathDialog = $('#path-dialog'); let pathAction;
 function ask(heading, label, hint, value, action) {
   $('#path-heading').textContent = heading; $('#path-label').textContent = label; $('#path-hint').textContent = hint; $('#path-confirm').textContent = heading; $('#path-input').value = value;
@@ -132,6 +190,9 @@ document.addEventListener('keydown', event => {
   if (mod && ['=','+','-','0'].includes(key)) { event.preventDefault(); zoom(key === '0' ? 0 : key === '-' ? -.1 : .1); return; }
   if (mod && key === 's') { event.preventDefault(); if (editing) event.target.blur(); toast('Every change is saved to the deck file as you make it.'); return; }
   if (editing || document.querySelector('dialog[open]')) return;
+  if (event.code === 'Space') { event.preventDefault(); state.spacePan = true; stage.classList.add('pan-ready'); return; }
+  if (event.shiftKey && event.code === 'Digit1') { event.preventDefault(); zoom(0); return; }
+  if (event.shiftKey && event.code === 'Digit0') { event.preventDefault(); zoomTo(1); return; }
   if (key === 'b' && state.preview) { event.preventDefault(); feedback.togglePreview(); }
   else if (event.key === 'Escape') { feedback.clearPreview(); state.openThread = null; state.draftAnchor = null; state.selected.clear(); render(); }
   else if (key === 'c') { state.mode = state.mode === 'comment' ? 'edit' : 'comment'; state.selected.clear(); render(); }

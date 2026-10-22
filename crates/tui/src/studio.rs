@@ -122,9 +122,19 @@ impl AppView {
         }
         let wake = self.studio_wake();
         self.studio.canvas = Some(spawn(&path, wake)?);
+        self.send_studio_theme();
         self.refresh_tool_cards();
         self.push_status("studio linked to this conversation");
         Ok(())
+    }
+
+    /// Send the current terminal palette on attach and after a theme switch.
+    pub fn send_studio_theme(&mut self) {
+        if let Some(canvas) = &mut self.studio.canvas {
+            canvas.send(Message::Theme {
+                colors: self.theme.colors(),
+            });
+        }
     }
 
     /// The deck for `/studio` without an argument: the last one, else the
@@ -199,7 +209,7 @@ impl AppView {
                     self.push_status("studio closed");
                 }
             }
-            Message::Open { .. } => {}
+            Message::Open { .. } | Message::Theme { .. } => {}
         }
         Ok(())
     }

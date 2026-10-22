@@ -1,6 +1,9 @@
 # Design: nexus studio — the canvas of the conversation (decks first, then docs and mini-apps)
 
-Status: 2026-10-21. Supersedes the editor half of `docs/web-editors.md`; that
+Status: terminal-theme identity and revised comments are implemented; deck data
+and editing remain version 1. D1's version-2 node tree, auto-layout, numeric
+typography, imported fonts, and taffy/browser parity are not implemented yet.
+Supersedes the editor half of `docs/web-editors.md`; that
 document's device-key pairing stays the plan for remote access (phase S5).
 
 ## Decision
@@ -38,6 +41,43 @@ to a conversation.
 | Desktop app | `crates/studio` (package `nexus-studio`, `publish = false` until S3) | `tao` window + `wry` webview; the Rust backend owns the deck file |
 | Studio UI | `crates/studio/ui/` | HTML/CSS/vanilla JS modules embedded with `include_str!`; no Node build step |
 | Launcher | `nexus studio [path]` in `crates/tui/src/cli.rs` | runs `nexus-studio` from PATH or beside the `nexus` binary |
+
+### Terminal identity and comments
+
+Studio's **chrome follows the nexus terminal palette**, independently of the
+OS light/dark preference. `crates/core/src/theme_colors.rs` owns the existing
+omarchy/Alacritty and Ghostty parsing and shade derivation; the TUI converts
+explicit RGB roles to ratatui colors while retaining its ANSI fallbacks.
+Studio receives plain hex roles through `Theme { colors }` on attach and theme
+changes. Standalone studio loads and polls the same theme sources. Where the
+terminal uses an unspecified ANSI color, studio uses its xterm equivalent;
+custom terminal remappings of ANSI colors cannot be inferred from theme files.
+Chrome uses system sans, monospace metadata and shortcuts, `accent` for you and
+interactive controls, and `accent2` with the TUI's `✦` glyph for nexus. Deck
+colors and font choices remain separate from these chrome tokens.
+
+Comment pins are circular, constant-size 24 px badges. A severity ring uses
+error / accent2 / dim for must / should / consider. Each pin is outside the
+anchored layer, at the nearest available corner, with a 1 px leader to the
+anchor; placement avoids other layer boxes and text overflow too. Free-point
+pins start above/right of the click. Hover enlarges the badge and shows a
+one-line preview. Comment mode uses a crosshair-plus cursor, not a badge
+following the pointer.
+
+Threads render code spans, bold and italic with DOM nodes. Links are inert
+text; no comment text is interpreted as HTML. Edit titles summarize the actual
+operations using the guarded pre-edit values, even when an old sidecar's
+`why` is just "Suggested edit". Existing v1 size steps are displayed using the
+renderer's native 1600 px canvas sizes (21.6 / 35.2 / 48 / 67.2 / 99.2 px),
+not a claim of numeric typography support. Applied cards say
+"Applied · undo with Cmd+Z"; the backend still saves an application as one undo
+step.
+
+Canvas navigation supports Ctrl/Cmd+scroll (and native webview pinch) to zoom
+around the pointer, Space+drag or two-axis scroll to pan, Shift+1 to fit and
+reset pan, and Shift+0 for native 100%. Numeric zoom remains fixed while the
+window resizes; fit follows the available canvas. Until v2, native 100% means
+the existing renderer's 1600 px slide width, not the proposed 1920 px frame.
 
 Why a webview rather than drawing natively: slides are layout plus type, and
 HTML/CSS does both well. `wry` uses the system webview (WKWebView on macOS,
@@ -198,6 +238,7 @@ line: `{"version":1,"type":"…",…}`. Messages over 64 KB are rejected.
 | studio → nexus | `Focus{deck_path, slide, blocks}` | what is on screen and selected (debounced 300 ms) |
 | nexus → studio | `Open{deck_path}` | switch to a deck (the same deck is a no-op, undo history is kept) |
 | nexus → studio | `Focus{deck_path, slide}` | the model changed this slide; jump to it |
+| nexus → studio | `Theme{colors}` | terminal semantic roles as plain hex; chrome only |
 | nexus → studio | `Bye` | the conversation ended |
 
 **Transport today:** the TUI launches `nexus-studio --attach <deck>` as a child
@@ -268,4 +309,16 @@ the same lines through `nexus host`, which is why the types live in core.
   `NEXUS_RENDER_OUT=<dir> cargo test write_fixture_renders` (core) and
   `write_core_renders_of_the_dev_deck` (studio) write core-renderer PNGs to
   compare with them.
+- **D1 comment/identity harness:** `node crates/studio/ui-dev/d1-shot.mjs`
+  uses a dark deck at 1440×900 in the default nexus palette and the checked-in
+  light Alacritty fixture. It checks safe Markdown, operation-derived edit
+  titles, preview/apply/undo, pin non-overlap and constant 24 px sizes at
+  0.5× / 1× / 2× native zoom, pointer-anchored zoom, Space+drag and two-axis
+  scroll panning, fit/100% shortcuts, and terminal colors winning over opposite
+  OS preferences.
+  Outputs: `ui-dev/shots/d1-{comments,applied,layers}-{default,light}.png`
+  and `d1-pin-geometry.json` (under `crates/studio/`). The original screenshot
+  harness and existing tests are unchanged. New Rust tests cover portable
+  colors, fixture palette equivalence, theme link round trips, and a theme
+  update leaving the saved deck and undo history untouched.
 - **Hermetic:** no network, and no windows opened in tests.

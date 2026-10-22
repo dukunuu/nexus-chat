@@ -1,0 +1,18 @@
+# Hermetic light Alacritty palette for studio's terminal-identity harness.
+[colors.primary]
+background = "#ffffff"
+foreground = "#000000"
+[colors.normal]
+black = "#000000"
+red = "#c83242"
+green = "#168542"
+yellow = "#aa6b00"
+magenta = "#8056b0"
+cyan = "#007d8a"
+[colors.bright]
+black = "#606a76"
+red = "#c83242"
+green = "#168542"
+yellow = "#aa6b00"
+magenta = "#8056b0"
+cyan = "#007d8a"

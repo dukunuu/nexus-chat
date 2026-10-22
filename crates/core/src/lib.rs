@@ -34,6 +34,7 @@ pub mod skills;
 pub mod space;
 pub mod subagent;
 pub mod sync;
+pub mod theme_colors;
 pub mod tools;
 pub mod trace;
 pub mod train;
