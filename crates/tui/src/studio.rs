@@ -6,14 +6,14 @@
 //! (what studio shows, which decks the model changed), so the headless CLI and
 //! the host are unaffected.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::io::{BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
-use nexus_core::deck::link::{Line, Message};
+use nexus_core::deck::link::{ActivityState, Line, Message, WaitingReason};
 use nexus_core::deck::{Deck, Kind, feedback, render, same_file};
 use tokio::sync::{Notify, mpsc};
 
@@ -62,12 +62,82 @@ struct Focus {
     blocks: Vec<String>,
 }
 
+#[derive(Clone)]
+struct StudioComment {
+    deck: PathBuf,
+    thread: String,
+    reason: Option<WaitingReason>,
+}
+
+struct CommentTurn {
+    comment: StudioComment,
+    task: nexus_core::app::ChatTaskId,
+    slides: Vec<(String, String)>,
+    edited: BTreeSet<usize>,
+    replies: usize,
+    replied: bool,
+}
+
+impl CommentTurn {
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.edited.is_empty() {
+            let numbers = self
+                .edited
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!(
+                "edited slide{} {numbers}",
+                if self.edited.len() == 1 { "" } else { "s" }
+            ));
+        }
+        if self.replied {
+            parts.push("replied in this thread".into());
+        }
+        parts.join("; ")
+    }
+}
+
+fn slide_revisions(path: &Path) -> Vec<(String, String)> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|source| Deck::check(&source).ok())
+        .map(|deck| {
+            deck.slides
+                .iter()
+                .map(|slide| {
+                    (
+                        slide.id.clone(),
+                        serde_json::to_string(slide).expect("slide JSON"),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn model_replies(comment: &StudioComment) -> usize {
+    feedback::load(&comment.deck)
+        .unwrap_or_default()
+        .iter()
+        .filter(|thread| thread.id == comment.thread)
+        .flat_map(|thread| &thread.messages)
+        .filter(|message| matches!(message.role, feedback::Role::Model))
+        .count()
+}
+
 /// Terminal-side link state; lives on `AppView`.
 #[derive(Default)]
 pub struct Studio {
     canvas: Option<Canvas>,
     /// Comments waiting for a free composer and no streaming reply.
     queued: VecDeque<String>,
+    comments: VecDeque<StudioComment>,
+    active: Option<CommentTurn>,
+    #[cfg(test)]
+    activities: Vec<Message>,
     last_deck: Option<PathBuf>,
     focus: Option<Focus>,
     /// What the model was last told, so it hears about a change once.
@@ -82,10 +152,10 @@ impl Studio {
         self.canvas.is_some()
     }
 
-    /// Whether comments are waiting to be sent.
+    /// Whether waiting comments or an active comment turn need polling.
     #[must_use]
     pub fn has_queued(&self) -> bool {
-        !self.queued.is_empty()
+        !self.queued.is_empty() || self.active.is_some()
     }
 }
 
@@ -184,24 +254,26 @@ impl AppView {
                 text,
                 ..
             } => {
-                let text =
-                    self.comment_text(&deck_path, &thread_id, &slide, block.as_deref(), &text)?;
-                self.queue_studio_text(text);
+                self.queue_studio_comment(deck_path, thread_id, &slide, block.as_deref(), &text)?;
             }
             Message::Reply {
                 deck_path,
                 thread_id,
                 text,
             } => {
-                let threads = feedback::load(&deck_path)?;
-                let thread = threads
-                    .iter()
-                    .find(|t| t.id == thread_id)
-                    .context("studio replied in a thread that no longer exists")?;
+                let threads = match feedback::load(&deck_path) {
+                    Ok(threads) => threads,
+                    Err(error) => {
+                        self.studio_failure(deck_path, thread_id);
+                        return Err(error);
+                    }
+                };
+                let Some(thread) = threads.iter().find(|t| t.id == thread_id) else {
+                    self.studio_failure(deck_path, thread_id);
+                    bail!("studio replied in a thread that no longer exists");
+                };
                 let (slide, block) = (thread.anchor.slide.clone(), thread.anchor.block.clone());
-                let text =
-                    self.comment_text(&deck_path, &thread_id, &slide, block.as_deref(), &text)?;
-                self.queue_studio_text(text);
+                self.queue_studio_comment(deck_path, thread_id, &slide, block.as_deref(), &text)?;
             }
             Message::Bye => {
                 if self.studio.canvas.take().is_some() {
@@ -209,14 +281,88 @@ impl AppView {
                     self.push_status("studio closed");
                 }
             }
-            Message::Open { .. } | Message::Theme { .. } => {}
+            Message::Open { .. } | Message::Theme { .. } | Message::Activity { .. } => {}
         }
         Ok(())
     }
 
-    fn queue_studio_text(&mut self, text: String) {
+    fn studio_activity(
+        &mut self,
+        comment: &StudioComment,
+        state: ActivityState,
+        detail: Option<String>,
+    ) {
+        let message = Message::Activity {
+            deck_path: comment.deck.clone(),
+            thread_id: comment.thread.clone(),
+            state,
+            detail: detail.map(|text| text.chars().take(1024).collect()),
+        };
+        #[cfg(test)]
+        self.studio.activities.push(message.clone());
+        if let Some(canvas) = &mut self.studio.canvas {
+            canvas.send(message);
+        }
+    }
+
+    fn studio_failure(&mut self, deck: PathBuf, thread: String) {
+        self.studio_activity(
+            &StudioComment {
+                deck,
+                thread,
+                reason: None,
+            },
+            ActivityState::Failed,
+            Some("Could not send this comment; see nexus for details".into()),
+        );
+    }
+
+    fn queue_studio_comment(
+        &mut self,
+        deck: PathBuf,
+        thread: String,
+        slide: &str,
+        block: Option<&str>,
+        text: &str,
+    ) -> Result<()> {
+        let text = match self.comment_text(&deck, &thread, slide, block, text) {
+            Ok(text) => text,
+            Err(error) => {
+                self.studio_failure(deck, thread);
+                return Err(error);
+            }
+        };
+        let reason = self
+            .studio_wait_reason()
+            .or_else(|| (!self.studio.queued.is_empty()).then_some(WaitingReason::Streaming));
+        let comment = StudioComment {
+            deck,
+            thread,
+            reason,
+        };
+        if let Some(reason) = comment.reason {
+            self.studio_activity(&comment, ActivityState::Queued { reason }, None);
+        }
         self.studio.queued.push_back(text);
+        self.studio.comments.push_back(comment);
         self.studio.warned_draft = false;
+        Ok(())
+    }
+
+    fn studio_wait_reason(&self) -> Option<WaitingReason> {
+        if !self.input_text().trim().is_empty() {
+            Some(WaitingReason::Draft)
+        } else if self.is_streaming() || self.studio.active.is_some() {
+            Some(WaitingReason::Streaming)
+        } else if self
+            .current_model
+            .as_deref()
+            .is_none_or(|model| self.resolve_model_backend(model).is_none())
+        {
+            Some(WaitingReason::NoModel)
+        } else {
+            None
+        }
     }
 
     /// `Comment on decks/a.deck.json · slide 2 (b4: Make room…): text`, the
@@ -280,6 +426,7 @@ impl AppView {
         }
         let changed = std::mem::take(&mut self.deck_link.lock().expect("deck link").changed);
         for (path, slide) in changed {
+            self.studio_progress(&path, &slide);
             self.studio.last_deck = Some(path.clone());
             if let Some(canvas) = &mut self.studio.canvas {
                 if !same_file(&canvas.deck, &path) {
@@ -295,7 +442,97 @@ impl AppView {
                 });
             }
         }
+        self.finish_studio_turn();
         self.send_queued_comment();
+    }
+
+    fn studio_progress(&mut self, path: &Path, slide: &str) {
+        let Some(turn) = &mut self.studio.active else {
+            return;
+        };
+        if !same_file(path, &turn.comment.deck) {
+            return;
+        }
+        let next = slide_revisions(path);
+        let before = turn.edited.clone();
+        for (index, revision) in next.iter().enumerate() {
+            if !turn.slides.contains(revision) {
+                turn.edited.insert(index + 1);
+            }
+        }
+        for (index, (id, _)) in turn.slides.iter().enumerate() {
+            if !next.iter().any(|(next_id, _)| next_id == id) {
+                turn.edited.insert(index + 1);
+            }
+        }
+        // Deck-wide changes (for example a theme) need not alter slide JSON.
+        if turn.edited == before
+            && let Some(index) = next.iter().position(|(id, _)| id == slide)
+        {
+            turn.edited.insert(index + 1);
+        }
+        turn.slides = next;
+        if turn.edited != before {
+            let (comment, summary) = (turn.comment.clone(), turn.summary());
+            self.studio_activity(&comment, ActivityState::Progress, Some(summary));
+        }
+    }
+
+    fn finish_studio_turn(&mut self) {
+        let Some(mut turn) = self.studio.active.take() else {
+            return;
+        };
+        if !turn.replied && model_replies(&turn.comment) > turn.replies {
+            turn.replied = true;
+            self.studio_activity(
+                &turn.comment,
+                ActivityState::Progress,
+                Some("replied in this thread".into()),
+            );
+        }
+        if self.chat_tasks.contains_key(&turn.task) {
+            self.studio.active = Some(turn);
+            return;
+        }
+        let outcome = self
+            .deck_link
+            .lock()
+            .expect("deck link")
+            .turns
+            .remove(&turn.task)
+            .flatten();
+        let (state, detail) = outcome.map_or_else(
+            || (ActivityState::Stopped, "Response stopped".into()),
+            |outcome| {
+                let summary = turn.summary();
+                let detail = if outcome.state == ActivityState::Done && !summary.is_empty() {
+                    summary
+                } else if outcome.detail.trim().is_empty() {
+                    "no changes".into()
+                } else {
+                    outcome.detail
+                };
+                (outcome.state, detail)
+            },
+        );
+        self.studio_activity(&turn.comment, state, Some(detail));
+    }
+
+    fn update_studio_waiting(&mut self) -> Option<WaitingReason> {
+        let reason = self.studio_wait_reason();
+        let mut updates = Vec::new();
+        for comment in &mut self.studio.comments {
+            if reason.is_some() && comment.reason != reason {
+                comment.reason = reason;
+                if let Some(reason) = reason {
+                    updates.push((comment.clone(), reason));
+                }
+            }
+        }
+        for (comment, reason) in updates {
+            self.studio_activity(&comment, ActivityState::Queued { reason }, None);
+        }
+        reason
     }
 
     /// One queued comment per call, and only when it cannot disturb anything:
@@ -304,7 +541,8 @@ impl AppView {
         if self.studio.queued.is_empty() {
             return;
         }
-        if !self.input_text().trim().is_empty() {
+        let reason = self.update_studio_waiting();
+        if reason == Some(WaitingReason::Draft) {
             if !self.studio.warned_draft {
                 self.studio.warned_draft = true;
                 self.push_status(
@@ -313,14 +551,37 @@ impl AppView {
             }
             return;
         }
-        if self.is_streaming() || self.current_model.is_none() || !self.backends.any() {
+        if reason.is_some() {
             return;
         }
         let text = self.studio.queued.pop_front().expect("a queued comment");
+        let comment = self.studio.comments.pop_front().expect("queued identity");
+        let slides = slide_revisions(&comment.deck);
+        let replies = model_replies(&comment);
         let text = self.with_studio_context(text);
         if let Err(error) = self.core.send_message(text) {
+            self.studio_failure(comment.deck, comment.thread);
             self.push_status(format!("studio comment not sent: {error:#}"));
+        } else if let Some(task) = self.active_chat_task().map(|task| task.id) {
+            self.deck_link
+                .lock()
+                .expect("deck link")
+                .turns
+                .insert(task, None);
+            self.studio_activity(&comment, ActivityState::Working, None);
+            self.studio.active = Some(CommentTurn {
+                comment,
+                task,
+                slides,
+                edited: BTreeSet::new(),
+                replies,
+                replied: false,
+            });
+            self.push_status("studio comment sent");
+        } else {
+            self.studio_failure(comment.deck, comment.thread);
         }
+        self.update_studio_waiting();
     }
 
     /// Append `studio: viewing slide 3, selected b4` to an outgoing message,
@@ -450,6 +711,327 @@ mod tests {
 
     fn temp() -> Dir {
         Dir(std::env::temp_dir().join(format!("nexus-studio-link-{}", uuid::Uuid::new_v4())))
+    }
+
+    fn ready(app: &mut AppView) {
+        app.current_model = Some("a/one".into());
+        // No metadata/memory jobs; the request task is aborted before this
+        // current-thread test runtime can poll it, so no network is touched.
+        app.incognito = true;
+    }
+
+    fn start_comment_turn(app: &mut AppView) -> nexus_core::app::ChatTaskId {
+        app.poll_studio();
+        let task = app.active_chat_task().expect("comment started");
+        task.abort.abort();
+        task.id
+    }
+
+    fn activities<'a>(app: &'a AppView, thread: &str) -> Vec<(ActivityState, Option<&'a str>)> {
+        app.studio
+            .activities
+            .iter()
+            .filter_map(|message| match message {
+                Message::Activity {
+                    thread_id,
+                    state,
+                    detail,
+                    ..
+                } if thread_id == thread => Some((*state, detail.as_deref())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn comment_activity_waits_works_and_reports_every_edited_slide() {
+        let dir = temp();
+        let mut app = view(&dir.0);
+        let path = deck_file(&app);
+        ready(&mut app);
+        app.set_input("my draft");
+        app.handle_studio_message(comment(path.clone(), "Clarify this"))
+            .unwrap();
+        assert_eq!(
+            activities(&app, "t1"),
+            vec![(
+                ActivityState::Queued {
+                    reason: WaitingReason::Draft
+                },
+                None
+            )]
+        );
+        app.clear_input();
+        let task = start_comment_turn(&mut app);
+        let mut deck = Deck::check(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        deck.slides[0].notes = "Changed".into();
+        nexus_core::deck::write_atomic(&path, &serde_json::to_vec(&deck).unwrap()).unwrap();
+        app.deck_link
+            .lock()
+            .unwrap()
+            .changed
+            .push((path.clone(), "s1".into()));
+        app.poll_studio();
+        assert_eq!(
+            activities(&app, "t1").last(),
+            Some(&(ActivityState::Progress, Some("edited slide 1")))
+        );
+        deck.slides[1].notes = "Also changed".into();
+        nexus_core::deck::write_atomic(&path, &serde_json::to_vec(&deck).unwrap()).unwrap();
+        app.deck_link
+            .lock()
+            .unwrap()
+            .changed
+            .push((path, "s2".into()));
+        app.poll_studio();
+        app.core
+            .on_chat_event(task, nexus_core::provider::StreamEvent::Done)
+            .unwrap();
+        app.poll_studio();
+        assert_eq!(
+            activities(&app, "t1"),
+            vec![
+                (
+                    ActivityState::Queued {
+                        reason: WaitingReason::Draft
+                    },
+                    None
+                ),
+                (ActivityState::Working, None),
+                (ActivityState::Progress, Some("edited slide 1")),
+                (ActivityState::Progress, Some("edited slides 1, 2")),
+                (ActivityState::Done, Some("edited slides 1, 2")),
+            ]
+        );
+        assert!(app.deck_link.lock().unwrap().turns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn comment_activity_single_slide_done_and_discarded_turn_are_observable() {
+        let dir = temp();
+        let mut app = view(&dir.0);
+        let path = deck_file(&app);
+        ready(&mut app);
+        app.set_input("draft");
+        app.handle_studio_message(comment(path.clone(), "Fix slide one"))
+            .unwrap();
+        app.clear_input();
+        let task = start_comment_turn(&mut app);
+        let mut deck = Deck::check(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        deck.slides[0].notes = "Fixed".into();
+        nexus_core::deck::write_atomic(&path, &serde_json::to_vec(&deck).unwrap()).unwrap();
+        app.deck_link
+            .lock()
+            .unwrap()
+            .changed
+            .push((path.clone(), "s1".into()));
+        app.core
+            .on_chat_event(task, nexus_core::provider::StreamEvent::Done)
+            .unwrap();
+        app.poll_studio();
+        assert_eq!(
+            activities(&app, "t1"),
+            vec![
+                (
+                    ActivityState::Queued {
+                        reason: WaitingReason::Draft
+                    },
+                    None
+                ),
+                (ActivityState::Working, None),
+                (ActivityState::Progress, Some("edited slide 1")),
+                (ActivityState::Done, Some("edited slide 1")),
+            ]
+        );
+        app.handle_studio_message(comment(path, "Try again"))
+            .unwrap();
+        start_comment_turn(&mut app);
+        assert!(
+            app.studio.has_queued(),
+            "active turns keep the bridge polling"
+        );
+        let session = app.session.as_ref().unwrap().id.clone();
+        app.core.discard_chat_task(&session);
+        app.poll_studio();
+        assert_eq!(
+            activities(&app, "t1").last(),
+            Some(&(ActivityState::Stopped, Some("Response stopped")))
+        );
+        assert!(!app.studio.has_queued());
+    }
+
+    #[tokio::test]
+    async fn comment_activity_failure_is_capped_scrubbed_and_cancel_is_stopped() {
+        let dir = temp();
+        let mut app = view(&dir.0);
+        let path = deck_file(&app);
+        ready(&mut app);
+        app.handle_studio_message(comment(path.clone(), "Try this"))
+            .unwrap();
+        let task = start_comment_turn(&mut app);
+        let error = format!("Bearer sk-123456789012345678901234 {}", "é".repeat(300));
+        app.core
+            .on_chat_event(task, nexus_core::provider::StreamEvent::Error(error))
+            .unwrap();
+        app.poll_studio();
+        let (state, detail) = activities(&app, "t1").pop().unwrap();
+        assert_eq!(state, ActivityState::Failed);
+        let detail = detail.unwrap();
+        assert!(detail.contains("[REDACTED]"));
+        assert!(!detail.contains("sk-123"));
+        assert_eq!(detail.chars().count(), 240);
+        app.handle_studio_message(comment(path, "Again")).unwrap();
+        let task = start_comment_turn(&mut app);
+        app.core.cancel_chat_task(task).unwrap();
+        app.poll_studio();
+        assert_eq!(
+            activities(&app, "t1").last(),
+            Some(&(ActivityState::Stopped, Some("Response stopped")))
+        );
+    }
+
+    #[tokio::test]
+    async fn two_comments_have_ordered_independent_turns_and_plain_answer_excerpts() {
+        let dir = temp();
+        let mut app = view(&dir.0);
+        let path = deck_file(&app);
+        ready(&mut app);
+        app.set_input("draft");
+        app.handle_studio_message(comment(path.clone(), "First"))
+            .unwrap();
+        let mut second = comment(path, "Second");
+        if let Message::Comment { thread_id, .. } = &mut second {
+            *thread_id = "t2".into();
+        }
+        app.handle_studio_message(second).unwrap();
+        app.clear_input();
+        let first = start_comment_turn(&mut app);
+        app.poll_studio();
+        assert_eq!(
+            activities(&app, "t2").last(),
+            Some(&(
+                ActivityState::Queued {
+                    reason: WaitingReason::Streaming
+                },
+                None
+            ))
+        );
+        app.core
+            .on_chat_event(
+                first,
+                nexus_core::provider::StreamEvent::Token("**Which** audience?".into()),
+            )
+            .unwrap();
+        app.core
+            .on_chat_event(first, nexus_core::provider::StreamEvent::Done)
+            .unwrap();
+        let second = start_comment_turn(&mut app);
+        assert_ne!(first, second);
+        assert_eq!(
+            activities(&app, "t1").last(),
+            Some(&(ActivityState::Done, Some("Which audience?")))
+        );
+        app.core
+            .on_chat_event(second, nexus_core::provider::StreamEvent::Done)
+            .unwrap();
+        app.poll_studio();
+        assert_eq!(
+            activities(&app, "t2"),
+            vec![
+                (
+                    ActivityState::Queued {
+                        reason: WaitingReason::Draft
+                    },
+                    None
+                ),
+                (
+                    ActivityState::Queued {
+                        reason: WaitingReason::Streaming
+                    },
+                    None
+                ),
+                (ActivityState::Working, None),
+                (ActivityState::Done, Some("no changes")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn comment_activity_tracks_model_replies_in_its_own_thread() {
+        let dir = temp();
+        let mut app = view(&dir.0);
+        let path = deck_file(&app);
+        ready(&mut app);
+        app.handle_studio_message(comment(path.clone(), "Explain this"))
+            .unwrap();
+        let task = start_comment_turn(&mut app);
+        let thread = feedback::Thread {
+            id: "t1".into(),
+            anchor: feedback::Anchor {
+                slide: "s1".into(),
+                block: None,
+                x: 0,
+                y: 0,
+                px: true,
+            },
+            severity: feedback::Severity::Consider,
+            created: feedback::now(),
+            resolved: None,
+            messages: vec![feedback::Message::new(
+                feedback::Role::Model,
+                "Explained".into(),
+                vec![],
+            )],
+        };
+        feedback::save(&path, &[thread]).unwrap();
+        app.poll_studio();
+        assert_eq!(
+            activities(&app, "t1").last(),
+            Some(&(ActivityState::Progress, Some("replied in this thread")))
+        );
+        app.core
+            .on_chat_event(task, nexus_core::provider::StreamEvent::Done)
+            .unwrap();
+        app.poll_studio();
+        assert_eq!(
+            activities(&app, "t1").last(),
+            Some(&(ActivityState::Done, Some("replied in this thread")))
+        );
+    }
+
+    #[tokio::test]
+    async fn comment_activity_reason_changes_and_invalid_send_fails() {
+        let dir = temp();
+        let mut app = view(&dir.0);
+        let path = deck_file(&app);
+        app.handle_studio_message(comment(path.clone(), "Wait"))
+            .unwrap();
+        assert_eq!(
+            activities(&app, "t1").last(),
+            Some(&(
+                ActivityState::Queued {
+                    reason: WaitingReason::NoModel
+                },
+                None
+            ))
+        );
+        app.set_input("draft");
+        app.poll_studio();
+        assert_eq!(
+            activities(&app, "t1").last(),
+            Some(&(
+                ActivityState::Queued {
+                    reason: WaitingReason::Draft
+                },
+                None
+            ))
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(app.handle_studio_message(comment(path, "Gone")).is_err());
+        assert_eq!(
+            activities(&app, "t1").last().unwrap().0,
+            ActivityState::Failed
+        );
     }
 
     #[tokio::test]

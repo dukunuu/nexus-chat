@@ -1254,9 +1254,55 @@ impl App {
         self.finish_chat_task_state(task, error, false)
     }
 
+    fn finish_chat_task_state(
+        &mut self,
+        task: super::ChatTask,
+        error: Option<String>,
+        stopped: bool,
+    ) -> Result<()> {
+        use crate::deck::link::{ActivityState, TurnOutcome};
+
+        let id = task.id;
+        let watching = self
+            .deck_link
+            .lock()
+            .expect("deck link")
+            .turns
+            .contains_key(&id);
+        let outcome = watching.then(|| {
+            let scrubber = crate::trace::Scrubber::new(self.saved_secrets());
+            let (answer, _) = split_inline_reasoning(&task.buffer);
+            let (state, detail) = if let Some(error) = &error {
+                (ActivityState::Failed, scrubber.scrub(error))
+            } else if stopped {
+                (ActivityState::Stopped, "Response stopped".to_string())
+            } else {
+                (
+                    ActivityState::Done,
+                    scrubber.scrub(&crate::markdown::to_plain(&answer)),
+                )
+            };
+            TurnOutcome {
+                state,
+                detail: detail.chars().take(240).collect(),
+            }
+        });
+        let result = self.persist_chat_task_state(task, error, stopped);
+        if let Some(mut outcome) = outcome {
+            if result.is_err() {
+                outcome.state = ActivityState::Failed;
+                outcome.detail = "Could not save the response; see nexus for details".into();
+            }
+            let mut link = self.deck_link.lock().expect("deck link");
+            link.turns.insert(id, Some(outcome));
+            link.notify.notify_one();
+        }
+        result
+    }
+
     // Long by design (long state-transition fn).
     #[allow(clippy::too_many_lines)]
-    fn finish_chat_task_state(
+    fn persist_chat_task_state(
         &mut self,
         task: super::ChatTask,
         error: Option<String>,

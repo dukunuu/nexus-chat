@@ -1,5 +1,6 @@
 //! Version-one, secret-free JSON-lines canvas protocol. One envelope per line.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ pub struct Line {
     pub message: Message,
 }
 
-/// Studio sends Hello/Comment/Reply/Focus; nexus sends Open/Focus/Theme/Bye.
+/// Studio sends Hello/Comment/Reply/Focus; nexus sends Open/Focus/Theme/Activity/Bye.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Message {
@@ -47,12 +48,79 @@ pub enum Message {
     Theme {
         colors: crate::theme_colors::ThemeColors,
     },
+    Activity {
+        deck_path: PathBuf,
+        thread_id: String,
+        #[serde(flatten)]
+        state: ActivityState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
     Bye,
+}
+
+/// Additive thread activity; unknown future states are ignored by studio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ActivityState {
+    Queued {
+        reason: WaitingReason,
+    },
+    Working,
+    Progress,
+    Done,
+    Failed,
+    Stopped,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Why a received comment cannot start yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitingReason {
+    Draft,
+    Streaming,
+    NoModel,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A result retained only for a chat task the studio bridge is watching.
+pub struct TurnOutcome {
+    pub state: ActivityState,
+    pub detail: String,
+}
+
+impl Message {
+    fn check(&self) -> Result<()> {
+        if let Self::Activity {
+            deck_path,
+            thread_id,
+            detail,
+            ..
+        } = self
+        {
+            ensure!(
+                deck_path.as_os_str().len() <= 4096,
+                "activity path too long"
+            );
+            ensure!(thread_id.chars().count() <= 128, "activity thread too long");
+            ensure!(
+                detail
+                    .as_ref()
+                    .is_none_or(|text| text.chars().count() <= 1024),
+                "activity detail too long"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Line {
     /// Encode a complete line, including its newline.
     pub fn encode(message: Message) -> Result<String> {
+        message.check()?;
         Ok(serde_json::to_string(&Self {
             version: 1,
             message,
@@ -64,6 +132,7 @@ impl Line {
         ensure!(source.len() <= 64 * 1024, "link message too large");
         let line: Self = serde_json::from_str(source)?;
         ensure!(line.version == 1, "unsupported studio protocol version");
+        line.message.check()?;
         Ok(line.message)
     }
 }
@@ -80,6 +149,8 @@ pub struct Context {
     pub changed: Vec<(PathBuf, String)>,
     /// Whether the `deck` tool already sent its field reference this session.
     pub schema_shown: bool,
+    /// Registered comment turns, keyed by chat task id; the bridge drains results.
+    pub turns: HashMap<u64, Option<TurnOutcome>>,
     /// Wakes the terminal's event loop when `changed` grows.
     pub notify: Arc<Notify>,
 }
@@ -87,6 +158,48 @@ pub struct Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_is_additive_bounded_and_forward_compatible() {
+        for state in [
+            ActivityState::Queued {
+                reason: WaitingReason::Draft,
+            },
+            ActivityState::Queued {
+                reason: WaitingReason::Streaming,
+            },
+            ActivityState::Queued {
+                reason: WaitingReason::NoModel,
+            },
+            ActivityState::Working,
+            ActivityState::Progress,
+            ActivityState::Done,
+            ActivityState::Failed,
+            ActivityState::Stopped,
+        ] {
+            let message = Message::Activity {
+                deck_path: "a.deck.json".into(),
+                thread_id: "t1".into(),
+                state,
+                detail: Some("edited slide 3".into()),
+            };
+            let line = Line::encode(message.clone()).unwrap();
+            assert_eq!(Line::decode(&line).unwrap(), message);
+        }
+        let future = r#"{"version":1,"type":"Activity","deck_path":"a","thread_id":"t","state":"thinking","detail":"future"}"#;
+        assert!(matches!(
+            Line::decode(future).unwrap(),
+            Message::Activity {
+                state: ActivityState::Unknown,
+                ..
+            }
+        ));
+        let huge = future.replace("future", &"x".repeat(1025));
+        assert!(Line::decode(&huge).is_err());
+        assert!(
+            Line::decode(&future.replace("\"t\"", &format!("\"{}\"", "t".repeat(129)))).is_err()
+        );
+    }
 
     #[test]
     fn protocol_roundtrip_and_version() {

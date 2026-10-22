@@ -10,7 +10,7 @@ import { animatePanelController } from './animate-panel.js';
 
 hydrateIcons();
 const $ = selector => document.querySelector(selector);
-const state = { deck:null, revision:'', hashes:{}, images:{}, slideId:null, selected:new Set(), scopeSlide:false, preview:null, threads:[], linked:false, flash:[], mode:'edit', panelTab:'design', playStep:0, properties:false, comments:false, openThread:null, draftAnchor:null, drafts:{}, showResolved:false, zoom:null, panX:0, panY:0, spacePan:false };
+const state = { deck:null, revision:'', hashes:{}, images:{}, slideId:null, selected:new Set(), scopeSlide:false, preview:null, threads:[], activities:{}, linked:false, flash:[], mode:'edit', panelTab:'design', playStep:0, properties:false, comments:false, openThread:null, draftAnchor:null, drafts:{}, showResolved:false, zoom:null, panX:0, panY:0, spacePan:false };
 const queue = []; let pending = null, toastTimer, focusTimer, lastFocus = '', flashTimer;
 function applyTheme(colors) {
   const roles = { bg:'bg', surface:'bg', raised:'raised', control:'control', hairline:'border_dim', text:'fg', muted:'fg_dim', faint:'fg_dim', accent:'accent', accent2:'accent2', 'accent-soft':'selection', success:'success', warning:'warning', danger:'error', canvas:'bg', 'on-accent':'bg', code:'raised', present:'bg' };
@@ -24,7 +24,11 @@ function focusChanged() {
   lastFocus = key; clearTimeout(focusTimer);
   focusTimer = setTimeout(() => command({ command:'Focus', slide:state.slideId, blocks:[...state.selected] }), 300);
 }
-function toast(text) { const node = $('#status'); node.textContent = text; node.hidden = !text; clearTimeout(toastTimer); toastTimer = setTimeout(() => node.hidden = true, 6000); }
+function toast(text, view) {
+  const node = $('#status'); node.textContent = text; node.hidden = !text;
+  if (view) { const action = document.createElement('button'); action.textContent = 'View'; action.onclick = () => { node.hidden = true; view(); }; node.append(document.createTextNode(' · '), action); }
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => node.hidden = true, 6000);
+}
 function pump() {
   if (pending || !queue.length) return;
   pending = queue.shift();
@@ -86,8 +90,8 @@ function render() {
   applyViewport();
   for (const mode of ['edit','comment']) $(`#${mode}-mode`).setAttribute('aria-pressed', String(state.mode === mode));
   for (const node of document.querySelectorAll('#canvas .block')) node.classList.toggle('external-flash', state.flash.includes(node.dataset.id));
-  const pill = $('#link-status'); pill.textContent = state.linked ? 'linked to nexus' : 'not linked'; pill.classList.toggle('connected', state.linked);
-  pill.title = state.linked ? 'Comments go to your nexus conversation' : 'Not linked to a conversation — open it from nexus with /studio';
+  feedback.renderLink();
+  $('#link-status').title = state.linked ? 'Comments go to your nexus conversation' : 'Not linked to a conversation — open it from nexus with /studio';
   for (const tab of ['design','animate']) $(`#tab-${tab}`).setAttribute('aria-selected',String(state.panelTab === tab));
   feedback.renderPins(); animationPanel.badges(); focusChanged(); playback.refresh();
 }
@@ -100,8 +104,9 @@ function handleEvent(event, reply) {
     if (!api.slide()) state.slideId = state.deck.slides[0]?.id || null;
     const known = new Set(allNodes(api.slide()).map(n => n.id)); state.selected = new Set([...state.selected].filter(id => known.has(id)));
     if (state.openNewest) { state.openThread = state.threads.at(-1)?.id; state.openNewest = false; }
-    render();
     if (event.notice) toast(event.notice);
+    feedback.updateActivities(event.activities);
+    render();
     if (state.flash.length) { clearTimeout(flashTimer); flashTimer = setTimeout(() => { state.flash = []; document.querySelectorAll('.external-flash').forEach(n => n.classList.remove('external-flash')); }, 1800); }
   } else if (event.event === 'Theme') {
     applyTheme(event.colors);

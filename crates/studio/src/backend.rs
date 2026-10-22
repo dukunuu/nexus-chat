@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 mod feedback;
 mod fonts;
-use nexus_core::deck::link::Message as LinkMessage;
+use nexus_core::deck::link::{ActivityState, Message as LinkMessage};
 use std::time::SystemTime;
 
 /// All messages accepted from the presentation layer. `Open` and `ImportAsset`
@@ -88,6 +88,13 @@ pub enum Command {
     },
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ThreadActivity {
+    #[serde(flatten)]
+    state: ActivityState,
+    detail: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "event")]
 pub enum Event {
@@ -101,11 +108,13 @@ pub enum Event {
         images: BTreeMap<String, String>,
         threads: Vec<nexus_core::deck::feedback::Thread>,
         linked: bool,
+        activities: BTreeMap<String, ThreadActivity>,
         changed: Vec<String>,
         notice: Option<String>,
     },
     Feedback {
         threads: Vec<nexus_core::deck::feedback::Thread>,
+        activities: BTreeMap<String, ThreadActivity>,
         notes: Vec<String>,
     },
     Focus {
@@ -155,6 +164,7 @@ pub struct Backend {
     redo: Vec<Deck>,
     pub fetcher: Arc<Fetcher>,
     feedback: Vec<nexus_core::deck::feedback::Thread>,
+    activities: BTreeMap<PathBuf, BTreeMap<String, ThreadActivity>>,
     pub linked: bool,
     pub outgoing: Vec<LinkMessage>,
     deck_stamp: Option<Stamp>,
@@ -194,6 +204,7 @@ impl Backend {
             undo: Vec::new(),
             redo: Vec::new(),
             feedback: Vec::new(),
+            activities: BTreeMap::new(),
             linked: false,
             outgoing: Vec::new(),
             deck_stamp: None,
@@ -216,6 +227,7 @@ impl Backend {
         Event::Deck {
             threads: self.feedback.clone(),
             linked: self.linked,
+            activities: self.thread_activities(),
             changed: Vec::new(),
             notice: self.load_notice(),
             deck: self.deck.clone(),
@@ -469,6 +481,26 @@ impl Backend {
 
     pub fn receive_link(&mut self, message: LinkMessage) -> Result<Event> {
         match message {
+            LinkMessage::Activity {
+                deck_path,
+                thread_id,
+                state,
+                detail,
+            } => {
+                if state != ActivityState::Unknown {
+                    let path = absolute(&deck_path)?;
+                    self.activities
+                        .entry(path)
+                        .or_default()
+                        .insert(thread_id, ThreadActivity { state, detail });
+                }
+                // Include a just-written deck in this event, so Undo is ready
+                // even when completion beats the periodic filesystem poll.
+                Ok(self
+                    .sync()?
+                    .0
+                    .unwrap_or_else(|| self.feedback_event(Vec::new())))
+            }
             LinkMessage::Theme { colors } => {
                 self.colors = colors;
                 Ok(Event::Theme {

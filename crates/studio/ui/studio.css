@@ -51,6 +51,23 @@ main { display:flex; height:calc(100vh - 64px); }
 .message-author.you { color:var(--accent); }.message-author.model,.message-author.model .avatar { color:var(--accent2); }
 .message-text code,.edit-summary code,.comment-row code { font:11px var(--ui-mono); padding:1px 4px; border:1px solid var(--hairline); border-radius:3px; background:var(--code); }
 .message-author time { margin-left:auto; font-size:11px; font-weight:400; color:var(--faint); }
+.thread-activity { margin:0 0 18px 30px; padding:10px 0; font:11px/1.6 var(--ui-mono); color:var(--accent2); overflow-wrap:anywhere; }
+.activity-label { display:flex; align-items:center; gap:7px; }.activity-label .icon { width:14px; height:14px; }
+.activity-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--accent2); flex-shrink:0; animation:activity-pulse 1.4s ease-in-out infinite; }
+.activity-progress,.activity-detail { margin-top:6px; white-space:pre-wrap; }.activity-detail p { margin:0 0 5px; }
+.thread-activity button { margin-top:8px; font:11px var(--ui-mono); border:1px solid var(--hairline); padding:4px 9px; }
+.thread-activity.failed,.thread-activity.stopped { color:var(--danger); }
+.link-pill.working { max-width:210px; white-space:nowrap; }
+.link-pill.working::before { background:var(--accent2); animation:activity-pulse 1.4s ease-in-out infinite; }
+.pin.activity-busy::before { content:''; position:absolute; inset:-5px; border:1px solid transparent; border-top-color:var(--accent2); border-right-color:var(--accent2); border-radius:50%; animation:activity-spin 1s linear infinite; pointer-events:none; }
+.pin.activity-done { color:var(--accent2); border-color:var(--accent2); }.pin.activity-done .icon { width:14px; height:14px; }
+#status button { font:inherit; color:var(--accent2); padding:0; border:0; text-decoration:underline; }
+@keyframes activity-spin { to { transform:rotate(360deg); } }
+@keyframes activity-pulse { 50% { opacity:.35; } }
+@media (prefers-reduced-motion:reduce) {
+  .activity-dot,.link-pill.working::before,.pin.activity-busy::before { animation:none; }
+  .pin.activity-busy::before { inset:auto -3px -3px auto; width:5px; height:5px; border:0; background:var(--accent2); }
+}
 .message-text { font-size:12px; line-height:1.75; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 10px; }
 #workspace { display:flex; flex:1; min-width:0; position:relative; background:var(--canvas); }
 #strip-pane { width:216px; flex-shrink:0; display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--hairline); }

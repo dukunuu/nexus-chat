@@ -408,6 +408,7 @@ line: `{"version":1,"type":"…",…}`. Messages over 64 KB are rejected.
 | nexus → studio | `Open{deck_path}` | switch to a deck (the same deck is a no-op, undo history is kept) |
 | nexus → studio | `Focus{deck_path, slide}` | the model changed this slide; jump to it |
 | nexus → studio | `Theme{colors}` | terminal semantic roles as plain hex; chrome only |
+| nexus → studio | `Activity{deck_path, thread_id, state, reason?, detail?}` | latest comment-turn activity, in memory only |
 | nexus → studio | `Bye` | the conversation ended |
 
 **Transport today:** the TUI launches `nexus-studio --attach <deck>` as a child
@@ -417,6 +418,48 @@ window closed. The terminal side is view state in `crates/tui/src/studio.rs`:
 no new `AppEvent`, and core only shares a small `deck_link` context with the
 tool (what studio shows, which decks the model changed). The web app will speak
 the same lines through `nexus host`, which is why the types live in core.
+
+**Comment activity (additive in version 1):**
+
+```jsonl
+{"version":1,"type":"Activity","deck_path":"/tmp/a.deck.json","thread_id":"t1","state":"queued","reason":"draft"}
+{"version":1,"type":"Activity","deck_path":"/tmp/a.deck.json","thread_id":"t1","state":"queued","reason":"streaming"}
+{"version":1,"type":"Activity","deck_path":"/tmp/a.deck.json","thread_id":"t1","state":"queued","reason":"no_model"}
+{"version":1,"type":"Activity","deck_path":"/tmp/a.deck.json","thread_id":"t1","state":"working"}
+{"version":1,"type":"Activity","deck_path":"/tmp/a.deck.json","thread_id":"t1","state":"progress","detail":"edited slide 3"}
+{"version":1,"type":"Activity","deck_path":"/tmp/a.deck.json","thread_id":"t1","state":"done","detail":"edited slides 2, 4; replied in this thread"}
+{"version":1,"type":"Activity","deck_path":"/tmp/a.deck.json","thread_id":"t1","state":"failed","detail":"Request timed out"}
+{"version":1,"type":"Activity","deck_path":"/tmp/a.deck.json","thread_id":"t1","state":"stopped","detail":"Response stopped"}
+```
+
+Unknown states are ignored. Activity paths are bounded to 4096 bytes, thread
+IDs to 128 characters, and details to 1024 characters (inside the existing
+64 KB envelope limit). Errors and answer excerpts are scrubbed of configured
+credentials and recognizable secret formats before clipping to 240 characters.
+A failed send uses a generic short error, with details remaining in nexus.
+
+The terminal preserves comment order and each comment's deck/thread identity.
+It emits waiting reasons on receipt and when they change, then binds `working`
+to the actual chat task ID returned by sending the user message. Only registered
+comment tasks retain a result in `deck_link`; finishing, failing, or cancelling
+the task supplies `done`, `failed`, or `stopped`. A removed/discarded task is
+also stopped. While it runs, deck-change notifications trigger a comparison of
+slide revisions; new model replies in that thread supply reply progress. Done
+summarizes edited slide numbers and/or a thread reply, otherwise the first 240
+characters of the assistant's final answer as plain text, otherwise `no changes`.
+Detached windows simply drop outgoing activity.
+
+Studio keeps the latest activity per deck/thread in memory, never in the
+comments sidecar. Beneath the latest user message the thread shows the waiting
+reason, an accent2 working dot and progress lines, or a completion check and
+summary. Answer excerpts use the same safe DOM-only Markdown subset as comments.
+Edited turns offer Undo through the existing external-change undo history;
+failed/stopped turns offer Send again, resending the latest user text as a reply.
+Busy pins have a thin accent2 ring; completion checks clear after four seconds.
+The link pill prioritizes `linked · nexus working`, otherwise counts waiting
+threads. Finishing a closed thread produces a toast with View, which focuses its
+slide and opens the thread. Reduced-motion mode uses static dots, not spinning
+rings or pulses.
 
 **In the conversation:**
 
@@ -572,6 +615,12 @@ webview's installed faces, so platform font availability still matters.
   `NEXUS_RENDER_OUT=<dir> cargo test write_fixture_renders` (core) and
   `write_core_renders_of_the_dev_deck` (studio) write core-renderer PNGs to
   compare with them.
+- **Activity harness:** `node crates/studio/ui-dev/activity-shot.mjs` checks
+  all waiting reasons, working/progress/done/failed/stopped text, safe excerpts,
+  pin rings and four-second checks, link-pill priority/counts, retry sending,
+  external-change Undo, toast View focus, unknown states, and reduced motion.
+  Outputs: `ui-dev/shots/activity-{working,done-excerpt,failed}-{default,light}.png`
+  at 1440×900.
 - **D1 comment/identity harness:** `node crates/studio/ui-dev/d1-shot.mjs`
   uses a dark deck at 1440×900 in the default nexus palette and the checked-in
   light Alacritty fixture. It checks safe Markdown, operation-derived edit

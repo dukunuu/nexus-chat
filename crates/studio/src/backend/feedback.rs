@@ -9,9 +9,20 @@ use uuid::Uuid;
 use super::{Backend, Event, stamp};
 
 impl Backend {
+    pub(super) fn thread_activities(
+        &self,
+    ) -> std::collections::BTreeMap<String, super::ThreadActivity> {
+        self.activities
+            .iter()
+            .find(|(path, _)| deck::same_file(path, &self.path))
+            .map(|(_, activities)| activities.clone())
+            .unwrap_or_default()
+    }
+
     pub(super) fn feedback_event(&self, notes: Vec<String>) -> Event {
         Event::Feedback {
             threads: self.feedback.clone(),
+            activities: self.thread_activities(),
             notes,
         }
     }

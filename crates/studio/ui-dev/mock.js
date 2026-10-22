@@ -5,11 +5,11 @@
 (() => {
   const fixture = structuredClone(window.__studioFixture);
   let deck = fixture.deck, threads = fixture.threads, sequence = 0;
-  const undo = [], redo = [], sent = [];
+  const undo = [], redo = [], sent = [], activities = {};
   const emit = event => window.studioEvent(event);
-  const feedback = () => ({ event:'Feedback', threads, notes:[] });
+  const feedback = () => ({ event:'Feedback', threads, activities, notes:[] });
   function current(extra = {}) {
-    return { event:'Deck', deck, revision:`r${sequence}`, hashes:Object.fromEntries(deck.slides.flatMap(s => nodesOf(s).map(b => [b.id, 'mock']))), images:{}, threads, linked:true, changed:[], notice:null, ...extra };
+    return { event:'Deck', deck, revision:`r${sequence}`, hashes:Object.fromEntries(deck.slides.flatMap(s => nodesOf(s).map(b => [b.id, 'mock']))), images:{}, threads, activities, linked:true, changed:[], notice:null, ...extra };
   }
   const nodesOf = slide => { const out = []; const walk = list => { for (const n of list) { out.push(n); walk(n.children || []); } }; walk(slide.children || []); return out; };
   const containerOf = (next, id) => { for (const s of next.slides) { if (s.id === id) return s.children; const f = nodesOf(s).find(n => n.id === id); if (f) return f.children; } };
@@ -35,6 +35,16 @@
   // What the model does from outside: change the deck file. One undo step.
   window.__mock = {
     sent,
+    activity(thread, state, detail, reason) {
+      activities[thread] = { state, detail, reason };
+      window.studioAsyncEvent(feedback());
+    },
+    async activitySequence(thread, sequence) {
+      for (const activity of sequence) {
+        this.activity(thread, activity.state, activity.detail, activity.reason);
+        await new Promise(resolve => setTimeout(resolve, activity.delay || 50));
+      }
+    },
     emitCurrent: extra => window.studioAsyncEvent(current(extra)),
     externalEdit(ops, focusSlide) {
       const before = deck, next = apply(ops);

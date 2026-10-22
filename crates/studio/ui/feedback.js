@@ -1,5 +1,5 @@
 import { element } from './render.js';
-import { inlineTokens, allNodes, slideSize, resolveFont } from './helpers.js';
+import { inlineTokens, markdownTokens, allNodes, slideSize, resolveFont } from './helpers.js';
 import { button, icon } from './icons.js';
 
 function inlineMarkdown(text) {
@@ -53,6 +53,59 @@ export function editSlide(deck, edit, fallback) {
 export function feedbackController(api) {
   const state = api.state, pins = document.querySelector('#pins'), popover = document.querySelector('#thread-popover'), comments = document.querySelector('#comments-list');
   let filter = 'open';
+  const progress = {}, doneUntil = {};
+  const knownStates = new Set(['queued', 'working', 'progress', 'done', 'failed', 'stopped']);
+  const busy = activity => ['queued', 'working', 'progress'].includes(activity?.state);
+  function renderLink() {
+    const activities = Object.values(state.activities), working = activities.some(a => ['working', 'progress'].includes(a.state)), waiting = activities.filter(a => a.state === 'queued').length;
+    const pill = document.querySelector('#link-status');
+    pill.textContent = !state.linked ? 'not linked' : working ? 'linked · nexus working' : waiting ? `linked · ${waiting} waiting` : 'linked to nexus';
+    pill.classList.toggle('connected', state.linked); pill.classList.toggle('working', state.linked && working);
+  }
+  function updateActivities(activities) {
+    if (!activities) return;
+    const previous = state.activities;
+    state.activities = Object.fromEntries(Object.entries(activities).flatMap(([id, activity]) => knownStates.has(activity.state) ? [[id, activity]] : previous[id] ? [[id, previous[id]]] : []));
+    for (const [id, activity] of Object.entries(state.activities)) {
+      const before = previous[id];
+      if (['queued', 'working'].includes(activity.state) && before?.state !== activity.state) { progress[id] = []; delete doneUntil[id]; }
+      if (activity.state === 'progress' && activity.detail && !progress[id]?.includes(activity.detail)) (progress[id] ||= []).push(activity.detail);
+      if (['done', 'failed', 'stopped'].includes(activity.state) && before?.state !== activity.state) {
+        if (activity.state === 'done') {
+          doneUntil[id] = Date.now() + 4000;
+          setTimeout(renderPins, 4000);
+        }
+        const thread = state.threads.find(t => t.id === id);
+        if (thread && state.openThread !== id) api.toast(`nexus ${activity.detail || (activity.state === 'done' ? 'finished' : activity.state)}`, () => openThread(thread));
+      }
+    }
+    renderLink();
+  }
+  function activityRow(thread) {
+    const activity = state.activities[thread.id]; if (!activity) return null;
+    const row = element('div', `thread-activity ${activity.state}`); row.setAttribute('role', 'status'); row.setAttribute('aria-live', 'polite');
+    const label = element('div', 'activity-label');
+    if (busy(activity)) label.append(element('span', 'activity-dot'));
+    if (activity.state === 'done') label.append(icon('check'));
+    const waiting = { draft:'Waiting — you have a draft in nexus', streaming:'Waiting — nexus is answering something else', no_model:'Waiting — no model selected' };
+    const text = activity.state === 'queued' ? (waiting[activity.reason] || 'Waiting for nexus') : ['working', 'progress'].includes(activity.state) ? 'nexus is working…' : activity.state === 'done' ? 'Done' : activity.state === 'stopped' ? 'Stopped' : 'Failed';
+    label.append(element('span', '', text)); row.append(label);
+    if (['working', 'progress'].includes(activity.state)) for (const line of progress[thread.id] || []) row.append(element('div', 'activity-progress', line));
+    if (!busy(activity) && activity.detail) {
+      const detail = element('div', 'activity-detail');
+      for (const token of markdownTokens(activity.detail)) { const line = element(['h1', 'h2', 'h3'].includes(token.kind) ? 'strong' : 'p'); line.append(inlineMarkdown(token.text)); detail.append(line); }
+      row.append(detail);
+    }
+    if (activity.state === 'done' && /^edited slides? \d/.test(activity.detail || '')) {
+      const undo = element('button', '', 'Undo'); undo.onclick = () => api.command({ command:'Undo' }); row.append(undo);
+    }
+    if (['failed', 'stopped'].includes(activity.state)) {
+      const retry = element('button', '', 'Send again'); retry.disabled = !state.linked;
+      retry.onclick = () => { const message = thread.messages.findLast(m => m.role === 'you'); if (message) api.command({ command:'CommentReply', thread:thread.id, text:message.text, send:true }); };
+      row.append(retry);
+    }
+    return row;
+  }
   function author(message) {
     const row = element('div', `message-author ${message.role}`), avatar = element('span', 'avatar', message.role === 'model' ? '✦' : '❯');
     row.append(avatar, element('span', '', message.role === 'model' ? 'nexus' : 'You'), element('time', '', new Date(message.created * 1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }))); return row;
@@ -86,7 +139,7 @@ export function feedbackController(api) {
       return { left:Math.max(0, Math.min(box.left, ...ink.map(r => r.left)) - bounds.left), right:Math.min(bounds.width, Math.max(box.right, ...ink.map(r => r.right)) - bounds.left), top:Math.max(0, Math.min(box.top, ...ink.map(r => r.top)) - bounds.top), bottom:Math.min(bounds.height, Math.max(box.bottom, ...ink.map(r => r.bottom)) - bounds.top) };
     });
     const placed = [];
-    function add(anchor, label, severity, preview, active, click) {
+    function add(anchor, label, severity, preview, active, click, activity, done) {
       const size = slideSize(state.deck.theme), at = id => { const rect = id && api.rectOf(id); return rect || null; };
       const block = at(anchor.block);
       const ax = anchor.x / size.w * bounds.width, ay = anchor.y / size.h * bounds.height;
@@ -105,6 +158,8 @@ export function feedbackController(api) {
       const line = element('span', `pin-leader ${severity}`), length = Math.hypot(x - ax, y - ay);
       Object.assign(line.style, { left:`${ax / bounds.width * 100}%`, top:`${ay / bounds.height * 100}%`, width:`${Math.max(0, length - 12) / scale}px`, height:`${1 / scale}px`, transform:`rotate(${Math.atan2(y - ay, x - ax)}rad)` });
       const pin = element(click ? 'button' : 'span', `pin ${severity}${active ? ' active' : ''}`, label);
+      pin.classList.toggle('activity-busy', busy(activity));
+      if (done) { pin.classList.add('activity-done'); pin.replaceChildren(icon('check')); }
       pin.dataset.preview = preview; pin.setAttribute('aria-label', `Comment ${label}: ${preview}`);
       pin.style.left = `${x / bounds.width * 100}%`; pin.style.top = `${y / bounds.height * 100}%`;
       if (click) pin.onclick = click;
@@ -113,7 +168,7 @@ export function feedbackController(api) {
     state.threads.forEach((thread, i) => {
       if (thread.anchor.slide !== state.slideId || (thread.resolved && !state.showResolved)) return;
       const preview = inlineTokens(thread.messages[0]?.text || 'Comment thread').map(token => token.text).join('').replace(/\s+/g, ' ');
-      add(thread.anchor, String(i + 1), thread.severity, preview, state.openThread === thread.id, () => openThread(thread));
+      add(thread.anchor, String(i + 1), thread.severity, preview, state.openThread === thread.id, () => openThread(thread), state.activities[thread.id], doneUntil[thread.id] > Date.now());
     });
     if (state.draftAnchor) add(state.draftAnchor, '+', 'consider', 'New comment', true);
   }
@@ -127,6 +182,7 @@ export function feedbackController(api) {
     if (thread) for (const message of thread.messages) {
       const row = element('article', 'thread-message'), text = element('p', 'message-text'); text.append(inlineMarkdown(message.text));
       row.append(author(message), text); message.edits.forEach(edit => row.append(card(thread.id, edit))); popover.append(row);
+      if (message === thread.messages.findLast(m => m.role === 'you')) { const activity = activityRow(thread); if (activity) popover.append(activity); }
     }
     if (thread?.resolved) popover.append(element('p', 'hint', 'Resolved. Kept with your deck.'));
     const reply = element('textarea'); reply.maxLength = 2000; reply.placeholder = thread ? 'Reply to this thread…' : 'Add a note or request a change…'; reply.setAttribute('aria-label', thread ? 'Reply to thread' : 'Comment text');
@@ -156,7 +212,7 @@ export function feedbackController(api) {
   function render() { renderThread(); renderPins(); renderComments(); }
   function clearPreview() { state.preview = null; state.previewTarget = null; document.querySelector('#preview-bar').hidden = true; }
   function event(event) {
-    if (event.event === 'Feedback') { state.threads = event.threads; render(); if (event.notes.length) api.toast(event.notes.join('; ')); }
+    if (event.event === 'Feedback') { state.threads = event.threads; updateActivities(event.activities); render(); if (event.notes.length) api.toast(event.notes.join('; ')); }
     else if (event.event === 'Preview' && state.previewTarget) {
       const target = state.previewTarget; state.preview = { deck:event.deck, slideId:target.slideId, before:false }; state.slideId = target.slideId;
       document.querySelector('#preview-bar').hidden = false; document.querySelector('#preview-apply').onclick = () => api.command({ command:'ApplyEdit', owner:target.owner, edit:target.edit }); api.render();
@@ -166,5 +222,5 @@ export function feedbackController(api) {
   document.querySelector('#preview-toggle').onclick = togglePreview; document.querySelector('#close-preview').onclick = () => { clearPreview(); api.render(); };
   for (const name of ['open','resolved']) document.querySelector(`#filter-${name}`).onclick = () => { filter = name; for (const f of ['open','resolved']) document.querySelector(`#filter-${f}`).setAttribute('aria-pressed', String(f === filter)); renderComments(); };
   document.querySelector('#show-resolved').onchange = e => { state.showResolved = e.target.checked; renderPins(); };
-  return { render, event, clearPreview, togglePreview, closeThread, renderThread, renderPins };
+  return { render, event, clearPreview, togglePreview, closeThread, renderThread, renderPins, renderLink, updateActivities };
 }
