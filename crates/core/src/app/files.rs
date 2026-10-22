@@ -172,6 +172,50 @@ fn clip_err(e: &str) -> String {
     s
 }
 
+/// Prefix of the transient status shown while a file's chunks are embedded.
+const EMBEDDING_STATUS: &str = "embedding…";
+
+/// The embedding marker for a file whose settled status is `prev`: a plain
+/// "ok" stays "embedding…", a richer one ("ok · html → text") is carried
+/// along so it comes back afterwards.
+fn embedding_status(prev: &str) -> String {
+    if prev == "ok" {
+        EMBEDDING_STATUS.to_string()
+    } else {
+        format!("{EMBEDDING_STATUS} · {prev}")
+    }
+}
+
+/// Undo [`embedding_status`].
+fn restored_status(status: &str) -> String {
+    status
+        .strip_prefix(EMBEDDING_STATUS)
+        .and_then(|rest| rest.strip_prefix(" · "))
+        .map_or_else(|| "ok".to_string(), str::to_string)
+}
+
+/// How a finished OCR / conversion job read the file, for the status
+/// ("pdf (ocr)", "image (caption)", the converter's name).
+fn read_label(previous_status: &str, name: &str) -> String {
+    if let Some(via) = previous_status.strip_prefix("convert: ") {
+        return via.trim_end_matches('…').trim().to_string();
+    }
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext == "pdf" {
+        "pdf (ocr)".to_string()
+    } else if previous_status.contains("caption") {
+        "image (caption)".to_string()
+    } else if crate::extract::is_image_ext(&ext) {
+        "image (ocr)".to_string()
+    } else {
+        "ocr".to_string()
+    }
+}
+
 /// Request body for Ollama's native generate endpoint: raw base64 in
 /// `images`, not an OpenAI-style content part.
 fn ollama_ocr_body(model: &str, png_b64: &str) -> serde_json::Value {
@@ -310,54 +354,99 @@ async fn ocr_pdf_vlm_in(
     Ok((crate::extract::join_pages(&results), errors))
 }
 
-/// OCR a standalone image file through a vision backend: read the file,
-/// transcribe it directly (no page rendering), return OCR text. Reuses the
-/// same `OcrUpdate` channel as `pdf_vlm` for status/progress.
-async fn ocr_image_vlm(
+/// Describe a standalone image through a vision backend (a caption that also
+/// carries any visible text verbatim).
+async fn caption_image(
     backend: &OcrBackend,
+    path: &Path,
+    name: &str,
+) -> std::result::Result<String, String> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Err(format!("cannot read {name}"));
+    };
+    let mime = crate::extract::vision_mime(&bytes).unwrap_or("image/png");
+    backend
+        .describe(&bytes, mime)
+        .await
+        .map_err(|e| format!("error: ocr: {e}"))
+}
+
+/// Read an image: tesseract first when the engine allows it (free and local),
+/// then a vision-model caption when OCR found little or nothing and one is
+/// configured. A "vlm" engine goes straight to the model. Never blocks
+/// indexing: the file is already searchable by name.
+async fn ocr_image_flow(
+    backend: Option<&OcrBackend>,
+    engine: &str,
     path: &Path,
     tx: &tokio::sync::mpsc::UnboundedSender<(String, String, OcrUpdate)>,
     space_id: &str,
     name: &str,
 ) -> std::result::Result<(String, Vec<(usize, String)>), String> {
-    let _ = tx.send((
-        space_id.to_string(),
-        name.to_string(),
-        OcrUpdate::Stage("transcribing image…".to_string()),
-    ));
-    let Ok(bytes) = std::fs::read(path) else {
-        return Err(format!("cannot read {name}"));
+    let send = |u: OcrUpdate| {
+        let _ = tx.send((space_id.to_string(), name.to_string(), u));
     };
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let mime = match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        _ => "image/png",
-    };
-    let _ = tx.send((
-        space_id.to_string(),
-        name.to_string(),
-        OcrUpdate::Progress(0, 1, 0),
-    ));
-    match backend.describe(&bytes, mime).await {
-        Ok(text) => {
+    let mut local = String::new();
+    let mut local_missing = false;
+    if engine != "vlm" || backend.is_none() {
+        send(OcrUpdate::Stage("tesseract".to_string()));
+        let p = path.to_path_buf();
+        match tokio::task::spawn_blocking(move || crate::extract::ocr_image(&p)).await {
+            Ok(Ok(text)) => local = text,
+            Ok(Err(crate::extract::OcrError::MissingTools)) => local_missing = true,
+            Ok(Err(crate::extract::OcrError::Failed(e))) => {
+                if backend.is_none() {
+                    return Err(format!("error: ocr: {e}"));
+                }
+            }
+            Err(e) => return Err(format!("error: ocr: {e}")),
+        }
+    }
+    let enough = local.chars().filter(|c| !c.is_whitespace()).count() >= 40;
+    match backend {
+        Some(b) if !enough => {
+            send(OcrUpdate::Stage("captioning image…".to_string()));
+            send(OcrUpdate::Progress(0, 1, 0));
+            let caption = caption_image(b, path, name).await?;
+            send(OcrUpdate::Progress(1, 1, 0));
+            let text = if local.trim().is_empty() {
+                caption
+            } else {
+                format!("{}\n\n[ocr text]\n{}", caption.trim(), local.trim())
+            };
+            Ok((text, Vec::new()))
+        }
+        None if local_missing => {
+            Err("image: install tesseract for ocr or set an image model in /config".to_string())
+        }
+        _ => Ok((local, Vec::new())),
+    }
+}
+
+/// Run a file's background converter (pandoc, `LibreOffice`, ffprobe/whisper or
+/// a user hook) on a blocking thread, with the tool's name as the final
+/// stage so the status can say how the file was read.
+async fn convert_flow(
+    path: std::path::PathBuf,
+    tx: &tokio::sync::mpsc::UnboundedSender<(String, String, OcrUpdate)>,
+    space_id: &str,
+    name: &str,
+) -> std::result::Result<(String, Vec<(usize, String)>), String> {
+    let result = tokio::task::spawn_blocking(move || {
+        crate::extract::convert_file(&path, &crate::extract::ExtractConfig::load())
+    })
+    .await
+    .map_err(|e| format!("conversion failed: {e}"))?;
+    match result {
+        Ok(done) => {
             let _ = tx.send((
                 space_id.to_string(),
                 name.to_string(),
-                OcrUpdate::Progress(1, 1, 0),
+                OcrUpdate::Stage(format!("convert: {}", done.via)),
             ));
-            Ok((text, Vec::new()))
+            Ok((done.text, Vec::new()))
         }
-        Err(e) => {
-            let err = e.to_string();
-            Err(format!("error: ocr: {err}"))
-        }
+        Err(e) => Err(format!("conversion failed: {}", clip_err(&e))),
     }
 }
 
@@ -388,6 +477,34 @@ async fn ocr_pdf_tesseract(
     .unwrap_or_else(|e| Err(format!("error: ocr: {e}")))
 }
 
+/// SHA-256 of a file as lowercase hex, plus its bytes when small enough to
+/// hand to the extractor without reading the file twice. `None` = unreadable.
+fn read_and_hash(path: &Path, size: i64) -> Option<(String, Option<Vec<u8>>)> {
+    use std::io::Read as _;
+    let hex = |digest: &[u8]| {
+        digest.iter().fold(String::new(), |mut h, b| {
+            let _ = write!(h, "{b:02x}");
+            h
+        })
+    };
+    if size <= 64 * 1024 * 1024 {
+        let bytes = std::fs::read(path).ok()?;
+        return Some((hex(&Sha256::digest(&bytes)), Some(bytes)));
+    }
+    // Big files (video, disk images) are hashed as a stream, never held.
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some((hex(&hasher.finalize()), None))
+}
+
 impl App {
     /// Sync the active space's files directory with the db: new or changed
     /// files (by sha256) are re-extracted and re-indexed, rows for deleted
@@ -395,8 +512,13 @@ impl App {
     /// single bad file gets an "error: …" status instead of failing the scan.
     /// ponytail: runs synchronously on the UI task — extraction of a huge PDF
     /// blocks a beat; move to a blocking task if that ever hurts.
-    #[allow(clippy::too_many_lines)]
     pub fn rescan_files(&mut self) {
+        self.rescan_files_with(&crate::extract::ExtractConfig::load());
+    }
+
+    /// [`Self::rescan_files`] with explicit converter settings.
+    #[allow(clippy::too_many_lines)]
+    pub fn rescan_files_with(&mut self, cfg: &crate::extract::ExtractConfig) {
         let dir = self.space.files_dir(&self.active_space.name);
         let known = self
             .db
@@ -404,6 +526,7 @@ impl App {
             .unwrap_or_default();
         let mut seen: Vec<String> = Vec::new();
         let mut ocr_jobs: Vec<(String, String, std::path::PathBuf)> = Vec::new();
+        let version = crate::extract::EXTRACTOR_VERSION;
 
         let entries = std::fs::read_dir(&dir)
             .map(|rd| rd.flatten().collect::<Vec<_>>())
@@ -430,36 +553,32 @@ impl App {
                 && f.mtime == mtime
                 && mtime != 0
             {
-                // Stale "ocr…"/"ocr N/M" (app quit mid-OCR) re-queues once no
-                // batch is in flight.  Do not let the stat fast path hide a
-                // file imported by an older build that has no chunks yet.
-                if f.status.starts_with("ocr") {
+                // Stale "ocr…"/"convert: …" (app quit mid-job) re-queues once
+                // no batch is in flight.  Do not let the stat fast path hide a
+                // file imported by an older build that has no chunks yet, or
+                // one indexed by an older extractor.
+                if crate::extract::status_is_queued(&f.status) {
                     if self.ocr_rx.is_none() {
                         ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
                     }
                     continue;
                 }
-                if self.db.file_has_chunks(&f.id).unwrap_or(false) {
+                if f.extractor >= version && self.db.file_has_chunks(&f.id).unwrap_or(false) {
                     continue;
                 }
             }
-            let Ok(bytes) = std::fs::read(&path) else {
+            let Some((hash, bytes)) = read_and_hash(&path, disk_size) else {
                 continue;
             };
-            let hash = Sha256::digest(&bytes)
-                .iter()
-                .fold(String::new(), |mut h, b| {
-                    let _ = write!(h, "{b:02x}");
-                    h
-                });
             if let Some(f) = existing.filter(|f| f.hash == hash)
+                && f.extractor >= version
                 && self.db.file_indexed(&f.id).unwrap_or(false)
                 && self.db.file_has_chunks(&f.id).unwrap_or(false)
             {
                 // Content unchanged (touched, or indexed before mtimes were
                 // tracked): just record the stat for next time.
                 let _ = self.db.set_file_mtime(&f.id, mtime);
-                if f.status.starts_with("ocr") && self.ocr_rx.is_none() {
+                if crate::extract::status_is_queued(&f.status) && self.ocr_rx.is_none() {
                     ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
                 }
                 continue;
@@ -467,40 +586,31 @@ impl App {
             // Cold cache (fresh restore, wiped cache.db): the durable row
             // survives but this device's index state is gone — fall through
             // to re-extract so chunks/embeddings rebuild here.
-            let size = bytes.len() as i64;
-            let (status, chunks) = match crate::extract::extract_text(&path) {
-                Ok(text) if text.trim().is_empty() => {
-                    let ext = std::path::Path::new(&name)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    if ext == "pdf" || crate::extract::is_image_ext(&ext) {
-                        // Queued below, once the row exists.
-                        ("ocr…".to_string(), Vec::new())
-                    } else {
-                        (
-                            "no text (scanned?)".to_string(),
-                            crate::extract::metadata_chunks(&name),
-                        )
-                    }
-                }
-                Ok(text) => {
-                    let chunks = crate::extract::chunk_lines(&text);
-                    if chunks.is_empty() {
-                        (
-                            "no text (scanned?)".to_string(),
-                            crate::extract::metadata_chunks(&name),
-                        )
-                    } else {
-                        ("ok".to_string(), chunks)
-                    }
-                }
-                Err(e) => (
-                    format!("error: {e}"),
-                    crate::extract::metadata_chunks(&name),
-                ),
+            let size = disk_size;
+            let extracted = match &bytes {
+                Some(b) => crate::extract::to_text_bytes(b, &name, cfg),
+                None => crate::extract::to_text_with(&path, cfg),
             };
+            // An older extractor re-reads files whose content is unchanged,
+            // but never re-OCRs one that already has text: that is a paid
+            // call for the same pages.
+            if let Some(f) = existing.filter(|f| f.hash == hash)
+                && matches!(extracted.outcome, crate::extract::Outcome::NeedsOcr)
+                && {
+                    let settled = if f.status.starts_with(EMBEDDING_STATUS) {
+                        restored_status(&f.status)
+                    } else {
+                        f.status.clone()
+                    };
+                    crate::extract::status_is_ok(&settled) || settled.starts_with("no text")
+                }
+                && self.db.file_has_chunks(&f.id).unwrap_or(false)
+            {
+                let _ = self.db.set_file_mtime(&f.id, mtime);
+                let _ = self.db.set_file_extractor(&f.id, version);
+                continue;
+            }
+            let (status, chunks) = extracted.index(&name, size.unsigned_abs());
             match self
                 .db
                 .upsert_file(&self.active_space.id, &name, &hash, size, &status)
@@ -508,10 +618,11 @@ impl App {
                 Ok(id) => {
                     let _ = self.db.set_file_chunks(&id, &chunks);
                     let _ = self.db.set_file_mtime(&id, mtime);
-                    // Only OCR a file whose row exists: without one the
+                    let _ = self.db.set_file_extractor(&id, version);
+                    // Only queue a file whose row exists: without one the
                     // result can't be recorded, and the batch-done rescan
                     // would queue the same file again — a paid call loop.
-                    if status == "ocr…" {
+                    if crate::extract::status_is_queued(&status) {
                         ocr_jobs.push((self.active_space.id.clone(), name.clone(), path.clone()));
                     }
                 }
@@ -542,28 +653,35 @@ impl App {
         // Images are described by the image model when one is set; otherwise
         // the OCR backend handles them too.
         let image_backend = self.image_backend().or_else(|| pdf_backend.clone());
+        let engine = self.ocr_engine.clone();
         let files_dir = self.space.files_dir(&self.active_space.name);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.ocr_rx = Some(rx);
         tokio::spawn(async move {
             for (space_id, name, path) in jobs {
-                let is_image = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(crate::extract::is_image_ext);
-                let result = match (is_image, &image_backend, &pdf_backend) {
-                    (true, Some(backend), _) => {
-                        ocr_image_vlm(backend, &path, &tx, &space_id, &name).await
+                let kind = crate::extract::detect_path(&path);
+                let result = if kind.is_ocr_image() {
+                    ocr_image_flow(
+                        image_backend.as_ref(),
+                        &engine,
+                        &path,
+                        &tx,
+                        &space_id,
+                        &name,
+                    )
+                    .await
+                } else if kind == crate::extract::Kind::Pdf {
+                    match &pdf_backend {
+                        Some(backend) => {
+                            ocr_pdf_vlm(backend, &path, &tx, &space_id, &name, &files_dir).await
+                        }
+                        None => {
+                            ocr_pdf_tesseract(path, tx.clone(), space_id.clone(), name.clone())
+                                .await
+                        }
                     }
-                    // Images can't be OCR'd via tesseract — skip; the file keeps
-                    // its metadata chunk until a vision backend is configured.
-                    (true, None, _) => Err("no vlm backend for image ocr".to_string()),
-                    (false, _, Some(backend)) => {
-                        ocr_pdf_vlm(backend, &path, &tx, &space_id, &name, &files_dir).await
-                    }
-                    (false, _, None) => {
-                        ocr_pdf_tesseract(path, tx.clone(), space_id.clone(), name.clone()).await
-                    }
+                } else {
+                    convert_flow(path, &tx, &space_id, &name).await
                 };
                 if tx.send((space_id, name, OcrUpdate::Done(result))).is_err() {
                     return;
@@ -704,16 +822,12 @@ impl App {
         let Some(f) = self.files_cache.iter().find(|f| f.name == name).cloned() else {
             return;
         };
-        let ext = std::path::Path::new(&f.name)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        if ext != "pdf" && !crate::extract::is_image_ext(&ext) {
+        let path = self.space.files_dir(&self.active_space.name).join(&f.name);
+        let kind = crate::extract::detect_path(&path);
+        if kind != crate::extract::Kind::Pdf && !kind.is_ocr_image() {
             self.push_status(format!("only PDFs and images support OCR: {}", f.name));
             return;
         }
-        let path = self.space.files_dir(&self.active_space.name).join(&f.name);
         // Force-cancel any in-progress OCR batch so our job isn't silently dropped
         self.ocr_rx = None;
         let _ = self.db.set_file_status(&f.id, "ocr…");
@@ -747,7 +861,8 @@ impl App {
         };
         let Some(file) = self.db.list_files(&space_id).ok().and_then(|files| {
             files.into_iter().find(|file| {
-                missing.iter().any(|id| id == &file.id) && !file.status.starts_with("ocr")
+                missing.iter().any(|id| id == &file.id)
+                    && !crate::extract::status_is_queued(&file.status)
             })
         }) else {
             return;
@@ -781,9 +896,12 @@ impl App {
         // Keep extraction/OCR status text for metadata-only and failed files;
         // the transient embedding marker is only safe to replace with "ok"
         // when the original index status was already "ok".
-        let show_embedding_status = matches!(file.status.as_str(), "ok" | "embedding…");
-        if show_embedding_status {
-            let _ = self.db.set_file_status(&file_id, "embedding…");
+        let show_embedding_status =
+            crate::extract::status_is_ok(&file.status) || file.status.starts_with(EMBEDDING_STATUS);
+        if show_embedding_status && !file.status.starts_with(EMBEDDING_STATUS) {
+            let _ = self
+                .db
+                .set_file_status(&file_id, &embedding_status(&file.status));
         }
         if space_id == self.active_space.id {
             self.files_cache = self.db.list_files(&space_id).unwrap_or_default();
@@ -843,18 +961,19 @@ impl App {
             .list_files(&space_id)
             .ok()
             .and_then(|files| files.into_iter().find(|file| file.id == file_id))
-            .is_some_and(|file| file.status == "embedding…");
+            .filter(|file| file.status.starts_with(EMBEDDING_STATUS))
+            .map(|file| restored_status(&file.status));
         match result {
             Ok(vecs) => {
                 let _ = self.db.set_chunk_embeddings(&file_id, &vecs);
-                if restore_status {
-                    let _ = self.db.set_file_status(&file_id, "ok");
+                if let Some(status) = &restore_status {
+                    let _ = self.db.set_file_status(&file_id, status);
                 }
                 self.start_embedding();
             }
             Err(e) => {
-                if restore_status {
-                    let _ = self.db.set_file_status(&file_id, "ok");
+                if let Some(status) = &restore_status {
+                    let _ = self.db.set_file_status(&file_id, status);
                 }
                 self.push_status(format!("embedding failed: {e}"));
             }
@@ -882,14 +1001,20 @@ impl App {
         let Some(f) = files.iter().find(|f| f.name == name) else {
             return; // deleted mid-OCR
         };
-        if !f.status.starts_with("ocr") {
-            return; // re-imported mid-OCR — this result is for stale content
+        if !crate::extract::status_is_queued(&f.status) {
+            return; // re-imported mid-job — this result is for stale content
         }
         let completed = matches!(update, OcrUpdate::Done(_));
         match update {
             OcrUpdate::Stage(s) => {
-                // Keep the "ocr" prefix — the stale-check above depends on it.
-                let _ = self.db.set_file_status(&f.id, &format!("ocr: {s}"));
+                // Keep the "ocr" / "convert:" prefix — the stale-check above
+                // depends on it.
+                let shown = if s.starts_with("convert:") {
+                    s.clone()
+                } else {
+                    format!("ocr: {s}")
+                };
+                let _ = self.db.set_file_status(&f.id, &shown);
                 if space_id == self.active_space.id {
                     self.push_status(format!("ocr {name}: {s}"));
                 }
@@ -918,6 +1043,9 @@ impl App {
                     Some((i, e)) => {
                         format!("all pages failed (p{}: {})", i + 1, clip_err(e))
                     }
+                    None if f.status.starts_with("convert:") => {
+                        "no text (converter found nothing)".to_string()
+                    }
                     None => "no text (ocr found nothing)".to_string(),
                 };
                 let _ = self.db.set_file_status(&f.id, &status);
@@ -934,7 +1062,7 @@ impl App {
                 };
                 let _ = self.db.set_file_chunks(&f.id, &chunks);
                 let status = match errors.first() {
-                    None => "ok".to_string(),
+                    None => format!("ok · {}", read_label(&f.status, &name)),
                     Some((i, e)) => format!(
                         "ok — {} page{} failed (p{}: {})",
                         errors.len(),
@@ -1559,7 +1687,7 @@ mod tests {
                 Vec::new(),
             ))),
         )));
-        assert_eq!(a.files_cache[0].status, "ok");
+        assert_eq!(a.files_cache[0].status, "ok · pdf (ocr)");
         let hits = crate::db::search_chunks(a.db.conn_for_test(), &a.active_space.id, "revenue", 8)
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -1584,7 +1712,7 @@ mod tests {
             "scan.pdf".to_string(),
             OcrUpdate::Done(Ok(("[page 1]\nfound".to_string(), Vec::new()))),
         )));
-        assert_eq!(a.files_cache[0].status, "ok");
+        assert_eq!(a.files_cache[0].status, "ok · pdf (ocr)");
     }
 
     #[test]
@@ -1641,7 +1769,7 @@ mod tests {
             "active-space cache must not show other space's file"
         );
         let rows = a.db.list_files(&other.id).unwrap();
-        assert_eq!(rows[0].status, "ok");
+        assert_eq!(rows[0].status, "ok · pdf (ocr)");
 
         // Deleted-mid-OCR: result for a row that no longer exists is a no-op.
         a.on_ocr_done(Some((
@@ -1663,5 +1791,282 @@ mod tests {
         // Batch finishes: channel clears, and the straggler chains into a new batch.
         a.on_ocr_done(None);
         assert!(a.ocr_rx.is_some(), "straggler should re-queue on batch end");
+    }
+
+    fn files_dir_of(a: &App) -> std::path::PathBuf {
+        let dir = a.space.files_dir(&a.active_space.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn status_of(a: &App, name: &str) -> String {
+        a.files_cache
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .status
+            .clone()
+    }
+
+    #[test]
+    fn html_export_is_indexed_as_clean_text_with_a_status() {
+        let mut a = test_app();
+        let dir = files_dir_of(&a);
+        // Shaped like a chat export: styles, scripts, an inline data URI and
+        // the actual messages.
+        let blob = "QUJD".repeat(300);
+        let html = format!(
+            "<html><head><style>.a{{color:red}}</style><script>var track=1;</script></head><body>\
+             <img src=\"data:image/png;base64,{blob}\">\
+             <div class=\"chatlog__message-container\"><div class=\"chatlog__header\">\
+             <span class=\"chatlog__author\">Ann</span><span class=\"chatlog__timestamp\">10:02 PM</span></div>\
+             <div class=\"chatlog__content\">lunch at noon</div></div></body></html>"
+        );
+        std::fs::write(dir.join("chat.html"), html).unwrap();
+        a.rescan_files();
+        assert_eq!(status_of(&a, "chat.html"), "ok · html → text");
+        let text = crate::db::file_text(a.db.conn_for_test(), &a.active_space.id, "chat.html")
+            .unwrap()
+            .unwrap();
+        assert_eq!(text, "[10:02 PM] Ann: lunch at noon");
+        assert!(!text.contains("QUJD") && !text.contains("track"));
+    }
+
+    #[test]
+    fn a_pdf_without_a_pdf_extension_is_still_read_as_a_pdf() {
+        let mut a = test_app();
+        let dir = files_dir_of(&a);
+        let pdf = crate::extract::pdf_with_pages(&["QUARTERLY NEXUS REPORT"]);
+        std::fs::write(dir.join("download"), &pdf).unwrap();
+        std::fs::write(dir.join("report.txt"), &pdf).unwrap();
+        a.rescan_files();
+        for name in ["download", "report.txt"] {
+            assert_eq!(status_of(&a, name), "ok", "{name}");
+            let text = crate::db::file_text(a.db.conn_for_test(), &a.active_space.id, name)
+                .unwrap()
+                .unwrap();
+            assert!(text.contains("QUARTERLY NEXUS REPORT"), "{name}: {text:?}");
+            assert!(!text.contains("%PDF"), "{name}: raw bytes leaked");
+        }
+    }
+
+    #[test]
+    fn unknown_binary_is_metadata_only_with_a_status_and_a_clear_read_message() {
+        let mut a = test_app();
+        let dir = files_dir_of(&a);
+        std::fs::write(dir.join("asset.bin"), [0u8, 159, 146, 150, 1, 2]).unwrap();
+        a.rescan_files();
+        let status = status_of(&a, "asset.bin");
+        assert!(
+            status.starts_with("binary: unknown, no converter — install pandoc/libreoffice"),
+            "{status}"
+        );
+        // No text chunk: `files read` has nothing to show and says why.
+        assert!(
+            crate::db::file_text(a.db.conn_for_test(), &a.active_space.id, "asset.bin")
+                .unwrap()
+                .is_none()
+        );
+        let msg = crate::tools::unreadable_file_message_for_test(
+            a.db.conn_for_test(),
+            &a.active_space.id,
+            "asset.bin",
+        );
+        assert!(
+            msg.starts_with("asset.bin has no readable text · binary: unknown"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn an_older_extractor_version_re_extracts_once() {
+        let mut a = test_app();
+        let dir = files_dir_of(&a);
+        std::fs::write(dir.join("page.html"), "<p>fresh words</p>").unwrap();
+        a.rescan_files();
+        let id = a.files_cache[0].id.clone();
+        assert_eq!(
+            a.files_cache[0].extractor,
+            crate::extract::EXTRACTOR_VERSION
+        );
+
+        // Simulate an index made by an older extractor (raw markup chunks).
+        a.db.set_file_chunks(&id, &[("lines 1-1".into(), "<p>stale markup</p>".into())])
+            .unwrap();
+        a.db.set_file_extractor(&id, 0).unwrap();
+        a.rescan_files();
+        let texts = a.db.file_chunk_texts(&id).unwrap();
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].1, "fresh words");
+        assert_eq!(
+            a.files_cache[0].extractor,
+            crate::extract::EXTRACTOR_VERSION
+        );
+
+        // Current version, unchanged file: left alone (the stat fast path).
+        a.db.set_file_chunks(&id, &[("lines 1-1".into(), "sentinel".into())])
+            .unwrap();
+        a.rescan_files();
+        assert_eq!(a.db.file_chunk_texts(&id).unwrap()[0].1, "sentinel");
+    }
+
+    #[tokio::test]
+    async fn a_version_bump_never_re_ocrs_a_pdf_that_already_has_text() {
+        let mut a = test_app();
+        a.embedding_model.clear();
+        let dir = files_dir_of(&a);
+        std::fs::write(dir.join("scan.pdf"), crate::extract::minimal_pdf(None)).unwrap();
+        a.rescan_files();
+        a.on_ocr_done(Some((
+            a.active_space.id.clone(),
+            "scan.pdf".to_string(),
+            OcrUpdate::Done(Ok(("[page 1]\npaid for text".to_string(), Vec::new()))),
+        )));
+        a.ocr_rx = None;
+        let id = a.files_cache[0].id.clone();
+        a.db.set_file_extractor(&id, 0).unwrap();
+
+        a.rescan_files();
+        assert!(
+            a.ocr_rx.is_none(),
+            "no new OCR batch: {}",
+            status_of(&a, "scan.pdf")
+        );
+        assert_eq!(status_of(&a, "scan.pdf"), "ok · pdf (ocr)");
+        assert_eq!(
+            a.db.file_chunk_texts(&id).unwrap()[0].1,
+            "[page 1]\npaid for text"
+        );
+        assert_eq!(
+            a.files_cache[0].extractor,
+            crate::extract::EXTRACTOR_VERSION
+        );
+    }
+
+    #[test]
+    fn embedding_status_carries_the_read_status_and_restores_it() {
+        assert_eq!(embedding_status("ok"), "embedding…");
+        assert_eq!(
+            embedding_status("ok · html → text"),
+            "embedding… · ok · html → text"
+        );
+        assert_eq!(restored_status("embedding…"), "ok");
+        assert_eq!(
+            restored_status("embedding… · ok · html → text"),
+            "ok · html → text"
+        );
+    }
+
+    #[tokio::test]
+    async fn embedding_a_converted_file_keeps_how_it_was_read() {
+        let mut a = test_app();
+        let space = a.active_space.id.clone();
+        let id =
+            a.db.upsert_file(&space, "p.html", "h", 1, "ok · html → text")
+                .unwrap();
+        a.db.set_file_chunks(&id, &[("l".into(), "text".into())])
+            .unwrap();
+        a.start_embedding();
+        assert_eq!(
+            a.db.list_files(&space).unwrap()[0].status,
+            "embedding… · ok · html → text"
+        );
+        a.on_embed_done(Some((space.clone(), id, Ok(vec![(0, vec![1.0f32, 0.0])]))));
+        assert_eq!(
+            a.db.list_files(&space).unwrap()[0].status,
+            "ok · html → text"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_converter_job_marks_the_file_then_replaces_the_stand_in_text() {
+        use crate::extract::external::fake_tools::Bin;
+        let bin = Bin::new();
+        bin.tool("pandoc", "echo '# converted by pandoc'");
+        let mut a = test_app();
+        a.embedding_model.clear();
+        let dir = files_dir_of(&a);
+        std::fs::write(dir.join("notes.rst"), "Title\n=====\nrst body words").unwrap();
+        a.rescan_files_with(&bin.cfg());
+        assert_eq!(status_of(&a, "notes.rst"), "convert: pandoc…");
+        assert!(a.ocr_rx.is_some(), "a job is queued");
+        // The built-in text is searchable while the converter works.
+        let hits =
+            crate::db::search_chunks(a.db.conn_for_test(), &a.active_space.id, "words", 8).unwrap();
+        assert_eq!(hits.len(), 1);
+
+        let space = a.active_space.id.clone();
+        a.on_ocr_done(Some((
+            space.clone(),
+            "notes.rst".into(),
+            OcrUpdate::Stage("convert: pandoc".into()),
+        )));
+        assert_eq!(status_of(&a, "notes.rst"), "convert: pandoc");
+        a.on_ocr_done(Some((
+            space.clone(),
+            "notes.rst".into(),
+            OcrUpdate::Done(Ok(("# converted by pandoc".into(), Vec::new()))),
+        )));
+        assert_eq!(status_of(&a, "notes.rst"), "ok · pandoc");
+        let text = crate::db::file_text(a.db.conn_for_test(), &space, "notes.rst")
+            .unwrap()
+            .unwrap();
+        assert_eq!(text, "# converted by pandoc");
+
+        // A failed conversion keeps the stand-in text and says so.
+        std::fs::write(dir.join("other.rst"), "Other\n=====\nkept words").unwrap();
+        a.ocr_rx = None;
+        a.rescan_files_with(&bin.cfg());
+        a.on_ocr_done(Some((
+            space.clone(),
+            "other.rst".into(),
+            OcrUpdate::Done(Err("conversion failed: pandoc: boom".into())),
+        )));
+        assert_eq!(
+            status_of(&a, "other.rst"),
+            "conversion failed: pandoc: boom"
+        );
+        assert!(!crate::extract::status_is_queued(&status_of(
+            &a,
+            "other.rst"
+        )));
+        assert!(
+            crate::db::file_text(a.db.conn_for_test(), &space, "other.rst")
+                .unwrap()
+                .unwrap()
+                .contains("kept words")
+        );
+    }
+
+    #[test]
+    fn read_labels_say_how_a_job_read_the_file() {
+        assert_eq!(read_label("ocr…", "scan.pdf"), "pdf (ocr)");
+        assert_eq!(read_label("ocr 3/10", "scan.PDF"), "pdf (ocr)");
+        assert_eq!(read_label("ocr: tesseract", "shot.png"), "image (ocr)");
+        assert_eq!(
+            read_label("ocr: captioning image…", "shot.png"),
+            "image (caption)"
+        );
+        assert_eq!(
+            read_label("convert: soffice → pdf", "old.xls"),
+            "soffice → pdf"
+        );
+        assert_eq!(read_label("convert: pandoc…", "a.rst"), "pandoc");
+    }
+
+    #[test]
+    fn reocr_only_applies_to_pdfs_and_images() {
+        let mut a = test_app();
+        let dir = files_dir_of(&a);
+        std::fs::write(dir.join("notes.txt"), "plain words").unwrap();
+        a.rescan_files();
+        a.reocr_file("notes.txt");
+        assert!(
+            a.last_status().contains("only PDFs and images support OCR"),
+            "{}",
+            a.last_status()
+        );
+        assert_eq!(status_of(&a, "notes.txt"), "ok");
     }
 }

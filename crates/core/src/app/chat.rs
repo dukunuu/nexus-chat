@@ -685,11 +685,11 @@ impl App {
                 while let Some(start) = rest.find("![") {
                     if let Some(end) = rest[start..].find(')') {
                         let inner = &rest[start + 2..start + end];
-                        if let Some((_alt, file)) = inner.split_once("](") {
-                            let path = images_dir.join(file);
-                            if let Ok(bytes) = std::fs::read(&path) {
-                                images.push(crate::app::transcribe::png_bytes_data_url(&bytes));
-                            }
+                        if let Some((_alt, file)) = inner.split_once("](")
+                            && let Some(url) =
+                                crate::app::transcribe::image_ref_data_url(&images_dir, file)
+                        {
+                            images.push(url);
                         }
                         rest = &rest[start + end + 1..];
                     } else {
@@ -2145,26 +2145,16 @@ impl App {
         let mut urls: Vec<String> = Vec::new();
         let mut names: Vec<&str> = Vec::new();
         for f in &self.files_cache {
-            let ext = std::path::Path::new(&f.name)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            if !crate::extract::is_image_ext(ext) {
+            // Judged by content: a renamed PDF is never sent as an image, and
+            // a PNG with a wrong extension still is one.
+            let Ok(bytes) = std::fs::read(files_dir.join(&f.name)) else {
                 continue;
-            }
-            let path = files_dir.join(&f.name);
-            if let Ok(bytes) = std::fs::read(&path) {
-                use base64::Engine;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                let mime = match ext {
-                    "jpg" | "jpeg" => "image/jpeg",
-                    "gif" => "image/gif",
-                    "webp" => "image/webp",
-                    "bmp" => "image/bmp",
-                    _ => "image/png",
-                };
-                urls.push(format!("data:{mime};base64,{b64}"));
-            }
+            };
+            let Some(mime) = crate::extract::vision_mime(&bytes) else {
+                continue;
+            };
+            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+            urls.push(format!("data:{mime};base64,{b64}"));
             names.push(f.name.as_str());
         }
         if urls.is_empty() {

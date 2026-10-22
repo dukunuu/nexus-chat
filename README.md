@@ -141,9 +141,23 @@ agent on macOS and prints the activation command.
 - Rust 1.91+ (only needed to build/install — no runtime dependency)
 - A modern terminal (truecolor recommended)
 - Extra tooling, all optional:
-  - `tesseract` — local OCR
-  - `ffmpeg` — video transforms for `media`
+  - `tesseract` — local OCR (scanned PDFs and images)
+  - `ffmpeg` — video transforms for `media`; with `ffprobe` and a local
+    `whisper`, audio/video files get metadata and transcripts
+  - `pandoc`, `libreoffice` (`soffice`), `antiword`/`catdoc` — richer reads of
+    markup and legacy office files (docx, odt, epub, rtf, org, rst, … work
+    without them; `.doc`/`.xls`/`.ppt`/`.key` need one of these)
   - `ollama` — local embeddings/OCR
+
+Files are read by content, not extension: HTML becomes clean Markdown, PDFs,
+office/ODF/EPUB, RTF, mail, notebooks, subtitles and CSV are converted, and a
+binary nothing can read is indexed by name and metadata only (never as text).
+Add your own converter per extension or MIME type in `config.toml`:
+
+```toml
+[extract.converters]
+"key" = ["keynote2md", "{in}"]   # stdout is Markdown
+```
 
 ### Configuration
 
@@ -449,7 +463,10 @@ crates/core/        nexus-chat-core (lib crate `nexus_core`) — domain only, ze
 ├── src/provider/   message shapes, tool-call wire format, events
 │   └── openrouter.rs  one client for all OpenAI-wire backends (OR/OpenAI/…)
 ├── src/tools.rs    the model's tools: search, fetch, python, video, apps…
-├── src/skills.rs, extract.rs, citations.rs   tool support
+├── src/skills.rs, citations.rs   tool support
+├── src/extract/    any file → text: content sniffing (detect), converters
+│                   (html, office, odf, epub, rtf, mail, …), external tools
+│                   (external), the one `to_text` every read path uses
 ├── src/db.rs       SQLite: sessions, messages, usage, citations, model prefs
 ├── src/appserver.rs  localhost static server for model-created apps (8642)
 ├── src/host/         HTTP/SSE daemon, provider gateway, sync/worker routes,

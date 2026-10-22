@@ -3098,7 +3098,7 @@ impl ToolBox {
                                 )
                             }
                         }
-                        Ok(None) => format!("unknown file: {name}"),
+                        Ok(None) => unreadable_file_message(&ctx.db_path, &ctx.space_id, &name),
                         Err(e) => format!("file read failed: {e}"),
                     },
                 };
@@ -5116,6 +5116,65 @@ fn fs_list_dir(
     Ok(())
 }
 
+/// A file that is not UTF-8 text: PDFs, office documents, UTF-16 text and
+/// the like are read through the same converter the file index uses (so the
+/// model sees the text, never bytes); anything else is reported by type.
+/// Converted lines carry no edit anchors: such files cannot be edited.
+fn fs_read_converted(
+    workspace: &Workspace,
+    path: &Path,
+    bytes: &[u8],
+    offset: usize,
+    limit: usize,
+) -> String {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let ex = crate::extract::to_text_bytes(bytes, name, &crate::extract::ExtractConfig::none());
+    if ex.text.trim().is_empty() {
+        let kind = ex.kind;
+        return match (&ex.outcome, kind) {
+            (crate::extract::Outcome::NeedsOcr, crate::extract::Kind::Pdf) => format!(
+                "pdf ({} bytes) has no text layer · import it into the space files to have it OCR'd",
+                bytes.len()
+            ),
+            (crate::extract::Outcome::NeedsOcr, _) => format!(
+                "{} image ({} bytes) · not shown as text · import it into the space files to have it OCR'd or described",
+                kind.label(),
+                bytes.len()
+            ),
+            (_, crate::extract::Kind::Binary("unknown")) => {
+                format!("binary file ({} bytes) · not shown", bytes.len())
+            }
+            _ => format!(
+                "binary file ({} bytes, {}) · not shown",
+                bytes.len(),
+                kind.label()
+            ),
+        };
+    }
+    let lines: Vec<_> = ex.text.lines().collect();
+    let start = offset.saturating_sub(1).min(lines.len());
+    let end = start.saturating_add(limit).min(lines.len());
+    let (first, last) = if start == end {
+        (0, 0)
+    } else {
+        (start + 1, end)
+    };
+    let mut result = format!(
+        "{} (converted from {}, lines {first}-{last} of {}):\n{}",
+        fs_relative(workspace, path),
+        ex.kind.label(),
+        lines.len(),
+        number_lines(&lines[start..end], start)
+    );
+    if end < lines.len() {
+        let _ = write!(result, "\n… continue with offset={}", end + 1);
+    }
+    result
+}
+
 fn fs_read(
     workspace: &Workspace,
     path: &Path,
@@ -5132,9 +5191,19 @@ fn fs_read(
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    let mut result = if bytes.contains(&0) {
-        format!("binary file ({} bytes) · not shown", bytes.len())
-    } else if let Ok(text) = std::str::from_utf8(&bytes) {
+    // Judged by content: an uncompressed PDF is valid UTF-8, and still not
+    // something to show line by line.
+    let is_text = !bytes.contains(&0)
+        && crate::extract::detect_head(
+            &bytes[..bytes.len().min(64 * 1024)],
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default(),
+        )
+        .is_text();
+    let mut result = if let Ok(text) = std::str::from_utf8(&bytes)
+        && is_text
+    {
         let lines: Vec<_> = text.lines().collect();
         let start = offset.saturating_sub(1).min(lines.len());
         let end = start.saturating_add(limit).min(lines.len());
@@ -5154,7 +5223,7 @@ fn fs_read(
         }
         result
     } else {
-        format!("binary file ({} bytes) · not shown", bytes.len())
+        fs_read_converted(workspace, path, &bytes, offset, limit)
     };
     workspace.record_read(path, Workspace::stamp_bytes(&bytes, &metadata)?);
     // Empty files still have a header, but no empty hash-line.
@@ -5319,6 +5388,36 @@ fn semantic_snippets(conn: &rusqlite::Connection, space_id: &str, query: &[f32])
             .collect::<Vec<_>>()
             .join("\n"),
     )
+}
+
+/// Why `files read` has no text for `name`: unknown, still being processed,
+/// or imported but without readable text (with the status that says why).
+fn unreadable_file_message(db_path: &Path, space_id: &str, name: &str) -> String {
+    let status = crate::db::open_attached(db_path)
+        .and_then(|conn| crate::db::file_status(&conn, space_id, name))
+        .ok()
+        .flatten();
+    unreadable_message(status, name)
+}
+
+fn unreadable_message(status: Option<String>, name: &str) -> String {
+    match status {
+        None => format!("unknown file: {name}"),
+        Some(s) if crate::extract::status_is_queued(&s) => {
+            format!("{name} is still being processed ({s}) · try again shortly")
+        }
+        Some(s) => format!("{name} has no readable text · {s}"),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn unreadable_file_message_for_test(
+    conn: &rusqlite::Connection,
+    space_id: &str,
+    name: &str,
+) -> String {
+    let status = crate::db::file_status(conn, space_id, name).ok().flatten();
+    unreadable_message(status, name)
 }
 
 /// `cat -n`-style numbering for ranged reads, matching what agent harnesses
@@ -5944,22 +6043,11 @@ async fn brave_search(client: &reqwest::Client, query: &str) -> anyhow::Result<V
     Ok(hits.into_iter().take(8).collect())
 }
 
-/// Extract readable text from a fetched body: PDF (by content-type or
-/// `%PDF` magic bytes) via `pdf-extract`, otherwise treated as HTML.
-/// PDF extraction failures degrade to an explanatory string rather than
-/// erroring the whole fetch — a scanned/malformed PDF shouldn't kill the
-/// searcher's tool call.
+/// Extract readable text from a fetched body. The type comes from the bytes
+/// (PDF, HTML, office, plain text, …), the `Content-Type` is only a hint, and
+/// binary content becomes a one-line note instead of mojibake.
 fn extract_pdf_or_html(bytes: &[u8], content_type: &str) -> String {
-    let looks_like_pdf =
-        content_type.to_lowercase().contains("application/pdf") || bytes.starts_with(b"%PDF");
-    if looks_like_pdf {
-        return match pdf_extract::extract_text_from_mem(bytes) {
-            Ok(text) => text.trim().to_string(),
-            Err(e) => format!("[could not extract PDF text: {e}]"),
-        };
-    }
-    let html = String::from_utf8_lossy(bytes);
-    strip_html_to_text(&html)
+    crate::extract::from_fetched(bytes, content_type)
 }
 
 /// GET `url` and return its readable text. Capped at 2MB of raw body and a
@@ -6233,101 +6321,8 @@ fn html_unescape(s: &str) -> String {
         .replace("&#39;", "'")
 }
 
-/// Remove every `<tag>...</tag>` block (case-sensitive on the lowercase tag
-/// name callers pass, e.g. "script"/"style") including its content. An
-/// unterminated opening tag drops the remainder of the string rather than
-/// looping forever or panicking on a truncated/malformed fetch.
-fn drop_tag_blocks(html: &str, tag: &str) -> String {
-    let open = format!("<{tag}");
-    let close = format!("</{tag}>");
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    loop {
-        match rest.find(&open) {
-            None => {
-                out.push_str(rest);
-                break;
-            }
-            Some(start) => {
-                out.push_str(&rest[..start]);
-                match rest[start..].find(&close) {
-                    None => break,
-                    Some(end_rel) => {
-                        rest = &rest[start + end_rel + close.len()..];
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Pull every top-level `<table>...</table>` block out of `html`, replacing
-/// it with a markdown pipe-table rendering. Runs before the generic
-/// tag-stripper so table structure survives; a `<table>` nested inside
-/// another is left as inner markup (rendered as flattened text by the
-/// generic stripper afterward) rather than recursed into — good enough for
-/// the benchmark/pricing tables research actually hits.
-fn render_tables_as_markdown(html: &str) -> String {
-    let mut out = String::new();
-    let mut rest = html;
-    while let Some(start) = rest.find("<table") {
-        out.push_str(&rest[..start]);
-        let Some(tag_end) = rest[start..].find('>') else {
-            out.push_str(&rest[start..]);
-            return out;
-        };
-        let body_start = start + tag_end + 1;
-        let Some(close_rel) = rest[body_start..].find("</table>") else {
-            out.push_str(&rest[start..]);
-            return out;
-        };
-        let body_end = body_start + close_rel;
-        out.push_str(&table_to_markdown(&rest[body_start..body_end]));
-        rest = &rest[body_end + "</table>".len()..];
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Render one table's inner HTML (rows of `<tr>`, cells `<th>`/`<td>`) as a
-/// GitHub-style pipe table. Header row = first `<tr>`'s cells; a `---`
-/// separator follows it unconditionally (even if that row used `<td>`, not
-/// `<th>` — most scraped tables don't bother with `<th>`).
-fn table_to_markdown(table_html: &str) -> String {
-    let rows: Vec<Vec<String>> = split_tag_blocks(table_html, "tr")
-        .iter()
-        .map(|row_html| {
-            let mut cells: Vec<String> = split_tag_blocks(row_html, "th")
-                .iter()
-                .map(|c| strip_tags(c).replace('\n', " ").trim().to_string())
-                .collect();
-            cells.extend(
-                split_tag_blocks(row_html, "td")
-                    .iter()
-                    .map(|c| strip_tags(c).replace('\n', " ").trim().to_string()),
-            );
-            cells
-        })
-        .filter(|r| !r.is_empty())
-        .collect();
-    if rows.is_empty() {
-        return String::new();
-    }
-    let cols = rows[0].len();
-    let mut out = String::from("\n");
-    let _ = writeln!(out, "| {} |", rows[0].join(" | "));
-    let _ = writeln!(out, "| {} |", vec!["---"; cols].join(" | "));
-    for row in &rows[1..] {
-        let _ = writeln!(out, "| {} |", row.join(" | "));
-    }
-    out.push('\n');
-    out
-}
-
 /// Every top-level `<tag>...</tag>` block's inner HTML, in order. Does not
-/// recurse into nested same-named tags — a nested `<tr>` inside a cell (rare,
-/// malformed markup) is left as part of the outer block's text.
+/// recurse into nested same-named tags.
 fn split_tag_blocks(html: &str, tag: &str) -> Vec<String> {
     let open = format!("<{tag}");
     let close = format!("</{tag}>");
@@ -6348,19 +6343,11 @@ fn split_tag_blocks(html: &str, tag: &str) -> Vec<String> {
     out
 }
 
-/// HTML page body → plain readable text: drop script/style blocks, strip all
-/// remaining tags, unescape entities, and collapse blank/whitespace-only
-/// lines so paginated output isn't mostly empty lines.
+/// HTML page body → readable Markdown (headings, lists, tables kept; scripts,
+/// styles and inline data dropped). One converter for web fetches and files:
+/// see `extract::html`.
 fn strip_html_to_text(html: &str) -> String {
-    let no_script = drop_tag_blocks(html, "script");
-    let no_style = drop_tag_blocks(&no_script, "style");
-    let with_tables = render_tables_as_markdown(&no_style);
-    strip_tags(&with_tables)
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    crate::extract::html::to_markdown(html)
 }
 
 /// One scholarly-paper hit, flattened from the Semantic Scholar response.
@@ -7619,6 +7606,8 @@ fn resolve_image(files_dir: &std::path::Path, id: &str) -> Option<Vec<u8>> {
     std::fs::read(&direct)
         .ok()
         .or_else(|| std::fs::read(files_dir.join(format!("{id}.png"))).ok())
+        // Only real images: a PDF or text file is never sent as a reference.
+        .filter(|bytes| crate::extract::vision_mime(bytes).is_some())
 }
 
 /// Extract a single frame from a video via ffmpeg subprocess. When `use_eof`
@@ -9348,6 +9337,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fs_read_shows_converted_text_for_documents_never_raw_bytes() {
+        let (toolbox, dir) = fs_toolbox();
+        let workspace = toolbox.workspace.as_ref().unwrap();
+        let root = workspace.root().to_path_buf();
+        // A PDF, even without a .pdf name, is read as text (this used to be
+        // "binary file · not shown", or bytes if it was decoded lossily).
+        std::fs::write(
+            root.join("report"),
+            crate::extract::pdf_with_pages(&["WORKSPACE PDF TEXT"]),
+        )
+        .unwrap();
+        let (result, _) = toolbox.run("fs_read", r#"{"path":"report"}"#).await;
+        assert!(
+            result.starts_with("report (converted from pdf, lines 1-"),
+            "{result}"
+        );
+        assert!(
+            result.contains("WORKSPACE PDF TEXT") && !result.contains("%PDF"),
+            "{result}"
+        );
+        // UTF-16 text with a BOM reads as text.
+        let mut utf16 = vec![0xFF, 0xFE];
+        utf16.extend("wide text".encode_utf16().flat_map(u16::to_le_bytes));
+        std::fs::write(root.join("wide.txt"), utf16).unwrap();
+        let (result, _) = toolbox.run("fs_read", r#"{"path":"wide.txt"}"#).await;
+        assert!(result.contains("wide text"), "{result}");
+        // A known binary is named; an unknown one is unchanged.
+        std::fs::write(root.join("pic"), b"\x89PNG\r\n\x1a\n\0\0\0\0").unwrap();
+        let (result, _) = toolbox.run("fs_read", r#"{"path":"pic"}"#).await;
+        assert_eq!(
+            result,
+            "png image (12 bytes) · not shown as text · import it into the space files to have it OCR'd or described"
+        );
+        // Converted files cannot be edited through the anchors.
+        let (result, _) = toolbox
+            .run(
+                "fs_edit",
+                r#"{"path":"report","edits":[{"line":1,"hash":"zz","text":"x"}]}"#,
+            )
+            .await;
+        assert!(!result.contains("WORKSPACE"), "{result}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn fs_read_refuses_files_over_sixteen_mib_without_recording_a_stamp() {
         let (toolbox, dir) = fs_toolbox();
         let workspace = toolbox.workspace.as_ref().unwrap();
@@ -10337,64 +10371,6 @@ mod tests {
     }
 
     #[test]
-    fn drop_tag_blocks_removes_script_and_style_content() {
-        let html =
-            "<p>keep</p><script>var x = 1;</script><style>.a{color:red}</style><p>also keep</p>";
-        let no_script = drop_tag_blocks(html, "script");
-        assert!(!no_script.contains("var x"));
-        assert!(no_script.contains("also keep"));
-        let no_style = drop_tag_blocks(&no_script, "style");
-        assert!(!no_style.contains("color:red"));
-        assert!(no_style.contains("keep"));
-    }
-
-    #[test]
-    fn drop_tag_blocks_handles_unterminated_tag_by_dropping_the_remainder() {
-        // A truncated fetch (or malformed page) shouldn't panic or infinite-loop.
-        let html = "<p>keep</p><script>var x = 1;";
-        let out = drop_tag_blocks(html, "script");
-        assert_eq!(out, "<p>keep</p>");
-    }
-
-    #[test]
-    fn strip_html_to_text_drops_tags_scripts_styles_and_blank_lines() {
-        let html = "<html><head><style>body{}</style><script>track();</script></head>\
-                     <body>\n\n<h1>Title</h1>\n<p>Some   text</p>\n\n\n<p>More</p></body></html>";
-        let text = strip_html_to_text(html);
-        assert!(!text.contains("track()"));
-        assert!(!text.contains("body{}"));
-        assert!(text.contains("Title"));
-        assert!(text.contains("More"));
-        // No blank lines left over from stripped block-level tags.
-        assert!(!text.contains("\n\n"));
-    }
-
-    #[test]
-    fn strip_html_to_text_renders_table_as_markdown_pipe_table() {
-        let html = "<body><p>Intro</p><table>\
-            <tr><th>Model</th><th>Score</th></tr>\
-            <tr><td>A</td><td>91</td></tr>\
-            <tr><td>B</td><td>88</td></tr>\
-            </table><p>Outro</p></body>";
-        let text = strip_html_to_text(html);
-        assert!(text.contains("| Model | Score |"), "{text:?}");
-        assert!(text.contains("| --- | --- |"), "{text:?}");
-        assert!(text.contains("| A | 91 |"), "{text:?}");
-        assert!(text.contains("| B | 88 |"), "{text:?}");
-        assert!(text.contains("Intro"));
-        assert!(text.contains("Outro"));
-    }
-
-    #[test]
-    fn strip_html_to_text_flattens_nested_tables_without_recursing() {
-        let html = "<table><tr><td>outer<table><tr><td>inner</td></tr></table></td></tr></table>";
-        // Must not panic or infinite-loop; nested content just degrades to flattened text.
-        let text = strip_html_to_text(html);
-        assert!(text.contains("outer"));
-        assert!(text.contains("inner"));
-    }
-
-    #[test]
     fn is_youtube_url_matches_watch_and_short_links() {
         assert!(is_youtube_url("https://www.youtube.com/watch?v=abc123"));
         assert!(is_youtube_url("https://youtu.be/abc123"));
@@ -10516,6 +10492,38 @@ mod tests {
             None,
         );
         (tb, db, space)
+    }
+
+    #[tokio::test]
+    async fn files_read_explains_a_file_that_has_no_readable_text() {
+        let (tb, db, space) = files_toolbox();
+        let id = db
+            .upsert_file(
+                &space,
+                "blob.bin",
+                "h",
+                4,
+                "binary: unknown, no converter — install pandoc/libreoffice or add [extract.converters]",
+            )
+            .unwrap();
+        db.set_file_chunks(&id, &crate::extract::metadata_chunks("blob.bin"))
+            .unwrap();
+        let (out, _) = tb
+            .run("files", r#"{"action":"read","name":"blob.bin"}"#)
+            .await;
+        assert!(
+            out.starts_with("blob.bin has no readable text · binary: unknown, no converter"),
+            "{out}"
+        );
+        db.set_file_status(&id, "convert: pandoc…").unwrap();
+        let (out, _) = tb
+            .run("files", r#"{"action":"read","name":"blob.bin"}"#)
+            .await;
+        assert!(out.contains("still being processed"), "{out}");
+        let (out, _) = tb
+            .run("files", r#"{"action":"read","name":"nope.bin"}"#)
+            .await;
+        assert_eq!(out, "unknown file: nope.bin");
     }
 
     fn skills_toolbox() -> (ToolBox, PathBuf) {

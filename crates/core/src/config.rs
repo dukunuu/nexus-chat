@@ -56,6 +56,10 @@ struct Config {
     #[serde(default)]
     #[allow(dead_code)] // parsed so the key is known; read through `read_table_at`
     connectors: Option<toml::Value>,
+    /// Raw `[extract.converters]` section, read by `load_extract_converters`.
+    #[serde(default)]
+    #[allow(dead_code)] // parsed so the key is known
+    extract: Option<toml::Value>,
 }
 
 /// Machine-local rules and model thresholds for agent-auto policy.
@@ -448,6 +452,44 @@ fn load_experiments() -> Result<Experiments> {
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let config: Config = toml::from_str(&text).context("parsing experiments configuration")?;
     Ok(config.experiments)
+}
+
+/// The user's file converters from `[extract.converters]`: `"<ext or mime>" =
+/// ["cmd", "{in}"]`, run with the file path substituted for `{in}` and read
+/// as Markdown from stdout. Read through the config reader, so a bad or
+/// missing file just means no hooks; the config writer is read-modify-write,
+/// so the section survives every save.
+pub fn load_extract_converters() -> Vec<(String, Vec<String>)> {
+    config_path()
+        .ok()
+        .and_then(|path| read_table_at(&path).ok())
+        .map(|root| converters_from_table(&root))
+        .unwrap_or_default()
+}
+
+/// Valid `[extract.converters]` entries of `root`: a non-empty command array
+/// of strings under a key that is an extension (`rtf`, `.rtf`) or a MIME type.
+pub(crate) fn converters_from_table(root: &toml::Table) -> Vec<(String, Vec<String>)> {
+    let Some(table) = root
+        .get("extract")
+        .and_then(|e| e.get("converters"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Vec::new();
+    };
+    table
+        .iter()
+        .filter_map(|(key, value)| {
+            let argv: Vec<String> = value
+                .as_array()?
+                .iter()
+                .map(|v| v.as_str().map(str::to_string))
+                .collect::<Option<_>>()?;
+            let key = key.trim().trim_start_matches('.').to_lowercase();
+            (!key.is_empty() && argv.first().is_some_and(|c| !c.trim().is_empty()))
+                .then_some((key, argv))
+        })
+        .collect()
 }
 
 fn load_local_config() -> Result<Option<crate::provider::local::LocalConfig>> {
@@ -1319,5 +1361,68 @@ mod tests {
     #[test]
     fn first_configured_none_when_nothing_saved() {
         assert_eq!(first_configured(&SavedCreds::default()), None);
+    }
+
+    #[test]
+    fn extract_converters_come_from_the_config_table() {
+        let root: toml::Table = toml::from_str(
+            r#"
+            [extract.converters]
+            "RTF" = ["unrtf", "--text", "{in}"]
+            ".key" = ["keynote2md", "{in}"]
+            "application/x-thing" = ["thing"]
+            empty = []
+            wrong = "not an array"
+            mixed = ["ok", 3]
+            blank = [""]
+            "#,
+        )
+        .unwrap();
+        let mut got = converters_from_table(&root);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("application/x-thing".to_string(), vec!["thing".to_string()]),
+                (
+                    "key".to_string(),
+                    vec!["keynote2md".to_string(), "{in}".to_string()]
+                ),
+                (
+                    "rtf".to_string(),
+                    vec![
+                        "unrtf".to_string(),
+                        "--text".to_string(),
+                        "{in}".to_string()
+                    ]
+                ),
+            ]
+        );
+        assert!(converters_from_table(&toml::Table::new()).is_empty());
+    }
+
+    #[test]
+    fn extract_converters_survive_a_credential_save() {
+        let dir = std::env::temp_dir().join(format!("nexus-config-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            "[extract.converters]\n\"rtf\" = [\"unrtf\", \"{in}\"]\n",
+        )
+        .unwrap();
+        write_config_at(&path, "key", "", "", None, None).unwrap();
+        let saved = read_table_at(&path).unwrap();
+        assert_eq!(
+            converters_from_table(&saved),
+            vec![(
+                "rtf".to_string(),
+                vec!["unrtf".to_string(), "{in}".to_string()]
+            )]
+        );
+        assert_eq!(saved["provider"]["openrouter_key"].as_str(), Some("key"));
+        // The config struct accepts the section too.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(toml::from_str::<Config>(&text).is_ok());
     }
 }

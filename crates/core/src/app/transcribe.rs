@@ -27,11 +27,33 @@ pub fn encode_png(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// `data:image/png;base64,…` URL for PNG bytes.
+#[cfg(test)]
 pub fn png_bytes_data_url(bytes: &[u8]) -> String {
     format!(
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
     )
+}
+
+/// The `data:` URL for a `![alt](file)` reference under `dir`, or `None`
+/// unless the file is a real, relative-path image a vision model accepts. The
+/// type comes from the bytes: a PDF or text file named in an image reference
+/// is never sent as image data.
+pub fn image_ref_data_url(dir: &std::path::Path, file: &str) -> Option<String> {
+    let rel = std::path::Path::new(file);
+    if rel.is_absolute()
+        || rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let bytes = std::fs::read(dir.join(rel)).ok()?;
+    let mime = crate::extract::vision_mime(&bytes)?;
+    Some(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    ))
 }
 
 /// Encode raw RGBA pixels as a `data:image/png;base64,…` URL. Test-only:
@@ -119,6 +141,41 @@ mod tests {
         let reader = decoder.read_info().unwrap();
         assert_eq!(reader.info().width, 2);
         assert_eq!(reader.info().height, 1);
+    }
+
+    #[test]
+    fn image_references_only_send_real_images_judged_by_content() {
+        let dir = std::env::temp_dir().join(format!("nexus-imgref-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let png = encode_png(1, 1, &[0, 0, 0, 255]).unwrap();
+        std::fs::write(dir.join("real.png"), &png).unwrap();
+        std::fs::write(dir.join("sub/renamed.dat"), &png).unwrap();
+        std::fs::write(dir.join("fake.png"), b"%PDF-1.4 not an image").unwrap();
+        std::fs::write(dir.join("notes.png"), b"just text").unwrap();
+        std::fs::write(dir.join("../nexus-imgref-outside.png"), &png).unwrap();
+
+        assert!(
+            image_ref_data_url(&dir, "real.png")
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
+        assert!(image_ref_data_url(&dir, "sub/renamed.dat").is_some());
+        // A PDF or text file in an image reference is never sent as image data.
+        assert!(image_ref_data_url(&dir, "fake.png").is_none());
+        assert!(image_ref_data_url(&dir, "notes.png").is_none());
+        assert!(image_ref_data_url(&dir, "missing.png").is_none());
+        // And a reference cannot climb out of the files directory.
+        assert!(image_ref_data_url(&dir, "../nexus-imgref-outside.png").is_none());
+        assert!(image_ref_data_url(&dir, "/etc/hosts").is_none());
+        let _ = std::fs::remove_file(dir.join("../nexus-imgref-outside.png"));
+
+        // Tool results get the same treatment.
+        let result = "![a](fake.png) ![b](notes.png)";
+        assert!(crate::provider::openrouter::extract_tool_images(result, &dir).is_none());
+        let both = "![a](fake.png) ![b](real.png)";
+        let imgs = crate::provider::openrouter::extract_tool_images(both, &dir).unwrap();
+        assert_eq!(imgs.urls.len(), 1);
+        assert_eq!(imgs.description, "The tool returned this image: b");
     }
 
     #[tokio::test]

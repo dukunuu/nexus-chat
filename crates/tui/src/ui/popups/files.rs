@@ -110,7 +110,7 @@ fn render_files(f: &mut Frame, app: &AppView) {
         .files_cache
         .iter()
         .map(|file| {
-            let ok = file.status == "ok";
+            let ok = nexus_core::extract::status_is_ok(&file.status);
             let status_style = if ok {
                 dim
             } else {

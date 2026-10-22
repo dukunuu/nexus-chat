@@ -3576,20 +3576,24 @@ pub(crate) fn extract_tool_images(
         if let Some(end) = rest[start..].find(')') {
             let inner = &rest[start + 2..start + end];
             if let Some((desc, file)) = inner.split_once("](") {
-                let path = files_dir.join(file);
-                if let Ok(bytes) = std::fs::read(&path) {
+                let rel = std::path::Path::new(file);
+                let safe = !rel.is_absolute()
+                    && !rel
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir));
+                // Only real images, judged by content: a PDF or text file
+                // named in an image reference is never sent as image data.
+                let image = safe
+                    .then(|| std::fs::read(files_dir.join(rel)).ok())
+                    .flatten()
+                    .and_then(|bytes| crate::extract::vision_mime(&bytes).map(|m| (bytes, m)));
+                if let Some((bytes, original_mime)) = image {
                     let resized = resize_for_api(&bytes, files_dir);
                     let b64 = base64::engine::general_purpose::STANDARD.encode(&resized);
-                    let ext = if resized.len() < bytes.len() {
-                        "jpg"
+                    let mime = if resized.len() < bytes.len() {
+                        "image/jpeg"
                     } else {
-                        "png"
-                    };
-                    let mime = match ext {
-                        "jpg" | "jpeg" => "image/jpeg",
-                        "gif" => "image/gif",
-                        "webp" => "image/webp",
-                        _ => "image/png",
+                        original_mime
                     };
                     urls.push(format!("data:{mime};base64,{b64}"));
                     descs.push(desc.to_string());

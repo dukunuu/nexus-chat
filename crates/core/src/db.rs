@@ -99,8 +99,9 @@ pub struct Watch {
     pub last_run_at: Option<String>,
 }
 
-/// A file imported into a space's fileset. `status` is "ok", "no text
-/// (scanned?)", "unsupported", or "error: …"; extraction text lives in the
+/// A file imported into a space's fileset. `status` is "ok" (or "ok · html →
+/// text", say how it was read), "no text (scanned?)", "binary: …, no
+/// converter", "metadata only: …" or "error: …"; extraction text lives in the
 /// `cache.file_chunks` FTS table. `status`/`mtime` are this device's derived
 /// index state from `cache.file_index_state` — a cold cache reports
 /// "not indexed"/0 until the next rescan re-derives them.
@@ -114,6 +115,9 @@ pub struct FileRow {
     /// Unix mtime of the disk file when last indexed; lets rescans skip
     /// reading/hashing files whose (size, mtime) haven't changed.
     pub mtime: i64,
+    /// `extract::EXTRACTOR_VERSION` that produced the index; 0 = indexed by
+    /// a build that predates versioning.
+    pub extractor: i64,
 }
 
 /// One message in a session. `model`/`reasoning`/`tokens`/`secs`/`cost` are
@@ -371,6 +375,7 @@ fn apply_pragmas(conn: &Connection) {
 /// Create the device-local cache schema on `conn` under the given schema
 /// name — `cache` on a main-db connection from `open_attached`, or `main`
 /// on a standalone cache-only connection.
+#[allow(clippy::too_many_lines)]
 pub fn migrate_cache(conn: &Connection, schema: &str) -> Result<()> {
     conn.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS {schema}.web_cache (
@@ -405,7 +410,8 @@ pub fn migrate_cache(conn: &Connection, schema: &str) -> Result<()> {
             file_id TEXT PRIMARY KEY,
             mtime INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            extractor INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS {schema}.session_workspaces (
             session_id TEXT PRIMARY KEY,
@@ -456,6 +462,17 @@ pub fn migrate_cache(conn: &Connection, schema: &str) -> Result<()> {
     if !columns.iter().any(|column| column == "mode") {
         conn.execute_batch(&format!(
             "ALTER TABLE {schema}.session_workspaces ADD COLUMN mode TEXT"
+        ))?;
+    }
+    // Which extractor version indexed each file: older ones are re-extracted
+    // once (see `extract::EXTRACTOR_VERSION`).
+    let mut stmt = conn.prepare(&format!("PRAGMA {schema}.table_info(file_index_state)"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|column| column == "extractor") {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {schema}.file_index_state ADD COLUMN extractor INTEGER NOT NULL DEFAULT 0"
         ))?;
     }
     let mut stmt = conn.prepare(&format!("PRAGMA {schema}.table_info(decisions)"))?;
@@ -2018,7 +2035,8 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT files.id, files.name, files.hash, files.size,
                     COALESCE(cache.file_index_state.status, 'not indexed'),
-                    COALESCE(cache.file_index_state.mtime, 0)
+                    COALESCE(cache.file_index_state.mtime, 0),
+                    COALESCE(cache.file_index_state.extractor, 0)
              FROM files
              LEFT JOIN cache.file_index_state
                  ON cache.file_index_state.file_id = files.id
@@ -2032,6 +2050,7 @@ impl Db {
                 size: r.get(3)?,
                 status: r.get(4)?,
                 mtime: r.get(5)?,
+                extractor: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2094,6 +2113,19 @@ impl Db {
         Ok(())
     }
 
+    /// Record which extractor version indexed a file (see `FileRow::extractor`).
+    pub fn set_file_extractor(&self, file_id: &str, version: i64) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO cache.file_index_state (file_id, mtime, status, updated_at, extractor)
+             VALUES (?1, 0, '', ?3, ?2)
+             ON CONFLICT(file_id) DO UPDATE SET extractor = excluded.extractor,
+                 updated_at = excluded.updated_at",
+            (file_id, version, &now),
+        )?;
+        Ok(())
+    }
+
     /// Update a file's derived status (e.g. "ok", "ocr…", or an error
     /// message) in `cache.file_index_state`. A missing row (cold cache) is
     /// created with the current mtime.
@@ -2136,9 +2168,21 @@ impl Db {
 
     /// Replace a file's indexed chunks. `chunks` are `(location, text)` in
     /// order. Any stored embeddings are dropped too — they described the old
-    /// chunk texts, and the embedder backfills the new ones. All of this is
-    /// device-local derived state in `cache.db`.
+    /// chunk texts, and the embedder backfills the new ones. Identical chunks
+    /// are left alone, so re-reading an unchanged file costs no re-embedding.
+    /// All of this is device-local derived state in `cache.db`.
     pub fn set_file_chunks(&self, file_id: &str, chunks: &[(String, String)]) -> Result<()> {
+        let current: Vec<(String, String)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT location, text FROM cache.file_chunks
+                 WHERE file_id = ?1 ORDER BY CAST(seq AS INTEGER) ASC",
+            )?;
+            stmt.query_map([file_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        if current == chunks {
+            return Ok(());
+        }
         self.conn.execute(
             "DELETE FROM cache.file_chunks WHERE file_id = ?1",
             [file_id],
@@ -3660,6 +3704,19 @@ pub fn file_text(conn: &Connection, space_id: &str, name: &str) -> Result<Option
     Ok((!parts.is_empty()).then(|| parts.join("\n")))
 }
 
+/// The indexing status of a named file ("ok · html → text", "binary: zip, …"),
+/// or `None` when the space has no such file.
+pub fn file_status(conn: &Connection, space_id: &str, name: &str) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(cache.file_index_state.status, 'not indexed')
+         FROM files
+         LEFT JOIN cache.file_index_state ON cache.file_index_state.file_id = files.id
+         WHERE files.space_id = ?1 AND files.name = ?2",
+    )?;
+    let mut rows = stmt.query_map((space_id, name), |r| r.get::<_, String>(0))?;
+    Ok(rows.next().transpose()?)
+}
+
 pub fn count_files(conn: &Connection, space_id: &str) -> Result<u64> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM files WHERE space_id = ?1",
@@ -4831,6 +4888,26 @@ mod tests {
         assert_eq!(
             files_missing_embeddings(&db.conn, &space).unwrap(),
             vec![id.clone()]
+        );
+    }
+
+    #[test]
+    fn rewriting_identical_chunks_keeps_their_embeddings() {
+        let db = Db::open_in_memory().unwrap();
+        let space = db.default_space_id().unwrap();
+        let id = db.upsert_file(&space, "book.pdf", "h1", 10, "ok").unwrap();
+        let chunks = [
+            ("page 1".to_string(), "cooking with fire".to_string()),
+            ("page 2".to_string(), "quantum entanglement".to_string()),
+        ];
+        db.set_file_chunks(&id, &chunks).unwrap();
+        db.set_chunk_embeddings(&id, &[(0, vec![1.0, 0.0]), (1, vec![0.0, 1.0])])
+            .unwrap();
+        db.set_file_chunks(&id, &chunks).unwrap();
+        assert!(
+            files_missing_embeddings(&db.conn, &space)
+                .unwrap()
+                .is_empty()
         );
     }
 

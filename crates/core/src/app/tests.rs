@@ -3466,6 +3466,44 @@ async fn history_carries_markdown_images_as_data_urls_for_vision_models() {
     assert!(user.content.contains("![this](t.png)"));
 }
 
+#[tokio::test]
+async fn space_images_are_chosen_by_content_not_extension() {
+    let mut a = app_with_key();
+    a.embedding_model.clear();
+    let dir = a.space.files_dir(&a.active_space.name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = crate::app::transcribe::encode_png(1, 1, &[0, 0, 0, 255]).unwrap();
+    std::fs::write(dir.join("photo.dat"), &png).unwrap();
+    std::fs::write(
+        dir.join("report.png"),
+        crate::extract::minimal_pdf(Some("TEXT")),
+    )
+    .unwrap();
+    a.rescan_files();
+    a.models = vec![Model {
+        id: "vis/model".into(),
+        name: "v".into(),
+        reasoning_efforts: Vec::new(),
+        context_length: None,
+        supports_images: true,
+        supports_image_generation: false,
+        supports_video_generation: false,
+        backend: BackendTag::OpenRouter,
+        pricing: None,
+    }];
+    a.current_model = Some("vis/model".into());
+    let history = a.build_history();
+    let with_images: Vec<_> = history.iter().filter(|m| !m.images.is_empty()).collect();
+    assert_eq!(with_images.len(), 1);
+    assert_eq!(
+        with_images[0].images.len(),
+        1,
+        "the PDF named .png is not an image"
+    );
+    assert!(with_images[0].content.contains("photo.dat"));
+    assert!(!with_images[0].content.contains("report.png"));
+}
+
 #[test]
 fn tool_call_events_persist_and_replay_into_history() {
     let mut a = app_with_key();
