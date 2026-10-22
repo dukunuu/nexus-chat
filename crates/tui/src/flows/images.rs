@@ -22,7 +22,8 @@ impl AppView {
         );
     }
 
-    /// Enter in Browse: open the image in the system viewer.
+    /// Enter in Browse: open the image in the viewer (terminal first, the
+    /// system viewer as the fallback).
     pub fn open_selected_image(&mut self) {
         let Some(img) = self.core.images_cache.get(self.images_selected).cloned() else {
             return;
@@ -32,8 +33,14 @@ impl AppView {
             .space
             .files_dir(&self.core.active_space.name)
             .join(&img.name);
-        let _ = open::that_detached(&path);
-        self.push_status(format!("opened {}", img.name));
+        self.open_image_target(
+            &path.to_string_lossy(),
+            &crate::image_viewer::Anchor::ByTarget,
+            crate::image_viewer::Return::Files,
+        );
+        if self.popup != nexus_core::app::Popup::ImageViewer {
+            self.push_status(format!("opened {}", img.name));
+        }
     }
 
     /// Ctrl+D confirm: delete the image file from disk and refresh.

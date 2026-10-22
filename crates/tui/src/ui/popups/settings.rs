@@ -55,6 +55,10 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 app.settings.reply_style.clone(),
                 Style::default().fg(app.theme.accent),
             ),
+            SettingsField::ImageViewer => Span::styled(
+                app.settings.image_viewer.clone(),
+                Style::default().fg(app.theme.accent),
+            ),
             SettingsField::ColumnWidth => Span::styled(
                 app.settings.column_width.clone(),
                 Style::default().fg(app.theme.accent),

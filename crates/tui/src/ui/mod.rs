@@ -39,7 +39,10 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     app.popup_hit.set(None);
     let send_ready = crate::interactive::can_send(app);
     app.interactive.begin_frame(send_ready);
-    if app.popup != Popup::InteractiveUi {
+    // The image viewer keeps the focused document for when it closes.
+    let viewing_from_ui = app.popup == Popup::ImageViewer
+        && app.image_viewer.return_to() == crate::image_viewer::Return::Interactive;
+    if app.popup != Popup::InteractiveUi && !viewing_from_ui {
         app.interactive.unfocus();
     }
     // Paint the base first so widgets that only set foreground colors inherit
@@ -128,6 +131,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         Popup::Login => popups::login::render(f, app),
         Popup::Local => popups::local::render(f, app),
         Popup::Help => popups::help::render(f, app),
+        Popup::ImageViewer => popups::image_viewer::render(f, app),
         Popup::Connectors => popups::connectors::render(f, app),
         // An approval is drawn in the composer's place above.
         Popup::Approval | Popup::None => {}

@@ -77,7 +77,7 @@ impl App {
 
 /// Every key `set_setting` accepts — the same keys `apply_setting` (and the
 /// `blocked_domains` special case) can actually apply.
-const SETTING_KEYS: [&str; 25] = [
+const SETTING_KEYS: [&str; 26] = [
     "remote_images",
     "show_stats",
     "show_reasoning",
@@ -103,6 +103,7 @@ const SETTING_KEYS: [&str; 25] = [
     "blocked_domains",
     "column_width",
     "popup_sizes",
+    "image_viewer",
 ];
 
 /// Narrowest and widest the conversation column can be set to, in cells.
@@ -243,6 +244,7 @@ fn valid_setting_value(key: &str, value: &str) -> bool {
         "ocr_engine" => OCR_ENGINES.contains(&value),
         "verbosity" => VERBOSITY_LEVELS.contains(&value),
         "reply_style" => super::REPLY_STYLES.contains(&value),
+        "image_viewer" => super::IMAGE_VIEWERS.contains(&value),
         "search_provider" => SEARCH_PROVIDERS.contains(&value),
         "column_width" => valid_column_width(value),
         "popup_sizes" => valid_popup_sizes(value),

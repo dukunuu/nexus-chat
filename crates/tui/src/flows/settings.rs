@@ -127,6 +127,16 @@ impl AppView {
                         .core
                         .set_setting("reply_style", styles[(i + 1) % styles.len()]);
                 }
+                SettingsField::ImageViewer => {
+                    let modes = nexus_core::app::IMAGE_VIEWERS;
+                    let i = modes
+                        .iter()
+                        .position(|&m| m == self.core.settings.image_viewer)
+                        .unwrap_or(0);
+                    let _ = self
+                        .core
+                        .set_setting("image_viewer", modes[(i + 1) % modes.len()]);
+                }
                 SettingsField::Verbosity => {
                     let i = VERBOSITY_LEVELS
                         .iter()

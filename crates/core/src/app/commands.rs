@@ -130,6 +130,11 @@ pub const COMMANDS: &[Command] = &[
         ],
     },
     Command {
+        name: "view",
+        desc: "view an image in the terminal: /view <path|url>",
+        aliases: &["viewer"],
+    },
+    Command {
         name: "connectors",
         desc: "connect outside services (MCP): add, tools, policy — /connectors add <name> <url|command>",
         aliases: &["connector", "mcp", "integrations", "services"],
@@ -399,6 +404,9 @@ pub enum AppCommand {
     OpenTuiApp(String),
     /// `/studio [deck]` — open or focus the linked slide canvas (view-owned).
     OpenStudio { deck: Option<String> },
+    /// `/view <path|url>` — show an image in the in-terminal viewer (or the
+    /// system viewer, per the `image_viewer` setting). View-owned.
+    OpenImage { target: String },
     /// `/research [topic]` — `gated: false` skips the plan-approval gate
     /// (`/research!`); an empty topic distills one from recent chat.
     RunResearch { topic: String, gated: bool },
@@ -536,6 +544,12 @@ impl App {
                 },
             }),
             "apps" => Ok(AppCommand::OpenApps),
+            "view" => match rest(cmd, token).as_str() {
+                "" => Err("usage: /view <path|url>".into()),
+                target => Ok(AppCommand::OpenImage {
+                    target: target.to_string(),
+                }),
+            },
             "studio" => Ok(AppCommand::OpenStudio {
                 deck: Some(rest(cmd, token)).filter(|deck| !deck.is_empty()),
             }),
@@ -624,6 +638,7 @@ impl App {
             | AppCommand::OpenConnectors
             | AppCommand::OpenTuiApp(_)
             | AppCommand::OpenStudio { .. }
+            | AppCommand::OpenImage { .. }
             | AppCommand::OpenUsage
             | AppCommand::OpenJobForm
             | AppCommand::OpenProcs

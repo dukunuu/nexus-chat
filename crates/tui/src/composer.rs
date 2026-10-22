@@ -866,6 +866,7 @@ impl AppView {
                 }
             }
             AppCommand::OpenTuiApp(name) => crate::ui::popups::tui_app::open(self, &name),
+            AppCommand::OpenImage { target } => self.open_image_command(&target),
             AppCommand::OpenStudio { deck } => {
                 if let Err(error) = self.open_studio(deck.as_deref()) {
                     self.push_status(format!("{error:#}"));

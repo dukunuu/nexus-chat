@@ -7,6 +7,7 @@ pub mod copy;
 pub mod files;
 pub mod harness;
 pub mod help;
+pub mod image_viewer;
 pub mod jobs;
 pub mod key;
 pub mod local;

@@ -4125,6 +4125,57 @@ fn popup_sizes_setting_validates_strictly_and_loads_leniently() {
 }
 
 #[test]
+fn image_viewer_setting_defaults_auto_validates_and_survives_a_restart() {
+    let root = std::env::temp_dir().join(format!("nexus-viewer-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("spaces")).unwrap();
+    let path = root.join("nexus.db");
+    let mut a = App::new(Db::open(&path).unwrap(), None, Space { root: root.clone() });
+    assert_eq!(a.settings.image_viewer, "auto");
+    for good in ["terminal", "system", "auto"] {
+        a.set_setting("image_viewer", good).unwrap();
+        assert_eq!(a.settings.image_viewer, good);
+    }
+    for bad in ["", "Terminal", "native", "on"] {
+        assert!(a.set_setting("image_viewer", bad).is_err(), "{bad:?}");
+    }
+    assert_eq!(
+        a.settings.image_viewer, "auto",
+        "rejected values change nothing"
+    );
+    a.set_setting("image_viewer", "system").unwrap();
+    // A stored row from a newer build is ignored, not fatal.
+    drop(a);
+    let mut b = App::new(Db::open(&path).unwrap(), None, Space { root: root.clone() });
+    assert_eq!(b.settings.image_viewer, "system");
+    b.db.set_setting("image_viewer", "hologram").unwrap();
+    b.load_settings();
+    assert_eq!(
+        b.settings.image_viewer, "system",
+        "an unknown value is ignored"
+    );
+    drop(b);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn view_command_carries_its_target_and_needs_one() {
+    let a = app_with_key();
+    assert_eq!(
+        a.parse_command("view ~/pics/cat.png").unwrap(),
+        AppCommand::OpenImage {
+            target: "~/pics/cat.png".into()
+        }
+    );
+    assert_eq!(
+        a.parse_command("viewer https://example.com/a.png").unwrap(),
+        AppCommand::OpenImage {
+            target: "https://example.com/a.png".into()
+        }
+    );
+    assert!(a.parse_command("view").unwrap_err().contains("usage"));
+}
+
+#[test]
 fn popup_size_helpers_read_replace_and_remove_entries() {
     use super::{popup_size, with_popup_size};
     let sizes = with_popup_size("", "settings", Some((80, 75)));

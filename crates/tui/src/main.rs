@@ -7,6 +7,7 @@ mod events;
 mod filter_input;
 mod flows;
 mod history_cache;
+mod image_viewer;
 mod interactive;
 mod resize;
 mod selection;
@@ -50,10 +51,10 @@ async fn main() -> Result<()> {
     diagrams::protect_terminal_from_renderer_panics();
     // Probe graphics once, before EventStream owns terminal input. Unknown
     // terminals retain portable half-block previews.
-    app.diagrams.set_picker(
-        ratatui_image::picker::Picker::from_query_stdio()
-            .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks()),
-    );
+    let picker = ratatui_image::picker::Picker::from_query_stdio()
+        .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+    app.diagrams.set_picker(picker.clone());
+    app.image_viewer.set_picker(picker);
     // Capture mouse so popups are clickable/scrollable and the terminal doesn't
     // do its own screen-wide text selection. Bracketed paste delivers a native
     // paste as one event.

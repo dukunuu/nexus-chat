@@ -2755,3 +2755,111 @@ fn only_connector_approvals_offer_always() {
     drop(app);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+fn viewer_png(name: &str, width: u32, height: u32) -> String {
+    let dir = std::env::temp_dir().join(format!("nexus-viewer-snap-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([(x * 3 % 256) as u8, (y * 6 % 256) as u8, 150])
+    })
+    .save(&path)
+    .unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn image_viewer_chrome_shows_title_footer_and_hints_for_a_generated_png() {
+    use crate::image_viewer::{Anchor, Return};
+    let pic = viewer_png("sunset.png", 64, 32);
+    let mut app = test_app();
+    app.core.settings.image_viewer = "terminal".into();
+    app.open_image_target(&pic, &Anchor::ByTarget, Return::Nothing);
+    assert!(app.popup == nexus_core::app::Popup::ImageViewer);
+    let screen = render_to_string(100, 24, |f| super::image_viewer::render(f, &mut app));
+    let lines: Vec<_> = screen.lines().collect();
+    assert!(
+        lines[0].starts_with("\u{256d}") && lines[0].contains(" sunset.png "),
+        "{screen}"
+    );
+    // The footer row sits just above the bottom border, which carries the hints.
+    let footer = lines[lines.len() - 2];
+    let size = crate::image_viewer::human_bytes(std::fs::metadata(&pic).unwrap().len());
+    assert!(
+        footer.contains(&format!("64x32 \u{b7} PNG \u{b7} {size} \u{b7} fit")),
+        "{footer}"
+    );
+    assert!(
+        !footer.contains('/'),
+        "a lone image shows no counter: {footer}"
+    );
+    let hints = lines[lines.len() - 1];
+    for hint in [
+        "\u{2190}\u{2192} prev/next",
+        "f 1:1",
+        "o system viewer",
+        "c copy",
+        "Esc close",
+    ] {
+        assert!(hints.contains(hint), "{hint}: {hints}");
+    }
+    assert!(
+        screen.contains('\u{2580}'),
+        "the picture is drawn:\n{screen}"
+    );
+}
+
+#[test]
+fn image_viewer_footer_counts_images_and_names_the_one_to_one_mode() {
+    use crate::image_viewer::{Anchor, Return};
+    let a = viewer_png("a.png", 20, 10);
+    let b = viewer_png("b.png", 20, 10);
+    let mut app = test_app();
+    app.core.settings.image_viewer = "terminal".into();
+    app.history_cache.image_at_line = vec![Some(a.clone()), None, Some(b)];
+    app.open_image_target(&a, &Anchor::Line(0), Return::Nothing);
+    super::image_viewer::handle_key(&mut app, crossterm::event::KeyCode::Char('f').into());
+    let screen = render_to_string(100, 24, |f| super::image_viewer::render(f, &mut app));
+    let footer = screen.lines().nth(22).unwrap();
+    assert!(
+        footer.contains("\u{b7} 1:1") && footer.contains("1/2"),
+        "{footer}"
+    );
+    assert!(
+        screen.lines().nth(23).unwrap().contains("f fit"),
+        "{screen}"
+    );
+    super::image_viewer::handle_key(&mut app, crossterm::event::KeyCode::Right.into());
+    let screen = render_to_string(100, 24, |f| super::image_viewer::render(f, &mut app));
+    assert!(
+        screen.lines().next().unwrap().contains(" b.png "),
+        "{screen}"
+    );
+    assert!(screen.lines().nth(22).unwrap().contains("2/2"), "{screen}");
+}
+
+#[test]
+fn settings_image_viewer_row_cycles_persists_and_round_trips() {
+    let mut app = test_app();
+    select_settings_field(&mut app, SettingsField::ImageViewer);
+    let screen = render_to_string(110, 40, |f| super::settings::render(f, &app));
+    assert!(screen.contains("image viewer"), "{screen}");
+    assert_eq!(app.settings.image_viewer, "auto");
+    let mut seen = vec![app.settings.image_viewer.clone()];
+    for _ in 0..3 {
+        press(&mut app, crossterm::event::KeyCode::Char(' '));
+        seen.push(app.settings.image_viewer.clone());
+    }
+    assert_eq!(seen, ["auto", "terminal", "system", "auto"]);
+    press(&mut app, crossterm::event::KeyCode::Char(' '));
+    let stored = app.db.load_settings().unwrap();
+    assert!(
+        stored
+            .iter()
+            .any(|(k, v)| k == "image_viewer" && v == "terminal")
+    );
+    assert_eq!(
+        crate::image_viewer::Preference::parse(&app.settings.image_viewer),
+        crate::image_viewer::Preference::Terminal
+    );
+}

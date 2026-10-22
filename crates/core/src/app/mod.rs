@@ -332,6 +332,9 @@ pub enum Popup {
     Local,
     /// `/help` (or F1): keybindings plus the slash-command catalog.
     Help,
+    /// Full-screen in-terminal image viewer (opened from the transcript, the
+    /// files popup, an interactive block, or `/view`).
+    ImageViewer,
 }
 
 /// Which backend a pasted key in `Popup::Key` is for — set by whichever
@@ -565,10 +568,11 @@ pub enum SettingsField {
     VideoGenModel,
     ReplyStyle,
     ColumnWidth,
+    ImageViewer,
 }
 
 impl SettingsField {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::RemoteImages,
         Self::ShowStats,
         Self::ShowReasoning,
@@ -591,6 +595,7 @@ impl SettingsField {
         Self::VideoGenModel,
         Self::ReplyStyle,
         Self::ColumnWidth,
+        Self::ImageViewer,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -599,6 +604,9 @@ impl SettingsField {
             Self::ReplyStyle => "reply style (Space cycles interactive/auto/rich/plain)",
             Self::ColumnWidth => {
                 "column width (Space cycles auto/full/100/140/180/220; or drag the column edge)"
+            }
+            Self::ImageViewer => {
+                "image viewer (Space cycles auto/terminal/system; auto = in-terminal when graphics are available)"
             }
             Self::ShowStats => "show stats (model · TPS footer)",
             Self::ShowReasoning => "expand reasoning (Ctrl+R)",
@@ -697,6 +705,7 @@ pub const SETTINGS_GROUPS: &[SettingsGroup] = &[
             SettingsField::ReplyStyle,
             SettingsField::RemoteImages,
             SettingsField::ColumnWidth,
+            SettingsField::ImageViewer,
         ],
     },
 ];
@@ -710,6 +719,9 @@ pub enum SettingsRow {
 }
 
 pub const REPLY_STYLES: [&str; 4] = ["interactive", "auto", "rich", "plain"];
+/// Where an image opens: the in-terminal viewer, the OS viewer, or whichever
+/// the terminal's graphics support makes sensible (`auto`).
+pub const IMAGE_VIEWERS: [&str; 3] = ["auto", "terminal", "system"];
 pub const VERBOSITY_LEVELS: [&str; 3] = ["normal", "concise", "caveman"];
 pub const OCR_ENGINES: [&str; 4] = ["auto", "tesseract", "vlm", "local"];
 pub const SEARCH_PROVIDERS: [&str; 4] = ["auto", "langsearch", "searxng", "duckduckgo"];
@@ -723,6 +735,10 @@ pub struct Settings {
     pub remote_images: bool,
     /// Model-selected layouts, preferred layouts, or no layout guidance.
     pub reply_style: String,
+    /// `auto`, `terminal` or `system`: which viewer opens an image on click.
+    /// Only the terminal frontend reads it; it lives here because it persists
+    /// with the other display settings.
+    pub image_viewer: String,
     /// Show the per-message model · TPS footer.
     pub show_stats: bool,
     /// Expand stored reasoning traces (vs. a collapsed one-liner).
@@ -749,6 +765,7 @@ impl Default for Settings {
         Self {
             remote_images: true,
             reply_style: "interactive".into(),
+            image_viewer: "auto".into(),
             show_stats: false,
             show_reasoning: false,
             hide_hints: false,
@@ -2019,6 +2036,9 @@ impl App {
                     self.settings.reply_style = v.to_string();
                     self.bump_cache_epoch();
                 }
+            }
+            "image_viewer" if IMAGE_VIEWERS.contains(&v) => {
+                self.settings.image_viewer = v.to_string();
             }
             "verbosity" if VERBOSITY_LEVELS.contains(&v) => {
                 if self.verbosity != v {

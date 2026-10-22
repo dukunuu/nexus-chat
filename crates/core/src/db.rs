@@ -1203,6 +1203,8 @@ impl Db {
                 | "ui_background"
                 | "column_width"
                 | "popup_sizes"
+                // Whether a terminal draws graphics is a property of this device.
+                | "image_viewer"
                 | "last_update_check"
                 | "jobs_seen"
                 // Which remote device the ssh transport last synced with —
@@ -5648,6 +5650,7 @@ mod tests {
             "ui_background",
             "column_width",
             "popup_sizes",
+            "image_viewer",
             "last_update_check",
         ] {
             assert!(Db::setting_is_local(local), "{local} should be local");

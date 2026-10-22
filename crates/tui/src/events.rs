@@ -184,6 +184,11 @@ async fn run_loop(
                     app.diagrams.complete(completion);
                 }
             }
+            completion = app.image_viewer.next_completion() => {
+                if let Some(completion) = completion {
+                    app.apply_image_completion(completion);
+                }
+            }
             event = app.core.next_event() => {
                 // View-side events (status line, composer restore, viewport
                 // reset) apply to the view layer; domain events go to their
@@ -412,6 +417,7 @@ fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
         Popup::Harness => ui::popups::harness::handle_key(app, key)?,
         Popup::Procs => ui::popups::procs::handle_key(app, key)?,
         Popup::Help => ui::popups::help::handle_key(app, key),
+        Popup::ImageViewer => ui::popups::image_viewer::handle_key(app, key),
         Popup::Connectors => ui::popups::connectors::handle_key(app, key),
 
         Popup::None => handle_normal(app, key)?,

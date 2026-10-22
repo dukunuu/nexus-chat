@@ -231,6 +231,17 @@ impl AppView {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if ext == "md" {
             self.pending_editor = Some(nexus_core::app::PendingEditor::ScriptFile(path));
+        } else if crate::image_viewer::is_image_extension(ext) {
+            // Images get the viewer (terminal first); it says so itself when
+            // it falls back to the system viewer.
+            self.open_image_target(
+                &path.to_string_lossy(),
+                &crate::image_viewer::Anchor::ByTarget,
+                crate::image_viewer::Return::Files,
+            );
+            if self.popup == nexus_core::app::Popup::ImageViewer {
+                return;
+            }
         } else {
             let _ = open::that_detached(&path);
         }

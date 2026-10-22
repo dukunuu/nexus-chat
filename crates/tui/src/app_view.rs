@@ -378,6 +378,8 @@ pub struct AppView {
         std::cell::RefCell<HashMap<(String, usize), Vec<ratatui::text::Line<'static>>>>,
     /// Disposable, background-rendered TUI diagram previews.
     pub diagrams: crate::diagrams::DiagramCache,
+    /// The full-screen in-terminal image viewer's state and background jobs.
+    pub image_viewer: crate::image_viewer::Viewer,
     /// Per-session history caches preserved across session switches so
     /// switching back doesn't re-wrap every message from scratch.
     pub session_caches: HashMap<String, HistoryCache>,
@@ -589,6 +591,7 @@ impl AppView {
             remote_images,
             stream_image_cache: std::cell::RefCell::default(),
             diagrams: crate::diagrams::DiagramCache::default(),
+            image_viewer: crate::image_viewer::Viewer::default(),
             session_caches: HashMap::new(),
             show_tool_detail: false,
             tool_open: HashMap::new(),
@@ -722,44 +725,6 @@ impl AppView {
         self.history_cache = HistoryCache::default();
     }
 
-    /// If the given rendered line index is an image or video thumbnail line,
-    /// open it in the default OS viewer. For video thumbnails (`_first.png`),
-    /// opens the sibling `.mp4` instead.
-    pub fn open_image_at_line(&self, line: usize) -> bool {
-        if let Some(Some(path)) = self.history_cache.image_at_line.get(line) {
-            if path.starts_with("https://") {
-                return open::that(path).is_ok();
-            }
-            let p = std::path::Path::new(path);
-            let open_path = if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                // Check for sibling video: abc123_first.png → abc123.mp4 or _stitch_abc123.mp4
-                if let Some(base) = stem
-                    .strip_suffix("_first")
-                    .or_else(|| stem.strip_suffix("_last"))
-                {
-                    let dir = p.parent().unwrap_or_else(|| std::path::Path::new(""));
-                    let direct = dir.join(format!("{base}.mp4"));
-                    let stitched = dir.join(format!("_stitch_{base}.mp4"));
-                    if direct.exists() {
-                        direct.to_string_lossy().to_string()
-                    } else if stitched.exists() {
-                        stitched.to_string_lossy().to_string()
-                    } else {
-                        path.clone()
-                    }
-                } else {
-                    path.clone()
-                }
-            } else {
-                path.clone()
-            };
-            let _ = open::that_detached(&open_path);
-            true
-        } else {
-            false
-        }
-    }
-
     /// Ctrl+O: navigate to the session linked in the message under the
     /// selection. Selection state is read here; the domain resolves the link.
     pub fn open_session_link(&mut self) {
@@ -810,6 +775,7 @@ impl AppView {
             | SettingsField::ImageGenModel
             | SettingsField::VideoGenModel
             | SettingsField::ReplyStyle
+            | SettingsField::ImageViewer
             | SettingsField::ColumnWidth => None,
             SettingsField::Temperature => Some(0),
             SettingsField::TopP => Some(1),

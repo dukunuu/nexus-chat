@@ -322,6 +322,25 @@ impl Entry {
         }
         (buffer, hits)
     }
+    fn image_targets(&self, width: u16) -> Vec<ImageTarget> {
+        self.session
+            .as_ref()
+            .map_or_else(|_| Vec::new(), |session| image_targets(session, width))
+    }
+    /// The image `v` opens: the focused image button's, else the first one.
+    fn focused_image(&self) -> Option<(usize, String)> {
+        let session = self.session.as_ref().ok()?;
+        let images = document_images(session.document());
+        let focused = match self.controls().get(self.focus) {
+            Some(Control::Action(target)) => Some(*target),
+            _ => None,
+        };
+        let index = images
+            .iter()
+            .position(|image| focused.is_some() && image.button == focused)
+            .unwrap_or(0);
+        images.get(index).map(|image| (index, image.url.clone()))
+    }
     fn nodes(
         session: &Session,
         regions: &[Rect],
@@ -412,6 +431,132 @@ impl Entry {
         }
         hits
     }
+}
+/// One image drawn inside a document, in document order. `button` names the
+/// (node, item) of an image button, whose click belongs to its action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DocImage {
+    pub url: String,
+    pub button: Option<(usize, usize)>,
+}
+/// Every image a document draws, in the order `image_targets` lays them out.
+pub(crate) fn document_images(document: &Document) -> Vec<DocImage> {
+    let plain = |url: &String| DocImage {
+        url: url.clone(),
+        button: None,
+    };
+    let mut out = Vec::new();
+    for (index, node) in document.nodes().iter().enumerate() {
+        match node {
+            Node::Image { src, .. } => out.push(plain(src)),
+            Node::Hero {
+                image: Some(url), ..
+            } => out.push(plain(url)),
+            Node::Cards { items } => {
+                out.extend(items.iter().filter_map(|c| c.image.as_ref().map(plain)));
+            }
+            Node::Buttons { items, .. } => {
+                out.extend(items.iter().enumerate().filter_map(|(item, button)| {
+                    button.image.as_ref().map(|url| DocImage {
+                        url: url.clone(),
+                        button: Some((index, item)),
+                    })
+                }));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+/// Where one image sits on a document canvas. Plain images are clickable
+/// over their whole area; an image button exposes only its corner tag so the
+/// rest of the button keeps its action.
+#[derive(Clone, Debug)]
+pub(crate) struct ImageTarget {
+    pub rect: Rect,
+    pub url: String,
+    pub index: usize,
+}
+/// Card images in the same grid `cards_lines` draws.
+fn card_image_rects(items: &[Card], session: &Session, region: Rect) -> Vec<(Rect, String, bool)> {
+    let theme = Theme::default();
+    let fit = usize::from((region.width.saturating_add(2) / 26).clamp(1, 3)).min(items.len());
+    let count = items.len().div_ceil(items.len().div_ceil(fit));
+    let columns = u16::try_from(count).unwrap_or(1);
+    let cell = region.width.saturating_sub(2 * (columns - 1)) / columns;
+    let mut out = Vec::new();
+    let mut y = region.y;
+    for (row, chunk) in items.chunks(count).enumerate() {
+        if row > 0 {
+            y = y.saturating_add(1);
+        }
+        let rows = chunk
+            .iter()
+            .map(|item| {
+                card_lines(item, session, cell, &theme, 0)
+                    .len()
+                    .saturating_sub(2)
+            })
+            .max()
+            .unwrap_or(0);
+        for (column, item) in chunk.iter().enumerate() {
+            if let Some(url) = &item.image {
+                let head = card_head(item, session, cell, &theme).len();
+                out.push((
+                    Rect::new(
+                        region.x + u16::try_from(column).unwrap_or(0) * (cell + 2) + 2,
+                        y.saturating_add(1 + u16::try_from(head).unwrap_or(0)),
+                        cell.saturating_sub(4),
+                        6,
+                    ),
+                    url.clone(),
+                    false,
+                ));
+            }
+        }
+        y = y.saturating_add(u16::try_from(rows + 2).unwrap_or(u16::MAX));
+    }
+    out
+}
+pub(crate) fn image_targets(session: &Session, width: u16) -> Vec<ImageTarget> {
+    let regions = node_regions(session, width);
+    let mut found: Vec<(Rect, String, bool)> = Vec::new();
+    for (node, region) in session.document().nodes().iter().zip(&regions) {
+        let region = *region;
+        match node {
+            Node::Image { src, .. } => found.push((region, src.clone(), false)),
+            Node::Hero {
+                image: Some(url), ..
+            } => found.push((
+                Rect::new(region.x, region.y, region.width, 6.min(region.height)),
+                url.clone(),
+                false,
+            )),
+            Node::Cards { items } => found.extend(card_image_rects(items, session, region)),
+            Node::Buttons { items, .. } => {
+                for (item, rect) in button_regions(session, items, region) {
+                    if let Some(url) = &items[item].image {
+                        let area =
+                            Rect::new(rect.x + 1, rect.y + 1, rect.width.saturating_sub(2), 6);
+                        // A button too narrow to draw the tag still counts in
+                        // the order; it just has nothing to click.
+                        let tag = if area.width >= VIEW_TAG_WIDTH + 5 {
+                            view_tag(area)
+                        } else {
+                            Rect::new(area.x, area.y, 0, 0)
+                        };
+                        found.push((tag, url.clone(), true));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+        .into_iter()
+        .enumerate()
+        .map(|(index, (rect, url, _))| ImageTarget { rect, url, index })
+        .collect()
 }
 /// Render validated nodes into their measured, padded regions.
 pub(crate) fn render_nodes(
@@ -565,9 +710,23 @@ fn render_button_group(
                 theme,
             ))
             .render(area, buffer);
+            // The button keeps its click for the action; this tag (and the
+            // `v` key) opens the image in the viewer instead.
+            if area.width >= VIEW_TAG_WIDTH + 5 {
+                Paragraph::new(VIEW_TAG)
+                    .style(Style::default().fg(theme.fg).bg(theme.control))
+                    .render(view_tag(area), buffer);
+            }
         }
     }
     hits
+}
+/// The small affordance drawn over an image button's top-right corner.
+const VIEW_TAG: &str = " v ";
+const VIEW_TAG_WIDTH: u16 = 3;
+fn view_tag(image_area: Rect) -> Rect {
+    let width = VIEW_TAG_WIDTH.min(image_area.width);
+    Rect::new(image_area.right() - width, image_area.y, width, 1)
 }
 fn choice_lines(label: &str, width: u16) -> Vec<Line<'static>> {
     wrapped_text(label, width.saturating_sub(6), Style::default())
@@ -1007,15 +1166,8 @@ fn hero_lines(
     }
     lines
 }
-/// One bordered card, padded to at least `rows` content rows so cards
-/// sharing a grid row line up.
-fn card_lines(
-    item: &Card,
-    session: &Session,
-    width: u16,
-    theme: &Theme,
-    rows: usize,
-) -> Vec<Line<'static>> {
+/// A card's title and badge rows: everything above its image.
+fn card_head(item: &Card, session: &Session, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let inner = width.saturating_sub(4);
     let accent = accent_color(session.document(), theme);
     let color = tone_color(item.tone, accent, theme);
@@ -1044,6 +1196,19 @@ fn card_lines(
             _ => content.extend(wrapped_text(&badge, inner, Style::default().fg(color))),
         }
     }
+    content
+}
+/// One bordered card, padded to at least `rows` content rows so cards
+/// sharing a grid row line up.
+fn card_lines(
+    item: &Card,
+    session: &Session,
+    width: u16,
+    theme: &Theme,
+    rows: usize,
+) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(4);
+    let mut content = card_head(item, session, width, theme);
     if let Some(image) = &item.image {
         content.extend(image_lines(
             image,
@@ -1741,6 +1906,25 @@ struct Hit {
     key: Key,
     control: Option<usize>,
     row_offset: u16,
+    /// An image region: its URL and position among the document's images.
+    image: Option<(String, usize)>,
+}
+
+/// An image the user asked to see full size, waiting for the app to open the
+/// viewer (the document layer has no popup of its own to open).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingImage {
+    pub owner: usize,
+    pub ordinal: usize,
+    pub index: usize,
+    pub url: String,
+}
+
+/// The rows of `rect` that fall inside `first..limit`, as (low, high).
+fn visible_rows(rect: Rect, first: usize, limit: usize) -> Option<(usize, usize)> {
+    let low = usize::from(rect.y).max(first);
+    let high = usize::from(rect.bottom()).min(limit);
+    (low < high).then_some((low, high))
 }
 
 /// Disposable UI instances and this frame's hit areas. No filesystem writes.
@@ -1756,6 +1940,8 @@ pub struct Widgets {
     expanded: bool,
     pinned: bool,
     layout: Option<(Rect, usize, Vec<Placement>)>,
+    /// Set by a click on an image (or `v` on a focused one); the app takes it.
+    pending_image: Option<PendingImage>,
 }
 impl Widgets {
     /// Discard all local state and stale hit areas on a viewport/session reset.
@@ -1767,6 +1953,10 @@ impl Widgets {
         self.send_ready = send_ready;
         self.hits.clear();
         self.visible.clear();
+    }
+    /// Whether a document currently owns the keyboard.
+    pub(crate) fn is_focused(&self) -> bool {
+        self.focused.is_some()
     }
     /// Return keyboard ownership without resetting document state.
     pub fn unfocus(&mut self) {
@@ -1869,6 +2059,7 @@ impl Widgets {
         }
     }
     /// Overlay visible regions and capture exact-frame, clipped control hits.
+    #[allow(clippy::too_many_lines)]
     pub fn paint(
         &mut self,
         f: &mut Frame,
@@ -1955,21 +2146,36 @@ impl Widgets {
                 }
             }
             if active {
+                let limit = end.saturating_sub(usize::from(pinned));
+                let screen = |rect: Rect, low: usize, high: usize| {
+                    Rect::new(
+                        viewport.x + 2 + rect.x,
+                        viewport.y + u16::try_from(row + low - top).unwrap_or(0),
+                        rect.width,
+                        u16::try_from(high - low).unwrap_or(0),
+                    )
+                };
                 for (rect, control) in hits {
-                    let low = usize::from(rect.y).max(first);
-                    let high =
-                        usize::from(rect.bottom()).min(end.saturating_sub(usize::from(pinned)));
-                    if low < high {
+                    if let Some((low, high)) = visible_rows(rect, first, limit) {
                         self.hits.push(Hit {
-                            rect: Rect::new(
-                                viewport.x + 2 + rect.x,
-                                viewport.y + u16::try_from(row + low - top).unwrap_or(0),
-                                rect.width,
-                                u16::try_from(high - low).unwrap_or(0),
-                            ),
+                            rect: screen(rect, low, high),
                             key: key.clone(),
                             control: Some(control),
                             row_offset: u16::try_from(low).unwrap_or(0).saturating_sub(rect.y),
+                            image: None,
+                        });
+                    }
+                }
+                // After the controls: an image button's corner tag must win
+                // over the button it sits on.
+                for target in entry.image_targets(width) {
+                    if let Some((low, high)) = visible_rows(target.rect, first, limit) {
+                        self.hits.push(Hit {
+                            rect: screen(target.rect, low, high),
+                            key: key.clone(),
+                            control: None,
+                            row_offset: 0,
+                            image: Some((target.url, target.index)),
                         });
                     }
                 }
@@ -1990,6 +2196,17 @@ impl Widgets {
         else {
             return (false, None);
         };
+        if let Some((url, index)) = hit.image {
+            // Viewing an image neither focuses the document nor presses
+            // anything: it only asks the app for the viewer.
+            self.pending_image = Some(PendingImage {
+                owner: hit.key.owner,
+                ordinal: hit.key.ordinal,
+                index,
+                url,
+            });
+            return (true, None);
+        }
         let Some(entry) = self.entries.get_mut(&hit.key) else {
             return (false, None);
         };
@@ -2117,6 +2334,19 @@ impl Widgets {
         if entry.navigate(key.code) {
             return (false, None);
         }
+        if key.code == KeyCode::Char('v')
+            && !matches!(controls.get(entry.focus), Some(Control::Input(_)))
+            && let Some((index, url)) = entry.focused_image()
+            && let Some(focused) = &self.focused
+        {
+            self.pending_image = Some(PendingImage {
+                owner: focused.owner,
+                ordinal: focused.ordinal,
+                index,
+                url,
+            });
+            return (false, None);
+        }
         match key.code {
             KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                 entry.focus = (entry.focus + 1) % count;
@@ -2176,20 +2406,39 @@ impl Widgets {
                 f.buffer_mut()[(area.x + x, area.y + y)] = canvas[(x, y + entry.scroll)].clone();
             }
         }
+        let scroll = entry.scroll;
+        let shown = |rect: Rect| {
+            let low = rect.y.max(scroll);
+            let high = rect.bottom().min(scroll + area.height);
+            (low < high).then_some((low, high))
+        };
+        let placed = |rect: Rect, low: u16, high: u16| {
+            Rect::new(
+                area.x + rect.x,
+                area.y + low - scroll,
+                rect.width,
+                high - low,
+            )
+        };
         for (rect, control) in hits {
-            let low = rect.y.max(entry.scroll);
-            let high = rect.bottom().min(entry.scroll + area.height);
-            if low < high {
+            if let Some((low, high)) = shown(rect) {
                 self.hits.push(Hit {
-                    rect: Rect::new(
-                        area.x + rect.x,
-                        area.y + low - entry.scroll,
-                        rect.width,
-                        high - low,
-                    ),
+                    rect: placed(rect, low, high),
                     key: key.clone(),
                     control: Some(control),
                     row_offset: low.saturating_sub(rect.y),
+                    image: None,
+                });
+            }
+        }
+        for target in entry.image_targets(area.width) {
+            if let Some((low, high)) = shown(target.rect) {
+                self.hits.push(Hit {
+                    rect: placed(target.rect, low, high),
+                    key: key.clone(),
+                    control: None,
+                    row_offset: 0,
+                    image: Some((target.url, target.index)),
                 });
             }
         }
@@ -2322,7 +2571,20 @@ pub fn mouse(app: &mut AppView, event: MouseEvent, screen: Rect) -> bool {
         app.sel.clear();
     }
     respond(app, message);
+    open_pending_image(app);
     handled
+}
+/// Hand an image the user picked to the viewer, remembering whether to come
+/// back to the focused document when it closes.
+fn open_pending_image(app: &mut AppView) {
+    if let Some(pending) = app.interactive.pending_image.take() {
+        let back = if app.interactive.focused.is_some() {
+            crate::image_viewer::Return::Interactive
+        } else {
+            crate::image_viewer::Return::Nothing
+        };
+        app.open_widget_image(&pending, back);
+    }
 }
 /// Focused keyboard events stay inside the selected document.
 pub fn key(app: &mut AppView, event: KeyEvent) {
@@ -2351,6 +2613,7 @@ pub fn key(app: &mut AppView, event: KeyEvent) {
         app.popup = Popup::None;
     }
     respond(app, message);
+    open_pending_image(app);
 }
 /// Render a keyboard-accessible enlarged view of the same inline state.
 pub fn render_popup(f: &mut Frame, app: &mut AppView) {
@@ -2379,6 +2642,10 @@ mod answer_tests;
 #[cfg(test)]
 #[path = "interactive/components_tests.rs"]
 mod components_tests;
+
+#[cfg(test)]
+#[path = "interactive/viewer_tests.rs"]
+mod viewer_tests;
 
 #[cfg(test)]
 #[path = "interactive/layouts_tests.rs"]
