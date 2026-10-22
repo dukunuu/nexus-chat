@@ -1,5 +1,12 @@
 import { element } from './render.js';
 
+// Keep accessible field names while using a short, in-field caption.
+export function compact(row, caption) {
+  const label = row.firstChild;
+  label.title = `${label.textContent}${label.title ? ` · ${label.title}` : ''}`;
+  label.replaceChildren(caption); return row;
+}
+
 // A deliberately small arithmetic grammar, never JavaScript evaluation.
 export function arithmetic(source, base = 0) {
   let text = String(source).trim();

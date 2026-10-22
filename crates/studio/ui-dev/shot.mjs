@@ -38,6 +38,8 @@ try {
       page.on('pageerror', error => errors.push(`${scenario}: ${error.message}`));
       await page.addInitScript(value => { window.__studioFixture = value; }, fixture); await page.addInitScript({ content:mock });
       await page.goto(`http://127.0.0.1:${server.address().port}/`); await page.waitForFunction(() => document.querySelectorAll('#strip .slide-item').length === 3);
+      const colors = JSON.parse(fs.readFileSync(path.join(here, `fixtures/theme-${colorScheme === 'dark' ? 'default' : 'light'}.json`), 'utf8'));
+      await page.evaluate(colors => window.studioAsyncEvent({ event:'Theme', colors }), colors);
       // Studio is a pure canvas: no chat pane, no host connection, and it says it is linked.
       assert.equal(await page.locator('#chat-pane, #chat-input, #host-status, #review').count(), 0);
       assert.equal((await page.locator('#link-status').textContent()).trim(), 'linked to nexus');

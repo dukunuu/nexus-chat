@@ -19,6 +19,24 @@ const paths = {
   'object-bottom':'M3 21h18M5 3h5v14H5Zm9 5h5v9h-5Z',
   'object-distribute-h':'M2 3v18M22 3v18M6 5h4v14H6Zm8 0h4v14h-4Z',
   'object-distribute-v':'M3 2h18M3 22h18M5 6h14v4H5Zm0 8h14v4H5Z',
+  more:'M5 12h.01M12 12h.01M19 12h.01', minus:'M4 12h16',
+  rotation:'M4 10a8 8 0 1 1 2 8M4 4v6h6', radius:'M5 20V12a7 7 0 0 1 7-7h8',
+  opacity:'M12 3a9 9 0 1 0 0 18V3Zm0 0a9 9 0 0 1 0 18',
+  absolute:'M3 8V3h5m8 0h5v5m0 8v5h-5M8 21H3v-5M8 8h8v8H8Z',
+  'layout-none':'M4 4h6v6H4Zm10 10h6v6h-6Z',
+  'layout-column':'M12 3v18m-5-5 5 5 5-5M4 4h3M4 9h3M4 14h3',
+  'layout-row':'M3 12h18m-5-5 5 5-5 5M4 4v3M9 4v3M14 4v3',
+  'layout-wrap':'M3 5h13a5 5 0 0 1 0 10H6m4-4-4 4 4 4M3 2v6',
+  gap:'M5 4v16M19 4v16M9 12h6m-4-3-3 3 3 3m2-6 3 3-3 3',
+  'padding-h':'M3 3v18M21 3v18M8 6h8v12H8Z',
+  'padding-v':'M3 3h18M3 21h18M6 8h12v8H6Z',
+  'padding-sides':'M3 3h18v18H3ZM8 8h8v8H8Z',
+  clip:'M7 2v15h15M2 7h15v15', stretch:'M3 3v18M21 3v18M8 7l-4 5 4 5m8-10 4 5-4 5M4 12h16',
+  'line-height':'M8 4h13M8 20h13M14 4v16M3 4v16m-2-3 2 3 2-3M1 7l2-3 2 3',
+  'letter-spacing':'m8 15 4-12 4 12M9 11h6M3 21h18m-3-3 3 3-3 3M6 18l-3 3 3 3',
+  'case-upper':'m2 19 5-14 5 14M4 14h6m3 5 4-10 5 10m-7-4h5',
+  'case-lower':'M10 10v9M10 12c-8-6-10 11 0 5M15 3v16M15 12c9-8 9 12 0 5',
+  'case-capitalize':'m3 19 5-14 5 14M5 14h6M17 10h5m-3-4v11c0 2 2 2 3 2',
   undo: 'M6 5 2 9l4 4M2 9h8a5 5 0 0 1 0 10',
   redo: 'm18 5 4 4-4 4m4-4h-8a5 5 0 0 0 0 10',
   play: 'm8 4 12 8-12 8Z', export: 'M12 15V2m-5 5 5-5 5 5M4 14v7h16v-7',
@@ -44,6 +62,19 @@ export function icon(name) {
 export function button(name, label, action, className = '') {
   const node = document.createElement('button'); node.className = className; node.title = label; node.setAttribute('aria-label', label); node.append(icon(name)); node.onclick = action; return node;
 }
+export function actionMenu(label, actions) {
+  const menu = document.createElement('details'); menu.className = 'action-menu';
+  const summary = document.createElement('summary'); summary.title = label; summary.setAttribute('aria-label', label); summary.append(icon('more'));
+  const list = document.createElement('div'); list.className = 'action-list';
+  for (const [title, action] of actions) {
+    const control = document.createElement('button'); control.textContent = title; control.onclick = () => { menu.open = false; action(); }; list.append(control);
+  }
+  menu.append(summary, list);
+  menu.addEventListener('focusout', event => { if (!menu.contains(event.relatedTarget)) menu.open = false; });
+  return menu;
+}
 export function hydrateIcons() {
+  document.addEventListener('pointerdown', event => document.querySelectorAll('.action-menu[open]').forEach(menu => { if (!menu.contains(event.target)) menu.open = false; }));
+  document.addEventListener('keydown', event => { const menu = event.target.closest('.action-menu[open]'); if (event.key === 'Escape' && menu) { event.preventDefault(); event.stopImmediatePropagation(); menu.open = false; menu.querySelector('summary').focus(); } });
   document.querySelectorAll('[data-icon]').forEach(node => node.prepend(icon(node.dataset.icon)));
 }

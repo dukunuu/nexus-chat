@@ -1,5 +1,7 @@
 import { resolveFont } from './helpers.js';
 import { element, fontStack } from './render.js';
+import { compact } from './fields.js';
+import { actionMenu, button, icon } from './icons.js';
 
 export function fontController(api, field, nodes) {
   let families = null, requested = false, popup, fileSignature = '';
@@ -18,7 +20,7 @@ export function fontController(api, field, nodes) {
     const installed = families?.find(f => f.family === name);
     return { weights:[...new Set([...(installed?.weights || []), ...files.map(f => f.weight)])].sort((a, b) => a - b), variable:installed?.variable };
   }
-  function close() { popup?.observer?.disconnect(); popup?.element.remove(); popup = null; }
+  function close() { popup?.observer?.disconnect(); popup?.anchor?.setAttribute('aria-expanded', 'false'); popup?.element.remove(); popup = null; }
   function open(anchor, query = '') {
     close(); request();
     const panel = element('div', 'font-popover popover'); panel.id = 'font-picker';
@@ -37,7 +39,7 @@ export function fontController(api, field, nodes) {
       };
       input.click();
     };
-    panel.append(search, list, importButton); document.body.append(panel);
+    panel.append(search, list, importButton); anchor.closest('.family-row').append(panel); anchor.setAttribute('aria-expanded', 'true');
     const observer = new IntersectionObserver(entries => { for (const entry of entries) if (entry.isIntersecting) { entry.target.style.fontFamily = fontStack(entry.target.dataset.family); observer.unobserve(entry.target); } }, { root:list });
     popup = { element:panel, anchor, observer, search }; search.value = query;
     let active = 0, rows = [];
@@ -64,43 +66,52 @@ export function fontController(api, field, nodes) {
       else if (['ArrowDown','ArrowUp','Home','End'].includes(event.key)) { event.preventDefault(); active = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, active + (event.key === 'ArrowDown' ? 1 : -1))); highlight(); }
       else if (event.key === 'Enter') { event.preventDefault(); rows[active]?.click(); }
     };
-    const box = anchor?.getBoundingClientRect();
-    panel.style.top = `${Math.min(window.innerHeight - 440, Math.max(72, box?.top || 120))}px`;
-    panel.style.left = `${Math.max(16, Math.min(window.innerWidth - 340, (box?.left || window.innerWidth - 340) - 320))}px`;
-    draw(); search.focus();
+    draw(); search.focus({ preventScroll:true });
   }
-  document.addEventListener('pointerdown', event => { if (popup && !popup.element.contains(event.target) && event.target !== popup.anchor) close(); });
+  document.addEventListener('pointerdown', event => { if (popup && !popup.element.contains(event.target) && !popup.anchor.contains(event.target)) close(); });
   function render(container, node) {
     request();
     const theme = api.state.deck.theme, resolved = resolveFont(theme, node.style, node.font), selected = nodes().filter(n => ['text','code','table'].includes(n.kind));
     const values = key => selected.map(n => resolveFont(theme, n.style, n.font)[key]);
     const detached = n => (n.style || (n.kind === 'code' ? 'code' : 'body')) === (n.kind === 'code' ? 'code' : 'body') && Object.keys(resolveFont(theme, n.style, n.font)).every(key => n.font?.[key] != null);
-    container.append(field('Text style', selected.map(n => detached(n) ? 'detached' : n.style || 'body'), style => { if (style !== 'detached') patch({ style, font:null }); }, [...(selected.some(detached) ? [['detached','Detached']] : []), ...Object.keys(theme.text_styles)]));
-    const actions = element('div', 'style-actions');
-    const detach = element('button', '', 'Detach'); detach.onclick = () => api.updateMany(api.slide().id, selected.map(n => ({ id:n.id, fields:{ style:null, font:resolveFont(theme, n.style, n.font) } })));
-    const update = element('button', '', 'Update style'); update.onclick = () => api.apply(() => [{ op:'set_text_style', name:node.style || 'body', font:resolved }]);
-    const create = element('button', '', 'Create style'); create.onclick = () => api.ask('Create style', 'Style name', 'Up to 32 lowercase letters, digits, - and _. Spaces become dashes.', '', value => {
-      const name = value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').slice(0, 32);
-      if (name) api.apply(() => [{ op:'set_text_style', name, font:resolved }, ...selected.map(n => ({ op:'update_node', id:n.id, fields:{ style:name, font:null }, base_hash:api.state.hashes[n.id] }))]);
-    });
-    actions.append(detach, update, create); container.append(actions);
-    const familyRow = element('div', 'property'), picker = element('button', 'family-picker', concrete(resolved.family)); picker.setAttribute('aria-label', 'Font family'); picker.onclick = () => open(picker); familyRow.append(element('span', '', 'Family'), picker); container.append(familyRow);
-    const size = field('Size (px)', values('size'), n => { if (n > 0) font({ size:n }); }, null, 'number');
-    const sizes = element('select', 'size-presets'); sizes.setAttribute('aria-label', 'Size presets');
+    const pair = (...controls) => { const row = element('div', 'field-pair'); row.append(...controls); return row; };
+    const numeric = (label, value, change, glyph) => compact(field(label, value, change, null, 'number'), glyph);
+    const style = compact(field('Text style', selected.map(n => detached(n) ? 'detached' : n.style || 'body'), style => { if (style !== 'detached') patch({ style, font:null }); }, [...(selected.some(detached) ? [['detached','Detached']] : []), ...Object.keys(theme.text_styles)]), 'Text style ·');
+    style.classList.add('text-style-row');
+    const menu = actionMenu('Text style actions', [
+      ['Detach', () => api.updateMany(api.slide().id, selected.map(n => ({ id:n.id, fields:{ style:null, font:resolveFont(theme, n.style, n.font) } })))],
+      ['Update style', () => api.apply(() => [{ op:'set_text_style', name:node.style || 'body', font:resolved }])],
+      ['Create style', () => api.ask('Create style', 'Style name', 'Up to 32 lowercase letters, digits, - and _. Spaces become dashes.', '', value => {
+        const name = value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').slice(0, 32);
+        if (name) api.apply(() => [{ op:'set_text_style', name, font:resolved }, ...selected.map(n => ({ op:'update_node', id:n.id, fields:{ style:name, font:null }, base_hash:api.state.hashes[n.id] }))]);
+      })],
+    ]);
+    const styleRow = element('div', 'text-style-header'); styleRow.append(style, menu); container.append(styleRow);
+    const familyRow = element('div', 'family-row'), picker = element('button', 'family-picker', values('family').every(f => f === resolved.family) ? concrete(resolved.family) : 'Mixed');
+    picker.setAttribute('aria-label', 'Font family'); picker.setAttribute('aria-expanded', 'false'); picker.append(icon('chevron')); picker.title = 'Font family'; picker.onclick = () => popup ? close() : open(picker); familyRow.append(picker); container.append(familyRow);
+    const size = numeric('Size (px)', values('size'), n => { if (n > 0) font({ size:n }); }, 'Size');
+    const sizes = element('select', 'size-presets'); sizes.setAttribute('aria-label', 'Size presets'); sizes.title = 'Size presets';
+    const placeholder = element('option', '', ''); placeholder.value = ''; placeholder.disabled = true; sizes.append(placeholder);
     for (const n of [12,14,16,18,20,24,28,32,36,40,48,56,64,72,80,96,120,144,160,200]) { const option = element('option', '', String(n)); option.value = n; sizes.append(option); }
-    sizes.value = resolved.size; sizes.onchange = () => font({ size:Number(sizes.value) }); size.append(sizes); container.append(size);
+    sizes.value = ''; sizes.onchange = () => font({ size:Number(sizes.value) }); size.append(sizes);
     const metadata = info(resolved.family), weights = metadata.weights.length ? metadata.weights : [resolved.weight];
-    container.append(field('Weight', values('weight'), value => { if (value !== 'variable') font({ weight:Number(value) }); }, [...weights.map(n => [String(n), String(n)]), ...(metadata.variable ? [['variable','Variable']] : [])]));
-    if (metadata.variable) container.append(field('Variable weight', values('weight'), value => font({ weight:Math.max(100, Math.min(900, Math.round(value))) }), null, 'number'));
-    container.append(field('Italic', values('italic'), italic => font({ italic }), null, 'checkbox'));
-    container.append(field('Line height mode', node.font?.line_height == null ? 'auto' : 'custom', mode => font({ line_height:mode === 'auto' ? null : resolved.line_height }), [['auto','Auto'],['custom','Multiplier']]));
-    container.append(field('Line height', values('line_height'), n => { if (n >= .5 && n <= 5) font({ line_height:n }); }, null, 'number'));
-    container.append(field('Letter spacing (%)', values('letter_spacing').map(n => Math.round(n * 10000) / 100), n => font({ letter_spacing:n / 100 }), null, 'number'));
-    container.append(field('Alignment', values('align'), align => font({ align }), ['left','center','right']));
-    container.append(field('Vertical', values('valign'), valign => font({ valign }), ['top','middle','bottom']));
-    container.append(field('Case', values('transform'), transform => font({ transform }), ['none','uppercase','lowercase','capitalize']));
-    container.append(field('Text color', values('color'), color => font({ color }), [...Object.keys(theme.colors), ...(resolved.color.startsWith('#') ? [resolved.color] : [])]));
-    container.append(field('Hex color', resolved.color.startsWith('#') ? resolved.color : theme.colors[resolved.color], color => { if (/^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i.test(color)) font({ color }); }));
+    const weight = compact(field('Weight', values('weight'), value => { if (value !== 'variable') font({ weight:Number(value) }); }, [...weights.map(n => [String(n), String(n)]), ...(metadata.variable ? [['variable','Variable']] : [])]), 'Wt');
+    container.append(pair(weight, size));
+    if (metadata.variable) container.append(numeric('Variable weight', values('weight'), value => font({ weight:Math.max(100, Math.min(900, Math.round(value))) }), 'Wt'));
+    const line = numeric('Line height', values('line_height'), n => { if (n >= .5 && n <= 5) font({ line_height:n }); }, icon('line-height'));
+    const auto = element('button', 'inline-mode', 'Auto'); auto.title = 'Automatic line height'; auto.setAttribute('aria-label', 'Automatic line height'); auto.setAttribute('aria-pressed', String(node.font?.line_height == null)); auto.onclick = () => font({ line_height:node.font?.line_height == null ? resolved.line_height : null }); line.append(auto);
+    container.append(pair(line, numeric('Letter spacing (%)', values('letter_spacing').map(n => Math.round(n * 10000) / 100), n => font({ letter_spacing:n / 100 }), icon('letter-spacing'))));
+    const segments = (key, label, options) => {
+      const group = element('div', 'segmented'); group.setAttribute('role', 'group'); group.setAttribute('aria-label', label);
+      for (const [value, glyph, title] of options) { const control = button(glyph, title, () => font({ [key]:value })); control.setAttribute('aria-pressed', String(values(key).every(v => v === value))); group.append(control); }
+      return group;
+    };
+    container.append(pair(segments('align', 'Text alignment', [['left','align-left','Text align left'],['center','align-center','Text align center'],['right','align-right','Text align right']]), segments('valign', 'Vertical alignment', [['top','object-top','Text align top'],['middle','object-v-center','Text align middle'],['bottom','object-bottom','Text align bottom']])));
+    const toggles = element('div', 'type-toggles');
+    for (const [value, title] of [['uppercase','Uppercase'],['lowercase','Lowercase'],['capitalize','Capitalize']]) {
+      const active = values('transform').every(v => v === value), control = button(`case-${value === 'uppercase' ? 'upper' : value === 'lowercase' ? 'lower' : 'capitalize'}`, title, () => font({ transform:active ? 'none' : value })); control.setAttribute('aria-pressed', String(active)); toggles.append(control);
+    }
+    const italic = button('italic', 'Italic', () => font({ italic:!values('italic').every(Boolean) })); italic.setAttribute('aria-pressed', String(values('italic').every(Boolean))); toggles.append(italic); container.append(toggles);
   }
   return { render, close };
 }

@@ -84,7 +84,7 @@ export function editingController(api) {
       control.disabled = selected().length < (action.startsWith('distribute') ? 3 : 1); row.append(control);
     }
     container.append(row);
-    const tidyButton = element('button', 'tidy-action', 'Tidy up'); tidyButton.disabled = selected().length < 3; tidyButton.onclick = tidy; container.append(tidyButton);
+    const tidyButton = button('sparkle', 'Tidy up', tidy, 'tidy-action'); tidyButton.disabled = selected().length < 3; container.append(tidyButton);
   }
   return { wrap, align, tidy, alignRow };
 }

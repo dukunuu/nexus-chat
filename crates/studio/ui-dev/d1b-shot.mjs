@@ -52,6 +52,7 @@ const point = async (x,y) => { const c = await page.locator('#canvas').boundingB
 const moveTo = async p => page.mouse.move(p.x,p.y,{steps:8});
 async function select(ids) {
   for (let i=0;i<ids.length;i++) await layer(ids[i]).locator('.layer-name').click({modifiers:i ? ['Shift'] : []});
+  await wait();
 }
 async function fresh(theme) {
   if (page) await page.close();
@@ -72,21 +73,32 @@ try {
       const {renderNode}=await import('/render.js'), theme=window.__d1.deck.theme;
       return ['table','code'].map(kind=>{ const n=renderNode({id:`hidden-${kind}`,kind,hidden:true,rows:[['Hidden']],source:'Hidden',style:'body',font:{valign:'middle'}},theme);document.body.append(n);const r=n.getBoundingClientRect();n.remove();return [r.width,r.height]; });
     }),[[0,0],[0,0]],'hidden typography stays hidden even with vertical alignment');
+    const collisions = await page.evaluate(async () => {
+      const {guideController}=await import('/guides.js'), canvas=document.querySelector('#canvas'), guide=guideController(canvas,()=>canvas.getBoundingClientRect().width/1920);
+      guide.measure({x:400,y:400,w:8,h:8},{x:398,y:398,w:12,h:12},true);
+      const pills=[...document.querySelectorAll('.distance-label')].map(n=>{const r=n.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height};});guide.clear();return pills;
+    });
+    assert.equal(collisions.length,4,'all four small parent gaps are measured');
+    collisions.forEach((a,i)=>collisions.slice(i+1).forEach(b=>assert.ok(a.x+a.w<=b.x || b.x+b.w<=a.x || a.y+a.h<=b.y || b.y+b.h<=a.y,'crowded distance pills are offset, not overlapped')));
     await select(['row']);
     await page.getByRole('button',{name:'Align bottom right',exact:true}).click();await wait();
     assert.deepEqual((({main,cross})=>({main,cross}))((await data('row')).layout),{main:'end',cross:'end'});
     await page.getByRole('button',{name:'Align middle center',exact:true}).click();await wait();
     assert.equal(await page.getByRole('button',{name:'Align middle center',exact:true}).getAttribute('aria-pressed'),'true');
-    await page.getByLabel('Gap mode',{exact:true}).selectOption('auto');await wait();assert.equal((await data('row')).layout.main,'space_between');
-    await page.getByLabel('Gap mode',{exact:true}).selectOption('fixed');await wait();
+    await page.getByRole('button',{name:'Auto gap (space between)',exact:true}).click();await wait();assert.equal((await data('row')).layout.main,'space_between');
+    await page.getByRole('button',{name:'Auto gap (space between)',exact:true}).click();await wait();
+    await set('Horizontal padding','24*2');assert.deepEqual((await data('row')).layout.padding,[32,48,32,48]);
+    await set('Vertical padding','16*2');assert.deepEqual((await data('row')).layout.padding,[32,48,32,48]);
+    await set('Horizontal padding','32');
     await page.getByRole('button',{name:'Wrap',exact:true}).click();await wait();
     await set('Cross gap','24*2');assert.equal((await data('row')).layout.gap_cross,48);
     await page.getByRole('button',{name:'Per-side padding',exact:true}).click();await set('Padding left','+8');assert.equal((await data('row')).layout.padding[3],40);
     await page.getByRole('button',{name:'Row',exact:true}).click();await wait();
     await page.getByRole('button',{name:'Align middle left',exact:true}).click();await wait();
-    await page.getByLabel('Clip content',{exact:true}).check();await wait();assert.equal((await data('row')).clip,true);
-    await page.getByRole('button',{name:'+ min/max',exact:true}).click();await set('MIN W','800');assert.equal((await data('row')).sizing.min_w,800);
-    await page.getByRole('button',{name:'− min/max',exact:true}).click();
+    await page.getByRole('button',{name:'Clip content',exact:true}).click();await wait();assert.equal((await data('row')).clip,true);
+    await page.getByRole('button',{name:'Min/max size',exact:true}).click();await set('MIN W','800');assert.equal((await data('row')).sizing.min_w,800);
+    await page.getByRole('button',{name:'Min/max size',exact:true}).click();
+    await page.getByRole('button',{name:'Paired padding',exact:true}).click();await wait();assert.deepEqual((await data('row')).layout.padding,[32,32,32,40],'collapsing padding preserves individual sides');
     await page.getByRole('button',{name:'Align middle left',exact:true}).scrollIntoViewIfNeeded();
     await shot('auto-layout',theme);
 
@@ -97,17 +109,31 @@ try {
     assert.ok(await page.locator('.guide-line').count()>0);assert.ok(await page.locator('.distance-label').count()>0);
     assert.ok(await page.locator('.guide-line').evaluateAll(lines => lines.some(n => n.getBoundingClientRect().width===1 || n.getBoundingClientRect().height===1)));
     assert.equal(await applyCount(),count,'drag preview does not send operations');
-    await shot('guides',theme);await page.mouse.up();await wait();
+    const cleanGuides = async () => {
+      const guides = await page.locator('.guide-line').evaluateAll(lines => lines.map(n => { const r=n.getBoundingClientRect();return {segment:n.dataset.segment,label:n.querySelector('.distance-label')?.textContent,w:r.width,h:r.height}; }));
+      const segments=guides.filter(g=>g.segment).map(g=>g.segment);assert.equal(new Set(segments).size,segments.length,'one bracket per measured segment');
+      assert.equal(guides.filter(g=>g.label==='240').length,1,'the nearest 240px gap is measured only once');
+      const canvas=await page.locator('#canvas').boundingBox();assert.ok(guides.filter(g=>!g.label).every(g=>g.w<canvas.width && g.h<canvas.height),'snap lines stay local to moving and target nodes');
+      const pills=await page.locator('.distance-label').evaluateAll(labels=>labels.map(n=>{const r=n.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height};}));
+      pills.forEach((a,i)=>pills.slice(i+1).forEach(b=>assert.ok(a.x+a.w<=b.x || b.x+b.w<=a.x || a.y+a.h<=b.y || b.y+b.h<=a.y,'distance pills never overlap')));
+    };
+    await cleanGuides();await shot('guides',theme);await page.mouse.up();await wait();
     assert.ok(Math.abs((await data('a')).position.x-580)<=1,'snap position within one slide pixel');
     assert.equal(await depth(),before+1);assert.equal(await applyCount(),count+1);
     await page.locator('#undo').click();await wait();assert.equal((await data('a')).position.x,180);
     start=await point(240,710);end=await point(204,710);await moveTo(start);await page.mouse.down();await moveTo(end);
-    assert.ok(await page.locator('.equal-spacing').count()>0,'matching gaps display equal-spacing brackets');await page.mouse.up();await wait();
+    assert.equal(await page.locator('.equal-spacing').count(),2,'both equal gaps display exactly once');
+    assert.equal(await page.locator('.distance-label').filter({hasText:/^240$/}).count(),2,'one pill per equal gap');await page.mouse.up();await wait();
     assert.ok(Math.abs((await data('a')).position.x-140)<=1);
     await page.keyboard.down('Alt');const hover=await point(1100,700);await moveTo(hover);assert.ok(await page.locator('.distance-label').count()>0);await moveTo(await point(1550,560));assert.equal(await page.locator('.distance-label').count(),2,'Alt measures diagonal neighbours on both axes');await page.keyboard.up('Alt');
     const beforeNudge=(await data('a')).position.x;await page.keyboard.press('Shift+ArrowRight');await wait();assert.equal((await data('a')).position.x,beforeNudge+10);
 
-    await fresh(theme);await select(['r1']);before=await depth();count=await applyCount();
+    await fresh(theme);await select(['r1']);
+    assert.ok(await page.getByLabel('Auto-layout alignment',{exact:true}).isVisible(),'a flowing text node exposes its parent layout');
+    const italicBox=await page.getByRole('button',{name:'Italic',exact:true}).boundingBox();assert.ok(italicBox.y>=64 && italicBox.y+italicBox.height<=900,'common layout and typography controls fit without scrolling');
+    assert.equal(await page.locator('#properties-panel').evaluate(n=>n.scrollTop),0);
+    assert.ok(await page.locator('#properties-panel').evaluate(n=>n.scrollWidth<=n.clientWidth),'no horizontal panel scrolling');
+    before=await depth();count=await applyCount();
     let r=await rect('r1');start=await point(r.x+r.w/2,r.y+r.h/2);r=await rect('r3');end=await point(r.x+r.w*.9,r.y+r.h/2);
     await moveTo(start);await page.mouse.down();await moveTo(end);
     assert.equal(await page.locator('.insertion-line').count(),1);assert.equal((await page.locator('.insertion-line').boundingBox()).width,2);
@@ -127,14 +153,29 @@ try {
     await page.getByRole('button',{name:'Font family',exact:true}).click();await page.locator('#font-picker').waitFor();
     assert.deepEqual(await page.locator('.font-group').allTextContents(),['In this deck','Installed']);
     await page.waitForFunction(()=>[...document.querySelectorAll('.font-row')].some(n=>n.style.fontFamily.includes('Helvetica')));
+    const family=await page.getByRole('button',{name:'Font family',exact:true}).boundingBox(), picker=await page.locator('#font-picker').boundingBox(), panel=await page.locator('#properties-panel').boundingBox(), weight=await page.getByLabel('Weight',{exact:true}).boundingBox();
+    assert.ok(picker.y>=family.y+family.height && picker.x>=panel.x && picker.x+picker.width<=panel.x+panel.width,'font picker is anchored below its field inside the panel');
+    assert.ok(weight.y>=picker.y+picker.height,'the picker pushes typography labels down instead of covering them');
     await shot('fonts',theme);
+    await page.getByRole('button',{name:'Font family',exact:true}).locator('svg').click();assert.equal(await page.locator('#font-picker').count(),0,'the family chevron also closes the picker');
+    await page.getByRole('button',{name:'Font family',exact:true}).locator('svg').click();
     await page.getByLabel('Search fonts').fill('Georgia');await page.keyboard.press('ArrowDown');await page.keyboard.press('Enter');await wait();assert.equal((await data('heading')).font.family,'Georgia');
     assert.deepEqual(await page.getByLabel('Weight',{exact:true}).locator('option').evaluateAll(options=>options.map(o=>o.value)),['400','700']);
+    await page.getByLabel('Size presets',{exact:true}).selectOption('56');await wait();assert.equal((await data('heading')).font.size,56);
+    await page.getByRole('button',{name:'Italic',exact:true}).click();await wait();assert.equal((await data('heading')).font.italic,true);
+    await page.getByRole('button',{name:'Uppercase',exact:true}).click();await wait();assert.equal((await data('heading')).font.transform,'uppercase');
+    await page.getByRole('button',{name:'Uppercase',exact:true}).click();await wait();assert.equal((await data('heading')).font.transform,'none');
+    await page.getByRole('button',{name:'Text align center',exact:true}).click();await wait();assert.equal((await data('heading')).font.align,'center');
+    await page.getByRole('button',{name:'Text align middle',exact:true}).click();await wait();assert.equal((await data('heading')).font.valign,'middle');
+    await set('Letter spacing (%)','2');assert.equal((await data('heading')).font.letter_spacing,.02);
+    await set('Line height','1.5');assert.equal((await data('heading')).font.line_height,1.5);
+    await page.getByRole('button',{name:'Automatic line height',exact:true}).click();await wait();assert.equal((await data('heading')).font.line_height,undefined);
     await set('Size (px)','24*2');assert.equal((await data('heading')).font.size,48);
-    await page.getByRole('button',{name:'Detach',exact:true}).click();await wait();assert.equal((await data('heading')).style,'body');assert.equal(await page.getByLabel('Text style',{exact:true}).inputValue(),'detached');assert.equal((await data('heading')).font.size,48);
-    await page.getByRole('button',{name:'Create style',exact:true}).click();await page.locator('#path-input').fill('Evidence');await page.locator('#path-confirm').click();await wait();assert.equal((await data('heading')).style,'evidence');
-    await set('Size (px)','64');await page.getByRole('button',{name:'Update style',exact:true}).click();await wait();assert.equal(await page.evaluate(()=>window.__d1.deck.theme.text_styles.evidence.size),64);
-    const caption=page.locator('.property > .scrub-label').filter({hasText:/^Size \(px\)$/});await caption.scrollIntoViewIfNeeded();const label=await caption.boundingBox();
+    await page.getByLabel('Text style actions',{exact:true}).click();await page.keyboard.press('Escape');assert.equal(await page.getByRole('button',{name:'Detach',exact:true}).count(),0);assert.ok(await page.getByLabel('Size (px)',{exact:true}).isVisible(),'Escape closes the style menu without clearing selection');
+    await page.getByLabel('Text style actions',{exact:true}).click();await page.getByRole('button',{name:'Detach',exact:true}).click();await wait();assert.equal((await data('heading')).style,'body');assert.equal(await page.getByLabel('Text style',{exact:true}).inputValue(),'detached');assert.equal((await data('heading')).font.size,48);
+    await page.getByLabel('Text style actions',{exact:true}).click();await page.getByRole('button',{name:'Create style',exact:true}).click();await page.locator('#path-input').fill('Evidence');await page.locator('#path-confirm').click();await wait();assert.equal((await data('heading')).style,'evidence');
+    await set('Size (px)','64');await page.getByLabel('Text style actions',{exact:true}).click();await page.getByRole('button',{name:'Update style',exact:true}).click();await wait();assert.equal(await page.evaluate(()=>window.__d1.deck.theme.text_styles.evidence.size),64);
+    const caption=page.locator('.property > .scrub-label[title^="Size (px)"]');await caption.scrollIntoViewIfNeeded();const label=await caption.boundingBox();
     before=await depth();count=await applyCount();await page.mouse.move(label.x+10,label.y+label.height/2);await page.mouse.down();await page.mouse.move(label.x+30,label.y+label.height/2,{steps:10});assert.equal(await applyCount(),count);await page.mouse.up();await wait();
     assert.equal((await data('heading')).font.size,84);assert.equal(await depth(),before+1);assert.equal(await applyCount(),count+1);await page.locator('#undo').click();await wait();assert.equal((await data('heading')).font.size,64);
     await page.getByLabel('Size (px)',{exact:true}).press('Shift+ArrowUp');await wait();assert.equal((await data('heading')).font.size,74);
@@ -164,6 +205,8 @@ try {
     await page.getByRole('button',{name:'Tidy up',exact:true}).click();await wait();
     await page.keyboard.press('Shift+KeyA');await wait();const wrapped=await page.evaluate(()=>window.__d1.deck.slides[0].children.find(n=>n.kind==='frame'&&n.children.some(c=>c.id==='a')));assert.equal(wrapped.layout.mode,'row');assert.equal(wrapped.layout.gap,220);
     await page.keyboard.press('Alt+Shift+KeyA');await wait();assert.ok(await page.evaluate(()=>window.__d1.deck.slides[0].children.some(n=>n.id==='a')));
+    await page.getByRole('button',{name:'Wrap selection (Shift+A)',exact:true}).click();await wait();assert.ok(await page.evaluate(()=>window.__d1.deck.slides[0].children.some(n=>n.kind==='frame'&&n.children.some(c=>c.id==='a'))));
+    await page.getByRole('button',{name:'Unwrap (Alt+Shift+A)',exact:true}).click();await wait();assert.ok(await page.evaluate(()=>window.__d1.deck.slides[0].children.some(n=>n.id==='a')));
     await select(['r1']);await page.keyboard.press('Alt+KeyD');await wait();assert.equal((await data('row')).layout.main,'end');
     await select(['row']);await page.getByRole('button',{name:'Column',exact:true}).click();await wait();await select(['r1','r2','r3']);before=await depth();await page.getByRole('button',{name:'Tidy up',exact:true}).click();await wait();assert.equal((await data('row')).layout.main,'space_between');assert.equal(await depth(),before+1);
     // Resizing hug/fill changes only touched axes to fixed; modifiers preserve
@@ -178,4 +221,5 @@ try {
   console.log('12 screenshots at 1440×900 · default nexus + light Alacritty');
   console.log('PASS: wrap/unwrap, layout grid/modes/padding/min/max/clip, snap ≤1px, 1px guides/distances/equal gaps, reorder/reparent/absolute escape, align/distribute/tidy, mixed values, arithmetic/steps/scrub, font search/keyboard/weights/styles/native chooser transport, rename/hide/lock/collapse/layers drop, hug resize/aspect/center/cancel; gestures send one Apply and one undo step.');
   console.log(outputs.join('\n'));
-} finally { await browser.close();await new Promise(resolve=>server.close(resolve)); }
+} catch (error) { console.error(errors); await page?.screenshot({path:path.join(out,'d1b-failure.png')}); throw error; }
+finally { await browser.close();await new Promise(resolve=>server.close(resolve)); }

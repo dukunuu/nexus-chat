@@ -376,11 +376,19 @@ insertion, zoom/pan and presenting remain available. D1 adds:
   guessing row versus column from their positions and using the median gap.
   Alt+Shift+A unwraps frames. Both actions are also in the canvas context menu
   and auto-layout panel.
-- **Auto-layout:** none/row/column/wrap buttons, fixed or auto (space-between)
-  gap, cross gap for wrapping, uniform/per-side padding, and a direction-aware
-  3×3 grid setting main and cross together. The sizing controls expose
-  fixed/hug/fill and optional min/max; frames expose clip content and children
-  expose Ignore auto layout.
+- **Design panel:** a 256 px sidebar with collapsible sections, 28 px controls
+  and paired, in-field numeric labels. Alignment icons sit above X/Y and W/H;
+  sizing modes are inline Fix/Hug/Fill menus, Ignore auto layout is an icon
+  beside X/Y, and min/max is behind “…” in the Layout / position header.
+  Appearance pairs opacity/radius and exposes swatches with role-or-hex inputs.
+  Chrome uses only terminal palette tokens, with labels/numbers at least 11 px.
+- **Auto-layout:** none/down/right/wrap icon segments, a fixed gap with an auto
+  (space-between) toggle, cross gap for wrapping, horizontal/vertical padding
+  with a four-side toggle, and a direction-aware 3×3 alignment grid. Collapsing
+  padding keeps differing sides intact and displays Mixed. Clip and stretch are
+  icon toggles; the header offers wrap (+, Shift+A) and unwrap (−, Alt+Shift+A).
+  A flowing text selection also exposes its parent's layout, so layout and
+  typography fit together at 1440×900 without scrolling.
 - **Canvas ordering:** drag flowing children to reorder, with a translucent
   ghost and a 2-screen-pixel accent insertion line. Drop over another
   auto-layout frame to reparent. Ctrl/Cmd+drag escapes into absolute slide
@@ -388,7 +396,9 @@ insertion, zoom/pan and presenting remain available. D1 adds:
   one atomic `Apply` transaction, so one undo restores it.
 - **Free positioning:** drag and resize snap within 6 screen px to sibling and
   slide edges/centers. Error-role guides are 1 screen px; nearest-neighbour
-  distances and equal-spacing brackets show slide-pixel gaps. Shift constrains
+  distances and equal-spacing brackets show slide-pixel gaps once per measured
+  segment. Snap lines span only the moving and target nodes, with a small
+  overshoot; crowded distance pills are offset so they do not overlap. Shift constrains
   dragging; Alt with a selection measures to the hovered node or parent edges.
   Arrows nudge 1 px, Shift 10 px. Resizing a hug/fill axis fixes that axis;
   Shift preserves aspect ratio and Alt preserves the center. Escape cancels
@@ -405,6 +415,11 @@ insertion, zoom/pan and presenting remain available. D1 adds:
   scrub commits once on release, not once per pointer move.
 - **Typography:** searchable, keyboard-navigable family picker grouped into
   In this deck / Installed, with visible rows previewed in their own faces.
+  The picker opens below the family field inside the panel, pushing subsequent
+  fields down rather than covering their labels. Weight/size and line-height/
+  letter-spacing share rows; size is scrubbable with a separate preset chevron.
+  Alignment, vertical alignment, case and italic use icon controls. Text style
+  is a compact header row, with detach/update/create in its “…” menu.
   Size presets span 12–200 px; weights come from fontdb and registered deck
   files, with variable weight controls when available. Italics, line-height
   auto/multiplier, letter spacing (%), alignment, vertical alignment, case,
@@ -419,7 +434,9 @@ insertion, zoom/pan and presenting remain available. D1 adds:
   supplies family/weight/italic from readable faces. WOFF2 is webview-only:
   its filename supplies the family when unreadable, with regular weight and
   the deck body font as PNG fallback.
-- **Layers:** double-click names to rename; hide/show and lock/unlock buttons;
+- **Layers:** a left-column tree beneath the slide rail; drag the rail's lower
+  corner to resize the split and give Layers more room. Double-click names to
+  rename; hide/show and lock/unlock buttons;
   expand/collapse frames; drag above/below to reorder or into a frame's middle
   to reparent. SVG kind icons and selection track the canvas. Locked nodes
   (and descendants of locked frames) cannot be selected/edited on canvas,
@@ -479,7 +496,9 @@ webview's installed faces, so platform font availability still matters.
   guides/distances/equal gaps, reorder/reparent/absolute escape, align/distribute/
   tidy, arithmetic/steps/scrubbing/mixed values, font search/keyboard/weights/
   styles/native chooser-byte transport, layers rename/hide/lock/collapse/drop,
-  resize modifiers and cancellation.
+  resize modifiers and cancellation. It also checks paired padding preserving
+  individual values, inline font-picker bounds/non-occlusion, common-section
+  fit, unique gap pills, local guide spans and crowded-label non-overlap.
   It asserts that drag and scrub previews send no edits, and release sends one
   `Apply` and adds one undo step. Outputs are 1440×900 in default nexus and the
   light Alacritty fixture: `ui-dev/shots/d1b-{auto-layout,guides,reorder,fonts,
