@@ -9,19 +9,22 @@
   const emit = event => window.studioEvent(event);
   const feedback = () => ({ event:'Feedback', threads, notes:[] });
   function current(extra = {}) {
-    return { event:'Deck', deck, revision:`r${sequence}`, hashes:Object.fromEntries(deck.slides.flatMap(s => s.blocks.map(b => [b.id, 'mock']))), images:{}, threads, linked:true, changed:[], notice:null, ...extra };
+    return { event:'Deck', deck, revision:`r${sequence}`, hashes:Object.fromEntries(deck.slides.flatMap(s => nodesOf(s).map(b => [b.id, 'mock']))), images:{}, threads, linked:true, changed:[], notice:null, ...extra };
   }
+  const nodesOf = slide => { const out = []; const walk = list => { for (const n of list) { out.push(n); walk(n.children || []); } }; walk(slide.children || []); return out; };
+  const containerOf = (next, id) => { for (const s of next.slides) { if (s.id === id) return s.children; const f = nodesOf(s).find(n => n.id === id); if (f) return f.children; } };
+  function merge(target, patch) { for (const [k, v] of Object.entries(patch)) { if (v === null) delete target[k]; else if (v && typeof v === 'object' && !Array.isArray(v) && target[k] && typeof target[k] === 'object') merge(target[k], v); else target[k] = structuredClone(v); } return target; }
   function apply(ops) {
     const next = structuredClone(deck);
     for (const op of ops) {
-      const slide = next.slides.find(s => s.id === op.slide);
-      if (op.op === 'update_block') Object.assign(slide.blocks.find(b => b.id === op.id), op.fields);
-      else if (op.op === 'set_notes') slide.notes = op.notes;
-      else if (op.op === 'set_layout') slide.layout = op.layout;
-      else if (op.op === 'restyle') { for (const s of next.slides) for (const b of s.blocks) if (['deck', s.id, b.id].includes(op.target)) b.style = op.style; }
+      if (op.op === 'update_node') { for (const s of next.slides) { const n = nodesOf(s).find(n => n.id === op.id); if (n) merge(n, op.fields); } }
+      else if (op.op === 'set_notes') next.slides.find(s => s.id === op.slide).notes = op.notes;
+      else if (op.op === 'update_slide') merge(next.slides.find(s => s.id === op.id), op.fields);
       else if (op.op === 'set_theme') next.theme = op.theme;
-      else if (op.op === 'delete_block') slide.blocks = slide.blocks.filter(b => b.id !== op.id);
-      else if (op.op === 'insert_block') slide.blocks.push(op.block);
+      else if (op.op === 'set_layout') { const t = next.slides.find(s => s.id === op.target) || next.slides.flatMap(nodesOf).find(n => n.id === op.target); t.layout = op.layout; }
+      else if (op.op === 'delete_node') { for (const s of next.slides) { const list = containerOf(next, s.id); const walk = l => { const i = l.findIndex(n => n.id === op.id); if (i >= 0) l.splice(i, 1); else l.forEach(n => n.children && walk(n.children)); }; walk(list); } }
+      else if (op.op === 'insert_node') { const list = containerOf(next, op.parent); list.splice(op.index ?? list.length, 0, op.node); }
+      else if (op.op === 'move_node') { for (const s of next.slides) { const walk = l => { const i = l.findIndex(n => n.id === op.id); if (i >= 0) return l.splice(i, 1)[0]; for (const n of l) if (n.children) { const f = walk(n.children); if (f) return f; } }; const node = walk(s.children); if (node) { const list = containerOf(next, op.parent); list.splice(op.index ?? list.length, 0, node); break; } } }
       else if (op.op === 'delete_slide') next.slides = next.slides.filter(s => s.id !== op.id);
       else if (op.op === 'add_slide') { const index = next.slides.findIndex(s => s.id === op.after); next.slides.splice(index < 0 ? next.slides.length : index + 1, 0, op.slide); }
       else if (op.op === 'move_slide') { const index = next.slides.findIndex(s => s.id === op.id); next.slides.splice(op.to, 0, ...next.slides.splice(index, 1)); }
@@ -35,8 +38,8 @@
     emitCurrent: extra => window.studioAsyncEvent(current(extra)),
     externalEdit(ops, focusSlide) {
       const before = deck, next = apply(ops);
-      const old = before.slides.flatMap(s => s.blocks);
-      const changed = next.slides.flatMap(s => s.blocks).filter(b => !old.some(o => JSON.stringify(o) === JSON.stringify(b))).map(b => b.id);
+      const shallow = n => JSON.stringify({ ...n, children: undefined }); const old = before.slides.flatMap(nodesOf).map(shallow);
+      const changed = next.slides.flatMap(nodesOf).filter(b => !old.includes(shallow(b))).map(b => b.id);
       undo.push(before); redo.length = 0; deck = next; sequence++;
       window.studioAsyncEvent(current({ changed, notice:'The deck changed on disk and was reloaded. Undo takes the change back.' }));
       if (focusSlide) window.studioAsyncEvent({ event:'Focus', slide:focusSlide });

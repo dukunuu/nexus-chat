@@ -28,8 +28,8 @@ const browser = await chromium.launch();
 const errors = [];
 const scenarios = ['editing', 'external', 'thread', 'preview', 'comments', 'properties'];
 const modelEdit = [
-  { op:'update_block', slide:'s1', id:'b1', fields:{ text:'Room to do your\nbest work.' }, base_hash:'mock' },
-  { op:'update_block', slide:'s1', id:'subtitle', fields:{ text:'Less noise. More room for the work that matters most.' }, base_hash:'mock' },
+  { op:'update_node', id:'b1', fields:{ text:'Room to do your\nbest work.' }, base_hash:'mock' },
+  { op:'update_node', id:'subtitle', fields:{ text:'Less noise. More room for the work that matters most.' }, base_hash:'mock' },
 ];
 try {
   for (const colorScheme of ['light', 'dark']) {

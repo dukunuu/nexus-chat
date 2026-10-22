@@ -1,32 +1,253 @@
 {
   "deck": {
-    "version": 1,
-    "title": "Research systems / 2026",
+    "slides": [
+      {
+        "children": [
+          {
+            "font": {
+              "color": "accent",
+              "size": 26
+            },
+            "id": "kicker",
+            "kind": "text",
+            "position": {
+              "x": 180,
+              "y": 180
+            },
+            "sizing": {
+              "h": 60,
+              "w": 1500
+            },
+            "style": "body",
+            "text": "NEXUS  /  RESEARCH SYSTEMS"
+          },
+          {
+            "font": {
+              "color": "fg",
+              "line_height": 1.08,
+              "size": 119
+            },
+            "id": "title",
+            "kind": "text",
+            "position": {
+              "x": 180,
+              "y": 360
+            },
+            "sizing": {
+              "h": 360,
+              "w": 1560
+            },
+            "style": "body",
+            "text": "Research, without\nlosing the thread."
+          },
+          {
+            "font": {
+              "color": "muted"
+            },
+            "id": "note",
+            "kind": "text",
+            "position": {
+              "x": 180,
+              "y": 780
+            },
+            "sizing": {
+              "h": 120,
+              "w": 1440
+            },
+            "style": "body",
+            "text": "One conversation. Every source in reach."
+          }
+        ],
+        "id": "s1",
+        "layout": {
+          "mode": "none"
+        },
+        "notes": "Keep the conversation connected to the evidence."
+      }
+    ],
     "theme": {
-      "colors": { "bg": "#0b1020", "fg": "#edf2ff", "accent": "#7dc4c4", "muted": "#a2afc7" },
-      "fonts": { "heading": "Helvetica Neue", "body": "Helvetica Neue", "mono": "Menlo" }
+      "colors": {
+        "accent": "#7dc4c4",
+        "bg": "#0b1020",
+        "fg": "#edf2ff",
+        "muted": "#a2afc7"
+      },
+      "fonts": {
+        "body": "Helvetica Neue",
+        "heading": "Helvetica Neue",
+        "mono": "Menlo"
+      },
+      "size": {
+        "h": 1080,
+        "w": 1920
+      },
+      "text_styles": {
+        "body": {
+          "align": "left",
+          "color": "fg",
+          "family": "body",
+          "italic": false,
+          "letter_spacing": 0.0,
+          "line_height": 1.35,
+          "size": 42,
+          "transform": "none",
+          "valign": "top",
+          "weight": 400
+        },
+        "caption": {
+          "align": "left",
+          "color": "muted",
+          "family": "body",
+          "italic": false,
+          "letter_spacing": 0.0,
+          "line_height": 1.35,
+          "size": 26,
+          "transform": "none",
+          "valign": "top",
+          "weight": 400
+        },
+        "code": {
+          "align": "left",
+          "color": "fg",
+          "family": "mono",
+          "italic": false,
+          "letter_spacing": 0.0,
+          "line_height": 1.35,
+          "size": 36,
+          "transform": "none",
+          "valign": "top",
+          "weight": 400
+        },
+        "heading": {
+          "align": "left",
+          "color": "fg",
+          "family": "heading",
+          "italic": false,
+          "letter_spacing": 0.0,
+          "line_height": 1.08,
+          "size": 81,
+          "transform": "none",
+          "valign": "top",
+          "weight": 700
+        },
+        "subheading": {
+          "align": "left",
+          "color": "fg",
+          "family": "heading",
+          "italic": false,
+          "letter_spacing": 0.0,
+          "line_height": 1.2,
+          "size": 58,
+          "transform": "none",
+          "valign": "top",
+          "weight": 600
+        },
+        "title": {
+          "align": "left",
+          "color": "fg",
+          "family": "heading",
+          "italic": false,
+          "letter_spacing": 0.0,
+          "line_height": 1.08,
+          "size": 120,
+          "transform": "none",
+          "valign": "top",
+          "weight": 700
+        }
+      }
     },
-    "slides": [{
-      "id": "s1", "layout": "title", "notes": "Keep the conversation connected to the evidence.",
-      "blocks": [
-        { "id": "kicker", "kind": "text", "x": 3, "y": 3, "w": 25, "h": 1, "text": "NEXUS  /  RESEARCH SYSTEMS", "style": { "size": "s", "color": "accent" } },
-        { "id": "title", "kind": "text", "x": 3, "y": 6, "w": 26, "h": 6, "text": "Research, without\nlosing the thread.", "style": { "size": "xxl", "color": "fg" } },
-        { "id": "note", "kind": "text", "x": 3, "y": 13, "w": 24, "h": 2, "text": "One conversation. Every source in reach.", "style": { "size": "m", "color": "muted" } }
-      ]
-    }]
+    "title": "Research systems / 2026",
+    "version": 2
   },
-  "threads": [{
-    "id": "t1", "anchor": { "slide": "s1", "block": "note", "x": 27, "y": 13 }, "severity": "should", "created": 1791021600, "resolved": null,
-    "messages": [
-      { "id": "u1", "role": "you", "text": "The supporting line feels too small. Can we bring it closer to the headline?", "created": 1791021600, "edits": [] },
-      { "id": "m1", "role": "model", "text": "Raise the note from `m` to `l`. The **larger size** gives it presence without competing with the headline; keep the *muted color*.", "created": 1791021660, "edits": [{
-        "id": "e1", "why": "Suggested edit", "status": "pending",
-        "ops": [{ "op": "update_block", "slide": "s1", "id": "note", "fields": { "style": { "size": "l", "color": "muted" } }, "base_hash": "mock" }],
-        "guards": { "note": { "id": "note", "kind": "text", "x": 3, "y": 13, "w": 24, "h": 2, "text": "One conversation. Every source in reach.", "style": { "size": "m", "color": "muted" } } }
-      }] }
-    ]
-  }, {
-    "id": "t2", "anchor": { "slide": "s1", "block": "kicker", "x": 3, "y": 3 }, "severity": "consider", "created": 1791021600, "resolved": null,
-    "messages": [{ "id": "m2", "role": "model", "text": "Keep the kicker short so it stays secondary to the headline.", "created": 1791021600, "edits": [] }]
-  }]
+  "threads": [
+    {
+      "anchor": {
+        "block": "note",
+        "slide": "s1",
+        "x": 1620,
+        "y": 780,
+        "px": true
+      },
+      "created": 1791021600,
+      "id": "t1",
+      "messages": [
+        {
+          "created": 1791021600,
+          "edits": [],
+          "id": "u1",
+          "role": "you",
+          "text": "The supporting line feels too small. Can we bring it closer to the headline?"
+        },
+        {
+          "created": 1791021660,
+          "edits": [
+            {
+              "guards": {
+                "note": {
+                  "font": {
+                    "color": "muted"
+                  },
+                  "id": "note",
+                  "kind": "text",
+                  "position": {
+                    "x": 180,
+                    "y": 780
+                  },
+                  "sizing": {
+                    "h": 120,
+                    "w": 1440
+                  },
+                  "style": "body",
+                  "text": "One conversation. Every source in reach."
+                }
+              },
+              "id": "e1",
+              "ops": [
+                {
+                  "op": "update_node",
+                  "id": "note",
+                  "fields": {
+                    "font": {
+                      "size": 58,
+                      "color": "muted"
+                    }
+                  },
+                  "base_hash": "mock"
+                }
+              ],
+              "status": "pending",
+              "why": "Suggested edit"
+            }
+          ],
+          "id": "m1",
+          "role": "model",
+          "text": "Raise the note from `m` to `l`. The **larger size** gives it presence without competing with the headline; keep the *muted color*."
+        }
+      ],
+      "resolved": null,
+      "severity": "should"
+    },
+    {
+      "anchor": {
+        "block": "kicker",
+        "slide": "s1",
+        "x": 180,
+        "y": 180,
+        "px": true
+      },
+      "created": 1791021600,
+      "id": "t2",
+      "messages": [
+        {
+          "created": 1791021600,
+          "edits": [],
+          "id": "m2",
+          "role": "model",
+          "text": "Keep the kicker short so it stays secondary to the headline."
+        }
+      ],
+      "resolved": null,
+      "severity": "consider"
+    }
+  ]
 }

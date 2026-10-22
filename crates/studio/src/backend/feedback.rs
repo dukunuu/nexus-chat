@@ -21,6 +21,9 @@ impl Backend {
         text: String,
         send: bool,
     ) -> Result<Event> {
+        // The page speaks slide pixels; only version-1 sidecars hold grid cells.
+        let mut anchor = anchor;
+        anchor.px = true;
         anchor.check(&self.deck).map_err(anyhow::Error::msg)?;
         ensure!(
             !text.trim().is_empty() && text.chars().count() <= 2000,

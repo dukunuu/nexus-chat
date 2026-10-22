@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::deck::feedback::{self, Anchor, Edit, Message, Role, Severity, Thread};
 use crate::deck::suggest::{self, RawSuggestion, Suggestion};
-use crate::deck::{Block, CheckError, Content, Deck, Op, render};
+use crate::deck::{CheckError, Deck, Dim, Font, Kind, Mode, Node, Op, Position, render};
 
 use super::ToolBox;
 
@@ -173,7 +173,7 @@ fn clip(text: &str, chars: usize) -> String {
     }
 }
 
-/// A lowercase enum name (`Xxl` becomes `xxl`).
+/// A lowercase enum name (`SpaceBetween` becomes `spacebetween`).
 fn name(value: &impl std::fmt::Debug) -> String {
     format!("{value:?}").to_lowercase()
 }
@@ -182,69 +182,247 @@ fn name(value: &impl std::fmt::Debug) -> String {
 fn describe(op: &Op, before: &Deck) -> String {
     let number =
         |id: &str| slide_number(before, id).map_or_else(|_| id.to_string(), |n| n.to_string());
+    let on = |id: &str| {
+        before
+            .slide_of_node(id)
+            .map_or(String::new(), |s| format!(" on slide {}", number(&s.id)))
+    };
     match op {
         Op::AddSlide { slide, .. } => {
-            format!("add_slide {} ({} blocks)", slide.id, slide.blocks.len())
+            format!("add_slide {} ({} nodes)", slide.id, slide.nodes().len())
         }
         Op::DeleteSlide { id } => format!("delete_slide {id} (was slide {})", number(id)),
         Op::MoveSlide { id, to } => format!("move_slide {id} to position {}", to + 1),
-        Op::SetLayout { slide, layout } => {
-            format!("set_layout slide {} to {}", number(slide), name(layout))
-        }
         Op::SetNotes { slide, .. } => format!("set_notes slide {}", number(slide)),
-        Op::InsertBlock { slide, block } => {
-            format!("insert_block {} on slide {}", block.id, number(slide))
-        }
-        Op::UpdateBlock {
-            slide, id, fields, ..
-        } => format!(
-            "update_block {id} on slide {}: {}",
-            number(slide),
+        Op::UpdateSlide { id, fields } => format!(
+            "update_slide {} : {}",
+            number(id),
             fields.keys().cloned().collect::<Vec<_>>().join(", ")
         ),
-        Op::DeleteBlock { slide, id } => format!("delete_block {id} on slide {}", number(slide)),
-        Op::Restyle { target, .. } => format!("restyle {target}"),
+        Op::InsertNode { parent, node, .. } => {
+            format!("insert_node {} {} into {parent}", node.kind.name(), node.id)
+        }
+        Op::UpdateNode { id, fields, .. } => format!(
+            "update_node {id}{}: {}",
+            on(id),
+            fields.keys().cloned().collect::<Vec<_>>().join(", ")
+        ),
+        Op::DeleteNode { id } => format!("delete_node {id}{}", on(id)),
+        Op::MoveNode { id, parent, .. } => format!("move_node {id} into {parent}"),
+        Op::Wrap { ids, layout, .. } => {
+            format!("wrap {} in a {} frame", ids.join(", "), name(&layout.mode))
+        }
+        Op::Unwrap { id } => format!("unwrap {id}"),
+        Op::SetLayout { target, layout } => {
+            format!("set_layout {target} to {}", name(&layout.mode))
+        }
+        Op::SetTextStyle { name, .. } => format!("set_text_style {name}"),
         Op::SetTheme { .. } => "set_theme".into(),
     }
 }
 
-fn block_line(block: &Block) -> String {
-    let rect = format!("[{},{} {}x{}]", block.x, block.y, block.w, block.h);
-    let style = format!(
-        "{}/{}{}",
-        name(&block.style.size),
-        name(&block.style.align),
-        block
-            .style
-            .color
-            .as_ref()
-            .map_or(String::new(), |c| format!("/{c}"))
-    );
-    let detail = match &block.content {
-        Content::Text { text } => format!("text {style}: {}", clip(text, READ_TEXT_CHARS)),
-        Content::Code { language, source } => {
-            format!("code {language} {style}: {}", clip(source, READ_TEXT_CHARS))
+fn px(v: f64) -> String {
+    if v.fract() == 0.0 {
+        format!("{v:.0}")
+    } else {
+        format!("{v:.1}")
+    }
+}
+
+fn dim(d: Dim) -> String {
+    match d {
+        Dim::Fixed(n) => px(n),
+        Dim::Hug => "hug".into(),
+        Dim::Fill => "fill".into(),
+    }
+}
+
+/// Only the fields a font overrides: `size=58 color=accent`.
+fn font_line(font: &Font) -> String {
+    let mut parts = Vec::new();
+    if let Some(v) = &font.family {
+        parts.push(format!("family={v}"));
+    }
+    if let Some(v) = font.size {
+        parts.push(format!("size={}", px(v)));
+    }
+    if let Some(v) = font.weight {
+        parts.push(format!("weight={v}"));
+    }
+    if font.italic == Some(true) {
+        parts.push("italic".into());
+    }
+    if let Some(v) = font.line_height {
+        parts.push(format!("line_height={v}"));
+    }
+    if let Some(v) = font.letter_spacing {
+        parts.push(format!("letter_spacing={v}"));
+    }
+    if let Some(v) = &font.color {
+        parts.push(format!("color={v}"));
+    }
+    if let Some(v) = font.align {
+        parts.push(format!("align={}", name(&v)));
+    }
+    if let Some(v) = font.valign {
+        parts.push(format!("valign={}", name(&v)));
+    }
+    if let Some(v) = font.transform {
+        parts.push(format!("transform={}", name(&v)));
+    }
+    parts.join(" ")
+}
+
+fn layout_line(layout: &crate::deck::AutoLayout) -> String {
+    let mut out = name(&layout.mode);
+    if layout.mode != Mode::None {
+        if layout.wrap {
+            out.push_str(" wrap");
         }
-        Content::Table { rows } => {
+        let _ = write!(out, " gap {}", px(layout.gap));
+        if let Some(cross) = layout.gap_cross {
+            let _ = write!(out, "/{}", px(cross));
+        }
+        let _ = write!(
+            out,
+            " main {} cross {}",
+            name(&layout.main),
+            name(&layout.cross)
+        );
+    }
+    if layout.padding.iter().any(|p| *p != 0.0) {
+        let [t, r, b, l] = layout.padding;
+        let _ = write!(out, " padding {},{},{},{}", px(t), px(r), px(b), px(l));
+    }
+    out
+}
+
+// One arm per node kind.
+#[allow(clippy::too_many_lines)]
+fn node_line(
+    node: &Node,
+    rect: Option<crate::deck::Rect>,
+    depth: usize,
+    parent_flows: bool,
+) -> String {
+    let at = rect.map_or(String::new(), |r| {
+        format!(" [{},{} {}x{}]", px(r.x), px(r.y), px(r.w), px(r.h))
+    });
+    let mut sizing = String::new();
+    if node.sizing.w != Dim::Hug || node.sizing.h != Dim::Hug {
+        let _ = write!(
+            sizing,
+            " size {}x{}",
+            dim(node.sizing.w),
+            dim(node.sizing.h)
+        );
+    }
+    for (key, value) in [
+        ("min_w", node.sizing.min_w),
+        ("max_w", node.sizing.max_w),
+        ("min_h", node.sizing.min_h),
+        ("max_h", node.sizing.max_h),
+    ] {
+        if let Some(v) = value {
+            let _ = write!(sizing, " {key} {}", px(v));
+        }
+    }
+    let position = match node.position {
+        Position::Absolute { x, y } if parent_flows => format!(" absolute({},{})", px(x), px(y)),
+        _ => String::new(),
+    };
+    let mut extra = String::new();
+    if node.opacity < 1.0 {
+        let _ = write!(extra, " opacity {}", node.opacity);
+    }
+    if let Some(r) = node.rotation {
+        let _ = write!(extra, " rotation {r}");
+    }
+    if node.hidden {
+        extra.push_str(" hidden");
+    }
+    if node.locked {
+        extra.push_str(" locked");
+    }
+    let label = node
+        .name
+        .as_ref()
+        .map_or(String::new(), |n| format!(" {n:?}"));
+    let detail = match &node.kind {
+        Kind::Frame {
+            layout,
+            fill,
+            stroke,
+            radius,
+            clip,
+            ..
+        } => {
+            let mut d = format!("layout {}", layout_line(layout));
+            if let Some(f) = fill {
+                let _ = write!(d, " fill {f}");
+            }
+            if let Some(s) = stroke {
+                let _ = write!(d, " stroke {} {}", s.color, px(s.width));
+            }
+            if *radius > 0.0 {
+                let _ = write!(d, " radius {}", px(*radius));
+            }
+            if *clip {
+                d.push_str(" clip");
+            }
+            d
+        }
+        Kind::Text { text, style, font } => {
+            format!(
+                "style {style} {} : {}",
+                font_line(font),
+                clip(text, READ_TEXT_CHARS)
+            )
+        }
+        Kind::Code {
+            language,
+            source,
+            style,
+            font,
+        } => format!(
+            "{language} style {style} {} : {}",
+            font_line(font),
+            clip(source, READ_TEXT_CHARS)
+        ),
+        Kind::Table { rows, style, font } => {
             let cells = rows
                 .iter()
                 .map(|row| row.join(" | "))
                 .collect::<Vec<_>>()
                 .join(" ; ");
             format!(
-                "table {}x{} {style}: {}",
+                "{}x{} style {style} {} : {}",
                 rows.len(),
                 rows.iter().map(Vec::len).max().unwrap_or(0),
+                font_line(font),
                 clip(&cells, READ_TEXT_CHARS)
             )
         }
-        Content::Image { src, fit } => format!("image {src} {}", name(fit)),
-        Content::Shape {
+        Kind::Image { src, fit } => format!("{src} {}", name(fit)),
+        Kind::Shape {
             shape,
             fill,
             stroke,
-        } => format!("shape {} fill={fill} stroke={stroke}", name(shape)),
-        Content::Chart {
+            radius,
+        } => {
+            let mut d = name(shape);
+            if let Some(f) = fill {
+                let _ = write!(d, " fill {f}");
+            }
+            if let Some(s) = stroke {
+                let _ = write!(d, " stroke {} {}", s.color, px(s.width));
+            }
+            if *radius > 0.0 {
+                let _ = write!(d, " radius {}", px(*radius));
+            }
+            d
+        }
+        Kind::Chart {
             chart,
             labels,
             series,
@@ -258,13 +436,60 @@ fn block_line(block: &Block) -> String {
                 .collect::<Vec<_>>()
                 .join("; ");
             format!(
-                "chart {} labels=[{}] series=[{series}]",
+                "{} labels=[{}] series=[{series}]",
                 name(chart),
                 labels.join(", ")
             )
         }
     };
-    format!("  {} {rect} {detail}", block.id)
+    format!(
+        "{}{} {}{label}{at}{sizing}{position}{extra} {detail}",
+        "  ".repeat(depth + 1),
+        node.id,
+        node.kind.name(),
+    )
+}
+
+fn write_tree(
+    out: &mut String,
+    nodes: &[Node],
+    rects: &std::collections::HashMap<String, crate::deck::Rect>,
+    depth: usize,
+    parent_flows: bool,
+) {
+    for node in nodes {
+        let _ = writeln!(
+            out,
+            "{}",
+            node_line(node, rects.get(&node.id).copied(), depth, parent_flows)
+        );
+        if let Kind::Frame {
+            layout, children, ..
+        } = &node.kind
+        {
+            write_tree(out, children, rects, depth + 1, layout.mode != Mode::None);
+        }
+    }
+}
+
+/// The compact field reference, sent with the first `read` or `create` of a
+/// session so the tool description can stay short.
+const SCHEMA: &str = "\nschema (sent once per session)\n\
+- container (slide, frame): layout{mode:none|row|column, wrap, gap, gap_cross, padding:[t,r,b,l], main:start|center|end|space_between, cross:start|center|end|stretch}. mode none = children are absolute. Slides also have fill (color) and notes.\n\
+- node: id name? sizing{w,h: px|\"hug\"|\"fill\", min_w,max_w,min_h,max_h} position:\"auto\"|{x,y} (absolute = ignore auto-layout; every child of a mode:none parent is absolute) opacity rotation hidden locked. hug = fit content, fill = share the leftover main-axis space (or stretch across).\n\
+- frame: fill stroke{color,width} radius clip children[]. A hug frame needs mode row|column.\n\
+- text: text (Markdown subset: # headings, - lists, **bold**, *italic*, `code`), style (title|heading|subheading|body|caption|code or a name you add), font{family,size px,weight 100-900,italic,line_height x,letter_spacing em,color,align left|center|right,valign top|middle|bottom,transform none|uppercase|lowercase|capitalize}. Text hugs its width unless sized; give it w fill (or a fixed w) so it wraps, h hug so it grows.\n\
+- shape: shape rect|ellipse|line|arrow, fill, stroke{color,width}, radius. image: src, fit contain|cover. table: rows[[..]], style, font. code: language, source, style, font. chart: chart bar|line|pie, labels[], series[{name,values[]}].\n\
+- colors: theme roles (bg fg accent muted ...) or hex. font.family: a role (heading body mono), a deck font or an installed family (see fonts).\n\
+- layouts that work: column slide, padding 120-160, gap 32-56, cross stretch; text w fill; two columns = a row frame (gap 64-96, cross stretch) with w fill children; centered title = main center.\n\
+- set_layout converts children like Figma (none to row/column makes them auto; back makes them absolute where they are). wrap{ids,layout} puts siblings in a new frame; unwrap{id} dissolves it. update_node merges: {\"font\":{\"size\":64}} keeps other font fields, null removes one. set_text_style{name,font} changes every node using the style.\n";
+
+fn schema_once(shown: &mut bool) -> &'static str {
+    if std::mem::replace(shown, true) {
+        ""
+    } else {
+        SCHEMA
+    }
 }
 
 fn author(role: &Role) -> &'static str {
@@ -277,9 +502,11 @@ fn author(role: &Role) -> &'static str {
 
 fn read_text(relative: &str, path: &Path, deck: &Deck) -> Result<String> {
     let mut out = format!(
-        "{relative} · {:?} · {} · revision {}\n",
+        "{relative} · {:?} · {} · {}x{} px · revision {}\n",
         deck.title,
         slides(deck.slides.len()),
+        px(deck.theme.size.w),
+        px(deck.theme.size.h),
         short(&deck.revision())
     );
     let tokens = |map: &std::collections::BTreeMap<String, String>| {
@@ -294,34 +521,81 @@ fn read_text(relative: &str, path: &Path, deck: &Deck) -> Result<String> {
         tokens(&deck.theme.colors),
         tokens(&deck.theme.fonts)
     );
+    for style in deck.theme.text_styles.keys() {
+        let font = deck.theme.resolve_font(style, &Font::default());
+        let _ = writeln!(
+            out,
+            "text style {style}: {} {}px/{} lh {} ls {} {} {}",
+            deck.theme.family(&font.family),
+            px(font.size),
+            font.weight,
+            font.line_height,
+            font.letter_spacing,
+            font.color,
+            name(&font.align)
+        );
+    }
+    for file in &deck.theme.font_files {
+        let _ = writeln!(
+            out,
+            "deck font {}: {} weight {}{}{}",
+            file.family,
+            file.file,
+            file.weight,
+            if file.italic { " italic" } else { "" },
+            if file.fallback.is_empty() {
+                String::new()
+            } else {
+                format!(" fallback {}", file.fallback.join(", "))
+            }
+        );
+    }
+    let assets = path.parent().map(|dir| dir.join("assets"));
     for (index, slide) in deck.slides.iter().enumerate() {
         let notes = if slide.notes.is_empty() {
             String::new()
         } else {
             format!(" · notes: {}", clip(&slide.notes, 160))
         };
+        let label = slide
+            .name
+            .as_ref()
+            .map_or(String::new(), |n| format!(" {n:?}"));
+        let fill = slide
+            .fill
+            .as_ref()
+            .map_or(String::new(), |f| format!(" fill {f}"));
         let _ = writeln!(
             out,
-            "slide {} (id {}, layout {}){notes}",
+            "slide {} (id {}){label}{fill} layout {}{notes}",
             index + 1,
             slide.id,
-            name(&slide.layout)
+            layout_line(&slide.layout)
         );
-        for block in &slide.blocks {
-            let _ = writeln!(out, "{}", block_line(block));
-        }
+        let rects = crate::deck::layout_map(deck, slide, assets.as_deref());
+        write_tree(
+            &mut out,
+            &slide.children,
+            &rects,
+            0,
+            slide.layout.mode != Mode::None,
+        );
     }
-    let threads = feedback::load(path)?;
+    thread_lines(&mut out, deck, &feedback::load(path)?);
+    Ok(out)
+}
+
+fn thread_lines(out: &mut String, deck: &Deck, threads: &[Thread]) {
     let open = threads.iter().filter(|t| t.resolved.is_none()).count();
     let _ = writeln!(out, "comment threads: {} ({open} open)", threads.len());
-    for thread in &threads {
+    for thread in threads {
         let slide =
             slide_number(deck, &thread.anchor.slide).map_or_else(|_| "?".into(), |n| n.to_string());
         let block = thread
             .anchor
             .block
             .as_ref()
-            .map_or(String::new(), |b| format!(" block {b}"));
+            .map_or(String::new(), |b| format!(" node {b}"));
         let state = if thread.resolved.is_some() {
             "resolved"
         } else {
@@ -348,19 +622,76 @@ fn read_text(relative: &str, path: &Path, deck: &Deck) -> Result<String> {
             );
         }
     }
-    Ok(out)
 }
 
-/// A new deck: the title and no placeholder content, or the given slides.
+/// The `fonts` action: the deck's own families, then installed ones.
+fn fonts_text(deck: &Deck, query: Option<&str>) -> String {
+    let mut out = String::new();
+    let roles = deck
+        .theme
+        .fonts
+        .iter()
+        .map(|(role, family)| format!("{role}={family}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let _ = writeln!(out, "deck font roles: {roles}");
+    if deck.theme.font_files.is_empty() {
+        out.push_str("deck font files: none imported\n");
+    }
+    for file in &deck.theme.font_files {
+        let _ = writeln!(
+            out,
+            "deck font: {} ({}, weight {}{})",
+            file.family,
+            file.file,
+            file.weight,
+            if crate::deck::text::loadable_font(&file.file) {
+                ""
+            } else {
+                ", woff2: shown in studio only, renders with the fallback here"
+            }
+        );
+    }
+    let query = query
+        .map(|q| q.trim().to_lowercase())
+        .filter(|q| !q.is_empty());
+    let installed = crate::deck::text::installed_families();
+    let matching: Vec<&String> = installed
+        .iter()
+        .filter(|name| {
+            query
+                .as_ref()
+                .is_none_or(|q| name.to_lowercase().contains(q))
+        })
+        .collect();
+    let shown: Vec<&str> = matching.iter().take(30).map(|s| s.as_str()).collect();
+    let _ = writeln!(
+        out,
+        "installed families{}: {} of {} shown{}",
+        query
+            .as_ref()
+            .map_or(String::new(), |q| format!(" matching {q:?}")),
+        shown.len(),
+        matching.len(),
+        if matching.len() > shown.len() {
+            " (narrow with query)"
+        } else {
+            ""
+        }
+    );
+    for family in shown {
+        let _ = writeln!(out, "- {family}");
+    }
+    out
+}
+
+/// A new deck: the title slide only, or the given slides.
 fn new_deck(title: &str, slides: Option<&Value>) -> Result<Deck> {
     if let Some(slides) = slides {
-        return Deck::check(&json!({"version": 1, "title": title, "slides": slides}).to_string())
+        return Deck::check(&json!({"version": 2, "title": title, "slides": slides}).to_string())
             .map_err(|errors| anyhow::anyhow!("slides are invalid: {}", located(&errors)));
     }
-    let mut deck = Deck::new_from_layouts(title);
-    deck.slides.truncate(1);
-    deck.slides[0].blocks.truncate(1);
-    Ok(deck)
+    Ok(Deck::titled(title))
 }
 
 /// Image references the model sees: individual slides, or one contact sheet.
@@ -452,7 +783,17 @@ impl ToolBox {
         let path = confined(&self.space_files_dir, &relative)?;
         match action {
             "deck_create" => self.deck_create(&relative, &path, v),
-            "deck_read" => read_text(&relative, &path, &load(&path)?),
+            "deck_read" => {
+                let mut out = read_text(&relative, &path, &load(&path)?)?;
+                out.push_str(schema_once(
+                    &mut self.deck_link.lock().expect("deck link").schema_shown,
+                ));
+                Ok(out)
+            }
+            "deck_fonts" => Ok(fonts_text(
+                &load(&path)?,
+                v["text"].as_str().or_else(|| v["query"].as_str()),
+            )),
             "deck_view" => self.deck_view(&relative, &path, v),
             "deck_edit" => self.deck_edit(&relative, &path, v),
             "deck_comment" => deck_comment(&relative, &path, v),
@@ -470,8 +811,9 @@ impl ToolBox {
         let deck = new_deck(title, v.get("slides"))?;
         save(path, &deck)?;
         self.deck_changed(path, deck.slides.first().map(|s| s.id.clone()));
+        let schema = schema_once(&mut self.deck_link.lock().expect("deck link").schema_shown);
         Ok(format!(
-            "created deck · {relative} · {} · revision {}\n{}",
+            "created deck · {relative} · {} · revision {}\n{}{schema}",
             slides(deck.slides.len()),
             short(&deck.revision()),
             Shown::overview(&deck).lines(&deck, path, &self.space_files_dir)?
@@ -535,10 +877,14 @@ impl ToolBox {
             let _ = writeln!(out, "- {}", describe(op, &deck));
         }
         out.push_str(&shown.lines(&next, path, &self.space_files_dir)?);
+        out.push_str(schema_once(
+            &mut self.deck_link.lock().expect("deck link").schema_shown,
+        ));
         Ok(out)
     }
 }
 
+#[allow(clippy::cast_possible_truncation)]
 fn deck_comment(relative: &str, path: &Path, v: &Value) -> Result<String> {
     let deck = load(path)?;
     let text = v["text"].as_str().context("text is required")?.trim();
@@ -573,16 +919,18 @@ fn deck_comment(relative: &str, path: &Path, v: &Value) -> Result<String> {
     let severity: Severity = serde_json::from_value(v["severity"].clone())
         .context("severity is required for a new comment: must, should or consider")?;
     let block = v["block"].as_str().map(str::to_string);
-    let rect = deck
-        .slides
-        .iter()
-        .find(|s| s.id == slide)
-        .and_then(|s| s.blocks.iter().find(|b| Some(&b.id) == block.as_ref()));
+    let size = deck.theme.size;
+    let rect = deck.slide(slide).zip(block.as_ref()).and_then(|(s, id)| {
+        let assets = path.parent().map(|dir| dir.join("assets"));
+        crate::deck::layout_map(&deck, s, assets.as_deref()).remove(id)
+    });
+    let clamp = |v: f64, bound: f64| v.clamp(0.0, bound - 1.0).round() as i32;
     let anchor = Anchor {
         slide: slide.into(),
         block,
-        x: rect.map_or(2, |b| b.x),
-        y: rect.map_or(2, |b| b.y),
+        x: rect.map_or(120, |r| clamp(r.x, size.w)),
+        y: rect.map_or(120, |r| clamp(r.y, size.h)),
+        px: true,
     };
     anchor.check(&deck).map_err(anyhow::Error::msg)?;
     ensure!(
@@ -689,13 +1037,21 @@ mod tests {
 
         let read = f.run("read", json!({"path": PATH})).await;
         assert!(
-            read.contains("slide 1 (id s1") && read.contains("b1 [3,6 25x5] text"),
+            read.contains("slide 1 (id s1)") && read.contains("b1 text [160,"),
             "{read}"
         );
         assert!(
-            read.contains("revision") && read.contains("comment threads: 0"),
+            read.contains("1920x1080 px")
+                && read.contains("text style title:")
+                && read.contains("comment threads: 0"),
             "{read}"
         );
+        // The field reference comes once per session: with the create result.
+        assert!(
+            created.contains("schema (sent once per session)"),
+            "{created}"
+        );
+        assert!(!read.contains("schema (sent once per session)"), "{read}");
 
         let view = f.run("view", json!({"path": PATH})).await;
         assert!(view.starts_with("viewed slide 1 ·"), "{view}");
@@ -713,8 +1069,8 @@ mod tests {
     async fn create_accepts_initial_slides_and_rejects_invalid_ones() {
         let f = Fixture::new();
         let slides = json!([
-            {"id": "a", "layout": "title", "blocks": [{"kind": "text", "x": 1, "y": 1, "w": 10, "h": 2, "text": "Hello"}]},
-            {"id": "b", "layout": "blank", "blocks": []}
+            {"id": "a", "layout": {"mode": "column", "padding": 80}, "children": [{"kind": "text", "text": "Hello"}]},
+            {"id": "b", "children": []}
         ]);
         let created = f
             .run("create", json!({"title": "Talk", "slides": slides}))
@@ -748,7 +1104,8 @@ mod tests {
         f.run("create", json!({"title": "Test deck"})).await;
         let before = std::fs::read(f.file(PATH)).unwrap();
         let rejected = [
-            json!({"path": PATH, "ops": [{"op": "update_block", "slide": "s1", "id": "missing", "fields": {"text": "x"}}]}),
+            json!({"path": PATH, "ops": [{"op": "update_node", "id": "missing", "fields": {"text": "x"}}]}),
+            json!({"path": PATH, "ops": [{"op": "update_block", "slide": "s1", "id": "b1", "fields": {"text": "x"}}]}),
             json!({"path": PATH, "ops": [{"op": "launch_missiles"}]}),
             json!({"path": PATH, "ops": []}),
             json!({"path": PATH, "revision": "deadbeefdeadbeef", "ops": [{"op": "delete_slide", "id": "s1"}]}),
@@ -771,7 +1128,7 @@ mod tests {
         let located = f
             .run(
                 "edit",
-                json!({"path": PATH, "ops": [{"op": "update_block", "slide": "s1", "id": "missing", "fields": {"text": "x"}}]}),
+                json!({"path": PATH, "ops": [{"op": "update_node", "id": "missing", "fields": {"text": "x"}}]}),
             )
             .await;
         assert!(
@@ -790,20 +1147,21 @@ mod tests {
             .run(
                 "edit",
                 json!({"path": PATH, "revision": revision, "ops": [
-                    {"op": "update_block", "slide": "s1", "id": "b1", "fields": {"text": "New title"}},
-                    {"op": "add_slide", "slide": {"layout": "blank", "blocks": [{"kind": "text", "x": 2, "y": 2, "w": 20, "h": 3, "text": "Added"}]}}
+                    {"op": "update_node", "id": "b1", "fields": {"text": "New title"}},
+                    {"op": "update_node", "id": "b1", "fields": {"font": {"size": 100}}},
+                    {"op": "add_slide", "slide": {"children": [{"kind": "text", "text": "Added", "position": {"x": 80, "y": 80}}]}}
                 ]}),
             )
             .await;
         assert!(edited.starts_with("edited 2 slides ·"), "{edited}");
         assert!(
-            edited.contains("- update_block b1 on slide 1: text") && edited.contains("- add_slide"),
+            edited.contains("- update_node b1 on slide 1: text") && edited.contains("- add_slide"),
             "{edited}"
         );
         assert_eq!(f.images(&edited).len(), 2, "{edited}");
         let deck = Deck::check(&std::fs::read_to_string(f.file(PATH)).unwrap()).unwrap();
         assert_eq!(deck.slides.len(), 2);
-        assert!(!deck.slides[1].id.is_empty() && !deck.slides[1].blocks[0].id.is_empty());
+        assert!(!deck.slides[1].id.is_empty() && !deck.slides[1].children[0].id.is_empty());
 
         let one = f
             .run(
@@ -842,10 +1200,14 @@ mod tests {
     #[tokio::test]
     async fn view_defaults_to_the_slide_studio_is_showing() {
         let f = Fixture::new();
-        f.run("create", json!({"title": "Test deck", "slides": [
-            {"id": "a", "blocks": [{"kind": "text", "x": 1, "y": 1, "w": 10, "h": 2, "text": "One"}]},
-            {"id": "b", "blocks": [{"kind": "text", "x": 1, "y": 1, "w": 10, "h": 2, "text": "Two"}]}
-        ]})).await;
+        f.run(
+            "create",
+            json!({"title": "Test deck", "slides": [
+                {"id": "a", "children": [{"kind": "text", "text": "One"}]},
+                {"id": "b", "children": [{"kind": "text", "text": "Two"}]}
+            ]}),
+        )
+        .await;
         let path = "decks/test-deck.deck.json";
         let overview = f.run("view", json!({"path": path})).await;
         assert!(overview.starts_with("viewed 2 slides"), "{overview}");
@@ -863,7 +1225,7 @@ mod tests {
                 "comment",
                 json!({"path": PATH, "slide": "s1", "block": "b1", "severity": "should",
                     "text": "Clarify the title so the audience knows the point.",
-                    "ops": [{"op": "update_block", "slide": "s1", "id": "b1", "fields": {"text": "Clear title"}}]}),
+                    "ops": [{"op": "update_node", "id": "b1", "fields": {"text": "Clear title"}}]}),
             )
             .await;
         assert!(comment.starts_with("commented on slide 1"), "{comment}");
@@ -909,6 +1271,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_returns_resolved_rects_for_every_node_and_the_tree_shape() {
+        let f = Fixture::new();
+        let slides = json!([{"id": "a", "layout": {"mode": "column", "gap": 20, "padding": 100, "cross": "stretch"}, "children": [
+            {"id": "t", "kind": "text", "text": "Title", "style": "heading"},
+            {"id": "row", "kind": "frame", "layout": {"mode": "row", "gap": 40}, "sizing": {"h": 300}, "fill": "muted", "children": [
+                {"id": "x", "kind": "frame", "sizing": {"w": 200, "h": "fill"}},
+                {"id": "y", "kind": "text", "text": "Side", "sizing": {"w": "fill"}, "font": {"size": 30, "color": "accent"}}
+            ]}
+        ]}]);
+        f.run("create", json!({"title": "Tree", "slides": slides}))
+            .await;
+        let read = f.run("read", json!({"path": "decks/tree.deck.json"})).await;
+        // Resolved rects, with children nested one level deeper.
+        assert!(read.contains("\n  t text [100,100 1720x"), "{read}");
+        assert!(read.contains("\n  row frame [100,"), "{read}");
+        assert!(
+            read.contains("\n    x frame [100,") && read.contains("size 200xfill"),
+            "{read}"
+        );
+        assert!(
+            read.contains("layout row gap 40") && read.contains("fill muted"),
+            "{read}"
+        );
+        assert!(read.contains("size=30 color=accent"), "{read}");
+        assert!(
+            read.contains("slide 1 (id a) layout column gap 20"),
+            "{read}"
+        );
+    }
+
+    #[tokio::test]
+    async fn v2_structure_ops_work_through_edit() {
+        let f = Fixture::new();
+        f.run("create", json!({"title": "Test deck"})).await;
+        let edited = f
+            .run(
+                "edit",
+                json!({"path": PATH, "ops": [
+                    {"op": "insert_node", "parent": "s1", "node": {"id": "sub", "kind": "text", "text": "More", "style": "caption"}},
+                    {"op": "wrap", "ids": ["b1", "sub"], "layout": {"mode": "column", "gap": 12}, "id": "stack"},
+                    {"op": "set_text_style", "name": "caption", "font": {"size": 30}},
+                    {"op": "set_layout", "target": "s1", "layout": {"mode": "column", "padding": 120, "main": "center"}}
+                ]}),
+            )
+            .await;
+        assert!(edited.starts_with("edited slide 1"), "{edited}");
+        for line in [
+            "- insert_node text sub into s1",
+            "- wrap b1, sub in a column frame",
+            "- set_text_style caption",
+            "- set_layout s1 to column",
+        ] {
+            assert!(edited.contains(line), "{line}: {edited}");
+        }
+        let deck = Deck::check(&std::fs::read_to_string(f.file(PATH)).unwrap()).unwrap();
+        assert_eq!(deck.version, 2);
+        assert_eq!(deck.node("stack").unwrap().children().len(), 2);
+        assert_eq!(deck.theme.text_styles["caption"].size, Some(30.0));
+        let two = f
+            .run(
+                "edit",
+                json!({"path": PATH, "ops": [
+                    {"op": "update_node", "id": "sub", "fields": {"text": "A"}},
+                    {"op": "update_node", "id": "sub", "fields": {"font": {"weight": 700}}}
+                ]}),
+            )
+            .await;
+        assert!(
+            two.starts_with("edited slide 1"),
+            "two updates of one node in a call are fine: {two}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_version_one_deck_on_disk_reads_and_edits_as_version_two() {
+        let f = Fixture::new();
+        std::fs::create_dir_all(f.file("decks")).unwrap();
+        std::fs::write(
+            f.file(PATH),
+            include_str!("../../tests/fixtures/deck/classic.deck.json"),
+        )
+        .unwrap();
+        let read = f.run("read", json!({"path": PATH})).await;
+        assert!(read.contains("b1 text [120,360 1680x300]"), "{read}");
+        assert!(read.contains("size=119"), "{read}");
+        let edited = f
+            .run(
+                "edit",
+                json!({"path": PATH, "ops": [{"op": "update_node", "id": "b1", "fields": {"font": {"size": 140}}}]}),
+            )
+            .await;
+        assert!(edited.starts_with("edited slide 1"), "{edited}");
+        let on_disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(f.file(PATH)).unwrap()).unwrap();
+        assert_eq!(on_disk["version"], 2);
+        assert!(on_disk["slides"][0].get("blocks").is_none());
+    }
+
+    #[tokio::test]
+    async fn fonts_lists_deck_fonts_and_at_most_thirty_installed_families() {
+        let f = Fixture::new();
+        f.run("create", json!({"title": "Test deck"})).await;
+        f.run(
+            "edit",
+            json!({"path": PATH, "ops": [{"op": "set_theme", "theme": {
+                "fonts": {"heading": "Brand Sans"},
+                "font_files": [{"family": "Brand Sans", "file": "assets/fonts/brand.ttf", "weight": 700},
+                               {"family": "Web Only", "file": "assets/fonts/web.woff2"}]}}]}),
+        )
+        .await;
+        let all = f.run("fonts", json!({"path": PATH})).await;
+        assert!(
+            all.contains("deck font roles: body=Inter heading=Brand Sans mono=JetBrains Mono"),
+            "{all}"
+        );
+        assert!(
+            all.contains("deck font: Brand Sans (assets/fonts/brand.ttf, weight 700)"),
+            "{all}"
+        );
+        assert!(all.contains("Web Only") && all.contains("woff2"), "{all}");
+        let listed = all.lines().filter(|l| l.starts_with("- ")).count();
+        assert!(listed <= 30, "{all}");
+        let none = f
+            .run(
+                "fonts",
+                json!({"path": PATH, "text": "zzzz-no-such-family"}),
+            )
+            .await;
+        assert!(none.contains("0 of 0 shown"), "{none}");
+        assert_eq!(none.lines().filter(|l| l.starts_with("- ")).count(), 0);
+        // Fonts never write.
+        assert!(!all.contains("deck failed"));
+    }
+
+    #[tokio::test]
     async fn paths_cannot_leave_decks_or_pass_symlinks() {
         let f = Fixture::new();
         let files = &f.tools.space_files_dir;
@@ -947,6 +1444,7 @@ mod tests {
         for (args, read_only) in [
             (r#"{"action":"read","path":"decks/a.deck.json"}"#, true),
             (r#"{"action":"view","path":"decks/a.deck.json"}"#, true),
+            (r#"{"action":"fonts","path":"decks/a.deck.json"}"#, true),
             (
                 r#"{"action":"edit","path":"decks/a.deck.json","ops":[]}"#,
                 false,

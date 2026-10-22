@@ -10,9 +10,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::suggest::Suggestion;
-use super::{Deck, HEIGHT, Op, WIDTH};
+use super::{Deck, Op};
 
-/// A point on a slide, optionally attached to a block.
+/// A point on a slide, in slide pixels, optionally attached to a node (the
+/// field is still called `block`, as in version 1).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Anchor {
@@ -20,6 +21,10 @@ pub struct Anchor {
     pub block: Option<String>,
     pub x: i32,
     pub y: i32,
+    /// False only in sidecars written for version-1 grid decks, whose points
+    /// were grid cells; [`load`] converts those.
+    #[serde(default)]
+    pub px: bool,
 }
 
 impl Anchor {
@@ -33,11 +38,17 @@ impl Anchor {
         if self
             .block
             .as_ref()
-            .is_some_and(|id| !slide.blocks.iter().any(|b| b.id == *id))
+            .is_some_and(|id| slide.node(id).is_none())
         {
             return Err("unknown block on anchored slide".into());
         }
-        if !(0..WIDTH).contains(&self.x) || !(0..HEIGHT).contains(&self.y) {
+        let size = deck.theme.size;
+        if !self.px
+            || f64::from(self.x) < 0.0
+            || f64::from(self.x) >= size.w
+            || f64::from(self.y) < 0.0
+            || f64::from(self.y) >= size.h
+        {
             return Err("anchor point outside slide".into());
         }
         Ok(())
@@ -135,13 +146,7 @@ fn snapshot(deck: &Deck, key: &str) -> Value {
     if let Some(id) = key.strip_prefix("slide:") {
         return serde_json::to_value(deck.slides.iter().find(|s| s.id == id)).expect("slide JSON");
     }
-    serde_json::to_value(
-        deck.slides
-            .iter()
-            .flat_map(|s| &s.blocks)
-            .find(|b| b.id == key),
-    )
-    .expect("block JSON")
+    serde_json::to_value(deck.node(key)).expect("node JSON")
 }
 
 impl Edit {
@@ -154,23 +159,30 @@ impl Edit {
                 .clone()
                 .unwrap_or_else(|| format!("slide:{}", anchor.slide)),
         ];
+        let target = |id: &String| {
+            if base.slides.iter().any(|s| s.id == *id) {
+                format!("slide:{id}")
+            } else {
+                id.clone()
+            }
+        };
         for op in &proposal.ops {
             match op {
-                Op::UpdateBlock { id, .. } | Op::DeleteBlock { id, .. } => keys.push(id.clone()),
-                Op::Restyle { target, .. } => {
-                    if target == "deck" {
-                        keys.extend(base.slides.iter().map(|s| format!("slide:{}", s.id)));
-                    } else if base.slides.iter().any(|s| s.id == *target) {
-                        keys.push(format!("slide:{target}"));
-                    } else {
-                        keys.push(target.clone());
-                    }
+                Op::UpdateNode { id, .. } | Op::DeleteNode { id } | Op::Unwrap { id } => {
+                    keys.push(id.clone());
                 }
-                Op::SetTheme { .. } => keys.push("theme".into()),
-                Op::SetNotes { slide, .. }
-                | Op::SetLayout { slide, .. }
-                | Op::InsertBlock { slide, .. } => keys.push(format!("slide:{slide}")),
-                Op::DeleteSlide { id } => keys.push(format!("slide:{id}")),
+                Op::MoveNode { id, parent, .. } => {
+                    keys.push(id.clone());
+                    keys.push(target(parent));
+                }
+                Op::InsertNode { parent, .. } => keys.push(target(parent)),
+                Op::Wrap { ids, .. } => keys.extend(ids.iter().cloned()),
+                Op::SetLayout { target: id, .. } => keys.push(target(id)),
+                Op::SetTheme { .. } | Op::SetTextStyle { .. } => keys.push("theme".into()),
+                Op::SetNotes { slide, .. } => keys.push(format!("slide:{slide}")),
+                Op::UpdateSlide { id, .. } | Op::DeleteSlide { id } => {
+                    keys.push(format!("slide:{id}"));
+                }
                 Op::AddSlide { .. } | Op::MoveSlide { .. } => keys.push("order".into()),
             }
         }
@@ -216,7 +228,17 @@ pub fn load(path: &Path) -> Result<Vec<Thread>> {
         return Ok(vec![]);
     }
     ensure!(!path.is_symlink(), "comments file must not be a symlink");
-    serde_json::from_slice(&std::fs::read(path)?).context("invalid comments file")
+    let mut threads: Vec<Thread> =
+        serde_json::from_slice(&std::fs::read(path)?).context("invalid comments file")?;
+    for thread in &mut threads {
+        // Version-1 anchors were grid cells of 60 px (on the 1920 px slide).
+        if !thread.anchor.px {
+            thread.anchor.x = thread.anchor.x * 60 + 30;
+            thread.anchor.y = thread.anchor.y * 60 + 30;
+            thread.anchor.px = true;
+        }
+    }
+    Ok(threads)
 }
 
 /// Persist an entire comments transaction atomically.
@@ -237,49 +259,60 @@ mod tests {
             block: block.map(str::to_string),
             x,
             y,
+            px: true,
         }
     }
 
     #[test]
-    fn anchors_require_a_real_slide_block_and_grid_point() {
+    fn anchors_require_a_real_slide_node_and_pixel_point() {
         let deck = Deck::classic_fixture("Anchors");
-        assert!(anchor("s1", Some("b1"), 3, 6).check(&deck).is_ok());
+        assert!(anchor("s1", Some("b1"), 180, 360).check(&deck).is_ok());
         assert!(anchor("s1", None, 0, 0).check(&deck).is_ok());
-        assert!(anchor("s1", None, 31, 17).check(&deck).is_ok());
+        assert!(anchor("s1", None, 1919, 1079).check(&deck).is_ok());
         for bad in [
             anchor("nope", None, 1, 1),
             anchor("s1", Some("nope"), 1, 1),
             anchor("s1", Some("b2"), 1, 1),
-            anchor("s1", None, 32, 1),
-            anchor("s1", None, 1, 18),
+            anchor("s1", None, 1920, 1),
+            anchor("s1", None, 1, 1080),
             anchor("s1", None, -1, 1),
         ] {
             assert!(bad.check(&deck).is_err(), "{bad:?}");
         }
+        let mut grid = anchor("s1", None, 1, 1);
+        grid.px = false;
+        assert!(
+            grid.check(&deck).is_err(),
+            "unconverted grid anchors are refused"
+        );
     }
 
     #[test]
     fn suggested_edits_go_outdated_when_a_block_they_touch_changes() {
         let deck = Deck::classic_fixture("Edits");
-        let hash = deck.slides[0].blocks[0].hash();
+        let hash = deck.node("b1").unwrap().hash();
         let raw = RawSuggestion {
             why: "Sharper".into(),
             ops: vec![
-                json!({"op": "update_block", "slide": "s1", "id": "b1", "fields": {"text": "Sharper"}, "base_hash": hash}),
+                json!({"op": "update_node", "id": "b1", "fields": {"text": "Sharper"}, "base_hash": hash}),
             ],
         };
         let (mut valid, errors) = crate::deck::suggest::prepare(&deck, vec![raw]);
         assert!(errors.is_empty());
-        let mut edit = Edit::new(&deck, valid.pop().unwrap(), &anchor("s1", Some("b1"), 3, 6));
+        let mut edit = Edit::new(
+            &deck,
+            valid.pop().unwrap(),
+            &anchor("s1", Some("b1"), 180, 360),
+        );
         edit.recheck(&deck);
         assert_eq!(edit.status, EditStatus::Pending);
         // An unrelated change keeps it applicable; a change to its block does not.
         let mut other = deck.clone();
-        other.slides[1].blocks[0].x = 4;
+        other.slides[1].children[0].opacity = 0.5;
         edit.recheck(&other);
         assert_eq!(edit.status, EditStatus::Pending);
         let mut touched = deck.clone();
-        touched.slides[0].blocks[0].w = 20;
+        touched.slides[0].children[0].opacity = 0.2;
         edit.recheck(&touched);
         assert_eq!(edit.status, EditStatus::Outdated);
         // And it can come back when the file returns to what the edit guarded.
@@ -292,6 +325,24 @@ mod tests {
             EditStatus::Applied,
             "a settled edit stays settled"
         );
+    }
+
+    #[test]
+    fn version_one_grid_anchors_become_pixels_on_load() {
+        let dir = std::env::temp_dir().join(format!("nexus-anchor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.deck.json");
+        std::fs::write(
+            sidecar(&path),
+            r#"[{"id":"t","anchor":{"slide":"s1","block":"b1","x":3,"y":6},"severity":"must","created":1,"resolved":null,"messages":[]}]"#,
+        )
+        .unwrap();
+        let threads = load(&path).unwrap();
+        assert_eq!((threads[0].anchor.x, threads[0].anchor.y), (210, 390));
+        assert!(threads[0].anchor.px);
+        save(&path, &threads).unwrap();
+        assert_eq!(load(&path).unwrap()[0].anchor.x, 210, "converted once");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

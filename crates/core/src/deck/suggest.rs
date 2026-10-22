@@ -5,9 +5,10 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{CheckError, Content, Deck, Op, apply};
+use super::validate::{fill_id, reserve_id, reserved_ids};
+use super::{CheckError, Deck, Kind, Op, Slide, apply};
 
-/// Slides and (slide, block) pairs; empty means the whole deck.
+/// Slides and (slide, node) pairs; empty means the whole deck.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Selection {
@@ -27,7 +28,7 @@ impl Selection {
             if !deck
                 .slides
                 .iter()
-                .any(|s| s.id == *slide && s.blocks.iter().any(|b| b.id == *block))
+                .any(|s| s.id == *slide && s.node(block).is_some())
             {
                 super::issue(errors, &format!("selection.blocks[{i}]"), "unknown block");
             }
@@ -87,66 +88,56 @@ fn prepare_one(base: &Deck, raw: RawSuggestion, index: usize) -> Result<Suggesti
     if raw.ops.len() > 40 {
         return Err(failure(".ops", "at most 40 operations"));
     }
-    let mut reserved = super::reserved_ids(&serde_json::to_value(base).expect("deck JSON"));
+    let mut reserved = reserved_ids(&serde_json::to_value(base).expect("deck JSON"));
     for value in &raw.ops {
         if value["op"] == "add_slide" {
-            let wrapper = json!({"slides":[value["slide"]]});
-            reserved.extend(super::reserved_ids(&wrapper));
-        } else if value["op"] == "insert_block" {
-            super::reserve_id(&value["block"], &mut reserved);
+            reserved.extend(reserved_ids(&json!({"slides": [value["slide"]]})));
+        } else if value["op"] == "insert_node" {
+            reserved.extend(reserved_ids(
+                &json!({"slides": [{"children": [value["node"]]}]}),
+            ));
+        } else if value["op"] == "wrap" {
+            reserve_id(value, &mut reserved);
         }
     }
-    let mut used = super::reserved_ids(&serde_json::to_value(base).expect("deck JSON"));
+    let mut used = reserved_ids(&serde_json::to_value(base).expect("deck JSON"));
     let mut ops = Vec::new();
     for (j, mut value) in raw.ops.into_iter().enumerate() {
         let path = format!(".ops[{j}]");
-        if value["op"] == "update_block" {
-            let slide = value["slide"].as_str().unwrap_or_default();
+        if value["op"] == "update_node" {
             let id = value["id"].as_str().unwrap_or_default();
-            let block = base
-                .slides
-                .iter()
-                .find(|s| s.id == slide)
-                .and_then(|s| s.blocks.iter().find(|b| b.id == id))
-                .ok_or_else(|| {
-                    failure(
-                        &format!("{path}.id"),
-                        &format!("no block {id:?} on slide {slide:?}"),
-                    )
-                })?;
-            value["base_hash"] = json!(block.hash());
+            let node = base.node(id).ok_or_else(|| {
+                failure(
+                    &format!("{path}.id"),
+                    &format!("no node {id:?} in the deck"),
+                )
+            })?;
+            value["base_hash"] = json!(node.hash());
         }
         if value["op"] == "add_slide" {
-            insertion_id(
+            insertion_tree(
                 &mut value["slide"],
                 &format!("s_suggest_{index}_{j}"),
                 &reserved,
                 &mut used,
             )
-            .map_err(|e| failure(&format!("{path}.slide.id"), e))?;
-            if let Some(blocks) = value
-                .get_mut("slide")
-                .and_then(|slide| slide.get_mut("blocks"))
-                .and_then(Value::as_array_mut)
-            {
-                for (k, block) in blocks.iter_mut().enumerate() {
-                    insertion_id(
-                        block,
-                        &format!("b_suggest_{index}_{j}_{k}"),
-                        &reserved,
-                        &mut used,
-                    )
-                    .map_err(|e| failure(&format!("{path}.slide.blocks[{k}].id"), e))?;
-                }
-            }
-        } else if value["op"] == "insert_block" {
-            insertion_id(
-                &mut value["block"],
-                &format!("b_suggest_{index}_{j}"),
+            .map_err(|(p, e)| failure(&format!("{path}.slide{p}.id"), e))?;
+        } else if value["op"] == "insert_node" {
+            insertion_tree(
+                &mut value["node"],
+                &format!("n_suggest_{index}_{j}"),
                 &reserved,
                 &mut used,
             )
-            .map_err(|e| failure(&format!("{path}.block.id"), e))?;
+            .map_err(|(p, e)| failure(&format!("{path}.node{p}.id"), e))?;
+        } else if value["op"] == "wrap" {
+            insertion_id(
+                &mut value,
+                &format!("f_suggest_{index}_{j}"),
+                &reserved,
+                &mut used,
+            )
+            .map_err(|e| failure(&format!("{path}.id"), e))?;
         }
         ops.push(serde_json::from_value::<Op>(value).map_err(|e| failure(&path, &e))?);
     }
@@ -156,24 +147,25 @@ fn prepare_one(base: &Deck, raw: RawSuggestion, index: usize) -> Result<Suggesti
             .unwrap_or(0);
         failure(&format!(".ops[{j}]"), &error)
     })?;
-    let sources: BTreeSet<_> = base
-        .slides
+    let image_sources = |deck: &Deck| -> BTreeSet<String> {
+        deck.slides
+            .iter()
+            .flat_map(Slide::nodes)
+            .filter_map(|n| {
+                if let Kind::Image { src, .. } = &n.kind {
+                    Some(src.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    let sources = image_sources(base);
+    if image_sources(&next)
         .iter()
-        .flat_map(|s| &s.blocks)
-        .filter_map(|b| {
-            if let Content::Image { src, .. } = &b.content {
-                Some(src)
-            } else {
-                None
-            }
-        })
-        .collect();
-    for block in next.slides.iter().flat_map(|s| &s.blocks) {
-        if let Content::Image { src, .. } = &block.content
-            && !sources.contains(src)
-        {
-            return Err(failure(".ops", "image src must already occur in the deck"));
-        }
+        .any(|src| !sources.contains(src))
+    {
+        return Err(failure(".ops", "image src must already occur in the deck"));
     }
     Ok(Suggestion {
         id: uuid::Uuid::new_v4().to_string(),
@@ -193,7 +185,25 @@ fn insertion_id(
             return Err("id already exists");
         }
     } else {
-        super::fill_id(value, stem, reserved, used);
+        fill_id(value, stem, reserved, used);
+    }
+    Ok(())
+}
+
+/// Give a slide or node, and every node under it, an id. On a clash the
+/// error carries the JSON path of the node, such as `.children[1]`.
+fn insertion_tree(
+    value: &mut Value,
+    stem: &str,
+    reserved: &BTreeSet<String>,
+    used: &mut BTreeSet<String>,
+) -> Result<(), (String, &'static str)> {
+    insertion_id(value, stem, reserved, used).map_err(|e| (String::new(), e))?;
+    if let Some(children) = value.get_mut("children").and_then(Value::as_array_mut) {
+        for (k, child) in children.iter_mut().enumerate() {
+            insertion_tree(child, &format!("{stem}_{k}"), reserved, used)
+                .map_err(|(p, e)| (format!(".children[{k}]{p}"), e))?;
+        }
     }
     Ok(())
 }

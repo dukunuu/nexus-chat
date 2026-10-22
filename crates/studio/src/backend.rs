@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail, ensure};
-use nexus_core::deck::{self, Content, Deck, Op, same_file};
+use nexus_core::deck::{self, Deck, Kind, Node, Op, same_file};
 use nexus_core::remote_image::Fetcher;
 use nexus_core::theme_colors::{self, ThemeColors};
 use serde::{Deserialize, Serialize};
@@ -210,16 +210,16 @@ impl Backend {
                 .deck
                 .slides
                 .iter()
-                .flat_map(|s| &s.blocks)
-                .map(|b| (b.id.clone(), b.hash()))
+                .flat_map(deck::Slide::nodes)
+                .map(|n| (n.id.clone(), n.hash()))
                 .collect(),
             images: self
                 .deck
                 .slides
                 .iter()
-                .flat_map(|s| &s.blocks)
-                .filter_map(|b| {
-                    if let Content::Image { src, .. } = &b.content
+                .flat_map(deck::Slide::nodes)
+                .filter_map(|n| {
+                    if let Kind::Image { src, .. } = &n.kind
                         && src.starts_with("https://")
                     {
                         Some((src.clone(), image_hash(src)))
@@ -374,7 +374,7 @@ impl Backend {
             self.deck_stamp = deck_stamp;
             let next = read_deck(&self.path)?;
             if next.revision() != self.known_revision {
-                changed = changed_blocks(&self.deck, &next);
+                changed = changed_nodes(&self.deck, &next);
                 self.undo.push(std::mem::replace(&mut self.deck, next));
                 self.redo.clear();
                 self.known_revision = self.deck.revision();
@@ -513,6 +513,10 @@ impl Backend {
             Some("jpg" | "jpeg") => "image/jpeg",
             Some("webp") => "image/webp",
             Some("gif") => "image/gif",
+            // Fonts imported into the deck (`assets/fonts/`).
+            Some("ttf") => "font/ttf",
+            Some("otf") => "font/otf",
+            Some("woff2") => "font/woff2",
             _ => bail!("unsupported asset type"),
         };
         Ok((mime, read_bounded(&file, 8 * 1024 * 1024)?))
@@ -525,9 +529,9 @@ impl Backend {
             .deck
             .slides
             .iter()
-            .flat_map(|s| &s.blocks)
+            .flat_map(deck::Slide::nodes)
             .find_map(|b| {
-                if let Content::Image { src, .. } = &b.content
+                if let Kind::Image { src, .. } = &b.kind
                     && src.starts_with("https://")
                     && image_hash(src) == hash
                 {
@@ -548,14 +552,29 @@ fn stamp(path: &Path) -> Option<Stamp> {
     Some((metadata.modified().ok()?, metadata.len()))
 }
 
-/// Blocks that are new or different in `next`; every block when the theme changed.
-fn changed_blocks(before: &Deck, next: &Deck) -> Vec<String> {
-    let old: Vec<_> = before.slides.iter().flat_map(|s| &s.blocks).collect();
+/// A node without its children, so a frame counts as changed only when the
+/// frame itself changed, not when something inside it did.
+fn shallow(node: &Node) -> Node {
+    let mut copy = node.clone();
+    if let Some(children) = copy.children_mut() {
+        children.clear();
+    }
+    copy
+}
+
+/// Nodes that are new or different in `next`; every node when the theme changed.
+fn changed_nodes(before: &Deck, next: &Deck) -> Vec<String> {
+    let old: Vec<Node> = before
+        .slides
+        .iter()
+        .flat_map(deck::Slide::nodes)
+        .map(shallow)
+        .collect();
     next.slides
         .iter()
-        .flat_map(|s| &s.blocks)
-        .filter(|b| before.theme != next.theme || !old.iter().any(|o| o == b))
-        .map(|b| b.id.clone())
+        .flat_map(deck::Slide::nodes)
+        .filter(|n| before.theme != next.theme || !old.contains(&shallow(n)))
+        .map(|n| n.id.clone())
         .collect()
 }
 

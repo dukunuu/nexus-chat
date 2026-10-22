@@ -1,8 +1,13 @@
 # Design: nexus studio — the canvas of the conversation (decks first, then docs and mini-apps)
 
-Status: terminal-theme identity and revised comments are implemented; deck data
-and editing remain version 1. D1's version-2 node tree, auto-layout, numeric
-typography, imported fonts, and taffy/browser parity are not implemented yet.
+Status: the core of D1 is implemented: deck format **version 2** (a pixel node
+tree with Figma-style auto-layout, numeric typography, named text styles and
+imported fonts), a `taffy` layout engine with browser parity, a v2 `deck` tool,
+and a studio backend and UI that speak v2. The editor's full D1 controls (smart
+guides, align and distribute, the font picker with import, a drag-to-reparent
+layers tree) are the next task; what the UI can and cannot do today is listed
+under *Editor status*. Terminal-theme identity and revised comments are
+implemented.
 Supersedes the editor half of `docs/web-editors.md`; that
 document's device-key pairing stays the plan for remote access (phase S5).
 
@@ -32,7 +37,8 @@ to a conversation.
 
 | Piece | Where | Notes |
 |---|---|---|
-| Deck schema, validation, operations, revision hashes | `crates/core/src/deck.rs` | pure data; shared by studio, the `deck` tool and the renderer; no UI deps |
+| Deck schema, validation, operations, revision hashes | `crates/core/src/deck.rs` and `deck/{model,validate,migrate,ops}.rs` | pure data; shared by studio, the `deck` tool and the renderer; no UI deps |
+| Layout | `crates/core/src/deck/layout.rs` (`taffy`) and `deck/text.rs` | node rectangles in px; text measured with the renderer's fonts |
 | Renderer | `crates/core/src/deck/render.rs` | deck → SVG → PNG with `resvg`; one slide, a numbered contact sheet, and a revision-keyed cache under `<space files>/decks/.renders/` |
 | `deck` tool | `crates/core/src/tools/deck.rs`, spec in `tools/spec.rs` | create, read, view, edit, comment, resolve; confined to `<space files>/decks/` |
 | Comment threads | `crates/core/src/deck/feedback.rs` | `<deck>.comments.json`, shared by the tool and studio |
@@ -67,17 +73,16 @@ following the pointer.
 Threads render code spans, bold and italic with DOM nodes. Links are inert
 text; no comment text is interpreted as HTML. Edit titles summarize the actual
 operations using the guarded pre-edit values, even when an old sidecar's
-`why` is just "Suggested edit". Existing v1 size steps are displayed using the
-renderer's native 1600 px canvas sizes (21.6 / 35.2 / 48 / 67.2 / 99.2 px),
-not a claim of numeric typography support. Applied cards say
+`why` is just "Suggested edit". Font edits show the real px values (`size 42 → 58 px`),
+read from the node's overrides or its text style. Applied cards say
 "Applied · undo with Cmd+Z"; the backend still saves an application as one undo
 step.
 
 Canvas navigation supports Ctrl/Cmd+scroll (and native webview pinch) to zoom
 around the pointer, Space+drag or two-axis scroll to pan, Shift+1 to fit and
 reset pan, and Shift+0 for native 100%. Numeric zoom remains fixed while the
-window resizes; fit follows the available canvas. Until v2, native 100% means
-the existing renderer's 1600 px slide width, not the proposed 1920 px frame.
+window resizes; fit follows the available canvas. Native 100% is the slide's own
+1920 px width.
 
 Why a webview rather than drawing natively: slides are layout plus type, and
 HTML/CSS does both well. `wry` uses the system webview (WKWebView on macOS,
@@ -118,72 +123,142 @@ images in decks go through `nexus_core::remote_image` (the same vetted fetcher
 as the TUI) and reach the page as `nexus://asset/<hash>`. The link carries no
 secrets, and studio has no host token and no host connection.
 
-## Deck format (`*.deck.json`, version 1)
+## Deck format (`*.deck.json`, version 2)
+
+A slide is a **frame** of the theme's size (1920 × 1080 px) holding a tree of
+**nodes**. Every length is a pixel.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "title": "Q3 review",
   "theme": {
     "colors": {"bg": "#0f1115", "fg": "#e8e6e3", "accent": "#7aa2f7", "muted": "#8b8f98"},
-    "fonts": {"heading": "Inter", "body": "Inter", "mono": "JetBrains Mono"}
+    "fonts": {"heading": "Brand Sans", "body": "Inter", "mono": "JetBrains Mono"},
+    "size": {"w": 1920, "h": 1080},
+    "text_styles": {"title": {"family": "heading", "size": 120, "weight": 700, "line_height": 1.08}},
+    "font_files": [{"family": "Brand Sans", "file": "assets/fonts/brand.ttf", "weight": 700, "fallback": ["Inter"]}]
   },
-  "slides": [
-    {
-      "id": "s1",
-      "layout": "title",
-      "blocks": [
-        {"id": "b1", "kind": "text", "x": 2, "y": 6, "w": 28, "h": 4,
-         "text": "# Q3 review\nRevenue up **18%**", "style": {"align": "left", "size": "xl"}},
-        {"id": "b2", "kind": "image", "x": 20, "y": 2, "w": 10, "h": 8, "src": "assets/chart.png", "fit": "cover"}
-      ],
-      "notes": "Open with the headline number."
-    }
-  ]
+  "slides": [{
+    "id": "s1", "notes": "Open with the headline number.",
+    "layout": {"mode": "column", "gap": 32, "padding": [160, 160, 160, 160], "main": "center", "cross": "stretch"},
+    "transition": {},
+    "children": [
+      {"id": "b1", "kind": "text", "text": "# Q3 review", "style": "title"},
+      {"id": "row", "kind": "frame", "layout": {"mode": "row", "gap": 64, "cross": "stretch"},
+       "fill": "muted", "radius": 24, "sizing": {"h": 420}, "children": [
+        {"id": "b2", "kind": "text", "text": "Revenue up **18%**", "sizing": {"w": "fill"},
+         "font": {"size": 58, "color": "accent"}},
+        {"id": "b3", "kind": "image", "src": "assets/chart.png", "fit": "cover", "sizing": {"w": 640, "h": "fill"},
+         "position": {"x": 1000, "y": 40}}
+      ]}
+    ]
+  }]
 }
 ```
 
-- **Canvas**: 16:9 as a 32×18 grid. Block positions and sizes are integer
-  grid units, clamped inside the slide.
-- **Blocks**: `text` holds a Markdown subset (headings, bold, italic,
-  bullets, numbered lists, inline code, links). `image` has a `src` that
-  is either relative to the deck's `assets/` folder or https through the
-  vetted fetcher. The others are `shape` (rect, ellipse, line, arrow, with
-  fill and stroke as theme roles or hex), `table` (rows of cells), `code`
-  (language and source) and `chart` (bar, line or pie, with labels and
-  series).
-- **Layouts**: title, section, content, two-column, image-text, quote,
-  blank. A layout is a starting arrangement only; blocks own their
-  positions.
-- **Theme**: colors and fonts are tokens. Style values name a role
-  (`accent`, `muted`, …) or give a hex color.
-- **Ids** are stable strings unique within the deck, and a **revision** is
-  the sha256 of the canonical JSON. Validation is forgiving where the
-  intent is clear: it clamps positions and fills in missing ids, the same
-  approach as `interactive::check`. Every error it reports names a JSON
-  path.
+- **Container** (slide or frame): `layout {mode: none|row|column, wrap, gap,
+  gap_cross, padding [t,r,b,l], main: start|center|end|space_between, cross:
+  start|center|end|stretch}`, `children`. In `mode: none` every child is
+  absolute. A frame adds `fill`, `stroke {color, width}`, `radius`, `clip`; a
+  slide adds `fill`, `notes`, `name` and a preserved `transition`.
+- **Node**: `id`, `name?`, `kind`, `sizing {w, h: px | "hug" | "fill", min_w,
+  max_w, min_h, max_h}`, `position: "auto" | {x, y}` (absolute: ignore
+  auto-layout), `opacity`, `rotation`, `hidden`, `locked` and a preserved
+  `animation`. Kinds: `frame`, `text`, `image`, `shape`, `table`, `code`,
+  `chart`.
+- **Typography.** `text`, `table` and `code` nodes name a theme **text style**
+  (`title`, `heading`, `subheading`, `body`, `caption`, `code`, or one added with
+  `set_text_style`) and override fields with `font {family, size px, weight
+  100–900, italic, line_height (multiplier), letter_spacing (em), color, align,
+  valign, transform}`. Text hugs its width, wraps inside a fixed or `fill`
+  width with `hug` height, or sits in a fixed box. `family` is a theme role
+  (`heading`, `body`, `mono`), an installed family or a deck font.
+- **Fonts.** The theme's `font_files` register files under `assets/fonts/`
+  (`ttf`, `otf`, `ttc`, `woff2`) as families, with `fallback` families. The
+  core renderer loads `ttf`, `otf` and `ttc`; a `woff2` file is for the studio
+  webview and renders with its fallback in PNGs.
+- **Colors** are theme roles or hex; **images** are HTTPS or relative to the
+  deck's `assets/`; text is a Markdown subset (headings, lists, bold, italic,
+  inline code, links).
+- **Ids** are stable strings unique within the deck; a **revision** is the
+  sha256 of the canonical JSON. Validation repairs missing or duplicate ids and
+  fills missing theme tokens and text styles; every other error names a JSON
+  path (`$.slides[1].children[0].font.size`). Limits: 200 slides, 200 nodes per
+  slide, frames nested 8 deep, 8 KB of text per node.
+
+### Migration from version 1
+
+Decks load as version 2 whatever their file says, and the first save writes
+version 2. The migration is idempotent and keeps ids:
+
+- grid units become px (× 60); each block becomes an absolute, fixed-size child
+  of a `mode: none` slide, in paint order;
+- text size steps map to px (`s` 26, `m` 42, `l` 58, `xl` 81, `xxl` 119) and
+  `xl`/`xxl` keep their tighter 1.08 line height; only values that differ from
+  the default style are written; `style.align` and `style.color` become
+  `font.align` and `font.color`;
+- text and tables use the `body` style, code the `code` style; a shape's
+  `stroke` becomes `{color, width: 2.4}`; the slide's template name is dropped;
+- comment sidecars written for the grid keep working: their anchors (grid cells)
+  become the cell's pixel origin plus 30 on load.
+
+### Layout
+
+`deck::layout(deck, slide)` returns every node's rectangle in slide px (tree
+order). It maps onto flexbox, which the editor's CSS follows too:
+
+| Deck | Flexbox |
+|---|---|
+| `row` / `column`, `gap`, `padding` | `display: flex`, `flex-direction`, `gap`, `padding` |
+| `wrap` | `flex-wrap: wrap`, `align-content: flex-start`, `gap_cross` is the line gap |
+| `main` / `cross` | `justify-content` / `align-items`; `stretch` also stretches `hug` children |
+| size `fixed(n)` | `width`/`height: n`; on the main axis `flex: 0 0 auto` |
+| size `hug` | `auto`; on the main axis `flex: 0 1 auto` (text wraps rather than overflow) |
+| size `fill` | main axis `flex: 1 1 0`; cross axis `align-self: stretch` |
+| absolute position | `position: absolute; left; top` from the parent's box edge, ignoring padding; `fill` pins the far edge to 0 |
+| `stroke` | drawn inside the box, never takes layout space |
+| `hidden` | `display: none` |
+
+Text is measured with the renderer's own glyph metrics (`fontdb`, including
+imported deck fonts): max-content is the widest unwrapped line, min-content the
+longest word; the last paragraph or heading has no trailing margin. Images,
+charts and shapes have a natural size (images follow their file, charts 640 ×
+360, shapes 160 × 160) and no automatic minimum, so `fill` can shrink them.
+A `hug` frame with `mode: none` collapses (absolute children give it no
+content): give it a fixed size or use auto-layout.
 
 ### Operations (edits and suggestions use the same language)
 
 `add_slide{after, slide}`, `delete_slide{id}`, `move_slide{id, to}`,
-`set_layout{slide, layout}`, `set_notes{slide, notes}`,
-`insert_block{slide, block}`, `update_block{slide, id, fields, base_hash}`,
-`delete_block{slide, id}`, `restyle{target, style}`, `set_theme{theme}`.
+`set_notes{slide, notes}`, `update_slide{id, fields}`,
+`insert_node{parent, index?, node}`, `update_node{id, fields, base_hash}`,
+`delete_node{id}`, `move_node{id, parent, index?}`, `wrap{ids, layout, id?}`,
+`unwrap{id}`, `set_layout{target, layout}`, `set_text_style{name, font}`,
+`set_theme{theme}`. `parent` and `target` are a slide or frame id.
 
-`deck::apply(&Deck, &[Op]) -> Result<Deck>` is atomic. `base_hash`, the
-hash of the block as it was when the suggestion was made, makes a stale
-suggestion fail cleanly instead of overwriting newer edits. Undo and redo
-in studio are inverse operations, and the file saved on disk is always a
-whole deck.
+`update_node` and `update_slide` take a JSON merge patch (objects merge, `null`
+removes a key); `id`, `kind` and `children` cannot be patched. `set_layout`
+converts children like Figma: none → row/column makes them auto (ordered by
+position), the reverse makes them absolute where they are, and a hugging frame
+keeps its size. `wrap` puts siblings in a new frame (hug for auto-layout, the
+exact bounding box for `none`); `unwrap` dissolves one; both keep the picture.
+
+`deck::apply(&Deck, &[Op]) -> Result<Deck>` is atomic. `base_hash`, the hash of
+the node as the caller last saw it, makes a stale update fail cleanly; within
+one transaction a node may be updated more than once. `suggest::prepare` fills
+`base_hash` and the ids of inserted nodes. Undo and redo in studio are inverse
+operations, and the file saved on disk is always a whole deck.
 
 ## The `deck` tool
 
-One public tool with six actions (the model sees it as `deck`):
+One public tool with seven actions (the model sees it as `deck`):
 
 | Action | Does | Read-only |
 |---|---|---|
 | `create {title, path?, slides?}` | New deck under `decks/` (slug from the title); optional slide objects validated like a file; returns path, revision and a contact sheet | no |
-| `read {path}` | Slide ids and layouts, block ids, kinds, rectangles and styles, text (truncated per block), revision, comment threads | yes |
+| `read {path}` | The node tree with resolved rectangles, sizing, text styles and overrides, text (truncated per node), revision, comment threads; the first `read`, `create` or `edit` of a session also returns a compact field reference | yes |
+| `fonts {path, text?}` | The deck's font roles and files, and up to 30 installed families matching the filter (`text`) | yes |
 | `view {path, slides?}` | Renders slides: the ones named, else the slide open in studio (when linked), else the whole deck as a contact sheet | yes |
 | `edit {path, ops, revision?}` | Applies `deck::Op`s atomically; fills `base_hash` and insertion ids; returns the new revision, a line per op and images of the changed slides | no |
 | `comment {path, slide, block?, text, severity, ops?}` | Pins a model comment (`must`, `should`, `consider`), optionally with suggested ops; with `thread` it replies in that thread instead | no |
@@ -209,18 +284,20 @@ One public tool with six actions (the model sees it as `deck`):
 
 ## The renderer
 
-`deck::render` draws a slide as SVG and rasterizes it with `resvg`, measuring
-text with the font database `resvg` renders with, so line breaks come from real
-glyph widths, not an estimate. Layout numbers (font sizes, line heights,
-paragraph and heading spacing, list indent, table and code padding, chart box)
-live in one table, `render::LAYOUT`, and `studio.css` and `render.js` use the
+`deck::render` places every node where `deck::layout` puts it, draws the slide
+as SVG (frames with fill, stroke, radius and clip; numeric typography with
+weight, italics, line height and letter spacing; imported fonts) and rasterizes
+it with `resvg`, measuring text with the font database `resvg` renders with, so
+line breaks come from real glyph widths, not an estimate. Layout numbers (heading scale, paragraph and
+heading spacing, list indent, table and code padding, chart box) live in one
+table, `render::LAYOUT`, and `studio.css` and `render.js` use the
 same numbers; a studio test fails if either drifts. Text that does not fit its
 block box stays visible past the box, in both renderers, and is clipped only at
 the slide edge, so the model sees overflow exactly as the author does.
 
 Where the SVG differs from the HTML, deliberately: font stacks name platform
-fonts (`system-ui` and `ui-serif` are CSS-only); shape and table borders scale
-with the slide instead of staying 1–2 CSS pixels; the inline-code tint is the
+fonts (`system-ui` and `ui-serif` are CSS-only); table borders scale
+with the slide instead of staying 1 CSS pixel; the inline-code tint is the
 light one; and a baseline can sit a pixel off a browser's rounding of the same
 font metrics. Remote images are drawn only when the vetted fetcher already
 cached them, and never fetched here.
@@ -288,10 +365,34 @@ the same lines through `nexus host`, which is why the types live in core.
   the same operation and comment model. Remote hosts use the device-key pairing
   in `docs/web-editors.md` §1.
 
+## Editor status
+
+The studio UI renders version-2 decks with real flexbox (`ui/render.js` follows
+the layout table above) and edits them through v2 operations. Today it can:
+select any node (nested ones too), drag and resize it (absolute nodes move;
+resizing any node writes a fixed size), nudge with the arrow keys (1 px, Shift
+10 px), edit text in place, duplicate, delete, reorder (layers list, bring
+forward and back), change size, weight, italics, line height, letter spacing,
+alignment, case and color in px, pick a text style, set sizing modes, absolute
+or auto position, opacity, and a frame's or slide's auto-layout (mode, gap,
+padding, main and cross alignment, wrap), fill, radius and clip, insert text,
+shapes and images, preview and apply comment edits, pin comments in slide
+pixels, and present. It cannot yet: wrap or unwrap a selection (Shift+A), show
+smart guides or distances, align or distribute, scrub numeric labels, pick or
+import fonts, edit text styles, reparent by dragging on the canvas, or drag a
+node that follows auto-layout (the panel changes its sizing and order). Fonts
+imported by the `deck` tool or a file are served and loaded
+(`/assets/fonts/…`).
+
 ## Tests
 
-- **Core:** deck round-trips, validation paths, every operation, atomic
-  failure and stale `base_hash`; the renderer (size, ink in every block,
+- **Core:** deck round-trips, validation paths, version-1 migration (idempotent,
+  every kind, the classic fixture), every operation, atomic failure and stale
+  `base_hash`; the layout engine (rows, columns, wrap, fill/hug, absolute,
+  text measure) and **browser parity**: `ui-dev/fixtures/parity-*.deck.json`
+  laid out by taffy against `rects-*.json` from Chromium
+  (`node crates/studio/ui-dev/rects.mjs`; frames within 2 px, text-sized boxes
+  within 6 px, text decks skipped where the font is not installed); the renderer (size, ink in every block,
   wrapping that follows glyph widths, overflow, contact sheets, the cache);
   every `deck` action in a temp space (confinement, stale revisions, located
   errors, image references in results); the link protocol's encode/decode.

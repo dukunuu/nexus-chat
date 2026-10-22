@@ -3,7 +3,7 @@ import { stripController } from './strip.js';
 import { panelController } from './panel.js';
 import { feedbackController } from './feedback.js';
 import { hydrateIcons } from './icons.js';
-import { textBlock, id } from './helpers.js';
+import { textNode, id, allNodes, slideSize } from './helpers.js';
 import { renderSlide } from './render.js';
 
 hydrateIcons();
@@ -35,7 +35,8 @@ const api = {
   state, apply, command, toast, render,
   slide:() => state.deck?.slides.find(s => s.id === state.slideId),
   renderCanvas:() => { if (state.deck) { canvas.render(); panel.renderToolbar(); } },
-  updateMany(slide, updates) { apply(() => updates.map(({ id, fields }) => ({ op:'update_block', slide, id, fields, base_hash:state.hashes[id] || '' }))); },
+  updateMany(slide, updates) { apply(() => updates.map(({ id, fields }) => ({ op:'update_node', id, fields, base_hash:state.hashes[id] || '' }))); },
+  rectOf:nodeId => canvas.rectOf(nodeId),
   selectionChanged() { canvas.decorate(); panel.render(); feedback.render(); focusChanged(); },
   duplicate:() => canvas.duplicate(), remove:() => canvas.remove(),
   clearPreview:() => feedback.clearPreview(),
@@ -50,7 +51,7 @@ function render() {
   $('#deck-title-label').textContent = state.deck.title;
   $('#dirty').textContent = 'Saved';
   $('#speaker-notes').value = api.slide()?.notes || ''; $('#speaker-notes').disabled = !api.slide();
-  $('#slide-label').textContent = api.slide() ? `Slide ${String(state.deck.slides.indexOf(api.slide()) + 1).padStart(2, '0')} / ${String(state.deck.slides.length).padStart(2, '0')}  ·  ${api.slide().layout.replaceAll('-', ' ')}` : 'Your canvas';
+  $('#slide-label').textContent = api.slide() ? `Slide ${String(state.deck.slides.indexOf(api.slide()) + 1).padStart(2, '0')} / ${String(state.deck.slides.length).padStart(2, '0')}${api.slide().name ? `  ·  ${api.slide().name}` : ''}` : 'Your canvas';
   $('#slide-wrap').hidden = !api.slide(); $('#canvas-empty').hidden = Boolean(api.slide());
   applyViewport();
   for (const mode of ['edit','comment']) $(`#${mode}-mode`).setAttribute('aria-pressed', String(state.mode === mode));
@@ -65,7 +66,7 @@ function handleEvent(event, reply) {
     if (event.colors) applyTheme(event.colors);
     feedback.clearPreview(); Object.assign(state, { deck:event.deck, revision:event.revision, hashes:event.hashes, images:event.images, threads:event.threads || [], linked:event.linked, flash:event.changed || [] });
     if (!api.slide()) state.slideId = state.deck.slides[0]?.id || null;
-    const blocks = new Set(api.slide()?.blocks.map(b => b.id) || []); state.selected = new Set([...state.selected].filter(id => blocks.has(id)));
+    const known = new Set(allNodes(api.slide()).map(n => n.id)); state.selected = new Set([...state.selected].filter(id => known.has(id)));
     if (state.openNewest) { state.openThread = state.threads.at(-1)?.id; state.openNewest = false; }
     render();
     if (event.notice) toast(event.notice);
@@ -93,10 +94,11 @@ $('#toggle-properties').onclick = properties; $('#close-properties').onclick = p
 function comments() { state.comments = !state.comments; if (state.comments) state.properties = false; render(); }
 $('#toggle-comments').onclick = comments; $('#close-comments').onclick = comments;
 for (const mode of ['edit','comment']) $(`#${mode}-mode`).onclick = () => { state.mode = mode; state.selected.clear(); render(); };
-// Version-one slides have a native 1600 px renderer width. Fit is responsive;
+// A slide is 1920 px wide natively (the theme's size). Fit is responsive;
 // numeric zoom is screen pixels per native slide pixel, not a multiple of fit.
-const nativeWidth = 1600, stage = $('#stage'), wrap = $('#slide-wrap');
+let nativeWidth = 1920; const stage = $('#stage'), wrap = $('#slide-wrap');
 function applyViewport() {
+  nativeWidth = state.deck ? slideSize(state.deck.theme).w : 1920;
   const scale = state.zoom === null ? 1 : state.zoom * nativeWidth / Math.max(1, parseFloat(getComputedStyle(wrap).width));
   wrap.style.transform = `translate(${state.panX}px,${state.panY}px) scale(${scale})`;
   $('#zoom-fit').textContent = state.zoom === null ? 'Fit' : `${Math.round(state.zoom * 100)}%`;
@@ -156,12 +158,12 @@ $('#open-deck').onclick = () => { deckMenu(false); ask('Open', 'Deck path', 'Ent
 $('#new-deck').onclick = () => { deckMenu(false); ask('New deck', 'Title', 'Created in your active space’s files/decks folder.', 'Untitled', title => command({ command:'NewDeck', title })); };
 function insert(block) {
   const slide = api.slide(); if (!slide) { toast('Add a slide first.'); return; }
-  state.selected = new Set([block.id]); state.mode = 'edit'; apply(() => [{ op:'insert_block', slide:slide.id, block }]); $('#insert-options').hidden = true;
+  state.selected = new Set([block.id]); state.mode = 'edit'; apply(() => [{ op:'insert_node', parent:slide.id, node:block }]); $('#insert-options').hidden = true;
 }
 $('#insert-toggle').onclick = () => $('#insert-options').hidden = !$('#insert-options').hidden;
-$('#add-text').onclick = () => insert(textBlock());
-$('#add-shape').onclick = () => insert({ id:id('b'), kind:'shape', x:8,y:5,w:10,h:7,shape:'rect',fill:'accent',stroke:'accent',style:{} });
-$('#add-image').onclick = () => ask('Import image', 'Image path', 'PNG, JPEG or WebP. A sanitized copy stays with the deck.', '', path => command({ command:'ImportAsset', path }, event => { if (event.event === 'Asset') insert({ id:id('b'),kind:'image',x:4,y:3,w:20,h:12,src:event.src,fit:'contain',style:{} }); }));
+$('#add-text').onclick = () => insert(textNode('Double-click to edit', { position:{ x:160, y:160 }, sizing:{ w:960 } }));
+$('#add-shape').onclick = () => insert({ id:id('b'), kind:'shape', shape:'rect', fill:'accent', position:{ x:480, y:300 }, sizing:{ w:600, h:420 } });
+$('#add-image').onclick = () => ask('Import image', 'Image path', 'PNG, JPEG or WebP. A sanitized copy stays with the deck.', '', path => command({ command:'ImportAsset', path }, event => { if (event.event === 'Asset') insert({ id:id('b'), kind:'image', src:event.src, fit:'contain', position:{ x:240, y:180 }, sizing:{ w:1200, h:720 } }); }));
 $('#speaker-notes').onchange = event => { const slide = api.slide(), notes = event.target.value; if (slide) apply(() => [{ op:'set_notes', slide:slide.id, notes }]); };
 $('#export').onclick = () => ask('Export deck', 'Destination path', 'Exports deck JSON. Keep the deck’s assets folder beside the exported file.', `${state.deck.title.replace(/[^\w-]+/g, '-')}.deck.json`, path => command({ command:'ExportDeck', path }));
 let presenting = false, presentIndex = 0;
@@ -199,7 +201,7 @@ document.addEventListener('keydown', event => {
   else if (mod && key === 'z') { event.preventDefault(); command({ command:event.shiftKey ? 'Redo' : 'Undo' }); }
   else if (mod && key === 'd') { event.preventDefault(); canvas.duplicate(); }
   else if (['Delete','Backspace'].includes(event.key)) { event.preventDefault(); canvas.remove(); }
-  else if (event.key.startsWith('Arrow')) { event.preventDefault(); const step = event.shiftKey ? 4 : 1; canvas.nudge(event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0, event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0); }
+  else if (event.key.startsWith('Arrow')) { event.preventDefault(); const step = event.shiftKey ? 10 : 1; canvas.nudge(event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0, event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0); }
   else if (event.key === 'F5') { event.preventDefault(); present(); }
 });
 command({ command:'Load' });

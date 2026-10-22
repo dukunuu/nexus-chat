@@ -1,0 +1,303 @@
+{
+  "version": 2,
+  "title": "Parity: text",
+  "theme": {
+    "colors": {
+      "accent": "#ae593e",
+      "bg": "#faf9f6",
+      "fg": "#282923",
+      "muted": "#76766b"
+    },
+    "fonts": {
+      "body": "Helvetica Neue",
+      "heading": "Helvetica Neue",
+      "mono": "Menlo"
+    },
+    "size": {
+      "w": 1920,
+      "h": 1080
+    },
+    "text_styles": {
+      "body": {
+        "family": "body",
+        "size": 42,
+        "weight": 400,
+        "italic": false,
+        "line_height": 1.35,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "caption": {
+        "family": "body",
+        "size": 26,
+        "weight": 400,
+        "italic": false,
+        "line_height": 1.35,
+        "letter_spacing": 0.0,
+        "color": "muted",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "code": {
+        "family": "mono",
+        "size": 36,
+        "weight": 400,
+        "italic": false,
+        "line_height": 1.35,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "heading": {
+        "family": "heading",
+        "size": 81,
+        "weight": 700,
+        "italic": false,
+        "line_height": 1.08,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "subheading": {
+        "family": "heading",
+        "size": 58,
+        "weight": 600,
+        "italic": false,
+        "line_height": 1.2,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "title": {
+        "family": "heading",
+        "size": 120,
+        "weight": 700,
+        "italic": false,
+        "line_height": 1.08,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      }
+    }
+  },
+  "slides": [
+    {
+      "id": "s1",
+      "layout": {
+        "mode": "column",
+        "gap": 32,
+        "padding": [
+          60,
+          60,
+          60,
+          60
+        ]
+      },
+      "children": [
+        {
+          "id": "hug",
+          "kind": "text",
+          "text": "Hugging text takes the width of its line",
+          "style": "body"
+        },
+        {
+          "id": "fixed",
+          "sizing": {
+            "w": 700,
+            "h": "hug"
+          },
+          "kind": "text",
+          "text": "The quick brown fox jumps over the lazy dog and keeps running through the quiet morning.",
+          "style": "body"
+        },
+        {
+          "id": "narrow",
+          "sizing": {
+            "w": 320,
+            "h": "hug"
+          },
+          "kind": "text",
+          "text": "The quick brown fox jumps over the lazy dog and keeps running through the quiet morning.",
+          "style": "body",
+          "font": {
+            "size": 30
+          }
+        },
+        {
+          "id": "big",
+          "kind": "text",
+          "text": "Big",
+          "style": "body",
+          "font": {
+            "size": 120,
+            "weight": 700
+          }
+        },
+        {
+          "id": "spaced",
+          "kind": "text",
+          "text": "Letter spacing",
+          "style": "body",
+          "font": {
+            "size": 48,
+            "letter_spacing": 0.15
+          }
+        },
+        {
+          "id": "upper",
+          "kind": "text",
+          "text": "upper case text",
+          "style": "body",
+          "font": {
+            "size": 40,
+            "transform": "uppercase"
+          }
+        },
+        {
+          "id": "lines",
+          "kind": "text",
+          "text": "One\nTwo\nThree",
+          "style": "body",
+          "font": {
+            "line_height": 1.8
+          }
+        },
+        {
+          "id": "md",
+          "sizing": {
+            "w": 900,
+            "h": "hug"
+          },
+          "kind": "text",
+          "text": "# A heading\nBody paragraph with **bold** and *italic* words.\n- first item\n- second item\n1. numbered",
+          "style": "body"
+        },
+        {
+          "id": "row",
+          "sizing": {
+            "w": 1400,
+            "h": "hug"
+          },
+          "kind": "frame",
+          "layout": {
+            "mode": "row",
+            "gap": 40
+          },
+          "children": [
+            {
+              "id": "r1",
+              "sizing": {
+                "w": "fill",
+                "h": "hug"
+              },
+              "kind": "text",
+              "text": "The quick brown fox jumps over the lazy dog and keeps running through the quiet morning.",
+              "style": "body"
+            },
+            {
+              "id": "r2",
+              "sizing": {
+                "w": 300,
+                "h": 100
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "none"
+              },
+              "fill": "accent",
+              "children": []
+            },
+            {
+              "id": "r3",
+              "kind": "text",
+              "text": "Side note",
+              "style": "body",
+              "font": {
+                "size": 28,
+                "color": "muted"
+              }
+            }
+          ]
+        },
+        {
+          "id": "squeezed",
+          "sizing": {
+            "w": 600,
+            "h": "hug"
+          },
+          "kind": "frame",
+          "layout": {
+            "mode": "row",
+            "gap": 20
+          },
+          "children": [
+            {
+              "id": "sq",
+              "kind": "text",
+              "text": "The quick brown fox jumps over the lazy dog and keeps running through the quiet morning.",
+              "style": "body"
+            },
+            {
+              "id": "sq2",
+              "sizing": {
+                "w": 300,
+                "h": 40
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "none"
+              },
+              "fill": "accent",
+              "children": []
+            }
+          ]
+        },
+        {
+          "id": "card",
+          "kind": "frame",
+          "layout": {
+            "mode": "column",
+            "gap": 12,
+            "padding": [
+              24,
+              32,
+              24,
+              32
+            ]
+          },
+          "fill": "muted",
+          "children": [
+            {
+              "id": "c1",
+              "kind": "text",
+              "text": "Card title",
+              "style": "subheading"
+            },
+            {
+              "id": "c2",
+              "kind": "text",
+              "text": "Card body text that sits inside a hugging card.",
+              "style": "body",
+              "font": {
+                "size": 30
+              }
+            }
+          ]
+        }
+      ],
+      "notes": ""
+    }
+  ]
+}

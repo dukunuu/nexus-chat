@@ -46,13 +46,13 @@ try {
     assert.deepEqual(await page.locator('.thread-message .message-text code').allTextContents(), ['m', 'l']);
     assert.equal(await page.locator('.thread-message .message-text strong').textContent(), 'larger size');
     assert.equal(await page.locator('.thread-message .message-text em').textContent(), 'muted color');
-    assert.match(await page.locator('.edit-kicker').textContent(), /size 35\.2 → 48 px/);
+    assert.match(await page.locator('.edit-kicker').textContent(), /size 42 → 58 px/);
     assert.doesNotMatch(await page.locator('.edit-card').textContent(), /Suggested edit/);
     assert.equal(await page.locator('.message-author.model .avatar').textContent(), '✦');
     assert.equal(await page.locator('.message-author.model .avatar').evaluate(n => getComputedStyle(n).color), theme === 'default' ? 'rgb(205, 0, 205)' : 'rgb(128, 86, 176)');
     for (const zoom of [.5, 1, 2]) {
       await page.keyboard.press('Shift+Digit0');
-      assert.ok(Math.abs((await page.locator('#canvas').boundingBox()).width - 1600) < 1, 'Shift+0 is native 100%, not fit');
+      assert.ok(Math.abs((await page.locator('#canvas').boundingBox()).width - 1920) < 1, 'Shift+0 is native 100%, not fit');
       const button = zoom < 1 ? '#zoom-out' : '#zoom-in';
       for (let i = 0; i < Math.abs(zoom - 1) * 10; i++) await page.locator(button).click();
       await page.waitForTimeout(30);
@@ -88,6 +88,7 @@ try {
     const fitted = await page.locator('#canvas').boundingBox();
     assert.ok(Math.abs(fitted.x - beforePan.x) < 1 && Math.abs(fitted.y - beforePan.y) < 1, 'Fit resets pan');
     await page.screenshot({ path:path.join(out, `d1-comments-${theme}.png`) });
+    const noteSize = await page.locator('#canvas [data-id="note"]').evaluate(n => n.style.fontSize);
     await page.getByRole('button', { name:'Preview', exact:true }).click();
     await page.locator('#canvas .ghost-changed').waitFor();
     await page.locator('#preview-apply').click();
@@ -95,7 +96,7 @@ try {
     assert.equal(await page.locator('.edit-status').textContent(), 'Applied · undo with Cmd+Z');
     await page.screenshot({ path:path.join(out, `d1-applied-${theme}.png`) });
     await page.locator('#undo').click();
-    await page.waitForFunction(() => document.querySelector('#canvas [data-id="note"]').dataset.size === 'm');
+    await page.waitForFunction(size => document.querySelector('#canvas [data-id="note"]').style.fontSize === size, noteSize);
     // Untrusted Markdown stays readable text and cannot create executable DOM.
     await page.locator('#thread-popover textarea').fill('Check `source()` and [reference](javascript:alert(1)). <img src=x onerror=alert(1)>');
     await page.getByRole('button', { name:'Note', exact:true }).click();
@@ -109,7 +110,7 @@ try {
     await page.locator('#thread-popover textarea').waitFor();
     const draft = await page.locator('#pins span.pin').boundingBox();
     const reframed = await page.locator('#canvas').boundingBox();
-    const anchor = { x:reframed.x + Math.floor(.5 * 32) / 32 * reframed.width, y:reframed.y + Math.floor(.16 * 18) / 18 * reframed.height };
+    const anchor = { x:reframed.x + Math.floor(.5 * 1920) / 1920 * reframed.width, y:reframed.y + Math.floor(.16 * 1080) / 1080 * reframed.height };
     assert.ok(draft.x > anchor.x && draft.y + draft.height < anchor.y, 'A free-point badge is outside the anchor, above/right after the thread reflows the canvas');
     const count = await page.locator('#pins .pin').count();
     await page.mouse.move(400, 200);

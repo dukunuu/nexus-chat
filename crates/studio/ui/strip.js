@@ -1,4 +1,4 @@
-import { layoutSlide, layouts, id } from './helpers.js';
+import { layoutSlide, layouts, id, withNewIds } from './helpers.js';
 import { element, renderSlide } from './render.js';
 
 export function stripController(api) {
@@ -37,7 +37,7 @@ export function stripController(api) {
       actions.append(summary);
       const duplicate = element('button', '', 'Duplicate');
       duplicate.onclick = () => {
-        const copy = structuredClone(slide); copy.id = id('s'); copy.blocks.forEach(b => b.id = id('b'));
+        const copy = structuredClone(slide); copy.id = id('s'); copy.children = copy.children.map(node => withNewIds(node, 'b'));
         api.apply(() => [{ op: 'add_slide', after: slide.id, slide: copy }]);
         api.state.slideId = copy.id; api.state.selected.clear();
       };

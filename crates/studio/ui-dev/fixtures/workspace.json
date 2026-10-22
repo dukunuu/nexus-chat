@@ -1,190 +1,306 @@
 {
   "deck": {
-    "version": 1,
-    "title": "The space to do good work",
-    "theme": {
-      "colors": {
-        "bg": "#faf9f6",
-        "fg": "#30352d",
-        "accent": "#b06143",
-        "muted": "#7b8072"
-      },
-      "fonts": {
-        "heading": "Inter",
-        "body": "Inter",
-        "mono": "JetBrains Mono"
-      }
-    },
     "slides": [
       {
-        "id": "s1",
-        "layout": "title",
-        "notes": "Start with a pause. Good work begins with enough space to think.",
-        "blocks": [
+        "children": [
           {
+            "font": {
+              "color": "accent",
+              "size": 26
+            },
             "id": "kicker",
             "kind": "text",
-            "x": 3,
-            "y": 3,
-            "w": 26,
-            "h": 1,
-            "text": "FIELDNOTES   /   A BETTER WAY TO WORK",
-            "style": {
-              "size": "s",
-              "color": "accent"
-            }
+            "position": {
+              "x": 180,
+              "y": 180
+            },
+            "sizing": {
+              "h": 60,
+              "w": 1560
+            },
+            "style": "body",
+            "text": "FIELDNOTES   /   A BETTER WAY TO WORK"
           },
           {
+            "font": {
+              "color": "fg",
+              "line_height": 1.08,
+              "size": 119
+            },
             "id": "b1",
             "kind": "text",
-            "x": 3,
-            "y": 6,
-            "w": 26,
-            "h": 6,
-            "text": "A quieter kind\nof momentum.",
-            "style": {
-              "size": "xxl",
-              "color": "fg"
-            }
+            "position": {
+              "x": 180,
+              "y": 360
+            },
+            "sizing": {
+              "h": 360,
+              "w": 1560
+            },
+            "style": "body",
+            "text": "A quieter kind\nof momentum."
           },
           {
+            "font": {
+              "color": "muted"
+            },
             "id": "subtitle",
             "kind": "text",
-            "x": 3,
-            "y": 13,
-            "w": 24,
-            "h": 2,
-            "text": "Less noise. More room for the work that matters.",
-            "style": {
-              "size": "m",
-              "color": "muted"
-            }
+            "position": {
+              "x": 180,
+              "y": 780
+            },
+            "sizing": {
+              "h": 120,
+              "w": 1440
+            },
+            "style": "body",
+            "text": "Less noise. More room for the work that matters."
           }
-        ]
+        ],
+        "id": "s1",
+        "layout": {
+          "mode": "none"
+        },
+        "notes": "Start with a pause. Good work begins with enough space to think."
       },
       {
-        "id": "s2",
-        "layout": "content",
-        "notes": "These values are illustrative, not research data.",
-        "blocks": [
+        "children": [
           {
+            "font": {
+              "line_height": 1.08,
+              "size": 81
+            },
             "id": "b2",
             "kind": "text",
-            "x": 3,
-            "y": 2,
-            "w": 26,
-            "h": 3,
-            "text": "Make space. Find your rhythm.",
-            "style": {
-              "size": "xl"
-            }
+            "position": {
+              "x": 180,
+              "y": 120
+            },
+            "sizing": {
+              "h": 180,
+              "w": 1560
+            },
+            "style": "body",
+            "text": "Make space. Find your rhythm."
           },
           {
             "id": "bullets",
             "kind": "text",
-            "x": 3,
-            "y": 7,
-            "w": 13,
-            "h": 9,
-            "text": "- Start with one clear intention\n- Protect time for deep work\n- Let progress compound",
-            "style": {
-              "size": "m"
-            }
+            "position": {
+              "x": 180,
+              "y": 420
+            },
+            "sizing": {
+              "h": 540,
+              "w": 780
+            },
+            "style": "body",
+            "text": "- Start with one clear intention\n- Protect time for deep work\n- Let progress compound"
           },
           {
+            "chart": "bar",
             "id": "chart",
             "kind": "chart",
-            "x": 18,
-            "y": 7,
-            "w": 11,
-            "h": 8,
-            "chart": "bar",
             "labels": [
               "Start",
               "Build",
               "Grow"
             ],
+            "position": {
+              "x": 1080,
+              "y": 420
+            },
             "series": [
               {
                 "name": "Illustrative",
                 "values": [
-                  3,
-                  5,
-                  8
+                  3.0,
+                  5.0,
+                  8.0
                 ]
               }
             ],
-            "style": {}
+            "sizing": {
+              "h": 480,
+              "w": 660
+            }
           }
-        ]
+        ],
+        "id": "s2",
+        "layout": {
+          "mode": "none"
+        },
+        "notes": "These values are illustrative, not research data."
       },
       {
-        "id": "s3",
-        "layout": "quote",
-        "notes": "Invite the audience to name one thing they can simplify.",
-        "blocks": [
+        "children": [
           {
+            "font": {
+              "line_height": 1.08,
+              "size": 81
+            },
             "id": "quote",
             "kind": "text",
-            "x": 4,
-            "y": 5,
-            "w": 24,
-            "h": 7,
-            "text": "“Clarity is what we\nchoose to leave in.”",
-            "style": {
-              "size": "xl"
-            }
+            "position": {
+              "x": 240,
+              "y": 300
+            },
+            "sizing": {
+              "h": 420,
+              "w": 1440
+            },
+            "style": "body",
+            "text": "\u201cClarity is what we\nchoose to leave in.\u201d"
           },
           {
+            "font": {
+              "color": "accent",
+              "size": 26
+            },
             "id": "end",
             "kind": "text",
-            "x": 4,
-            "y": 14,
-            "w": 24,
-            "h": 2,
-            "text": "A SMALL THOUGHT TO TAKE WITH YOU",
-            "style": {
-              "size": "s",
-              "color": "accent"
-            }
+            "position": {
+              "x": 240,
+              "y": 840
+            },
+            "sizing": {
+              "h": 120,
+              "w": 1440
+            },
+            "style": "body",
+            "text": "A SMALL THOUGHT TO TAKE WITH YOU"
           }
-        ]
+        ],
+        "id": "s3",
+        "layout": {
+          "mode": "none"
+        },
+        "notes": "Invite the audience to name one thing they can simplify."
       }
-    ]
+    ],
+    "theme": {
+      "colors": {
+        "accent": "#b06143",
+        "bg": "#faf9f6",
+        "fg": "#30352d",
+        "muted": "#7b8072"
+      },
+      "fonts": {
+        "body": "Inter",
+        "heading": "Inter",
+        "mono": "JetBrains Mono"
+      },
+      "size": {
+        "h": 1080,
+        "w": 1920
+      },
+      "text_styles": {
+        "body": {
+          "align": "left",
+          "color": "fg",
+          "family": "body",
+          "italic": false,
+          "letter_spacing": 0.0,
+          "line_height": 1.35,
+          "size": 42,
+          "transform": "none",
+          "valign": "top",
+          "weight": 400
+        },
+        "caption": {
+          "align": "left",
+          "color": "muted",
+          "family": "body",
+          "italic": false,
+          "letter_spacing": 0.0,
+          "line_height": 1.35,
+          "size": 26,
+          "transform": "none",
+          "valign": "top",
+          "weight": 400
+        },
+        "code": {
+          "align": "left",
+          "color": "fg",
+          "family": "mono",
+          "italic": false,
+          "letter_spacing": 0.0,
+          "line_height": 1.35,
+          "size": 36,
+          "transform": "none",
+          "valign": "top",
+          "weight": 400
+        },
+        "heading": {
+          "align": "left",
+          "color": "fg",
+          "family": "heading",
+          "italic": false,
+          "letter_spacing": 0.0,
+          "line_height": 1.08,
+          "size": 81,
+          "transform": "none",
+          "valign": "top",
+          "weight": 700
+        },
+        "subheading": {
+          "align": "left",
+          "color": "fg",
+          "family": "heading",
+          "italic": false,
+          "letter_spacing": 0.0,
+          "line_height": 1.2,
+          "size": 58,
+          "transform": "none",
+          "valign": "top",
+          "weight": 600
+        },
+        "title": {
+          "align": "left",
+          "color": "fg",
+          "family": "heading",
+          "italic": false,
+          "letter_spacing": 0.0,
+          "line_height": 1.08,
+          "size": 120,
+          "transform": "none",
+          "valign": "top",
+          "weight": 700
+        }
+      }
+    },
+    "title": "The space to do good work",
+    "version": 2
   },
   "threads": [
     {
-      "id": "t1",
       "anchor": {
-        "slide": "s1",
         "block": "subtitle",
-        "x": 27,
-        "y": 13
+        "slide": "s1",
+        "x": 1620,
+        "y": 780,
+        "px": true
       },
-      "severity": "should",
       "created": 1791021600,
-      "resolved": null,
+      "id": "t1",
       "messages": [
         {
+          "created": 1791021600,
+          "edits": [],
           "id": "u1",
           "role": "you",
-          "text": "Can this line feel a little more purposeful?",
-          "created": 1791021600,
-          "edits": []
+          "text": "Can this line feel a little more purposeful?"
         },
         {
-          "id": "m1",
-          "role": "model",
-          "text": "The supporting line could connect calm with an outcome, so the promise feels more tangible. This keeps your quiet, considered tone.",
           "created": 1791021660,
           "edits": [
             {
+              "guards": {},
               "id": "e1",
-              "why": "Connect the feeling to a clearer promise",
               "ops": [
                 {
-                  "op": "update_block",
-                  "slide": "s1",
+                  "op": "update_node",
                   "id": "subtitle",
                   "fields": {
                     "text": "Find your focus. Make room for meaningful work."
@@ -193,79 +309,89 @@
                 }
               ],
               "status": "pending",
-              "guards": {}
+              "why": "Connect the feeling to a clearer promise"
             }
-          ]
+          ],
+          "id": "m1",
+          "role": "model",
+          "text": "The supporting line could connect calm with an outcome, so the promise feels more tangible. This keeps your quiet, considered tone."
         }
-      ]
+      ],
+      "resolved": null,
+      "severity": "should"
     },
     {
-      "id": "t2",
       "anchor": {
-        "slide": "s1",
         "block": "kicker",
-        "x": 29,
-        "y": 3
+        "slide": "s1",
+        "x": 1740,
+        "y": 180,
+        "px": true
       },
-      "severity": "consider",
       "created": 1791021700,
-      "resolved": null,
+      "id": "t2",
       "messages": [
         {
+          "created": 1791021700,
+          "edits": [],
           "id": "m2",
           "role": "model",
-          "text": "Consider shortening the kicker to give the headline a little more breathing room. It will make the hierarchy easier to scan.",
-          "created": 1791021700,
-          "edits": []
+          "text": "Consider shortening the kicker to give the headline a little more breathing room. It will make the hierarchy easier to scan."
         }
-      ]
+      ],
+      "resolved": null,
+      "severity": "consider"
     },
     {
-      "id": "r1",
       "anchor": {
-        "slide": "s2",
         "block": "chart",
-        "x": 28,
-        "y": 8
+        "slide": "s2",
+        "x": 1680,
+        "y": 480,
+        "px": true
       },
-      "severity": "must",
       "created": 1791022000,
-      "resolved": null,
+      "id": "r1",
       "messages": [
         {
-          "id": "rm1",
-          "role": "model",
-          "text": "Label these values as illustrative so the audience does not mistake them for measured results.",
           "created": 1791022000,
           "edits": [
             {
+              "guards": {},
               "id": "e3",
-              "why": "Add an illustrative-values caption under the chart",
               "ops": [
                 {
-                  "op": "insert_block",
-                  "slide": "s2",
-                  "block": {
+                  "op": "insert_node",
+                  "parent": "s2",
+                  "node": {
                     "id": "caption",
                     "kind": "text",
-                    "x": 18,
-                    "y": 15,
-                    "w": 11,
-                    "h": 1,
                     "text": "Illustrative values, not measured results.",
-                    "style": {
-                      "size": "s",
+                    "style": "caption",
+                    "position": {
+                      "x": 1080,
+                      "y": 900
+                    },
+                    "sizing": {
+                      "w": 660
+                    },
+                    "font": {
                       "color": "muted"
                     }
                   }
                 }
               ],
               "status": "pending",
-              "guards": {}
+              "why": "Add an illustrative-values caption under the chart"
             }
-          ]
+          ],
+          "id": "rm1",
+          "role": "model",
+          "text": "Label these values as illustrative so the audience does not mistake them for measured results."
         }
-      ]
+      ],
+      "resolved": null,
+      "severity": "must"
     }
   ]
 }

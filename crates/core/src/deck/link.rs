@@ -78,6 +78,8 @@ pub struct Context {
     /// Decks the model created or edited since the terminal last looked, with
     /// the first changed slide, in order.
     pub changed: Vec<(PathBuf, String)>,
+    /// Whether the `deck` tool already sent its field reference this session.
+    pub schema_shown: bool,
     /// Wakes the terminal's event loop when `changed` grows.
     pub notify: Arc<Notify>,
 }

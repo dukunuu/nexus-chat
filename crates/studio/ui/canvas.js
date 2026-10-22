@@ -1,23 +1,35 @@
-import { snap, clampRect, id } from './helpers.js';
-import { renderSlide, renderBlock, positionBlock, element } from './render.js';
+import { allNodes, findNode, parentOf, isAbsolute, withNewIds, slideSize } from './helpers.js';
+import { renderSlide, renderNode, element } from './render.js';
 
+// Canvas editing on the version-2 node tree. Boxes come from the browser's own
+// layout (the same flexbox mapping the core renderer follows), in slide pixels.
 export function canvasController(api) {
   const canvas = document.querySelector('#canvas');
-  const selectedBlocks = () => api.slide()?.blocks.filter(b => api.state.selected.has(b.id)) || [];
-  const nodeFor = blockId => [...canvas.querySelectorAll('.block')].find(n => n.dataset.id === blockId);
+  const width = () => slideSize(api.state.deck?.theme).w;
+  const slideScale = () => canvas.getBoundingClientRect().width / width();
+  const selectedNodes = () => { const slide = api.slide(); return slide ? allNodes(slide).filter(n => api.state.selected.has(n.id)) : []; };
+  const nodeFor = nodeId => [...canvas.querySelectorAll('.block')].find(n => n.dataset.id === nodeId);
+  /** The node's box in slide px, from the laid-out page. */
+  function rectOf(nodeId) {
+    const element = nodeFor(nodeId); if (!element) return null;
+    const bounds = canvas.getBoundingClientRect(), box = element.getBoundingClientRect(), scale = slideScale();
+    return { x: (box.left - bounds.left) / scale, y: (box.top - bounds.top) / scale, w: box.width / scale, h: box.height / scale };
+  }
+  const percent = (value, total) => `${value / total * 100}%`;
   function decorate() {
     canvas.querySelectorAll('.resize-handle').forEach(n => n.remove());
     if (api.state.preview || api.state.mode === 'comment') return;
     for (const node of canvas.querySelectorAll('.block')) node.classList.toggle('selected', api.state.selected.has(node.dataset.id));
     if (api.state.selected.size !== 1) return;
-    const block = selectedBlocks()[0];
-    if (!block) return;
+    const node = selectedNodes()[0], rect = node && rectOf(node.id);
+    if (!rect) return;
+    const size = slideSize(api.state.deck.theme);
     for (const direction of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']) {
       const handle = element('div', `resize-handle handle-${direction}`);
-      handle.dataset.direction = direction; handle.dataset.target = block.id;
-      const x = block.x + (direction.includes('w') ? 0 : direction.includes('e') ? block.w : block.w / 2);
-      const y = block.y + (direction.includes('n') ? 0 : direction.includes('s') ? block.h : block.h / 2);
-      handle.style.left = `${x / 32 * 100}%`; handle.style.top = `${y / 18 * 100}%`;
+      handle.dataset.direction = direction; handle.dataset.target = node.id;
+      const x = rect.x + (direction.includes('w') ? 0 : direction.includes('e') ? rect.w : rect.w / 2);
+      const y = rect.y + (direction.includes('n') ? 0 : direction.includes('s') ? rect.h : rect.h / 2);
+      handle.style.left = percent(x, size.w); handle.style.top = percent(y, size.h);
       canvas.append(handle);
     }
   }
@@ -30,13 +42,17 @@ export function canvasController(api) {
       const deck = preview.before ? api.state.deck : preview.deck;
       renderSlide(canvas, preview.before ? before : after, deck.theme, api.state.images);
       if (!preview.before) {
-        for (const node of canvas.querySelectorAll('.block')) {
-          const old = before?.blocks.find(b => b.id === node.dataset.id);
-          const block = after?.blocks.find(b => b.id === node.dataset.id);
-          if (JSON.stringify(old) !== JSON.stringify(block) || JSON.stringify(api.state.deck.theme) !== JSON.stringify(deck.theme)) node.classList.add('ghost-changed');
+        const shallow = n => JSON.stringify({ ...n, children: undefined });
+        const old = new Map(allNodes(before).map(n => [n.id, shallow(n)]));
+        const themeChanged = JSON.stringify(api.state.deck.theme) !== JSON.stringify(deck.theme);
+        for (const node of allNodes(after)) {
+          if (themeChanged || old.get(node.id) !== shallow(node)) nodeFor(node.id)?.classList.add('ghost-changed');
         }
-        for (const block of before?.blocks || []) if (!after?.blocks.some(b => b.id === block.id)) {
-          const node = renderBlock(block, api.state.deck.theme, api.state.images); node.classList.add('ghost-removed'); canvas.append(node);
+        // Removed nodes that had a place of their own are drawn faintly where they were.
+        const root = canvas.querySelector('.slide-root');
+        const kept = new Set(allNodes(after).map(n => n.id));
+        for (const node of before?.children || []) if (!kept.has(node.id) && typeof node.position === 'object') {
+          const ghost = renderNode(node, api.state.deck.theme, api.state.images, { mode: 'none' }); ghost.classList.add('ghost-removed'); root.append(ghost);
         }
       }
     } else renderSlide(canvas, api.slide(), api.state.deck.theme, api.state.images);
@@ -47,52 +63,62 @@ export function canvasController(api) {
     if (api.state.preview || event.button !== 0 || event.target.closest('[contenteditable]')) return;
     if (event.target.closest('.pin')) return;
     if (api.state.mode === 'comment') {
-      const bounds = canvas.getBoundingClientRect();
+      const bounds = canvas.getBoundingClientRect(), size = slideSize(api.state.deck.theme);
       const node = event.target.closest('.block');
-      api.commentAt({ slide: api.slide().id, block: node?.dataset.id || null, x: Math.max(0, Math.min(31, Math.floor((event.clientX - bounds.left) / bounds.width * 32))), y: Math.max(0, Math.min(17, Math.floor((event.clientY - bounds.top) / bounds.height * 18))) });
+      api.commentAt({ slide: api.slide().id, block: node?.dataset.id || null,
+        x: Math.max(0, Math.min(size.w - 1, Math.floor((event.clientX - bounds.left) / bounds.width * size.w))),
+        y: Math.max(0, Math.min(size.h - 1, Math.floor((event.clientY - bounds.top) / bounds.height * size.h))) });
       event.preventDefault(); return;
     }
     api.state.scopeSlide = false;
     const handle = event.target.closest('.resize-handle');
     const blockNode = event.target.closest('.block');
-    const blockId = handle?.dataset.target || blockNode?.dataset.id;
-    if (!blockId) { api.state.selected.clear(); api.selectionChanged(); return; }
+    const nodeId = handle?.dataset.target || blockNode?.dataset.id;
+    if (!nodeId) { api.state.selected.clear(); api.selectionChanged(); return; }
     if (!handle) {
       if (event.shiftKey) {
-        if (api.state.selected.has(blockId)) api.state.selected.delete(blockId);
-        else api.state.selected.add(blockId);
-      } else if (!api.state.selected.has(blockId)) api.state.selected = new Set([blockId]);
+        if (api.state.selected.has(nodeId)) api.state.selected.delete(nodeId);
+        else api.state.selected.add(nodeId);
+      } else if (!api.state.selected.has(nodeId)) api.state.selected = new Set([nodeId]);
       api.selectionChanged();
     }
-    if (!api.state.selected.has(blockId)) return;
+    if (!api.state.selected.has(nodeId)) return;
     event.preventDefault(); canvas.focus();
-    drag = { startX: event.clientX, startY: event.clientY, direction: handle?.dataset.direction, slide: api.slide().id,
-      blocks: selectedBlocks().map(b => ({ ...b })), rects: new Map(), moved: false, bounds: canvas.getBoundingClientRect() };
+    const slide = api.slide(), nodes = selectedNodes();
+    drag = { startX: event.clientX, startY: event.clientY, direction: handle?.dataset.direction, slide: slide.id,
+      nodes: nodes.map(n => ({ node: n, rect: rectOf(n.id), free: isAbsolute(slide, n) })), changes: new Map(), moved: false, scale: slideScale(), told: false };
     canvas.setPointerCapture(event.pointerId);
   });
   canvas.addEventListener('pointermove', event => {
     if (!drag) return;
-    let dx = snap((event.clientX - drag.startX) / drag.bounds.width * 32);
-    let dy = snap((event.clientY - drag.startY) / drag.bounds.height * 18);
-    if (!drag.direction) {
-      dx = Math.max(-Math.min(...drag.blocks.map(b => b.x)), Math.min(32 - Math.max(...drag.blocks.map(b => b.x + b.w)), dx));
-      dy = Math.max(-Math.min(...drag.blocks.map(b => b.y)), Math.min(18 - Math.max(...drag.blocks.map(b => b.y + b.h)), dy));
-    }
+    const dx = Math.round((event.clientX - drag.startX) / drag.scale), dy = Math.round((event.clientY - drag.startY) / drag.scale);
     drag.moved ||= dx !== 0 || dy !== 0;
     canvas.classList.toggle('dragging', drag.moved);
     canvas.querySelectorAll('.resize-handle').forEach(n => n.hidden = drag.moved);
-    for (const block of drag.blocks) {
-      let rect = { x: block.x + dx, y: block.y + dy, w: block.w, h: block.h };
-      if (drag.direction) {
-        let left = block.x, top = block.y, right = block.x + block.w, bottom = block.y + block.h;
-        if (drag.direction.includes('w')) left = Math.max(0, Math.min(right - 1, left + dx));
-        if (drag.direction.includes('e')) right = Math.max(left + 1, Math.min(32, right + dx));
-        if (drag.direction.includes('n')) top = Math.max(0, Math.min(bottom - 1, top + dy));
-        if (drag.direction.includes('s')) bottom = Math.max(top + 1, Math.min(18, bottom + dy));
-        rect = { x: left, y: top, w: right - left, h: bottom - top };
+    const size = slideSize(api.state.deck.theme), unit = px => `${px / size.w * 100}cqw`;
+    for (const { node, rect, free } of drag.nodes) {
+      const element = nodeFor(node.id); if (!element) continue;
+      const at = typeof node.position === 'object' ? node.position : { x: 0, y: 0 };
+      if (!drag.direction) {
+        if (!free) { if (drag.moved && !drag.told) { drag.told = true; api.toast('This layer follows auto-layout, so it cannot be dragged. Change its order in Layers, or set its position to absolute.'); } continue; }
+        const position = { x: at.x + dx, y: at.y + dy };
+        Object.assign(element.style, { left: unit(position.x), top: unit(position.y), position: 'absolute' });
+        drag.changes.set(node.id, { position });
+      } else {
+        const west = drag.direction.includes('w'), east = drag.direction.includes('e'), north = drag.direction.includes('n'), south = drag.direction.includes('s');
+        const w = Math.max(1, rect.w + (east ? dx : west ? -dx : 0)), h = Math.max(1, rect.h + (south ? dy : north ? -dy : 0));
+        const sizing = {}, fields = {};
+        if (east || west) { sizing.w = Math.round(w); element.style.width = unit(w); }
+        if (north || south) { sizing.h = Math.round(h); element.style.height = unit(h); }
+        fields.sizing = sizing;
+        if (free && (west || north)) {
+          const position = { x: west ? at.x + dx : at.x, y: north ? at.y + dy : at.y };
+          if (west) element.style.left = unit(position.x);
+          if (north) element.style.top = unit(position.y);
+          fields.position = position;
+        }
+        drag.changes.set(node.id, fields);
       }
-      rect = clampRect(rect); drag.rects.set(block.id, rect);
-      positionBlock(nodeFor(block.id), rect);
     }
   });
   function finish(event, cancel = false) {
@@ -100,60 +126,67 @@ export function canvasController(api) {
     const finished = drag; drag = null; canvas.classList.remove('dragging');
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
     if (finished.moved) render(); else decorate();
-    if (!cancel && finished.moved) api.updateMany(finished.slide, [...finished.rects].map(([blockId, fields]) => ({ id: blockId, fields })));
+    if (!cancel && finished.changes.size) api.updateMany(finished.slide, [...finished.changes].map(([id, fields]) => ({ id, fields })));
   }
   canvas.addEventListener('pointerup', event => finish(event));
   canvas.addEventListener('pointercancel', event => finish(event, true));
   canvas.addEventListener('dblclick', event => {
     if (api.state.preview || api.state.mode === 'comment') return;
-    const node = event.target.closest('.block-text');
-    if (!node || node.isContentEditable) return;
+    const element = event.target.closest('.block-text');
+    if (!element || element.isContentEditable) return;
     const slideId = api.slide().id;
-    const block = api.slide().blocks.find(b => b.id === node.dataset.id);
-    node.textContent = block.text;
-    node.contentEditable = 'plaintext-only';
-    node.classList.add('editing'); node.focus();
-    node.addEventListener('paste', paste => {
+    const node = findNode(api.slide(), element.dataset.id);
+    element.textContent = node.text;
+    element.contentEditable = 'plaintext-only';
+    element.classList.add('editing'); element.focus();
+    element.addEventListener('paste', paste => {
       paste.preventDefault(); document.execCommand('insertText', false, paste.clipboardData.getData('text/plain'));
     });
-    node.addEventListener('keydown', key => {
-      if (key.key === 'Escape') { key.preventDefault(); key.stopPropagation(); node.blur(); }
+    element.addEventListener('keydown', key => {
+      if (key.key === 'Escape') { key.preventDefault(); key.stopPropagation(); element.blur(); }
     });
-    node.addEventListener('blur', () => {
-      const text = node.innerText;
-      node.removeAttribute('contenteditable'); node.classList.remove('editing');
-      if (text !== block.text) api.updateMany(slideId, [{ id: block.id, fields: { text } }]);
+    element.addEventListener('blur', () => {
+      const text = element.innerText;
+      element.removeAttribute('contenteditable'); element.classList.remove('editing');
+      if (text !== node.text) api.updateMany(slideId, [{ id: node.id, fields: { text } }]);
       else render();
     }, { once: true });
   });
   function nudge(dx, dy) {
     if (api.state.preview) return;
     const slide = api.slide();
-    const ids = new Set(selectedBlocks().map(b => b.id));
+    const ids = new Set(selectedNodes().map(n => n.id));
     if (!slide || !ids.size) return;
     // Resolve relative edits when they leave the command queue, so fast key
     // repeats accumulate against the last authoritative deck, not a preview.
     api.apply(() => {
-      const blocks = api.state.deck.slides.find(s => s.id === slide.id)?.blocks.filter(b => ids.has(b.id)) || [];
-      if (!blocks.length) return [];
-      const moveX = Math.max(-Math.min(...blocks.map(b => b.x)), Math.min(32 - Math.max(...blocks.map(b => b.x + b.w)), dx));
-      const moveY = Math.max(-Math.min(...blocks.map(b => b.y)), Math.min(18 - Math.max(...blocks.map(b => b.y + b.h)), dy));
-      return blocks.map(b => ({ op: 'update_block', slide: slide.id, id: b.id, fields: { x: b.x + moveX, y: b.y + moveY }, base_hash: api.state.hashes[b.id] }));
+      const current = api.state.deck.slides.find(s => s.id === slide.id);
+      const nodes = current ? allNodes(current).filter(n => ids.has(n.id) && isAbsolute(current, n)) : [];
+      return nodes.map(n => {
+        const at = typeof n.position === 'object' ? n.position : { x: 0, y: 0 };
+        return { op: 'update_node', id: n.id, fields: { position: { x: at.x + dx, y: at.y + dy } }, base_hash: api.state.hashes[n.id] };
+      });
     });
   }
   function remove() {
     if (api.state.preview) return;
     const slide = api.slide();
-    const ids = selectedBlocks().map(b => b.id);
-    if (slide) api.apply(() => ids.map(id => ({ op: 'delete_block', slide: slide.id, id })));
+    // A selected frame already takes its children with it.
+    const inside = nodeId => { for (let at = parentOf(slide, nodeId); at && at.parent !== slide; at = parentOf(slide, at.parent.id)) if (api.state.selected.has(at.parent.id)) return true; return false; };
+    const ids = selectedNodes().map(n => n.id).filter(nodeId => !inside(nodeId));
+    if (slide) api.apply(() => ids.map(id => ({ op: 'delete_node', id })));
   }
   function duplicate() {
     if (api.state.preview) return;
     const slide = api.slide();
     if (!slide) return;
-    const blocks = selectedBlocks().map(b => ({ ...structuredClone(b), id: id('b'), ...clampRect({ ...b, x: b.x + 1, y: b.y + 1 }) }));
-    api.apply(() => blocks.map(block => ({ op: 'insert_block', slide: slide.id, block })));
-    api.state.selected = new Set(blocks.map(b => b.id));
+    const copies = selectedNodes().map(node => {
+      const copy = withNewIds(node, 'b'), at = parentOf(slide, node.id);
+      if (typeof copy.position === 'object') copy.position = { x: copy.position.x + 24, y: copy.position.y + 24 };
+      return { copy, parent: at.parent.id, index: at.index + 1 };
+    });
+    api.apply(() => copies.map(({ copy, parent, index }) => ({ op: 'insert_node', parent, index, node: copy })));
+    api.state.selected = new Set(copies.map(c => c.copy.id));
   }
-  return { render, decorate, nudge, remove, duplicate };
+  return { render, decorate, nudge, remove, duplicate, rectOf };
 }

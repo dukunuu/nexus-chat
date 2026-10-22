@@ -1372,10 +1372,10 @@ pub(super) static TASK: ToolSpec = ToolSpec {
 pub(super) static DECK: ToolSpec = ToolSpec {
     name: "deck",
     purpose: "Build and edit slide decks in space files decks/*.deck.json. The user sees them live in studio (/studio) and can undo your edits; you see slides as images. \
-Edit directly when asked for a change; comment when reviewing or unsure. View after layout-affecting edits. Never invent data, sources or images. \
-Canvas is 32x18 integer units. Block: id,x,y,w,h,style{align,size:s|m|l|xl|xxl,color} plus kind text{text Markdown}|image{src already in the deck,fit}|shape{shape,fill,stroke}|table{rows}|code{language,source}|chart{chart:bar|line|pie,labels,series:[{name,values}]}. \
-Ops: add_slide{after?,slide} delete_slide{id} move_slide{id,to} set_layout{slide,layout} set_notes{slide,notes} insert_block{slide,block} update_block{slide,id,fields} delete_block{slide,id} restyle{target,style} set_theme{theme}. ids and base_hash are filled in; one bad op writes nothing. \
-Commenting principles: anchor to a slide and block; one issue in at most two sentences, with why it matters; attach ops when a fix exists; few, most important first (max 8 per review), severity must|should|consider; respect the author's intent and facts; answer the thread you are in.",
+Edit directly when asked; comment when reviewing or unsure. View after layout edits. Never invent data, sources or images. \
+Slides are 1920x1080 px. Slide and frame: layout{mode:none|row|column,gap,padding,main,cross,wrap}, children[]. Node: kind,sizing{w,h:px|hug|fill},position:auto|{x,y}; kinds frame text{text,style,font} image{src} shape{shape,fill} table{rows} code{source} chart{chart,labels,series}. Prefer auto-layout and text styles over absolute x,y. \
+Ops: add_slide{after?,slide} delete_slide/delete_node/unwrap{id} move_slide{id,to} set_notes{slide,notes} update_slide{id,fields} insert_node{parent,node} update_node{id,fields: merge patch} move_node{id,parent} wrap{ids,layout} set_layout{target,layout} set_text_style{name,font} set_theme. ids and base_hash are filled in; one bad op writes nothing. \
+Commenting principles: anchor to a slide and node; one issue in at most two sentences, with why it matters; attach ops when a fix exists; few, most important first (max 8 per review), severity must|should|consider; respect the author's intent and facts; answer the thread you are in.",
     selector: Some("action"),
     params: &[
         Param {
@@ -1396,12 +1396,12 @@ Commenting principles: anchor to a slide and block; one issue in at most two sen
         Param {
             name: "ops",
             kind: Kind::Objects,
-            doc: "operations, applied atomically",
+            doc: "operations, atomic",
         },
         Param {
             name: "revision",
             kind: Kind::Str,
-            doc: "from read; a stale one is refused",
+            doc: "from read; stale is refused",
         },
         Param {
             name: "slide",
@@ -1411,12 +1411,12 @@ Commenting principles: anchor to a slide and block; one issue in at most two sen
         Param {
             name: "block",
             kind: Kind::Str,
-            doc: "block id",
+            doc: "node id",
         },
         Param {
             name: "text",
             kind: Kind::Str,
-            doc: "the comment",
+            doc: "the comment; fonts: name filter",
         },
         Param {
             name: "severity",
@@ -1440,7 +1440,7 @@ Commenting principles: anchor to a slide and block; one issue in at most two sen
         },
         ActionSpec {
             name: "read",
-            summary: "Ids, rectangles, text, revision, threads",
+            summary: "Node tree with rects, revision, threads",
             required: &["path"],
             optional: &[],
             read_only: true,
@@ -1453,6 +1453,14 @@ Commenting principles: anchor to a slide and block; one issue in at most two sen
             optional: &["slides"],
             read_only: true,
             internal: "deck_view",
+        },
+        ActionSpec {
+            name: "fonts",
+            summary: "Deck and installed families",
+            required: &["path"],
+            optional: &["text"],
+            read_only: true,
+            internal: "deck_fonts",
         },
         ActionSpec {
             name: "edit",
@@ -1579,6 +1587,11 @@ mod tests {
             "deck",
             r#"{"action":"view","path":"decks/x.deck.json"}"#,
             "deck_view",
+        ),
+        (
+            "deck",
+            r#"{"action":"fonts","path":"decks/x.deck.json","text":"mono"}"#,
+            "deck_fonts",
         ),
         (
             "deck",
@@ -1841,6 +1854,7 @@ mod tests {
         let read_only = [
             "deck_read",
             "deck_view",
+            "deck_fonts",
             "task",
             "skill",
             "web_search",

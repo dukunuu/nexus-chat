@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use nexus_core::deck::link::{Line, Message};
-use nexus_core::deck::{Content, Deck, feedback, render, same_file};
+use nexus_core::deck::{Deck, Kind, feedback, render, same_file};
 use tokio::sync::{Notify, mpsc};
 
 use crate::app_view::AppView;
@@ -240,11 +240,11 @@ impl AppView {
             .position(|s| s.id == slide)
             .context("the commented slide no longer exists")?;
         let summary = block
-            .and_then(|id| deck.slides[index].blocks.iter().find(|b| b.id == id))
+            .and_then(|id| deck.slides[index].node(id))
             .map_or_else(
                 || "slide".to_string(),
-                |b| match &b.content {
-                    Content::Text { text } => {
+                |b| match &b.kind {
+                    Kind::Text { text, .. } => {
                         let clip: String = text
                             .chars()
                             .map(|c| if c == '\n' { ' ' } else { c })
@@ -436,7 +436,7 @@ mod tests {
             thread_id: "t1".into(),
             slide: "s1".into(),
             block: Some("b1".into()),
-            point: (3, 6),
+            point: (210, 390),
             text: text.into(),
         }
     }

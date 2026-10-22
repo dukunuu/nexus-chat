@@ -1,10 +1,9 @@
-// Pure grid and Markdown helpers. No DOM, filesystem or network access.
+// Pure deck and Markdown helpers. No DOM, filesystem or network access.
+// Deck format v2: slides are 1920 x 1080 px frames holding a tree of nodes;
+// every length is a pixel.
+export const SIZE = { w: 1920, h: 1080 };
+export const slideSize = theme => theme?.size || SIZE;
 export const snap = value => Math.round(value);
-export function clampRect({ x, y, w, h }) {
-  x = Math.max(0, Math.min(31, snap(x)));
-  y = Math.max(0, Math.min(17, snap(y)));
-  return { x, y, w: Math.max(1, Math.min(32 - x, snap(w))), h: Math.max(1, Math.min(18 - y, snap(h))) };
-}
 export function inlineTokens(text) {
   const pattern = /(\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`|\[([^\]]+)\]\(([^\s)]+)\))/g;
   const tokens = [];
@@ -29,22 +28,73 @@ export function markdownTokens(text) {
 }
 let sequence = 0;
 export const id = prefix => `${prefix}-${Date.now().toString(36)}-${++sequence}`;
-export const layouts = ['title', 'section', 'content', 'two-column', 'image-text', 'quote', 'blank'];
-export function textBlock(text = 'Double-click to edit', rect = { x: 2, y: 3, w: 20, h: 4 }, size = 'l') {
-  return { id: id('b'), kind: 'text', ...rect, text, style: { size, align: 'left' } };
+
+// -- the node tree ---------------------------------------------------------------
+export const childrenOf = node => (node?.kind === 'frame' || node?.children ? node.children || [] : []);
+/** Every node of a slide, depth first. */
+export function allNodes(slide) {
+  const out = [];
+  const walk = nodes => { for (const node of nodes) { out.push(node); walk(childrenOf(node)); } };
+  walk(slide?.children || []);
+  return out;
 }
+export const findNode = (slide, nodeId) => allNodes(slide).find(n => n.id === nodeId);
+/** The slide or frame that holds a node, and the node's index in it. */
+export function parentOf(slide, nodeId) {
+  const search = (parent, nodes) => {
+    const index = nodes.findIndex(n => n.id === nodeId);
+    if (index >= 0) return { parent, index };
+    for (const node of nodes) { const found = search(node, childrenOf(node)); if (found) return found; }
+    return null;
+  };
+  return search(slide, slide?.children || []);
+}
+/** The layout mode of the container that holds a node: none, row or column. */
+export const parentMode = (slide, nodeId) => parentOf(slide, nodeId)?.parent.layout?.mode || 'none';
+/** A node with an explicit place: absolute, or the child of a free container. */
+export const isAbsolute = (slide, node) => typeof node.position === 'object' || parentMode(slide, node.id) === 'none';
+export function withNewIds(node, prefix = 'n') {
+  const copy = structuredClone(node);
+  const walk = n => { n.id = id(prefix); for (const child of childrenOf(n)) walk(child); };
+  walk(copy);
+  return copy;
+}
+export const nodeLabel = node => node.name || (node.kind === 'text' || node.kind === 'code' ? (node.text || node.source || '').replace(/[#*`]/g, '').split('\n')[0].slice(0, 28) : '') || node.kind;
+
+// -- text styles -------------------------------------------------------------------
+const HARD = { family:'body', size:42, weight:400, italic:false, line_height:1.35, letter_spacing:0, color:'fg', align:'left', valign:'top', transform:'none' };
+/** A text style by name with a node's overrides on top, every field decided. */
+export function resolveFont(theme, style, overrides = {}) {
+  const base = theme.text_styles?.[style] || theme.text_styles?.body || {};
+  return { ...HARD, ...base, ...Object.fromEntries(Object.entries(overrides || {}).filter(([, v]) => v !== null && v !== undefined)) };
+}
+
+// -- new slides and nodes ----------------------------------------------------------
+export const layouts = ['title', 'section', 'content', 'two-column', 'image-text', 'quote', 'blank'];
+export function textNode(text = 'Double-click to edit', extra = {}) {
+  return { id: id('b'), kind: 'text', text, style: 'body', ...extra };
+}
+const frame = (children, layout, extra = {}) => ({ id: id('f'), kind: 'frame', layout, children, ...extra });
 export function layoutSlide(layout) {
-  const slide = { id: id('s'), layout, notes: '', blocks: [] };
+  const slide = { id: id('s'), layout: { mode: 'none' }, children: [], notes: '' };
   if (layout === 'blank') return slide;
+  const page = { mode: 'column', gap: 56, padding: [120, 160, 120, 160], cross: 'stretch' };
   if (layout === 'title' || layout === 'section') {
-    slide.blocks.push(textBlock('Your headline', { x: 2, y: 6, w: 28, h: 5 }, 'xxl'));
+    slide.layout = { mode: 'column', gap: 32, padding: [160, 160, 160, 160], main: 'center', cross: 'stretch' };
+    slide.children.push(textNode('Your headline', { style: 'title' }));
   } else if (layout === 'quote') {
-    slide.blocks.push(textBlock('*A thought worth sharing.*', { x: 4, y: 5, w: 24, h: 8 }, 'xl'));
+    slide.layout = { mode: 'column', padding: [240, 240, 240, 240], main: 'center', cross: 'stretch' };
+    slide.children.push(textNode('*A thought worth sharing.*', { style: 'heading' }));
   } else {
-    slide.blocks.push(textBlock('Slide title', { x: 2, y: 1, w: 28, h: 3 }, 'xl'));
-    slide.blocks.push(textBlock('- Start your story here', { x: 2, y: 5, w: layout === 'content' ? 28 : 13, h: 11 }));
-    if (layout === 'two-column') slide.blocks.push(textBlock('Another perspective', { x: 17, y: 5, w: 13, h: 11 }));
-    if (layout === 'image-text') slide.blocks.push({ id: id('b'), kind: 'shape', shape: 'rect', x: 17, y: 5, w: 13, h: 11, fill: 'muted', stroke: 'muted', style: {} });
+    slide.layout = page;
+    slide.children.push(textNode('Slide title', { style: 'heading' }));
+    const body = textNode('- Start your story here', { sizing: { w: 'fill' } });
+    if (layout === 'content') { body.sizing = { w: 'fill', h: 'fill' }; slide.children.push(body); }
+    else {
+      const second = layout === 'two-column' ? textNode('Another perspective', { sizing: { w: 'fill' } })
+        : { id: id('b'), kind: 'shape', shape: 'rect', fill: 'muted', sizing: { w: 'fill', h: 'fill' } };
+      slide.children.push(frame([body, second], { mode: 'row', gap: 96, cross: 'stretch' }, { sizing: { h: 'fill' } }));
+    }
   }
   return slide;
 }

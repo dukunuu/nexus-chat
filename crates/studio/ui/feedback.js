@@ -1,5 +1,5 @@
 import { element } from './render.js';
-import { inlineTokens } from './helpers.js';
+import { inlineTokens, allNodes, slideSize, resolveFont } from './helpers.js';
 import { button, icon } from './icons.js';
 
 function inlineMarkdown(text) {
@@ -10,26 +10,30 @@ function inlineMarkdown(text) {
   }
   return fragment;
 }
-function editSummary(edit) {
+function editSummary(edit, deck) {
   const parts = [], labels = [];
-  const steps = { s:21.6, m:35.2, l:48, xl:67.2, xxl:99.2 };
-  for (const op of edit.ops) {
+    for (const op of edit.ops) {
     const before = edit.guards?.[op.id || op.target];
     const id = op.id || op.target;
     const label = before?.name || (id && !/^b\d|^b[-_]\d/.test(id) ? id.replaceAll(/[-_]/g, ' ').replace(/^./, c => c.toUpperCase()) : before?.text?.replace(/[#*`]/g, '').split('\n')[0]) || id;
     if (label && !labels.includes(label)) labels.push(label);
-    const fields = op.op === 'restyle' ? { style:op.style } : op.fields;
+    const fields = op.fields;
     if (fields && before) {
       for (const [key, value] of Object.entries(fields)) {
-        if (key === 'style' || key === 'font') {
+        if (key === 'font') {
           for (const [field, next] of Object.entries(value)) {
-            const previous = before[key]?.[field] ?? (key === 'style' ? ({ size:'m', align:'left', color:'fg' })[field] : undefined);
+            const previous = before[key]?.[field] ?? (deck ? resolveFont(deck.theme, before.style, {})[field] : undefined);
             if (JSON.stringify(previous) === JSON.stringify(next)) continue;
-            if (field === 'size') parts.push(`size ${steps[previous] || previous || 'default'} → ${steps[next] || next} px`);
+            if (field === 'size') parts.push(`size ${previous ?? 'default'} → ${next} px`);
             else parts.push(`${field.replaceAll('_', ' ')} ${previous ?? 'default'} → ${next}`);
           }
         } else if (key === 'text' || key === 'source') parts.push(`revise ${key === 'text' ? 'text' : 'code'}`);
-        else if (typeof value !== 'object') parts.push(`${key} ${before[key] ?? 'default'} → ${value}`);
+        else if (value && typeof value === 'object' && !Array.isArray(value) && ['sizing', 'position', 'layout'].includes(key)) {
+          for (const [field, next] of Object.entries(value)) {
+            const previous = before[key]?.[field];
+            if (JSON.stringify(previous) !== JSON.stringify(next)) parts.push(`${key === 'sizing' ? 'size' : key} ${field.replaceAll('_', ' ')} ${previous ?? 'auto'} → ${Array.isArray(next) ? next.join(' ') : next}`);
+          }
+        } else if (typeof value !== 'object') parts.push(`${key} ${before[key] ?? 'default'} → ${value}`);
       }
     } else if (fields) parts.push(`update ${Object.keys(fields).join(', ')}`);
     else parts.push(({ insert_block:'Add layer', insert_node:'Add layer', delete_block:'Delete layer', delete_node:'Delete layer', add_slide:'Add slide', delete_slide:'Delete slide', move_slide:'Reorder slide', move_node:'Move layer', set_layout:'Change layout', set_theme:'Update deck theme', set_notes:'Update speaker notes', set_text_style:'Update text style', wrap:'Create auto-layout frame', unwrap:'Remove frame' })[op.op] || 'Update layer');
@@ -41,7 +45,7 @@ export function editSlide(deck, edit, fallback) {
   for (const op of edit.ops) {
     if (op.op === 'add_slide') return op.slide.id;
     if (typeof op.slide === 'string') return op.slide;
-    const slide = deck.slides.find(s => s.id === op.target || s.id === op.id || s.blocks.some(b => b.id === op.target || b.id === op.id));
+    const slide = deck.slides.find(s => [op.target, op.id, op.parent, op.slide].includes(s.id) || allNodes(s).some(b => b.id === op.target || b.id === op.id || b.id === op.parent));
     if (slide) return slide.id;
   }
   return fallback;
@@ -55,7 +59,7 @@ export function feedbackController(api) {
   }
   function card(owner, edit) {
     const node = element('div', `edit-card ${edit.status}`), info = element('div', 'edit-info');
-    info.append(element('div', 'edit-kicker', editSummary(edit)));
+    info.append(element('div', 'edit-kicker', editSummary(edit, state.deck)));
     if (edit.why && !/^suggested edit\.?$/i.test(edit.why.trim())) {
       const reason = element('p', 'edit-summary'); reason.append(inlineMarkdown(edit.why)); info.append(reason);
     }
@@ -75,7 +79,7 @@ export function feedbackController(api) {
     if (!bounds.width || !bounds.height || !api.slide()) return;
     const scale = bounds.width / canvas.clientWidth;
     pins.style.setProperty('--pin-scale', 1 / scale);
-    const occupied = [...canvas.querySelectorAll('.block')].map(node => {
+    const occupied = [...canvas.querySelectorAll('.block:not(.block-frame)')].map(node => {
       const box = node.getBoundingClientRect();
       const range = document.createRange(); range.selectNodeContents(node);
       const ink = [...range.getClientRects()];
@@ -83,9 +87,10 @@ export function feedbackController(api) {
     });
     const placed = [];
     function add(anchor, label, severity, preview, active, click) {
-      const block = api.slide().blocks.find(b => b.id === anchor.block);
-      const ax = anchor.x / 32 * bounds.width, ay = anchor.y / 18 * bounds.height;
-      const box = block ? { left:block.x / 32 * bounds.width, right:(block.x + block.w) / 32 * bounds.width, top:block.y / 18 * bounds.height, bottom:(block.y + block.h) / 18 * bounds.height } : { left:ax, right:ax, top:ay, bottom:ay };
+      const size = slideSize(state.deck.theme), at = id => { const rect = id && api.rectOf(id); return rect || null; };
+      const block = at(anchor.block);
+      const ax = anchor.x / size.w * bounds.width, ay = anchor.y / size.h * bounds.height;
+      const box = block ? { left:block.x / size.w * bounds.width, right:(block.x + block.w) / size.w * bounds.width, top:block.y / size.h * bounds.height, bottom:(block.y + block.h) / size.h * bounds.height } : { left:ax, right:ax, top:ay, bottom:ay };
       const corners = block ? [[box.left, box.top, -1, -1], [box.right, box.top, 1, -1], [box.left, box.bottom, -1, 1], [box.right, box.bottom, 1, 1]] : [[ax, ay, 1, -1]];
       corners.sort((a, b) => Math.hypot(a[0] - ax, a[1] - ay) - Math.hypot(b[0] - ax, b[1] - ay));
       const clear = (x, y) => ![...occupied, ...placed].some(r => x + 17 > r.left && x - 17 < r.right && y + 17 > r.top && y - 17 < r.bottom);

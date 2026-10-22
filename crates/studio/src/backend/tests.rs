@@ -51,7 +51,7 @@ fn command_parser_rejects_unknown_and_malformed_messages() {
     }
     let before = backend.deck.clone();
     let mut invalid = serde_json::to_value(&before).unwrap();
-    invalid["version"] = json!(2);
+    invalid["version"] = json!(3);
     assert!(matches!(
         send(&mut backend, json!({"command":"Save","deck":invalid})),
         Event::Error { .. }
@@ -188,11 +188,11 @@ fn undo_redo_is_exact_across_mixed_transactions_and_autosaved() {
     let temp = Temp::new();
     let mut backend = temp.backend();
     let original = backend.deck.clone();
-    let hash = original.slides[0].blocks[0].hash();
+    let hash = original.node("b1").unwrap().hash();
     success(send(
         &mut backend,
         json!({"command":"Apply", "ops":[
-            {"op":"update_block", "slide":"s1", "id":"b1", "fields":{"text":"A new headline", "x":5}, "base_hash":hash},
+            {"op":"update_node", "id":"b1", "fields":{"text":"A new headline", "position":{"x":300, "y":200}}, "base_hash":hash},
             {"op":"set_notes", "slide":"s2", "notes":"Tell a story"},
             {"op":"move_slide", "id":"s2", "to":0}
         ]}),
@@ -200,7 +200,7 @@ fn undo_redo_is_exact_across_mixed_transactions_and_autosaved() {
     let middle = backend.deck.clone();
     success(send(
         &mut backend,
-        json!({"command":"Apply", "ops":[{"op":"delete_slide", "id":"s1"}, {"op":"set_layout", "slide":"s2", "layout":"quote"}]}),
+        json!({"command":"Apply", "ops":[{"op":"delete_slide", "id":"s1"}, {"op":"set_layout", "target":"s2", "layout":{"mode":"column", "gap":24}}]}),
     ));
     let last = backend.deck.clone();
     success(send(&mut backend, json!({"command":"Save", "deck":last})));
@@ -357,11 +357,11 @@ fn external_edit(backend: &Backend, ops: serde_json::Value) -> Deck {
 /// A model comment pinned on `b1` of `s1`, carrying one suggested edit.
 fn model_thread(backend: &Backend, text: &str) -> Thread {
     let deck = backend.deck.clone();
-    let hash = deck.slides[0].blocks[0].hash();
+    let hash = deck.node("b1").unwrap().hash();
     let raw = RawSuggestion {
         why: "Shorter headline".into(),
         ops: vec![
-            json!({"op":"update_block","slide":"s1","id":"b1","fields":{"text":"A sharper headline"},"base_hash":hash}),
+            json!({"op":"update_node","id":"b1","fields":{"text":"A sharper headline"},"base_hash":hash}),
         ],
     };
     let (mut valid, errors) = suggest::prepare(&deck, vec![raw]);
@@ -369,8 +369,9 @@ fn model_thread(backend: &Backend, text: &str) -> Thread {
     let anchor = Anchor {
         slide: "s1".into(),
         block: Some("b1".into()),
-        x: 3,
-        y: 6,
+        x: 210,
+        y: 390,
+        px: true,
     };
     let edit = Edit::new(&deck, valid.pop().unwrap(), &anchor);
     Thread {
@@ -406,7 +407,7 @@ fn every_applied_edit_reaches_the_file_at_once() {
 }
 
 #[test]
-fn an_external_deck_edit_reloads_as_one_undo_step_and_flashes_the_changed_blocks() {
+fn an_external_deck_edit_reloads_as_one_undo_step_and_flashes_the_changed_nodes() {
     let temp = Temp::new();
     let mut backend = temp.backend();
     let original = backend.deck.clone();
@@ -415,8 +416,8 @@ fn an_external_deck_edit_reloads_as_one_undo_step_and_flashes_the_changed_blocks
     let external = external_edit(
         &backend,
         json!([
-            {"op":"update_block","slide":"s1","id":"b1","fields":{"text":"Written by the model"},"base_hash":original.slides[0].blocks[0].hash()},
-            {"op":"update_block","slide":"s1","id":"b_subtitle","fields":{"text":"Also changed"},"base_hash":original.slides[0].blocks[2].hash()},
+            {"op":"update_node","id":"b1","fields":{"text":"Written by the model"},"base_hash":original.node("b1").unwrap().hash()},
+            {"op":"update_node","id":"b_subtitle","fields":{"text":"Also changed"},"base_hash":original.node("b_subtitle").unwrap().hash()},
             {"op":"set_notes","slide":"s1","notes":"Model notes"}
         ]),
     );
@@ -433,7 +434,7 @@ fn an_external_deck_edit_reloads_as_one_undo_step_and_flashes_the_changed_blocks
     assert_eq!(
         changed,
         ["b1", "b_subtitle"],
-        "only the changed blocks flash"
+        "only the changed nodes flash"
     );
     assert!(notice.is_some_and(|n| n.contains("reloaded")));
     assert_eq!(backend.undo.len(), 1, "the whole edit is one undo step");
@@ -617,7 +618,7 @@ fn dismissed_and_outdated_edits_are_not_applicable() {
     // The block the edit guards changes in the file: the edit goes stale.
     external_edit(
         &backend,
-        json!([{"op":"update_block","slide":"s1","id":"b1","fields":{"text":"Changed meanwhile"},"base_hash":backend.deck.slides[0].blocks[0].hash()}]),
+        json!([{"op":"update_node","id":"b1","fields":{"text":"Changed meanwhile"},"base_hash":backend.deck.node("b1").unwrap().hash()}]),
     );
     backend.poll().unwrap();
     assert_eq!(
@@ -649,7 +650,7 @@ fn dismissed_and_outdated_edits_are_not_applicable() {
 fn comments_go_to_nexus_only_over_the_link_and_only_when_linked() {
     let temp = Temp::new();
     let mut backend = temp.backend();
-    let anchor = json!({"slide":"s1","block":"b1","x":3,"y":6});
+    let anchor = json!({"slide":"s1","block":"b1","x":210,"y":390});
     // Standalone: a note is kept; sending is refused with the way to link.
     success_or_feedback(send(
         &mut backend,
@@ -692,7 +693,7 @@ fn comments_go_to_nexus_only_over_the_link_and_only_when_linked() {
     let sent = std::mem::take(&mut backend.outgoing);
     assert!(matches!(&sent[0], Link::Hello { .. }));
     assert!(
-        matches!(&sent[1], Link::Comment { thread_id: id, slide, block, point: (3, 6), text, .. } if *id == thread_id && slide == "s1" && block.as_deref() == Some("b1") && text == "Send me")
+        matches!(&sent[1], Link::Comment { thread_id: id, slide, block, point: (210, 390), text, .. } if *id == thread_id && slide == "s1" && block.as_deref() == Some("b1") && text == "Send me")
     );
     assert!(matches!(&sent[2], Link::Reply { text, .. } if text == "And this"));
     assert!(
@@ -762,16 +763,8 @@ fn the_html_renderer_uses_the_shared_layout_numbers() {
     let js = include_str!("../../ui/render.js");
     // CSS writes lengths without a leading zero: `.3em`.
     let n = |value: f64| format!("{value}").trim_start_matches('0').to_string();
-    let sizes = LAYOUT.size_percent.map(|p| format!("{p}"));
-    let wanted = format!(
-        "{{ s: {}, m: {}, l: {}, xl: {}, xxl: {} }}",
-        sizes[0], sizes[1], sizes[2], sizes[3], sizes[4]
-    );
-    assert!(js.contains(&wanted), "render.js sizes: {wanted}");
     for needle in [
-        format!("line-height:{}", LAYOUT.line_height),
         format!(".block p {{ margin:0 0 {}em", n(LAYOUT.paragraph_gap)),
-        format!("line-height:{}", LAYOUT.large_line_height),
         format!(
             "line-height:{}; margin:0 0 {}em; font-weight:{}",
             LAYOUT.heading_line_height,
@@ -788,11 +781,12 @@ fn the_html_renderer_uses_the_shared_layout_numbers() {
             n(LAYOUT.cell_padding_y),
             n(LAYOUT.cell_padding_x)
         ),
-        format!(
-            ".block pre {{ margin:0; padding:{}em",
-            n(LAYOUT.code_padding)
-        ),
+        format!(".block-code {{ padding:{}em", n(LAYOUT.code_padding)),
         format!("padding:0 {}em", n(LAYOUT.inline_code_padding)),
+        // The last paragraph or heading has no trailing margin, so a hugging
+        // text box is as tall as the core renderer measures it.
+        ".block-text > :is(p,h1,h2,h3):last-child { margin-bottom:0; }".to_string(),
+        ".block-text.tight p { margin:0; }".to_string(),
     ] {
         assert!(css.contains(&needle), "studio.css is missing `{needle}`");
     }
@@ -801,9 +795,125 @@ fn the_html_renderer_uses_the_shared_layout_numbers() {
         LAYOUT.chart_width, LAYOUT.chart_height
     )));
     assert!(
+        js.contains(&format!("font.line_height < {}", LAYOUT.tight_line_height)),
+        "tight text (titles) has no paragraph gap in both renderers"
+    );
+    // The flexbox mapping documented in `deck/layout.rs`.
+    for needle in [
+        "'0 0 auto'",
+        "'1 1 0px'",
+        "'0 1 auto'",
+        "alignSelf = 'stretch'",
+        "alignContent = 'flex-start'",
+        "space_between:'space-between'",
+        "inset 0 0 0",
+    ] {
+        assert!(js.contains(needle), "render.js is missing `{needle}`");
+    }
+    assert!(
         css.contains("overflow:visible"),
         "overflowing text stays visible past its box"
     );
+}
+
+#[test]
+fn a_version_one_deck_opens_as_version_two_and_is_saved_that_way() {
+    let temp = Temp::new();
+    let path = temp.0.join("old.deck.json");
+    fs::write(
+        &path,
+        include_str!("../../../core/tests/fixtures/deck/classic.deck.json"),
+    )
+    .unwrap();
+    let mut backend =
+        Backend::start(Some(&path), &temp.0.join("files"), &temp.0.join("data")).unwrap();
+    assert_eq!(backend.deck.version, 2);
+    let Event::Deck { deck, hashes, .. } = backend.event() else {
+        panic!()
+    };
+    assert_eq!(deck.slides[0].children[0].id, "b1");
+    assert_eq!(hashes["b1"], deck.node("b1").unwrap().hash());
+    // The file is migrated by the first write, not by opening it.
+    let on_disk: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(on_disk["version"], 1);
+    success(send(
+        &mut backend,
+        json!({"command":"Apply","ops":[{"op":"set_notes","slide":"s1","notes":"Now v2"}]}),
+    ));
+    let on_disk: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(on_disk["version"], 2);
+    assert!(on_disk["slides"][0].get("blocks").is_none());
+    assert_eq!(read_deck(&path).unwrap(), backend.deck);
+}
+
+#[test]
+fn events_carry_a_hash_for_every_nested_node_and_flash_only_what_changed() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    let Event::Deck { hashes, .. } = backend.event() else {
+        panic!()
+    };
+    // `b3` sits inside the `b_row` frame on slide 2.
+    for id in ["b1", "b_row", "b3", "b_chart"] {
+        assert!(hashes.contains_key(id), "{id}");
+    }
+    let original = backend.deck.clone();
+    external_edit(
+        &backend,
+        json!([{"op":"update_node","id":"b3","fields":{"text":"- Inside a frame"},"base_hash":original.node("b3").unwrap().hash()}]),
+    );
+    let Some(Event::Deck { changed, .. }) = backend.poll().unwrap() else {
+        panic!("not noticed");
+    };
+    assert_eq!(changed, ["b3"], "the frame around the node does not flash");
+}
+
+#[test]
+fn deck_fonts_are_served_from_the_assets_folder() {
+    let temp = Temp::new();
+    let backend = temp.backend();
+    let fonts = asset_root(&backend.path).unwrap().join("fonts");
+    fs::create_dir_all(&fonts).unwrap();
+    fs::write(fonts.join("brand.woff2"), b"wOF2").unwrap();
+    let (mime, bytes) = backend
+        .serve("nexus://localhost/assets/fonts/brand.woff2")
+        .unwrap();
+    assert_eq!((mime, bytes.as_slice()), ("font/woff2", &b"wOF2"[..]));
+    assert!(
+        backend
+            .serve("nexus://localhost/assets/fonts/../../x.woff2")
+            .is_err()
+    );
+    assert!(
+        backend
+            .serve("nexus://localhost/assets/fonts/script.js")
+            .is_err()
+    );
+}
+
+#[test]
+fn comments_are_pinned_in_slide_pixels_and_old_grid_sidecars_are_converted() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    // An anchor outside the 1920 x 1080 slide is refused.
+    let out = json!({"slide":"s1","block":null,"x":1920,"y":10});
+    assert!(matches!(
+        send(
+            &mut backend,
+            json!({"command":"CommentCreate","anchor":out,"text":"x","send":false})
+        ),
+        Event::Error { .. }
+    ));
+    // A version-1 sidecar (grid cells) is read as pixels.
+    fs::write(
+        feedback::sidecar(&backend.path),
+        r#"[{"id":"old","anchor":{"slide":"s1","block":"b1","x":3,"y":6},"severity":"should","created":1,"resolved":null,"messages":[]}]"#,
+    )
+    .unwrap();
+    let Some(Event::Deck { threads, .. }) = backend.poll().unwrap() else {
+        panic!("sidecar change not noticed");
+    };
+    assert_eq!((threads[0].anchor.x, threads[0].anchor.y), (210, 390));
 }
 
 /// `NEXUS_RENDER_OUT=<dir> cargo test -p nexus-studio write_core_renders_of_the_dev_deck`
