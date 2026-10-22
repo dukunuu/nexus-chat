@@ -447,6 +447,197 @@ pub struct Stroke {
     pub width: f64,
 }
 
+// -- animation -----------------------------------------------------------------
+
+/// Direction of a transition or build.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    #[default]
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Playback timing curve; spring is a bounded overshoot curve in studio.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Easing {
+    Linear,
+    Ease,
+    EaseIn,
+    #[default]
+    EaseOut,
+    EaseInOut,
+    Spring,
+}
+
+/// How a slide enters from its predecessor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionType {
+    #[default]
+    None,
+    Fade,
+    Push,
+    Slide,
+    Cover,
+    Zoom,
+    Smart,
+}
+
+fn duration() -> f64 {
+    400.0
+}
+
+/// A slide transition, played on entry to the slide.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Transition {
+    #[serde(rename = "type")]
+    pub kind: TransitionType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<Direction>,
+    #[serde(serialize_with = "num")]
+    pub duration_ms: f64,
+    pub easing: Easing,
+}
+
+impl Default for Transition {
+    fn default() -> Self {
+        Self {
+            kind: TransitionType::None,
+            direction: None,
+            duration_ms: duration(),
+            easing: Easing::default(),
+        }
+    }
+}
+
+/// A node build's visual effect.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Effect {
+    Appear,
+    #[default]
+    Fade,
+    Rise,
+    Fly,
+    Scale,
+    Wipe,
+    Blur,
+    Typewriter,
+    Pulse,
+    Shake,
+}
+
+/// Start on a click, alongside the previous build, or after it finishes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Trigger {
+    #[default]
+    Click,
+    WithPrevious,
+    AfterPrevious,
+}
+
+/// Playback-only text segmentation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildBy {
+    #[default]
+    Whole,
+    Word,
+    Line,
+    Item,
+}
+
+/// The lifecycle slot occupied by a build.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnimationSlot {
+    BuildIn,
+    Emphasis,
+    BuildOut,
+}
+
+impl AnimationSlot {
+    /// The slot's JSON key.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::BuildIn => "build_in",
+            Self::Emphasis => "emphasis",
+            Self::BuildOut => "build_out",
+        }
+    }
+}
+
+/// One timed build. Durations are milliseconds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Build {
+    pub effect: Effect,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<Direction>,
+    #[serde(serialize_with = "num")]
+    pub duration_ms: f64,
+    #[serde(serialize_with = "num")]
+    pub delay_ms: f64,
+    pub easing: Easing,
+    pub trigger: Trigger,
+    pub by: BuildBy,
+    #[serde(serialize_with = "num_opt", skip_serializing_if = "Option::is_none")]
+    pub stagger_ms: Option<f64>,
+}
+
+impl Default for Build {
+    fn default() -> Self {
+        Self {
+            effect: Effect::default(),
+            direction: None,
+            duration_ms: duration(),
+            delay_ms: 0.0,
+            easing: Easing::default(),
+            trigger: Trigger::default(),
+            by: BuildBy::default(),
+            stagger_ms: None,
+        }
+    }
+}
+
+/// A node's entry, emphasis and exit builds, in lifecycle order.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Animation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_in: Option<Build>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emphasis: Option<Build>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_out: Option<Build>,
+}
+
+impl Animation {
+    /// No slot is set.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.build_in.is_none() && self.emphasis.is_none() && self.build_out.is_none()
+    }
+
+    /// Builds in lifecycle order, without empty slots.
+    pub fn sequence(&self) -> impl Iterator<Item = (AnimationSlot, &Build)> {
+        [
+            (AnimationSlot::BuildIn, self.build_in.as_ref()),
+            (AnimationSlot::Emphasis, self.emphasis.as_ref()),
+            (AnimationSlot::BuildOut, self.build_out.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(slot, build)| build.map(|b| (slot, b)))
+    }
+}
+
 // -- nodes ---------------------------------------------------------------------
 
 /// Kind-specific payload, flattened into each node's JSON object.
@@ -558,9 +749,9 @@ pub struct Node {
     pub hidden: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub locked: bool,
-    /// Parsed and preserved; no behaviour yet.
+    /// Entry, emphasis and exit builds; played in present mode only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub animation: Option<Value>,
+    pub animation: Option<Animation>,
     #[serde(flatten)]
     pub kind: Kind,
 }
@@ -645,12 +836,31 @@ pub struct Slide {
     pub children: Vec<Node>,
     #[serde(default)]
     pub notes: String,
-    /// Parsed and preserved; no behaviour yet.
+    /// How this slide enters from the previous one; played in present mode only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transition: Option<Value>,
+    pub transition: Option<Transition>,
+    /// Explicit node build order; repaired and completed in tree order on load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub builds: Vec<String>,
 }
 
 impl Slide {
+    /// The slide's builds in playback order: each node's slots in lifecycle
+    /// order, nodes in `builds` order (which validation keeps complete).
+    #[must_use]
+    pub fn build_sequence(&self) -> Vec<(&Node, AnimationSlot, &Build)> {
+        self.builds
+            .iter()
+            .filter_map(|id| self.node(id))
+            .flat_map(|node| {
+                node.animation
+                    .iter()
+                    .flat_map(Animation::sequence)
+                    .map(move |(slot, build)| (node, slot, build))
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn new(id: &str) -> Self {
         Self {
@@ -661,6 +871,7 @@ impl Slide {
             children: Vec::new(),
             notes: String::new(),
             transition: None,
+            builds: Vec::new(),
         }
     }
 

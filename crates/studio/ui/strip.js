@@ -1,5 +1,7 @@
 import { layoutSlide, layouts, id, withNewIds } from './helpers.js';
 import { element, renderSlide } from './render.js';
+import { icon } from './icons.js';
+import { previewThumbnail } from './animate-panel.js';
 
 export function stripController(api) {
   const strip = document.querySelector('#strip');
@@ -28,7 +30,11 @@ export function stripController(api) {
       const thumb = element('div', 'slide thumbnail');
       thumb.tabIndex = 0; thumb.setAttribute('role', 'button'); thumb.setAttribute('aria-label', `Slide ${index + 1}`);
       renderSlide(thumb, slide, api.state.deck.theme, api.state.images);
-      const select = () => { api.clearPreview(); api.state.openThread = null; api.state.draftAnchor = null; api.state.slideId = slide.id; api.state.selected.clear(); api.state.scopeSlide = true; api.render(); };
+      thumb.onpointerenter = () => previewThumbnail(thumb,api.state.deck.slides[index-1],slide,api.state.deck.theme,api.state.images,renderSlide);
+      if (slide.transition && slide.transition.type !== 'none') {
+        const glyph = element('span','transition-glyph'); glyph.append(icon('transition')); glyph.title = `${slide.transition.type || 'none'} transition`; item.append(glyph);
+      }
+      const select = () => { api.clearPreview(); api.state.openThread = null; api.state.draftAnchor = null; api.state.slideId = slide.id; api.state.playStep = 0; api.state.selected.clear(); api.state.scopeSlide = true; api.render(); };
       thumb.onclick = select; thumb.onkeydown = event => { if (event.key === 'Enter') select(); };
       const caption = element('div', 'slide-caption');
       caption.append(element('span', '', `${String(index + 1).padStart(2, '0')}`));

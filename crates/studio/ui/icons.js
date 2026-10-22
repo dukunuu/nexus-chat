@@ -52,7 +52,7 @@ const paths = {
   italic: 'M10 3h10M4 21h10M15 3 9 21', chevron: 'm8 4 8 8-8 8',
   send: 'm12 20 0-16m-6 6 6-6 6 6', check: 'm4 12 5 5L20 5', x: 'm5 5 14 14M5 19 19 5',
   sparkle: 'm12 2 3 7 7 3-7 3-3 7-3-7-7-3 7-3Z',
-  panel: 'M3 3h18v18H3Zm6 0v18', forward: 'm7 14 5-5 5 5M5 4h14', back: 'm7 10 5 5 5-5M5 20h14',
+  panel: 'M3 3h18v18H3Zm6 0v18', forward: 'm7 14 5-5 5 5M5 4h14', transition: 'M3 7h9v10H3Zm11 5h7m-3-3 3 3-3 3', back: 'm7 10 5 5 5-5M5 20h14',
 };
 export function icon(name) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');

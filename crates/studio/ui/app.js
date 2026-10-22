@@ -5,11 +5,12 @@ import { feedbackController } from './feedback.js';
 import { editingController } from './editing.js';
 import { hydrateIcons } from './icons.js';
 import { textNode, id, allNodes, slideSize } from './helpers.js';
-import { renderSlide } from './render.js';
+import { playbackController } from './playback.js';
+import { animatePanelController } from './animate-panel.js';
 
 hydrateIcons();
 const $ = selector => document.querySelector(selector);
-const state = { deck:null, revision:'', hashes:{}, images:{}, slideId:null, selected:new Set(), scopeSlide:false, preview:null, threads:[], linked:false, flash:[], mode:'edit', properties:false, comments:false, openThread:null, draftAnchor:null, drafts:{}, showResolved:false, zoom:null, panX:0, panY:0, spacePan:false };
+const state = { deck:null, revision:'', hashes:{}, images:{}, slideId:null, selected:new Set(), scopeSlide:false, preview:null, threads:[], linked:false, flash:[], mode:'edit', panelTab:'design', playStep:0, properties:false, comments:false, openThread:null, draftAnchor:null, drafts:{}, showResolved:false, zoom:null, panX:0, panY:0, spacePan:false };
 const queue = []; let pending = null, toastTimer, focusTimer, lastFocus = '', flashTimer;
 function applyTheme(colors) {
   const roles = { bg:'bg', surface:'bg', raised:'raised', control:'control', hairline:'border_dim', text:'fg', muted:'fg_dim', faint:'fg_dim', accent:'accent', accent2:'accent2', 'accent-soft':'selection', success:'success', warning:'warning', danger:'error', canvas:'bg', 'on-accent':'bg', code:'raised', present:'bg' };
@@ -40,6 +41,9 @@ function apply(build) {
     for (const op of ops) {
       const target = op.op === 'update_slide' ? state.deck.slides.find(s => s.id === op.id) : state.deck.slides.flatMap(allNodes).find(n => n.id === op.id);
       if (target && op.fields) merge(target, op.fields);
+      if (op.op === 'set_transition') state.deck.slides.find(s => s.id === op.slide).transition = op.transition;
+      if (op.op === 'set_animation' && target) { target.animation ||= {}; if (op.build) target.animation[op.slot] = op.build; else delete target.animation[op.slot]; }
+      if (op.op === 'reorder_builds') state.deck.slides.find(s => s.id === op.slide).builds = op.ids;
     }
     api.renderCanvas(); return;
   }
@@ -57,15 +61,18 @@ const api = {
   align:action => editing.align(action),
   alignRow:container => editing.alignRow(container),
   slide:() => state.deck?.slides.find(s => s.id === state.slideId),
-  renderCanvas:() => { if (state.deck) { canvas.render(); panel.renderToolbar(); } },
+  renderCanvas:() => { if (state.deck) { canvas.render(); panel.renderToolbar(); animationPanel.badges(); } },
+  renderAnimations:container => animationPanel.render(container),
   updateMany(slide, updates) { apply(() => updates.map(({ id, fields }) => ({ op:'update_node', id, fields, base_hash:state.hashes[id] || '' }))); },
   rectOf:nodeId => canvas.rectOf(nodeId),
-  selectionChanged() { canvas.decorate(); panel.render(true); feedback.render(); focusChanged(); },
+  selectionChanged() { canvas.decorate(); panel.render(true); feedback.render(); animationPanel.badges(); focusChanged(); },
   duplicate:() => canvas.duplicate(), remove:() => canvas.remove(),
   clearPreview:() => feedback.clearPreview(),
   commentAt(anchor) { state.draftAnchor = anchor; state.openThread = null; state.selected.clear(); feedback.clearPreview(); render(); setTimeout(() => $('#thread-popover textarea')?.focus(), 0); },
 };
 const canvas = canvasController(api), strip = stripController(api), panel = panelController(api), feedback = feedbackController(api), editing = editingController(api);
+const animationPanel = animatePanelController(api), playback = playbackController(api);
+for (const tab of ['design','animate']) $(`#tab-${tab}`).onclick = () => { state.panelTab = tab; render(); };
 function render() {
   if (!state.deck) return;
   $('#properties-panel').hidden = !state.properties; $('#comments-panel').hidden = !state.comments;
@@ -81,7 +88,8 @@ function render() {
   for (const node of document.querySelectorAll('#canvas .block')) node.classList.toggle('external-flash', state.flash.includes(node.dataset.id));
   const pill = $('#link-status'); pill.textContent = state.linked ? 'linked to nexus' : 'not linked'; pill.classList.toggle('connected', state.linked);
   pill.title = state.linked ? 'Comments go to your nexus conversation' : 'Not linked to a conversation — open it from nexus with /studio';
-  feedback.renderPins(); focusChanged(); renderPresentation();
+  for (const tab of ['design','animate']) $(`#tab-${tab}`).setAttribute('aria-selected',String(state.panelTab === tab));
+  feedback.renderPins(); animationPanel.badges(); focusChanged(); playback.refresh();
 }
 function handleEvent(event, reply) {
   const finished = reply ? pending : null; if (reply) pending = null;
@@ -126,6 +134,7 @@ function applyViewport() {
   const scale = state.zoom === null ? 1 : state.zoom * nativeWidth / Math.max(1, parseFloat(getComputedStyle(wrap).width));
   wrap.style.transform = `translate(${state.panX}px,${state.panY}px) scale(${scale})`;
   $('#zoom-fit').textContent = state.zoom === null ? 'Fit' : `${Math.round(state.zoom * 100)}%`;
+  animationPanel.badges();
 }
 function zoomTo(value, point) {
   const bounds = wrap.getBoundingClientRect();
@@ -190,27 +199,8 @@ $('#add-shape').onclick = () => insert({ id:id('b'), kind:'shape', shape:'rect',
 $('#add-image').onclick = () => ask('Import image', 'Image path', 'PNG, JPEG or WebP. A sanitized copy stays with the deck.', '', path => command({ command:'ImportAsset', path }, event => { if (event.event === 'Asset') insert({ id:id('b'), kind:'image', src:event.src, fit:'contain', position:{ x:240, y:180 }, sizing:{ w:1200, h:720 } }); }));
 $('#speaker-notes').onchange = event => { const slide = api.slide(), notes = event.target.value; if (slide) apply(() => [{ op:'set_notes', slide:slide.id, notes }]); };
 $('#export').onclick = () => ask('Export deck', 'Destination path', 'Exports deck JSON. Keep the deck’s assets folder beside the exported file.', `${state.deck.title.replace(/[^\w-]+/g, '-')}.deck.json`, path => command({ command:'ExportDeck', path }));
-let presenting = false, presentIndex = 0;
-const presentation = $('#presentation');
-function renderPresentation() {
-  if (!presenting) return;
-  presentIndex = Math.max(0, Math.min(state.deck.slides.length - 1, presentIndex));
-  renderSlide($('#present-slide'), state.deck.slides[presentIndex], state.deck.theme, state.images); $('#present-counter').textContent = `${presentIndex + 1} / ${state.deck.slides.length}`;
-}
-function present() {
-  if (!state.deck?.slides.length) return;
-  presenting = true; presentIndex = Math.max(0, state.deck.slides.findIndex(s => s.id === state.slideId)); presentation.hidden = false; renderPresentation();
-  const request = presentation.requestFullscreen || presentation.webkitRequestFullscreen; if (request) Promise.resolve(request.call(presentation)).catch(() => toast('Presenting in window.'));
-}
-function exitPresent() { presenting = false; presentation.hidden = true; if (document.fullscreenElement) document.exitFullscreen(); else if (document.webkitFullscreenElement) document.webkitExitFullscreen(); }
-$('#present').onclick = present; $('#exit-present').onclick = exitPresent;
-presentation.onclick = event => { if (event.target.id !== 'exit-present') { presentIndex++; renderPresentation(); } };
-for (const name of ['fullscreenchange','webkitfullscreenchange']) document.addEventListener(name, () => { if (!document.fullscreenElement && !document.webkitFullscreenElement && presenting) { presenting = false; presentation.hidden = true; } });
 document.addEventListener('keydown', event => {
-  if (presenting) {
-    if (event.key === 'Escape') exitPresent(); else if (['ArrowRight','ArrowDown',' '].includes(event.key)) { presentIndex++; renderPresentation(); } else if (['ArrowLeft','ArrowUp'].includes(event.key)) { presentIndex--; renderPresentation(); }
-    event.preventDefault(); return;
-  }
+  if (playback.key(event)) return;
   const key = event.key.toLowerCase(), mod = event.metaKey || event.ctrlKey, editingField = event.target.closest('input,textarea,select,[contenteditable]');
   if (mod && key === '\\') { event.preventDefault(); properties(); return; }
   if (mod && ['=','+','-','0'].includes(key)) { event.preventDefault(); zoom(key === '0' ? 0 : key === '-' ? -.1 : .1); return; }
@@ -232,6 +222,6 @@ document.addEventListener('keydown', event => {
   else if (mod && key === 'd') { event.preventDefault(); canvas.duplicate(); }
   else if (['Delete','Backspace'].includes(event.key)) { event.preventDefault(); canvas.remove(); }
   else if (event.key.startsWith('Arrow')) { event.preventDefault(); const step = event.shiftKey ? 10 : 1; canvas.nudge(event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0, event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0); }
-  else if (event.key === 'F5') { event.preventDefault(); present(); }
+  else if (event.key === 'F5' || (event.shiftKey && event.key === 'Enter')) { event.preventDefault(); playback.start(event.key === 'Enter'); }
 });
 command({ command:'Load' });

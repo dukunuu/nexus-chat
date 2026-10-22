@@ -23,9 +23,10 @@ use sha2::{Digest, Sha256};
 
 pub use layout::{Rect, layout, layout_at, layout_map};
 pub use model::{
-    Align, AutoLayout, Chart, Cross, Deck, Dim, Fit, Font, FontFile, Kind, Main, Mode, Node,
-    Position, ResolvedFont, Series, Shape, Sizing, Slide, SlideSize, Stroke, Theme, Transform,
-    VAlign,
+    Align, Animation, AnimationSlot, AutoLayout, Build, BuildBy, Chart, Cross, Deck, Dim,
+    Direction, Easing, Effect, Fit, Font, FontFile, Kind, Main, Mode, Node, Position, ResolvedFont,
+    Series, Shape, Sizing, Slide, SlideSize, Stroke, Theme, Transform, Transition, TransitionType,
+    Trigger, VAlign,
 };
 pub use ops::{Op, apply};
 
@@ -226,5 +227,7 @@ fn hash(value: &impl Serialize) -> String {
     result
 }
 
+#[cfg(test)]
+mod animation_tests;
 #[cfg(test)]
 mod tests;

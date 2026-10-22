@@ -6,8 +6,9 @@ imported fonts), a `taffy` layout engine with browser parity, a v2 `deck` tool,
 and a studio backend and UI that speak v2. D1 editor controls now include
 auto-layout wrapping and reparenting, smart guides, align/distribute, scrub
 fields, font picking/import and a drag-to-reparent layers tree; details and
-remaining limitations are under *Editor status*. Terminal-theme identity and
-revised comments are implemented.
+remaining limitations are under *Editor status*. D2 adds typed slide transitions and node builds (schema, validation, three
+operations), an Animate panel and step-based presentation playback; see
+*Animations*. Terminal-theme identity and revised comments are implemented.
 Supersedes the editor half of `docs/web-editors.md`; that
 document's device-key pairing stays the plan for remote access (phase S5).
 
@@ -161,11 +162,11 @@ A slide is a **frame** of the theme's size (1920 × 1080 px) holding a tree of
   gap_cross, padding [t,r,b,l], main: start|center|end|space_between, cross:
   start|center|end|stretch}`, `children`. In `mode: none` every child is
   absolute. A frame adds `fill`, `stroke {color, width}`, `radius`, `clip`; a
-  slide adds `fill`, `notes`, `name` and a preserved `transition`.
+  slide adds `fill`, `notes`, `name`, `transition` and `builds`.
 - **Node**: `id`, `name?`, `kind`, `sizing {w, h: px | "hug" | "fill", min_w,
   max_w, min_h, max_h}`, `position: "auto" | {x, y}` (absolute: ignore
-  auto-layout), `opacity`, `rotation`, `hidden`, `locked` and a preserved
-  `animation`. Kinds: `frame`, `text`, `image`, `shape`, `table`, `code`,
+  auto-layout), `opacity`, `rotation`, `hidden`, `locked` and an `animation` (played in
+  present mode only). Kinds: `frame`, `text`, `image`, `shape`, `table`, `code`,
   `chart`.
 - **Typography.** `text`, `table` and `code` nodes name a theme **text style**
   (`title`, `heading`, `subheading`, `body`, `caption`, `code`, or one added with
@@ -186,6 +187,97 @@ A slide is a **frame** of the theme's size (1920 × 1080 px) holding a tree of
   fills missing theme tokens and text styles; every other error names a JSON
   path (`$.slides[1].children[0].font.size`). Limits: 200 slides, 200 nodes per
   slide, frames nested 8 deep, 8 KB of text per node.
+
+### Animations
+
+Transitions belong to the **incoming** slide:
+
+```json
+{"id":"s2","transition":{"type":"smart","duration_ms":600,"easing":"ease_out"},"builds":["headline","evidence"],"children":[{"id":"headline","name":"Headline","kind":"text","text":"Ideas in motion","animation":{"build_in":{"effect":"fade","trigger":"click"}}},{"id":"evidence","kind":"text","text":"- One source\n- A connection","animation":{"build_in":{"effect":"rise","trigger":"with_previous","by":"item","stagger_ms":80}}}]}
+```
+
+- `transition`: `type` is `none|fade|push|slide|cover|zoom|smart`, optional
+  `direction` is `left|right|up|down`, `duration_ms` is 0–5000 (default 400),
+  `easing` is `linear|ease|ease_in|ease_out|ease_in_out|spring` (default
+  `ease_out`). Spring uses a bounded cubic-bezier overshoot. `direction` on a
+  push, slide or cover is the way the content moves (`left` brings the new
+  slide in from the right); default `left`.
+- `animation` holds optional `build_in`, `emphasis`, `build_out` slots.
+  Each Build has `effect`, optional `direction`, `duration_ms` (0–5000,
+  default 400), `delay_ms` (0–10000, default 0), `easing`, `trigger`
+  (`click|with_previous|after_previous`, default click), `by`
+  (`whole|word|line|item`, default whole), optional `stagger_ms` (0–10000,
+  playback default 60). Entry/exit effects: `appear|fade|rise|fly|scale|wipe|blur|
+  typewriter`; emphasis: `pulse|shake`. Typewriter and non-whole segmentation
+  require text; list items are Markdown text. Word/visual-line/item spans are
+  generated only in playback DOM, retaining inline formatting, never saved.
+- `builds:[node_id...]` orders animated nodes. Missing animated nodes append
+  depth-first; unknown, duplicate and no-longer-animated references are removed
+  on load, the way other dangling references are repaired. Each node runs its slots in entry → emphasis → exit order. Dragging
+  a row reorders the node and its slots together.
+- **Typed schema.** `Slide.transition` and `Node.animation` are strongly typed
+  (`Transition`, `Animation`, `Build` in `deck/model.rs`; unknown fields are
+  rejected). `Deck::check` range-checks every value and the slot/effect/kind
+  rules with located errors (`$.slides[1].children[0].animation.build_in.effect`).
+  **Migration:** a transition or animation that does not parse (the old free-form
+  placeholders such as `{"kind":"push"}`, a typo, a wrong type) is dropped rather
+  than failing the deck, and each drop is reported as a load note: studio shows it
+  once as a notice, the `deck` tool's `read` prints `load note:` lines. Edits are
+  stricter: through `apply`, unparseable animation data is an error, so a
+  merge patch cannot silently lose it.
+- Operations: `set_transition{slide,transition|null}`,
+  `set_animation{id,slot,build|null}`, `reorder_builds{slide,ids}` (every id must
+  be an animated node of that slide, listed once). Payload errors are located like
+  any other deck error and reject the whole transaction. Each editor edit/scrub/drop
+  is one `Apply` and one undo snapshot; previews never write. Merge patches on
+  `update_node`/`update_slide` continue to merge animation objects.
+
+**Editor.** The design sidebar has a Design and an Animate tab. Animate shows the
+slide's transition (picker, direction, duration scrub field, easing), the
+selected layer's build in / emphasis / build out rows (effect, start trigger,
+duration, delay, direction, easing, and for text by/stagger, with a Preview that
+plays on the canvas and never writes) and the slide's build order: numbered rows
+(step, trigger icon, effect, layer name), click to select, drag to reorder.
+While the tab is open, numbered badges sit just outside each animated layer on the
+canvas, like comment pins. A slide with a transition shows a small glyph beside its
+rail thumbnail, and hovering the thumbnail plays the transition there for one
+second. Play from here (Shift+Enter or the button) presents from the current slide
+and step. Every control is one set_transition / set_animation / reorder_builds
+operation, so one undo.
+
+**Playback.** Click, Space or Right runs the next click-triggered build and
+following with/after-previous entries. With-previous starts relative to the
+previous start; after-previous starts relative to its completion (including
+stagger). Each build's delay is added. Leading non-click builds play on entry.
+Once click groups are exhausted, the next advance enters the following slide.
+Back/Backspace instantly reconstructs the previous click boundary, crossing to
+previous slides at their final step. Home/End go to the first/last boundary;
+number + Enter jumps to a slide's initial boundary; Esc exits. A new advance
+settles unfinished playback before running its next group. The indicator counts
+completed click groups. P toggles current slide, next-step thumbnail, notes and
+elapsed timer in this same window. Shift+Enter / Play from here starts at the
+selected build row's preceding boundary (or the cursor retained on exit).
+
+**Smart matching.** One-to-one matches prefer equal ids, then equal nonempty
+names in tree order. Deck ids remain globally unique, so across persisted
+slides names are the practical matching key. Both rendered trees are measured
+before FLIP transform/opacity animations. A matched node whose
+appearance is unchanged (same text, fill, color, font) simply moves: shapes and
+images translate, rotate and scale about their centers, text translates at its
+native size (never an anisotropic scale) and the old copy is hidden. If the
+appearance changed (fill, font size or color, or text content) the new node
+moves in from the old position while the old one fades out, a crossfade, so no
+colors or glyphs are interpolated. The incoming slide background fades in as its
+own layer. Matched frames crossfade in place so child transforms are not
+compounded. Unmatched nodes fade. Motion uses only transform/opacity/clip-path/filter;
+`prefers-reduced-motion` replaces every effect and transition with a fade, and
+halves durations, delays and stagger; emphasis becomes a brief opacity dip. Core PNGs and the editor always show all
+nodes in their authored final state, ignoring even build-out visibility; the
+model's `read` adds a `transition: push left 400ms ease_out` line and a compact
+numbered build order per slide, for example
+`builds: 1 click fade b2 · 2 with-prev rise b3 · 3 click emphasis pulse b2`. The field
+reference and new operation names appear only in the once-per-session schema,
+not the unchanged tool description or prompt golden.
 
 ### Migration from version 1
 
@@ -450,7 +542,8 @@ local paths to JavaScript, and returns the normal `Deck` event. Only font-data
 commands may exceed the normal deck-command limit; the decoded cap is 16 MB.
 
 It cannot yet export/import PowerPoint or PDF (S3), render WOFF2 in core PNGs,
-or animate the preserved animation/transition fields. Font previews use the
+or play animations anywhere but present mode. Smart text/font/color changes crossfade rather than interpolating glyphs or
+color channels, to keep playback compositor-only. Font previews use the
 webview's installed faces, so platform font availability still matters.
 
 ## Tests
@@ -505,5 +598,15 @@ webview's installed faces, so platform font availability still matters.
   layers,align}-{default,light}.png` (gitignored). `backend/font_tests.rs` covers
   cached font listing, imported metadata/theme/undo, chooser-byte transport,
   type/data/size/path rejection, symlink confinement and the serving size cap.
+- **D2 animation harness:** `node crates/studio/ui-dev/d2-shot.mjs` checks
+  click/with/after groups, leading automatic builds, reverse/jump boundaries,
+  id/name smart matching, reduced-motion half-duration fades, one undo per
+  animation edit/scrub/reorder, no-write previews, canvas badges, Play from here,
+  presenter notes and next-step thumbnails. Outputs at 1440×900 in both terminal
+  palettes: `ui-dev/shots/d2-{animate,badges,push,smart,presenter}-{default,light}.png`.
+  Push and smart frames are captured halfway through paused WAAPI animations.
+  New Rust animation tests cover typed payload defaults/round trips, operation
+  validation/atomicity/clearing, build-order repair, merge-patch preservation,
+  read summaries, schema-once references and backend Apply/undo/redo/resources.
 - **Hermetic:** no network, and no windows opened in Rust tests. Browser harnesses
   use loopback-only static fixtures and mock IPC.

@@ -168,7 +168,10 @@ impl Edit {
         };
         for op in &proposal.ops {
             match op {
-                Op::UpdateNode { id, .. } | Op::DeleteNode { id } | Op::Unwrap { id } => {
+                Op::UpdateNode { id, .. }
+                | Op::DeleteNode { id }
+                | Op::Unwrap { id }
+                | Op::SetAnimation { id, .. } => {
                     keys.push(id.clone());
                 }
                 Op::MoveNode { id, parent, .. } => {
@@ -179,7 +182,9 @@ impl Edit {
                 Op::Wrap { ids, .. } => keys.extend(ids.iter().cloned()),
                 Op::SetLayout { target: id, .. } => keys.push(target(id)),
                 Op::SetTheme { .. } | Op::SetTextStyle { .. } => keys.push("theme".into()),
-                Op::SetNotes { slide, .. } => keys.push(format!("slide:{slide}")),
+                Op::SetNotes { slide, .. }
+                | Op::SetTransition { slide, .. }
+                | Op::ReorderBuilds { slide, .. } => keys.push(format!("slide:{slide}")),
                 Op::UpdateSlide { id, .. } | Op::DeleteSlide { id } => {
                     keys.push(format!("slide:{id}"));
                 }

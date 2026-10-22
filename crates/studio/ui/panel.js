@@ -200,6 +200,7 @@ export function panelController(api) {
     if (!slide) { panel.append(element('p', 'hint', 'Add a slide to get started.')); return; }
     if (preserveLayers) listContainer.querySelectorAll('[data-layer]').forEach(row => { const active = api.state.selected.has(row.dataset.layer); row.classList.toggle('active', active); row.setAttribute('aria-selected', String(active)); });
     else layerRows(slide, slide.children, 0);
+    if (api.state.panelTab === 'animate') { api.renderAnimations(panel); return; }
     const roles = element('datalist'); roles.id = 'paint-roles';
     for (const role of Object.keys(api.state.deck.theme.colors)) { const option = element('option'); option.value = role; roles.append(option); } panel.append(roles);
     const selected = nodes(), node = selected[0];

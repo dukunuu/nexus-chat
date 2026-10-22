@@ -161,6 +161,8 @@ pub struct Backend {
     comments_stamp: Option<Stamp>,
     colors: ThemeColors,
     theme_stamp: String,
+    /// Animation data dropped while reading the deck from disk, reported once.
+    load_notes: Vec<String>,
 }
 
 /// Modified time and length: enough to notice another writer within one mtime tick.
@@ -177,10 +179,10 @@ impl Backend {
             Some(path) => absolute(path)?,
             None => new_path(files_dir)?,
         };
-        let deck = if path.exists() {
-            read_deck(&path)?
+        let (deck, load_notes) = if path.exists() {
+            read_deck_noted(&path)?
         } else {
-            Deck::new_from_layouts("Untitled")
+            (Deck::new_from_layouts("Untitled"), Vec::new())
         };
         let mut backend = Self {
             fetcher: Fetcher::new(asset_root(&path)?),
@@ -198,6 +200,7 @@ impl Backend {
             comments_stamp: None,
             colors: theme_colors::load().colors,
             theme_stamp: theme_colors::source_stamp(),
+            load_notes,
         };
         if !backend.path.exists() {
             backend.save()?;
@@ -214,7 +217,7 @@ impl Backend {
             threads: self.feedback.clone(),
             linked: self.linked,
             changed: Vec::new(),
-            notice: None,
+            notice: self.load_notice(),
             deck: self.deck.clone(),
             colors: self.colors.clone(),
             revision: self.deck.revision(),
@@ -265,10 +268,24 @@ impl Backend {
                 }
                 return Ok(event);
             }
+            // Dropped-animation notes are shown once, with the load that found them.
+            if !matches!(command, Command::Load {} | Command::Open { .. }) {
+                self.load_notes.clear();
+            }
             self.execute(command)
         })();
         result.unwrap_or_else(|e| Event::Error {
             message: e.to_string(),
+        })
+    }
+
+    /// What was dropped while reading the deck, for the page's notice.
+    fn load_notice(&self) -> Option<String> {
+        (!self.load_notes.is_empty()).then(|| {
+            format!(
+                "Animation data that could not be read was dropped: {}",
+                self.load_notes.join("; ")
+            )
         })
     }
 
@@ -356,8 +373,7 @@ impl Backend {
             }
             Command::Open { path } => {
                 let path = absolute(&path)?;
-                let deck = read_deck(&path)?;
-                self.open_document(path, deck)?;
+                self.open_file(path)?;
             }
             Command::ExportDeck { path } => {
                 atomic_write(&absolute(&path)?, &serde_json::to_vec_pretty(&self.deck)?)?;
@@ -412,8 +428,9 @@ impl Backend {
             // Remember the stamp first: an unreadable file is reported once,
             // not on every tick.
             self.deck_stamp = deck_stamp;
-            let next = read_deck(&self.path)?;
+            let (next, notes) = read_deck_noted(&self.path)?;
             if next.revision() != self.known_revision {
+                self.load_notes = notes;
                 changed = changed_nodes(&self.deck, &next);
                 self.undo.push(std::mem::replace(&mut self.deck, next));
                 self.redo.clear();
@@ -439,9 +456,12 @@ impl Backend {
         {
             *flash = changed;
             if reloaded {
-                *notice = Some(
-                    "The deck changed on disk and was reloaded. Undo takes the change back.".into(),
-                );
+                let dropped = self
+                    .load_notice()
+                    .map_or_else(String::new, |n| format!(" {n}"));
+                *notice = Some(format!(
+                    "The deck changed on disk and was reloaded. Undo takes the change back.{dropped}"
+                ));
             }
         }
         Ok((Some(event), reloaded))
@@ -459,8 +479,7 @@ impl Backend {
                 // Opening the deck that is already open must not drop its undo history.
                 if !same_file(&deck_path, &self.path) {
                     let path = absolute(&deck_path)?;
-                    let deck = read_deck(&path)?;
-                    self.open_document(path, deck)?;
+                    self.open_file(path)?;
                 }
                 Ok(self.event())
             }
@@ -489,6 +508,14 @@ impl Backend {
 
     fn remember(&self) -> Result<()> {
         atomic_write(&self.recent, &serde_json::to_vec(&self.path)?)
+    }
+
+    /// Read a deck from disk and make it the open document.
+    fn open_file(&mut self, path: PathBuf) -> Result<()> {
+        let (deck, notes) = read_deck_noted(&path)?;
+        self.open_document(path, deck)?;
+        self.load_notes = notes;
+        Ok(())
     }
 
     fn open_document(&mut self, path: PathBuf, deck: Deck) -> Result<()> {
@@ -645,9 +672,14 @@ fn read_bounded(path: &Path, max: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn read_deck(path: &Path) -> Result<Deck> {
+    read_deck_noted(path).map(|(deck, _)| deck)
+}
+
+fn read_deck_noted(path: &Path) -> Result<(Deck, Vec<String>)> {
     let bytes = read_bounded(path, deck::MAX_SOURCE)?;
-    Deck::check(std::str::from_utf8(&bytes)?).map_err(|errors| {
+    Deck::check_noted(std::str::from_utf8(&bytes)?).map_err(|errors| {
         anyhow::anyhow!(
             "{}",
             errors
@@ -775,10 +807,15 @@ fn embedded(path: &str) -> Option<(&'static str, &'static str)> {
         "/fields.js" => ("text/javascript", include_str!("../ui/fields.js")),
         "/fonts.js" => ("text/javascript", include_str!("../ui/fonts.js")),
         "/guides.js" => ("text/javascript", include_str!("../ui/guides.js")),
+        "/animations.js" => ("text/javascript", include_str!("../ui/animations.js")),
+        "/playback.js" => ("text/javascript", include_str!("../ui/playback.js")),
+        "/animate-panel.js" => ("text/javascript", include_str!("../ui/animate-panel.js")),
         _ => return None,
     })
 }
 
+#[cfg(test)]
+mod animation_tests;
 #[cfg(test)]
 mod font_tests;
 #[cfg(test)]

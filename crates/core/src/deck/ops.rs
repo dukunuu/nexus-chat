@@ -11,7 +11,8 @@ use serde_json::{Map, Value};
 
 use super::layout::{Rect, layout_map};
 use super::model::{
-    AutoLayout, Deck, Dim, Font, Kind, Mode, Node, Position, Slide, Theme, default_text_styles,
+    Animation, AnimationSlot, AutoLayout, Build, Deck, Dim, Font, Kind, Mode, Node, Position,
+    Slide, Theme, Transition, default_text_styles,
 };
 
 /// The complete editing language. Slide indices in `move_slide` are zero-based.
@@ -85,6 +86,22 @@ pub enum Op {
     SetTheme {
         theme: Theme,
     },
+    /// Replace or clear the incoming slide transition.
+    SetTransition {
+        slide: String,
+        transition: Option<Transition>,
+    },
+    /// Replace or clear one node build slot.
+    SetAnimation {
+        id: String,
+        slot: AnimationSlot,
+        build: Option<Build>,
+    },
+    /// Explicit node order; omitted animated nodes follow in tree order.
+    ReorderBuilds {
+        slide: String,
+        ids: Vec<String>,
+    },
 }
 
 /// Apply an entire transaction on a copy. Any invalid or stale operation
@@ -94,8 +111,10 @@ pub fn apply(deck: &Deck, ops: &[Op]) -> Result<Deck> {
     for op in ops {
         step(deck, &mut next, op)?;
     }
-    match Deck::check(&serde_json::to_string(&next)?) {
-        Ok(deck) => Ok(deck),
+    match Deck::check_noted(&serde_json::to_string(&next)?) {
+        // Loading forgives unparseable animation data; an edit must not.
+        Ok((_, notes)) if !notes.is_empty() => bail!("{}", notes.join("; ")),
+        Ok((deck, _)) => Ok(deck),
         Err(errors) => bail!(
             "{}",
             errors
@@ -333,7 +352,53 @@ fn step(original: &Deck, next: &mut Deck, op: &Op) -> Result<()> {
                 .insert(name.clone(), base.merged(font));
         }
         Op::SetTheme { theme } => next.theme.clone_from(theme),
+        Op::SetTransition { slide, transition } => {
+            set_transition(next, slide, transition.as_ref())?;
+        }
+        Op::SetAnimation { id, slot, build } => set_animation(next, id, *slot, build.as_ref())?,
+        Op::ReorderBuilds { slide, ids } => reorder_builds(next, slide, ids)?,
     }
+    Ok(())
+}
+
+fn set_transition(deck: &mut Deck, slide: &str, transition: Option<&Transition>) -> Result<()> {
+    let index = slide_index(deck, slide)?;
+    deck.slides[index].transition = transition.cloned();
+    Ok(())
+}
+
+fn reorder_builds(deck: &mut Deck, slide: &str, ids: &[String]) -> Result<()> {
+    let index = slide_index(deck, slide)?;
+    let target = &mut deck.slides[index];
+    let mut seen = std::collections::BTreeSet::new();
+    for id in ids {
+        let node = target
+            .node(id)
+            .ok_or_else(|| anyhow!("unknown build node {id} on slide {slide}"))?;
+        ensure!(
+            node.animation.is_some(),
+            "node {id} has no animation to order"
+        );
+        ensure!(seen.insert(id), "build node {id} is listed twice");
+    }
+    target.builds = ids.to_vec();
+    Ok(())
+}
+
+fn set_animation(
+    deck: &mut Deck,
+    id: &str,
+    slot: AnimationSlot,
+    build: Option<&Build>,
+) -> Result<()> {
+    let node = node_mut(deck, id)?;
+    let mut animation: Animation = node.animation.take().unwrap_or_default();
+    *match slot {
+        AnimationSlot::BuildIn => &mut animation.build_in,
+        AnimationSlot::Emphasis => &mut animation.emphasis,
+        AnimationSlot::BuildOut => &mut animation.build_out,
+    } = build.cloned();
+    node.animation = (!animation.is_empty()).then_some(animation);
     Ok(())
 }
 

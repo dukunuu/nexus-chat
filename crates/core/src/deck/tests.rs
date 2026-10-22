@@ -166,7 +166,7 @@ fn round_trip_all_node_kinds() {
         json!({"kind": "frame", "name": "Row", "fill": "muted", "stroke": {"color": "fg", "width": 2}, "radius": 12, "clip": true,
                "layout": {"mode": "row", "wrap": true, "gap": 16, "gap_cross": 8, "padding": [8, 16], "main": "space_between", "cross": "center"},
                "sizing": {"w": "fill", "h": "hug", "min_w": 100, "max_h": 400}, "opacity": 0.5, "rotation": 3.5,
-               "animation": {"kind": "fade"},
+               "animation": {"build_in": {"effect": "fade"}},
                "children": [text("inner", "Hello")]}),
     ];
     for mut payload in payloads {
@@ -176,16 +176,26 @@ fn round_trip_all_node_kinds() {
             .unwrap()
             .push(payload);
     }
-    doc["slides"][0]["transition"] = json!({"kind": "push"});
+    doc["slides"][0]["transition"] = json!({"type": "push"});
     let deck = check(&doc).unwrap();
     assert_eq!(
         Deck::check(&serde_json::to_string_pretty(&deck).unwrap()).unwrap(),
         deck
     );
     assert_eq!(deck.slides[0].children.len(), 7);
-    assert_eq!(deck.slides[0].transition, Some(json!({"kind": "push"})));
+    assert_eq!(
+        deck.slides[0].transition.as_ref().map(|t| t.kind),
+        Some(TransitionType::Push)
+    );
     let frame = deck.slides[0].children.last().unwrap();
-    assert_eq!(frame.animation, Some(json!({"kind": "fade"})));
+    assert_eq!(
+        frame
+            .animation
+            .as_ref()
+            .and_then(|a| a.build_in.as_ref())
+            .map(|b| b.effect),
+        Some(Effect::Fade)
+    );
     let Kind::Frame { layout, .. } = &frame.kind else {
         panic!()
     };
@@ -462,7 +472,7 @@ fn slide_operations() {
         &moved,
         &[
             op(
-                json!({"op": "update_slide", "id": "s3", "fields": {"name": "Intro", "fill": "accent", "transition": {"kind": "fade"}}}),
+                json!({"op": "update_slide", "id": "s3", "fields": {"name": "Intro", "fill": "accent", "transition": {"type": "fade"}}}),
             ),
             Op::SetNotes {
                 slide: "s3".into(),
@@ -474,7 +484,10 @@ fn slide_operations() {
     .unwrap();
     assert_eq!(next.slides[0].name.as_deref(), Some("Intro"));
     assert_eq!(next.slides[0].fill.as_deref(), Some("accent"));
-    assert_eq!(next.slides[0].transition, Some(json!({"kind": "fade"})));
+    assert_eq!(
+        next.slides[0].transition.as_ref().map(|t| t.kind),
+        Some(TransitionType::Fade)
+    );
     assert_eq!(next.slides[0].notes, "Remember the story");
     assert_eq!(next.slides.len(), 2);
     let cleared = apply(

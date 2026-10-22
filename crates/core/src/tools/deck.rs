@@ -10,7 +10,10 @@ use serde_json::{Value, json};
 
 use crate::deck::feedback::{self, Anchor, Edit, Message, Role, Severity, Thread};
 use crate::deck::suggest::{self, RawSuggestion, Suggestion};
-use crate::deck::{CheckError, Deck, Dim, Font, Kind, Mode, Node, Op, Position, render};
+use crate::deck::{
+    AnimationSlot, BuildBy, CheckError, Deck, Dim, Font, Kind, Mode, Node, Op, Position, Slide,
+    Transition, Trigger, render,
+};
 
 use super::ToolBox;
 
@@ -87,6 +90,11 @@ fn located(errors: &[CheckError]) -> String {
 }
 
 fn load(path: &Path) -> Result<Deck> {
+    load_noted(path).map(|(deck, _)| deck)
+}
+
+/// Load a deck with the notes about animation data dropped while parsing it.
+fn load_noted(path: &Path) -> Result<(Deck, Vec<String>)> {
     let bytes = std::fs::read(path).with_context(|| {
         format!(
             "no deck at {}; create it first",
@@ -98,7 +106,7 @@ fn load(path: &Path) -> Result<Deck> {
         "deck file is too large"
     );
     let source = String::from_utf8(bytes).context("deck file is not UTF-8")?;
-    Deck::check(&source)
+    Deck::check_noted(&source)
         .map_err(|errors| anyhow::anyhow!("deck file is invalid: {}", located(&errors)))
 }
 
@@ -218,6 +226,9 @@ fn describe(op: &Op, before: &Deck) -> String {
         }
         Op::SetTextStyle { name, .. } => format!("set_text_style {name}"),
         Op::SetTheme { .. } => "set_theme".into(),
+        Op::SetTransition { slide, .. } => format!("set_transition slide {}", number(slide)),
+        Op::SetAnimation { id, slot, .. } => format!("set_animation {id} {slot:?}"),
+        Op::ReorderBuilds { slide, .. } => format!("reorder_builds slide {}", number(slide)),
     }
 }
 
@@ -482,6 +493,9 @@ const SCHEMA: &str = "\nschema (sent once per session)\n\
 - shape: shape rect|ellipse|line|arrow, fill, stroke{color,width}, radius. image: src, fit contain|cover. table: rows[[..]], style, font. code: language, source, style, font. chart: chart bar|line|pie, labels[], series[{name,values[]}].\n\
 - colors: theme roles (bg fg accent muted ...) or hex. font.family: a role (heading body mono), a deck font or an installed family (see fonts).\n\
 - layouts that work: column slide, padding 120-160, gap 32-56, cross stretch; text w fill; two columns = a row frame (gap 64-96, cross stretch) with w fill children; centered title = main center.\n\
+- slide transition{type:none|fade|push|slide|cover|zoom|smart, direction?:left|right|up|down, duration_ms:0-5000 (400), easing:linear|ease|ease_in|ease_out|ease_in_out|spring (ease_out)} plays on entering the slide in present mode. smart morphs nodes with the same id or name on the previous slide (position, size, opacity, rotation, fill, font size and color) and fades the rest. Renders and view show the final state of a slide, every build in.\n\
+- node animation{build_in?:Build, emphasis?:Build, build_out?:Build}; Build{effect:appear|fade|rise|fly|scale|wipe|blur|typewriter|pulse|shake, direction?, duration_ms:0-5000 (400), delay_ms:0-10000 (0), easing, trigger:click|with_previous|after_previous (click), by:whole|word|line|item (whole), stagger_ms?:0-10000}. pulse and shake are emphasis only and emphasis takes only them; typewriter and by word|line|item need a text node (item = list line). Slide builds:[node_id,...] is the playback order of animated nodes (a node's slots run in, emphasis, out); animated nodes left out are appended in tree order and unknown ids dropped. A click build starts a step; with_previous and after_previous join the step before them; builds ahead of the first click play on entry. read lists them as `builds: 1 click fade b2 · 2 with-prev rise b3`.\n\
+- animation ops: set_transition{slide,transition|null}, set_animation{id,slot:build_in|emphasis|build_out,build|null}, reorder_builds{slide,ids}. Each is atomic with the other ops; update_node and update_slide merge patches also reach animation and transition.\n\
 - set_layout converts children like Figma (none to row/column makes them auto; back makes them absolute where they are). wrap{ids,layout} puts siblings in a new frame; unwrap{id} dissolves it. update_node merges: {\"font\":{\"size\":64}} keeps other font fields, null removes one. set_text_style{name,font} changes every node using the style.\n";
 
 fn schema_once(shown: &mut bool) -> &'static str {
@@ -572,6 +586,12 @@ fn read_text(relative: &str, path: &Path, deck: &Deck) -> Result<String> {
             slide.id,
             layout_line(&slide.layout)
         );
+        if let Some(transition) = &slide.transition {
+            let _ = writeln!(out, "  transition: {}", transition_line(transition));
+        }
+        if let Some(builds) = builds_line(slide) {
+            let _ = writeln!(out, "  builds: {builds}");
+        }
         let rects = crate::deck::layout_map(deck, slide, assets.as_deref());
         write_tree(
             &mut out,
@@ -583,6 +603,54 @@ fn read_text(relative: &str, path: &Path, deck: &Deck) -> Result<String> {
     }
     thread_lines(&mut out, deck, &feedback::load(path)?);
     Ok(out)
+}
+
+/// The numbered build sequence of a slide on one line, if it has builds.
+fn builds_line(slide: &Slide) -> Option<String> {
+    let sequence = slide.build_sequence();
+    if sequence.is_empty() {
+        return None;
+    }
+    let builds = sequence
+        .iter()
+        .enumerate()
+        .map(|(i, (node, slot, build))| {
+            let slot = match slot {
+                AnimationSlot::BuildIn => "",
+                AnimationSlot::Emphasis => "emphasis ",
+                AnimationSlot::BuildOut => "out ",
+            };
+            let trigger = match build.trigger {
+                Trigger::Click => "click",
+                Trigger::WithPrevious => "with-prev",
+                Trigger::AfterPrevious => "after-prev",
+            };
+            let by = if build.by == BuildBy::Whole {
+                String::new()
+            } else {
+                format!(" by {}", name(&build.by))
+            };
+            format!(
+                "{} {trigger} {slot}{}{by} {}",
+                i + 1,
+                name(&build.effect),
+                node.id
+            )
+        })
+        .collect::<Vec<_>>();
+    Some(builds.join(" · "))
+}
+
+/// `push left 400ms ease_out`: a transition on one line.
+fn transition_line(transition: &Transition) -> String {
+    let snake = |value: &Value| value.as_str().unwrap_or_default().to_string();
+    let mut parts = vec![snake(&json!(transition.kind))];
+    if let Some(direction) = transition.direction {
+        parts.push(snake(&json!(direction)));
+    }
+    parts.push(format!("{}ms", transition.duration_ms));
+    parts.push(snake(&json!(transition.easing)));
+    parts.join(" ")
 }
 
 fn thread_lines(out: &mut String, deck: &Deck, threads: &[Thread]) {
@@ -784,7 +852,11 @@ impl ToolBox {
         match action {
             "deck_create" => self.deck_create(&relative, &path, v),
             "deck_read" => {
-                let mut out = read_text(&relative, &path, &load(&path)?)?;
+                let (deck, notes) = load_noted(&path)?;
+                let mut out = read_text(&relative, &path, &deck)?;
+                for note in notes {
+                    let _ = writeln!(out, "load note: {note}");
+                }
                 out.push_str(schema_once(
                     &mut self.deck_link.lock().expect("deck link").schema_shown,
                 ));
@@ -965,6 +1037,10 @@ fn deck_resolve(relative: &str, path: &Path, v: &Value) -> Result<String> {
     feedback::save(path, &threads)?;
     Ok(format!("resolved thread {id} · {relative}\n"))
 }
+
+#[cfg(test)]
+#[path = "deck_animation_tests.rs"]
+mod animation_tests;
 
 #[cfg(test)]
 mod tests {
