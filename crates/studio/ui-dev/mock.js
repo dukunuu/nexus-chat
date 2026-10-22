@@ -6,7 +6,9 @@
   const fixture = structuredClone(window.__studioFixture);
   let deck = fixture.deck, threads = fixture.threads, sequence = 0;
   const undo = [], redo = [], sent = [], activities = {};
-  const emit = event => window.studioEvent(event);
+  const emit = event => window.studioEvent(structuredClone(event));
+  const options = window.__studioMockOptions || {};
+  const commands = [];
   const feedback = () => ({ event:'Feedback', threads, activities, notes:[] });
   function current(extra = {}) {
     return { event:'Deck', deck, revision:`r${sequence}`, hashes:Object.fromEntries(deck.slides.flatMap(s => nodesOf(s).map(b => [b.id, 'mock']))), images:{}, threads, activities, linked:true, changed:[], notice:null, ...extra };
@@ -34,7 +36,8 @@
   const edits = () => threads.flatMap(t => t.messages).flatMap(m => m.edits);
   // What the model does from outside: change the deck file. One undo step.
   window.__mock = {
-    sent,
+    sent, commands, latency:options.latency ?? 15, rejectNextApply:false,
+    get deck() { return structuredClone(deck); },
     activity(thread, state, detail, reason) {
       activities[thread] = { state, detail, reason };
       window.studioAsyncEvent(feedback());
@@ -56,8 +59,9 @@
     },
   };
   window.ipc = { postMessage(source) {
-    const m = JSON.parse(source);
+    const m = JSON.parse(source); commands.push(m);
     setTimeout(() => {
+      if (m.command === 'Apply' && window.__mock.rejectNextApply) { window.__mock.rejectNextApply = false; return emit({ event:'Error', message:'Mock rejected apply' }); }
       if (m.command === 'Focus') { sent.push({ type:'Focus', slide:m.slide, blocks:m.blocks }); return emit(feedback()); }
       if (m.command === 'PreviewEdit') return emit({ event:'Preview', deck:apply(edits().find(e => e.id === m.edit).ops) });
       if (m.command === 'DismissEdit') { edits().find(e => e.id === m.edit).status = 'dismissed'; return emit(feedback()); }
@@ -80,6 +84,6 @@
       else if (m.command === 'Apply') { undo.push(deck); redo.length = 0; deck = apply(m.ops); sequence++; }
       else if (m.command === 'Save') deck = m.deck;
       emit(current());
-    }, 15);
+    }, window.__mock.latency);
   } };
 })();

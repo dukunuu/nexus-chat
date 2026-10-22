@@ -167,6 +167,11 @@ async fn respond(backend: &Arc<Mutex<Backend>>, uri: &str) -> Response<Vec<u8>> 
             b"Resource unavailable".to_vec(),
         ),
     };
+    let cache_control = if status == 200 {
+        backend::cache_control(uri, &bytes)
+    } else {
+        "no-store"
+    };
     Response::builder()
         .status(status)
         .header("Content-Type", mime)
@@ -175,7 +180,7 @@ async fn respond(backend: &Arc<Mutex<Backend>>, uri: &str) -> Response<Vec<u8>> 
         .header("Access-Control-Allow-Origin", "*")
         .header("Content-Security-Policy", csp())
         .header("X-Content-Type-Options", "nosniff")
-        .header("Cache-Control", "no-store")
+        .header("Cache-Control", cache_control)
         .body(bytes)
         .expect("static response headers")
 }

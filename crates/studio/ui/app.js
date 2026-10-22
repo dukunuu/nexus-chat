@@ -4,7 +4,8 @@ import { panelController } from './panel.js';
 import { feedbackController } from './feedback.js';
 import { editingController } from './editing.js';
 import { hydrateIcons } from './icons.js';
-import { textNode, id, allNodes, slideSize } from './helpers.js';
+import { textNode, id, allNodes, slideSize, nodeLabel, parentOf } from './helpers.js';
+import { applyLocal, signature, slideAssets } from './local.js';
 import { playbackController } from './playback.js';
 import { animatePanelController } from './animate-panel.js';
 
@@ -33,25 +34,28 @@ function pump() {
   if (pending || !queue.length) return;
   pending = queue.shift();
   try { window.ipc.postMessage(JSON.stringify(pending.build())); }
-  catch (error) { toast(error.message); pending = null; pump(); }
+  catch (error) { rollback(); toast(error.message); pending = null; pump(); }
 }
-function command(build, complete) { queue.push({ build:typeof build === 'function' ? build : () => build, complete }); pump(); }
-let gesture;
+function command(build, complete) { queue.push({ build:typeof build === 'function' ? build : () => build, complete, barrier:typeof build === 'function' || !['Focus','ListFonts','Load'].includes(build.command) }); pump(); }
+let gesture, authoritative;
+function rollback() {
+  gesture = null; state.scrubbing = false;
+  // Unsent edits may depend on the rejected one. Do not send those previews.
+  for (let i = queue.length - 1; i >= 0; i--) if (queue[i].ops) queue.splice(i, 1);
+  if (pending?.ops) delete pending.ops;
+  if (authoritative) { state.deck = authoritative; renderDeck(); }
+}
 function apply(build) {
   if (gesture) {
     const ops = build(); gesture.ops = ops;
-    state.deck = structuredClone(gesture.deck);
-    const merge = (target, patch) => { for (const [key, value] of Object.entries(patch)) { if (value === null) delete target[key]; else if (value && typeof value === 'object' && !Array.isArray(value)) merge(target[key] ||= {}, value); else target[key] = value; } };
-    for (const op of ops) {
-      const target = op.op === 'update_slide' ? state.deck.slides.find(s => s.id === op.id) : state.deck.slides.flatMap(allNodes).find(n => n.id === op.id);
-      if (target && op.fields) merge(target, op.fields);
-      if (op.op === 'set_transition') state.deck.slides.find(s => s.id === op.slide).transition = op.transition;
-      if (op.op === 'set_animation' && target) { target.animation ||= {}; if (op.build) target.animation[op.slot] = op.build; else delete target.animation[op.slot]; }
-      if (op.op === 'reorder_builds') state.deck.slides.find(s => s.id === op.slide).builds = op.ids;
-    }
-    api.renderCanvas(); return;
+    state.deck = applyLocal(gesture.deck, ops) || gesture.deck;
+    paintCanvas(); return;
   }
-  command(() => ({ command:'Apply', ops:build() }));
+  const ops = build();
+  const next = ![pending, ...queue].some(item => item?.barrier) && applyLocal(state.deck, ops);
+  const entry = { ops:next ? ops : null, barrier:!next, build:() => ({ command:'Apply', ops:(next ? ops : build()).map(op => op.op === 'update_node' ? { ...op, base_hash:state.hashes[op.id] || '' } : op) }) };
+  if (next) { state.deck = next; paintCanvas(); }
+  queue.push(entry); pump();
 }
 const api = {
   state, apply, command, toast, render, ask,
@@ -59,17 +63,17 @@ const api = {
   endGesture(cancel = false) {
     if (!gesture) return;
     const finished = gesture; gesture = null; state.scrubbing = false; state.deck = finished.deck;
-    if (!cancel && finished.ops.length) apply(() => finished.ops); else render();
+    if (!cancel && finished.ops.length) apply(() => finished.ops); else renderDeck();
   },
   wrap:unwrap => editing.wrap(unwrap),
   align:action => editing.align(action),
   alignRow:container => editing.alignRow(container),
   slide:() => state.deck?.slides.find(s => s.id === state.slideId),
-  renderCanvas:() => { if (state.deck) { canvas.render(); panel.renderToolbar(); animationPanel.badges(); } },
+  renderCanvas:() => { if (state.deck) { paintCanvas(); panel.renderToolbar(); animationPanel.badges(); } },
   renderAnimations:container => animationPanel.render(container),
   updateMany(slide, updates) { apply(() => updates.map(({ id, fields }) => ({ op:'update_node', id, fields, base_hash:state.hashes[id] || '' }))); },
   rectOf:nodeId => canvas.rectOf(nodeId),
-  selectionChanged() { canvas.decorate(); panel.render(true); feedback.render(); animationPanel.badges(); focusChanged(); },
+  selectionChanged() { canvas.decorate(); panel.render(true); panelKey = panelSignatures().props; feedback.render(); feedbackKey = feedbackSignature(); animationPanel.badges(); focusChanged(); },
   duplicate:() => canvas.duplicate(), remove:() => canvas.remove(),
   clearPreview:() => feedback.clearPreview(),
   commentAt(anchor) { state.draftAnchor = anchor; state.openThread = null; state.selected.clear(); feedback.clearPreview(); render(); setTimeout(() => $('#thread-popover textarea')?.focus(), 0); },
@@ -77,16 +81,54 @@ const api = {
 const canvas = canvasController(api), strip = stripController(api), panel = panelController(api), feedback = feedbackController(api), editing = editingController(api);
 const animationPanel = animatePanelController(api), playback = playbackController(api);
 for (const tab of ['design','animate']) $(`#tab-${tab}`).onclick = () => { state.panelTab = tab; render(); };
+let canvasKey, layersKey, panelKey, feedbackKey, ancillaryFrame, deckActivities;
+const currentCanvasKey = () => signature([api.slide(), state.deck.theme, slideAssets(api.slide(), state.deck.theme, state.images), state.preview]);
+function paintCanvas() { canvas.render(); canvasKey = currentCanvasKey(); }
+function deferAncillary() {
+  if (ancillaryFrame) return;
+  // The first frame paints the canvas; ancillary DOM work runs after it.
+  ancillaryFrame = requestAnimationFrame(() => { ancillaryFrame = requestAnimationFrame(() => { ancillaryFrame = null; renderAncillary(); }); });
+}
+function renderDeck() {
+  if (canvasKey !== currentCanvasKey()) paintCanvas();
+  deferAncillary();
+}
+const feedbackSignature = () => signature([state.threads, state.activities, state.slideId, state.openThread, state.draftAnchor, state.linked]);
+function panelSignatures() {
+  const slide = api.slide();
+  const tree = nodes => nodes.map(n => [n.id, n.kind, nodeLabel(n), Boolean(n.hidden), Boolean(n.locked), tree(n.children || [])]);
+  const layers = signature([state.slideId, tree(slide?.children || [])]);
+  const selected = allNodes(slide).filter(n => state.selected.has(n.id));
+  const ancestors = selected.map(n => { const out = []; for (let p = parentOf(slide, n.id)?.parent; p && p !== slide; p = parentOf(slide, p.id)?.parent) out.push({ ...p, children:undefined }); return out; });
+  const props = signature([state.slideId, [...state.selected], selected, selected.map(n => api.rectOf(n.id)), ancestors, slide && { ...slide, children:undefined }, state.deck.theme, state.panelTab, state.properties, state.mode, state.preview]);
+  return { layers, props };
+}
+function renderAncillary() {
+  if (deckActivities) { feedback.updateActivities(deckActivities); deckActivities = null; }
+  const { layers, props } = panelSignatures();
+  if (layers !== layersKey || props !== panelKey) { panel.render(layers === layersKey); layersKey = layers; panelKey = props; }
+  else panel.renderToolbar();
+  strip.render();
+  const comments = feedbackSignature();
+  if (comments !== feedbackKey) { feedback.render(); feedbackKey = comments; }
+  renderLabels(); animationPanel.badges(); focusChanged(); playback.refresh();
+}
+function renderLabels() {
+  $('#deck-title-label').textContent = state.deck.title;
+  $('#link-status').title = state.linked ? 'Comments go to your nexus conversation' : 'Not linked to a conversation — open it from nexus with /studio';
+  $('#dirty').textContent = pending?.ops || queue.some(item => item.ops) ? 'Saving' : 'Saved';
+  $('#speaker-notes').value = api.slide()?.notes || ''; $('#speaker-notes').disabled = !api.slide();
+  $('#slide-label').textContent = api.slide() ? `Slide ${String(state.deck.slides.indexOf(api.slide()) + 1).padStart(2, '0')} / ${String(state.deck.slides.length).padStart(2, '0')}${api.slide().name ? `  ·  ${api.slide().name}` : ''}` : 'Your canvas';
+  $('#slide-wrap').hidden = !api.slide(); $('#canvas-empty').hidden = Boolean(api.slide());
+}
 function render() {
   if (!state.deck) return;
   $('#properties-panel').hidden = !state.properties; $('#comments-panel').hidden = !state.comments;
   $('#workspace').classList.toggle('commenting', state.mode === 'comment');
-  feedback.render(); canvas.render(); strip.render(); panel.render();
-  $('#deck-title-label').textContent = state.deck.title;
-  $('#dirty').textContent = 'Saved';
-  $('#speaker-notes').value = api.slide()?.notes || ''; $('#speaker-notes').disabled = !api.slide();
-  $('#slide-label').textContent = api.slide() ? `Slide ${String(state.deck.slides.indexOf(api.slide()) + 1).padStart(2, '0')} / ${String(state.deck.slides.length).padStart(2, '0')}${api.slide().name ? `  ·  ${api.slide().name}` : ''}` : 'Your canvas';
-  $('#slide-wrap').hidden = !api.slide(); $('#canvas-empty').hidden = Boolean(api.slide());
+  if (deckActivities) { feedback.updateActivities(deckActivities); deckActivities = null; }
+  feedback.render(); paintCanvas(); strip.render(); panel.render();
+  ({ layers:layersKey, props:panelKey } = panelSignatures()); feedbackKey = feedbackSignature();
+  renderLabels();
   applyViewport();
   for (const mode of ['edit','comment']) $(`#${mode}-mode`).setAttribute('aria-pressed', String(state.mode === mode));
   for (const node of document.querySelectorAll('#canvas .block')) node.classList.toggle('external-flash', state.flash.includes(node.dataset.id));
@@ -100,13 +142,17 @@ function handleEvent(event, reply) {
   if (event.event === 'Deck') {
     if (gesture) api.endGesture(true);
     if (event.colors) applyTheme(event.colors);
-    feedback.clearPreview(); Object.assign(state, { deck:event.deck, revision:event.revision, hashes:event.hashes, images:event.images, threads:event.threads || [], linked:event.linked, flash:event.changed || [] });
+    feedback.clearPreview(); authoritative = structuredClone(event.deck);
+    Object.assign(state, { deck:authoritative, revision:event.revision, hashes:event.hashes, images:event.images, threads:event.threads || [], linked:event.linked, flash:event.changed || [] });
+    // A reply acknowledges only its own command, not previews still in flight.
+    for (const item of [pending, ...queue]) if (item?.ops) state.deck = applyLocal(state.deck, item.ops) || state.deck;
     if (!api.slide()) state.slideId = state.deck.slides[0]?.id || null;
     const known = new Set(allNodes(api.slide()).map(n => n.id)); state.selected = new Set([...state.selected].filter(id => known.has(id)));
     if (state.openNewest) { state.openThread = state.threads.at(-1)?.id; state.openNewest = false; }
     if (event.notice) toast(event.notice);
-    feedback.updateActivities(event.activities);
-    render();
+    deckActivities = event.activities;
+    renderDeck();
+    for (const node of document.querySelectorAll('#canvas .block')) node.classList.toggle('external-flash', state.flash.includes(node.dataset.id));
     if (state.flash.length) { clearTimeout(flashTimer); flashTimer = setTimeout(() => { state.flash = []; document.querySelectorAll('.external-flash').forEach(n => n.classList.remove('external-flash')); }, 1800); }
   } else if (event.event === 'Theme') {
     applyTheme(event.colors);
@@ -114,7 +160,7 @@ function handleEvent(event, reply) {
     if (state.deck.slides.some(s => s.id === event.slide)) { state.slideId = event.slide; state.selected.clear(); render(); }
   } else {
     feedback.event(event);
-    if (event.event === 'Error') toast(event.message);
+    if (event.event === 'Error') { rollback(); toast(event.message); }
     if (event.event === 'Exported') toast('Deck JSON exported. Keep the assets folder beside it when moving the deck.');
   }
   finished?.complete?.(event); pump();

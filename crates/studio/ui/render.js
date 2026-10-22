@@ -145,10 +145,11 @@ const stackFor = (theme, family) => fontStack(theme.fonts?.[family] || family);
 
 /** A style tag that makes the deck's imported font files usable by name. */
 let fontCss = '';
-export function ensureDeckFonts(theme) {
+const versioned = (path, hash) => hash ? `${path}?v=${hash}` : path;
+export function ensureDeckFonts(theme, images = {}) {
   const rules = (theme.font_files || []).map(file => {
     const family = String(file.family).replace(/["'\\;{}<>]/g, '');
-    const src = `/${String(file.file).split('/').map(encodeURIComponent).join('/')}`;
+    const src = versioned(`/${String(file.file).split('/').map(encodeURIComponent).join('/')}`, images[file.file]);
     return `@font-face{font-family:"${family}";src:url("${src}");font-weight:${Number(file.weight) || 400};font-style:${file.italic ? 'italic' : 'normal'};}`;
   }).join('\n');
   if (rules === fontCss) return;
@@ -188,7 +189,8 @@ export function renderNode(node, theme, images = {}, parent = { mode: 'none' }) 
   } else if (node.kind === 'image') {
     // Only the backend's origin can supply image bytes. Remote images are
     // resolved through the core fetcher and exposed by content hash.
-    el.src = node.src.startsWith('https://') ? `/asset/${images[node.src] || 'missing'}` : `/assets/${node.src.replace(/^assets\//, '')}`;
+    const path = node.src.startsWith('https://') ? `/asset/${images[node.src] || 'missing'}` : `/assets/${node.src.replace(/^assets\//, '')}`;
+    el.src = versioned(path, images[node.src.startsWith('https://') ? path : node.src]);
     el.alt = 'Slide image'; el.draggable = false;
     el.style.objectFit = node.fit || 'contain';
     naturalSize(el, node, theme, [640, 360], true);
@@ -225,7 +227,7 @@ export function renderNode(node, theme, images = {}, parent = { mode: 'none' }) 
 }
 /** Where a node sits among its siblings is up to its parent; this only re-applies its own box. */
 export function renderSlide(container, slide, theme, images) {
-  ensureDeckFonts(theme);
+  ensureDeckFonts(theme, images);
   container.replaceChildren();
   container.style.aspectRatio = `${slideSize(theme).w} / ${slideSize(theme).h}`;
   const root = element('div', 'slide-root');

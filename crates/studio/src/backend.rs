@@ -173,6 +173,9 @@ pub struct Backend {
     theme_stamp: String,
     /// Animation data dropped while reading the deck from disk, reported once.
     load_notes: Vec<String>,
+    /// Content hashes of deck assets by file, reused while the file's stamp
+    /// is unchanged, so an edit doesn't re-read every image and font.
+    asset_hashes: std::cell::RefCell<std::collections::HashMap<PathBuf, (Stamp, String)>>,
 }
 
 /// Modified time and length: enough to notice another writer within one mtime tick.
@@ -212,6 +215,7 @@ impl Backend {
             colors: theme_colors::load().colors,
             theme_stamp: theme_colors::source_stamp(),
             load_notes,
+            asset_hashes: std::cell::RefCell::default(),
         };
         if !backend.path.exists() {
             backend.save()?;
@@ -240,22 +244,59 @@ impl Backend {
                 .flat_map(deck::Slide::nodes)
                 .map(|n| (n.id.clone(), n.hash()))
                 .collect(),
-            images: self
-                .deck
-                .slides
-                .iter()
-                .flat_map(deck::Slide::nodes)
-                .filter_map(|n| {
-                    if let Kind::Image { src, .. } = &n.kind
-                        && src.starts_with("https://")
-                    {
-                        Some((src.clone(), image_hash(src)))
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
+            images: self.asset_hashes(),
         }
+    }
+
+    fn asset_hashes(&self) -> BTreeMap<String, String> {
+        let root = asset_root(&self.path).ok();
+        let local = |src: &str| {
+            let root = root.as_ref()?;
+            let path = root.join(src.strip_prefix("assets/").unwrap_or(src));
+            self.cached_hash(&path, || {
+                self.serve(&format!("nexus://localhost/{src}"))
+                    .ok()
+                    .map(|(_, bytes)| bytes)
+            })
+        };
+        let mut images = BTreeMap::new();
+        for node in self.deck.slides.iter().flat_map(deck::Slide::nodes) {
+            if let Kind::Image { src, .. } = &node.kind {
+                if src.starts_with("https://") {
+                    let route = image_hash(src);
+                    images.insert(src.clone(), route.clone());
+                    if let Some(path) = self.fetcher.cached(src)
+                        && let Some(hash) =
+                            self.cached_hash(&path, || read_bounded(&path, 8 * 1024 * 1024).ok())
+                    {
+                        images.insert(format!("/asset/{route}"), hash);
+                    }
+                } else if let Some(hash) = local(src) {
+                    images.insert(src.clone(), hash);
+                }
+            }
+        }
+        for file in &self.deck.theme.font_files {
+            if let Some(hash) = local(&file.file) {
+                images.insert(file.file.clone(), hash);
+            }
+        }
+        images
+    }
+
+    /// The content hash of `path`, read only when its stamp changed.
+    fn cached_hash(&self, path: &Path, read: impl FnOnce() -> Option<Vec<u8>>) -> Option<String> {
+        let current = stamp(path)?;
+        if let Some((seen, hash)) = self.asset_hashes.borrow().get(path)
+            && *seen == current
+        {
+            return Some(hash.clone());
+        }
+        let hash = hash_bytes(&read()?);
+        self.asset_hashes
+            .borrow_mut()
+            .insert(path.to_path_buf(), (current, hash.clone()));
+        Some(hash)
     }
 
     pub fn dispatch(&mut self, source: &str) -> Event {
@@ -796,6 +837,16 @@ pub fn protocol_path(uri: &str) -> Result<String> {
         .or_else(|| uri.strip_prefix("http://nexus.localhost"))
         .context("unknown protocol origin")?;
     let path = if path.is_empty() { "/" } else { path };
+    let path = if let Some((path, query)) = path.split_once('?') {
+        let version = query.strip_prefix("v=").context("unknown URL query")?;
+        ensure!(
+            version.len() == 64 && version.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid asset version"
+        );
+        path
+    } else {
+        path
+    };
     // Webviews percent-encode spaces and non-ASCII filenames. Decode exactly
     // once, then apply the same containment rules to the decoded path.
     let mut bytes = Vec::with_capacity(path.len());
@@ -823,11 +874,26 @@ pub fn protocol_path(uri: &str) -> Result<String> {
     Ok(path)
 }
 
+/// Only byte-addressed asset responses may survive a deck switch or reload.
+/// An unversioned download (including its first remote fetch) stays uncached.
+pub fn cache_control(uri: &str, bytes: &[u8]) -> &'static str {
+    if protocol_path(uri).is_ok_and(|p| p.starts_with("/assets/") || p.starts_with("/asset/"))
+        && uri
+            .split_once("?v=")
+            .is_some_and(|(_, v)| v == hash_bytes(bytes))
+    {
+        "private, max-age=31536000, immutable"
+    } else {
+        "no-store"
+    }
+}
+
 fn embedded(path: &str) -> Option<(&'static str, &'static str)> {
     Some(match path {
         "/" | "/index.html" => ("text/html; charset=utf-8", include_str!("../ui/index.html")),
         "/studio.css" => ("text/css; charset=utf-8", include_str!("../ui/studio.css")),
         "/app.js" => ("text/javascript", include_str!("../ui/app.js")),
+        "/local.js" => ("text/javascript", include_str!("../ui/local.js")),
         "/canvas.js" => ("text/javascript", include_str!("../ui/canvas.js")),
         "/strip.js" => ("text/javascript", include_str!("../ui/strip.js")),
         "/panel.js" => ("text/javascript", include_str!("../ui/panel.js")),
@@ -854,3 +920,5 @@ mod font_tests;
 mod tests;
 #[cfg(test)]
 mod theme_tests;
+#[cfg(test)]
+mod timing_tests;

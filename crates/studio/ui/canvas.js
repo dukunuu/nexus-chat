@@ -197,8 +197,7 @@ export function canvasController(api) {
     if (!drag) return;
     const finished = drag; drag = null; canvas.classList.remove('dragging'); finished.line?.remove(); guides.clear();
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-    if (finished.moved) render(); else decorate();
-    if (cancel || !finished.moved) return;
+    if (cancel || !finished.moved) { if (finished.moved) render(); else decorate(); return; }
     const ops = [];
     if (finished.drop) {
       // Append first so insertion indices are computed after all dragged nodes
@@ -210,7 +209,7 @@ export function canvasController(api) {
       const fields = finished.drop && !finished.drop.absolute ? { position:'auto' } : change;
       if (Object.keys(fields).length) ops.push({ op:'update_node', id, fields, base_hash:api.state.hashes[id] });
     }
-    if (ops.length) api.apply(() => ops);
+    if (ops.length) api.apply(() => ops); else render();
   }
   function measureHover(event) {
     const nodes = selectedNodes(), boxes = nodes.map(n => rectOf(n.id)).filter(Boolean); if (!boxes.length) return;
@@ -268,8 +267,8 @@ export function canvasController(api) {
     const slide = api.slide();
     const ids = new Set(selectedNodes().map(n => n.id));
     if (!slide || !ids.size) return;
-    // Resolve relative edits when they leave the command queue, so fast key
-    // repeats accumulate against the last authoritative deck, not a preview.
+    // Resolve against the displayed optimistic deck, so key repeats paint
+    // immediately and accumulate even while previous commands are in flight.
     api.apply(() => {
       const current = api.state.deck.slides.find(s => s.id === slide.id);
       const nodes = current ? allNodes(current).filter(n => ids.has(n.id) && !locked(n.id) && !hasSelectedAncestor(n.id) && isAbsolute(current, n)) : [];
@@ -296,8 +295,8 @@ export function canvasController(api) {
       if (typeof copy.position === 'object') copy.position = { x: copy.position.x + 24, y: copy.position.y + 24 };
       return { copy, parent: at.parent.id, index: at.index + 1 };
     });
-    api.apply(() => copies.map(({ copy, parent, index }) => ({ op: 'insert_node', parent, index, node: copy })));
     api.state.selected = new Set(copies.map(c => c.copy.id));
+    api.apply(() => copies.map(({ copy, parent, index }) => ({ op: 'insert_node', parent, index, node: copy })));
   }
   return { render, decorate, nudge, remove, duplicate, rectOf };
 }
