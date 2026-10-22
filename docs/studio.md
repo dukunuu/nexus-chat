@@ -3,11 +3,11 @@
 Status: the core of D1 is implemented: deck format **version 2** (a pixel node
 tree with Figma-style auto-layout, numeric typography, named text styles and
 imported fonts), a `taffy` layout engine with browser parity, a v2 `deck` tool,
-and a studio backend and UI that speak v2. The editor's full D1 controls (smart
-guides, align and distribute, the font picker with import, a drag-to-reparent
-layers tree) are the next task; what the UI can and cannot do today is listed
-under *Editor status*. Terminal-theme identity and revised comments are
-implemented.
+and a studio backend and UI that speak v2. D1 editor controls now include
+auto-layout wrapping and reparenting, smart guides, align/distribute, scrub
+fields, font picking/import and a drag-to-reparent layers tree; details and
+remaining limitations are under *Editor status*. Terminal-theme identity and
+revised comments are implemented.
 Supersedes the editor half of `docs/web-editors.md`; that
 document's device-key pairing stays the plan for remote access (phase S5).
 
@@ -368,21 +368,73 @@ the same lines through `nexus host`, which is why the types live in core.
 ## Editor status
 
 The studio UI renders version-2 decks with real flexbox (`ui/render.js` follows
-the layout table above) and edits them through v2 operations. Today it can:
-select any node (nested ones too), drag and resize it (absolute nodes move;
-resizing any node writes a fixed size), nudge with the arrow keys (1 px, Shift
-10 px), edit text in place, duplicate, delete, reorder (layers list, bring
-forward and back), change size, weight, italics, line height, letter spacing,
-alignment, case and color in px, pick a text style, set sizing modes, absolute
-or auto position, opacity, and a frame's or slide's auto-layout (mode, gap,
-padding, main and cross alignment, wrap), fill, radius and clip, insert text,
-shapes and images, preview and apply comment edits, pin comments in slide
-pixels, and present. It cannot yet: wrap or unwrap a selection (Shift+A), show
-smart guides or distances, align or distribute, scrub numeric labels, pick or
-import fonts, edit text styles, reparent by dragging on the canvas, or drag a
-node that follows auto-layout (the panel changes its sizing and order). Fonts
-imported by the `deck` tool or a file are served and loaded
-(`/assets/fonts/…`).
+the layout table above) and edits them through v2 operations. Nested selection,
+in-place text editing, duplication, deletion, comments, image/shape/text
+insertion, zoom/pan and presenting remain available. D1 adds:
+
+- **Wrap / unwrap:** Shift+A wraps siblings in a hugging auto-layout frame,
+  guessing row versus column from their positions and using the median gap.
+  Alt+Shift+A unwraps frames. Both actions are also in the canvas context menu
+  and auto-layout panel.
+- **Auto-layout:** none/row/column/wrap buttons, fixed or auto (space-between)
+  gap, cross gap for wrapping, uniform/per-side padding, and a direction-aware
+  3×3 grid setting main and cross together. The sizing controls expose
+  fixed/hug/fill and optional min/max; frames expose clip content and children
+  expose Ignore auto layout.
+- **Canvas ordering:** drag flowing children to reorder, with a translucent
+  ghost and a 2-screen-pixel accent insertion line. Drop over another
+  auto-layout frame to reparent. Ctrl/Cmd+drag escapes into absolute slide
+  positioning, or into a free-layout frame under the pointer. A gesture sends
+  one atomic `Apply` transaction, so one undo restores it.
+- **Free positioning:** drag and resize snap within 6 screen px to sibling and
+  slide edges/centers. Error-role guides are 1 screen px; nearest-neighbour
+  distances and equal-spacing brackets show slide-pixel gaps. Shift constrains
+  dragging; Alt with a selection measures to the hovered node or parent edges.
+  Arrows nudge 1 px, Shift 10 px. Resizing a hug/fill axis fixes that axis;
+  Shift preserves aspect ratio and Alt preserves the center. Escape cancels
+  an in-progress drag or scrub.
+- **Align / distribute:** the panel offers six alignments, horizontal/vertical
+  spacing distribution (3+ nodes) and tidy up. Alt+A/H/D aligns left/center/right,
+  Alt+W/V/S top/center/bottom. A single free node aligns to its parent; multiple
+  free nodes align to their bounding box. Flowing selections change their
+  parent's main/cross alignment instead of acquiring absolute positions.
+- **Numeric fields:** X/Y/W/H, rotation, opacity, radius, gaps, padding and type
+  metrics accept arithmetic (`24*2`, `+8`, parentheses). Drag a label to scrub
+  with a live local preview; Shift multiplies by 10 and Alt by 0.1. Up/Down
+  steps values, Shift by 10. Multi-selection differences display “Mixed”. A
+  scrub commits once on release, not once per pointer move.
+- **Typography:** searchable, keyboard-navigable family picker grouped into
+  In this deck / Installed, with visible rows previewed in their own faces.
+  Size presets span 12–200 px; weights come from fontdb and registered deck
+  files, with variable weight controls when available. Italics, line-height
+  auto/multiplier, letter spacing (%), alignment, vertical alignment, case,
+  theme colors and hex are editable. Styles can be applied, detached into
+  resolved overrides, updated from selection or created. Detach clears the named
+  style; v2 restores its implicit body/code fallback, but complete overrides
+  keep the text independent and the picker displays Detached.
+- **Import font…:** the webview's file chooser accepts TTF/OTF/WOFF2. The backend
+  bounds imports to the core's 16 MB cap, sanitizes and hashes filenames,
+  refuses other types and escaping/symlink destinations, copies into
+  `assets/fonts/` and registers `theme.font_files` as one undo step. Fontdb
+  supplies family/weight/italic from readable faces. WOFF2 is webview-only:
+  its filename supplies the family when unreadable, with regular weight and
+  the deck body font as PNG fallback.
+- **Layers:** double-click names to rename; hide/show and lock/unlock buttons;
+  expand/collapse frames; drag above/below to reorder or into a frame's middle
+  to reparent. SVG kind icons and selection track the canvas. Locked nodes
+  (and descendants of locked frames) cannot be selected/edited on canvas,
+  but remain selectable in Layers.
+
+New IPC: `ListFonts {}` → `Fonts {families: [{family, weights, italic,
+variable}]}` uses the renderer's cached system font database plus deck faces.
+`ImportFont {path}` supports explicit local paths like image import;
+`ImportFontData {name, data}` carries hex-encoded chooser bytes without exposing
+local paths to JavaScript, and returns the normal `Deck` event. Only font-data
+commands may exceed the normal deck-command limit; the decoded cap is 16 MB.
+
+It cannot yet export/import PowerPoint or PDF (S3), render WOFF2 in core PNGs,
+or animate the preserved animation/transition fields. Font previews use the
+webview's installed faces, so platform font availability still matters.
 
 ## Tests
 
@@ -422,4 +474,17 @@ imported by the `deck` tool or a file are served and loaded
   harness and existing tests are unchanged. New Rust tests cover portable
   colors, fixture palette equivalence, theme link round trips, and a theme
   update leaving the saved deck and undo history untouched.
-- **Hermetic:** no network, and no windows opened in tests.
+- **D1 editor harness:** `node crates/studio/ui-dev/d1b-shot.mjs` checks wrapping,
+  layout modes/grid/gaps/padding/min-max/clip, snapping within 1 px, screen-space
+  guides/distances/equal gaps, reorder/reparent/absolute escape, align/distribute/
+  tidy, arithmetic/steps/scrubbing/mixed values, font search/keyboard/weights/
+  styles/native chooser-byte transport, layers rename/hide/lock/collapse/drop,
+  resize modifiers and cancellation.
+  It asserts that drag and scrub previews send no edits, and release sends one
+  `Apply` and adds one undo step. Outputs are 1440×900 in default nexus and the
+  light Alacritty fixture: `ui-dev/shots/d1b-{auto-layout,guides,reorder,fonts,
+  layers,align}-{default,light}.png` (gitignored). `backend/font_tests.rs` covers
+  cached font listing, imported metadata/theme/undo, chooser-byte transport,
+  type/data/size/path rejection, symlink confinement and the serving size cap.
+- **Hermetic:** no network, and no windows opened in Rust tests. Browser harnesses
+  use loopback-only static fixtures and mock IPC.

@@ -9,7 +9,7 @@
     clippy::cast_sign_loss
 )]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -64,7 +64,8 @@ pub const LAYOUT: LayoutSpec = LayoutSpec {
 };
 
 pub(super) const CODE_TINT: &str = "#8d8875";
-const MAX_FONT_FILE: u64 = 16 * 1024 * 1024;
+/// Maximum size of an imported deck font, shared with studio.
+pub const MAX_FONT_FILE: usize = 16 * 1024 * 1024;
 
 // -- fonts -----------------------------------------------------------------
 
@@ -139,6 +140,90 @@ pub fn installed_families() -> Vec<String> {
     names
 }
 
+/// Installed family metadata for the studio font picker.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct FontFamily {
+    pub family: String,
+    pub weights: Vec<u16>,
+    pub italic: bool,
+    pub variable: bool,
+}
+
+/// Cached families and available weights from the renderer's font database.
+#[must_use]
+pub fn installed_font_info() -> &'static [FontFamily] {
+    static INFO: OnceLock<Vec<FontFamily>> = OnceLock::new();
+    INFO.get_or_init(|| font_info(&system_fonts()))
+}
+
+/// Family metadata including the deck's imported faces and variable fonts.
+#[must_use]
+pub fn deck_font_info(theme: &Theme, assets: Option<&Path>) -> Vec<FontFamily> {
+    if theme.font_files.is_empty() {
+        return installed_font_info().to_vec();
+    }
+    font_info(&deck_fonts(theme, assets))
+}
+
+fn font_info(db: &usvg::fontdb::Database) -> Vec<FontFamily> {
+    let mut families = BTreeMap::<String, FontFamily>::new();
+    for face in db.faces() {
+        let Some((name, _)) = face.families.first() else {
+            continue;
+        };
+        let entry = families.entry(name.clone()).or_insert_with(|| FontFamily {
+            family: name.clone(),
+            weights: Vec::new(),
+            italic: false,
+            variable: false,
+        });
+        entry.weights.push(face.weight.0);
+        entry.italic |= face.style != usvg::fontdb::Style::Normal;
+        entry.variable |= db.with_face_data(face.id, variable_font).unwrap_or(false);
+    }
+    let mut result: Vec<_> = families.into_values().collect();
+    for family in &mut result {
+        family.weights.sort_unstable();
+        family.weights.dedup();
+    }
+    result.sort_by_key(|f| f.family.to_lowercase());
+    result
+}
+
+// A variable OpenType face has an `fvar` table. No shaping or decompression is
+// needed to inspect the sfnt directory (including a face within a collection).
+fn variable_font(data: &[u8], index: u32) -> bool {
+    let u32_at = |at: usize| -> Option<usize> {
+        Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?) as usize)
+    };
+    let offset = if data.starts_with(b"ttcf") {
+        let Some(offset) = u32_at(12 + index as usize * 4) else {
+            return false;
+        };
+        offset
+    } else {
+        0
+    };
+    let Some(count) = data.get(offset + 4..offset + 6) else {
+        return false;
+    };
+    let count = usize::from(u16::from_be_bytes([count[0], count[1]]));
+    (0..count).any(|i| data.get(offset + 12 + i * 16..offset + 16 + i * 16) == Some(b"fvar"))
+}
+
+/// Read a font's own family, weight and italic flag, if fontdb can decode it.
+#[must_use]
+pub fn imported_font_info(bytes: &[u8]) -> Option<(String, u16, bool)> {
+    let mut db = usvg::fontdb::Database::new();
+    db.load_font_data(bytes.to_vec());
+    let face = db.faces().next()?;
+    Some((
+        face.families.first()?.0.clone(),
+        face.weight.0,
+        face.style != usvg::fontdb::Style::Normal,
+    ))
+}
+
 /// Whether `path` is a font file the core renderer can load (`woff2` is for
 /// the editor's webview only).
 #[must_use]
@@ -169,7 +254,7 @@ pub fn deck_fonts(theme: &Theme, assets: Option<&Path>) -> Arc<usvg::fontdb::Dat
         };
         if !path.starts_with(&root)
             || !loadable_font(&file.file)
-            || std::fs::metadata(&path).map_or(true, |m| m.len() > MAX_FONT_FILE)
+            || std::fs::metadata(&path).map_or(true, |m| m.len() > MAX_FONT_FILE as u64)
         {
             continue;
         }

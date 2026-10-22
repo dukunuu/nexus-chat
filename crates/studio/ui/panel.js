@@ -1,23 +1,17 @@
 import { allNodes, childrenOf, parentOf, isAbsolute, nodeLabel, resolveFont, slideSize } from './helpers.js';
-import { element, color, fontStack, availableFont } from './render.js';
+import { element, color } from './render.js';
+import { fields } from './fields.js';
+import { fontController } from './fonts.js';
 import { button, icon } from './icons.js';
 
 const TEXTY = ['text', 'code', 'table'];
-const WEIGHTS = [100, 200, 300, 400, 500, 600, 700, 800, 900];
 
 export function panelController(api) {
   const panel = document.querySelector('#properties'), toolbar = document.querySelector('#floating-toolbar');
   const nodes = () => { const slide = api.slide(); return slide ? allNodes(slide).filter(n => api.state.selected.has(n.id)) : []; };
   const number = value => { const n = Number(value); return Number.isFinite(n) ? n : null; };
-  function field(label, value, change, options, type = 'text') {
-    const row = element('label', 'property'); row.append(element('span', '', label));
-    const input = element(options ? 'select' : 'input');
-    if (options) for (const [value, label] of options.map(o => Array.isArray(o) ? o : [o, o])) { const node = element('option', '', label); node.value = value; input.append(node); }
-    else input.type = type;
-    if (type === 'checkbox') { input.checked = Boolean(value); input.onchange = () => change(input.checked); }
-    else { input.value = value ?? ''; input.onchange = () => change(input.value); }
-    row.append(input); return row;
-  }
+  const field = fields(api), fonts = fontController(api, field, nodes);
+  const collapsed = new Set(), perSide = new Set(), limits = new Set();
   /** Merge-patch every selected node. */
   const patch = fields => api.updateMany(api.slide().id, nodes().map(node => ({ id: node.id, fields: structuredClone(fields) })));
   const font = fields => patch({ font: fields });
@@ -68,94 +62,130 @@ export function panelController(api) {
   // -- layers ----------------------------------------------------------------------
   function layerRows(slide, list, depth) {
     [...list].reverse().forEach(node => {
-      const row = element('button', `layer${api.state.selected.has(node.id) ? ' active' : ''}`);
+      const row = element('div', `layer${api.state.selected.has(node.id) ? ' active' : ''}${node.hidden ? ' hidden-layer' : ''}`);
+      row.dataset.layer = node.id; row.tabIndex = 0; row.setAttribute('role', 'treeitem'); row.setAttribute('aria-selected', String(api.state.selected.has(node.id)));
       row.style.paddingLeft = `${8 + depth * 14}px`;
-      row.append(icon(node.kind === 'text' ? 'align-left' : 'layers'), element('span', '', nodeLabel(node)));
-      row.onclick = () => { api.state.selected = new Set([node.id]); api.selectionChanged(); }; row.draggable = true;
-      row.ondragstart = event => event.dataTransfer.setData('text/plain', node.id);
-      row.ondragover = event => event.preventDefault();
-      row.ondrop = event => {
-        event.preventDefault();
-        const dragged = event.dataTransfer.getData('text/plain'), from = parentOf(slide, dragged), to = parentOf(slide, node.id);
-        if (!from || !to || dragged === node.id) return;
-        if (event.altKey && node.kind === 'frame') api.apply(() => [{ op: 'move_node', id: dragged, parent: node.id }]);
-        else api.apply(() => [{ op: 'move_node', id: dragged, parent: to.parent.id, index: to.index + 1 - (from.parent === to.parent && from.index < to.index ? 1 : 0) }]);
+      if (node.kind === 'frame') {
+        const toggle = button('chevron', collapsed.has(node.id) ? 'Expand frame' : 'Collapse frame', event => { event.stopPropagation(); collapsed.has(node.id) ? collapsed.delete(node.id) : collapsed.add(node.id); render(); }, 'layer-toggle');
+        toggle.classList.toggle('expanded', !collapsed.has(node.id)); row.append(toggle); row.setAttribute('aria-expanded', String(!collapsed.has(node.id)));
+      }
+      const name = element('span', 'layer-name', nodeLabel(node)); row.append(icon(`node-${node.kind}`), name);
+      const select = event => { if (event.shiftKey) { if (api.state.selected.has(node.id)) api.state.selected.delete(node.id); else api.state.selected.add(node.id); } else api.state.selected = new Set([node.id]); api.selectionChanged(); };
+      row.onclick = select; row.onkeydown = event => { if (event.key === 'Enter') select(event); };
+      name.ondblclick = event => {
+        event.stopPropagation(); row.draggable = false;
+        const input = element('input', 'layer-rename'); input.value = node.name || nodeLabel(node); name.replaceWith(input); input.focus(); input.select();
+        input.onclick = e => e.stopPropagation();
+        let cancel = false;
+        input.onkeydown = e => { e.stopPropagation(); if (['Enter','Escape'].includes(e.key)) { cancel = e.key === 'Escape'; input.blur(); } };
+        input.onblur = () => { if (!cancel && input.value.trim()) api.updateMany(slide.id, [{ id:node.id, fields:{ name:input.value.trim() } }]); else render(); };
       };
-      panel.append(row);
-      layerRows(slide, childrenOf(node), depth + 1);
+      for (const [key, glyph, title] of [['hidden', node.hidden ? 'eye-off' : 'eye', node.hidden ? 'Show layer' : 'Hide layer'], ['locked', node.locked ? 'lock' : 'unlock', node.locked ? 'Unlock layer' : 'Lock layer']]) {
+        const control = button(glyph, title, event => { event.stopPropagation(); api.updateMany(slide.id, [{ id:node.id, fields:{ [key]:!node[key] } }]); }, 'layer-control'); control.setAttribute('aria-pressed', String(Boolean(node[key]))); row.append(control);
+      }
+      row.draggable = true;
+      row.ondragstart = event => event.dataTransfer.setData('text/plain', node.id);
+      row.ondragover = event => { event.preventDefault(); event.stopPropagation(); const box = row.getBoundingClientRect(); row.dataset.drop = node.kind === 'frame' && event.clientY > box.top + box.height * .25 && event.clientY < box.bottom - box.height * .25 ? 'inside' : event.clientY < box.top + box.height / 2 ? 'above' : 'below'; };
+      row.ondragleave = () => delete row.dataset.drop;
+      row.ondrop = event => {
+        event.preventDefault(); event.stopPropagation();
+        const dragged = event.dataTransfer.getData('text/plain'), from = parentOf(slide, dragged), to = parentOf(slide, node.id), drop = row.dataset.drop; delete row.dataset.drop;
+        if (!from || !to || dragged === node.id || allNodes({ children:[childrenOf(from.parent)[from.index]] }).some(n => n.id === node.id)) return;
+        if (drop === 'inside') api.apply(() => [{ op:'move_node', id:dragged, parent:node.id }]);
+        else {
+          const index = to.index + (drop === 'above' ? 1 : 0);
+          api.apply(() => [{ op:'move_node', id:dragged, parent:to.parent.id, index:index - (from.parent === to.parent && from.index < index ? 1 : 0) }]);
+        }
+      };
+      listContainer.append(row);
+      if (!collapsed.has(node.id)) layerRows(slide, childrenOf(node), depth + 1);
     });
   }
   // -- sections --------------------------------------------------------------------
-  const MAIN = ['start', 'center', 'end', 'space_between'], CROSS = ['start', 'center', 'end', 'stretch'];
+  let listContainer;
   function layoutFields(container, layout, target, isSlide) {
     const write = (fields, extra) => isSlide
       ? api.apply(() => [{ op: 'update_slide', id: target.id, fields: { layout: fields } }])
       : api.updateMany(api.slide().id, [{ id: target.id, fields: { layout: fields, ...extra } }]);
-    container.append(field('Auto-layout', layout.mode || 'none', mode => api.apply(() => [{ op: 'set_layout', target: target.id, layout: { ...layout, mode } }]), [['none', 'None'], ['row', 'Row'], ['column', 'Column']]));
+    const modes = element('div', 'layout-modes');
+    for (const [mode, title] of [['none','None'],['row','Row'],['column','Column'],['wrap','Wrap']]) {
+      const control = element('button', '', title); control.setAttribute('aria-pressed', String((layout.wrap ? 'wrap' : layout.mode || 'none') === mode));
+      control.onclick = () => api.apply(() => [{ op:'set_layout', target:target.id, layout:{ ...layout, mode:mode === 'wrap' ? 'row' : mode, wrap:mode === 'wrap' } }]); modes.append(control);
+    }
+    container.append(modes);
+    const wrapActions = element('div', 'quick-actions');
+    const wrap = element('button', '', 'Wrap selection'); wrap.onclick = () => api.wrap(); wrap.disabled = !nodes().length;
+    const unwrap = element('button', '', 'Unwrap'); unwrap.onclick = () => api.wrap(true); unwrap.disabled = !nodes().some(n => n.kind === 'frame'); wrapActions.append(wrap, unwrap); container.append(wrapActions);
     if ((layout.mode || 'none') === 'none') return;
-    container.append(field('Gap', layout.gap || 0, value => { const n = number(value); if (n !== null) write({ gap: Math.max(0, n) }); }, null, 'number'));
-    container.append(field('Padding', layout.padding?.[0] || 0, value => { const n = number(value); if (n !== null) write({ padding: Array(4).fill(Math.max(0, n)) }); }, null, 'number'));
-    container.append(field('Main axis', layout.main || 'start', main => write({ main }), MAIN));
-    container.append(field('Cross axis', layout.cross || 'start', cross => write({ cross }), CROSS));
-    container.append(field('Wrap', layout.wrap, wrap => write({ wrap }), null, 'checkbox'));
-  }
-  function typography(container, node) {
-    const theme = api.state.deck.theme, resolved = resolveFont(theme, node.style, node.font);
-    const rendered = [...document.querySelectorAll('#canvas .block')].find(n => n.dataset.id === node.id);
-    const content = rendered?.querySelector('h1, h2, h3') || rendered;
-    const stack = content ? getComputedStyle(content).fontFamily : fontStack(theme.fonts.body);
-    const hint = element('p', 'hint', `Font · ${availableFont(stack)}`); hint.title = stack; container.append(hint);
-    container.append(field('Text style', node.style || 'body', style => patch({ style }), Object.keys(theme.text_styles || { body: 1 })));
-    container.append(field('Family', node.font?.family ?? '', family => font({ family: family.trim() || null })));
-    container.append(field('Size (px)', resolved.size, value => { const n = number(value); if (n > 0) font({ size: n }); }, null, 'number'));
-    container.append(field('Weight', resolved.weight, value => font({ weight: Number(value) }), WEIGHTS.map(String)));
-    container.append(field('Italic', resolved.italic, italic => font({ italic }), null, 'checkbox'));
-    container.append(field('Line height', resolved.line_height, value => { const n = number(value); if (n > 0) font({ line_height: n }); }, null, 'number'));
-    container.append(field('Letter spacing (em)', resolved.letter_spacing, value => { const n = number(value); if (n !== null) font({ letter_spacing: n }); }, null, 'number'));
-    container.append(field('Alignment', resolved.align, align => font({ align }), ['left', 'center', 'right']));
-    container.append(field('Vertical', resolved.valign, valign => font({ valign }), ['top', 'middle', 'bottom']));
-    container.append(field('Case', resolved.transform, transform => font({ transform }), ['none', 'uppercase', 'lowercase', 'capitalize']));
+    container.append(field('Gap mode', layout.main === 'space_between' ? 'auto' : 'fixed', value => write({ main:value === 'auto' ? 'space_between' : 'start' }), [['fixed','Fixed'],['auto','Auto']]));
+    container.append(field('Gap', layout.gap || 0, n => write({ gap:Math.max(0, n) }), null, 'number'));
+    if (layout.wrap) container.append(field('Cross gap', layout.gap_cross ?? layout.gap ?? 0, n => write({ gap_cross:Math.max(0, n) }), null, 'number'));
+    const grid = element('div', 'alignment-grid'); grid.setAttribute('aria-label', 'Auto-layout alignment');
+    for (let y = 0; y < 3; y++) for (let x = 0; x < 3; x++) {
+      const positions = ['start','center','end'], main = positions[layout.mode === 'column' ? y : x], cross = positions[layout.mode === 'column' ? x : y];
+      const control = element('button'); control.setAttribute('aria-label', `Align ${['top','middle','bottom'][y]} ${['left','center','right'][x]}`);
+      control.setAttribute('aria-pressed', String((layout.main || 'start') === main && (layout.cross || 'start') === cross));
+      control.append(element('span')); control.onclick = () => write({ main, cross }); grid.append(control);
+    }
+    container.append(grid);
+    container.append(field('Stretch children', layout.cross === 'stretch', value => write({ cross:value ? 'stretch' : 'start' }), null, 'checkbox'));
+    const pad = layout.padding || [0,0,0,0], sides = perSide.has(target.id) || !pad.every(n => n === pad[0]);
+    const toggle = element('button', 'padding-toggle', sides ? 'Uniform padding' : 'Per-side padding'); toggle.onclick = () => { if (sides) { perSide.delete(target.id); if (!pad.every(n => n === pad[0])) write({ padding:Array(4).fill(pad[0]) }); } else perSide.add(target.id); render(); }; container.append(toggle);
+    if (sides) for (const [i, label] of ['Padding top','Padding right','Padding bottom','Padding left'].entries()) container.append(field(label, pad[i], n => write({ padding:pad.map((v, j) => i === j ? Math.max(0, n) : v) }), null, 'number'));
+    else container.append(field('Padding', pad[0], n => write({ padding:Array(4).fill(Math.max(0, n)) }), null, 'number'));
   }
   function geometry(container, node, slide) {
     const rect = api.rectOf(node.id) || { x: 0, y: 0, w: 0, h: 0 }, free = isAbsolute(slide, node);
-    const at = typeof node.position === 'object' ? node.position : { x: 0, y: 0 };
     const holder = parentOf(slide, node.id)?.parent, origin = holder && holder !== slide ? api.rectOf(holder.id) || { x: 0, y: 0 } : { x: 0, y: 0 };
-    const grid = element('div', 'rect-fields');
-    const place = (key, label) => { const row = field(label, free ? at[key] : 'auto', value => { const n = number(value); if (n !== null) patch({ position: { x: at.x, y: at.y, [key]: Math.round(n) } }); }, null, free ? 'number' : 'text'); row.lastChild.disabled = !free; return row; };
-    grid.append(place('x', 'Left'), place('y', 'Top'));
-    for (const [key, label, size] of [['w', 'Width', rect.w], ['h', 'Height', rect.h]]) {
-      grid.append(field(label, Math.round(size), value => { const n = number(value); if (n !== null && n >= 0) patch({ sizing: { [key]: Math.round(n) } }); }, null, 'number'));
+    const selected = nodes(), grid = element('div', 'rect-fields');
+    const place = (key, label) => {
+      const row = field(label, selected.map(n => isAbsolute(slide, n) ? (typeof n.position === 'object' ? n.position[key] : 0) : 'auto'), value => {
+        api.updateMany(slide.id, selected.filter(n => isAbsolute(slide, n)).map(n => ({ id:n.id, fields:{ position:{ ...(typeof n.position === 'object' ? n.position : { x:0, y:0 }), [key]:value } } })));
+      }, null, free ? 'number' : 'text'); row.lastChild.disabled = !free; return row;
+    };
+    grid.append(place('x', 'X'), place('y', 'Y'));
+    for (const [key, label] of [['w', 'W'], ['h', 'H']]) {
+      grid.append(field(label, selected.map(n => Math.round(api.rectOf(n.id)?.[key] || 0)), n => { if (n >= 0) patch({ sizing:{ [key]:n } }); }, null, 'number'));
     }
     container.append(grid);
     for (const [key, label, size] of [['w', 'Width mode', rect.w], ['h', 'Height mode', rect.h]]) {
-      const mode = typeof node.sizing?.[key] === 'number' ? 'fixed' : node.sizing?.[key] || 'hug';
-      container.append(field(label, mode, value => patch({ sizing: { [key]: value === 'fixed' ? Math.round(size) : value } }), [['fixed', 'Fixed'], ['hug', 'Hug'], ['fill', 'Fill']]));
+      container.append(field(label, selected.map(n => typeof n.sizing?.[key] === 'number' ? 'fixed' : n.sizing?.[key] || 'hug'), value => api.updateMany(slide.id, selected.map(n => ({ id:n.id, fields:{ sizing:{ [key]:value === 'fixed' ? Math.round(api.rectOf(n.id)?.[key] || size) : value } } }))), [['fixed', 'Fixed'], ['hug', 'Hug'], ['fill', 'Fill']]));
     }
-    container.append(field('Position', free ? 'absolute' : 'auto', value => patch({ position: value === 'auto' ? 'auto' : { x: Math.round(rect.x - origin.x), y: Math.round(rect.y - origin.y) } }), [['auto', 'Follow auto-layout'], ['absolute', 'Absolute']]));
-    container.append(field('Opacity', node.opacity ?? 1, value => { const n = number(value); if (n !== null) patch({ opacity: Math.max(0, Math.min(1, n)) }); }, null, 'number'));
+    const disclosure = element('button', 'limits-toggle', limits.has(node.id) ? '− min/max' : '+ min/max'); disclosure.onclick = () => { limits.has(node.id) ? limits.delete(node.id) : limits.add(node.id); render(); }; container.append(disclosure);
+    if (limits.has(node.id)) for (const key of ['min_w','max_w','min_h','max_h']) {
+      const row = field(key.replace('_',' ').toUpperCase(), selected.map(n => n.sizing?.[key] ?? ''), n => patch({ sizing:{ [key]:Math.max(0, n) } }), null, 'number');
+      row.append(button('x', `Clear ${key}`, () => patch({ sizing:{ [key]:null } }))); container.append(row);
+    }
+    container.append(field('Ignore auto layout', selected.map(n => typeof n.position === 'object'), value => api.updateMany(slide.id, selected.map(n => { const r = api.rectOf(n.id) || rect, p = parentOf(slide, n.id)?.parent, o = p === slide ? { x:0,y:0 } : api.rectOf(p.id) || origin; return { id:n.id, fields:{ position:value ? { x:Math.round(r.x - o.x), y:Math.round(r.y - o.y) } : 'auto' } }; })), null, 'checkbox'));
+    container.append(field('Rotation', selected.map(n => n.rotation || 0), n => patch({ rotation:n }), null, 'number'));
+    container.append(field('Opacity', selected.map(n => n.opacity ?? 1), n => patch({ opacity:Math.max(0, Math.min(1, n)) }), null, 'number'));
   }
-  function render() {
+  function render(preserveLayers = false) {
+    const previous = preserveLayers && listContainer;
     panel.replaceChildren(); renderToolbar();
     const slide = api.slide();
     if (!slide) { panel.append(element('p', 'hint', 'Add a slide to get started.')); return; }
     panel.append(element('h3', '', 'Layers'));
-    layerRows(slide, slide.children, 0);
+    listContainer = previous || element('div', 'layers-tree'); listContainer.setAttribute('role', 'tree'); panel.append(listContainer);
+    if (previous) listContainer.querySelectorAll('[data-layer]').forEach(row => { const active = api.state.selected.has(row.dataset.layer); row.classList.toggle('active', active); row.setAttribute('aria-selected', String(active)); });
+    else layerRows(slide, slide.children, 0);
     const selected = nodes(), node = selected[0];
     if (node) {
       panel.append(element('h3', '', selected.length > 1 ? `${selected.length} selected layers` : node.name || node.kind));
-      if (selected.length === 1) {
-        panel.append(element('h3', '', 'Position & size'));
-        geometry(panel, node, slide);
-        if (node.kind === 'frame') {
-          panel.append(element('h3', '', 'Frame'));
-          layoutFields(panel, node.layout || { mode: 'none' }, node, false);
-          panel.append(field('Corner radius', node.radius || 0, value => { const n = number(value); if (n !== null) patch({ radius: Math.max(0, n) }); }, null, 'number'));
-          panel.append(field('Clip content', node.clip, clip => patch({ clip }), null, 'checkbox'));
-        }
+      api.alignRow(panel);
+      panel.append(element('h3', '', 'Position & size'));
+      geometry(panel, node, slide);
+      if (node.kind === 'frame' && selected.length === 1) {
+        panel.append(element('h3', '', 'Auto-layout'));
+        layoutFields(panel, node.layout || { mode: 'none' }, node, false);
+        panel.append(field('Clip content', node.clip, clip => patch({ clip }), null, 'checkbox'));
       }
-      if (selected.some(n => TEXTY.includes(n.kind))) {
+      if (selected.every(n => ['shape','frame'].includes(n.kind))) panel.append(field('Corner radius', selected.map(n => n.radius || 0), n => patch({ radius:Math.max(0, n) }), null, 'number'));
+      if (!(node.kind === 'frame' && selected.length === 1)) { const actions = element('div', 'quick-actions'); const wrap = element('button', '', 'Wrap selection'); wrap.onclick = () => api.wrap(); actions.append(wrap); panel.append(actions); }
+      const text = selected.find(n => TEXTY.includes(n.kind));
+      if (text) {
         panel.append(element('h3', '', 'Typography'));
-        if (selected.length === 1) typography(panel, node);
+        fonts.render(panel, text);
       }
       const chips = element('div', 'swatches text-colors'); colors(chips, true); panel.append(chips);
       if (node.kind === 'image') panel.append(field('Image fit', node.fit, fit => patch({ fit }), ['contain', 'cover']));

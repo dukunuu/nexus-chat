@@ -2,6 +2,7 @@ import { canvasController } from './canvas.js';
 import { stripController } from './strip.js';
 import { panelController } from './panel.js';
 import { feedbackController } from './feedback.js';
+import { editingController } from './editing.js';
 import { hydrateIcons } from './icons.js';
 import { textNode, id, allNodes, slideSize } from './helpers.js';
 import { renderSlide } from './render.js';
@@ -30,19 +31,41 @@ function pump() {
   catch (error) { toast(error.message); pending = null; pump(); }
 }
 function command(build, complete) { queue.push({ build:typeof build === 'function' ? build : () => build, complete }); pump(); }
-function apply(build) { command(() => ({ command:'Apply', ops:build() })); }
+let gesture;
+function apply(build) {
+  if (gesture) {
+    const ops = build(); gesture.ops = ops;
+    state.deck = structuredClone(gesture.deck);
+    const merge = (target, patch) => { for (const [key, value] of Object.entries(patch)) { if (value === null) delete target[key]; else if (value && typeof value === 'object' && !Array.isArray(value)) merge(target[key] ||= {}, value); else target[key] = value; } };
+    for (const op of ops) {
+      const target = op.op === 'update_slide' ? state.deck.slides.find(s => s.id === op.id) : state.deck.slides.flatMap(allNodes).find(n => n.id === op.id);
+      if (target && op.fields) merge(target, op.fields);
+    }
+    api.renderCanvas(); return;
+  }
+  command(() => ({ command:'Apply', ops:build() }));
+}
 const api = {
-  state, apply, command, toast, render,
+  state, apply, command, toast, render, ask,
+  beginGesture() { state.scrubbing = true; gesture = { deck:structuredClone(state.deck), ops:[] }; },
+  endGesture(cancel = false) {
+    if (!gesture) return;
+    const finished = gesture; gesture = null; state.scrubbing = false; state.deck = finished.deck;
+    if (!cancel && finished.ops.length) apply(() => finished.ops); else render();
+  },
+  wrap:unwrap => editing.wrap(unwrap),
+  align:action => editing.align(action),
+  alignRow:container => editing.alignRow(container),
   slide:() => state.deck?.slides.find(s => s.id === state.slideId),
   renderCanvas:() => { if (state.deck) { canvas.render(); panel.renderToolbar(); } },
   updateMany(slide, updates) { apply(() => updates.map(({ id, fields }) => ({ op:'update_node', id, fields, base_hash:state.hashes[id] || '' }))); },
   rectOf:nodeId => canvas.rectOf(nodeId),
-  selectionChanged() { canvas.decorate(); panel.render(); feedback.render(); focusChanged(); },
+  selectionChanged() { canvas.decorate(); panel.render(true); feedback.render(); focusChanged(); },
   duplicate:() => canvas.duplicate(), remove:() => canvas.remove(),
   clearPreview:() => feedback.clearPreview(),
   commentAt(anchor) { state.draftAnchor = anchor; state.openThread = null; state.selected.clear(); feedback.clearPreview(); render(); setTimeout(() => $('#thread-popover textarea')?.focus(), 0); },
 };
-const canvas = canvasController(api), strip = stripController(api), panel = panelController(api), feedback = feedbackController(api);
+const canvas = canvasController(api), strip = stripController(api), panel = panelController(api), feedback = feedbackController(api), editing = editingController(api);
 function render() {
   if (!state.deck) return;
   $('#properties-panel').hidden = !state.properties; $('#comments-panel').hidden = !state.comments;
@@ -63,6 +86,7 @@ function render() {
 function handleEvent(event, reply) {
   const finished = reply ? pending : null; if (reply) pending = null;
   if (event.event === 'Deck') {
+    if (gesture) api.endGesture(true);
     if (event.colors) applyTheme(event.colors);
     feedback.clearPreview(); Object.assign(state, { deck:event.deck, revision:event.revision, hashes:event.hashes, images:event.images, threads:event.threads || [], linked:event.linked, flash:event.changed || [] });
     if (!api.slide()) state.slideId = state.deck.slides[0]?.id || null;
@@ -187,14 +211,20 @@ document.addEventListener('keydown', event => {
     if (event.key === 'Escape') exitPresent(); else if (['ArrowRight','ArrowDown',' '].includes(event.key)) { presentIndex++; renderPresentation(); } else if (['ArrowLeft','ArrowUp'].includes(event.key)) { presentIndex--; renderPresentation(); }
     event.preventDefault(); return;
   }
-  const key = event.key.toLowerCase(), mod = event.metaKey || event.ctrlKey, editing = event.target.closest('input,textarea,select,[contenteditable]');
+  const key = event.key.toLowerCase(), mod = event.metaKey || event.ctrlKey, editingField = event.target.closest('input,textarea,select,[contenteditable]');
   if (mod && key === '\\') { event.preventDefault(); properties(); return; }
   if (mod && ['=','+','-','0'].includes(key)) { event.preventDefault(); zoom(key === '0' ? 0 : key === '-' ? -.1 : .1); return; }
-  if (mod && key === 's') { event.preventDefault(); if (editing) event.target.blur(); toast('Every change is saved to the deck file as you make it.'); return; }
-  if (editing || document.querySelector('dialog[open]')) return;
+  if (mod && key === 's') { event.preventDefault(); if (editingField) event.target.blur(); toast('Every change is saved to the deck file as you make it.'); return; }
+  if (state.scrubbing && event.key === 'Escape') { event.preventDefault(); api.endGesture(true); return; }
+  if (editingField || document.querySelector('dialog[open]')) return;
   if (event.code === 'Space') { event.preventDefault(); state.spacePan = true; stage.classList.add('pan-ready'); return; }
   if (event.shiftKey && event.code === 'Digit1') { event.preventDefault(); zoom(0); return; }
   if (event.shiftKey && event.code === 'Digit0') { event.preventDefault(); zoomTo(1); return; }
+  if (event.shiftKey && event.code === 'KeyA') { event.preventDefault(); editing.wrap(event.altKey); return; }
+  if (event.altKey && !mod) {
+    const action = { KeyA:'left', KeyD:'right', KeyW:'top', KeyS:'bottom', KeyH:'h-center', KeyV:'v-center' }[event.code];
+    if (action) { event.preventDefault(); editing.align(action); return; }
+  }
   if (key === 'b' && state.preview) { event.preventDefault(); feedback.togglePreview(); }
   else if (event.key === 'Escape') { feedback.clearPreview(); state.openThread = null; state.draftAnchor = null; state.selected.clear(); render(); }
   else if (key === 'c') { state.mode = state.mode === 'comment' ? 'edit' : 'comment'; state.selected.clear(); render(); }

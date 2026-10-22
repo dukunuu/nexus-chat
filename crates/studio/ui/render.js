@@ -9,7 +9,7 @@ export function element(tag, className, text) {
 export function fontStack(name = '') {
   const clean = name.replace(/["'\\;]/g, '');
   if (/mono|code|consolas|menlo/i.test(clean)) return `"${clean}", ui-monospace, SFMono-Regular, Menlo, monospace`;
-  if (/serif|georgia|times|baskerville|garamond|new york/i.test(clean) && !/sans/i.test(clean)) return 'ui-serif, "New York", Georgia, serif';
+  if (/serif|georgia|times|baskerville|garamond|new york/i.test(clean) && !/sans/i.test(clean)) return `"${clean}", ui-serif, "New York", Georgia, serif`;
   return `"${clean}", system-ui, -apple-system, "Segoe UI", sans-serif`;
 }
 export function availableFont(stack) {
@@ -220,6 +220,7 @@ export function renderNode(node, theme, images = {}, parent = { mode: 'none' }) 
     el.append(renderChart(node, theme));
     naturalSize(el, node, theme, [640, 360], true);
   }
+  if (node.hidden) el.style.display = 'none';
   return el;
 }
 /** Where a node sits among its siblings is up to its parent; this only re-applies its own box. */

@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 mod feedback;
+mod fonts;
 use nexus_core::deck::link::Message as LinkMessage;
 use std::time::SystemTime;
 
@@ -41,6 +42,14 @@ pub enum Command {
     },
     ImportAsset {
         path: PathBuf,
+    },
+    ListFonts {},
+    ImportFont {
+        path: PathBuf,
+    },
+    ImportFontData {
+        name: String,
+        data: String,
     },
     ExportDeck {
         path: PathBuf,
@@ -110,6 +119,9 @@ pub enum Event {
     },
     Asset {
         src: String,
+    },
+    Fonts {
+        families: Vec<deck::text::FontFamily>,
     },
     Exported {},
     Error {
@@ -234,10 +246,15 @@ impl Backend {
     pub fn dispatch(&mut self, source: &str) -> Event {
         let result = (|| {
             ensure!(
-                source.len() <= deck::MAX_SOURCE + 64 * 1024,
+                source.len() <= deck::text::MAX_FONT_FILE * 2 + 64 * 1024,
                 "command too large"
             );
             let command: Command = serde_json::from_str(source).context("invalid command")?;
+            ensure!(
+                source.len() <= deck::MAX_SOURCE + 64 * 1024
+                    || matches!(command, Command::ImportFontData { .. }),
+                "command too large"
+            );
             // The file wins: when the deck changed under the page, show that
             // instead of applying an edit made against the old one.
             if let (Some(mut event), true) = self.sync()? {
@@ -278,6 +295,29 @@ impl Backend {
             Command::PreviewEdit { owner, edit } => return self.preview_edit(&owner, &edit),
             Command::ApplyEdit { owner, edit } => self.apply_edit(&owner, &edit)?,
             Command::DismissEdit { owner, edit } => return self.dismiss_edit(&owner, &edit),
+            Command::ListFonts {} => {
+                return Ok(Event::Fonts {
+                    families: deck::text::deck_font_info(
+                        &self.deck.theme,
+                        Some(&asset_root(&self.path)?),
+                    ),
+                });
+            }
+            Command::ImportFont { path } => self.import_font(&path)?,
+            Command::ImportFontData { name, data } => {
+                ensure!(
+                    data.len() <= deck::text::MAX_FONT_FILE * 2 && data.len().is_multiple_of(2),
+                    "font exceeds size limit or has invalid encoding"
+                );
+                let bytes: Result<Vec<u8>> = data
+                    .as_bytes()
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| Ok(u8::from_str_radix(std::str::from_utf8(pair)?, 16)?))
+                    .collect();
+                self.import_font_bytes(&name, &bytes?)?;
+            }
             Command::Load {} => {}
             Command::Apply { ops } => {
                 let next = deck::apply(&self.deck, &ops)?;
@@ -519,7 +559,12 @@ impl Backend {
             Some("woff2") => "font/woff2",
             _ => bail!("unsupported asset type"),
         };
-        Ok((mime, read_bounded(&file, 8 * 1024 * 1024)?))
+        let max = if mime.starts_with("font/") {
+            deck::text::MAX_FONT_FILE
+        } else {
+            8 * 1024 * 1024
+        };
+        Ok((mime, read_bounded(&file, max)?))
     }
 
     pub fn remote_image(&self, uri: &str) -> Result<(Arc<Fetcher>, String)> {
@@ -726,10 +771,16 @@ fn embedded(path: &str) -> Option<(&'static str, &'static str)> {
         "/helpers.js" => ("text/javascript", include_str!("../ui/helpers.js")),
         "/icons.js" => ("text/javascript", include_str!("../ui/icons.js")),
         "/feedback.js" => ("text/javascript", include_str!("../ui/feedback.js")),
+        "/editing.js" => ("text/javascript", include_str!("../ui/editing.js")),
+        "/fields.js" => ("text/javascript", include_str!("../ui/fields.js")),
+        "/fonts.js" => ("text/javascript", include_str!("../ui/fonts.js")),
+        "/guides.js" => ("text/javascript", include_str!("../ui/guides.js")),
         _ => return None,
     })
 }
 
+#[cfg(test)]
+mod font_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
