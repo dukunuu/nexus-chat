@@ -1,6 +1,7 @@
 pub mod approval;
 pub mod apps;
 pub mod chrome;
+pub mod connectors;
 pub mod context;
 pub mod copy;
 pub mod files;

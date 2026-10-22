@@ -43,6 +43,8 @@ pub mod glyph {
     pub const SPACE: &str = "⌂";
     /// Web answer mode.
     pub const WEB: &str = "◎";
+    /// A call to a connected service (an MCP connector).
+    pub const CONNECTOR: &str = "⇄";
     /// Incognito mode.
     pub const INCOGNITO: &str = "◌";
     /// Something running.

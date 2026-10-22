@@ -1,0 +1,50 @@
+[
+  {
+    "name": "linear__create_issue",
+    "description": "[linear] Create an issue.",
+    "parameters": {
+      "properties": {
+        "id": {
+          "description": "the record id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "linear__get_issue",
+    "description": "[linear] Fetch one issue by id.",
+    "parameters": {
+      "properties": {
+        "id": {
+          "description": "the record id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "notes__search_notes_",
+    "description": "[notes] search notes!",
+    "parameters": {
+      "properties": {
+        "id": {
+          "description": "the record id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  }
+]

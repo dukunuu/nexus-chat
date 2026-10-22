@@ -132,6 +132,9 @@ pub struct ApprovalRequest {
 pub enum Decision {
     Allow,
     AllowForSession,
+    /// Allow now and from here on (a connector tool: policy `allow` in
+    /// config, with its definition pinned). Only connector requests offer it.
+    AllowAlways,
     Deny,
     /// Fall back to individual prompts for a combined request.
     ReviewEach,
@@ -274,6 +277,8 @@ pub struct ToolBox {
     pub session_id: String,
     /// Provider + model for video generation. `None` = tools hidden.
     pub video_gen_backend: Option<(OpenRouter, String)>,
+    /// Connected MCP connectors; their tools follow the built-in ones.
+    pub connectors: Option<crate::connectors::Registry>,
 }
 
 /// Where the file tools read from: the shared db plus the space to scope to.
@@ -681,6 +686,9 @@ impl ToolExecutor for ToolBox {
     }
 
     fn is_read_only(&self, name: &str, args: &str) -> bool {
+        if let Some(read_only) = self.connector_read_only(name, args) {
+            return read_only;
+        }
         is_read_only_tool(name, args)
     }
 
@@ -691,6 +699,16 @@ impl ToolExecutor for ToolBox {
     fn effect(&self, name: &str, args: &str) -> Effect {
         if matches!(name, "propose_command" | "request_workspace") {
             return Effect::barrier();
+        }
+        if let Some(read_only) = self.connector_read_only(name, args) {
+            return if read_only {
+                Effect {
+                    network: true,
+                    ..Effect::read_only()
+                }
+            } else {
+                Effect::barrier()
+            };
         }
         if name == "batch" {
             let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
@@ -951,7 +969,30 @@ impl ToolBox {
             space_scripts_dir: PathBuf::new(),
             session_id: String::new(),
             video_gen_backend: None,
+            connectors: None,
         }
+    }
+
+    /// Whether a connector call is read-only, or `None` when `name` is not
+    /// a connector tool (so the built-in classification applies).
+    fn connector_read_only(&self, name: &str, args: &str) -> Option<bool> {
+        let connectors = self.connectors.as_ref().filter(|c| !c.is_empty())?;
+        if name == crate::connectors::exec::META_TOOL {
+            let value: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
+            return Some(
+                match value.get("action").and_then(serde_json::Value::as_str) {
+                    Some("search") => true,
+                    Some("call") => value
+                        .get("tool")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|tool| connectors.resolve(tool))
+                        .is_some_and(|target| connectors.is_read_only(&target)),
+                    _ => false,
+                },
+            );
+        }
+        let target = connectors.resolve(name)?;
+        Some(connectors.is_read_only(&target))
     }
 
     fn scrubber(&self) -> &crate::trace::Scrubber {
@@ -1007,6 +1048,7 @@ impl ToolBox {
             space_scripts_dir: self.space_scripts_dir.clone(),
             session_id: self.session_id.clone(),
             video_gen_backend: self.video_gen_backend.clone(),
+            connectors: self.connectors.clone(),
         }
     }
 
@@ -1386,6 +1428,14 @@ impl ToolBox {
                 }
             }
         }
+        // Connector tools come last, in a stable order, so adding or
+        // removing one never reorders (and so never re-caches) the built-ins.
+        // With no connectors this adds nothing: the list is byte-identical.
+        if let Some(connectors) = &self.connectors
+            && !self.research_only
+        {
+            defs.extend(connectors.exposure().defs.iter().cloned());
+        }
         defs
     }
 
@@ -1703,6 +1753,7 @@ impl ToolBox {
         let answer = match answer {
             Decision::Allow => "allow",
             Decision::AllowForSession => "allow_session",
+            Decision::AllowAlways => "allow_always",
             Decision::Deny => "deny",
             Decision::ReviewEach => return,
         };
@@ -1854,6 +1905,23 @@ impl ToolBox {
                 );
             }
         }
+        if let Some(connectors) = &self.connectors
+            && crate::connectors::exec::handles(connectors, name)
+        {
+            // Connector tools ask for approval themselves -- in chat mode
+            // too -- so they never reach the workspace policy below.
+            let (result, status) = crate::connectors::exec::run(
+                crate::connectors::exec::Exec {
+                    registry: connectors,
+                    approver: self.approver.as_ref(),
+                    files_dir: &self.space_files_dir,
+                },
+                name,
+                args,
+            )
+            .await;
+            return (cap_tool_result(result), status);
+        }
         let mut allow_unparseable = false;
         let mut auto_allowed = false;
         let mut gate = gate;
@@ -1899,7 +1967,10 @@ impl ToolBox {
                         "blocked".to_string(),
                     );
                 };
-                if !matches!(decision, Decision::Allow | Decision::AllowForSession) {
+                if !matches!(
+                    decision,
+                    Decision::Allow | Decision::AllowForSession | Decision::AllowAlways
+                ) {
                     return (
                         "denied by the user · ask what they want instead of retrying".to_string(),
                         "blocked".to_string(),
@@ -1933,7 +2004,7 @@ impl ToolBox {
                 // a denial.
                 if !matches!(
                     approver.request(request).await,
-                    Decision::Allow | Decision::AllowForSession
+                    Decision::Allow | Decision::AllowForSession | Decision::AllowAlways
                 ) {
                     return (
                         "denied by the user · ask what they want instead of retrying".to_string(),
@@ -1985,7 +2056,7 @@ impl ToolBox {
                     };
                     if !matches!(
                         approver.request(request).await,
-                        Decision::Allow | Decision::AllowForSession
+                        Decision::Allow | Decision::AllowForSession | Decision::AllowAlways
                     ) {
                         return (
                             "denied by the user · workspace sub-agent not started".into(),
@@ -2117,7 +2188,7 @@ impl ToolBox {
                 };
                 if !matches!(
                     approver.request(request).await,
-                    Decision::Allow | Decision::AllowForSession
+                    Decision::Allow | Decision::AllowForSession | Decision::AllowAlways
                 ) {
                     return (
                         "denied by the user · ask what they want instead of retrying".to_string(),
@@ -4573,7 +4644,7 @@ pub fn tool_result_masked_note(name: &str, _args: &str) -> String {
 /// Bound every tool result before it is sent back to the model and persisted.
 /// This is especially important for fetched web pages, which can otherwise
 /// consume the conversation context one tool call at a time.
-fn cap_tool_result(result: String) -> String {
+pub(crate) fn cap_tool_result(result: String) -> String {
     cap_result(result, MAX_TOOL_RESULT_CHARS)
 }
 

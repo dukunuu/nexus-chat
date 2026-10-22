@@ -18,6 +18,8 @@ impl App {
     /// the very first message of the app), so `/new` without typing anything
     /// doesn't leave an empty "new chat" behind in the session list.
     pub fn new_session(&mut self) {
+        // Session-scoped connector grants and promoted tools end with the chat.
+        self.connectors.reset_session();
         self.session = None;
         self.reset_work_mode();
         self.refresh_toolbox();
@@ -41,6 +43,7 @@ impl App {
     }
 
     fn restore_work_mode(&mut self) {
+        self.connectors.reset_session();
         self.reset_work_mode();
         if self.incognito {
             return;

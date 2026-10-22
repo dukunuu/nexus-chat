@@ -430,10 +430,12 @@ fn push_workspace_call(
     }
 }
 
-/// ✗ for a failed call, ◎ for web tools, ⚒ for everything else.
+/// ✗ for a failed call, ⇄ for connectors, ◎ for web tools, ⚒ for everything else.
 fn call_glyph(view: &nexus_core::app::ToolView, failed: bool) -> &'static str {
     if failed {
         glyph::FAIL
+    } else if view.connector {
+        glyph::CONNECTOR
     } else if is_web(view) {
         glyph::WEB
     } else {
@@ -1803,6 +1805,96 @@ mod tool_card_tests {
             "the slide is clickable"
         );
         std::fs::remove_dir_all(files).unwrap();
+    }
+
+    #[test]
+    fn connector_calls_show_the_tool_the_connector_arguments_and_a_result_preview() {
+        let args = json!({"title": "Fix the login bug", "priority": 2, "labels": ["a"]});
+        let ok = card(
+            "linear__create_issue",
+            args.clone(),
+            "created LIN-42\nhttps://linear.app/x/issue/LIN-42",
+            false,
+            true,
+        );
+        let head = text(&ok).remove(0);
+        assert!(
+            head.starts_with(&format!(
+                "{} create_issue linear · labels=… priority=2 title=\"Fix the login bug\"",
+                glyph::CONNECTOR
+            )),
+            "{head}"
+        );
+        assert!(head.contains("created LIN-42"), "{head}");
+        let failed = card(
+            "linear__create_issue",
+            args.clone(),
+            "linear create_issue error: no such team\nthe server reported that the tool failed",
+            false,
+            true,
+        );
+        let head = text(&failed).remove(0);
+        assert!(head.starts_with(glyph::FAIL), "{head}");
+        assert!(
+            head.contains("create_issue linear") && head.contains("failed"),
+            "{head}"
+        );
+        let denied = text(&card(
+            "linear__create_issue",
+            args.clone(),
+            "denied by the user · ask what they want instead of retrying",
+            false,
+            true,
+        ))
+        .remove(0);
+        assert!(denied.contains("denied"), "{denied}");
+        // Through the meta-tool the inner tool is what the card names.
+        let meta = card(
+            "connectors",
+            json!({"action": "call", "tool": "linear__get_issue", "arguments": {"id": "LIN-1"}}),
+            "LIN-1: Fix it",
+            false,
+            true,
+        );
+        let head = text(&meta).remove(0);
+        assert!(head.starts_with(glyph::CONNECTOR), "{head}");
+        assert!(
+            head.contains("get_issue linear · id=\"LIN-1\" · LIN-1: Fix it"),
+            "{head}"
+        );
+        let search = text(&card(
+            "connectors",
+            json!({"action": "search", "query": "issues"}),
+            "linear__a · read-only",
+            false,
+            true,
+        ))
+        .remove(0);
+        assert!(search.contains("search connectors"), "{search}");
+        // Expanded: the generic argument table and the full result.
+        let expanded = text(&card(
+            "linear__create_issue",
+            args,
+            "created LIN-42",
+            true,
+            true,
+        ))
+        .join("\n");
+        assert!(
+            expanded.contains("title") && expanded.contains("created LIN-42"),
+            "{expanded}"
+        );
+        // Built-in cards are untouched.
+        assert!(
+            text(&card(
+                "search",
+                json!({"query": "rust", "mode": "web"}),
+                "no results",
+                false,
+                true
+            ))[0]
+                .starts_with(glyph::WEB)
+        );
     }
 
     #[test]

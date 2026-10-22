@@ -38,6 +38,7 @@ directories = { workspace = true }
 futures-util = { workspace = true }
 image = { workspace = true }
 ignore = { workspace = true }
+keyring = { workspace = true }  # connector secrets: OS keychain (connectors/secrets.rs)
 open = { workspace = true }
 pdf-extract = { workspace = true }
 png = { workspace = true }

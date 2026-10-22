@@ -5454,3 +5454,364 @@ async fn ui_repair_matches_the_stored_message_id_after_reload_and_rejects_newer_
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+// ----- connectors ----------------------------------------------------------
+
+#[test]
+fn connectors_slash_command_parses_every_form() {
+    use crate::app::AppCommand as C;
+    let app = app_with_key();
+    let root = app.space.root.clone();
+    for alias in ["connectors", "connector", "mcp", "integrations"] {
+        assert_eq!(app.parse_command(alias), Ok(C::OpenConnectors), "{alias}");
+    }
+    assert_eq!(
+        app.parse_command("connectors add linear https://mcp.linear.app/mcp"),
+        Ok(C::AddConnector {
+            name: "linear".into(),
+            url: Some("https://mcp.linear.app/mcp".into()),
+            command: Vec::new(),
+            bearer: false,
+        })
+    );
+    assert_eq!(
+        app.parse_command("connectors add gh https://api.example.com/mcp --bearer"),
+        Ok(C::AddConnector {
+            name: "gh".into(),
+            url: Some("https://api.example.com/mcp".into()),
+            command: Vec::new(),
+            bearer: true,
+        })
+    );
+    assert_eq!(
+        app.parse_command(r#"connectors add files npx -y srv "/My Notes""#),
+        Ok(C::AddConnector {
+            name: "files".into(),
+            url: None,
+            command: vec!["npx".into(), "-y".into(), "srv".into(), "/My Notes".into()],
+            bearer: false,
+        })
+    );
+    assert_eq!(
+        app.parse_command("connectors remove linear"),
+        Ok(C::RemoveConnector {
+            name: "linear".into()
+        })
+    );
+    assert_eq!(
+        app.parse_command("connectors disable linear"),
+        Ok(C::SetConnectorEnabled {
+            name: "linear".into(),
+            on: false
+        })
+    );
+    assert_eq!(
+        app.parse_command("connectors deny linear delete_issue"),
+        Ok(C::SetConnectorPolicy {
+            name: "linear".into(),
+            tool: "delete_issue".into(),
+            policy: "deny".into(),
+        })
+    );
+    assert_eq!(
+        app.parse_command("connectors import cursor"),
+        Ok(C::ImportConnectors {
+            source: "cursor".into(),
+            names: Vec::new()
+        })
+    );
+    for bad in [
+        "connectors add",
+        "connectors add onlyname",
+        "connectors allow linear",
+        "connectors frobnicate x",
+        "connectors add f \"unterminated",
+    ] {
+        assert!(app.parse_command(bad).is_err(), "{bad}");
+    }
+    assert!(COMMANDS.iter().any(|command| command.name == "connectors"));
+    // Every variant survives the host wire format.
+    for command in [
+        C::OpenConnectors,
+        C::SetConnectorPolicy {
+            name: "a".into(),
+            tool: "b".into(),
+            policy: "ask".into(),
+        },
+    ] {
+        let json = serde_json::to_string(&command).unwrap();
+        assert_eq!(serde_json::from_str::<C>(&json).unwrap(), command);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn connector_commands_run_through_the_seam_and_local_commands_need_the_terminal_ui() {
+    use crate::app::AppCommand as C;
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    app.execute(C::AddConnector {
+        name: "linear".into(),
+        url: Some("https://mcp.linear.app/mcp".into()),
+        command: Vec::new(),
+        bearer: false,
+    })
+    .unwrap();
+    assert_eq!(app.connectors.infos().len(), 1);
+    // A command connector starts a process: refused unless this is the TUI.
+    let local = C::AddConnector {
+        name: "files".into(),
+        url: None,
+        command: vec!["npx".into(), "srv".into()],
+        bearer: false,
+    };
+    let error = app.execute(local.clone()).unwrap_err().to_string();
+    assert!(error.contains("terminal UI"), "{error}");
+    assert_eq!(app.connectors.infos().len(), 1);
+    app.interactive_ui = true;
+    app.execute(local).unwrap();
+    assert_eq!(app.connectors.infos().len(), 2);
+
+    app.execute(C::SetConnectorEnabled {
+        name: "files".into(),
+        on: false,
+    })
+    .unwrap();
+    assert!(!app.connectors.config_of("files").unwrap().enabled);
+    app.execute(C::SetConnectorPolicy {
+        name: "linear".into(),
+        tool: "t".into(),
+        policy: "deny".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        app.connectors.config_of("linear").unwrap().policy("t"),
+        Some(crate::connectors::Policy::Deny)
+    );
+    app.execute(C::SetConnectorPolicy {
+        name: "linear".into(),
+        tool: "t".into(),
+        policy: "default".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        app.connectors.config_of("linear").unwrap().policy("t"),
+        None
+    );
+    assert!(
+        app.execute(C::SetConnectorPolicy {
+            name: "linear".into(),
+            tool: "t".into(),
+            policy: "sometimes".into()
+        })
+        .is_err()
+    );
+    app.execute(C::RemoveConnector {
+        name: "files".into(),
+    })
+    .unwrap();
+    assert!(
+        app.execute(C::RemoveConnector {
+            name: "files".into()
+        })
+        .is_err()
+    );
+    assert_eq!(app.connectors.infos().len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn connector_import_reads_only_the_injected_paths_and_skips_commands_off_the_tui() {
+    use crate::app::AppCommand as C;
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    let desktop = root.join("claude_desktop_config.json");
+    std::fs::write(
+        &desktop,
+        r#"{"mcpServers": {"linear": {"url": "https://mcp.linear.app/mcp"}, "files": {"command": "npx", "args": ["srv"]}}}"#,
+    )
+    .unwrap();
+    app.import_paths = Some(crate::connectors::import::ImportPaths {
+        claude_desktop: Some(desktop),
+        ..Default::default()
+    });
+    app.execute(C::ImportConnectors {
+        source: "claude-desktop".into(),
+        names: Vec::new(),
+    })
+    .unwrap();
+    let names: Vec<_> = app
+        .connectors
+        .infos()
+        .into_iter()
+        .map(|info| info.name)
+        .collect();
+    assert_eq!(
+        names,
+        ["linear"],
+        "the command server needs the terminal UI"
+    );
+    app.interactive_ui = true;
+    app.execute(C::ImportConnectors {
+        source: "all".into(),
+        names: Vec::new(),
+    })
+    .unwrap();
+    assert_eq!(app.connectors.infos().len(), 2);
+    assert!(
+        app.execute(C::ImportConnectors {
+            source: "notion".into(),
+            names: Vec::new()
+        })
+        .is_err()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn connector_approvals_keep_grants_in_the_registry_not_in_the_approver() {
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    let (sender, receiver) = mpsc::unbounded_channel();
+    app.approval_rx = Some(receiver);
+    let approver = Arc::new(ChannelApprover::new(sender));
+    let ask_with = |class: Option<&'static str>| {
+        let approver = Arc::clone(&approver);
+        tokio::spawn(async move {
+            approver
+                .request(ApprovalRequest {
+                    tool: "linear".into(),
+                    class: class.map(str::to_string),
+                    detail: None,
+                    action: "create_issue".into(),
+                    summary: "writes".into(),
+                    allow_session: true,
+                })
+                .await
+        })
+    };
+    // "Allow for the session" on a connector tool is answered, but the
+    // approver does not remember it: asking again prompts again, so a
+    // changed definition can never ride an old name-only grant.
+    for round in 0..2 {
+        let ask = ask_with(Some("connector"));
+        receive_approvals(&mut app, 1).await;
+        assert!(
+            app.pending_approval_request.is_some(),
+            "round {round} prompted"
+        );
+        app.answer_approval(Decision::AllowForSession);
+        assert_eq!(ask.await.unwrap(), Decision::AllowForSession);
+    }
+    // Always passes through for a connector...
+    let ask = ask_with(Some("connector"));
+    receive_approvals(&mut app, 1).await;
+    app.answer_approval(Decision::AllowAlways);
+    assert_eq!(ask.await.unwrap(), Decision::AllowAlways);
+    // ...and is a plain allow for anything else.
+    let ask = ask_with(None);
+    receive_approvals(&mut app, 1).await;
+    app.answer_approval(Decision::AllowAlways);
+    assert_eq!(ask.await.unwrap(), Decision::Allow);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_new_conversation_forgets_connector_session_grants() {
+    use crate::connectors::protocol::{Annotations, ToolInfo};
+    use crate::connectors::{Access, ConnectorConfig, Status};
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    app.connectors
+        .add("demo", ConnectorConfig::remote("https://demo.example/mcp"))
+        .unwrap();
+    app.connectors.force_state(
+        "demo",
+        Status::Connected { tools: 1 },
+        vec![ToolInfo {
+            name: "write".into(),
+            title: None,
+            description: "writes".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: Annotations::default(),
+        }],
+    );
+    let target = app.connectors.resolve("demo__write").unwrap();
+    app.connectors.grant_session(&target);
+    app.connectors.promote(&target);
+    assert_eq!(app.connectors.access(&target), Access::Free);
+    app.new_session();
+    assert_eq!(
+        app.connectors.access(&target),
+        Access::Ask { changed: false }
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn toolboxes_get_the_connector_registry_but_evals_do_not() {
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    assert!(app.toolbox.defs().iter().all(|d| !d.name.contains("__")));
+    app.refresh_toolbox();
+    let before = serde_json::to_string(&app.toolbox.defs()).unwrap();
+    app.connectors
+        .add(
+            "demo",
+            crate::connectors::ConnectorConfig::remote("https://demo.example/mcp"),
+        )
+        .unwrap();
+    // Connecting/disconnected connectors add nothing to the model's list.
+    assert_eq!(serde_json::to_string(&app.toolbox.defs()).unwrap(), before);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn chat_toolbox_connector_writes_reach_the_existing_app_approval_channel() {
+    use crate::connectors::protocol::{Annotations, ToolInfo};
+    use crate::connectors::{ConnectorConfig, Env, Registry, Status, Tuning};
+    let mut app = app_with_key();
+    let root = app.space.root.clone();
+    app.connectors = Registry::new(Env {
+        config_path: None,
+        logs_dir: None,
+        vault: Arc::new(crate::connectors::secrets::Vault::in_memory()),
+        notes: None,
+        tuning: Tuning::default(),
+        autostart: false,
+    });
+    app.connectors
+        .add(
+            "chat-fixture",
+            ConnectorConfig::remote("https://fixture.example/mcp"),
+        )
+        .unwrap();
+    app.connectors.force_state(
+        "chat-fixture",
+        Status::Connected { tools: 1 },
+        vec![ToolInfo {
+            name: "write".into(),
+            title: None,
+            description: "Write a note".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: Annotations::default(),
+        }],
+    );
+    assert!(!app.work_mode.is_agent());
+    app.interactive_approvals = true;
+    app.refresh_toolbox();
+    let tools = Arc::clone(&app.toolbox);
+    let call = tokio::spawn(async move {
+        tools
+            .run("chat-fixture__write", r#"{"text":"a note"}"#)
+            .await
+    });
+    receive_approvals(&mut app, 1).await;
+    let request = app.pending_approval_request.as_ref().unwrap();
+    assert_eq!(request.class.as_deref(), Some("connector"));
+    assert_eq!(request.tool, "chat-fixture");
+    assert!(request.summary.contains("a note"));
+    app.answer_approval(Decision::Deny);
+    assert!(call.await.unwrap().0.starts_with("denied by the user"));
+    std::fs::remove_dir_all(root).unwrap();
+}

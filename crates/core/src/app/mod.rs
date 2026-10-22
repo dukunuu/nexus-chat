@@ -51,6 +51,7 @@ pub use settings::{
     COLUMN_WIDTH_MAX, COLUMN_WIDTH_MIN, POPUP_IDS, POPUP_SIZE_MAX, POPUP_SIZE_MIN, popup_size,
     with_popup_size,
 };
+mod connectors;
 mod skills_popup;
 mod snapshot;
 mod spaces;
@@ -153,7 +154,12 @@ impl Approver for ChannelApprover {
         Box::pin(async move {
             let key = (req.tool.clone(), req.action.clone());
             let allow_session = req.allow_session;
+            // A connector's grants live in the connector registry, keyed by
+            // the tool's definition hash, so a changed definition asks again;
+            // this approver's name-only memory must not shortcut that.
+            let connector = req.class.as_deref() == Some(crate::connectors::exec::CLASS);
             if allow_session
+                && !connector
                 && !req.summary.starts_with("could not parse safely:")
                 && self
                     .allowed
@@ -168,10 +174,13 @@ impl Approver for ChannelApprover {
                 return Decision::Deny;
             }
             let decision = receiver.await.unwrap_or(Decision::Deny);
+            if decision == Decision::AllowAlways && !connector {
+                return Decision::Allow;
+            }
             if decision == Decision::AllowForSession && !allow_session {
                 return Decision::Allow;
             }
-            if decision == Decision::AllowForSession {
+            if decision == Decision::AllowForSession && !connector {
                 self.allowed
                     .lock()
                     .expect("approval permissions")
@@ -237,7 +246,7 @@ impl Approver for ChannelApprover {
                 return WaveDecision::DenyAll;
             }
             match receiver.await.unwrap_or(Decision::Deny) {
-                Decision::Allow => WaveDecision::AllowAll,
+                Decision::Allow | Decision::AllowAlways => WaveDecision::AllowAll,
                 Decision::AllowForSession if !allow_session => WaveDecision::AllowAll,
                 Decision::AllowForSession => {
                     self.allowed
@@ -306,6 +315,8 @@ pub enum Popup {
     Watch,
     ResearchLive,
     Swarm,
+    /// `/connectors`: MCP connectors, their status, tools and policies.
+    Connectors,
     /// `/usage`: aggregated per-backend/per-model token, cache, and cost stats.
     Usage,
     /// `/harness`: ranked tool failure modes and their latest transcripts.
@@ -1168,6 +1179,15 @@ pub struct App {
     /// Discovered skills (name/description only — bodies are read from disk on
     /// invocation, so this list is cheap and reloaded whenever it changes).
     pub skills: Vec<crate::skills::Skill>,
+    /// MCP connectors (`/connectors`): shared with every toolbox this app
+    /// builds. Empty until `boot()` loads `config.toml`.
+    pub connectors: crate::connectors::Registry,
+    /// Where `/connectors import` looks for other tools' MCP configs; `None`
+    /// means the real locations. Tests point it at fixtures.
+    pub import_paths: Option<crate::connectors::import::ImportPaths>,
+    /// Where the registry's background tasks send short status notes.
+    pub connector_notes_tx: mpsc::UnboundedSender<String>,
+    connector_notes_rx: mpsc::UnboundedReceiver<String>,
     /// A skill armed by `/<skill-name>`, injected into the next message only.
     pub forced_skill: Option<String>,
     /// `/web` answer mode for the active session (or the next one created).
@@ -1420,6 +1440,7 @@ impl App {
         let (chat_event_tx, chat_event_rx) = mpsc::unbounded_channel();
         let (ui_repair_tx, ui_repair_rx) = mpsc::unbounded_channel();
         let (decider_status_tx, decider_status_rx) = mpsc::unbounded_channel();
+        let (connector_notes_tx, connector_notes_rx) = mpsc::unbounded_channel();
         // Built with search disabled; `load_settings()` below reads the
         // persisted config (if any) and rebuilds this via `refresh_toolbox`.
         let image_fetcher =
@@ -1454,6 +1475,10 @@ impl App {
             trace_store: None,
             last_turn: None,
             skills,
+            connectors: crate::connectors::Registry::empty(),
+            import_paths: None,
+            connector_notes_tx,
+            connector_notes_rx,
             searxng_url: String::new(),
             langsearch_key: String::new(),
             search_provider: "auto".to_string(),
@@ -2136,6 +2161,11 @@ impl App {
         toolbox.space_apps_dir = self.space.apps_dir(&self.active_space.name);
         toolbox.space_scripts_dir = self.space.scripts_dir(&self.active_space.name);
         toolbox.supports_images = self.current_model_supports_images();
+        // Evals run in a hermetic workspace: no outside services.
+        toolbox.connectors = self
+            .eval_approver
+            .is_none()
+            .then(|| self.connectors.clone());
         toolbox.record_events = !self.incognito;
         self.configure_auto_policy(&mut toolbox);
         toolbox.remote_images = Some(Arc::clone(&self.image_fetcher));
@@ -2461,6 +2491,7 @@ impl App {
                 AppEvent::Status("approval cancelled".to_string())
             },
             Some(status) = self.decider_status_rx.recv() => AppEvent::Status(status),
+            Some(note) = self.connector_notes_rx.recv() => AppEvent::Status(note),
             Some(repair) = self.ui_repair_rx.recv() => self.on_ui_repair_result(repair),
             ev = self.chat_event_rx.recv() => {
                 AppEvent::Stream(ev.map(|event| (event.task_id, event.event)))
@@ -2669,20 +2700,28 @@ impl App {
     /// they are never shown.
     pub(crate) fn answer_approval(&mut self, decision: Decision) {
         let request = self.pending_approval_request.take();
-        let decision = if decision == Decision::AllowForSession
-            && request
-                .as_ref()
-                .is_some_and(|request| !request.allow_session)
-        {
-            Decision::Allow
-        } else {
-            decision
+        let connector = request.as_ref().is_some_and(|request| {
+            request.class.as_deref() == Some(crate::connectors::exec::CLASS)
+        });
+        // "Always" writes policy to config; only a connector request offers
+        // it, so anything else answering with it is just a plain allow.
+        let decision = match decision {
+            Decision::AllowAlways if !connector => Decision::Allow,
+            Decision::AllowForSession
+                if request
+                    .as_ref()
+                    .is_some_and(|request| !request.allow_session) =>
+            {
+                Decision::Allow
+            }
+            other => other,
         };
         if let Some(sender) = self.pending_approval.take() {
             let _ = sender.send(decision);
         }
         if decision == Decision::AllowForSession
             && let Some(request) = request.filter(|request| request.tool != "wave")
+            && !connector
         {
             if let Some(receiver) = self.approval_rx.as_mut() {
                 while let Ok(item) = receiver.try_recv() {

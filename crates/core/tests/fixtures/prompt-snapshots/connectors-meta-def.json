@@ -1,0 +1,31 @@
+{
+  "name": "connectors",
+  "description": "Search and call tools from connected services (MCP connectors). action=search {query} finds tools by name or description and returns their names, one-line descriptions and input schemas; action=call {tool, arguments} runs one by the name search returned. Tools you have called become regular tools afterwards.",
+  "parameters": {
+    "properties": {
+      "action": {
+        "enum": [
+          "search",
+          "call"
+        ],
+        "type": "string"
+      },
+      "arguments": {
+        "description": "the tool's arguments, for call",
+        "type": "object"
+      },
+      "query": {
+        "description": "words to look for, for search",
+        "type": "string"
+      },
+      "tool": {
+        "description": "tool name from search, for call",
+        "type": "string"
+      }
+    },
+    "required": [
+      "action"
+    ],
+    "type": "object"
+  }
+}

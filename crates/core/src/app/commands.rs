@@ -130,6 +130,11 @@ pub const COMMANDS: &[Command] = &[
         ],
     },
     Command {
+        name: "connectors",
+        desc: "connect outside services (MCP): add, tools, policy — /connectors add <name> <url|command>",
+        aliases: &["connector", "mcp", "integrations", "services"],
+    },
+    Command {
         name: "apps",
         desc: "view space apps",
         aliases: &["app", "webapps"],
@@ -366,6 +371,30 @@ pub enum AppCommand {
     OpenFiles { tab: FilesTab },
     /// `/apps` — the apps popup.
     OpenApps,
+    /// `/connectors` — the connectors popup.
+    OpenConnectors,
+    /// `/connectors add <name> <url | command…>` — add an MCP connector.
+    /// `bearer` marks a hosted one that authenticates with a token (stored
+    /// separately in the keychain, never in a command).
+    AddConnector {
+        name: String,
+        url: Option<String>,
+        command: Vec<String>,
+        bearer: bool,
+    },
+    /// `/connectors remove <name>` — delete a connector and its keychain entries.
+    RemoveConnector { name: String },
+    /// `/connectors enable|disable <name>`.
+    SetConnectorEnabled { name: String, on: bool },
+    /// `/connectors allow|ask|deny|default <name> <tool>` — per-tool policy.
+    SetConnectorPolicy {
+        name: String,
+        tool: String,
+        policy: String,
+    },
+    /// `/connectors import [claude-desktop|claude-code|cursor]` — bring over
+    /// MCP servers from other tools (`names` empty = every new one).
+    ImportConnectors { source: String, names: Vec<String> },
     /// Open a sandboxed space-local terminal app.
     OpenTuiApp(String),
     /// `/studio [deck]` — open or focus the linked slide canvas (view-owned).
@@ -510,6 +539,7 @@ impl App {
             "studio" => Ok(AppCommand::OpenStudio {
                 deck: Some(rest(cmd, token)).filter(|deck| !deck.is_empty()),
             }),
+            "connectors" => parse_connectors(&rest(cmd, token)),
             "tuiapp" => Ok(AppCommand::OpenTuiApp(rest(cmd, token))),
             "research" => Ok(AppCommand::RunResearch {
                 topic: rest(cmd, token),
@@ -591,6 +621,7 @@ impl App {
             | AppCommand::OpenSkills
             | AppCommand::OpenFiles { .. }
             | AppCommand::OpenApps
+            | AppCommand::OpenConnectors
             | AppCommand::OpenTuiApp(_)
             | AppCommand::OpenStudio { .. }
             | AppCommand::OpenUsage
@@ -598,6 +629,22 @@ impl App {
             | AppCommand::OpenProcs
             | AppCommand::OpenHelp
             | AppCommand::Watch { .. } => {}
+            AppCommand::AddConnector {
+                name,
+                url,
+                command,
+                bearer,
+            } => self.add_connector(&name, url, command, bearer)?,
+            AppCommand::RemoveConnector { name } => self.remove_connector(&name)?,
+            AppCommand::SetConnectorEnabled { name, on } => {
+                self.set_connector_enabled(&name, on)?;
+            }
+            AppCommand::SetConnectorPolicy { name, tool, policy } => {
+                self.set_connector_policy(&name, &tool, &policy)?;
+            }
+            AppCommand::ImportConnectors { source, names } => {
+                self.import_connectors(&source, &names)?;
+            }
             AppCommand::OpenJobs => self.collect_job_notifications()?,
             AppCommand::CreateJob { mut spec } => {
                 spec.validate()?;
@@ -762,6 +809,72 @@ impl App {
                 Ok(())
             }
         }
+    }
+}
+
+/// `/connectors [add|remove|enable|disable|allow|ask|deny|default|import] …`.
+fn parse_connectors(rest: &str) -> std::result::Result<AppCommand, String> {
+    const USAGE: &str = "usage: /connectors [add <name> <url|command…> | remove <name> | enable|disable <name> | allow|ask|deny|default <name> <tool> | import [source]]";
+    let mut words = rest.split_whitespace();
+    let Some(verb) = words.next() else {
+        return Ok(AppCommand::OpenConnectors);
+    };
+    let tail = |count: usize| {
+        let mut skipped = rest.trim_start();
+        for _ in 0..count {
+            skipped = skipped
+                .trim_start_matches(|c: char| !c.is_whitespace())
+                .trim_start();
+        }
+        skipped.to_string()
+    };
+    let name = words.next().map(str::to_string);
+    match (verb, name) {
+        ("add", Some(name)) => {
+            let target = tail(2);
+            if target.is_empty() {
+                return Err(USAGE.into());
+            }
+            if target.starts_with("http://") || target.starts_with("https://") {
+                Ok(AppCommand::AddConnector {
+                    name,
+                    url: Some(
+                        target
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or_default()
+                            .to_string(),
+                    ),
+                    command: Vec::new(),
+                    bearer: target.split_whitespace().any(|word| word == "--bearer"),
+                })
+            } else {
+                Ok(AppCommand::AddConnector {
+                    name,
+                    url: None,
+                    command: crate::connectors::split_argv(&target)?,
+                    bearer: false,
+                })
+            }
+        }
+        ("remove" | "rm" | "delete", Some(name)) => Ok(AppCommand::RemoveConnector { name }),
+        ("enable" | "disable", Some(name)) => Ok(AppCommand::SetConnectorEnabled {
+            name,
+            on: verb == "enable",
+        }),
+        ("allow" | "ask" | "deny" | "default", Some(name)) => match words.next() {
+            Some(tool) => Ok(AppCommand::SetConnectorPolicy {
+                name,
+                tool: tool.to_string(),
+                policy: verb.to_string(),
+            }),
+            None => Err(USAGE.into()),
+        },
+        ("import", source) => Ok(AppCommand::ImportConnectors {
+            source: source.unwrap_or_default(),
+            names: Vec::new(),
+        }),
+        _ => Err(USAGE.into()),
     }
 }
 

@@ -50,6 +50,12 @@ struct Config {
     experiments: Experiments,
     #[serde(default)]
     agent: AgentConfig,
+    /// Raw `[connectors.*]` section. Typed parsing lives in
+    /// `connectors::config` so a malformed connector can never stop the
+    /// provider credentials above from loading.
+    #[serde(default)]
+    #[allow(dead_code)] // parsed so the key is known; read through `read_table_at`
+    connectors: Option<toml::Value>,
 }
 
 /// Machine-local rules and model thresholds for agent-auto policy.
@@ -226,6 +232,44 @@ fn write_secret_file(path: &std::path::Path, body: &str) -> Result<()> {
     std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
     restrict_to_owner(path);
     Ok(())
+}
+
+/// Read `path` as a TOML table (an absent file is an empty table).
+///
+/// # Errors
+/// The file exists but cannot be read or does not parse.
+pub(crate) fn read_table_at(path: &Path) -> Result<toml::Table> {
+    if !path.exists() {
+        return Ok(toml::Table::new());
+    }
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    // TOML diagnostics include source lines, which may contain credentials.
+    toml::from_str::<toml::Table>(&text)
+        .map_err(|_| anyhow::anyhow!("invalid TOML in {}", path.display()))
+}
+
+/// Edit the config file in place: read the whole table, let `edit` change
+/// the parts it owns, and write it back atomically with owner-only
+/// permissions. Everything else in the file is carried over untouched, and a
+/// file that does not parse is left alone rather than replaced.
+///
+/// # Errors
+/// Propagates read, parse, `edit` and write failures.
+pub(crate) fn edit_config_at(
+    path: &Path,
+    edit: impl FnOnce(&mut toml::Table) -> Result<()>,
+) -> Result<()> {
+    // Several connectors can persist their first definition pins at startup.
+    static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let _guard = WRITER.lock().expect("config writer");
+    let mut root = read_table_at(path)?;
+    edit(&mut root)?;
+    let body = toml::to_string_pretty(&root).context("serializing config")?;
+    write_secret_file(path, &body)
 }
 
 #[cfg(unix)]
@@ -939,6 +983,17 @@ mod reddit_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connectors_section_never_blocks_provider_loading() {
+        for body in [
+            "[provider]\nopenrouter_key = \"k\"\n[connectors]\nlinear = 5\n",
+            "connectors = \"nonsense\"\n[provider]\nopenrouter_key = \"k\"\n",
+        ] {
+            let config: super::Config = toml::from_str(body).unwrap();
+            assert_eq!(config.provider.openrouter_key, "k");
+        }
+    }
 
     #[test]
     fn experiment_defaults_round_trip_and_set() {

@@ -178,6 +178,11 @@ pub enum Command {
         #[arg(long)]
         quiet: bool,
     },
+    /// MCP connectors: list, add, remove, show tools, import from other apps.
+    Connectors {
+        #[command(subcommand)]
+        cmd: crate::connectors_cli::ConnectorsCmd,
+    },
     /// Durable agent jobs, independent of the host and terminal UI.
     Jobs {
         #[command(subcommand)]
@@ -537,6 +542,7 @@ pub async fn run(cmd: Command) -> Result<()> {
             json,
             quiet,
         } => research(topic, model, space, approve, json, quiet).await,
+        Command::Connectors { cmd } => crate::connectors_cli::run(cmd).await,
         Command::Jobs { cmd } => jobs(cmd).await,
         Command::Watch { cmd } => watch(cmd).await,
         Command::Usage {
@@ -644,6 +650,12 @@ fn launch_studio(path: Option<&Path>) -> Result<()> {
 async fn build_app(model: Option<&str>, space_name: Option<&str>) -> Result<app::App> {
     let saved = config::load_all_providers().await?;
     let mut app = nexus_core::boot(saved).await?;
+    // Connectors connect in the background; a headless turn has no UI to
+    // update later, so give the configured ones a moment before the first
+    // request builds its tool list.
+    app.connectors
+        .wait_ready(std::time::Duration::from_secs(12))
+        .await;
     if let Some(name) = space_name {
         app.execute(nexus_core::app::AppCommand::SwitchSpace {
             name: name.to_string(),

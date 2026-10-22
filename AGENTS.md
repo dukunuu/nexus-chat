@@ -71,6 +71,7 @@ The README has the full tree; the parts agents touch most:
 | `crates/core/src/provider/serve.rs` | managed local-provider servers: per-runtime launch commands, endpoint liveness probes, process-tree memory, and the advisory budget behind `/local start\|stop\|status` |
 | `crates/core/src/provider/local.rs`, `harmony.rs` | opt-in local runtimes: config + installed-model discovery, and the Harmony channel splitter for `gpt-oss` servers that leave framing in `content` |
 | `crates/core/src/tools.rs` | the model's tools + the `ToolExecutor` seam (`defs`/`is_read_only`/`run`) |
+| `crates/core/src/connectors/` | MCP connectors (docs/connectors.md): `protocol`/`transport`/`client` speak both protocol families over HTTP and stdio, `registry` tracks status and what the model may see (naming, >30-tool meta-tool, policy, rug-pull pins), `exec` runs a call through the approval flow, `import`/`secrets`/`config` cover other tools' configs, the keychain and `[connectors.*]` |
 | `crates/core/src/db.rs` | SQLite (rusqlite bundled): sessions, messages, usage, citations, model prefs |
 | `crates/core/src/sync.rs` | Phase 3 merge engine: changeset types, per-table registry (cursor + apply rules), build/apply/ack, file blobs + zip bundles |
 | `crates/core/src/appserver.rs` | localhost static server for model-created apps (port 8642) |

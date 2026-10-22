@@ -159,3 +159,113 @@ fn assembled_prompts_mention_only_existing_tools() {
         }
     }
 }
+
+fn connector_fixture() -> crate::connectors::Registry {
+    use crate::connectors::protocol::{Annotations, ToolInfo};
+    use crate::connectors::{ConnectorConfig, Registry, Status};
+    let registry = Registry::empty();
+    let tool =
+        |name: &str, title: Option<&str>, description: &str, read_only: Option<bool>| ToolInfo {
+            name: name.into(),
+            title: title.map(str::to_string),
+            description: description.into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"id": {"type": "string", "description": "the record id"}},
+                "required": ["id"]
+            }),
+            annotations: Annotations {
+                read_only,
+                raw: read_only.map(|_| "{}".to_string()),
+                ..Annotations::default()
+            },
+        };
+    for (name, url, tools) in [
+        (
+            "linear",
+            "https://mcp.linear.app/mcp",
+            vec![
+                tool(
+                    "get_issue",
+                    Some("Get issue"),
+                    "Fetch one issue by id.",
+                    Some(true),
+                ),
+                tool("create_issue", None, "Create an issue.", Some(false)),
+            ],
+        ),
+        (
+            "notes",
+            "https://notes.example/mcp",
+            vec![tool("search notes!", None, "", None)],
+        ),
+    ] {
+        registry.add(name, ConnectorConfig::remote(url)).unwrap();
+        registry.force_state(name, Status::Connected { tools: tools.len() }, tools);
+    }
+    registry
+}
+
+#[test]
+fn connector_tool_defs_snapshot() {
+    let registry = connector_fixture();
+    let exposure = registry.exposure();
+    assert!(!exposure.meta);
+    assert_snapshot(
+        "tool-defs-connectors.json",
+        &(serde_json::to_string_pretty(&exposure.defs).unwrap() + "\n"),
+    );
+}
+
+#[test]
+fn connector_meta_tool_def_snapshot() {
+    let meta = {
+        use crate::connectors::protocol::{Annotations, ToolInfo};
+        use crate::connectors::{ConnectorConfig, Registry, Status};
+        let many = Registry::empty();
+        many.add("big", ConnectorConfig::remote("https://big.example/mcp"))
+            .unwrap();
+        let tools: Vec<ToolInfo> = (0..31)
+            .map(|i| ToolInfo {
+                name: format!("t{i}"),
+                title: None,
+                description: String::new(),
+                input_schema: serde_json::json!({"type": "object"}),
+                annotations: Annotations::default(),
+            })
+            .collect();
+        many.force_state("big", Status::Connected { tools: 31 }, tools);
+        many.exposure().defs[0].clone()
+    };
+    assert_eq!(meta.name, "connectors");
+    assert_snapshot(
+        "connectors-meta-def.json",
+        &(serde_json::to_string_pretty(&meta).unwrap() + "\n"),
+    );
+}
+
+#[test]
+fn no_connectors_leaves_the_tool_list_byte_identical() {
+    let a = fixture_app();
+    let baseline = serde_json::to_string(&a.toolbox.defs()).unwrap();
+    let mut toolbox = crate::tools::ToolBox::new(
+        std::path::PathBuf::new(),
+        None,
+        None,
+        "auto".into(),
+        Vec::new(),
+        None,
+        None,
+        None,
+    );
+    for registry in [None, Some(crate::connectors::Registry::empty())] {
+        toolbox.connectors = registry;
+        let bare = serde_json::to_string(&toolbox.defs()).unwrap();
+        // Same builder, same capabilities: nothing about connectors leaks in.
+        assert!(!bare.contains("connectors"), "{bare}");
+        assert!(!bare.contains("__"));
+    }
+    // The app's own list (golden-tested above) has the empty registry attached.
+    assert!(a.toolbox.defs().iter().all(|d| d.name != "connectors"));
+    assert_eq!(baseline, serde_json::to_string(&a.toolbox.defs()).unwrap());
+}

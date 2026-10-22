@@ -223,6 +223,7 @@ impl AppView {
             Popup::InteractiveUi => self.interactive.paste(text),
             Popup::TuiApp => crate::ui::popups::tui_app::paste(self, text),
             Popup::Key => self.key_input.push_str(text),
+            Popup::Connectors => crate::ui::popups::connectors::paste(self, text),
             Popup::Jobs => {
                 if let Some(form) = &mut self.jobs_popup.form {
                     form.values[form.field].push_str(text);
@@ -856,6 +857,7 @@ impl AppView {
                     self.open_files_popup(tab);
                 }
             }
+            AppCommand::OpenConnectors => crate::ui::popups::connectors::open(self),
             AppCommand::OpenApps => {
                 if self.core.incognito {
                     self.push_status("apps not available in incognito mode");

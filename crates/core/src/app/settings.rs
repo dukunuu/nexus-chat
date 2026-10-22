@@ -115,9 +115,28 @@ pub const POPUP_SIZE_MIN: u16 = 20;
 pub const POPUP_SIZE_MAX: u16 = 100;
 
 /// Every popup whose size can be overridden — the ids `popup_sizes` accepts.
-pub const POPUP_IDS: [&str; 20] = [
-    "model", "session", "copy", "key", "settings", "space", "skills", "files", "apps", "terminal",
-    "watches", "research", "swarm", "usage", "jobs", "harness", "procs", "login", "local", "help",
+pub const POPUP_IDS: [&str; 21] = [
+    "model",
+    "session",
+    "copy",
+    "key",
+    "settings",
+    "space",
+    "skills",
+    "files",
+    "apps",
+    "terminal",
+    "watches",
+    "research",
+    "swarm",
+    "usage",
+    "jobs",
+    "harness",
+    "procs",
+    "login",
+    "local",
+    "help",
+    "connectors",
 ];
 
 /// `auto`, `full`, or a plain cell count in range.

@@ -128,6 +128,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
         Popup::Login => popups::login::render(f, app),
         Popup::Local => popups::local::render(f, app),
         Popup::Help => popups::help::render(f, app),
+        Popup::Connectors => popups::connectors::render(f, app),
         // An approval is drawn in the composer's place above.
         Popup::Approval | Popup::None => {}
     }

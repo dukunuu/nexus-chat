@@ -296,6 +296,8 @@ pub struct AppView {
     /// Selected failure mode in the `/harness` popup.
     pub harness_selected: usize,
     pub jobs_popup: crate::ui::popups::jobs::JobsPopup,
+    /// The `/connectors` popup: mode, cursors, add form and import rows.
+    pub connectors_popup: crate::ui::popups::connectors::ConnectorsPopup,
     /// Background-process popup selection, output view and kill confirmation.
     pub procs_selected: usize,
     pub procs_output: Option<String>,
@@ -548,6 +550,7 @@ impl AppView {
             usage_scroll: 0,
             harness_selected: 0,
             jobs_popup: crate::ui::popups::jobs::JobsPopup::default(),
+            connectors_popup: crate::ui::popups::connectors::ConnectorsPopup::default(),
             procs_selected: 0,
             procs_output: None,
             procs_scroll: 0,

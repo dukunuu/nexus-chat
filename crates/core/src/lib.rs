@@ -17,6 +17,7 @@ pub mod app_templates;
 pub mod appserver;
 pub mod citations;
 pub mod config;
+pub mod connectors;
 pub mod db;
 pub mod decider;
 pub mod deck;
@@ -71,6 +72,17 @@ pub async fn boot(saved: config::SavedCreds) -> Result<app::App> {
         app.push_status(note);
     }
     app.saved = saved;
+    // Connectors connect in the background; the TUI never waits for them.
+    app.connectors =
+        connectors::Registry::system(&app.space.root, Some(app.connector_notes_tx.clone()), true);
+    match app.connectors.load() {
+        Ok(problems) => {
+            for problem in problems {
+                app.push_status(format!("connector config: {problem}"));
+            }
+        }
+        Err(error) => app.push_status(format!("connectors not loaded: {error:#}")),
+    }
     app.rebuild_all_backends();
     app.app_server = appserver::AppServer::start(app.space.spaces_root()).await;
     app.refresh_toolbox();

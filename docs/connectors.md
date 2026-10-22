@@ -1,6 +1,6 @@
 # Design: connectors (MCP)
 
-Status: design, 2026-10-21. Decided with the user: build on MCP; remote
+Status: design, 2026-10-21; phase C1 (below) is implemented in `crates/core/src/connectors/`. Decided with the user: build on MCP; remote
 (HTTP + OAuth) **and** local (stdio) servers, remote first; tools the server
 marks read-only run freely, everything else asks for approval (in chat mode
 too); secrets live in the OS keychain.
@@ -161,6 +161,44 @@ OAuth 2.1 as the MCP authorization spec requires:
    `/connector:prompt` commands), `input_required` elicitation as a
    composer-area form, the tasks extension for long-running calls, and
    host/web sharing.
+
+## C1 as built
+
+Notes where the implementation settled a detail the design left open:
+
+- **Negotiation.** `server/discover` first; JSON-RPC method-not-found or any
+  HTTP 4xx except 401 falls back to `initialize` (2025-11-25 offered; 2025-11-25,
+  2025-06-18 and 2025-03-26 accepted). A `server/discover` answer whose
+  `supportedVersions` lacks 2026-07-28 also falls back.
+- **Broken streams.** A response stream that breaks is re-asked once for
+  read-only methods (`tools/list`); a `tools/call` is never re-sent, because it
+  may have run. The error says so.
+- **Expired sessions.** A 2025 server that answers 404 to a request carrying
+  its `Mcp-Session-Id` is re-`initialize`d once and the request retried.
+- **Cancellation.** A call that times out or is aborted sends
+  `notifications/cancelled` to stateful (2025) and stdio servers; a stateless
+  HTTP request is cancelled by closing its connection.
+- **Approval classes.** A connector request carries `class = "connector"`, the
+  connector as `tool` and the tool as `action`, including in chat mode. Session
+  grants live in the connector registry keyed by definition hash, not in the
+  approver. A definition changed while approval is pending cannot inherit that
+  approval. A manually configured `allow` gets its first definition pinned on
+  discovery; subsequent changes ask again.
+- **Secrets.** `keyring` 4.2 uses only its `v1` feature: macOS Keychain,
+  Windows Credential Manager, and the synchronous ZBus Secret Service API on
+  Linux. That supported facade uses async-io internally on Linux; selecting a
+  different synchronous backend requires bypassing the facade. Known credentials
+  are scrubbed from incoming JSON (including RPC errors and tool definitions)
+  and stderr before any model/UI/log output. Unavailable keychains fall back to
+  owner-only config with one warning.
+- **Results.** Structured content is retained alongside text, not discarded when
+  both are present. Normal tool result caps and unchanged-result handling apply.
+- **Lifecycle.** Background supervisors hold weak registry references while idle;
+  dropping the registry stops them and their stdio children. Reconnects invalidate
+  cached model exposure even when the listed definitions are unchanged.
+- **Redirects** are never followed (the token would travel with them).
+- **Local commands** (stdio) are only added from the terminal UI or the CLI,
+  never through the remote command channel.
 
 ## Open questions
 

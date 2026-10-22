@@ -1,6 +1,7 @@
 mod app_view;
 mod cli;
 mod composer;
+mod connectors_cli;
 mod diagrams;
 mod events;
 mod filter_input;

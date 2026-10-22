@@ -2129,6 +2129,7 @@ fn every_popup_renders_at_the_minimum_resize_size_without_panicking() {
             Popup::Login,
             Popup::Local,
             Popup::Help,
+            Popup::Connectors,
         ] {
             let mut app = test_app();
             app.core
@@ -2137,7 +2138,7 @@ fn every_popup_renders_at_the_minimum_resize_size_without_panicking() {
                     "model:20x20,session:20x20,copy:20x20,key:20x20,settings:20x20,space:20x20,\
                      skills:20x20,files:20x20,apps:20x20,terminal:20x20,watches:20x20,\
                      research:20x20,swarm:20x20,usage:20x20,jobs:20x20,harness:20x20,\
-                     procs:20x20,login:20x20,local:20x20,help:20x20",
+                     procs:20x20,login:20x20,local:20x20,help:20x20,connectors:20x20",
                 )
                 .unwrap();
             app.popup = popup;
@@ -2158,4 +2159,599 @@ fn help_popup_tells_you_the_borders_and_column_edge_can_be_dragged() {
         ),
         "{screen}"
     );
+}
+
+// ----- /connectors ---------------------------------------------------------
+
+fn body_lines(screen: &str) -> Vec<String> {
+    screen
+        .lines()
+        .filter_map(|line| {
+            let (_, body) = line.split_once('│')?;
+            let (body, _) = body.rsplit_once('│')?;
+            let body = body.trim();
+            (!body.is_empty()).then(|| body.to_string())
+        })
+        .collect()
+}
+
+fn tool_info(
+    name: &str,
+    description: &str,
+    annotations: nexus_core::connectors::protocol::Annotations,
+) -> nexus_core::connectors::protocol::ToolInfo {
+    nexus_core::connectors::protocol::ToolInfo {
+        name: name.into(),
+        title: None,
+        description: description.into(),
+        input_schema: serde_json::json!({"type": "object", "properties": {}}),
+        annotations,
+    }
+}
+
+fn connectors_app() -> AppView {
+    use nexus_core::connectors::protocol::Annotations;
+    use nexus_core::connectors::{ConnectorConfig, Status};
+    let mut app = test_app();
+    app.settings.hide_hints = false;
+    let registry = app.connectors.clone();
+    registry
+        .add(
+            "linear",
+            ConnectorConfig::remote("https://mcp.linear.app/mcp"),
+        )
+        .unwrap();
+    registry
+        .add(
+            "github",
+            ConnectorConfig::remote("https://api.githubcopilot.com/mcp/"),
+        )
+        .unwrap();
+    registry
+        .add(
+            "notes",
+            ConnectorConfig::local(vec!["npx".into(), "-y".into(), "notes-server".into()]),
+        )
+        .unwrap();
+    registry
+        .add(
+            "flaky",
+            ConnectorConfig::remote("https://flaky.example/mcp"),
+        )
+        .unwrap();
+    registry
+        .add(
+            "quiet",
+            ConnectorConfig::remote("https://quiet.example/mcp"),
+        )
+        .unwrap();
+    let read_only = Annotations {
+        read_only: Some(true),
+        open_world: Some(false),
+        raw: Some("{}".into()),
+        ..Annotations::default()
+    };
+    let writes = Annotations {
+        read_only: Some(false),
+        destructive: Some(true),
+        raw: Some("{}".into()),
+        ..Annotations::default()
+    };
+    registry.force_state(
+        "linear",
+        Status::Connected { tools: 3 },
+        vec![
+            tool_info("get_issue", "Fetch one issue by id.", read_only.clone()),
+            tool_info(
+                "create_issue",
+                "Create an issue.",
+                Annotations {
+                    destructive: Some(false),
+                    ..writes.clone()
+                },
+            ),
+            tool_info("delete_issue", "Delete an issue for good.", writes),
+        ],
+    );
+    registry.force_state(
+        "github",
+        Status::NeedsAuth {
+            resource_metadata: None,
+        },
+        Vec::new(),
+    );
+    registry.force_state(
+        "notes",
+        Status::Connected { tools: 1 },
+        vec![tool_info("add", "Add a note.", read_only)],
+    );
+    registry.force_state(
+        "flaky",
+        Status::Error("tools/list failed: timed out after 20s".into()),
+        Vec::new(),
+    );
+    registry.set_enabled("quiet", false).unwrap();
+    app
+}
+
+fn conn_press(app: &mut AppView, code: crossterm::event::KeyCode) {
+    super::connectors::handle_key(app, crossterm::event::KeyEvent::from(code));
+}
+
+fn type_text(app: &mut AppView, text: &str) {
+    for c in text.chars() {
+        conn_press(app, crossterm::event::KeyCode::Char(c));
+    }
+}
+
+#[test]
+fn connectors_list_shows_status_dots_tool_counts_and_the_selected_detail() {
+    let mut app = connectors_app();
+    app.execute(nexus_core::app::AppCommand::OpenConnectors)
+        .unwrap();
+    assert_eq!(app.popup, nexus_core::app::Popup::Connectors);
+    let screen = render_to_string(120, 30, |f| super::connectors::render(f, &app));
+    assert!(screen.contains(" connectors "), "{screen}");
+    assert_eq!(
+        body_lines(&screen),
+        [
+            "▸ ✗ flaky  · hosted · error",
+            "⚠ github · hosted · sign-in needed",
+            "● linear · hosted · 3 tools · connected",
+            "● notes  · local · 1 tool · connected",
+            "○ quiet  · hosted · off",
+            "──────────────────────────────────────────────────────────────────────────────────────────",
+            "https://flaky.example/mcp",
+            "error: tools/list failed: timed out after 20s",
+        ]
+    );
+    assert!(
+        screen.contains("5 connectors · ⏎ tools · a add"),
+        "{screen}"
+    );
+    // Moving the cursor changes the detail strip.
+    conn_press(&mut app, crossterm::event::KeyCode::Down);
+    let screen = render_to_string(120, 30, |f| super::connectors::render(f, &app));
+    assert!(
+        screen.contains("https://api.githubcopilot.com/mcp/"),
+        "{screen}"
+    );
+    assert!(screen.contains("sign in"), "{screen}");
+    conn_press(&mut app, crossterm::event::KeyCode::Esc);
+    assert_eq!(app.popup, nexus_core::app::Popup::None);
+}
+
+#[test]
+fn connectors_empty_state_points_at_add_and_import() {
+    let mut app = test_app();
+    app.settings.hide_hints = false;
+    super::connectors::open(&mut app);
+    let screen = render_to_string(120, 24, |f| super::connectors::render(f, &app));
+    assert!(screen.contains("no connectors yet"), "{screen}");
+    assert!(screen.contains("a adds one, i imports"), "{screen}");
+    // Keys on an empty list are harmless.
+    for code in [
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyCode::Char('d'),
+        crossterm::event::KeyCode::Char('e'),
+        crossterm::event::KeyCode::Char('l'),
+        crossterm::event::KeyCode::Down,
+    ] {
+        conn_press(&mut app, code);
+    }
+    assert_eq!(app.connectors_popup.mode, super::connectors::Mode::List);
+}
+
+#[test]
+fn connectors_enter_opens_tools_with_badges_and_keys_set_the_policy() {
+    use crossterm::event::KeyCode;
+    let mut app = connectors_app();
+    super::connectors::open(&mut app);
+    conn_press(&mut app, KeyCode::Down);
+    conn_press(&mut app, KeyCode::Down);
+    conn_press(&mut app, KeyCode::Enter);
+    assert_eq!(app.connectors_popup.mode, super::connectors::Mode::Tools);
+    let screen = render_to_string(120, 30, |f| super::connectors::render(f, &app));
+    let lines = body_lines(&screen);
+    assert_eq!(
+        lines[..3],
+        [
+            "▸ ask    create_issue · writes · reaches the internet",
+            "ask    delete_issue · writes · may delete · reaches the internet",
+            "free   get_issue · read-only",
+        ]
+        .map(String::from)
+    );
+    assert!(screen.contains("connectors · linear"), "{screen}");
+    assert!(
+        screen.contains("the model sees it as linear__create_issue"),
+        "{screen}"
+    );
+    // allow, then deny, then back to the default.
+    conn_press(&mut app, KeyCode::Char('a'));
+    let screen = render_to_string(120, 30, |f| super::connectors::render(f, &app));
+    assert!(
+        body_lines(&screen)[0].contains("allow  create_issue"),
+        "{screen}"
+    );
+    assert_eq!(
+        app.connectors
+            .config_of("linear")
+            .unwrap()
+            .policy("create_issue"),
+        Some(nexus_core::connectors::Policy::Allow)
+    );
+    conn_press(&mut app, KeyCode::Down);
+    conn_press(&mut app, KeyCode::Char('d'));
+    let screen = render_to_string(120, 30, |f| super::connectors::render(f, &app));
+    assert!(
+        body_lines(&screen)[1].contains("deny   delete_issue"),
+        "{screen}"
+    );
+    // A denied tool is no longer offered to the model.
+    assert!(
+        !app.connectors
+            .exposure()
+            .defs
+            .iter()
+            .any(|d| d.name == "linear__delete_issue")
+    );
+    conn_press(&mut app, KeyCode::Backspace);
+    assert_eq!(
+        app.connectors
+            .config_of("linear")
+            .unwrap()
+            .policy("delete_issue"),
+        None
+    );
+    conn_press(&mut app, KeyCode::Down);
+    conn_press(&mut app, KeyCode::Char('s'));
+    assert_eq!(
+        app.connectors
+            .config_of("linear")
+            .unwrap()
+            .policy("get_issue"),
+        Some(nexus_core::connectors::Policy::Ask)
+    );
+    conn_press(&mut app, KeyCode::Esc);
+    assert_eq!(app.connectors_popup.mode, super::connectors::Mode::List);
+}
+
+#[test]
+fn connectors_e_toggles_a_connector_off_and_on() {
+    use crossterm::event::KeyCode;
+    let mut app = connectors_app();
+    super::connectors::open(&mut app);
+    conn_press(&mut app, KeyCode::Down);
+    conn_press(&mut app, KeyCode::Down);
+    assert!(app.connectors.infos()[2].enabled);
+    conn_press(&mut app, KeyCode::Char('e'));
+    let screen = render_to_string(120, 30, |f| super::connectors::render(f, &app));
+    assert!(screen.contains("linear · hosted · off"), "{screen}");
+    assert!(!app.connectors.infos()[2].enabled);
+    conn_press(&mut app, KeyCode::Char('e'));
+    assert!(app.connectors.infos()[2].enabled);
+}
+
+#[test]
+fn connectors_add_flow_masks_the_token_and_stores_it_in_the_keychain() {
+    use crossterm::event::KeyCode;
+    let mut app = test_app();
+    app.settings.hide_hints = false;
+    super::connectors::open(&mut app);
+    conn_press(&mut app, KeyCode::Char('a'));
+    assert_eq!(app.connectors_popup.mode, super::connectors::Mode::Add);
+    // An empty target does not advance.
+    conn_press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.connectors_popup.add.step,
+        super::connectors::AddStep::Target
+    );
+    type_text(&mut app, "https://mcp.acme-tools.dev/mcp");
+    conn_press(&mut app, KeyCode::Enter);
+    assert_eq!(app.connectors_popup.add.name, "acme-tools");
+    let screen = render_to_string(100, 24, |f| super::connectors::render(f, &app));
+    assert!(screen.contains("name: acme-tools"), "{screen}");
+    conn_press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.connectors_popup.add.step,
+        super::connectors::AddStep::Auth
+    );
+    conn_press(&mut app, KeyCode::Tab);
+    assert!(app.connectors_popup.add.bearer);
+    conn_press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "sk-live-TOP-SECRET");
+    let screen = render_to_string(100, 24, |f| super::connectors::render(f, &app));
+    assert!(screen.contains("token: ******************"), "{screen}");
+    assert!(!screen.contains("TOP-SECRET"), "{screen}");
+    // Paste lands in the token field too, newline stripped.
+    super::connectors::paste(&mut app, "-pasted\n");
+    assert!(app.connectors_popup.add.token.ends_with("-pasted"));
+    conn_press(&mut app, KeyCode::Enter);
+    assert_eq!(app.connectors_popup.mode, super::connectors::Mode::List);
+    let config = app.connectors.config_of("acme-tools").unwrap();
+    assert_eq!(config.auth, nexus_core::connectors::AuthKind::Bearer);
+    assert_eq!(
+        app.connectors
+            .vault()
+            .get("acme-tools", "bearer")
+            .as_deref(),
+        Some("sk-live-TOP-SECRET-pasted")
+    );
+    let screen = render_to_string(100, 24, |f| super::connectors::render(f, &app));
+    assert!(screen.contains("acme-tools"), "{screen}");
+    assert!(!screen.contains("TOP-SECRET"), "{screen}");
+    assert!(!format!("{config:?}").contains("TOP-SECRET"));
+}
+
+#[test]
+fn connectors_add_flow_handles_local_commands_bad_names_and_back() {
+    use crossterm::event::KeyCode;
+    let mut app = test_app();
+    super::connectors::open(&mut app);
+    conn_press(&mut app, KeyCode::Char('a'));
+    type_text(
+        &mut app,
+        "npx -y @modelcontextprotocol/server-filesystem ~/notes",
+    );
+    conn_press(&mut app, KeyCode::Enter);
+    assert_eq!(app.connectors_popup.add.name, "notes");
+    // A bad name stays on the step; Esc steps back; a local command skips auth.
+    for _ in 0..5 {
+        conn_press(&mut app, KeyCode::Backspace);
+    }
+    type_text(&mut app, "Bad Name");
+    conn_press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.connectors_popup.add.step,
+        super::connectors::AddStep::Name
+    );
+    conn_press(&mut app, KeyCode::Esc);
+    assert_eq!(
+        app.connectors_popup.add.step,
+        super::connectors::AddStep::Target
+    );
+    conn_press(&mut app, KeyCode::Enter);
+    for _ in 0..8 {
+        conn_press(&mut app, KeyCode::Backspace);
+    }
+    type_text(&mut app, "notes");
+    // Local commands only run from the terminal UI.
+    app.interactive_ui = true;
+    conn_press(&mut app, KeyCode::Enter);
+    assert_eq!(app.connectors_popup.mode, super::connectors::Mode::List);
+    let config = app.connectors.config_of("notes").unwrap();
+    assert_eq!(
+        config.command,
+        [
+            "npx",
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            "~/notes"
+        ]
+    );
+    assert_eq!(app.connectors.infos()[0].name, "notes");
+}
+
+#[test]
+fn connectors_remove_asks_first_and_deletes_the_keychain_entries() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = connectors_app();
+    app.connectors
+        .vault()
+        .set("linear", "bearer", "tok-linear-123")
+        .unwrap();
+    super::connectors::open(&mut app);
+    conn_press(&mut app, KeyCode::Down);
+    conn_press(&mut app, KeyCode::Down);
+    conn_press(&mut app, KeyCode::Char('d'));
+    let screen = render_to_string(120, 24, |f| super::connectors::render(f, &app));
+    assert!(
+        screen.contains("remove \"linear\" and its keychain entries?"),
+        "{screen}"
+    );
+    // Anything but a confirmation backs out.
+    conn_press(&mut app, KeyCode::Esc);
+    assert_eq!(app.connectors.infos().len(), 5);
+    conn_press(&mut app, KeyCode::Char('d'));
+    super::connectors::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+    );
+    assert_eq!(app.connectors.infos().len(), 4);
+    assert!(
+        app.connectors
+            .infos()
+            .iter()
+            .all(|info| info.name != "linear")
+    );
+    assert_eq!(app.connectors.vault().get("linear", "bearer"), None);
+    assert_eq!(app.connectors_popup.mode, super::connectors::Mode::List);
+}
+
+#[test]
+fn connectors_import_lists_found_servers_with_checkboxes() {
+    use crossterm::event::KeyCode;
+    let mut app = test_app();
+    app.settings.hide_hints = false;
+    let dir = app.space.root.clone();
+    let desktop = dir.join("claude_desktop_config.json");
+    std::fs::write(
+        &desktop,
+        r#"{"mcpServers": {
+            "filesystem": {"command": "npx", "args": ["-y", "server-filesystem"], "env": {"API_KEY": "sk-secret-import"}},
+            "linear": {"url": "https://mcp.linear.app/mcp"}
+        }}"#,
+    )
+    .unwrap();
+    app.connectors
+        .add(
+            "lin",
+            nexus_core::connectors::ConnectorConfig::remote("https://mcp.linear.app/mcp"),
+        )
+        .unwrap();
+    let paths = nexus_core::connectors::import::ImportPaths {
+        claude_desktop: Some(desktop),
+        ..Default::default()
+    };
+    app.popup = nexus_core::app::Popup::Connectors;
+    super::connectors::open_import(&mut app, &paths);
+    let screen = render_to_string(120, 24, |f| super::connectors::render(f, &app));
+    assert_eq!(
+        body_lines(&screen)[..2],
+        [
+            "▸ [x] filesystem · Claude Desktop · npx",
+            "[=] linear · Claude Desktop · https://mcp.linear.app/mcp · already added",
+        ]
+        .map(String::from)
+    );
+    assert!(screen.contains("import · 1 selected"), "{screen}");
+    assert!(
+        screen.contains("1 secret will move to your keychain"),
+        "{screen}"
+    );
+    assert!(!screen.contains("sk-secret-import"), "{screen}");
+    conn_press(&mut app, KeyCode::Char(' '));
+    assert!(!app.connectors_popup.import[0].checked);
+    conn_press(&mut app, KeyCode::Char('a'));
+    assert!(app.connectors_popup.import[0].checked);
+    conn_press(&mut app, KeyCode::Esc);
+    assert_eq!(app.connectors_popup.mode, super::connectors::Mode::List);
+}
+
+#[test]
+fn connectors_import_applies_the_displayed_fixture_selection() {
+    use crossterm::event::KeyCode;
+    let mut app = test_app();
+    app.interactive_ui = true;
+    let root = app.space.root.clone();
+    let fixture = root.join("mcp-import.json");
+    std::fs::write(&fixture, r#"{"mcpServers":{"fixture-only":{"command":"fixture-server","env":{"API_KEY":"fake-import-secret"}}}}"#).unwrap();
+    let paths = nexus_core::connectors::import::ImportPaths {
+        cursor: Some(fixture),
+        ..Default::default()
+    };
+    super::connectors::open_import(&mut app, &paths);
+    conn_press(&mut app, KeyCode::Enter);
+    let config = app.connectors.config_of("fixture-only").unwrap();
+    assert_eq!(config.command, ["fixture-server"]);
+    assert_eq!(config.env["API_KEY"], "keychain:env-API_KEY");
+    assert_eq!(
+        app.connectors
+            .vault()
+            .get("fixture-only", "env-API_KEY")
+            .as_deref(),
+        Some("fake-import-secret")
+    );
+    assert_eq!(app.connectors.infos().len(), 1);
+    assert_eq!(app.connectors_popup.mode, super::connectors::Mode::List);
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn connectors_render_at_80_columns_and_tiny_sizes_without_panicking() {
+    use nexus_core::app::Popup;
+    for mode in [
+        super::connectors::Mode::List,
+        super::connectors::Mode::Tools,
+        super::connectors::Mode::Add,
+        super::connectors::Mode::ConfirmRemove,
+        super::connectors::Mode::Import,
+    ] {
+        for (w, h) in [(80, 24), (40, 10), (30, 8)] {
+            let mut app = connectors_app();
+            app.popup = Popup::Connectors;
+            app.connectors_popup.selected = 2;
+            app.connectors_popup.mode = mode;
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        }
+    }
+}
+
+#[test]
+fn connector_approvals_offer_session_and_always_and_warn_about_changed_definitions() {
+    use crossterm::event::{KeyCode, KeyEvent};
+    use nexus_core::tools::Decision;
+    let summary = "writes · may delete\n\n{\n  \"title\": \"Fix it\"\n}".to_string();
+    let (mut app, mut receiver) = approval_app("linear", summary);
+    let root = app.space.root.clone();
+    {
+        let request = app.pending_approval_request.as_mut().unwrap();
+        request.action = "create_issue".into();
+        request.class = Some("connector".into());
+    }
+    app.sync_approval_popup();
+    let screen = render_to_string(100, 24, |f| super::approval::render(f, &app));
+    let lines = body_lines(&screen);
+    assert!(
+        lines[0].starts_with("linear · create_issue"),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[0].ends_with("connector"), "{}", lines[0]);
+    assert_eq!(
+        lines[1],
+        "The model wants to use create_issue from your linear connector. Check what it will send:"
+    );
+    assert!(screen.contains("writes · may delete"), "{screen}");
+    assert!(screen.contains("\"title\": \"Fix it\""), "{screen}");
+    assert_eq!(
+        lines.last().unwrap(),
+        "y allow once · a this tool for the session · A always allow · n deny"
+    );
+    // The open delay applies to the new key as well.
+    app.approval_delay = std::time::Duration::from_millis(400);
+    app.approval_opened_at = Some(std::time::Instant::now());
+    super::approval::handle_key(&mut app, KeyEvent::from(KeyCode::Char('A'))).unwrap();
+    assert!(receiver.try_recv().is_err());
+    app.approval_opened_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+    super::approval::handle_key(&mut app, KeyEvent::from(KeyCode::Char('A'))).unwrap();
+    assert_eq!(receiver.try_recv().unwrap(), Decision::AllowAlways);
+
+    // A changed definition is called out in the warning color.
+    let (mut changed, _receiver) = approval_app(
+        "linear",
+        "this tool's definition changed since you allowed it\nwrites\n\n{}".into(),
+    );
+    {
+        let request = changed.pending_approval_request.as_mut().unwrap();
+        request.action = "create_issue".into();
+        request.class = Some("connector".into());
+    }
+    changed.sync_approval_popup();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|f| super::approval::render(f, &changed))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let cell = buffer
+        .content
+        .iter()
+        .find(|cell| cell.symbol() == "d" && cell.fg == changed.theme.warning);
+    assert!(
+        cell.is_some(),
+        "the changed-definition line uses the warning color"
+    );
+    drop(app);
+    drop(changed);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn only_connector_approvals_offer_always() {
+    use crossterm::event::{KeyCode, KeyEvent};
+    let (mut app, mut receiver) = approval_app("shell", "$ true".into());
+    let root = app.space.root.clone();
+    app.approval_opened_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+    super::approval::handle_key(&mut app, KeyEvent::from(KeyCode::Char('A'))).unwrap();
+    assert!(
+        receiver.try_recv().is_err(),
+        "A does nothing for a shell request"
+    );
+    let screen = render_to_string(100, 24, |f| super::approval::render(f, &app));
+    assert!(!screen.contains("always allow"), "{screen}");
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
 }

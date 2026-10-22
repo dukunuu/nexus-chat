@@ -97,7 +97,9 @@ fn request_lines(
         let text = if tool == "fs" { body } else { summary };
         for line in text.split('\n').filter(|line| !line.is_empty()) {
             let line = line.strip_prefix("background: ").unwrap_or(line);
-            let color = if line.starts_with("could not parse safely:") {
+            let color = if line.starts_with("could not parse safely:")
+                || line.starts_with("this tool's definition changed")
+            {
                 Style::default().fg(theme.warning)
             } else if line.starts_with("$ ") {
                 normal.add_modifier(Modifier::BOLD)
@@ -225,6 +227,7 @@ fn insert_intro(
     theme: &crate::theme::Theme,
 ) {
     let wave = request.tool == "wave";
+    let connector = request.class.as_deref() == Some(nexus_core::connectors::exec::CLASS);
     let at = if wave {
         0
     } else {
@@ -235,11 +238,18 @@ fn insert_intro(
     };
     // Word-wrapped (it's a sentence), then escaped: paths come from the model.
     let dim = Style::default().fg(theme.fg_dim);
-    let mut intro: Vec<Line<'static>> =
-        crate::ui::cards::wrap_plain(&explain(&request.tool, &request.action, text), width)
-            .iter()
-            .flat_map(|row| escaped_rows(row, width, Style::default().fg(theme.fg), dim))
-            .collect();
+    let sentence = if connector {
+        format!(
+            "The model wants to use {} from your {} connector. Check what it will send:",
+            request.action, request.tool
+        )
+    } else {
+        explain(&request.tool, &request.action, text)
+    };
+    let mut intro: Vec<Line<'static>> = crate::ui::cards::wrap_plain(&sentence, width)
+        .iter()
+        .flat_map(|row| escaped_rows(row, width, Style::default().fg(theme.fg), dim))
+        .collect();
     if wave {
         intro.push(Line::default());
     } else {
@@ -257,6 +267,9 @@ fn legend(app: &AppView, request: &nexus_core::tools::ApprovalRequest) -> String
         "wave" => "a + session",
         _ => "a allow for this session",
     };
+    if request.class.as_deref() == Some(nexus_core::connectors::exec::CLASS) {
+        return "y allow once · a this tool for the session · A always allow · n deny".to_string();
+    }
     if shell_unread(app) {
         let deny = if wave { "n deny all" } else { "n deny" };
         let review = if wave { " · r one by one" } else { "" };
@@ -538,6 +551,14 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> anyhow::Result<()> {
                     .is_some_and(|request| request.allow_session) =>
         {
             Decision::AllowForSession
+        }
+        KeyCode::Char('A')
+            if !super::is_chord(key)
+                && app.approval_request.as_ref().is_some_and(|request| {
+                    request.class.as_deref() == Some(nexus_core::connectors::exec::CLASS)
+                }) =>
+        {
+            Decision::AllowAlways
         }
         KeyCode::Char('n') if !super::is_chord(key) => Decision::Deny,
         KeyCode::Char('r')

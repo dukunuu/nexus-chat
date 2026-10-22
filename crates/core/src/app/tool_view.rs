@@ -29,6 +29,8 @@ pub struct ToolView {
     pub sources: Vec<Source>,
     /// Rendered slides the result refers to, as `(alt, path under the space files)`.
     pub images: Vec<(String, String)>,
+    /// A call to an MCP connector (or its search): drawn with the connector glyph.
+    pub connector: bool,
 }
 
 /// One web search hit: what a reader scans for in a results list.
@@ -85,6 +87,7 @@ pub fn tool_call_view(name: &str, args: &str, result: &str) -> ToolView {
         output: None,
         sources: Vec::new(),
         images: Vec::new(),
+        connector: false,
     })
 }
 
@@ -152,7 +155,11 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
         output: None,
         sources: Vec::new(),
         images: Vec::new(),
+        connector: false,
     };
+    if let Some(connector_view) = connector_view(name, &args, result, view.clone()) {
+        return Some(connector_view);
+    }
     let first = result.lines().next().unwrap_or_default();
     let (tool, action) = name
         .split_once('_')
@@ -485,6 +492,84 @@ fn deck_view(view: &mut ToolView, action: &str, path: Option<&str>, result: &str
         (!notes.is_empty()).then(|| notes.join("\n"))
     };
     Some(())
+}
+
+/// A connector tool call (`<connector>__<tool>`) or the `connectors`
+/// meta-tool: the tool's title (or name) is the verb, the connector the
+/// target, with the arguments and the result's first line as detail.
+fn connector_view(name: &str, args: &Value, result: &str, mut view: ToolView) -> Option<ToolView> {
+    let (exposed, inner) = if name == "connectors" {
+        match args.get("action")?.as_str()? {
+            "search" => {
+                view.connector = true;
+                view.verb = "search".into();
+                view.target = "connectors".into();
+                if let Some(query) = args.get("query").and_then(Value::as_str) {
+                    view.stats.push(format!("{query:?}"));
+                }
+                finish_connector_view(&mut view, result);
+                return Some(view);
+            }
+            "call" => (
+                args.get("tool")?.as_str()?.to_string(),
+                args.get("arguments").cloned().unwrap_or(Value::Null),
+            ),
+            _ => return None,
+        }
+    } else {
+        (name.to_string(), args.clone())
+    };
+    let (connector, tool) = exposed.split_once("__")?;
+    if connector.is_empty() || tool.is_empty() {
+        return None;
+    }
+    view.connector = true;
+    view.verb = crate::connectors::display_title(&exposed).unwrap_or_else(|| tool.to_string());
+    view.target = crate::connectors::registry::display_connector(&exposed)
+        .unwrap_or_else(|| connector.to_string());
+    let preview = argument_preview(&inner);
+    if !preview.is_empty() {
+        view.stats.push(preview);
+    }
+    finish_connector_view(&mut view, result);
+    Some(view)
+}
+
+fn finish_connector_view(view: &mut ToolView, result: &str) {
+    if view.outcome == ToolOutcome::Ok
+        && let Some(line) = result.lines().map(str::trim).find(|line| !line.is_empty())
+    {
+        let line: String = line.chars().take(80).collect();
+        view.stats.push(line);
+    }
+    match view.outcome {
+        ToolOutcome::Denied => view.stats.push("denied".into()),
+        ToolOutcome::Blocked => view.stats.push("blocked".into()),
+        ToolOutcome::Failed => view.stats.push("failed".into()),
+        ToolOutcome::Ok => {}
+    }
+}
+
+/// `key=value` pairs for the first few scalar arguments, short enough for a
+/// card header.
+fn argument_preview(args: &Value) -> String {
+    let Some(object) = args.as_object() else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    for (key, value) in object.iter().take(3) {
+        let shown = match value {
+            Value::String(text) => {
+                let text: String = text.chars().take(24).collect();
+                format!("{text:?}")
+            }
+            Value::Number(_) | Value::Bool(_) => value.to_string(),
+            Value::Null => continue,
+            _ => "…".to_string(),
+        };
+        parts.push(format!("{key}={shown}"));
+    }
+    parts.join(" ").chars().take(60).collect()
 }
 
 /// Parse the search tools' `[N] Title` / indented URL / text blocks.
