@@ -3101,7 +3101,6 @@ dependencies = [
  "image",
  "keyring",
  "libc",
- "nexus-chat-core",
  "open",
  "pdf-extract",
  "png",

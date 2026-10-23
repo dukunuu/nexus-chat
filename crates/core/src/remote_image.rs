@@ -283,7 +283,7 @@ impl Fetcher {
     /// Test hook: pretend `url` finished downloading with these PNG bytes.
     /// # Errors
     /// Fails when the cache file cannot be written.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[doc(hidden)]
     pub fn seed(&self, url: &str, png: &[u8]) -> Result<()> {
         let path = self.path(url);
         std::fs::create_dir_all(path.parent().expect("image cache parent"))?;
@@ -301,7 +301,7 @@ impl Fetcher {
     }
 
     /// Test hook: pretend `url` failed to download.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[doc(hidden)]
     pub fn seed_failure(&self, url: &str) {
         self.entries.lock().expect("image cache lock").insert(
             url.into(),

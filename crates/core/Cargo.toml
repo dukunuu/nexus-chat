@@ -15,16 +15,6 @@ categories.workspace = true
 [lib]
 name = "nexus_core"
 
-[features]
-# Compiles test-only helpers (in-memory Db) for downstream test code.
-# Enabled from the TUI crate's dev-dependencies only.
-test-helpers = []
-
-[dev-dependencies]
-# Core's own tests use the same `test-helpers` (event-drain assertions on
-# `App::last_status`/`drain_composer_sets`).
-nexus-chat-core = { path = ".", features = ["test-helpers"] }
-
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.186"
 

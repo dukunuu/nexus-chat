@@ -1046,7 +1046,7 @@ impl Registry {
 
     /// Put a connector into a given state without connecting: lets UI tests
     /// show every status and a tool list with no network or process.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[doc(hidden)]
     pub fn force_state(&self, name: &str, status: Status, tools: Vec<ToolInfo>) {
         let mut state = self.0.state.lock().expect("registry");
         if let Some(entry) = state.entries.get_mut(name) {

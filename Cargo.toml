@@ -52,3 +52,14 @@ unicode-width = "0.2.2"
 uuid = { version = "1.23.4", features = ["v4"] }
 wry = "0.57.0"
 zip = "8.6.0"
+
+# Development and test builds keep file:line backtraces but not full debug
+# info: full DWARF made the target dir several GB per build (most of it
+# debug info), and dependencies are rarely stepped through. Release is
+# unaffected. For a debugger session, override with
+# CARGO_PROFILE_DEV_DEBUG=full (and CARGO_PROFILE_DEV_PACKAGE_..._DEBUG).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

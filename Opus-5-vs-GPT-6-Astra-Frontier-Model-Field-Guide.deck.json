@@ -1,0 +1,1621 @@
+{
+  "version": 2,
+  "title": "Opus 5 vs GPT-6 Astra — Frontier Model Field Guide",
+  "theme": {
+    "colors": {
+      "accent": "#76E4C2",
+      "bg": "#101923",
+      "fg": "#F2F0E8",
+      "muted": "#98A7B6"
+    },
+    "fonts": {
+      "body": "Inter",
+      "heading": "Inter",
+      "mono": "JetBrains Mono"
+    },
+    "size": {
+      "w": 1920,
+      "h": 1080
+    },
+    "text_styles": {
+      "body": {
+        "family": "body",
+        "size": 42,
+        "weight": 400,
+        "italic": false,
+        "line_height": 1.35,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "caption": {
+        "family": "body",
+        "size": 26,
+        "weight": 400,
+        "italic": false,
+        "line_height": 1.35,
+        "letter_spacing": 0.0,
+        "color": "muted",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "code": {
+        "family": "mono",
+        "size": 36,
+        "weight": 400,
+        "italic": false,
+        "line_height": 1.35,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "heading": {
+        "family": "heading",
+        "size": 81,
+        "weight": 700,
+        "italic": false,
+        "line_height": 1.08,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "subheading": {
+        "family": "heading",
+        "size": 58,
+        "weight": 600,
+        "italic": false,
+        "line_height": 1.2,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "title": {
+        "family": "heading",
+        "size": 120,
+        "weight": 700,
+        "italic": false,
+        "line_height": 1.08,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      }
+    }
+  },
+  "slides": [
+    {
+      "id": "s1",
+      "fill": "#101923",
+      "layout": {
+        "mode": "column",
+        "gap": 22,
+        "padding": [
+          96,
+          118,
+          96,
+          118
+        ],
+        "main": "center",
+        "cross": "stretch"
+      },
+      "children": [
+        {
+          "id": "b1",
+          "kind": "text",
+          "text": "TWO FRONTIER MODELS.\nTWO DIFFERENT BETS.",
+          "style": "title",
+          "font": {
+            "family": "Inter",
+            "size": 100,
+            "weight": 750,
+            "line_height": 0.98,
+            "letter_spacing": -0.04,
+            "color": "#F2F0E8",
+            "align": "left"
+          }
+        },
+        {
+          "id": "n_suggest_0_3",
+          "kind": "text",
+          "text": "MODEL FIELD GUIDE   /   22 OCT 2026",
+          "style": "caption",
+          "font": {
+            "family": "JetBrains Mono",
+            "size": 22,
+            "weight": 700,
+            "letter_spacing": 0.12,
+            "color": "#76E4C2",
+            "align": "left"
+          }
+        },
+        {
+          "id": "n_suggest_0_4",
+          "kind": "text",
+          "text": "CLAUDE OPUS 5    ×    GPT-6 ASTRA",
+          "style": "subheading",
+          "font": {
+            "family": "Inter",
+            "size": 40,
+            "weight": 600,
+            "color": "#B8C4CE"
+          }
+        },
+        {
+          "id": "n_suggest_0_5",
+          "kind": "text",
+          "text": "A decision brief for teams choosing where to delegate complex work.",
+          "style": "body",
+          "font": {
+            "family": "Inter",
+            "size": 27,
+            "weight": 400,
+            "color": "#98A7B6"
+          }
+        }
+      ],
+      "notes": ""
+    },
+    {
+      "id": "s_suggest_0_6",
+      "fill": "#101923",
+      "layout": {
+        "mode": "column",
+        "gap": 34,
+        "padding": [
+          80,
+          110,
+          70,
+          110
+        ],
+        "cross": "stretch"
+      },
+      "children": [
+        {
+          "id": "s_suggest_0_6_0",
+          "kind": "text",
+          "text": "THE THESIS  /  NOT A LEADERBOARD",
+          "style": "caption",
+          "font": {
+            "family": "JetBrains Mono",
+            "size": 20,
+            "weight": 700,
+            "letter_spacing": 0.1,
+            "color": "#76E4C2"
+          }
+        },
+        {
+          "id": "s_suggest_0_6_1",
+          "kind": "text",
+          "text": "Choose the workflow,\nnot the winner.",
+          "style": "heading",
+          "font": {
+            "family": "Inter",
+            "size": 68,
+            "weight": 700,
+            "line_height": 1.02,
+            "color": "#F2F0E8"
+          }
+        },
+        {
+          "id": "s_suggest_0_6_2",
+          "sizing": {
+            "w": "fill",
+            "h": "fill"
+          },
+          "kind": "frame",
+          "layout": {
+            "mode": "row",
+            "gap": 32,
+            "cross": "stretch"
+          },
+          "children": [
+            {
+              "id": "s_suggest_0_6_2_0",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "column",
+                "gap": 22,
+                "padding": [
+                  34,
+                  38,
+                  34,
+                  38
+                ],
+                "cross": "stretch"
+              },
+              "fill": "#192A32",
+              "stroke": {
+                "color": "#315047",
+                "width": 1
+              },
+              "radius": 20,
+              "children": [
+                {
+                  "id": "s_suggest_0_6_2_0_0",
+                  "kind": "text",
+                  "text": "CLAUDE OPUS 5",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 21,
+                    "weight": 700,
+                    "letter_spacing": 0.08,
+                    "color": "#76E4C2"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_6_2_0_1",
+                  "kind": "text",
+                  "text": "The careful finisher",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 38,
+                    "weight": 700,
+                    "color": "#F2F0E8"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_6_2_0_2",
+                  "kind": "text",
+                  "text": "Built for deep reasoning, long-horizon agent work, coding and knowledge tasks—at a lower per-token price than Astra.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 25,
+                    "weight": 400,
+                    "line_height": 1.25,
+                    "color": "#C5D0D3"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_6_2_0_3",
+                  "kind": "text",
+                  "text": "Best starting bet: sustained coding, complex analysis, iterative verification.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 21,
+                    "weight": 500,
+                    "color": "#76E4C2"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s_suggest_0_6_2_1",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "column",
+                "gap": 22,
+                "padding": [
+                  34,
+                  38,
+                  34,
+                  38
+                ],
+                "cross": "stretch"
+              },
+              "fill": "#202536",
+              "stroke": {
+                "color": "#4B5270",
+                "width": 1
+              },
+              "radius": 20,
+              "children": [
+                {
+                  "id": "s_suggest_0_6_2_1_0",
+                  "kind": "text",
+                  "text": "GPT-6 ASTRA",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 21,
+                    "weight": 700,
+                    "letter_spacing": 0.08,
+                    "color": "#B1A4FF"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_6_2_1_1",
+                  "kind": "text",
+                  "text": "The broad operator",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 38,
+                    "weight": 700,
+                    "color": "#F2F0E8"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_6_2_1_2",
+                  "kind": "text",
+                  "text": "Built to reason, browse, use software and carry work across applications—with strong alignment and document output.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 25,
+                    "weight": 400,
+                    "line_height": 1.25,
+                    "color": "#C5C9D8"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_6_2_1_3",
+                  "kind": "text",
+                  "text": "Best starting bet: computer-use workflows, browser tasks, polished business artifacts.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 21,
+                    "weight": 500,
+                    "color": "#B1A4FF"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "notes": ""
+    },
+    {
+      "id": "s_suggest_0_7",
+      "fill": "#F0EEE7",
+      "layout": {
+        "mode": "column",
+        "gap": 28,
+        "padding": [
+          72,
+          100,
+          68,
+          100
+        ],
+        "cross": "stretch"
+      },
+      "children": [
+        {
+          "id": "s_suggest_0_7_0",
+          "kind": "text",
+          "text": "CAPABILITY MAP  /  VENDOR CLAIMS, NOT A HEAD-TO-HEAD TEST",
+          "style": "caption",
+          "font": {
+            "family": "JetBrains Mono",
+            "size": 19,
+            "weight": 700,
+            "letter_spacing": 0.08,
+            "color": "#5F746B"
+          }
+        },
+        {
+          "id": "s_suggest_0_7_1",
+          "kind": "text",
+          "text": "Where each model is trying to win",
+          "style": "heading",
+          "font": {
+            "family": "Inter",
+            "size": 60,
+            "weight": 700,
+            "color": "#17232B"
+          }
+        },
+        {
+          "id": "s_suggest_0_7_2",
+          "sizing": {
+            "w": "fill",
+            "h": "fill"
+          },
+          "kind": "frame",
+          "layout": {
+            "mode": "row",
+            "gap": 30,
+            "cross": "stretch"
+          },
+          "children": [
+            {
+              "id": "s_suggest_0_7_2_0",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "column",
+                "gap": 18,
+                "padding": [
+                  28,
+                  30,
+                  28,
+                  30
+                ],
+                "cross": "stretch"
+              },
+              "fill": "#FBFAF6",
+              "stroke": {
+                "color": "#CBD5CD",
+                "width": 1
+              },
+              "radius": 16,
+              "children": [
+                {
+                  "id": "s_suggest_0_7_2_0_0",
+                  "kind": "text",
+                  "text": "REASONING + AGENTS",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 18,
+                    "weight": 700,
+                    "color": "#467564"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_7_2_0_1",
+                  "kind": "text",
+                  "text": "Opus 5",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 36,
+                    "weight": 700,
+                    "color": "#17232B"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_7_2_0_2",
+                  "kind": "text",
+                  "text": "Anthropic emphasizes long-horizon task execution, self-verification, deep reasoning and coding/knowledge-work evaluations. Its release reports top results on Frontier-Bench and GDPval-AA.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 23,
+                    "weight": 400,
+                    "line_height": 1.24,
+                    "color": "#36434A"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_7_2_0_3",
+                  "kind": "text",
+                  "text": "SIGNAL  ·  Sustained, careful execution",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 17,
+                    "weight": 600,
+                    "color": "#467564"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s_suggest_0_7_2_1",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "column",
+                "gap": 18,
+                "padding": [
+                  28,
+                  30,
+                  28,
+                  30
+                ],
+                "cross": "stretch"
+              },
+              "fill": "#FBFAF6",
+              "stroke": {
+                "color": "#D3CEE8",
+                "width": 1
+              },
+              "radius": 16,
+              "children": [
+                {
+                  "id": "s_suggest_0_7_2_1_0",
+                  "kind": "text",
+                  "text": "COMPUTER USE + WORK",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 18,
+                    "weight": 700,
+                    "color": "#6557A1"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_7_2_1_1",
+                  "kind": "text",
+                  "text": "GPT-6 Astra",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 36,
+                    "weight": 700,
+                    "color": "#17232B"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_7_2_1_2",
+                  "kind": "text",
+                  "text": "OpenAI emphasizes computer and browser use, professional software workflows, coding, science and producing documents, spreadsheets and presentations. It reports strong results on OSWorld and ARC-AGI-3.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 23,
+                    "weight": 400,
+                    "line_height": 1.24,
+                    "color": "#36434A"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_7_2_1_3",
+                  "kind": "text",
+                  "text": "SIGNAL  ·  Turning plans into software actions",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 17,
+                    "weight": 600,
+                    "color": "#6557A1"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s_suggest_0_7_2_2",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "column",
+                "gap": 18,
+                "padding": [
+                  28,
+                  30,
+                  28,
+                  30
+                ],
+                "cross": "stretch"
+              },
+              "fill": "#FBFAF6",
+              "stroke": {
+                "color": "#D4D2C8",
+                "width": 1
+              },
+              "radius": 16,
+              "children": [
+                {
+                  "id": "s_suggest_0_7_2_2_0",
+                  "kind": "text",
+                  "text": "SHARED GROUND",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 18,
+                    "weight": 700,
+                    "color": "#746B57"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_7_2_2_1",
+                  "kind": "text",
+                  "text": "Both",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 36,
+                    "weight": 700,
+                    "color": "#17232B"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_7_2_2_2",
+                  "kind": "text",
+                  "text": "Both are frontier systems intended for complex work. Both can reason, code, use tools and handle long tasks; brand claims and benchmarks are not a substitute for testing your own workload.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 23,
+                    "weight": 400,
+                    "line_height": 1.24,
+                    "color": "#36434A"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_7_2_2_3",
+                  "kind": "text",
+                  "text": "SIGNAL  ·  Evaluate end-to-end outcomes",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 17,
+                    "weight": 600,
+                    "color": "#746B57"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "s_suggest_0_7_2_3",
+          "kind": "text",
+          "text": "Benchmarks cited here are each vendor’s own published results; methodology and harnesses differ, so scores are not directly comparable.",
+          "style": "body",
+          "font": {
+            "family": "Inter",
+            "size": 18,
+            "weight": 500,
+            "color": "#655F55"
+          }
+        }
+      ],
+      "notes": ""
+    },
+    {
+      "id": "s_suggest_0_9",
+      "fill": "#EAE9E3",
+      "layout": {
+        "mode": "column",
+        "gap": 28,
+        "padding": [
+          72,
+          100,
+          68,
+          100
+        ],
+        "cross": "stretch"
+      },
+      "children": [
+        {
+          "id": "s_suggest_0_9_0",
+          "kind": "text",
+          "text": "TASK FIT  /  A FIRST-PASS ROUTING RULE",
+          "style": "body",
+          "font": {
+            "family": "JetBrains Mono",
+            "size": 19,
+            "weight": 700,
+            "color": "#6A5F4E"
+          }
+        },
+        {
+          "id": "s_suggest_0_9_1",
+          "kind": "text",
+          "text": "Route by the work in front of you",
+          "style": "body",
+          "font": {
+            "family": "Inter",
+            "size": 60,
+            "weight": 700,
+            "color": "#17232B"
+          }
+        },
+        {
+          "id": "s_suggest_0_9_2",
+          "sizing": {
+            "w": "fill",
+            "h": "fill"
+          },
+          "kind": "frame",
+          "layout": {
+            "mode": "column",
+            "gap": 14,
+            "cross": "stretch"
+          },
+          "children": [
+            {
+              "id": "s_suggest_0_9_2_0",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "row",
+                "gap": 24,
+                "padding": [
+                  18,
+                  26,
+                  18,
+                  26
+                ],
+                "cross": "center"
+              },
+              "fill": "#F8F7F2",
+              "stroke": {
+                "color": "#D0CEC4",
+                "width": 1
+              },
+              "radius": 13,
+              "children": [
+                {
+                  "id": "s_suggest_0_9_2_0_0",
+                  "sizing": {
+                    "w": 420,
+                    "h": "hug"
+                  },
+                  "kind": "text",
+                  "text": "LONG, AMBIGUOUS CODING TASK",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 18,
+                    "weight": 700,
+                    "color": "#426F61"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_9_2_0_1",
+                  "sizing": {
+                    "w": "fill",
+                    "h": "hug"
+                  },
+                  "kind": "text",
+                  "text": "Start with Opus 5; measure correctness and how often it verifies the fix.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 23,
+                    "color": "#303D43"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s_suggest_0_9_2_1",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "row",
+                "gap": 24,
+                "padding": [
+                  18,
+                  26,
+                  18,
+                  26
+                ],
+                "cross": "center"
+              },
+              "fill": "#F8F7F2",
+              "stroke": {
+                "color": "#D0CEC4",
+                "width": 1
+              },
+              "radius": 13,
+              "children": [
+                {
+                  "id": "s_suggest_0_9_2_1_0",
+                  "sizing": {
+                    "w": 420,
+                    "h": "hug"
+                  },
+                  "kind": "text",
+                  "text": "BROWSER / DESKTOP WORKFLOW",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 18,
+                    "weight": 700,
+                    "color": "#6155A0"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_9_2_1_1",
+                  "sizing": {
+                    "w": "fill",
+                    "h": "hug"
+                  },
+                  "kind": "text",
+                  "text": "Start with Astra; validate tool access, permissions and recovery behavior.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 23,
+                    "color": "#303D43"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s_suggest_0_9_2_2",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "row",
+                "gap": 24,
+                "padding": [
+                  18,
+                  26,
+                  18,
+                  26
+                ],
+                "cross": "center"
+              },
+              "fill": "#F8F7F2",
+              "stroke": {
+                "color": "#D0CEC4",
+                "width": 1
+              },
+              "radius": 13,
+              "children": [
+                {
+                  "id": "s_suggest_0_9_2_2_0",
+                  "sizing": {
+                    "w": 420,
+                    "h": "hug"
+                  },
+                  "kind": "text",
+                  "text": "CITATION-HEAVY ANALYSIS",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 18,
+                    "weight": 700,
+                    "color": "#685E49"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_9_2_2_1",
+                  "sizing": {
+                    "w": "fill",
+                    "h": "hug"
+                  },
+                  "kind": "text",
+                  "text": "Run both on your documents; score source fidelity, omissions and unsupported claims.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 23,
+                    "color": "#303D43"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s_suggest_0_9_2_3",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "row",
+                "gap": 24,
+                "padding": [
+                  18,
+                  26,
+                  18,
+                  26
+                ],
+                "cross": "center"
+              },
+              "fill": "#F8F7F2",
+              "stroke": {
+                "color": "#D0CEC4",
+                "width": 1
+              },
+              "radius": 13,
+              "children": [
+                {
+                  "id": "s_suggest_0_9_2_3_0",
+                  "sizing": {
+                    "w": 420,
+                    "h": "hug"
+                  },
+                  "kind": "text",
+                  "text": "HIGH-VOLUME / COST-SENSITIVE",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 18,
+                    "weight": 700,
+                    "color": "#685E49"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_9_2_3_1",
+                  "sizing": {
+                    "w": "fill",
+                    "h": "hug"
+                  },
+                  "kind": "text",
+                  "text": "Compare cost per accepted result—not just input/output token rates.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 23,
+                    "color": "#303D43"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "s_suggest_0_9_3",
+          "kind": "text",
+          "text": "These are hypotheses to test, not universal rankings. A production decision needs your own prompts, tools, and review criteria.",
+          "style": "body",
+          "font": {
+            "family": "Inter",
+            "size": 20,
+            "weight": 500,
+            "color": "#5B5B51"
+          }
+        }
+      ],
+      "notes": ""
+    },
+    {
+      "id": "s_suggest_0_8",
+      "fill": "#111923",
+      "layout": {
+        "mode": "column",
+        "gap": 26,
+        "padding": [
+          72,
+          100,
+          70,
+          100
+        ],
+        "cross": "stretch"
+      },
+      "children": [
+        {
+          "id": "s_suggest_0_8_0",
+          "kind": "text",
+          "text": "THE NUMBERS  /  PUBLIC API PRICING",
+          "style": "body",
+          "font": {
+            "family": "JetBrains Mono",
+            "size": 19,
+            "weight": 700,
+            "letter_spacing": 0.08,
+            "color": "#76E4C2"
+          }
+        },
+        {
+          "id": "s_suggest_0_8_1",
+          "kind": "text",
+          "text": "Same context ceiling. Different bill.",
+          "style": "body",
+          "font": {
+            "family": "Inter",
+            "size": 60,
+            "weight": 700,
+            "color": "#F2F0E8"
+          }
+        },
+        {
+          "id": "s_suggest_0_8_2",
+          "sizing": {
+            "w": "fill",
+            "h": "fill"
+          },
+          "kind": "frame",
+          "layout": {
+            "mode": "row",
+            "gap": 34,
+            "cross": "stretch"
+          },
+          "children": [
+            {
+              "id": "s_suggest_0_8_2_0",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "column",
+                "gap": 22,
+                "padding": [
+                  32,
+                  36,
+                  32,
+                  36
+                ],
+                "main": "center",
+                "cross": "stretch"
+              },
+              "fill": "#192A32",
+              "stroke": {
+                "color": "#315047",
+                "width": 1
+              },
+              "radius": 18,
+              "children": [
+                {
+                  "id": "s_suggest_0_8_2_0_0",
+                  "kind": "text",
+                  "text": "CLAUDE OPUS 5",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 20,
+                    "weight": 700,
+                    "color": "#76E4C2"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_8_2_0_1",
+                  "kind": "text",
+                  "text": "$5  /  $25",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 64,
+                    "weight": 700,
+                    "color": "#F2F0E8"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_8_2_0_2",
+                  "kind": "text",
+                  "text": "Input / output per 1M tokens",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 22,
+                    "color": "#B8C7C5"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_8_2_0_3",
+                  "kind": "text",
+                  "text": "1M context  ·  128k max output",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 18,
+                    "weight": 600,
+                    "color": "#76E4C2"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s_suggest_0_8_2_1",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "column",
+                "gap": 22,
+                "padding": [
+                  32,
+                  36,
+                  32,
+                  36
+                ],
+                "main": "center",
+                "cross": "stretch"
+              },
+              "fill": "#202536",
+              "stroke": {
+                "color": "#4B5270",
+                "width": 1
+              },
+              "radius": 18,
+              "children": [
+                {
+                  "id": "s_suggest_0_8_2_1_0",
+                  "kind": "text",
+                  "text": "GPT-6 ASTRA",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 20,
+                    "weight": 700,
+                    "color": "#B1A4FF"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_8_2_1_1",
+                  "kind": "text",
+                  "text": "$10  /  $50",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 64,
+                    "weight": 700,
+                    "color": "#F2F0E8"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_8_2_1_2",
+                  "kind": "text",
+                  "text": "Input / output per 1M tokens",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 22,
+                    "color": "#C2C5D5"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_8_2_1_3",
+                  "kind": "text",
+                  "text": "1M context  ·  128k max output",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 18,
+                    "weight": 600,
+                    "color": "#B1A4FF"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "s_suggest_0_8_3",
+          "kind": "text",
+          "text": "Opus 5 is half the listed per-token price. That does not guarantee half the cost per task: retries, output volume, caching and success rate matter.",
+          "style": "body",
+          "font": {
+            "family": "Inter",
+            "size": 23,
+            "weight": 500,
+            "color": "#D5D8D6"
+          }
+        },
+        {
+          "id": "s_suggest_0_8_4",
+          "kind": "text",
+          "text": "Illustrative 1M input + 250k output: Opus $11.25  /  Astra $22.50 (uncached, standard context).",
+          "style": "body",
+          "font": {
+            "family": "JetBrains Mono",
+            "size": 17,
+            "weight": 500,
+            "color": "#9CAAB7"
+          }
+        }
+      ],
+      "notes": ""
+    },
+    {
+      "id": "s_suggest_0_10",
+      "fill": "#101923",
+      "layout": {
+        "mode": "column",
+        "gap": 28,
+        "padding": [
+          72,
+          100,
+          68,
+          100
+        ],
+        "cross": "stretch"
+      },
+      "children": [
+        {
+          "id": "s_suggest_0_10_0",
+          "kind": "text",
+          "text": "THE PILOT  /  TWO WEEKS, YOUR DATA",
+          "style": "body",
+          "font": {
+            "family": "JetBrains Mono",
+            "size": 19,
+            "weight": 700,
+            "letter_spacing": 0.08,
+            "color": "#76E4C2"
+          }
+        },
+        {
+          "id": "s_suggest_0_10_1",
+          "kind": "text",
+          "text": "Run a contest your team can trust",
+          "style": "body",
+          "font": {
+            "family": "Inter",
+            "size": 60,
+            "weight": 700,
+            "color": "#F2F0E8"
+          }
+        },
+        {
+          "id": "s_suggest_0_10_2",
+          "sizing": {
+            "w": "fill",
+            "h": "fill"
+          },
+          "kind": "frame",
+          "layout": {
+            "mode": "row",
+            "gap": 30,
+            "cross": "stretch"
+          },
+          "children": [
+            {
+              "id": "s_suggest_0_10_2_0",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "column",
+                "gap": 17,
+                "padding": [
+                  28,
+                  30,
+                  28,
+                  30
+                ],
+                "cross": "stretch"
+              },
+              "fill": "#192A32",
+              "stroke": {
+                "color": "#315047",
+                "width": 1
+              },
+              "radius": 18,
+              "children": [
+                {
+                  "id": "s_suggest_0_10_2_0_0",
+                  "kind": "text",
+                  "text": "BUILD THE TEST SET",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 18,
+                    "weight": 700,
+                    "color": "#76E4C2"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_10_2_0_1",
+                  "kind": "text",
+                  "text": "Sample 30–50 real tasks. Include routine work, edge cases, long tasks and failure recovery. Use identical inputs, tools and context where possible.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 23,
+                    "line_height": 1.24,
+                    "color": "#E0E8E4"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_10_2_0_2",
+                  "kind": "text",
+                  "text": "Blind-score outputs against a rubric before revealing model names.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 20,
+                    "weight": 600,
+                    "color": "#76E4C2"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s_suggest_0_10_2_1",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "column",
+                "gap": 17,
+                "padding": [
+                  28,
+                  30,
+                  28,
+                  30
+                ],
+                "cross": "stretch"
+              },
+              "fill": "#202536",
+              "stroke": {
+                "color": "#4B5270",
+                "width": 1
+              },
+              "radius": 18,
+              "children": [
+                {
+                  "id": "s_suggest_0_10_2_1_0",
+                  "kind": "text",
+                  "text": "MEASURE THE WHOLE JOB",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 18,
+                    "weight": 700,
+                    "color": "#B1A4FF"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_10_2_1_1",
+                  "kind": "text",
+                  "text": "Track task success, human correction time, tool errors, latency, retries, tokens and cost per accepted result.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 23,
+                    "line_height": 1.24,
+                    "color": "#E0E2EA"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_10_2_1_2",
+                  "kind": "text",
+                  "text": "For computer use, add permission violations and recovery from wrong actions.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 20,
+                    "weight": 600,
+                    "color": "#B1A4FF"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s_suggest_0_10_2_2",
+              "sizing": {
+                "w": "fill",
+                "h": "fill"
+              },
+              "kind": "frame",
+              "layout": {
+                "mode": "column",
+                "gap": 17,
+                "padding": [
+                  28,
+                  30,
+                  28,
+                  30
+                ],
+                "cross": "stretch"
+              },
+              "fill": "#242C32",
+              "stroke": {
+                "color": "#596369",
+                "width": 1
+              },
+              "radius": 18,
+              "children": [
+                {
+                  "id": "s_suggest_0_10_2_2_0",
+                  "kind": "text",
+                  "text": "DECIDE WITH EVIDENCE",
+                  "style": "body",
+                  "font": {
+                    "family": "JetBrains Mono",
+                    "size": 18,
+                    "weight": 700,
+                    "color": "#E7C98D"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_10_2_2_1",
+                  "kind": "text",
+                  "text": "Choose a default only if one model wins on your weighted score and clears safety, privacy and reliability gates.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 23,
+                    "line_height": 1.24,
+                    "color": "#E3E2DB"
+                  }
+                },
+                {
+                  "id": "s_suggest_0_10_2_2_2",
+                  "kind": "text",
+                  "text": "Keep a second model for the tasks where it is clearly better.",
+                  "style": "body",
+                  "font": {
+                    "family": "Inter",
+                    "size": 20,
+                    "weight": 600,
+                    "color": "#E7C98D"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "s_suggest_0_10_3",
+          "kind": "text",
+          "text": "DECISION  /  Opus 5 for a lower-cost, long-horizon coding/reasoning pilot. Astra for computer-use and cross-app work. Benchmark both on your own workload before standardizing.",
+          "style": "body",
+          "font": {
+            "family": "Inter",
+            "size": 25,
+            "weight": 600,
+            "color": "#F2F0E8"
+          }
+        }
+      ],
+      "notes": ""
+    },
+    {
+      "id": "s_suggest_0_11",
+      "fill": "#F0EEE7",
+      "layout": {
+        "mode": "column",
+        "gap": 24,
+        "padding": [
+          64,
+          92,
+          60,
+          92
+        ],
+        "cross": "stretch"
+      },
+      "children": [
+        {
+          "id": "s_suggest_0_11_0",
+          "kind": "text",
+          "text": "SOURCES  /  CHECKED 22 OCT 2026",
+          "style": "body",
+          "font": {
+            "family": "JetBrains Mono",
+            "size": 18,
+            "weight": 700,
+            "color": "#5F746B"
+          }
+        },
+        {
+          "id": "s_suggest_0_11_1",
+          "kind": "text",
+          "text": "Read the claims at source",
+          "style": "body",
+          "font": {
+            "family": "Inter",
+            "size": 56,
+            "weight": 700,
+            "color": "#17232B"
+          }
+        },
+        {
+          "id": "s_suggest_0_11_2",
+          "kind": "text",
+          "text": "ANTHROPIC  ·  Introducing Claude Opus 5  ·  Published Jul 24, 2026\nhttps://www.anthropic.com/news/claude-opus-5",
+          "style": "body",
+          "font": {
+            "family": "Inter",
+            "size": 20,
+            "weight": 500,
+            "color": "#28383D"
+          }
+        },
+        {
+          "id": "s_suggest_0_11_3",
+          "kind": "text",
+          "text": "ANTHROPIC  ·  Claude Platform models overview  ·  API pricing, context and output limits\nhttps://docs.anthropic.com/en/docs/about-claude/models",
+          "style": "body",
+          "font": {
+            "family": "Inter",
+            "size": 20,
+            "weight": 500,
+            "color": "#28383D"
+          }
+        },
+        {
+          "id": "s_suggest_0_11_4",
+          "kind": "text",
+          "text": "OPENAI  ·  GPT-6 Astra: A new generation of intelligence  ·  Published Sep 2026\nhttps://openai.com/index/gpt-6-astra/",
+          "style": "body",
+          "font": {
+            "family": "Inter",
+            "size": 20,
+            "weight": 500,
+            "color": "#28383D"
+          }
+        },
+        {
+          "id": "s_suggest_0_11_5",
+          "kind": "text",
+          "text": "OPENAI  ·  API pricing  ·  GPT-6 Astra standard-context rates\nhttps://platform.openai.com/docs/pricing",
+          "style": "body",
+          "font": {
+            "family": "Inter",
+            "size": 20,
+            "weight": 500,
+            "color": "#28383D"
+          }
+        },
+        {
+          "id": "s_suggest_0_11_6",
+          "sizing": {
+            "w": "fill",
+            "h": "hug"
+          },
+          "kind": "frame",
+          "layout": {
+            "mode": "column",
+            "gap": 8,
+            "padding": [
+              18,
+              22,
+              18,
+              22
+            ],
+            "cross": "stretch"
+          },
+          "fill": "#E3E1D8",
+          "radius": 12,
+          "children": [
+            {
+              "id": "s_suggest_0_11_6_0",
+              "kind": "text",
+              "text": "HOW TO READ THIS DECK",
+              "style": "body",
+              "font": {
+                "family": "JetBrains Mono",
+                "size": 16,
+                "weight": 700,
+                "color": "#5D584B"
+              }
+            },
+            {
+              "id": "s_suggest_0_11_6_1",
+              "kind": "text",
+              "text": "Capability statements and benchmark claims are vendor-published. Scores across different evals or harnesses are not directly comparable. Price example uses standard-context, uncached API rates; it excludes tools, retries and platform fees. Verify current pricing and access before procurement.",
+              "style": "body",
+              "font": {
+                "family": "Inter",
+                "size": 18,
+                "line_height": 1.25,
+                "color": "#4F514B"
+              }
+            }
+          ]
+        },
+        {
+          "id": "s_suggest_0_11_7",
+          "kind": "text",
+          "text": "Prepared as a decision aid—not a universal winner declaration.",
+          "style": "body",
+          "font": {
+            "family": "JetBrains Mono",
+            "size": 16,
+            "weight": 500,
+            "color": "#6B6A61"
+          }
+        }
+      ],
+      "notes": ""
+    }
+  ]
+}

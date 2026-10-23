@@ -2444,7 +2444,7 @@ impl App {
     /// Test helper: drain the pending event queue in one pass, returning
     /// `(composer sets in order, last status line)` — the status line and the
     /// composer live in the view, so tests assert on the events.
-    #[cfg(feature = "test-helpers")]
+    #[doc(hidden)]
     pub fn drain_ui_events(&mut self) -> (Vec<String>, String) {
         let mut sets = Vec::new();
         let mut last = String::new();
@@ -2459,14 +2459,14 @@ impl App {
     }
 
     /// Test helper: the last queued `Status` event, draining the queue.
-    #[cfg(feature = "test-helpers")]
+    #[doc(hidden)]
     pub fn last_status(&mut self) -> String {
         self.drain_ui_events().1
     }
 
     /// Test helper: every queued `ComposerSet` payload, in order, draining
     /// the queue (asserts composer-restore paths without a `TextArea`).
-    #[cfg(feature = "test-helpers")]
+    #[doc(hidden)]
     pub fn drain_composer_sets(&mut self) -> Vec<String> {
         self.drain_ui_events().0
     }
