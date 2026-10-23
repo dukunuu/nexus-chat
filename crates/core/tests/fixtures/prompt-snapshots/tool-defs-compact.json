@@ -157,7 +157,7 @@
   },
   {
     "name": "deck",
-    "description": "Build and edit slide decks in space files decks/*.deck.json. The user sees them live in studio (/studio) and can undo your edits; you see slides as images. Edit directly when asked; comment when reviewing or unsure. View after layout edits. Never invent data, sources or images. Slides are 1920x1080 px. Slide and frame: layout{mode:none|row|column,gap,padding,main,cross,wrap}, children[]. Node: kind,sizing{w,h:px|hug|fill},position:auto|{x,y}; kinds frame text{text,style,font} image{src} shape{shape,fill} table{rows} code{source} chart{chart,labels,series}. Prefer auto-layout and text styles over absolute x,y. Ops: add_slide{after?,slide} delete_slide/delete_node/unwrap{id} move_slide{id,to} set_notes{slide,notes} update_slide{id,fields} insert_node{parent,node} update_node{id,fields: merge patch} move_node{id,parent} wrap{ids,layout} set_layout{target,layout} set_text_style{name,font} set_theme. ids and base_hash are filled in; one bad op writes nothing. Commenting principles: anchor to a slide and node; one issue in at most two sentences, with why it matters; attach ops when a fix exists; few, most important first (max 8 per review), severity must|should|consider; respect the author's intent and facts; answer the thread you are in.\n- action=create (needs title)\n- action=read (needs path)\n- action=view (needs path)\n- action=fonts (needs path)\n- action=edit (needs path, ops)\n- action=comment (needs path, text)\n- action=resolve (needs path, thread)",
+    "description": "Build and edit slide decks in space files decks/*.deck.json. Shown live in /studio (the user can undo); you see slides as images. Edit directly when asked, then view layout changes; comment when reviewing or unsure. Never invent data, sources or images. Slides are 1920x1080 px. Slide and frame: layout{mode:none|row|column,gap,padding,main,cross,wrap}, children[]. Node: kind,sizing{w,h:px|hug|fill},position:auto|{x,y}; kinds frame text{text,style,font} image{src} shape{shape,fill} table{rows} code{source} chart{chart,labels,series}. Prefer auto-layout and text styles to absolute x,y. Ops: add_slide{after?,slide} delete_slide/delete_node/unwrap{id} move_slide{id,to} set_notes{slide,notes} update_slide{id,fields} insert_node{parent,node} update_node{id,fields: merge patch} move_node{id,parent} wrap{ids,layout} set_layout{target,layout} set_text_style{name,font} set_theme. ids and base_hash are automatic; ops are all-or-nothing. Commenting principles: anchor to a node; one issue, at most two sentences, with why it matters; attach ops when a fix exists; at most 8, most important first, severity must|should|consider; respect the author's intent and facts; answer the thread you are in.\n- action=create (needs title)\n- action=read (needs path)\n- action=view (needs path)\n- action=fonts (needs path)\n- action=edit (needs path, ops)\n- action=comment (needs path, text)\n- action=resolve (needs path, thread)\n- action=export (needs path, text)",
     "parameters": {
       "properties": {
         "action": {
@@ -168,7 +168,8 @@
             "fonts",
             "edit",
             "comment",
-            "resolve"
+            "resolve",
+            "export"
           ],
           "type": "string"
         },

@@ -1371,11 +1371,11 @@ pub(super) static TASK: ToolSpec = ToolSpec {
 
 pub(super) static DECK: ToolSpec = ToolSpec {
     name: "deck",
-    purpose: "Build and edit slide decks in space files decks/*.deck.json. The user sees them live in studio (/studio) and can undo your edits; you see slides as images. \
-Edit directly when asked; comment when reviewing or unsure. View after layout edits. Never invent data, sources or images. \
-Slides are 1920x1080 px. Slide and frame: layout{mode:none|row|column,gap,padding,main,cross,wrap}, children[]. Node: kind,sizing{w,h:px|hug|fill},position:auto|{x,y}; kinds frame text{text,style,font} image{src} shape{shape,fill} table{rows} code{source} chart{chart,labels,series}. Prefer auto-layout and text styles over absolute x,y. \
-Ops: add_slide{after?,slide} delete_slide/delete_node/unwrap{id} move_slide{id,to} set_notes{slide,notes} update_slide{id,fields} insert_node{parent,node} update_node{id,fields: merge patch} move_node{id,parent} wrap{ids,layout} set_layout{target,layout} set_text_style{name,font} set_theme. ids and base_hash are filled in; one bad op writes nothing. \
-Commenting principles: anchor to a slide and node; one issue in at most two sentences, with why it matters; attach ops when a fix exists; few, most important first (max 8 per review), severity must|should|consider; respect the author's intent and facts; answer the thread you are in.",
+    purpose: "Build and edit slide decks in space files decks/*.deck.json. Shown live in /studio (the user can undo); you see slides as images. \
+Edit directly when asked, then view layout changes; comment when reviewing or unsure. Never invent data, sources or images. \
+Slides are 1920x1080 px. Slide and frame: layout{mode:none|row|column,gap,padding,main,cross,wrap}, children[]. Node: kind,sizing{w,h:px|hug|fill},position:auto|{x,y}; kinds frame text{text,style,font} image{src} shape{shape,fill} table{rows} code{source} chart{chart,labels,series}. Prefer auto-layout and text styles to absolute x,y. \
+Ops: add_slide{after?,slide} delete_slide/delete_node/unwrap{id} move_slide{id,to} set_notes{slide,notes} update_slide{id,fields} insert_node{parent,node} update_node{id,fields: merge patch} move_node{id,parent} wrap{ids,layout} set_layout{target,layout} set_text_style{name,font} set_theme. ids and base_hash are automatic; ops are all-or-nothing. \
+Commenting principles: anchor to a node; one issue, at most two sentences, with why it matters; attach ops when a fix exists; at most 8, most important first, severity must|should|consider; respect the author's intent and facts; answer the thread you are in.",
     selector: Some("action"),
     params: &[
         Param {
@@ -1401,7 +1401,7 @@ Commenting principles: anchor to a slide and node; one issue in at most two sent
         Param {
             name: "revision",
             kind: Kind::Str,
-            doc: "from read; stale is refused",
+            doc: "from read; stale fails",
         },
         Param {
             name: "slide",
@@ -1416,7 +1416,7 @@ Commenting principles: anchor to a slide and node; one issue in at most two sent
         Param {
             name: "text",
             kind: Kind::Str,
-            doc: "the comment; fonts: name filter",
+            doc: "comment; fonts: filter; export: pptx|pdf|png|html",
         },
         Param {
             name: "severity",
@@ -1432,7 +1432,7 @@ Commenting principles: anchor to a slide and node; one issue in at most two sent
     actions: &[
         ActionSpec {
             name: "create",
-            summary: "New deck, shown as a contact sheet",
+            summary: "New deck; returns a contact sheet",
             required: &["title"],
             optional: &["path", "slides"],
             read_only: false,
@@ -1448,7 +1448,7 @@ Commenting principles: anchor to a slide and node; one issue in at most two sent
         },
         ActionSpec {
             name: "view",
-            summary: "See slides; default is the slide open in studio, else a contact sheet",
+            summary: "See slides (default: the one open in studio, else a contact sheet)",
             required: &["path"],
             optional: &["slides"],
             read_only: true,
@@ -1464,7 +1464,7 @@ Commenting principles: anchor to a slide and node; one issue in at most two sent
         },
         ActionSpec {
             name: "edit",
-            summary: "Apply ops live and see the changed slides",
+            summary: "Apply ops; returns changed slides",
             required: &["path", "ops"],
             optional: &["revision"],
             read_only: false,
@@ -1472,7 +1472,7 @@ Commenting principles: anchor to a slide and node; one issue in at most two sent
         },
         ActionSpec {
             name: "comment",
-            summary: "Pin a comment, optionally with suggested ops, or reply in a thread",
+            summary: "Pin a comment (ops optional) or reply in a thread",
             required: &["path", "text"],
             optional: &["slide", "block", "severity", "ops", "thread"],
             read_only: false,
@@ -1485,6 +1485,14 @@ Commenting principles: anchor to a slide and node; one issue in at most two sent
             optional: &[],
             read_only: false,
             internal: "deck_resolve",
+        },
+        ActionSpec {
+            name: "export",
+            summary: "Save a file in exports/",
+            required: &["path", "text"],
+            optional: &[],
+            read_only: false,
+            internal: "deck_export",
         },
     ],
 };
@@ -1607,6 +1615,11 @@ mod tests {
             "deck",
             r#"{"action":"resolve","path":"decks/x.deck.json","thread":"t"}"#,
             "deck_resolve",
+        ),
+        (
+            "deck",
+            r#"{"action":"export","path":"decks/x.deck.json","text":"pptx"}"#,
+            "deck_export",
         ),
         ("task", r#"{"prompt":"x"}"#, "task"),
         ("ui_check", r#"{"source":"{}"}"#, "ui_check"),

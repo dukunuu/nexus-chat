@@ -870,6 +870,7 @@ impl ToolBox {
             "deck_edit" => self.deck_edit(&relative, &path, v),
             "deck_comment" => deck_comment(&relative, &path, v),
             "deck_resolve" => deck_resolve(&relative, &path, v),
+            "deck_export" => self.deck_export(&relative, &path, v),
             _ => bail!("unknown deck action"),
         }
     }
@@ -1024,6 +1025,38 @@ fn deck_comment(relative: &str, path: &Path, v: &Value) -> Result<String> {
         "commented on slide {} · {relative}\nthread {id}\n",
         slide_number(&deck, slide)?
     ))
+}
+
+impl ToolBox {
+    /// Write the deck as a file under `<space files>/exports/`, never
+    /// overwriting, and list what had to be approximated.
+    fn deck_export(&self, relative: &str, path: &Path, v: &Value) -> Result<String> {
+        use crate::deck::export::{self, Format, Options};
+        let format: Format = v["text"]
+            .as_str()
+            .or_else(|| v["format"].as_str())
+            .context("text is the format: pptx, pdf, png, html or json")?
+            .trim()
+            .to_ascii_lowercase()
+            .parse()?;
+        let deck = load(path)?;
+        let assets = path.parent().map(|dir| dir.join("assets"));
+        let output = export::export(&deck, assets.as_deref(), format, Options::default())?;
+        let written = export::write_export(&output, &self.space_files_dir, None)?;
+        let shown = written
+            .strip_prefix(self.space_files_dir.canonicalize().unwrap_or_default())
+            .unwrap_or(&written)
+            .display()
+            .to_string();
+        let mut out = format!(
+            "exported {relative} → {shown} ({} KB)\n",
+            output.bytes.len().div_ceil(1024)
+        );
+        for warning in &output.warnings {
+            let _ = writeln!(out, "approximation: {warning}");
+        }
+        Ok(out)
+    }
 }
 
 fn deck_resolve(relative: &str, path: &Path, v: &Value) -> Result<String> {
@@ -1443,6 +1476,20 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(f.file(PATH)).unwrap()).unwrap();
         assert_eq!(on_disk["version"], 2);
         assert!(on_disk["slides"][0].get("blocks").is_none());
+    }
+
+    #[tokio::test]
+    async fn export_writes_under_exports_without_overwriting() {
+        let f = Fixture::new();
+        f.run("create", json!({"title": "Test deck"})).await;
+        let first = f.run("export", json!({"path": PATH, "text": "pptx"})).await;
+        assert!(first.contains("exports/test-deck.pptx"), "{first}");
+        let second = f.run("export", json!({"path": PATH, "text": "pptx"})).await;
+        assert!(second.contains("exports/test-deck (2).pptx"), "{second}");
+        let bytes = std::fs::read(f.file("exports/test-deck.pptx")).unwrap();
+        assert!(bytes.starts_with(b"PK"), "a pptx is a zip package");
+        let bad = f.run("export", json!({"path": PATH, "text": "key"})).await;
+        assert!(!bad.contains("exported"), "{bad}");
     }
 
     #[tokio::test]

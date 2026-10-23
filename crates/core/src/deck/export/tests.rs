@@ -248,7 +248,7 @@ fn pptx_package_geometry_notes_text_timing_and_determinism() {
     let temp = Temp::new();
     let path = temp.0.join("deck.pptx");
     std::fs::write(&path, &output.bytes).unwrap();
-    let extracted = crate::extract::extract_text(&path).unwrap();
+    let extracted = crate::extract::to_text(&path).text;
     assert_eq!(
         extracted,
         "[slide 1]\nA clearer story\nFind \nsignal\nKeep \ncontext\nUse \nevidence\nShare clarity\n[slide 2]\nEvidence\nPhase\nValue\nStart\n3\nGrow\n8\nlet evidence = 8;"

@@ -1330,7 +1330,7 @@ impl ToolBox {
         defs.push(def(
             &spec::DECK,
             &[
-                "create", "read", "view", "fonts", "edit", "comment", "resolve",
+                "create", "read", "view", "fonts", "edit", "comment", "resolve", "export",
             ],
         ));
         defs.push(def(
@@ -2018,7 +2018,7 @@ impl ToolBox {
         }
         let (result, status) = match name {
             "deck_create" | "deck_read" | "deck_view" | "deck_edit" | "deck_comment"
-            | "deck_resolve" | "deck_fonts" => {
+            | "deck_resolve" | "deck_fonts" | "deck_export" => {
                 let value = serde_json::from_str(args).expect("validated deck arguments");
                 match self.deck_action(name, &value) {
                     Ok(result) => (result, "done".into()),
