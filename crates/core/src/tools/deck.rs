@@ -45,6 +45,8 @@ const HISTORY_LINES: usize = 20;
 /// Remote images fetched in one call; the rest are reported.
 const MAX_FETCHES: usize = 12;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
+/// Approximations listed when a `.pptx` is imported; the rest are counted.
+const MAX_IMPORT_WARNINGS: usize = 12;
 
 fn slug(title: &str) -> String {
     let words = title
@@ -509,6 +511,7 @@ const SCHEMA: &str = "\nschema (sent once per session)\n\
 - reading: read slides:[\"s2\",3] returns just those slides in full. A deck over about 7000 characters reads as an outline (`id kind x,y wxh \"text\"`, ids complete) ending in a \"more slides\" line. Edit results list the changed nodes with their rects and the new revision, so edit again without reading; revision is optional, and a stale one is applied when the nodes you touch did not change, else refused with what changed.\n\
 - history lists earlier versions (kept on every write by you or the user, last 50); history with revision restores one as a new, undoable write. One deck per request: edit it instead of creating -redesign copies or probe decks.\n\
 - create also takes text_styles{name:font} to define styles it uses; update_node/update_slide fields.children replaces the children; edit takes up to 500 ops. Small slips (font as a string, kind ellipse, numeric strings, letter_spacing in px, an undefined style, a short path) are repaired and listed as `normalized:` lines; other errors list every located problem with a fix.\n\
+- import: create with from:\"file.pptx\" (a space file) rebuilds a PowerPoint deck: every shape absolute at its place, text as text nodes, pictures copied (crops baked in), tables as text, notes and transitions kept, glows as stacked ellipses. Charts become labelled placeholders and SmartArt becomes shapes or a list; the result lists each approximation. Rebuild what matters with edit, using the original's text and images only.\n\
 - set_layout converts children like Figma (none to row/column makes them auto; back makes them absolute where they are). wrap{ids,layout} puts siblings in a new frame; unwrap{id} dissolves it. update_node merges: {\"font\":{\"size\":64}} keeps other font fields, null removes one. set_text_style{name,font} changes every node using the style.\n";
 
 fn author(role: &Role) -> &'static str {
@@ -803,6 +806,11 @@ impl ToolBox {
         SCHEMA
     }
 
+    /// [`Self::schema_if_fits`] for the error path in `ToolBox::run`.
+    pub(super) fn deck_schema_if_fits(&self, used: usize) -> &'static str {
+        self.schema_if_fits(used)
+    }
+
     /// Copy space-file images named by `value` into the deck's `assets/`.
     fn import_images(&self, value: &mut Value, path: &Path, notes: &mut Vec<String>) -> Result<()> {
         let assets = path.parent().context("deck folder")?.join("assets");
@@ -920,6 +928,9 @@ impl ToolBox {
             "{relative} already exists; read it, then edit it (one deck per request: change the existing deck instead of creating variants)"
         );
         let title = v["title"].as_str().context("title is required")?;
+        if let Some(from) = v["from"].as_str().filter(|f| !f.trim().is_empty()) {
+            return self.deck_import(relative, path, title, from).await;
+        }
         let mut lenient = Lenient::for_new_deck();
         let mut styles = v.get("text_styles").cloned();
         if let Some(styles) = styles.as_mut() {
@@ -948,6 +959,48 @@ impl ToolBox {
             short(&deck.revision()),
         );
         out.push_str(&Self::image_report(path, &deck, &shown.ids, &problems));
+        out.push_str(&shown.lines(&deck, path, &self.space_files_dir)?);
+        let schema = self.schema_if_fits(out.chars().count());
+        out.push_str(schema);
+        Ok(out)
+    }
+
+    /// `create` with `from`: import a `.pptx` from the space files as the new deck.
+    async fn deck_import(
+        &self,
+        relative: &str,
+        path: &Path,
+        title: &str,
+        from: &str,
+    ) -> Result<String> {
+        let Some(source) = assets::find_space_file(from, &self.space_files_dir) else {
+            bail!("no file {from:?} in the space files; name a .pptx file from the files list");
+        };
+        let (target, name) = (path.to_path_buf(), title.to_string());
+        let imported = tokio::task::spawn_blocking(move || {
+            crate::deck::import::import_pptx_to(&source, &target, Some(&name))
+        })
+        .await
+        .context("the import was interrupted")??;
+        let deck = imported.deck;
+        self.deck_changed(path, deck.slides.first().map(|s| s.id.clone()));
+        let shown = Shown::overview(&deck);
+        let mut out = format!(
+            "created deck · {relative} · {} · revision {} · imported from {from}\n",
+            slides(deck.slides.len()),
+            short(&deck.revision()),
+        );
+        for warning in imported.warnings.iter().take(MAX_IMPORT_WARNINGS) {
+            let _ = writeln!(out, "approximation: {warning}");
+        }
+        if imported.warnings.len() > MAX_IMPORT_WARNINGS {
+            let _ = writeln!(
+                out,
+                "approximation: and {} more",
+                imported.warnings.len() - MAX_IMPORT_WARNINGS
+            );
+        }
+        out.push_str(&Self::image_report(path, &deck, &shown.ids, &[]));
         out.push_str(&shown.lines(&deck, path, &self.space_files_dir)?);
         let schema = self.schema_if_fits(out.chars().count());
         out.push_str(schema);
@@ -1437,6 +1490,10 @@ mod animation_tests;
 mod v3_tests;
 
 #[cfg(test)]
+#[path = "deck_import_tests.rs"]
+mod import_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1837,6 +1894,20 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(f.file(PATH)).unwrap()).unwrap();
         assert_eq!(on_disk["version"], 2);
         assert!(on_disk["slides"][0].get("blocks").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_first_failed_create_carries_the_field_reference_once() {
+        let f = Fixture::new();
+        let bad = json!({"title": "Test deck", "slides": [{"children": [{"kind": "hologram"}]}]});
+        let first = f.run("create", bad.clone()).await;
+        assert!(first.starts_with("deck failed"), "{first}");
+        assert!(first.contains("schema (sent once per session)"), "{first}");
+        let second = f.run("create", bad).await;
+        assert!(
+            !second.contains("schema (sent once per session)"),
+            "{second}"
+        );
     }
 
     #[tokio::test]

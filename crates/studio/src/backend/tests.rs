@@ -975,3 +975,85 @@ fn studio_writes_keep_the_replaced_version_in_the_decks_history() {
     success(send(&mut backend, json!({"command":"Save","deck":current})));
     assert_eq!(kept(&backend).len(), 3);
 }
+
+#[test]
+fn opening_a_pptx_imports_it_beside_the_decks_and_reports_approximations_once() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    let slide = backend.deck.slides[0].id.clone();
+    success(send(
+        &mut backend,
+        json!({"command":"Apply","ops":[{"op":"insert_node","parent":slide,"node":{
+            "id":"t1","kind":"table","rows":[["a","b"],["c","d"]],
+            "position":{"x":100,"y":100},"sizing":{"w":600,"h":200}}}]}),
+    ));
+    let Event::Exported { path: pptx, .. } =
+        send(&mut backend, json!({"command":"Export","format":"pptx"}))
+    else {
+        panic!("export failed");
+    };
+    let slides = backend.deck.slides.len();
+    let Event::Deck {
+        deck,
+        import_warnings,
+        ..
+    } = send(&mut backend, json!({"command":"Open","path":pptx}))
+    else {
+        panic!("open failed");
+    };
+    assert_eq!(deck.slides.len(), slides);
+    assert!(
+        import_warnings.iter().any(|w| w.contains("Tables")),
+        "{import_warnings:?}"
+    );
+    let decks = temp.0.join("files/decks").canonicalize().unwrap();
+    assert_eq!(backend.path.parent().unwrap(), decks);
+    assert!(backend.path.to_string_lossy().ends_with(".deck.json"));
+    assert!(backend.undo.is_empty());
+    // Warnings are reported with the open only, and a second open never
+    // overwrites the first import.
+    let first = backend.path.clone();
+    let Event::Deck {
+        import_warnings, ..
+    } = send(&mut backend, json!({"command":"Load"}))
+    else {
+        panic!("load failed");
+    };
+    assert!(import_warnings.is_empty());
+    success(send(&mut backend, json!({"command":"Open","path":pptx})));
+    assert_ne!(backend.path, first);
+    assert!(first.is_file() && backend.path.is_file());
+    // Not a presentation: a clear error, and the open deck stays open.
+    let bogus = temp.0.join("broken.pptx");
+    fs::write(&bogus, b"nothing").unwrap();
+    let open = backend.path.clone();
+    let event = send(&mut backend, json!({"command":"Open","path":bogus}));
+    assert!(
+        matches!(&event, Event::Error { message } if message.contains("not a .pptx")),
+        "{event:?}"
+    );
+    assert_eq!(backend.path, open);
+}
+
+#[test]
+fn starting_with_a_pptx_path_imports_it() {
+    let temp = Temp::new();
+    let mut source = temp.backend();
+    let Event::Exported { path, .. } =
+        send(&mut source, json!({"command":"Export","format":"pptx"}))
+    else {
+        panic!("export failed");
+    };
+    let backend = Backend::start(
+        Some(&path),
+        &temp.0.join("other-files"),
+        &temp.0.join("other-data"),
+    )
+    .unwrap();
+    assert!(backend.path.to_string_lossy().ends_with(".deck.json"));
+    assert!(
+        backend
+            .path
+            .starts_with(temp.0.join("other-files").canonicalize().unwrap())
+    );
+}

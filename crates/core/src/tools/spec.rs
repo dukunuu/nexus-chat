@@ -1395,6 +1395,11 @@ Comments: anchor to a node; one issue, two sentences max, with why; attach ops f
             doc: "create: slide objects; read, view: ids or numbers",
         },
         Param {
+            name: "from",
+            kind: Kind::Str,
+            doc: "create: import a .pptx space file",
+        },
+        Param {
             name: "ops",
             kind: Kind::Objects,
             doc: "operations, atomic",
@@ -1435,7 +1440,7 @@ Comments: anchor to a node; one issue, two sentences max, with why; attach ops f
             name: "create",
             summary: "New deck and contact sheet",
             required: &["title"],
-            optional: &["path", "slides"],
+            optional: &["path", "slides", "from"],
             read_only: false,
             internal: "deck_create",
         },

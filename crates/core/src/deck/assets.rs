@@ -52,11 +52,7 @@ pub fn visit_srcs(value: &mut Value, f: &mut dyn FnMut(&mut String) -> Result<()
     Ok(())
 }
 
-fn sanitized_stem(path: &Path) -> String {
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
+fn sanitized_stem(stem: &str) -> String {
     let clean: String = stem
         .chars()
         .map(|c| {
@@ -85,6 +81,34 @@ fn extension(format: ImageFormat) -> Option<&'static str> {
     }
 }
 
+/// A file in the space files named by `src`: relative to the space files, with
+/// or without a leading `files/`, or an absolute path inside them. Symlinks
+/// and `..` must not leave the space files.
+#[must_use]
+pub fn find_space_file(src: &str, space_files: &Path) -> Option<std::path::PathBuf> {
+    let cleaned = src.trim().trim_start_matches("./");
+    let root = space_files.canonicalize().ok()?;
+    let candidates = [
+        Some(cleaned),
+        cleaned.strip_prefix("files/"),
+        cleaned.strip_prefix(&format!("{}/", root.display())),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        let joined = if Path::new(candidate).is_absolute() {
+            Path::new(candidate).to_path_buf()
+        } else {
+            root.join(candidate)
+        };
+        if let Ok(real) = joined.canonicalize()
+            && real.starts_with(&root)
+            && real.is_file()
+        {
+            return Some(real);
+        }
+    }
+    None
+}
+
 /// Resolve an image `src` to something a deck can store.
 ///
 /// Returns `Ok(None)` when `src` should stay as written: an https URL, a path
@@ -105,30 +129,7 @@ pub fn import_space_image(src: &str, space_files: &Path, assets: &Path) -> Resul
     {
         return Ok(None);
     }
-    let Ok(root) = space_files.canonicalize() else {
-        return Ok(None);
-    };
-    let candidates = [
-        Some(cleaned),
-        cleaned.strip_prefix("files/"),
-        cleaned.strip_prefix(&format!("{}/", root.display())),
-    ];
-    let mut found = None;
-    for candidate in candidates.into_iter().flatten() {
-        let joined = if Path::new(candidate).is_absolute() {
-            Path::new(candidate).to_path_buf()
-        } else {
-            root.join(candidate)
-        };
-        if let Ok(real) = joined.canonicalize()
-            && real.starts_with(&root)
-            && real.is_file()
-        {
-            found = Some(real);
-            break;
-        }
-    }
-    let Some(file) = found else {
+    let Some(file) = find_space_file(cleaned, space_files) else {
         return Ok(None);
     };
     if let Ok(assets_real) = assets.canonicalize()
@@ -147,31 +148,53 @@ pub fn import_space_image(src: &str, space_files: &Path, assets: &Path) -> Resul
         MAX_IMAGE_BYTES / (1024 * 1024)
     );
     let bytes = std::fs::read(&file).with_context(|| format!("could not read {src}"))?;
-    let format = image::guess_format(&bytes).ok();
+    let stem = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    store_image_bytes(&bytes, src, &stem, assets).map(Some)
+}
+
+/// Check that `bytes` are an acceptable image (PNG, JPEG or WebP by content,
+/// at most [`MAX_IMAGE_BYTES`] and 16384 px on a side) and store them in the
+/// deck's `assets/` folder under a content-addressed name made from `stem`.
+/// Returns the `assets/…` path to store; the same bytes always give the same
+/// path. `label` names the source in error messages.
+///
+/// # Errors
+/// When the bytes are not an acceptable image, or cannot be written.
+pub fn store_image_bytes(bytes: &[u8], label: &str, stem: &str, assets: &Path) -> Result<String> {
+    ensure!(
+        bytes.len() as u64 <= MAX_IMAGE_BYTES,
+        "{label} is {} MB; images can be at most {} MB",
+        (bytes.len() as u64).div_ceil(1024 * 1024),
+        MAX_IMAGE_BYTES / (1024 * 1024)
+    );
+    let format = image::guess_format(bytes).ok();
     let Some(extension) = format.and_then(extension) else {
-        bail!("{src} is not a PNG, JPEG or WebP image (checked by content, not by name)");
+        bail!("{label} is not a PNG, JPEG or WebP image (checked by content, not by name)");
     };
-    let (w, h) = image::ImageReader::new(Cursor::new(&bytes))
+    let (w, h) = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()?
         .into_dimensions()
-        .with_context(|| format!("{src} is not a readable image"))?;
+        .with_context(|| format!("{label} is not a readable image"))?;
     ensure!(
         w.max(h) <= MAX_SIDE && w > 0 && h > 0,
-        "{src} is {w}x{h} px; at most {MAX_SIDE} px on a side"
+        "{label} is {w}x{h} px; at most {MAX_SIDE} px on a side"
     );
-    let digest = Sha256::digest(&bytes);
+    let digest = Sha256::digest(bytes);
     let sha8 = digest.iter().take(4).fold(String::new(), |mut hex, b| {
         let _ = write!(hex, "{b:02x}");
         hex
     });
-    let name = format!("{sha8}-{}.{extension}", sanitized_stem(&file));
+    let name = format!("{sha8}-{}.{extension}", sanitized_stem(stem));
     ensure!(!assets.is_symlink(), "assets folder must not be a symlink");
     std::fs::create_dir_all(assets)?;
     let target = assets.join(&name);
     if !target.is_file() {
-        write_atomic(&target, &bytes)?;
+        write_atomic(&target, bytes)?;
     }
-    Ok(Some(format!("assets/{name}")))
+    Ok(format!("assets/{name}"))
 }
 
 #[cfg(test)]

@@ -138,6 +138,14 @@ function render() {
   for (const tab of ['design','animate']) $(`#tab-${tab}`).setAttribute('aria-selected',String(state.panelTab === tab));
   feedback.renderPins(); animationPanel.badges(); focusChanged(); playback.refresh();
 }
+function showDetails(title, items) {
+  $('#export-details-heading').textContent = title;
+  $('#export-warnings').replaceChildren(...items.map(text => { const item = document.createElement('li'); item.textContent = text; return item; }));
+  $('#export-details').showModal();
+}
+function showApproximations(title, text, items) {
+  toast(text, null, [[`${items.length} approximations · Details`, () => showDetails(title, items)]]);
+}
 function handleEvent(event, reply) {
   const finished = reply ? pending : null; if (reply) pending = null;
   if (event.event === 'Deck') {
@@ -151,6 +159,7 @@ function handleEvent(event, reply) {
     const known = new Set(allNodes(api.slide()).map(n => n.id)); state.selected = new Set([...state.selected].filter(id => known.has(id)));
     if (state.openNewest) { state.openThread = state.threads.at(-1)?.id; state.openNewest = false; }
     if (event.notice) toast(event.notice);
+    if (event.import_warnings?.length) showApproximations('Import approximations', 'Imported from PowerPoint', event.import_warnings);
     deckActivities = event.activities;
     renderDeck();
     for (const node of document.querySelectorAll('#canvas .block')) node.classList.toggle('external-flash', state.flash.includes(node.dataset.id));
@@ -164,10 +173,7 @@ function handleEvent(event, reply) {
     if (event.event === 'Error') { rollback(); toast(event.message); }
     if (event.event === 'Exported') {
       const warnings = event.warnings || [], actions = [['Reveal', () => command({ command:'Reveal', path:event.path })]];
-      if (warnings.length) actions.push([`${warnings.length} approximations · Details`, () => {
-        $('#export-warnings').replaceChildren(...warnings.map(text => { const item = document.createElement('li'); item.textContent = text; return item; }));
-        $('#export-details').showModal();
-      }]);
+      if (warnings.length) actions.push([`${warnings.length} approximations · Details`, () => showDetails('Export approximations', warnings)]);
       toast(`Exported ${event.path.split(/[\\/]/).pop()}`, null, actions);
     }
   }
@@ -246,7 +252,7 @@ function ask(heading, label, hint, value, action) {
 }
 pathDialog.addEventListener('close', () => { if (pathDialog.returnValue === 'ok') pathAction($('#path-input').value); });
 $('#rename-deck').onclick = () => { deckMenu(false); ask('Rename deck', 'Title', 'Give this project a name.', state.deck.title, value => { const title = value.trim(); if (title) command(() => ({ command:'Save', deck:{ ...state.deck, title } })); }); };
-$('#open-deck').onclick = () => { deckMenu(false); ask('Open', 'Deck path', 'Enter a local .deck.json path.', '', path => command({ command:'Open', path })); };
+$('#open-deck').onclick = () => { deckMenu(false); ask('Open', 'Deck path', 'Enter a local .deck.json or PowerPoint .pptx path.', '', path => command({ command:'Open', path })); };
 $('#new-deck').onclick = () => { deckMenu(false); ask('New deck', 'Title', 'Created in your active space’s files/decks folder.', 'Untitled', title => command({ command:'NewDeck', title })); };
 function insert(block) {
   const slide = api.slide(); if (!slide) { toast('Add a slide first.'); return; }

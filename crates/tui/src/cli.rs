@@ -15,7 +15,7 @@ use std::fmt::Write as _;
 use std::io::{IsTerminal, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand};
 
 use nexus_core::app;
@@ -302,7 +302,8 @@ pub enum Command {
         /// Session id, slug, or id prefix.
         session: String,
     },
-    /// Convert a local deck to `PowerPoint`, PDF, PNG images, HTML or JSON.
+    /// Convert a local deck to `PowerPoint`, PDF, PNG images, HTML or JSON, or
+    /// import a `PowerPoint` file as a deck.
     Deck {
         #[command(subcommand)]
         cmd: DeckCmd,
@@ -365,6 +366,15 @@ pub enum DeckCmd {
         #[arg(long, value_parser = ["pptx", "pdf", "png", "html", "json"])]
         format: String,
         /// Explicit output path; existing files are never overwritten.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Import a `PowerPoint` file as an editable deck (<space files>/decks by default).
+    Import {
+        /// The .pptx file: a path, or a name in the active space's files.
+        path: PathBuf,
+        /// Deck to write, absolute or relative to the space files, ending in
+        /// .deck.json; an existing deck is never overwritten.
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -627,13 +637,54 @@ pub async fn run(cmd: Command) -> Result<()> {
     }
 }
 
+/// `nexus deck import`: write the imported deck and list what was approximated.
+fn deck_import(path: &Path, out_path: Option<&Path>, files: &Path) -> Result<()> {
+    use nexus_core::deck::import;
+    let source = if path.exists() {
+        path.to_path_buf()
+    } else {
+        files.join(path)
+    };
+    let (deck_path, warnings, slides) = if let Some(target) = out_path {
+        let target = if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            files.join(target)
+        };
+        ensure!(
+            target
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().ends_with(".deck.json")),
+            "--out must end in .deck.json"
+        );
+        ensure!(
+            !target.exists(),
+            "{} already exists; imports never overwrite a deck",
+            target.display()
+        );
+        let imported = import::import_pptx_to(&source, &target, None)?;
+        (target, imported.warnings, imported.deck.slides.len())
+    } else {
+        let imported = import::import_pptx_file(&source, &files.join("decks"), None)?;
+        (imported.path, imported.warnings, imported.deck.slides.len())
+    };
+    out(deck_path.display());
+    out(format!(
+        "{slides} slide{}",
+        if slides == 1 { "" } else { "s" }
+    ));
+    for warning in &warnings {
+        out(format!("warning: {warning}"));
+    }
+    Ok(())
+}
+
 fn deck_export(cmd: DeckCmd, files: &Path) -> Result<()> {
     use nexus_core::deck::{Deck, export};
-    let DeckCmd::Export {
-        path,
-        format,
-        out: destination,
-    } = cmd;
+    let (path, format, destination) = match cmd {
+        DeckCmd::Export { path, format, out } => (path, format, out),
+        DeckCmd::Import { path, out } => return deck_import(&path, out.as_deref(), files),
+    };
     let path = if path.is_absolute() {
         path
     } else {

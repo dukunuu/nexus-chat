@@ -8,6 +8,7 @@ pub mod direct;
 pub mod export;
 pub mod feedback;
 pub mod history;
+pub mod import;
 pub mod layout;
 pub mod lenient;
 pub mod link;

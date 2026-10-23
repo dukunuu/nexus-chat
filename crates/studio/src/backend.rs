@@ -105,6 +105,7 @@ pub struct ThreadActivity {
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "event")]
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     Deck {
         deck: Deck,
@@ -119,6 +120,8 @@ pub enum Event {
         activities: BTreeMap<String, ThreadActivity>,
         changed: Vec<String>,
         notice: Option<String>,
+        /// Approximations made when a `PowerPoint` file was just imported.
+        import_warnings: Vec<String>,
     },
     Feedback {
         threads: Vec<nexus_core::deck::feedback::Thread>,
@@ -185,6 +188,8 @@ pub struct Backend {
     theme_stamp: String,
     /// Animation data dropped while reading the deck from disk, reported once.
     load_notes: Vec<String>,
+    /// Approximations from importing a `.pptx`, reported once with the open.
+    import_warnings: Vec<String>,
     /// Reveal is limited to files exported by this window, never deck content.
     exports: Vec<PathBuf>,
     /// Content hashes of deck assets by file, reused while the file's stamp
@@ -202,7 +207,14 @@ impl Backend {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<PathBuf>(&bytes).ok())
             .filter(|p| p.is_absolute() && p.is_file());
+        let mut import_warnings = Vec::new();
         let path = match path.or(remembered.as_deref()) {
+            Some(path) if is_pptx(path) => {
+                let imported =
+                    deck::import::import_pptx_file(&absolute(path)?, &decks_dir(files_dir)?, None)?;
+                import_warnings = imported.warnings;
+                imported.path
+            }
             Some(path) => absolute(path)?,
             None => new_path(files_dir)?,
         };
@@ -229,6 +241,7 @@ impl Backend {
             colors: theme_colors::load().colors,
             theme_stamp: theme_colors::source_stamp(),
             load_notes,
+            import_warnings,
             exports: Vec::new(),
             asset_hashes: std::cell::RefCell::default(),
         };
@@ -249,6 +262,7 @@ impl Backend {
             activities: self.thread_activities(),
             changed: Vec::new(),
             notice: self.load_notice(),
+            import_warnings: self.import_warnings.clone(),
             deck: self.deck.clone(),
             colors: self.colors.clone(),
             revision: self.deck.revision(),
@@ -340,7 +354,14 @@ impl Backend {
             if !matches!(command, Command::Load {} | Command::Open { .. }) {
                 self.load_notes.clear();
             }
-            self.execute(command)
+            // Import approximations are reported once, with the event that
+            // opens or first loads the imported deck.
+            let reports = matches!(command, Command::Load {} | Command::Open { .. });
+            let event = self.execute(command);
+            if reports {
+                self.import_warnings.clear();
+            }
+            event
         })();
         result.unwrap_or_else(|e| Event::Error {
             message: e.to_string(),
@@ -440,8 +461,7 @@ impl Backend {
                 self.open_document(path, deck)?;
             }
             Command::Open { path } => {
-                let path = absolute(&path)?;
-                self.open_file(path)?;
+                self.open_path(absolute(&path)?)?;
             }
             Command::ExportDeck { path } => {
                 return self.export(deck::export::Format::Json, Some(&absolute(&path)?));
@@ -516,6 +536,7 @@ impl Backend {
         if !reloaded && !comments_changed {
             return Ok((None, false));
         }
+        self.import_warnings.clear();
         let mut event = self.event();
         if let Event::Deck {
             changed: flash,
@@ -613,6 +634,25 @@ impl Backend {
     }
 
     /// Read a deck from disk and make it the open document.
+    /// Open a deck, or import a `PowerPoint` file and open the result.
+    fn open_path(&mut self, path: PathBuf) -> Result<()> {
+        if is_pptx(&path) {
+            self.open_pptx(&path)
+        } else {
+            self.import_warnings.clear();
+            self.open_file(path)
+        }
+    }
+
+    /// A `PowerPoint` file becomes a new deck beside the others, then opens.
+    fn open_pptx(&mut self, path: &Path) -> Result<()> {
+        let imported = deck::import::import_pptx_file(path, &decks_dir(&self.files_dir)?, None)?;
+        self.open_document(imported.path, imported.deck)?;
+        self.load_notes.clear();
+        self.import_warnings = imported.warnings;
+        Ok(())
+    }
+
     fn open_file(&mut self, path: PathBuf) -> Result<()> {
         let (deck, notes) = read_deck_noted(&path)?;
         self.open_document(path, deck)?;
@@ -806,7 +846,13 @@ fn absolute(path: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn new_path(files_dir: &Path) -> Result<PathBuf> {
+fn is_pptx(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("pptx"))
+}
+
+/// The space's `decks/` folder, created and checked to stay inside the space.
+fn decks_dir(files_dir: &Path) -> Result<PathBuf> {
     fs::create_dir_all(files_dir)?;
     let root = files_dir.canonicalize()?;
     let decks = root.join("decks");
@@ -817,6 +863,11 @@ fn new_path(files_dir: &Path) -> Result<PathBuf> {
         );
     }
     fs::create_dir_all(&decks)?;
+    Ok(decks)
+}
+
+fn new_path(files_dir: &Path) -> Result<PathBuf> {
+    let decks = decks_dir(files_dir)?;
     let path = decks.join("untitled.deck.json");
     if path.exists() || path.is_symlink() {
         Ok(decks.join(format!("untitled-{}.deck.json", Uuid::new_v4())))

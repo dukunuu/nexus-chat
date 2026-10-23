@@ -177,6 +177,9 @@
         "block": {
           "type": "string"
         },
+        "from": {
+          "type": "string"
+        },
         "ops": {
           "items": {
             "type": "object"

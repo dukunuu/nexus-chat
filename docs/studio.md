@@ -43,6 +43,7 @@ to a conversation.
 | Renderer | `crates/core/src/deck/render.rs` | deck → SVG → PNG with `resvg`; one slide, a numbered contact sheet, and a revision-keyed cache under `<space files>/decks/.renders/` |
 | `deck` tool | `crates/core/src/tools/deck.rs` (+ `deck_read.rs`), spec in `tools/spec.rs` | create, read, view, edit, comment, resolve, history, export; confined to `<space files>/decks/` |
 | Direct edits, lenient input, history, images | `crates/core/src/deck/{direct,lenient,history,assets,brief}.rs` | see *The `deck` tool* |
+| PowerPoint import | `crates/core/src/deck/import/` | `.pptx` to a deck; see *Import* |
 | Comment threads | `crates/core/src/deck/feedback.rs` | `<deck>.comments.json`, shared by the tool and studio |
 | Link protocol | `crates/core/src/deck/link.rs` | versioned JSON lines; types in core so the web app can reuse them |
 | Terminal side of the link | `crates/tui/src/studio.rs`, `/studio` | spawns studio, turns comments into messages, tells it what the model changed |
@@ -349,7 +350,7 @@ One public tool with nine actions (the model sees it as `deck`):
 
 | Action | Does | Read-only |
 |---|---|---|
-| `create {title, path?, slides?}` | New deck under `decks/` (slug from the title); optional slide objects validated like a file; returns path, revision and a contact sheet | no |
+| `create {title, path?, slides?, from?}` | New deck under `decks/` (slug from the title); optional slide objects validated like a file, or `from` a `.pptx` in the space files to import (see *Import*); returns path, revision, any import approximations and a contact sheet | no |
 | `read {path, slides?}` | The node tree with resolved rectangles, sizing, text styles and overrides, text (truncated per node), revision, comment threads; `slides` (ids or 1-based numbers) limits it to those slides; a deck whose full text passes ~7000 characters comes back as an outline (`id kind x,y wxh "text"` per node, complete ids) ending in a "more slides" line, so the generic 8000-character tool-result cap never decides what is cut; the first `read`, `create` or `edit` of a session also returns a compact field reference (deferred to a result with room for it) | yes |
 | `fonts {path, text?}` | The deck's font roles and files, and up to 30 installed families matching the filter (`text`) | yes |
 | `view {path, slides?}` | Renders slides: the ones named, else the slide open in studio (when linked), else the whole deck as a contact sheet | yes |
@@ -468,6 +469,62 @@ argv (`open -R`, `xdg-open <dir>`, `explorer /select,`), never a shell.
   data URIs, a strict CSP and keyboard navigation; notes are removed.
 - **JSON** is the deck itself; keep the assets folder beside it.
 
+## Import
+
+`deck::import::import_pptx(bytes, assets_dir)` turns a `.pptx` into a deck and a
+list of warnings (`Imported {deck, warnings}`), in core with no new
+dependencies (the `zip` crate and a small bounded XML reader). It is the
+inverse of the PowerPoint exporter and is **faithful first**: every shape is
+placed absolutely (slides and frames are `mode: none`); nothing tries to infer
+auto-layout. Anything it cannot represent becomes a warning, never a failure;
+a file that is not a `.pptx` package (garbage, an old binary `.ppt`, a zip with
+no presentation) fails with a plain error. The result always passes
+`Deck::check`, with fresh unique ids.
+
+Surfaces: the `deck` tool's `create {title, from}` (a `.pptx` in the space
+files; the result lists the approximations, the slide count and the contact
+sheet), studio's **Open** (a `.pptx` path is imported to
+`<space files>/decks/<slug>.deck.json`, never overwriting, then opened; a toast
+says `N approximations` with a Details list), `nexus-studio file.pptx`, and
+`nexus deck import <file.pptx> [--out decks/name.deck.json]`. Pictures are
+copied into `decks/assets/` by content (PNG, JPEG, WebP, at most 16 MB each).
+
+| PowerPoint | Deck |
+|---|---|
+| slide size | `theme.size`, width normalized to 1920 px (1 px = EMU / 6350 at 16:9), aspect kept; 1 pt = 2 px at 16:9 |
+| theme colors | `bg` (bg1), `fg` (tx1), `accent` (accent1), `muted` (tx2), plus `accent2`..`accent6`; colors equal to a role are stored as the role |
+| theme fonts | `fonts.heading` / `fonts.body` (major / minor Latin font); master title and body styles become the `title` and `body` text styles, nodes keep only what differs |
+| placeholders | position, size, insets, anchor, size, color, bullets and alignment resolved slide, layout, master (and `defaultTextStyle`); date, footer and slide-number placeholders are skipped, empty placeholders too |
+| master and layout shapes | non-placeholder shapes and pictures are repeated behind each slide (unless `showMasterSp="0"`) |
+| text box | one `text` node: the dominant run sets the font; bold and italic runs, links, bullets (`- `), numbering (`1. `) and levels (two spaces each) become Markdown; `a:br` is a line break; autofit `fontScale` applies; a line is 1.2 x the size at 100 % spacing |
+| shape with fill or line and text | a frame (fixed size, rotation) holding a `shape` and a `text` node |
+| shapes | `rect`, `roundRect` (radius), `ellipse`, lines, connectors and arrows (any angle: a line of the right length, rotated), custom paths that are rectangles, rounded rectangles or ellipses (their bounding box inside the shape); fill, line width and color, alpha, rotation; other presets are drawn as rectangles |
+| picture | `image` node, `fit: cover`; `a:srcRect` crops are baked into a copy of the image; opacity kept |
+| table | `table` node with the cell text (paragraphs joined by a space) and the first cell's font |
+| group | `frame` (`mode: none`) with children placed through `chOff`/`chExt`; groups nested deeper than seven are flattened; the exporter's "Frame background" shape folds back into the frame's fill, stroke and radius |
+| background | solid color: the slide `fill`; picture: a full-bleed `image` node at the back; slide, then layout, then master |
+| notes | `slide.notes` (the notes body placeholder, paragraphs on lines) |
+| transitions | `fade`, `push`, `cover`, `pull` (`slide`), `zoom`, Morph (`smart`) with direction and the 2010 `dur` (else fast 250, medium 500, slow 800 ms); others become `fade` |
+| animations | main-sequence entrance, emphasis and exit effects: appear, fade, fly, wipe, float (rise), zoom (scale), pulse; click, with and after previous; delay, duration; paragraph builds of one shape become one `by: item` build; the order is the order of first appearance |
+| chart | an image placeholder node named "Chart (not imported)" and a warning |
+| SmartArt | its saved drawing as plain shapes in a frame; without one, its text as a list |
+| embedded object | its fallback picture, else a warning |
+
+What degrades (each is a warning, counted when repeated): gradients (a radial
+gradient that fades out becomes ten stacked translucent ellipses, a linear one
+its first color); pattern and picture fills; shadows, glows and other effects
+(dropped); text runs with their own size or color inside one box (the box's
+main style); mixed alignment in a box; nested bullet levels (kept as indented
+Markdown, but the renderers draw lists flat); paragraph spacing; vertical text;
+flipped pictures and groups; pictures masked to a shape (drawn as rectangles);
+table cell fills, borders and merged cells; pictures in EMF, WMF, SVG, GIF or
+TIFF (a placeholder image); linked (not embedded) pictures; audio and video (the
+poster image stands in); elbow and curved connectors (straight lines); motion
+paths and non-pulse emphasis effects; easing; hidden slides (imported as normal
+slides); more than 200 shapes on a slide (the rest are left out); text beyond
+8 KB per node. Fonts are referenced by family name, not embedded; install them
+or restyle the deck.
+
 ## The link
 
 A newline-delimited JSON protocol, version 1 (`deck::link`), one envelope per
@@ -566,10 +623,10 @@ rings or pulses.
   comments with suggested edits; the deck card in the TUI. This replaced the
   first S2 (a studio chat pane and `POST /v1/studio/suggest` on the host),
   which is removed.
-- **S3, import and export.** Export is done in core (see *Exports*). `.pptx`
-  import remains, through a sandboxed Python venv with `python-pptx`, the way
-  skills run. Publish `nexus-studio` to
-  crates.io and add it to the release workflow.
+- **S3, import and export.** Export is done in core (see *Exports*), and so
+  is `.pptx` import (see *Import*), in Rust with no new dependencies. PDF
+  import and publishing `nexus-studio` to crates.io (with the release
+  workflow) remain.
 - **S4, web app.** The web client's deck view speaks the link through the host
   and renders the same decks; the web editors plan in `docs/web-editors.md`.
 - **S5, mini-apps and remote.** Open `app` tool web apps in sandboxed studio
@@ -661,7 +718,7 @@ variable}]}` uses the renderer's cached system font database plus deck faces.
 local paths to JavaScript, and returns the normal `Deck` event. Only font-data
 commands may exceed the normal deck-command limit; the decoded cap is 16 MB.
 
-It cannot yet import PowerPoint or PDF (S3), render WOFF2 in core PNGs,
+It cannot yet import PDF (S3), render WOFF2 in core PNGs,
 or play animations anywhere but present mode. Smart text/font/color changes crossfade rather than interpolating glyphs or
 color channels, to keep playback compositor-only. Font previews use the
 webview's installed faces, so platform font availability still matters.
@@ -734,5 +791,11 @@ webview's installed faces, so platform font availability still matters.
   New Rust animation tests cover typed payload defaults/round trips, operation
   validation/atomicity/clearing, build-order repair, merge-patch preservation,
   read summaries, schema-once references and backend Apply/undo/redo/resources.
+- **Import:** `deck::import` tests round-trip the classic and motion fixtures
+  through the exporter (slide count, node kinds, text, rects within 2 px, notes,
+  transitions) and build minimal `.pptx` packages in-test (placeholder
+  inheritance, groups, crops, tables, charts, backgrounds, bullets, theme,
+  gradients, custom paths, animations, SmartArt, limits, garbage input, unknown
+  parts); the deck tool, studio's Open and the CLI have import tests too.
 - **Hermetic:** no network, and no windows opened in Rust tests. Browser harnesses
   use loopback-only static fixtures and mock IPC.

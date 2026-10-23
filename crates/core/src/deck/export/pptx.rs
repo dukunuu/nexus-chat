@@ -23,6 +23,9 @@ mod timing;
 
 const NS: &str = "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"";
 const WIDTH: f64 = 12_192_000.0;
+/// Points across the slide (12700 EMU per point): 960 pt, so 1920 px text
+/// is exported at half its pixel size.
+const WIDTH_PT: f64 = WIDTH / 12_700.0;
 
 fn integer(value: f64) -> i64 {
     value.round() as i64
@@ -122,7 +125,7 @@ fn run(theme: &Theme, font: &ResolvedFont, text: &str, mark: Mark, opacity: f64)
     }));
     let bold = font.weight >= 600 || mark == Mark::Bold;
     let italic = font.italic || mark == Mark::Italic;
-    let pt = font.size * 720.0 / theme.size.w;
+    let pt = font.size * WIDTH_PT / theme.size.w;
     format!(
         "<a:r><a:rPr lang=\"en-US\" sz=\"{}\" b=\"{}\" i=\"{}\" spc=\"{}\">{}<a:latin typeface=\"{family}\"/><a:ea typeface=\"{family}\"/><a:cs typeface=\"{family}\"/></a:rPr><a:t xml:space=\"preserve\">{}</a:t></a:r>",
         integer(pt * 100.0),
@@ -159,7 +162,7 @@ fn paragraphs(
         let align = match font.align { Align::Left => "l", Align::Center => "ctr", Align::Right => "r" };
         let indent = if matches!(row, Row::Bullet(_) | Row::Numbered(_)) { format!(" marL=\"{}\" indent=\"{}\"", integer(font.size * LAYOUT.list_indent * WIDTH / theme.size.w), -integer(font.size * 0.6 * WIDTH / theme.size.w)) } else { String::new() };
         let runs = if markdown { inline(text).iter().map(|r| run(theme, &font, &r.text, r.mark, opacity)).collect::<String>() } else { run(theme, &font, text, Mark::Plain, opacity) };
-        let _ = write!(out, "<a:p><a:pPr algn=\"{align}\"{indent}><a:lnSpc><a:spcPct val=\"{}\"/></a:lnSpc><a:spcAft><a:spcPts val=\"{}\"/></a:spcAft>{bullet}</a:pPr>{runs}<a:endParaRPr lang=\"en-US\" sz=\"{}\"/></a:p>", integer(font.line_height * 100_000.0), integer(font.size * 720.0 / theme.size.w * spacing * 100.0), integer(font.size * 720.0 / theme.size.w * 100.0));
+        let _ = write!(out, "<a:p><a:pPr algn=\"{align}\"{indent}><a:lnSpc><a:spcPct val=\"{}\"/></a:lnSpc><a:spcAft><a:spcPts val=\"{}\"/></a:spcAft>{bullet}</a:pPr>{runs}<a:endParaRPr lang=\"en-US\" sz=\"{}\"/></a:p>", integer(font.line_height * 100_000.0), integer(font.size * WIDTH_PT / theme.size.w * spacing * 100.0), integer(font.size * WIDTH_PT / theme.size.w * 100.0));
         out
     })
 }

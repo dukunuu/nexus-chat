@@ -2034,10 +2034,13 @@ impl ToolBox {
                 let value = serde_json::from_str(args).expect("validated deck arguments");
                 match self.deck_action(name, &value).await {
                     Ok(result) => (result, "done".into()),
-                    Err(error) => (
-                        format!("deck failed: {error:#}"),
-                        "invalid arguments".into(),
-                    ),
+                    Err(error) => {
+                        let message = format!("deck failed: {error:#}");
+                        // A first create usually fails before any result could
+                        // carry the field reference; send it with the error.
+                        let schema = self.deck_schema_if_fits(message.chars().count());
+                        (message + schema, "invalid arguments".into())
+                    }
                 }
             }
             "task" => {
