@@ -255,6 +255,10 @@ pub struct ToolBox {
     image_search: ImageSearch,
     /// Safe image verifier, sharing the device-local preview cache.
     pub remote_images: Option<Arc<crate::remote_image::Fetcher>>,
+    /// Test seam: the downloader the `deck` tool uses for https images. Normally
+    /// absent, and each deck gets one rooted at its own `assets/` folder.
+    #[cfg(test)]
+    pub(crate) deck_images: Option<Arc<crate::remote_image::Fetcher>>,
     files: Option<FilesCtx>,
     apps: Option<AppsCtx>,
     /// Whether the current model supports image inputs. When false, tool
@@ -959,6 +963,8 @@ impl ToolBox {
             discussions: Arc::new(DiscussionSearch::default()),
             image_search: ImageSearch::default(),
             remote_images: None,
+            #[cfg(test)]
+            deck_images: None,
             files,
             apps,
             cache_only: false,
@@ -1038,6 +1044,8 @@ impl ToolBox {
             discussions: self.discussions.clone(),
             image_search: self.image_search.clone(),
             remote_images: self.remote_images.clone(),
+            #[cfg(test)]
+            deck_images: self.deck_images.clone(),
             files: self.files.clone(),
             apps: self.apps.clone(),
             supports_images: self.supports_images,
@@ -1330,7 +1338,8 @@ impl ToolBox {
         defs.push(def(
             &spec::DECK,
             &[
-                "create", "read", "view", "fonts", "edit", "comment", "resolve", "export",
+                "create", "read", "view", "fonts", "edit", "comment", "resolve", "history",
+                "export",
             ],
         ));
         defs.push(def(
@@ -2021,9 +2030,9 @@ impl ToolBox {
         }
         let (result, status) = match name {
             "deck_create" | "deck_read" | "deck_view" | "deck_edit" | "deck_comment"
-            | "deck_resolve" | "deck_fonts" | "deck_export" => {
+            | "deck_resolve" | "deck_fonts" | "deck_export" | "deck_history" => {
                 let value = serde_json::from_str(args).expect("validated deck arguments");
-                match self.deck_action(name, &value) {
+                match self.deck_action(name, &value).await {
                     Ok(result) => (result, "done".into()),
                     Err(error) => (
                         format!("deck failed: {error:#}"),

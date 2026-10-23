@@ -181,7 +181,7 @@
   },
   {
     "name": "deck",
-    "description": "Build and edit slide decks in space files decks/*.deck.json. Shown live in /studio (the user can undo); you see slides as images. Edit directly when asked, then view layout changes; comment when reviewing or unsure. Never invent data, sources or images. Slides are 1920x1080 px. Slide and frame: layout{mode:none|row|column,gap,padding,main,cross,wrap}, children[]. Node: kind,sizing{w,h:px|hug|fill},position:auto|{x,y}; kinds frame text{text,style,font} image{src} shape{shape,fill} table{rows} code{source} chart{chart,labels,series}. Prefer auto-layout and text styles to absolute x,y. Ops: add_slide{after?,slide} delete_slide/delete_node/unwrap{id} move_slide{id,to} set_notes{slide,notes} update_slide{id,fields} insert_node{parent,node} update_node{id,fields: merge patch} move_node{id,parent} wrap{ids,layout} set_layout{target,layout} set_text_style{name,font} set_theme. ids and base_hash are automatic; ops are all-or-nothing. Commenting principles: anchor to a node; one issue, at most two sentences, with why it matters; attach ops when a fix exists; at most 8, most important first, severity must|should|consider; respect the author's intent and facts; answer the thread you are in.\n- action=create: New deck; returns a contact sheet. Needs title; optional path, slides.\n- action=read: Node tree with rects, revision, threads. Needs path.\n- action=view: See slides (default: the one open in studio, else a contact sheet). Needs path; optional slides.\n- action=fonts: Deck and installed families. Needs path; optional text.\n- action=edit: Apply ops; returns changed slides. Needs path, ops; optional revision.\n- action=comment: Pin a comment (ops optional) or reply in a thread. Needs path, text; optional slide, block, severity, ops, thread.\n- action=resolve: Resolve a comment thread. Needs path, thread.\n- action=export: Save a file in exports/. Needs path, text.",
+    "description": "Build and edit slide decks in space files decks/*.deck.json. Live in /studio (undoable); you see slides as images. Edit directly when asked, then view layout changes; comment when reviewing or unsure. Never invent data, sources or images. One deck per request: edit it, no variants or probe decks. Image src: https or space file (us_1.jpg). Big deck: read slides:[ids|numbers]; history lists or restores versions. Slides are 1920x1080 px. Slide and frame: layout{mode:none|row|column,gap,padding,main,cross,wrap}, children[]. Node: kind,sizing{w,h:px|hug|fill},position:auto|{x,y}; kinds frame text{text,style,font} image{src} shape{shape,fill} table{rows} code{source} chart{chart,labels,series}. Prefer auto-layout and text styles to x,y. Ops: add_slide{after?,slide} delete_slide/delete_node/unwrap{id} move_slide{id,to} set_notes{slide,notes} update_slide/update_node{id,fields: merge patch} insert_node{parent,node} move_node{id,parent} wrap{ids,layout} set_layout{target,layout} set_text_style{name,font} set_theme. ids, base_hash automatic; ops atomic. Comments: anchor to a node; one issue, two sentences max, with why; attach ops for a fix; at most 8, worst first; severity must|should|consider; respect the author's intent; answer the thread you are in.\n- action=create: New deck and contact sheet. Needs title; optional path, slides.\n- action=read: Tree with rects, revision, threads. Needs path; optional slides.\n- action=view: Render slides (default: studio's slide, else a sheet). Needs path; optional slides.\n- action=fonts: Deck and installed families. Needs path; optional text.\n- action=edit: Apply ops; shows changed slides. Needs path, ops; optional revision.\n- action=comment: Pin a comment (ops optional) or reply. Needs path, text; optional slide, block, severity, ops, thread.\n- action=resolve: Resolve a comment thread. Needs path, thread.\n- action=history: List or restore earlier versions. Needs path; optional revision.\n- action=export: Save a file in exports/. Needs path, text.",
     "parameters": {
       "properties": {
         "action": {
@@ -193,6 +193,7 @@
             "edit",
             "comment",
             "resolve",
+            "history",
             "export"
           ],
           "type": "string"
@@ -213,11 +214,11 @@
           "type": "string"
         },
         "revision": {
-          "description": "from read; stale fails",
+          "description": "edit: from read; history: version",
           "type": "string"
         },
         "severity": {
-          "description": "priority of a new comment",
+          "description": "new comment priority",
           "enum": [
             "must",
             "should",
@@ -230,7 +231,7 @@
           "type": "string"
         },
         "slides": {
-          "description": "create: slide objects; view: slide ids",
+          "description": "create: slide objects; read, view: ids or numbers",
           "items": {
             "oneOf": [
               {

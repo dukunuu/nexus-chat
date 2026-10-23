@@ -411,13 +411,13 @@ impl Backend {
             Command::Save { deck } => {
                 let next = checked(&deck)?;
                 // A failed save must not change the authoritative document.
-                atomic_write(&self.path, &serde_json::to_vec_pretty(&next)?)?;
+                self.write_deck(&next)?;
                 self.replace(next)?;
                 self.known_revision = self.deck.revision();
             }
             Command::Undo {} => {
                 if let Some(previous) = self.undo.last() {
-                    atomic_write(&self.path, &serde_json::to_vec_pretty(previous)?)?;
+                    self.write_deck(previous)?;
                     self.redo.push(std::mem::replace(
                         &mut self.deck,
                         self.undo.pop().expect("undo"),
@@ -426,7 +426,7 @@ impl Backend {
             }
             Command::Redo {} => {
                 if let Some(next) = self.redo.last() {
-                    atomic_write(&self.path, &serde_json::to_vec_pretty(next)?)?;
+                    self.write_deck(next)?;
                     self.undo.push(std::mem::replace(
                         &mut self.deck,
                         self.redo.pop().expect("redo"),
@@ -463,7 +463,7 @@ impl Backend {
 
     fn replace(&mut self, next: Deck) -> Result<()> {
         if self.deck != next {
-            atomic_write(&self.path, &serde_json::to_vec_pretty(&next)?)?;
+            self.write_deck(&next)?;
             self.undo.push(std::mem::replace(&mut self.deck, next));
             self.redo.clear();
         }
@@ -592,7 +592,20 @@ impl Backend {
     }
 
     fn save(&self) -> Result<()> {
-        atomic_write(&self.path, &serde_json::to_vec_pretty(&self.deck)?)
+        self.write_deck(&self.deck)
+    }
+
+    /// Write the deck file, first keeping the version it replaces in the
+    /// deck's history (`deck/history.rs`), so the model's `history` action and
+    /// the user can both go back.
+    fn write_deck(&self, deck: &Deck) -> Result<()> {
+        // History is a safety net: failing to keep a version must not block a save.
+        let _ = deck::history::record_before_write(
+            &self.path,
+            &deck.revision(),
+            deck::history::Who::User,
+        );
+        atomic_write(&self.path, &serde_json::to_vec_pretty(deck)?)
     }
 
     fn remember(&self) -> Result<()> {

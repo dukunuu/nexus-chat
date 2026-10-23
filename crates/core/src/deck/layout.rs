@@ -60,6 +60,13 @@ pub(super) fn image_path(src: &str, assets: Option<&Path>) -> Option<PathBuf> {
     path.starts_with(root.canonicalize().ok()?).then_some(path)
 }
 
+/// Whether an image `src` can be drawn right now: a file in the deck's
+/// `assets/` or an https image the fetcher already holds. Never fetches.
+#[must_use]
+pub fn image_resolves(src: &str, assets: Option<&Path>) -> bool {
+    image_path(src, assets).is_some()
+}
+
 fn image_size(src: &str, assets: Option<&Path>) -> (f64, f64) {
     image_path(src, assets)
         .and_then(|path| {

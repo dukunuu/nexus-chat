@@ -607,6 +607,25 @@ pub fn render_cached(
     relative(files, &output)
 }
 
+/// Forget the cached renders of one revision of a deck, for when an image it
+/// refers to has arrived since they were drawn.
+pub fn invalidate_cached(deck_path: &Path, files: &Path, revision: &str) {
+    let Ok(directory) = render_dir(deck_path, files) else {
+        return;
+    };
+    let suffix = format!("-{}.png", &revision[..8.min(revision.len())]);
+    for entry in std::fs::read_dir(&directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(&suffix) && !name.starts_with("snap-") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// A durable render of one slide for a conversation message. Unlike
 /// [`render_cached`] it is never pruned, because a past message keeps
 /// referring to it.

@@ -174,7 +174,7 @@ fn prepare_one(base: &Deck, raw: RawSuggestion, index: usize) -> Result<Suggesti
     })
 }
 
-fn insertion_id(
+pub(super) fn insertion_id(
     value: &mut Value,
     stem: &str,
     reserved: &BTreeSet<String>,
@@ -192,7 +192,7 @@ fn insertion_id(
 
 /// Give a slide or node, and every node under it, an id. On a clash the
 /// error carries the JSON path of the node, such as `.children[1]`.
-fn insertion_tree(
+pub(super) fn insertion_tree(
     value: &mut Value,
     stem: &str,
     reserved: &BTreeSet<String>,

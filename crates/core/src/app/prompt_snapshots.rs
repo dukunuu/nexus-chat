@@ -2,9 +2,11 @@ use std::path::Path;
 
 use super::{App, tests::app_with_key};
 
-// Measured 3,854 with per-action tool definitions; the `deck` tool is about 780 of
-// that (its ops, block kinds and commenting principles are always on).
-const CHAT_PROMPT_TOKEN_CEILING: usize = 3_900;
+// Measured 3,938 with per-action tool definitions; the `deck` tool is about 865 of
+// that (its ops, block kinds, commenting principles and the history action are
+// always on). Raised from 3,900 by 60 for the `history` action and the
+// one-deck-per-request / images / read-by-slides guidance.
+const CHAT_PROMPT_TOKEN_CEILING: usize = 3_960;
 
 fn fixture_app() -> App {
     // app_with_key uses a fresh temporary space, with no space instructions.

@@ -2,9 +2,14 @@
 //! editing operations. Slides are 1920 x 1080 px frames holding a tree of
 //! nodes; version-1 grid decks are migrated on load.
 
+pub mod assets;
+pub mod brief;
+pub mod direct;
 pub mod export;
 pub mod feedback;
+pub mod history;
 pub mod layout;
+pub mod lenient;
 pub mod link;
 pub mod migrate;
 pub mod model;
@@ -22,7 +27,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-pub use layout::{Rect, layout, layout_at, layout_map};
+pub use layout::{Rect, image_resolves, layout, layout_at, layout_map};
 pub use model::{
     Align, Animation, AnimationSlot, AutoLayout, Build, BuildBy, Chart, Cross, Deck, Dim,
     Direction, Easing, Effect, Fit, Font, FontFile, Kind, Main, Mode, Node, Position, ResolvedFont,

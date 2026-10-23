@@ -21,6 +21,8 @@ use crate::app_view::AppView;
 
 /// How much of a block's text names it in a comment message.
 const SUMMARY_CHARS: usize = 60;
+/// Characters of the anchored node's text a comment message carries.
+const NODE_TEXT_CHARS: usize = 300;
 
 /// A running studio window.
 struct Canvas {
@@ -405,8 +407,24 @@ impl AppView {
         let image = render::render_snapshot(&deck, path, &files, slide)?;
         let shown = path.strip_prefix(&files).unwrap_or(path).display();
         let number = index + 1;
+        // The anchored node and the revision, so the model can edit at once
+        // instead of reading the whole deck first.
+        let assets = path.parent().map(|dir| dir.join("assets"));
+        let anchored = block
+            .and_then(|id| {
+                nexus_core::deck::brief::node_brief(
+                    &deck,
+                    slide,
+                    id,
+                    assets.as_deref(),
+                    NODE_TEXT_CHARS,
+                )
+            })
+            .map_or_else(String::new, |line| format!("node {line}\n"));
+        let revision = deck.revision();
         Ok(format!(
-            "Comment on {shown} · slide {number} ({summary}): {text}\nthread {thread}\n![slide {number}]({image})"
+            "Comment on {shown} · slide {number} ({summary}): {text}\nthread {thread} · revision {}\n{anchored}![slide {number}]({image})",
+            &revision[..12]
         ))
     }
 
@@ -1048,7 +1066,23 @@ mod tests {
                 .starts_with("Comment on decks/test.deck.json · slide 1 (b1: Test): Clarify this"),
             "{queued}"
         );
-        assert!(queued.contains("thread t1"), "{queued}");
+        assert!(queued.contains("thread t1 · revision "), "{queued}");
+        // The anchored node rides along (id, kind, rect, style, text), so the
+        // model can edit at once; the deck's revision is the 12 characters
+        // `read` and `edit` print.
+        let deck = Deck::check(&std::fs::read_to_string(deck_file(&app)).unwrap()).unwrap();
+        assert!(
+            queued.contains(&format!("revision {}\n", &deck.revision()[..12])),
+            "{queued}"
+        );
+        let node = queued
+            .lines()
+            .find(|line| line.starts_with("node b1 text "))
+            .unwrap_or_else(|| panic!("{queued}"));
+        assert!(
+            node.contains(" style ") && node.ends_with(": \"Test\""),
+            "{node}"
+        );
         let image = queued
             .split("![slide 1](")
             .nth(1)

@@ -41,7 +41,8 @@ to a conversation.
 | Deck schema, validation, operations, revision hashes | `crates/core/src/deck.rs` and `deck/{model,validate,migrate,ops}.rs` | pure data; shared by studio, the `deck` tool and the renderer; no UI deps |
 | Layout | `crates/core/src/deck/layout.rs` (`taffy`) and `deck/text.rs` | node rectangles in px; text measured with the renderer's fonts |
 | Renderer | `crates/core/src/deck/render.rs` | deck → SVG → PNG with `resvg`; one slide, a numbered contact sheet, and a revision-keyed cache under `<space files>/decks/.renders/` |
-| `deck` tool | `crates/core/src/tools/deck.rs`, spec in `tools/spec.rs` | create, read, view, edit, comment, resolve; confined to `<space files>/decks/` |
+| `deck` tool | `crates/core/src/tools/deck.rs` (+ `deck_read.rs`), spec in `tools/spec.rs` | create, read, view, edit, comment, resolve, history, export; confined to `<space files>/decks/` |
+| Direct edits, lenient input, history, images | `crates/core/src/deck/{direct,lenient,history,assets,brief}.rs` | see *The `deck` tool* |
 | Comment threads | `crates/core/src/deck/feedback.rs` | `<deck>.comments.json`, shared by the tool and studio |
 | Link protocol | `crates/core/src/deck/link.rs` | versioned JSON lines; types in core so the web app can reuse them |
 | Terminal side of the link | `crates/tui/src/studio.rs`, `/studio` | spawns studio, turns comments into messages, tells it what the model changed |
@@ -344,25 +345,65 @@ operations, and the file saved on disk is always a whole deck.
 
 ## The `deck` tool
 
-One public tool with seven actions (the model sees it as `deck`):
+One public tool with nine actions (the model sees it as `deck`):
 
 | Action | Does | Read-only |
 |---|---|---|
 | `create {title, path?, slides?}` | New deck under `decks/` (slug from the title); optional slide objects validated like a file; returns path, revision and a contact sheet | no |
-| `read {path}` | The node tree with resolved rectangles, sizing, text styles and overrides, text (truncated per node), revision, comment threads; the first `read`, `create` or `edit` of a session also returns a compact field reference | yes |
+| `read {path, slides?}` | The node tree with resolved rectangles, sizing, text styles and overrides, text (truncated per node), revision, comment threads; `slides` (ids or 1-based numbers) limits it to those slides; a deck whose full text passes ~7000 characters comes back as an outline (`id kind x,y wxh "text"` per node, complete ids) ending in a "more slides" line, so the generic 8000-character tool-result cap never decides what is cut; the first `read`, `create` or `edit` of a session also returns a compact field reference (deferred to a result with room for it) | yes |
 | `fonts {path, text?}` | The deck's font roles and files, and up to 30 installed families matching the filter (`text`) | yes |
 | `view {path, slides?}` | Renders slides: the ones named, else the slide open in studio (when linked), else the whole deck as a contact sheet | yes |
-| `edit {path, ops, revision?}` | Applies `deck::Op`s atomically; fills `base_hash` and insertion ids; returns the new revision, a line per op and images of the changed slides | no |
+| `edit {path, ops, revision?}` | Applies `deck::Op`s atomically as a *direct* edit (see below); returns the new revision, a line per op (counts above 10), the changed nodes with their rects and images of the changed slides | no |
 | `comment {path, slide, block?, text, severity, ops?}` | Pins a model comment (`must`, `should`, `consider`), optionally with suggested ops; with `thread` it replies in that thread instead | no |
 | `resolve {path, thread}` | Resolves a thread | no |
+| `history {path, revision?}` | Without `revision`, lists the kept earlier versions; with it, restores that version as a new write | no |
 
 - **Confinement.** Paths are relative to the space's files and must be
   `decks/…/name.deck.json` with only letters, digits and `- _ . /`; no `..`,
   hidden folders or symlinks. Everything it writes, including the render cache,
   stays under `decks/`.
-- **Errors recover.** A bad operation writes nothing and the error names the
-  operation (`ops[1].id: no block "x" on slide "s2"`). A stale `revision`
-  refuses with the current revision and says to `read` again.
+- **Errors recover.** A bad operation writes nothing and the errors name the
+  operations (`ops[1].id: no node "x"`); *every* located problem is listed
+  (up to 12), each known mistake with a one-line `fix:` hint.
+- **Direct edits are not suggestions.** `edit` goes through `deck::direct`:
+  ids and `base_hash` are filled in and each operation is checked against the
+  deck as the earlier ones left it (so an inserted node can be updated in the
+  same call), up to 500 operations, new image sources allowed. A comment's
+  attached `ops` still go through `suggest::prepare` (at most 40 operations, no
+  image `src` the deck does not already hold), because an author reviews them
+  before they apply. A `children` patch in `update_node`/`update_slide` replaces
+  the children (deletes plus inserts) instead of being refused.
+- **Stale revisions explain themselves.** `revision` is optional. A stale one
+  is looked up in the deck's history; when none of the nodes the operations
+  touch changed since, the edit is applied (`rebased:` line), otherwise it is
+  refused listing the changed ids with their current values and the current
+  revision. A revision not in history is refused with a pointer to
+  `read` with `slides`.
+- **Lenient input.** Before validation, `deck::lenient` repairs a short
+  `path` (`name`, `name.deck.json`, `decks/name`), `font: "Avenir"` (to
+  `{family}`), an undefined text style (to `body`, or kept when the call defines
+  it with `set_text_style`, `set_theme` or a `text_styles` object), `kind:
+  ellipse|rect|circle|line|arrow` (to a shape), numeric strings and integral
+  floats, font weight words, and `letter_spacing` beyond 2 (taken as px,
+  converted to em with the font size). Each repair is a `normalized:` line under
+  the first line of the result.
+- **History.** Every write, by the tool and by studio's save, apply, undo and
+  redo, first keeps the version it replaces in
+  `decks/.history/<stem>/<timestamp>-<rev8>-<who>.json` (`who` is the writer
+  that replaced it: `model` or `user`; an unchanged revision is skipped; the
+  last 50 are kept). `history` lists them (time, writer, slide and image count,
+  what the replacing write changed) and restores one as a new write, which
+  studio reloads as one undo step.
+- **Images.** An image `src` may be an https URL, `assets/<file>`, or a space
+  file (`us_1.jpg`, `files/us_1.jpg`): the tool checks it by content (PNG, JPEG
+  or WebP, at most 16 MB), copies it to `decks/assets/<sha8>-<name>` and
+  rewrites `src`. https images are downloaded once through
+  `remote_image::Fetcher` (rooted at the deck's `assets/`, so studio and renders
+  share the cache) when a deck is created, edited, restored or viewed; at most
+  12 per call, bounded by the fetcher's concurrency and an 8 s timeout, and
+  skipped when the `remote_images` setting is off. A failure is reported per
+  node (`image b3: ...`), and any image that will draw as a placeholder is listed
+  with the reason.
 - **Images.** Results contain `![slide 3](decks/.renders/<deck>/<slide>-<rev8>.png)`;
   the chat loop reads those files and gives them to vision models. A render is
   named by deck revision and an older revision of the same slide is removed.
@@ -510,6 +551,9 @@ rings or pulses.
   the deck differs) and `Focus` for the first changed slide. With no window
   attached, the tool card says `open in studio · /studio`.
 - Opened, the tool card shows the rendered slides inline, with the op summaries.
+- The comment message also carries the deck's current revision and the anchored
+  node on one line (`node b4 text 160,200 800x120 style title size=58 : "text"`,
+  text up to 300 characters), so the model can edit without a `read`.
 
 ## Phases
 

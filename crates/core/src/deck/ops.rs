@@ -9,6 +9,7 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::CheckError;
 use super::layout::{Rect, layout_map};
 use super::model::{
     Animation, AnimationSlot, AutoLayout, Build, Deck, Dim, Font, Kind, Mode, Node, Position,
@@ -111,18 +112,48 @@ pub fn apply(deck: &Deck, ops: &[Op]) -> Result<Deck> {
     for op in ops {
         step(deck, &mut next, op)?;
     }
-    match Deck::check_noted(&serde_json::to_string(&next)?) {
-        // Loading forgives unparseable animation data; an edit must not.
-        Ok((_, notes)) if !notes.is_empty() => bail!("{}", notes.join("; ")),
-        Ok((deck, _)) => Ok(deck),
-        Err(errors) => bail!(
+    validate_deck(&next).map_err(|errors| {
+        anyhow!(
             "{}",
             errors
                 .iter()
                 .map(|e| format!("{}: {}", e.path, e.message))
                 .collect::<Vec<_>>()
                 .join("; ")
-        ),
+        )
+    })
+}
+
+/// Apply one operation to `working` without the whole-deck check, so a
+/// caller can build and locate a long transaction one operation at a time.
+/// `update_node` preconditions are measured against the working copy.
+pub(crate) fn apply_step(working: &mut Deck, op: &Op) -> Result<()> {
+    let before = working.clone();
+    let mut next = before.clone();
+    step(&before, &mut next, op)?;
+    *working = next;
+    Ok(())
+}
+
+/// The whole-deck check every edit ends with. Loading forgives unparseable
+/// animation data; an edit must not, so those notes are errors here.
+pub(crate) fn validate_deck(next: &Deck) -> std::result::Result<Deck, Vec<CheckError>> {
+    let source = serde_json::to_string(next).map_err(|e| {
+        vec![CheckError {
+            path: "$".into(),
+            message: e.to_string(),
+        }]
+    })?;
+    match Deck::check_noted(&source) {
+        Ok((_, notes)) if !notes.is_empty() => Err(notes
+            .into_iter()
+            .map(|note| CheckError {
+                path: "$".into(),
+                message: note,
+            })
+            .collect()),
+        Ok((deck, _)) => Ok(deck),
+        Err(errors) => Err(errors),
     }
 }
 

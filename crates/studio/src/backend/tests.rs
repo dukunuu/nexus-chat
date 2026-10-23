@@ -937,3 +937,41 @@ fn write_core_renders_of_the_dev_deck() {
         .unwrap();
     }
 }
+
+#[test]
+fn studio_writes_keep_the_replaced_version_in_the_decks_history() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    let original = backend.deck.clone();
+    let first = backend.deck.slides[0].id.clone();
+    let kept = |backend: &Backend| deck::history::list(&backend.path).unwrap();
+    assert!(kept(&backend).is_empty(), "creating the file keeps nothing");
+    success(send(
+        &mut backend,
+        json!({"command":"Apply","ops":[{"op":"set_notes","slide":first,"notes":"first edit"}]}),
+    ));
+    let after_apply = backend.deck.clone();
+    let versions = kept(&backend);
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].who, "user");
+    assert_eq!(versions[0].rev8, original.revision()[..8]);
+    assert_eq!(versions[0].load().unwrap(), original);
+    assert!(
+        versions[0]
+            .path
+            .starts_with(backend.path.parent().unwrap().join(".history"))
+    );
+
+    // Undo and redo are writes too; each keeps what it replaced, and an
+    // identical revision is never kept twice in a row.
+    success(send(&mut backend, json!({"command":"Undo"})));
+    let versions = kept(&backend);
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[1].rev8, after_apply.revision()[..8]);
+    success(send(&mut backend, json!({"command":"Redo"})));
+    assert_eq!(kept(&backend).len(), 3);
+    // Saving the same deck again replaces nothing.
+    let current = serde_json::to_value(&backend.deck).unwrap();
+    success(send(&mut backend, json!({"command":"Save","deck":current})));
+    assert_eq!(kept(&backend).len(), 3);
+}

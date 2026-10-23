@@ -2,20 +2,30 @@
 //! the same `*.deck.json` and `*.deck.json.comments.json` files, so every
 //! write here shows up in an open studio window within half a second.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::{Value, json};
 
+use crate::deck::brief::{font_line, px};
 use crate::deck::feedback::{self, Anchor, Edit, Message, Role, Severity, Thread};
+use crate::deck::history::{self, Who};
+use crate::deck::lenient::{self, Context as Lenient};
 use crate::deck::suggest::{self, RawSuggestion, Suggestion};
 use crate::deck::{
     AnimationSlot, BuildBy, CheckError, Deck, Dim, Font, Kind, Mode, Node, Op, Position, Slide,
-    Transition, Trigger, render,
+    Transition, Trigger, assets, direct, render,
 };
+use crate::remote_image::Fetcher;
 
 use super::ToolBox;
+
+#[path = "deck_read.rs"]
+mod read;
 
 /// Slides shown as individual images; more become one contact sheet.
 const MAX_SEPARATE_IMAGES: usize = 4;
@@ -26,6 +36,15 @@ const MAX_THREADS: usize = 200;
 /// How much of a block's text `read` returns.
 const READ_TEXT_CHARS: usize = 400;
 const SHORT_REVISION: usize = 12;
+/// Located errors listed in one failed call.
+const MAX_ERRORS_SHOWN: usize = 12;
+/// Operation lines listed before the edit result switches to counts.
+const MAX_OP_LINES: usize = 10;
+/// Versions listed by `history`.
+const HISTORY_LINES: usize = 20;
+/// Remote images fetched in one call; the rest are reported.
+const MAX_FETCHES: usize = 12;
+const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn slug(title: &str) -> String {
     let words = title
@@ -114,11 +133,30 @@ fn save(path: &Path, deck: &Deck) -> Result<()> {
     crate::deck::write_atomic(path, &serde_json::to_vec_pretty(deck)?)
 }
 
+/// Located errors, one per line, each with a one-line fix when the mistake
+/// is a known one.
+fn format_errors(errors: &[CheckError]) -> String {
+    let mut out = String::new();
+    for e in errors.iter().take(MAX_ERRORS_SHOWN) {
+        let _ = write!(out, "\n- {}: {}", e.path, e.message);
+        if let Some(hint) = lenient::hint(&e.path, &e.message) {
+            let _ = write!(out, " — fix: {hint}");
+        }
+    }
+    if errors.len() > MAX_ERRORS_SHOWN {
+        let _ = write!(out, "\n- … {} more", errors.len() - MAX_ERRORS_SHOWN);
+    }
+    out
+}
+
 /// Fill hashes and insertion ids, check every operation against `deck`, and
-/// return the prepared edit; no write happens here.
-fn prepare(deck: &Deck, ops: &Value) -> Result<Suggestion> {
-    let ops = ops.as_array().context("ops must be an array")?.clone();
+/// return the prepared suggestion; no write happens here. Used for comments:
+/// a suggestion is reviewed by the author before it applies, so it is held to
+/// the suggestion rules (at most 40 operations, no new images).
+fn prepare(deck: &Deck, ops: &Value, lenient: &mut Lenient) -> Result<Suggestion> {
+    let mut ops = ops.as_array().context("ops must be an array")?.clone();
     ensure!(!ops.is_empty(), "ops must contain at least one operation");
+    lenient.ops(&mut ops);
     let (mut valid, errors) = suggest::prepare(
         deck,
         vec![RawSuggestion {
@@ -127,11 +165,26 @@ fn prepare(deck: &Deck, ops: &Value) -> Result<Suggestion> {
         }],
     );
     valid.pop().ok_or_else(|| {
+        let limit = errors
+            .iter()
+            .any(|e| e.message.contains("at most 40") || e.message.contains("image src must"));
         anyhow::anyhow!(
-            "{}. Nothing was written; read the deck and correct that operation.",
-            located(&errors)
+            "Nothing was written. Problems to fix:{}{}",
+            format_errors(&errors),
+            if limit {
+                "\nA comment's suggested edit is limited to 40 operations and cannot add images; use edit to change the deck directly."
+            } else {
+                ""
+            }
         )
     })
+}
+
+/// Write a deck after keeping the version it replaces.
+fn write_deck(path: &Path, deck: &Deck, who: Who) -> Result<()> {
+    // History is a safety net: failing to keep a version must not block the write.
+    let _ = history::record_before_write(path, &deck.revision(), who);
+    save(path, deck)
 }
 
 /// Slides whose content differs, in deck order. A theme change touches all.
@@ -232,56 +285,12 @@ fn describe(op: &Op, before: &Deck) -> String {
     }
 }
 
-fn px(v: f64) -> String {
-    if v.fract() == 0.0 {
-        format!("{v:.0}")
-    } else {
-        format!("{v:.1}")
-    }
-}
-
 fn dim(d: Dim) -> String {
     match d {
         Dim::Fixed(n) => px(n),
         Dim::Hug => "hug".into(),
         Dim::Fill => "fill".into(),
     }
-}
-
-/// Only the fields a font overrides: `size=58 color=accent`.
-fn font_line(font: &Font) -> String {
-    let mut parts = Vec::new();
-    if let Some(v) = &font.family {
-        parts.push(format!("family={v}"));
-    }
-    if let Some(v) = font.size {
-        parts.push(format!("size={}", px(v)));
-    }
-    if let Some(v) = font.weight {
-        parts.push(format!("weight={v}"));
-    }
-    if font.italic == Some(true) {
-        parts.push("italic".into());
-    }
-    if let Some(v) = font.line_height {
-        parts.push(format!("line_height={v}"));
-    }
-    if let Some(v) = font.letter_spacing {
-        parts.push(format!("letter_spacing={v}"));
-    }
-    if let Some(v) = &font.color {
-        parts.push(format!("color={v}"));
-    }
-    if let Some(v) = font.align {
-        parts.push(format!("align={}", name(&v)));
-    }
-    if let Some(v) = font.valign {
-        parts.push(format!("valign={}", name(&v)));
-    }
-    if let Some(v) = font.transform {
-        parts.push(format!("transform={}", name(&v)));
-    }
-    parts.join(" ")
 }
 
 fn layout_line(layout: &crate::deck::AutoLayout) -> String {
@@ -496,15 +505,11 @@ const SCHEMA: &str = "\nschema (sent once per session)\n\
 - slide transition{type:none|fade|push|slide|cover|zoom|smart, direction?:left|right|up|down, duration_ms:0-5000 (400), easing:linear|ease|ease_in|ease_out|ease_in_out|spring (ease_out)} plays on entering the slide in present mode. smart morphs nodes with the same id or name on the previous slide (position, size, opacity, rotation, fill, font size and color) and fades the rest. Renders and view show the final state of a slide, every build in.\n\
 - node animation{build_in?:Build, emphasis?:Build, build_out?:Build}; Build{effect:appear|fade|rise|fly|scale|wipe|blur|typewriter|pulse|shake, direction?, duration_ms:0-5000 (400), delay_ms:0-10000 (0), easing, trigger:click|with_previous|after_previous (click), by:whole|word|line|item (whole), stagger_ms?:0-10000}. pulse and shake are emphasis only and emphasis takes only them; typewriter and by word|line|item need a text node (item = list line). Slide builds:[node_id,...] is the playback order of animated nodes (a node's slots run in, emphasis, out); animated nodes left out are appended in tree order and unknown ids dropped. A click build starts a step; with_previous and after_previous join the step before them; builds ahead of the first click play on entry. read lists them as `builds: 1 click fade b2 · 2 with-prev rise b3`.\n\
 - animation ops: set_transition{slide,transition|null}, set_animation{id,slot:build_in|emphasis|build_out,build|null}, reorder_builds{slide,ids}. Each is atomic with the other ops; update_node and update_slide merge patches also reach animation and transition.\n\
+- images: src is an https URL (fetched when you create or edit, so renders show it) or a space file such as us_1.jpg or files/us_1.jpg (checked by content and copied into decks/assets). view and edit list any image drawn as a placeholder and why. Use the user's own photos and generated images from the space files; do not replace them.\n\
+- reading: read slides:[\"s2\",3] returns just those slides in full. A deck over about 7000 characters reads as an outline (`id kind x,y wxh \"text\"`, ids complete) ending in a \"more slides\" line. Edit results list the changed nodes with their rects and the new revision, so edit again without reading; revision is optional, and a stale one is applied when the nodes you touch did not change, else refused with what changed.\n\
+- history lists earlier versions (kept on every write by you or the user, last 50); history with revision restores one as a new, undoable write. One deck per request: edit it instead of creating -redesign copies or probe decks.\n\
+- create also takes text_styles{name:font} to define styles it uses; update_node/update_slide fields.children replaces the children; edit takes up to 500 ops. Small slips (font as a string, kind ellipse, numeric strings, letter_spacing in px, an undefined style, a short path) are repaired and listed as `normalized:` lines; other errors list every located problem with a fix.\n\
 - set_layout converts children like Figma (none to row/column makes them auto; back makes them absolute where they are). wrap{ids,layout} puts siblings in a new frame; unwrap{id} dissolves it. update_node merges: {\"font\":{\"size\":64}} keeps other font fields, null removes one. set_text_style{name,font} changes every node using the style.\n";
-
-fn schema_once(shown: &mut bool) -> &'static str {
-    if std::mem::replace(shown, true) {
-        ""
-    } else {
-        SCHEMA
-    }
-}
 
 fn author(role: &Role) -> &'static str {
     if matches!(role, Role::Model) {
@@ -512,97 +517,6 @@ fn author(role: &Role) -> &'static str {
     } else {
         "user"
     }
-}
-
-fn read_text(relative: &str, path: &Path, deck: &Deck) -> Result<String> {
-    let mut out = format!(
-        "{relative} · {:?} · {} · {}x{} px · revision {}\n",
-        deck.title,
-        slides(deck.slides.len()),
-        px(deck.theme.size.w),
-        px(deck.theme.size.h),
-        short(&deck.revision())
-    );
-    let tokens = |map: &std::collections::BTreeMap<String, String>| {
-        map.iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let _ = writeln!(
-        out,
-        "theme colors {} · fonts {}",
-        tokens(&deck.theme.colors),
-        tokens(&deck.theme.fonts)
-    );
-    for style in deck.theme.text_styles.keys() {
-        let font = deck.theme.resolve_font(style, &Font::default());
-        let _ = writeln!(
-            out,
-            "text style {style}: {} {}px/{} lh {} ls {} {} {}",
-            deck.theme.family(&font.family),
-            px(font.size),
-            font.weight,
-            font.line_height,
-            font.letter_spacing,
-            font.color,
-            name(&font.align)
-        );
-    }
-    for file in &deck.theme.font_files {
-        let _ = writeln!(
-            out,
-            "deck font {}: {} weight {}{}{}",
-            file.family,
-            file.file,
-            file.weight,
-            if file.italic { " italic" } else { "" },
-            if file.fallback.is_empty() {
-                String::new()
-            } else {
-                format!(" fallback {}", file.fallback.join(", "))
-            }
-        );
-    }
-    let assets = path.parent().map(|dir| dir.join("assets"));
-    for (index, slide) in deck.slides.iter().enumerate() {
-        let notes = if slide.notes.is_empty() {
-            String::new()
-        } else {
-            format!(" · notes: {}", clip(&slide.notes, 160))
-        };
-        let label = slide
-            .name
-            .as_ref()
-            .map_or(String::new(), |n| format!(" {n:?}"));
-        let fill = slide
-            .fill
-            .as_ref()
-            .map_or(String::new(), |f| format!(" fill {f}"));
-        let _ = writeln!(
-            out,
-            "slide {} (id {}){label}{fill} layout {}{notes}",
-            index + 1,
-            slide.id,
-            layout_line(&slide.layout)
-        );
-        if let Some(transition) = &slide.transition {
-            let _ = writeln!(out, "  transition: {}", transition_line(transition));
-        }
-        if let Some(builds) = builds_line(slide) {
-            let _ = writeln!(out, "  builds: {builds}");
-        }
-        let rects = crate::deck::layout_map(deck, slide, assets.as_deref());
-        write_tree(
-            &mut out,
-            &slide.children,
-            &rects,
-            0,
-            slide.layout.mode != Mode::None,
-        );
-    }
-    thread_lines(&mut out, deck, &feedback::load(path)?);
-    Ok(out)
 }
 
 /// The numbered build sequence of a slide on one line, if it has builds.
@@ -651,45 +565,6 @@ fn transition_line(transition: &Transition) -> String {
     parts.push(format!("{}ms", transition.duration_ms));
     parts.push(snake(&json!(transition.easing)));
     parts.join(" ")
-}
-
-fn thread_lines(out: &mut String, deck: &Deck, threads: &[Thread]) {
-    let open = threads.iter().filter(|t| t.resolved.is_none()).count();
-    let _ = writeln!(out, "comment threads: {} ({open} open)", threads.len());
-    for thread in threads {
-        let slide =
-            slide_number(deck, &thread.anchor.slide).map_or_else(|_| "?".into(), |n| n.to_string());
-        let block = thread
-            .anchor
-            .block
-            .as_ref()
-            .map_or(String::new(), |b| format!(" node {b}"));
-        let state = if thread.resolved.is_some() {
-            "resolved"
-        } else {
-            "open"
-        };
-        let first = thread.messages.first();
-        let _ = writeln!(
-            out,
-            "  {} · slide {slide}{block} · {} · {state} · {} messages · {}: {}",
-            thread.id,
-            name(&thread.severity),
-            thread.messages.len(),
-            first.map_or("-", |m| author(&m.role)),
-            first.map_or(String::new(), |m| clip(&m.text, 160)),
-        );
-        if thread.messages.len() > 1
-            && let Some(last) = thread.messages.last()
-        {
-            let _ = writeln!(
-                out,
-                "    latest ({}): {}",
-                author(&last.role),
-                clip(&last.text, 160)
-            );
-        }
-    }
 }
 
 /// The `fonts` action: the deck's own families, then installed ones.
@@ -753,13 +628,30 @@ fn fonts_text(deck: &Deck, query: Option<&str>) -> String {
     out
 }
 
-/// A new deck: the title slide only, or the given slides.
-fn new_deck(title: &str, slides: Option<&Value>) -> Result<Deck> {
-    if let Some(slides) = slides {
-        return Deck::check(&json!({"version": 2, "title": title, "slides": slides}).to_string())
-            .map_err(|errors| anyhow::anyhow!("slides are invalid: {}", located(&errors)));
+/// A new deck: the title slide only, or the given slides, with any text
+/// styles the call defines.
+fn new_deck(title: &str, slides: Option<&Value>, styles: Option<&Value>) -> Result<Deck> {
+    if slides.is_none() && styles.is_none() {
+        return Ok(Deck::titled(title));
     }
-    Ok(Deck::titled(title))
+    let slides = slides.cloned().unwrap_or_else(|| {
+        json!([{"id": "s1", "children": [{"id": "b1", "kind": "text", "text": title, "style": "title"}]}])
+    });
+    let mut deck = json!({"version": 2, "title": title, "slides": slides});
+    if let Some(styles) = styles {
+        deck["theme"] = json!({"text_styles": styles});
+    }
+    Deck::check(&deck.to_string()).map_err(|errors| {
+        anyhow::anyhow!(
+            "Nothing was written. {} to fix:{}",
+            if errors.len() == 1 {
+                "1 problem".to_string()
+            } else {
+                format!("{} problems", errors.len())
+            },
+            format_errors(&errors)
+        )
+    })
 }
 
 /// Image references the model sees: individual slides, or one contact sheet.
@@ -839,10 +731,34 @@ impl ToolBox {
         }
     }
 
-    /// Run one `deck` action (`deck_create` … `deck_resolve`).
-    pub(super) fn deck_action(&self, action: &str, v: &Value) -> Result<String> {
+    /// Run one `deck` action (`deck_create` … `deck_resolve`). Repairs made to
+    /// the input are reported at the top of the result as `normalized:` lines.
+    pub(super) async fn deck_action(&self, action: &str, v: &Value) -> Result<String> {
+        let mut notes = Vec::new();
+        match self.deck_dispatch(action, v, &mut notes).await {
+            Ok(out) => Ok(with_notes(&out, &notes)),
+            Err(error) if !notes.is_empty() => Err(anyhow::anyhow!(
+                "{error:#}\n{}",
+                note_lines(&notes).trim_end()
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn deck_dispatch(
+        &self,
+        action: &str,
+        v: &Value,
+        notes: &mut Vec<String>,
+    ) -> Result<String> {
         let relative = match (v["path"].as_str(), v["title"].as_str()) {
-            (Some(path), _) => path.to_string(),
+            (Some(path), _) => match lenient::normalize_path(path) {
+                Some(fixed) => {
+                    notes.push(format!("path {path:?} → {fixed}"));
+                    fixed
+                }
+                None => path.to_string(),
+            },
             (None, Some(title)) if action == "deck_create" => {
                 format!("decks/{}.deck.json", slug(title))
             }
@@ -850,62 +766,243 @@ impl ToolBox {
         };
         let path = confined(&self.space_files_dir, &relative)?;
         match action {
-            "deck_create" => self.deck_create(&relative, &path, v),
+            "deck_create" => self.deck_create(&relative, &path, v, notes).await,
             "deck_read" => {
-                let (deck, notes) = load_noted(&path)?;
-                let mut out = read_text(&relative, &path, &deck)?;
-                for note in notes {
+                let (deck, load_notes) = load_noted(&path)?;
+                let selected = read::selection(&deck, v, true)?;
+                let mut out = read::read_text(&relative, &path, &deck, selected.as_deref())?;
+                for note in load_notes {
                     let _ = writeln!(out, "load note: {note}");
                 }
-                out.push_str(schema_once(
-                    &mut self.deck_link.lock().expect("deck link").schema_shown,
-                ));
+                let schema = self.schema_if_fits(out.chars().count());
+                out.push_str(schema);
                 Ok(out)
             }
             "deck_fonts" => Ok(fonts_text(
                 &load(&path)?,
                 v["text"].as_str().or_else(|| v["query"].as_str()),
             )),
-            "deck_view" => self.deck_view(&relative, &path, v),
-            "deck_edit" => self.deck_edit(&relative, &path, v),
-            "deck_comment" => deck_comment(&relative, &path, v),
+            "deck_view" => self.deck_view(&relative, &path, v).await,
+            "deck_edit" => self.deck_edit(&relative, &path, v, notes).await,
+            "deck_history" => self.deck_history(&relative, &path, v).await,
+            "deck_comment" => deck_comment(&relative, &path, v, notes),
             "deck_resolve" => deck_resolve(&relative, &path, v),
             "deck_export" => self.deck_export(&relative, &path, v),
             _ => bail!("unknown deck action"),
         }
     }
 
-    fn deck_create(&self, relative: &str, path: &Path, v: &Value) -> Result<String> {
-        ensure!(
-            !path.exists(),
-            "{relative} already exists; read it, then edit"
-        );
-        let title = v["title"].as_str().context("title is required")?;
-        let deck = new_deck(title, v.get("slides"))?;
-        save(path, &deck)?;
-        self.deck_changed(path, deck.slides.first().map(|s| s.id.clone()));
-        let schema = schema_once(&mut self.deck_link.lock().expect("deck link").schema_shown);
-        Ok(format!(
-            "created deck · {relative} · {} · revision {}\n{}{schema}",
-            slides(deck.slides.len()),
-            short(&deck.revision()),
-            Shown::overview(&deck).lines(&deck, path, &self.space_files_dir)?
-        ))
+    /// The once-per-session field reference, unless this result has no room
+    /// for it (it then goes with a later, shorter result).
+    fn schema_if_fits(&self, used: usize) -> &'static str {
+        let mut context = self.deck_link.lock().expect("deck link");
+        if context.schema_shown || used + SCHEMA.chars().count() > read::RESULT_BUDGET {
+            return "";
+        }
+        context.schema_shown = true;
+        SCHEMA
     }
 
-    fn deck_view(&self, relative: &str, path: &Path, v: &Value) -> Result<String> {
+    /// Copy space-file images named by `value` into the deck's `assets/`.
+    fn import_images(&self, value: &mut Value, path: &Path, notes: &mut Vec<String>) -> Result<()> {
+        let assets = path.parent().context("deck folder")?.join("assets");
+        assets::visit_srcs(value, &mut |src| {
+            if let Some(copy) = assets::import_space_image(src, &self.space_files_dir, &assets)? {
+                notes.push(format!(
+                    "image {src:?} → {copy} (copied from the space files)"
+                ));
+                *src = copy;
+            }
+            Ok(())
+        })
+    }
+
+    // `self` is only used by the test seam.
+    #[allow(clippy::unused_self)]
+    fn deck_fetcher(&self, assets: &Path) -> Arc<Fetcher> {
+        #[cfg(test)]
+        if let Some(fetcher) = &self.deck_images {
+            return fetcher.clone();
+        }
+        Fetcher::new(assets)
+    }
+
+    /// Download the https images of the given slides (all when empty) that are
+    /// not on this device yet, through the vetted fetcher, so renders and
+    /// studio show them. Returns a line per problem and whether any image
+    /// arrived.
+    async fn fetch_images(&self, path: &Path, deck: &Deck, ids: &[String]) -> (Vec<String>, bool) {
+        let mut wanted: Vec<(String, String)> = Vec::new();
+        for slide in deck
+            .slides
+            .iter()
+            .filter(|s| ids.is_empty() || ids.contains(&s.id))
+        {
+            for node in slide.nodes() {
+                if let Kind::Image { src, .. } = &node.kind
+                    && src.starts_with("https://")
+                {
+                    wanted.push((node.id.clone(), src.clone()));
+                }
+            }
+        }
+        if wanted.is_empty() {
+            return (Vec::new(), false);
+        }
+        let Some(assets) = path.parent().map(|dir| dir.join("assets")) else {
+            return (Vec::new(), false);
+        };
+        if self.remote_images.as_ref().is_some_and(|f| !f.enabled()) {
+            return (
+                vec![format!(
+                    "remote images are off (setting remote_images): {} https image(s) were not downloaded and will show as placeholders",
+                    wanted.len()
+                )],
+                false,
+            );
+        }
+        if assets.is_symlink() || std::fs::create_dir_all(&assets).is_err() {
+            return (
+                vec!["image cache unavailable: assets is not a usable folder".into()],
+                false,
+            );
+        }
+        let fetcher = self.deck_fetcher(&assets);
+        let mut urls: Vec<String> = Vec::new();
+        for (_, src) in &wanted {
+            if !urls.contains(src) && fetcher.cached(src).is_none() {
+                urls.push(src.clone());
+            }
+        }
+        if urls.is_empty() {
+            return (Vec::new(), false);
+        }
+        let skipped: Vec<String> = urls.split_off(urls.len().min(MAX_FETCHES));
+        let results = futures_util::future::join_all(urls.iter().map(|url| {
+            let fetcher = Arc::clone(&fetcher);
+            async move {
+                (
+                    url.clone(),
+                    tokio::time::timeout(FETCH_TIMEOUT, fetcher.fetch(url)).await,
+                )
+            }
+        }))
+        .await;
+        let mut lines = Vec::new();
+        let mut arrived = false;
+        for (id, src) in &wanted {
+            if skipped.contains(src) {
+                lines.push(format!("image {id}: not fetched (at most {MAX_FETCHES} downloads per call); edit again to fetch the rest"));
+            } else if let Some((_, result)) = results.iter().find(|(url, _)| url == src) {
+                match result {
+                    Ok(Ok(_)) => arrived = true,
+                    Ok(Err(error)) => lines.push(format!("image {id}: {}", fetch_reason(error))),
+                    Err(_) => lines.push(format!(
+                        "image {id}: timed out after {}s",
+                        FETCH_TIMEOUT.as_secs()
+                    )),
+                }
+            }
+        }
+        lines.dedup();
+        (lines, arrived)
+    }
+
+    async fn deck_create(
+        &self,
+        relative: &str,
+        path: &Path,
+        v: &Value,
+        notes: &mut Vec<String>,
+    ) -> Result<String> {
+        ensure!(
+            !path.exists(),
+            "{relative} already exists; read it, then edit it (one deck per request: change the existing deck instead of creating variants)"
+        );
+        let title = v["title"].as_str().context("title is required")?;
+        let mut lenient = Lenient::for_new_deck();
+        let mut styles = v.get("text_styles").cloned();
+        if let Some(styles) = styles.as_mut() {
+            lenient.text_styles(styles);
+        }
+        let mut slides_value = v.get("slides").cloned();
+        if let Some(value) = slides_value.as_mut() {
+            lenient.slides(value);
+            notes.extend(lenient.notes());
+            self.import_images(value, path, notes)?;
+        }
+        let fresh: Vec<String> = lenient
+            .notes()
+            .into_iter()
+            .filter(|n| !notes.contains(n))
+            .collect();
+        notes.extend(fresh);
+        let deck = new_deck(title, slides_value.as_ref(), styles.as_ref())?;
+        write_deck(path, &deck, Who::Model)?;
+        self.deck_changed(path, deck.slides.first().map(|s| s.id.clone()));
+        let (problems, _) = self.fetch_images(path, &deck, &[]).await;
+        let shown = Shown::overview(&deck);
+        let mut out = format!(
+            "created deck · {relative} · {} · revision {}\n",
+            slides(deck.slides.len()),
+            short(&deck.revision()),
+        );
+        out.push_str(&Self::image_report(path, &deck, &shown.ids, &problems));
+        out.push_str(&shown.lines(&deck, path, &self.space_files_dir)?);
+        let schema = self.schema_if_fits(out.chars().count());
+        out.push_str(schema);
+        Ok(out)
+    }
+
+    /// Fetch problems, then every image on `ids` that will render as a placeholder.
+    fn image_report(path: &Path, deck: &Deck, ids: &[String], problems: &[String]) -> String {
+        let mut out = String::new();
+        for line in problems {
+            let _ = writeln!(out, "{line}");
+        }
+        let assets = path.parent().map(|dir| dir.join("assets"));
+        let mut listed = 0;
+        for slide in deck.slides.iter().filter(|s| ids.contains(&s.id)) {
+            for node in slide.nodes() {
+                let Kind::Image { src, .. } = &node.kind else {
+                    continue;
+                };
+                if crate::deck::image_resolves(src, assets.as_deref()) {
+                    continue;
+                }
+                listed += 1;
+                if listed > 10 {
+                    break;
+                }
+                let reason = if src.starts_with("https://") {
+                    "the download did not complete, so it is drawn as a placeholder"
+                } else {
+                    "no such file in the deck's assets; name a space file (us_1.jpg) or an https URL"
+                };
+                let _ = writeln!(
+                    out,
+                    "placeholder: image {} on slide {} ({}): {reason}",
+                    node.id,
+                    slide_number(deck, &slide.id).unwrap_or(0),
+                    clip(src, 60)
+                );
+            }
+        }
+        out
+    }
+
+    async fn deck_view(&self, relative: &str, path: &Path, v: &Value) -> Result<String> {
         let deck = load(path)?;
-        let shown = if let Some(ids) = v.get("slides") {
-            let ids: Vec<String> = serde_json::from_value(ids.clone())
-                .context("slides must be a list of slide ids, for example [\"s1\",\"s3\"]")?;
+        let picked = read::selection(&deck, v, false)?.filter(|s| !s.is_empty());
+        let shown = if let Some(indexes) = picked {
             ensure!(
-                ids.len() <= MAX_SHEET_SLIDES,
+                indexes.len() <= MAX_SHEET_SLIDES,
                 "view at most {MAX_SHEET_SLIDES} slides at once"
             );
-            for id in &ids {
-                slide_number(&deck, id)?;
-            }
-            Shown::some(&deck, ids)
+            Shown::some(
+                &deck,
+                indexes.iter().map(|i| deck.slides[*i].id.clone()).collect(),
+            )
         } else if let Some(id) = self
             .studio_focus(path)
             .filter(|id| slide_number(&deck, id).is_ok())
@@ -914,51 +1011,303 @@ impl ToolBox {
         } else {
             Shown::overview(&deck)
         };
-        Ok(format!(
-            "viewed {} · {relative} · revision {}\n{}",
+        let (problems, arrived) = self.fetch_images(path, &deck, &shown.ids).await;
+        if arrived {
+            // Renders drawn before the images arrived show placeholders.
+            render::invalidate_cached(path, &self.space_files_dir, &deck.revision());
+        }
+        let mut out = format!(
+            "viewed {} · {relative} · revision {}\n",
             shown.label(&deck)?,
             short(&deck.revision()),
-            shown.lines(&deck, path, &self.space_files_dir)?
-        ))
+        );
+        out.push_str(&Self::image_report(path, &deck, &shown.ids, &problems));
+        out.push_str(&shown.lines(&deck, path, &self.space_files_dir)?);
+        Ok(out)
     }
 
-    fn deck_edit(&self, relative: &str, path: &Path, v: &Value) -> Result<String> {
-        let deck = load(path)?;
-        if let Some(revision) = v["revision"].as_str() {
-            ensure!(
-                revision.len() >= 8 && deck.revision().starts_with(revision),
-                "stale revision: the deck is now at revision {}. Nothing was written; read it again before editing.",
-                short(&deck.revision())
-            );
+    /// Check a caller's `revision` against the deck. A match is fine. A stale
+    /// one is compared with the kept version it names: edits that touch
+    /// nothing that changed since are applied anyway (the returned note says
+    /// so); otherwise the edit is refused with what changed.
+    fn check_revision(
+        path: &Path,
+        deck: &Deck,
+        revision: Option<&str>,
+        ops: &[Value],
+    ) -> Result<Option<String>> {
+        let Some(given) = revision
+            .map(|r| r.trim().to_lowercase())
+            .filter(|r| !r.is_empty())
+        else {
+            return Ok(None);
+        };
+        let current = deck.revision();
+        if given.len() >= 8 && current.starts_with(&given) {
+            return Ok(None);
         }
-        let edit = prepare(&deck, &v["ops"])?;
-        let next = crate::deck::apply(&deck, &edit.ops)?;
+        let stale = format!(
+            "stale revision {given}: the deck is now at revision {}.",
+            short(&current)
+        );
+        let Ok(entry) = history::find(path, &given) else {
+            bail!(
+                "{stale} That revision is not among the kept versions, so what changed cannot be told. Nothing was written. Read the slides you are editing (read with slides:[…]) and send the edit again."
+            );
+        };
+        let old = entry.load()?;
+        let assets = path.parent().context("deck folder")?.join("assets");
+        let (changed, theme_changed) = read::differences(&old, deck, &assets);
+        let (touched, touches_theme) = touched_ids(ops);
+        let clash: Vec<&String> = touched
+            .iter()
+            .filter(|id| changed.contains_key(*id))
+            .collect();
+        if !clash.is_empty() || (touches_theme && theme_changed) {
+            let mut message =
+                format!("{stale} These changed since then, and the edit touches them:");
+            for id in clash.iter().take(20) {
+                let _ = write!(message, "\n- {id}: {}", changed[*id]);
+            }
+            if touches_theme && theme_changed {
+                message.push_str("\n- the theme changed");
+            }
+            message.push_str(
+                "\nNothing was written. Send the edit again against these current values; no read is needed.",
+            );
+            bail!(message);
+        }
+        let what: Vec<&str> = changed.keys().take(8).map(String::as_str).collect();
+        Ok(Some(format!(
+            "rebased: the deck changed since revision {given} ({}{}), none of which these operations touch; applied to revision {}",
+            what.join(", "),
+            if changed.len() > 8 { ", …" } else { "" },
+            short(&current)
+        )))
+    }
+
+    async fn deck_edit(
+        &self,
+        relative: &str,
+        path: &Path,
+        v: &Value,
+        notes: &mut Vec<String>,
+    ) -> Result<String> {
+        let deck = load(path)?;
+        let mut ops: Vec<Value> = v["ops"].as_array().context("ops must be an array")?.clone();
+        if let Some(Value::Object(styles)) = v.get("text_styles") {
+            for (style, font) in styles.iter().rev() {
+                ops.insert(
+                    0,
+                    json!({"op": "set_text_style", "name": style, "font": font}),
+                );
+            }
+        }
+        ensure!(!ops.is_empty(), "ops must contain at least one operation");
+        let rebased = Self::check_revision(path, &deck, v["revision"].as_str(), &ops)?;
+        let mut lenient = Lenient::for_deck(&deck);
+        lenient.ops(&mut ops);
+        let mut value = Value::Array(ops);
+        let imported = self.import_images(&mut value, path, notes);
+        notes.extend(lenient.notes());
+        imported?;
+        let Value::Array(ops) = value else {
+            unreachable!("ops stay an array")
+        };
+        let prepared = direct::prepare(&deck, ops).map_err(|errors| {
+            anyhow::anyhow!(
+                "Nothing was written. {} to fix:{}",
+                if errors.len() == 1 {
+                    "1 problem".to_string()
+                } else {
+                    format!("{} problems", errors.len())
+                },
+                format_errors(&errors)
+            )
+        })?;
+        notes.extend(prepared.notes.iter().cloned());
+        let next = prepared.next;
         let changed = changed_slides(&deck, &next);
-        save(path, &next)?;
+        write_deck(path, &next, Who::Model)?;
         let focus = changed
             .first()
             .or_else(|| next.slides.first().map(|s| &s.id))
             .cloned();
         self.deck_changed(path, focus);
-        let shown = Shown::some(&next, changed);
+        let (problems, _) = self.fetch_images(path, &next, &changed).await;
+        let shown = Shown::some(&next, changed.clone());
         let mut out = format!(
-            "edited {} · {relative} · revision {}\n",
+            "edited {} · {relative} · revision {} (was {})\n",
             shown.label(&next)?,
-            short(&next.revision())
+            short(&next.revision()),
+            short(&deck.revision())
         );
-        for op in &edit.ops {
-            let _ = writeln!(out, "- {}", describe(op, &deck));
+        if let Some(rebased) = rebased {
+            let _ = writeln!(out, "{rebased}");
         }
+        out.push_str(&op_lines(&prepared.ops, &deck));
+        let assets = path.parent().context("deck folder")?.join("assets");
+        out.push_str(&read::changed_summary(&deck, &next, &assets, 3000));
+        out.push_str(&Self::image_report(path, &next, &changed, &problems));
         out.push_str(&shown.lines(&next, path, &self.space_files_dir)?);
-        out.push_str(schema_once(
-            &mut self.deck_link.lock().expect("deck link").schema_shown,
-        ));
+        let schema = self.schema_if_fits(out.chars().count());
+        out.push_str(schema);
+        Ok(out)
+    }
+
+    /// `history`: the kept versions, or restore one as a new write.
+    async fn deck_history(&self, relative: &str, path: &Path, v: &Value) -> Result<String> {
+        let deck = load(path)?;
+        if let Some(revision) = v["revision"].as_str().filter(|r| !r.trim().is_empty()) {
+            let entry = history::find(path, revision)?;
+            let snapshot = entry.load()?;
+            if snapshot.revision() == deck.revision() {
+                return Ok(format!(
+                    "{relative} is already at that version (revision {}); nothing to restore\n",
+                    short(&deck.revision())
+                ));
+            }
+            write_deck(path, &snapshot, Who::Model)?;
+            let changed = changed_slides(&deck, &snapshot);
+            self.deck_changed(
+                path,
+                changed
+                    .first()
+                    .or_else(|| snapshot.slides.first().map(|s| &s.id))
+                    .cloned(),
+            );
+            let (problems, _) = self.fetch_images(path, &snapshot, &changed).await;
+            let shown = Shown::some(&snapshot, changed.clone());
+            let mut out = format!(
+                "restored {relative} to version {} · revision {} (was {})\n{}\nThis is a new write: studio's undo goes back, and the version it replaced is in history.\n",
+                entry.rev8,
+                short(&snapshot.revision()),
+                short(&deck.revision()),
+                history::describe_change(&deck, &snapshot)
+            );
+            out.push_str(&Self::image_report(path, &snapshot, &changed, &problems));
+            out.push_str(&shown.lines(&snapshot, path, &self.space_files_dir)?);
+            return Ok(out);
+        }
+        let entries = history::list(path)?;
+        let mut out = format!(
+            "history · {relative} · current revision {} · {} · {} image(s)\n",
+            short(&deck.revision()),
+            slides(deck.slides.len()),
+            history::image_count(&deck)
+        );
+        if entries.is_empty() {
+            out.push_str(
+                "no earlier versions are kept yet; every write by nexus or studio from now on keeps the version it replaces\n",
+            );
+            return Ok(out);
+        }
+        let _ = writeln!(
+            out,
+            "{} earlier version(s), newest first. Each line is a version that was replaced; `then` is what the replacing write changed.",
+            entries.len()
+        );
+        let shown: Vec<&history::Entry> = entries.iter().rev().take(HISTORY_LINES).collect();
+        let mut later = deck.clone();
+        for entry in shown {
+            let Ok(version) = entry.load() else {
+                let _ = writeln!(out, "{} · {} · unreadable", entry.rev8, entry.time());
+                continue;
+            };
+            let _ = writeln!(
+                out,
+                "{} · {} · replaced by {} · {} · {} image(s) · then: {}",
+                entry.rev8,
+                entry.time(),
+                entry.who,
+                slides(version.slides.len()),
+                history::image_count(&version),
+                history::describe_change(&version, &later)
+            );
+            later = version;
+        }
+        if entries.len() > HISTORY_LINES {
+            let _ = writeln!(
+                out,
+                "… {} older versions not listed",
+                entries.len() - HISTORY_LINES
+            );
+        }
+        out.push_str("restore one with history and revision set to its first column\n");
         Ok(out)
     }
 }
 
+/// Ids an operation list refers to, and whether it changes the theme.
+fn touched_ids(ops: &[Value]) -> (BTreeSet<String>, bool) {
+    let mut ids = BTreeSet::new();
+    let mut theme = false;
+    for op in ops {
+        for key in ["id", "slide", "parent", "target", "after"] {
+            if let Some(id) = op[key].as_str() {
+                ids.insert(id.to_string());
+            }
+        }
+        if let Some(list) = op["ids"].as_array() {
+            ids.extend(list.iter().filter_map(Value::as_str).map(str::to_string));
+        }
+        if matches!(op["op"].as_str(), Some("set_text_style" | "set_theme")) {
+            theme = true;
+        }
+    }
+    (ids, theme)
+}
+
+/// One line per operation, or counts by kind when there are many.
+fn op_lines(ops: &[Op], before: &Deck) -> String {
+    let mut out = String::new();
+    if ops.len() <= MAX_OP_LINES {
+        for op in ops {
+            let _ = writeln!(out, "- {}", describe(op, before));
+        }
+        return out;
+    }
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for op in ops {
+        let line = describe(op, before);
+        let kind = line
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        *counts.entry(kind).or_default() += 1;
+    }
+    let parts: Vec<String> = counts.iter().map(|(k, n)| format!("{n} {k}")).collect();
+    let _ = writeln!(out, "- {} operations: {}", ops.len(), parts.join(", "));
+    out
+}
+
+fn fetch_reason(error: &anyhow::Error) -> String {
+    let text = format!("{error:#}");
+    let text = text.split(" for url").next().unwrap_or(&text);
+    clip(text, 120)
+}
+
+fn note_lines(notes: &[String]) -> String {
+    notes.iter().fold(String::new(), |mut out, note| {
+        let _ = writeln!(out, "normalized: {note}");
+        out
+    })
+}
+
+/// Put the `normalized:` lines right under the first line of a result.
+fn with_notes(out: &str, notes: &[String]) -> String {
+    if notes.is_empty() {
+        return out.to_string();
+    }
+    match out.split_once('\n') {
+        Some((first, rest)) => format!("{first}\n{}{rest}", note_lines(notes)),
+        None => format!("{out}\n{}", note_lines(notes)),
+    }
+}
+
 #[allow(clippy::cast_possible_truncation)]
-fn deck_comment(relative: &str, path: &Path, v: &Value) -> Result<String> {
+fn deck_comment(relative: &str, path: &Path, v: &Value, notes: &mut Vec<String>) -> Result<String> {
     let deck = load(path)?;
     let text = v["text"].as_str().context("text is required")?.trim();
     ensure!(
@@ -966,11 +1315,19 @@ fn deck_comment(relative: &str, path: &Path, v: &Value) -> Result<String> {
         "a comment is one to two sentences, at most {MAX_COMMENT_CHARS} characters"
     );
     let mut threads = feedback::load(path)?;
-    let edits = |anchor: &Anchor| -> Result<Vec<Edit>> {
-        if v.get("ops").is_none() {
-            return Ok(vec![]);
-        }
-        Ok(vec![Edit::new(&deck, prepare(&deck, &v["ops"])?, anchor)])
+    let mut lenient = Lenient::for_deck(&deck);
+    let suggestion = if v.get("ops").is_some() {
+        let prepared = prepare(&deck, &v["ops"], &mut lenient);
+        notes.extend(lenient.notes());
+        Some(prepared?)
+    } else {
+        None
+    };
+    let edits = |anchor: &Anchor| -> Vec<Edit> {
+        suggestion
+            .iter()
+            .map(|s| Edit::new(&deck, s.clone(), anchor))
+            .collect()
     };
     if let Some(id) = v["thread"].as_str() {
         let thread = threads
@@ -979,7 +1336,7 @@ fn deck_comment(relative: &str, path: &Path, v: &Value) -> Result<String> {
             .context("unknown thread; read the deck for current thread ids")?;
         ensure!(thread.messages.len() < 100, "that thread is full");
         thread.anchor.check(&deck).map_err(anyhow::Error::msg)?;
-        let edits = edits(&thread.anchor)?;
+        let edits = edits(&thread.anchor);
         thread
             .messages
             .push(Message::new(Role::Model, text.into(), edits));
@@ -1010,7 +1367,7 @@ fn deck_comment(relative: &str, path: &Path, v: &Value) -> Result<String> {
         threads.len() < MAX_THREADS,
         "this deck has {MAX_THREADS} threads; resolve some first"
     );
-    let edits = edits(&anchor)?;
+    let edits = edits(&anchor);
     let id = uuid::Uuid::new_v4().to_string();
     threads.push(Thread {
         id: id.clone(),
@@ -1076,16 +1433,20 @@ fn deck_resolve(relative: &str, path: &Path, v: &Value) -> Result<String> {
 mod animation_tests;
 
 #[cfg(test)]
+#[path = "deck_v3_tests.rs"]
+mod v3_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    struct Fixture {
-        root: PathBuf,
-        tools: ToolBox,
+    pub(super) struct Fixture {
+        pub(super) root: PathBuf,
+        pub(super) tools: ToolBox,
     }
 
     impl Fixture {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let root = std::env::temp_dir().join(format!("nexus-deck-{}", uuid::Uuid::new_v4()));
             let mut tools = ToolBox::new(
                 root.join("skills"),
@@ -1101,17 +1462,17 @@ mod tests {
             Self { root, tools }
         }
 
-        async fn run(&self, action: &str, mut fields: Value) -> String {
+        pub(super) async fn run(&self, action: &str, mut fields: Value) -> String {
             fields["action"] = json!(action);
             self.tools.run("deck", &fields.to_string()).await.0
         }
 
-        fn file(&self, relative: &str) -> PathBuf {
+        pub(super) fn file(&self, relative: &str) -> PathBuf {
             self.tools.space_files_dir.join(relative)
         }
 
         /// The files named by `![alt](path)` lines in a result.
-        fn images(&self, result: &str) -> Vec<PathBuf> {
+        pub(super) fn images(&self, result: &str) -> Vec<PathBuf> {
             result
                 .lines()
                 .filter_map(|line| line.strip_prefix("!["))
@@ -1231,7 +1592,7 @@ mod tests {
             )
             .await;
         assert!(
-            stale.contains("stale revision") && stale.contains("read it again"),
+            stale.contains("stale revision") && stale.contains("Nothing was written"),
             "{stale}"
         );
         let located = f
@@ -1537,7 +1898,6 @@ mod tests {
             "decks/../../bad.deck.json",
             "/tmp/bad.deck.json",
             "other/bad.deck.json",
-            "decks/bad.json",
             "decks/.renders/x.deck.json",
             "decks/a b.deck.json",
             "decks/a)(b.deck.json",

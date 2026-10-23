@@ -1371,11 +1371,12 @@ pub(super) static TASK: ToolSpec = ToolSpec {
 
 pub(super) static DECK: ToolSpec = ToolSpec {
     name: "deck",
-    purpose: "Build and edit slide decks in space files decks/*.deck.json. Shown live in /studio (the user can undo); you see slides as images. \
+    purpose: "Build and edit slide decks in space files decks/*.deck.json. Live in /studio (undoable); you see slides as images. \
 Edit directly when asked, then view layout changes; comment when reviewing or unsure. Never invent data, sources or images. \
-Slides are 1920x1080 px. Slide and frame: layout{mode:none|row|column,gap,padding,main,cross,wrap}, children[]. Node: kind,sizing{w,h:px|hug|fill},position:auto|{x,y}; kinds frame text{text,style,font} image{src} shape{shape,fill} table{rows} code{source} chart{chart,labels,series}. Prefer auto-layout and text styles to absolute x,y. \
-Ops: add_slide{after?,slide} delete_slide/delete_node/unwrap{id} move_slide{id,to} set_notes{slide,notes} update_slide{id,fields} insert_node{parent,node} update_node{id,fields: merge patch} move_node{id,parent} wrap{ids,layout} set_layout{target,layout} set_text_style{name,font} set_theme. ids and base_hash are automatic; ops are all-or-nothing. \
-Commenting principles: anchor to a node; one issue, at most two sentences, with why it matters; attach ops when a fix exists; at most 8, most important first, severity must|should|consider; respect the author's intent and facts; answer the thread you are in.",
+One deck per request: edit it, no variants or probe decks. Image src: https or space file (us_1.jpg). Big deck: read slides:[ids|numbers]; history lists or restores versions. \
+Slides are 1920x1080 px. Slide and frame: layout{mode:none|row|column,gap,padding,main,cross,wrap}, children[]. Node: kind,sizing{w,h:px|hug|fill},position:auto|{x,y}; kinds frame text{text,style,font} image{src} shape{shape,fill} table{rows} code{source} chart{chart,labels,series}. Prefer auto-layout and text styles to x,y. \
+Ops: add_slide{after?,slide} delete_slide/delete_node/unwrap{id} move_slide{id,to} set_notes{slide,notes} update_slide/update_node{id,fields: merge patch} insert_node{parent,node} move_node{id,parent} wrap{ids,layout} set_layout{target,layout} set_text_style{name,font} set_theme. ids, base_hash automatic; ops atomic. \
+Comments: anchor to a node; one issue, two sentences max, with why; attach ops for a fix; at most 8, worst first; severity must|should|consider; respect the author's intent; answer the thread you are in.",
     selector: Some("action"),
     params: &[
         Param {
@@ -1391,7 +1392,7 @@ Commenting principles: anchor to a node; one issue, at most two sentences, with 
         Param {
             name: "slides",
             kind: Kind::Slides,
-            doc: "create: slide objects; view: slide ids",
+            doc: "create: slide objects; read, view: ids or numbers",
         },
         Param {
             name: "ops",
@@ -1401,7 +1402,7 @@ Commenting principles: anchor to a node; one issue, at most two sentences, with 
         Param {
             name: "revision",
             kind: Kind::Str,
-            doc: "from read; stale fails",
+            doc: "edit: from read; history: version",
         },
         Param {
             name: "slide",
@@ -1421,7 +1422,7 @@ Commenting principles: anchor to a node; one issue, at most two sentences, with 
         Param {
             name: "severity",
             kind: Kind::Enum(&["must", "should", "consider"]),
-            doc: "priority of a new comment",
+            doc: "new comment priority",
         },
         Param {
             name: "thread",
@@ -1432,7 +1433,7 @@ Commenting principles: anchor to a node; one issue, at most two sentences, with 
     actions: &[
         ActionSpec {
             name: "create",
-            summary: "New deck; returns a contact sheet",
+            summary: "New deck and contact sheet",
             required: &["title"],
             optional: &["path", "slides"],
             read_only: false,
@@ -1440,15 +1441,15 @@ Commenting principles: anchor to a node; one issue, at most two sentences, with 
         },
         ActionSpec {
             name: "read",
-            summary: "Node tree with rects, revision, threads",
+            summary: "Tree with rects, revision, threads",
             required: &["path"],
-            optional: &[],
+            optional: &["slides"],
             read_only: true,
             internal: "deck_read",
         },
         ActionSpec {
             name: "view",
-            summary: "See slides (default: the one open in studio, else a contact sheet)",
+            summary: "Render slides (default: studio's slide, else a sheet)",
             required: &["path"],
             optional: &["slides"],
             read_only: true,
@@ -1464,7 +1465,7 @@ Commenting principles: anchor to a node; one issue, at most two sentences, with 
         },
         ActionSpec {
             name: "edit",
-            summary: "Apply ops; returns changed slides",
+            summary: "Apply ops; shows changed slides",
             required: &["path", "ops"],
             optional: &["revision"],
             read_only: false,
@@ -1472,7 +1473,7 @@ Commenting principles: anchor to a node; one issue, at most two sentences, with 
         },
         ActionSpec {
             name: "comment",
-            summary: "Pin a comment (ops optional) or reply in a thread",
+            summary: "Pin a comment (ops optional) or reply",
             required: &["path", "text"],
             optional: &["slide", "block", "severity", "ops", "thread"],
             read_only: false,
@@ -1485,6 +1486,14 @@ Commenting principles: anchor to a node; one issue, at most two sentences, with 
             optional: &[],
             read_only: false,
             internal: "deck_resolve",
+        },
+        ActionSpec {
+            name: "history",
+            summary: "List or restore earlier versions",
+            required: &["path"],
+            optional: &["revision"],
+            read_only: false,
+            internal: "deck_history",
         },
         ActionSpec {
             name: "export",
@@ -1615,6 +1624,11 @@ mod tests {
             "deck",
             r#"{"action":"resolve","path":"decks/x.deck.json","thread":"t"}"#,
             "deck_resolve",
+        ),
+        (
+            "deck",
+            r#"{"action":"history","path":"decks/x.deck.json"}"#,
+            "deck_history",
         ),
         (
             "deck",

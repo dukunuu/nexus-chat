@@ -17,7 +17,7 @@ fn read_summarizes_transition_and_all_build_slots_in_order() {
     .unwrap();
     let path =
         std::env::temp_dir().join(format!("nexus-motion-{}.deck.json", uuid::Uuid::new_v4()));
-    let read = read_text("decks/motion.deck.json", &path, &deck).unwrap();
+    let read = read::read_text("decks/motion.deck.json", &path, &deck, None).unwrap();
     assert!(
         read.contains("transition: push left 400ms ease_out"),
         "{read}"
@@ -32,8 +32,7 @@ fn read_summarizes_transition_and_all_build_slots_in_order() {
 
 #[test]
 fn animation_reference_is_only_in_the_once_per_session_cheat_sheet() {
-    let mut shown = false;
-    let schema = schema_once(&mut shown);
+    let schema = SCHEMA;
     for field in [
         "transition{",
         "animation{",
@@ -46,5 +45,4 @@ fn animation_reference_is_only_in_the_once_per_session_cheat_sheet() {
     ] {
         assert!(schema.contains(field), "missing {field}");
     }
-    assert_eq!(schema_once(&mut shown), "");
 }
