@@ -429,6 +429,11 @@ fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
 const QUIT_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_millis(1500);
 
 fn ctrl_c(app: &mut AppView) -> Result<()> {
+    // In the image viewer Ctrl+C copies the picture; Esc closes.
+    if app.popup == Popup::ImageViewer {
+        app.viewer_action(crate::image_viewer_actions::Action::CopyImage);
+        return Ok(());
+    }
     if app.popup == Popup::Approval {
         return app.execute(AppCommand::Approve {
             decision: nexus_core::tools::Decision::Deny,
@@ -945,6 +950,7 @@ fn handle_popup_mouse(app: &mut AppView, m: MouseEvent) -> Result<()> {
 
 /// Route mouse events: composer click/drag when no popup is open, else the
 /// open popup.
+#[allow(clippy::too_many_lines)] // one early return per popup that owns the pointer
 fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
     if app.popup == Popup::Approval {
         // The approval sits in the composer's place: the wheel over it
@@ -971,6 +977,10 @@ fn handle_mouse(app: &mut AppView, m: MouseEvent, screen: Rect) -> Result<()> {
             (MouseEventKind::ScrollDown, false) => app.scroll = app.scroll.saturating_sub(3),
             _ => {}
         }
+        return Ok(());
+    }
+    if app.popup == Popup::ImageViewer {
+        ui::popups::image_viewer::mouse(app, m);
         return Ok(());
     }
     // The column edge and popup borders resize before anything else sees the
@@ -1952,5 +1962,89 @@ mod tests {
             "{:?}",
             app.current_model
         );
+    }
+
+    /// A clipboard that only counts what the viewer copies to it.
+    struct CountingClipboard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl crate::image_viewer_actions::Clipboard for CountingClipboard {
+        fn set_text(&mut self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn set_image(&mut self, width: usize, height: usize, rgba: Vec<u8>) -> Result<(), String> {
+            assert_eq!((width, height, rgba.len()), (16, 8, 16 * 8 * 4));
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn viewer_with_picture() -> (AppView, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let mut app = test_app();
+        app.core.settings.image_viewer = "terminal".into();
+        let dir =
+            std::env::temp_dir().join(format!("nexus-events-viewer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.png");
+        image::RgbImage::from_pixel(16, 8, image::Rgb([5, 6, 7]))
+            .save(&path)
+            .unwrap();
+        let copies = std::sync::Arc::default();
+        app.image_viewer.hooks.clipboard =
+            Some(Box::new(CountingClipboard(std::sync::Arc::clone(&copies))));
+        app.open_image_target(
+            &path.to_string_lossy(),
+            &crate::image_viewer::Anchor::ByTarget,
+            crate::image_viewer::Return::Nothing,
+        );
+        assert_eq!(app.popup, Popup::ImageViewer);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| ui::render(f, &mut app)).unwrap();
+        (app, copies)
+    }
+
+    #[test]
+    fn ctrl_c_in_the_image_viewer_copies_the_picture_and_leaves_it_open() {
+        let (mut app, copies) = viewer_with_picture();
+        handle_key(&mut app, ctrl('c')).unwrap();
+        assert_eq!(copies.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(app.popup, Popup::ImageViewer, "Esc closes, Ctrl+C copies");
+        assert!(!app.should_quit && app.quit_armed_at.is_none());
+        handle_key(&mut app, KeyCode::Esc.into()).unwrap();
+        assert_eq!(app.popup, Popup::None);
+    }
+
+    #[test]
+    fn the_image_viewer_gets_every_mouse_event_while_it_is_open() {
+        let (mut app, _copies) = viewer_with_picture();
+        let screen = Rect::new(0, 0, 80, 24);
+        let event = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(
+            &mut app,
+            event(MouseEventKind::Down(MouseButton::Right), 20, 6),
+            screen,
+        )
+        .unwrap();
+        assert!(
+            app.image_viewer.pointer.menu.is_some(),
+            "right-click opens the menu"
+        );
+        handle_mouse(
+            &mut app,
+            event(MouseEventKind::Down(MouseButton::Left), 70, 20),
+            screen,
+        )
+        .unwrap();
+        assert!(app.image_viewer.pointer.menu.is_none());
+        assert_eq!(app.popup, Popup::ImageViewer);
+        handle_mouse(&mut app, event(MouseEventKind::ScrollUp, 40, 10), screen).unwrap();
+        assert_ne!(app.image_viewer.zoom(), crate::image_viewer::Zoom::Fit);
+        assert_eq!(app.scroll, 0, "the transcript behind it did not scroll");
     }
 }

@@ -2863,3 +2863,140 @@ fn settings_image_viewer_row_cycles_persists_and_round_trips() {
         crate::image_viewer::Preference::Terminal
     );
 }
+
+fn open_viewer_on(app: &mut AppView, names: &[&str]) -> Vec<String> {
+    use crate::image_viewer::{Anchor, Return};
+    let pics: Vec<String> = names.iter().map(|n| viewer_png(n, 40, 20)).collect();
+    app.core.settings.image_viewer = "terminal".into();
+    app.history_cache.image_at_line = pics.iter().flat_map(|p| [Some(p.clone()), None]).collect();
+    app.open_image_target(&pics[0], &Anchor::Line(0), Return::Nothing);
+    assert!(app.popup == nexus_core::app::Popup::ImageViewer);
+    pics
+}
+
+#[test]
+fn image_viewer_action_menu_lists_every_action_with_its_key() {
+    use crossterm::event::KeyCode;
+    let mut app = test_app();
+    open_viewer_on(&mut app, &["menu.png"]);
+    super::image_viewer::handle_key(&mut app, KeyCode::Char('.').into());
+    let screen = render_to_string(100, 24, |f| super::image_viewer::render(f, &mut app));
+    assert!(screen.contains(" actions "), "{screen}");
+    for (label, key) in [
+        ("Copy image", "y"),
+        ("Copy path", "c"),
+        ("Save to files", "s"),
+        ("Save to Downloads", "S"),
+        ("Reveal", "r"),
+        ("Open in default app", "o"),
+        ("Attach to message", "a"),
+    ] {
+        let row = screen
+            .lines()
+            .find(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("{label} is listed:\n{screen}"));
+        let cell = row
+            .split('\u{2502}')
+            .find(|part| part.contains(label))
+            .unwrap();
+        assert!(
+            cell.trim_end().ends_with(key),
+            "{label} shows its key {key}: {row}"
+        );
+    }
+    let first = screen.lines().find(|l| l.contains("Copy image")).unwrap();
+    assert!(
+        first.contains("\u{25b8} Copy image"),
+        "selection marker: {first}"
+    );
+    assert!(screen.contains("Enter run"), "{screen}");
+    // The menu sits in the shared rounded chrome.
+    assert!(
+        screen.contains('\u{256d}') && screen.contains('\u{256f}'),
+        "{screen}"
+    );
+
+    super::image_viewer::handle_key(&mut app, KeyCode::Down.into());
+    let screen = render_to_string(100, 24, |f| super::image_viewer::render(f, &mut app));
+    assert!(screen.contains("\u{25b8} Copy path"), "{screen}");
+    assert!(!screen.contains("\u{25b8} Copy image"), "{screen}");
+}
+
+#[test]
+fn image_viewer_hints_and_footer_adapt_to_the_width() {
+    let mut app = test_app();
+    open_viewer_on(&mut app, &["sunset.png"]);
+    let wide = render_to_string(140, 24, |f| super::image_viewer::render(f, &mut app));
+    let lines: Vec<_> = wide.lines().collect();
+    let hints = lines[lines.len() - 1];
+    for hint in [
+        ". menu",
+        "y copy image",
+        "c copy path",
+        "s save",
+        "+/- zoom",
+        "r reveal",
+    ] {
+        assert!(hints.contains(hint), "{hint}: {hints}");
+    }
+    let footer = lines[lines.len() - 2];
+    assert!(
+        footer.contains("40x20 \u{b7} PNG") && footer.contains("fit 100%"),
+        "{footer}"
+    );
+    assert!(
+        footer.trim_end().ends_with("sunset.png \u{2502}") || footer.contains("sunset.png"),
+        "{footer}"
+    );
+
+    let narrow = render_to_string(44, 12, |f| super::image_viewer::render(f, &mut app));
+    let lines: Vec<_> = narrow.lines().collect();
+    let hints = lines[lines.len() - 1];
+    assert!(
+        hints.contains("Esc close"),
+        "the essentials survive: {hints}"
+    );
+    assert!(!hints.contains("y copy image"), "{hints}");
+    let footer = lines[lines.len() - 2];
+    assert!(footer.contains("40x20"), "size is the last to go: {footer}");
+    assert!(
+        !footer.contains("sunset.png"),
+        "source goes first: {footer}"
+    );
+}
+
+#[test]
+fn image_viewer_shows_a_chevron_only_where_the_pointer_would_turn_the_page() {
+    use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+    let mut app = test_app();
+    open_viewer_on(&mut app, &["one.png", "two.png"]);
+    let hover = |app: &mut AppView, column, row| {
+        super::image_viewer::mouse(
+            app,
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+    };
+    render_to_string(100, 24, |f| super::image_viewer::render(f, &mut app));
+    let body = app.image_viewer.body();
+    // First image: nothing to go back to on the left, a chevron on the right.
+    hover(&mut app, body.x + 2, body.y + 3);
+    let screen = render_to_string(100, 24, |f| super::image_viewer::render(f, &mut app));
+    assert!(
+        !screen.contains('\u{2039}') && !screen.contains('\u{203a}'),
+        "{screen}"
+    );
+    hover(&mut app, body.right() - 2, body.y + 3);
+    let screen = render_to_string(100, 24, |f| super::image_viewer::render(f, &mut app));
+    assert!(
+        screen.contains('\u{203a}') && !screen.contains('\u{2039}'),
+        "{screen}"
+    );
+    hover(&mut app, body.x + body.width / 2, body.y + 3);
+    let screen = render_to_string(100, 24, |f| super::image_viewer::render(f, &mut app));
+    assert!(!screen.contains('\u{203a}'), "{screen}");
+}

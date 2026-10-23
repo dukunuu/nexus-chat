@@ -8,6 +8,7 @@ mod filter_input;
 mod flows;
 mod history_cache;
 mod image_viewer;
+mod image_viewer_actions;
 mod interactive;
 mod resize;
 mod selection;

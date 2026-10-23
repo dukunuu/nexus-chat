@@ -228,9 +228,9 @@ pub struct Meta {
 
 #[derive(Clone)]
 pub struct Decoded {
-    path: PathBuf,
-    image: Arc<DynamicImage>,
-    meta: Meta,
+    pub(crate) path: PathBuf,
+    pub(crate) image: Arc<DynamicImage>,
+    pub(crate) meta: Meta,
 }
 
 enum Load {
@@ -246,7 +246,7 @@ pub struct ViewKey {
     path: PathBuf,
     cols: u16,
     rows: u16,
-    fit: bool,
+    zoom: Zoom,
     pan: (i32, i32),
 }
 
@@ -255,12 +255,106 @@ struct Shown {
     protocol: Protocol,
 }
 
-/// Pixel sizes of the last view, for clamping and for deciding whether the
-/// arrows pan or move between images.
+/// Pixel sizes of the last view, for clamping, for anchoring a zoom and for
+/// deciding whether the arrows pan or move between images.
 #[derive(Clone, Copy, Debug)]
 struct Geometry {
+    /// The window the image is drawn in, in pixels.
     view: (u32, u32),
+    /// The decoded (possibly downscaled) copy.
     image: (u32, u32),
+    /// Width of the file's own pixels: what a zoom percentage is relative to.
+    natural_w: u32,
+}
+
+// ── Zoom ──────────────────────────────────────────────────────────────────
+
+/// How big the image is drawn: scaled down to the window, or a percentage of
+/// the file's own pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Zoom {
+    Fit,
+    Percent(u32),
+}
+
+/// The percentages the keys and the wheel step through.
+pub const ZOOM_STEPS: [u32; 10] = [25, 50, 75, 100, 150, 200, 300, 400, 600, 800];
+
+/// The next step above (`dir > 0`) or below `percent`, clamped to the range.
+#[must_use]
+pub fn next_zoom_percent(percent: f64, dir: i32) -> u32 {
+    let first = ZOOM_STEPS[0];
+    let last = ZOOM_STEPS[ZOOM_STEPS.len() - 1];
+    if dir > 0 {
+        ZOOM_STEPS
+            .into_iter()
+            .find(|step| f64::from(*step) > percent + 0.5)
+            .unwrap_or(last)
+    } else {
+        ZOOM_STEPS
+            .into_iter()
+            .rev()
+            .find(|step| f64::from(*step) < percent - 0.5)
+            .unwrap_or(first)
+    }
+}
+
+/// Display pixels per decoded pixel. Fit shrinks to the window and never
+/// enlarges; a percentage is relative to the file's own width, so a photo
+/// downscaled for memory still reads 100% at its real size.
+fn scale_for(zoom: Zoom, decoded: (u32, u32), natural_w: u32, view: (u32, u32)) -> f64 {
+    let (width, height) = (f64::from(decoded.0.max(1)), f64::from(decoded.1.max(1)));
+    match zoom {
+        Zoom::Fit => (f64::from(view.0) / width)
+            .min(f64::from(view.1) / height)
+            .min(1.0),
+        Zoom::Percent(percent) => f64::from(percent) / 100.0 * f64::from(natural_w.max(1)) / width,
+    }
+}
+
+/// The decoded image's size once drawn at `scale`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // bounded: 800% of 3072
+fn display_size(decoded: (u32, u32), scale: f64) -> (u32, u32) {
+    (
+        ((f64::from(decoded.0) * scale).round() as u32).max(1),
+        ((f64::from(decoded.1) * scale).round() as u32).max(1),
+    )
+}
+
+/// Where the window starts along one axis, in display pixels from the image's
+/// edge: negative when the image is smaller than the window (centered).
+fn axis_origin(disp: f64, view: f64, pan: f64) -> f64 {
+    if disp > view {
+        (disp - view) / 2.0 + clamp_pan_f(pan, disp, view)
+    } else {
+        -(view - disp) / 2.0
+    }
+}
+
+fn clamp_pan_f(pan: f64, disp: f64, view: f64) -> f64 {
+    if disp > view {
+        let half = ((disp - view) / 2.0).floor();
+        pan.clamp(-half, half)
+    } else {
+        0.0
+    }
+}
+
+/// The pan (display pixels from centered) that keeps the image point under
+/// `pointer` (display pixels from the window's edge) fixed while the scale
+/// goes from `old` to `new`. Pure, so the zoom math is testable on its own.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)] // clamped to half an image
+pub fn anchored_pan(decoded: u32, view: u32, pan: i32, pointer: f64, old: f64, new: f64) -> i32 {
+    let (decoded, view) = (f64::from(decoded), f64::from(view));
+    let old_origin = axis_origin(decoded * old, view, f64::from(pan));
+    let image_point = (old_origin + pointer) / old;
+    let new_disp = decoded * new;
+    if new_disp <= view {
+        return 0;
+    }
+    let wanted = image_point * new - pointer;
+    clamp_pan_f(wanted - (new_disp - view) / 2.0, new_disp, view).round() as i32
 }
 
 pub enum Completion {
@@ -385,14 +479,73 @@ fn decode(path: &Path) -> Result<Decoded, String> {
     })
 }
 
-/// Fit: scale down to the view. 1:1: cut the view-sized window at `pan`
-/// (pixels from centered) out of the pixels, untouched.
+/// The file decoded at its own size, for copying to the clipboard. Vector
+/// images aren't handled here: they have no pixels of their own.
+pub(crate) fn decode_original(path: &Path) -> Result<DynamicImage, String> {
+    let bytes = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if bytes > MAX_FILE_BYTES {
+        return Err("file is too big".into());
+    }
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    image::ImageReader::new(std::io::Cursor::new(&data))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?
+        .decode()
+        .map_err(|e| e.to_string())
+}
+
+/// The window of the image the view shows, at `scale`, panned `pan` display
+/// pixels from centered. Only the visible part is resampled, so a deep zoom
+/// costs a window, not the whole image; at exactly 100% nothing is resampled.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::similar_names
+)] // bounded by the decoded copy
+fn render_window(
+    image: &DynamicImage,
+    scale: f64,
+    view: (u32, u32),
+    pan: (i32, i32),
+) -> DynamicImage {
+    let (width, height) = image.dimensions();
+    let disp = display_size((width, height), scale);
+    let shown = (disp.0.min(view.0).max(1), disp.1.min(view.1).max(1));
+    let origin = (
+        axis_origin(f64::from(disp.0), f64::from(view.0), f64::from(pan.0)).max(0.0),
+        axis_origin(f64::from(disp.1), f64::from(view.1), f64::from(pan.1)).max(0.0),
+    );
+    let span = |origin: f64, shown: u32, size: u32| -> (u32, u32) {
+        let start = ((origin / scale).floor() as u32).min(size - 1);
+        let len = ((f64::from(shown) / scale).round() as u32).clamp(1, size - start);
+        (start, len)
+    };
+    let (x, w) = span(origin.0, shown.0, width);
+    let (y, h) = span(origin.1, shown.1, height);
+    let window = if (x, y, w, h) == (0, 0, width, height) {
+        image.clone()
+    } else {
+        image.crop_imm(x, y, w, h)
+    };
+    if window.dimensions() == shown {
+        return window;
+    }
+    // Past 300% the pixels are the point: keep them crisp.
+    let filter = if scale >= 3.0 {
+        FilterType::Nearest
+    } else {
+        FilterType::Triangle
+    };
+    window.resize_exact(shown.0, shown.1, filter)
+}
+
+/// Draw `image` for a `cols` x `rows` window at `zoom` and `pan`.
 fn encode(
     picker: &Picker,
     image: &DynamicImage,
-    cols: u16,
-    rows: u16,
-    fit: bool,
+    natural_w: u32,
+    (cols, rows): (u16, u16),
+    zoom: Zoom,
     pan: (i32, i32),
 ) -> Result<Protocol, String> {
     let font = picker.font_size();
@@ -400,36 +553,18 @@ fn encode(
         u32::from(cols) * u32::from(font.width),
         u32::from(rows) * u32::from(font.height),
     );
-    let (width, height) = image.dimensions();
-    let source = if fit {
-        if width > view.0 || height > view.1 {
-            image.resize(view.0.max(1), view.1.max(1), FilterType::Triangle)
-        } else {
-            image.clone()
-        }
-    } else {
-        let origin = |size: u32, window: u32, pan: i32| -> u32 {
-            if size <= window {
-                0
-            } else {
-                let centered = i64::from((size - window) / 2) + i64::from(pan);
-                u32::try_from(centered.clamp(0, i64::from(size - window))).unwrap_or(0)
-            }
-        };
-        image.crop_imm(
-            origin(width, view.0, pan.0),
-            origin(height, view.1, pan.1),
-            width.min(view.0),
-            height.min(view.1),
-        )
-    };
+    let scale = scale_for(zoom, image.dimensions(), natural_w, view);
     picker
-        .new_protocol(source, Size::new(cols, rows), Resize::Fit(None))
+        .new_protocol(
+            render_window(image, scale, view, pan),
+            Size::new(cols, rows),
+            Resize::Fit(None),
+        )
         .map_err(|e| e.to_string())
 }
 
-fn clamp_pan(pan: i32, image: u32, view: u32) -> i32 {
-    let half = i32::try_from(image.saturating_sub(view) / 2).unwrap_or(i32::MAX);
+fn clamp_pan(pan: i32, disp: u32, view: u32) -> i32 {
+    let half = i32::try_from(disp.saturating_sub(view) / 2).unwrap_or(i32::MAX);
     pan.clamp(-half, half)
 }
 
@@ -491,7 +626,7 @@ pub struct Viewer {
     picker: Picker,
     items: Vec<Item>,
     index: usize,
-    fit: bool,
+    zoom: Zoom,
     pan: (i32, i32),
     return_to: Return,
     load: Load,
@@ -504,6 +639,10 @@ pub struct Viewer {
     tx: mpsc::UnboundedSender<Completion>,
     rx: mpsc::UnboundedReceiver<Completion>,
     opener: Opener,
+    /// The pointer's drag, clicks, hover and the open action menu.
+    pub(crate) pointer: crate::image_viewer_actions::Pointer,
+    /// Clipboard, file-manager and Downloads seams (real ones outside tests).
+    pub(crate) hooks: crate::image_viewer_actions::Hooks,
 }
 
 impl Default for Viewer {
@@ -513,7 +652,7 @@ impl Default for Viewer {
             picker: Picker::halfblocks(),
             items: Vec::new(),
             index: 0,
-            fit: true,
+            zoom: Zoom::Fit,
             pan: (0, 0),
             return_to: Return::Nothing,
             load: Load::Idle,
@@ -525,6 +664,8 @@ impl Default for Viewer {
             geometry: None,
             tx,
             rx,
+            pointer: crate::image_viewer_actions::Pointer::default(),
+            hooks: crate::image_viewer_actions::Hooks::default(),
             // Tests must never launch a real viewer.
             #[cfg(test)]
             opener: Opener::new(|_| {}),
@@ -567,7 +708,8 @@ impl Viewer {
         self.index = index.min(items.len().saturating_sub(1));
         self.items = items;
         self.return_to = return_to;
-        self.fit = true;
+        self.zoom = Zoom::Fit;
+        self.pointer = crate::image_viewer_actions::Pointer::default();
         self.reset_item();
     }
 
@@ -587,6 +729,7 @@ impl Viewer {
         self.shown = None;
         self.requested = None;
         self.items.clear();
+        self.pointer = crate::image_viewer_actions::Pointer::default();
         std::mem::take(&mut self.return_to)
     }
 
@@ -612,7 +755,13 @@ impl Viewer {
 
     #[must_use]
     pub fn is_fit(&self) -> bool {
-        self.fit
+        self.zoom == Zoom::Fit
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn zoom(&self) -> Zoom {
+        self.zoom
     }
 
     #[cfg(test)]
@@ -621,10 +770,103 @@ impl Viewer {
         self.pan
     }
 
+    /// The window the image is drawn in, as of the last draw (cells).
+    #[cfg(test)]
+    #[must_use]
+    pub fn body(&self) -> Rect {
+        self.pointer.body
+    }
+
+    /// The decoded image, once it has loaded.
+    #[must_use]
+    pub(crate) fn decoded(&self) -> Option<&Decoded> {
+        match &self.load {
+            Load::Ready(decoded) => Some(decoded),
+            _ => None,
+        }
+    }
+
+    /// `f`: fit <-> 1:1.
     pub fn toggle_fit(&mut self) {
-        self.fit = !self.fit;
-        self.pan = (0, 0);
+        self.set_zoom(
+            if self.zoom == Zoom::Fit {
+                Zoom::Percent(100)
+            } else {
+                Zoom::Fit
+            },
+            None,
+        );
+    }
+
+    /// The zoom now in effect, as a percentage of the file's own pixels.
+    #[must_use]
+    pub fn percent(&self) -> Option<f64> {
+        let g = self.geometry?;
+        let scale = scale_for(self.zoom, g.image, g.natural_w, g.view);
+        Some(scale * f64::from(g.image.0) / f64::from(g.natural_w.max(1)) * 100.0)
+    }
+
+    /// Change the zoom. With a `pointer` (cells, screen coordinates) the image
+    /// point under it stays put; without one the view keeps its center.
+    pub fn set_zoom(&mut self, zoom: Zoom, pointer: Option<(u16, u16)>) {
+        let Some(g) = self.geometry else {
+            self.zoom = zoom;
+            self.pan = (0, 0);
+            self.requested = None;
+            return;
+        };
+        let old = scale_for(self.zoom, g.image, g.natural_w, g.view);
+        let new = scale_for(zoom, g.image, g.natural_w, g.view);
+        let at = self
+            .pointer_px(pointer)
+            .unwrap_or((f64::from(g.view.0) / 2.0, f64::from(g.view.1) / 2.0));
+        self.pan = if zoom == Zoom::Fit {
+            (0, 0)
+        } else {
+            (
+                anchored_pan(g.image.0, g.view.0, self.pan.0, at.0, old, new),
+                anchored_pan(g.image.1, g.view.1, self.pan.1, at.1, old, new),
+            )
+        };
+        self.zoom = zoom;
         self.requested = None;
+    }
+
+    /// One zoom step in (`dir > 0`) or out, anchored at the pointer.
+    pub fn zoom_step(&mut self, dir: i32, pointer: Option<(u16, u16)>) {
+        let current = self.percent().unwrap_or(match self.zoom {
+            Zoom::Percent(percent) => f64::from(percent),
+            Zoom::Fit => 100.0,
+        });
+        let next = next_zoom_percent(current, dir);
+        if self.zoom != Zoom::Fit && self.zoom == Zoom::Percent(next) {
+            return;
+        }
+        self.set_zoom(Zoom::Percent(next), pointer);
+    }
+
+    /// A double-click: fit <-> 100% around the pointer.
+    pub fn toggle_zoom_at(&mut self, pointer: (u16, u16)) {
+        let next = if self.zoom == Zoom::Fit {
+            Zoom::Percent(100)
+        } else {
+            Zoom::Fit
+        };
+        self.set_zoom(next, Some(pointer));
+    }
+
+    /// A screen cell as pixels from the window's top left (cell centre).
+    fn pointer_px(&self, pointer: Option<(u16, u16)>) -> Option<(f64, f64)> {
+        let (column, row) = pointer?;
+        let body = self.pointer.body;
+        let font = self.picker.font_size();
+        let axis = |cell: u16, origin: u16, size: u16| {
+            (f64::from(cell.saturating_sub(origin)) + 0.5) * f64::from(size)
+        };
+        Some((
+            axis(column, body.x, font.width),
+            axis(row, body.y, font.height),
+        ))
     }
 
     /// Move to a neighbouring image; stays put at either end.
@@ -647,26 +889,50 @@ impl Viewer {
         }
     }
 
-    /// Whether the 1:1 view is larger than the window on (x, y).
+    /// Insert `target` after the current image and show it (a dropped file).
+    pub fn insert_after_current(&mut self, target: String) {
+        let at = (self.index + 1).min(self.items.len());
+        self.items.insert(
+            at,
+            Item {
+                target,
+                anchor: Anchor::ByTarget,
+            },
+        );
+        self.go(at);
+    }
+
+    /// Whether the picture is larger than the window on (x, y) at this zoom.
     #[must_use]
     pub fn can_pan(&self) -> (bool, bool) {
-        match (self.fit, self.geometry) {
-            (false, Some(g)) => (g.image.0 > g.view.0, g.image.1 > g.view.1),
-            _ => (false, false),
-        }
+        let Some(g) = self.geometry else {
+            return (false, false);
+        };
+        let scale = scale_for(self.zoom, g.image, g.natural_w, g.view);
+        let disp = display_size(g.image, scale);
+        (disp.0 > g.view.0, disp.1 > g.view.1)
     }
 
     /// Pan by whole cells (the window shows more of the image in that direction).
     pub fn pan_by(&mut self, dx: i32, dy: i32) {
         let font = self.picker.font_size();
-        self.pan.0 = self
-            .pan
-            .0
-            .saturating_add(dx.saturating_mul(i32::from(font.width)));
-        self.pan.1 = self
-            .pan
-            .1
-            .saturating_add(dy.saturating_mul(i32::from(font.height)));
+        self.pan_px(
+            dx.saturating_mul(i32::from(font.width)),
+            dy.saturating_mul(i32::from(font.height)),
+        );
+    }
+
+    /// Pan by display pixels; the next draw clamps to the image's edges.
+    pub fn pan_px(&mut self, dx: i32, dy: i32) {
+        self.pan.0 = self.pan.0.saturating_add(dx);
+        self.pan.1 = self.pan.1.saturating_add(dy);
+    }
+
+    /// One cell in display pixels.
+    #[must_use]
+    pub fn cell_px(&self) -> (i32, i32) {
+        let font = self.picker.font_size();
+        (i32::from(font.width), i32::from(font.height))
     }
 
     // ── Background work ──────────────────────────────────────────────────
@@ -767,7 +1033,8 @@ impl Viewer {
                 });
             } else if let Load::Ready(decoded) = &self.load {
                 let image = Arc::clone(&decoded.image);
-                let key = self.view_key(path, &image, body);
+                let natural_w = decoded.meta.width;
+                let key = self.view_key(path, &image, natural_w, body);
                 let done = self.shown.as_ref().is_some_and(|shown| shown.key == key)
                     || self.requested.as_ref() == Some(&key);
                 if !done && self.in_flight < MAX_JOBS {
@@ -775,7 +1042,14 @@ impl Viewer {
                     let (ticket, picker) = (self.ticket, self.picker.clone());
                     self.spawn(move || Completion::Encoded {
                         ticket,
-                        result: encode(&picker, &image, key.cols, key.rows, key.fit, key.pan),
+                        result: encode(
+                            &picker,
+                            &image,
+                            natural_w,
+                            (key.cols, key.rows),
+                            key.zoom,
+                            key.pan,
+                        ),
                         key,
                     });
                 }
@@ -787,27 +1061,38 @@ impl Viewer {
         }
     }
 
-    fn view_key(&mut self, path: &Path, image: &DynamicImage, body: Rect) -> ViewKey {
+    fn view_key(
+        &mut self,
+        path: &Path,
+        image: &DynamicImage,
+        natural_w: u32,
+        body: Rect,
+    ) -> ViewKey {
         let font = self.picker.font_size();
         let view = (
             u32::from(body.width) * u32::from(font.width),
             u32::from(body.height) * u32::from(font.height),
         );
         let size = image.dimensions();
-        self.geometry = Some(Geometry { view, image: size });
-        if self.fit {
+        self.geometry = Some(Geometry {
+            view,
+            image: size,
+            natural_w,
+        });
+        if self.zoom == Zoom::Fit {
             self.pan = (0, 0);
         } else {
+            let disp = display_size(size, scale_for(self.zoom, size, natural_w, view));
             self.pan = (
-                clamp_pan(self.pan.0, size.0, view.0),
-                clamp_pan(self.pan.1, size.1, view.1),
+                clamp_pan(self.pan.0, disp.0, view.0),
+                clamp_pan(self.pan.1, disp.1, view.1),
             );
         }
         ViewKey {
             path: path.to_path_buf(),
             cols: body.width,
             rows: body.height,
-            fit: self.fit,
+            zoom: self.zoom,
             pan: self.pan,
         }
     }
@@ -828,21 +1113,53 @@ impl Viewer {
         }
     }
 
-    /// The footer fields after the separators: size, format, bytes, mode.
+    /// The footer's fields in reading order, each with a keep-priority (lower
+    /// goes first when the line is too narrow): size, format, bytes, zoom,
+    /// whether the copy is downscaled, and where the image came from.
     #[must_use]
-    pub fn info_fields(&self) -> Vec<String> {
+    pub fn footer_fields(&self) -> Vec<(String, u8)> {
         let mut fields = Vec::new();
         if let Some(meta) = self.meta() {
-            fields.push(format!("{}x{}", meta.width, meta.height));
-            fields.push(meta.format.clone());
-            fields.push(human_bytes(meta.bytes));
-            if let Some((w, h)) = meta.shown {
-                fields.push(format!("shown at {w}x{h}"));
-            }
+            fields.push((format!("{}x{}", meta.width, meta.height), 9));
+            fields.push((meta.format.clone(), 4));
+            fields.push((human_bytes(meta.bytes), 3));
         }
-        fields.push(if self.fit { "fit".into() } else { "1:1".into() });
+        fields.push((self.zoom_label(), 8));
+        if let Some((w, h)) = self.meta().and_then(|meta| meta.shown) {
+            fields.push((format!("shown at {w}x{h}"), 2));
+        }
+        if let Some(item) = self.current() {
+            fields.push((source_label(&item.target), 1));
+        }
         fields
     }
+
+    /// `fit 62%`, `1:1 100%` or `150%`.
+    #[must_use]
+    pub fn zoom_label(&self) -> String {
+        let percent = self
+            .percent()
+            .map_or_else(String::new, |p| format!("{}%", p.round()));
+        match self.zoom {
+            Zoom::Fit => format!("fit {percent}").trim_end().to_string(),
+            Zoom::Percent(100) => format!("1:1 {percent}").trim_end().to_string(),
+            Zoom::Percent(p) => format!("{p}%"),
+        }
+    }
+}
+
+/// Where an image came from, for the footer: a URL's host or a file's name.
+#[must_use]
+pub fn source_label(target: &str) -> String {
+    if is_remote(target)
+        && let Ok(url) = reqwest::Url::parse(target)
+        && let Some(host) = url.host_str()
+    {
+        return host.to_string();
+    }
+    Path::new(target)
+        .file_name()
+        .map_or_else(|| target.to_string(), |name| name.to_string_lossy().into())
 }
 
 // ── AppView: opening, closing, falling back ───────────────────────────────
@@ -1644,6 +1961,111 @@ mod tests {
         assert_eq!(
             *log.lock().unwrap(),
             [dir.join("v.mp4").to_string_lossy().into_owned()]
+        );
+    }
+
+    // ── zoom ─────────────────────────────────────────────────────────────
+
+    fn gradient(width: u32, height: u32) -> DynamicImage {
+        DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, (x / 256) as u8])
+        }))
+    }
+
+    #[test]
+    fn windows_are_cut_and_scaled_to_the_view() {
+        let img = gradient(400, 300);
+        // 100% is a plain crop of the middle, never resampled.
+        let window = render_window(&img, 1.0, (100, 80), (0, 0));
+        assert_eq!(window.dimensions(), (100, 80));
+        assert_eq!(
+            window.to_rgb8().get_pixel(0, 0),
+            img.to_rgb8().get_pixel(150, 110)
+        );
+        // Panning moves the window; far past the edge it stops at the edge.
+        let right = render_window(&img, 1.0, (100, 80), (10_000, 10_000));
+        assert_eq!(
+            right.to_rgb8().get_pixel(0, 0),
+            img.to_rgb8().get_pixel(300, 220)
+        );
+        let left = render_window(&img, 1.0, (100, 80), (-10_000, -10_000));
+        assert_eq!(
+            left.to_rgb8().get_pixel(0, 0),
+            img.to_rgb8().get_pixel(0, 0)
+        );
+        // 200% shows half as much of the image, blown up to the same window.
+        let zoomed = render_window(&img, 2.0, (100, 80), (0, 0));
+        assert_eq!(zoomed.dimensions(), (100, 80));
+        // 25% of a picture smaller than the window is just the small picture.
+        let small = render_window(&img, 0.25, (200, 200), (0, 0));
+        assert_eq!(small.dimensions(), (100, 75));
+        // Fit never enlarges.
+        let scale = scale_for(Zoom::Fit, (400, 300), 400, (1000, 1000));
+        assert!((scale - 1.0).abs() < f64::EPSILON);
+        let scale = scale_for(Zoom::Fit, (400, 300), 400, (200, 200));
+        assert!((scale - 0.5).abs() < f64::EPSILON);
+        assert_eq!(
+            render_window(&img, 0.5, (200, 200), (0, 0)).dimensions(),
+            (200, 150)
+        );
+    }
+
+    #[test]
+    fn a_downscaled_photo_reads_100_percent_at_its_real_size() {
+        let dir = temp_dir();
+        let pic = png_file(&dir, "wide.png", 4000, 200);
+        let mut app = app();
+        app.core.settings.image_viewer = "terminal".into();
+        app.open_image_target(&pic, &Anchor::ByTarget, Return::Nothing);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).unwrap();
+        let draw = |app: &mut AppView, terminal: &mut ratatui::Terminal<_>| {
+            terminal
+                .draw(|f| crate::ui::popups::image_viewer::render(f, app))
+                .unwrap();
+        };
+        draw(&mut app, &mut terminal);
+        assert!(app.image_viewer.meta().unwrap().shown.is_some());
+        key(&mut app, crossterm::event::KeyCode::Char('1'));
+        draw(&mut app, &mut terminal);
+        assert!((app.image_viewer.percent().unwrap() - 100.0).abs() < 0.01);
+        assert_eq!(app.image_viewer.zoom_label(), "1:1 100%");
+        assert!(
+            app.image_viewer.can_pan().0,
+            "4000 px is wider than the window"
+        );
+        // The footer carries the percentage and the source.
+        let text = screen(&terminal);
+        assert!(
+            text.contains("4000x200") && text.contains("wide.png"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn zoom_labels_say_fit_with_its_percentage_or_the_chosen_step() {
+        let dir = temp_dir();
+        let pic = png_file(&dir, "big.png", 400, 300);
+        let mut app = app();
+        app.core.settings.image_viewer = "terminal".into();
+        app.open_image_target(&pic, &Anchor::ByTarget, Return::Nothing);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|f| crate::ui::popups::image_viewer::render(f, &mut app))
+            .unwrap();
+        let label = app.image_viewer.zoom_label();
+        assert!(label.starts_with("fit ") && label.ends_with('%'), "{label}");
+        let fit: f64 = label[4..label.len() - 1].parse().unwrap();
+        assert!(
+            fit < 100.0,
+            "a 400 px picture shrinks into 38 cells: {label}"
+        );
+        key(&mut app, crossterm::event::KeyCode::Char('+'));
+        let label = app.image_viewer.zoom_label();
+        assert!(
+            ["25%", "50%", "75%", "1:1 100%", "150%"].contains(&label.as_str()),
+            "{label}"
         );
     }
 }

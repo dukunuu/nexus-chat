@@ -119,7 +119,7 @@ pub(crate) fn copy_to_clipboard(clipboard: &mut Option<arboard::Clipboard>, text
 /// If pasted text is a single absolute path to an existing regular file
 /// (optionally `file://`-prefixed or quoted, as file managers produce on
 /// drag/drop), return the cleaned path.
-fn pasted_file_path(text: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn pasted_file_path(text: &str) -> Option<std::path::PathBuf> {
     let t = text.trim().trim_matches('"').trim_matches('\'');
     let t = t.strip_prefix("file://").unwrap_or(t);
     if t.contains('\n') || !t.starts_with('/') {
@@ -220,6 +220,7 @@ impl AppView {
                 }
                 self.input.insert_str(text);
             }
+            Popup::ImageViewer => self.viewer_drop(text),
             Popup::InteractiveUi => self.interactive.paste(text),
             Popup::TuiApp => crate::ui::popups::tui_app::paste(self, text),
             Popup::Key => self.key_input.push_str(text),

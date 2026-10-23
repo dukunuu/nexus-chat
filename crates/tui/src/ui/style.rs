@@ -71,6 +71,9 @@ pub mod glyph {
     pub const FAVORITE: &str = "★";
     /// Accepts images.
     pub const VISION: &str = "⊡";
+    /// Previous / next item in a viewer.
+    pub const PREV: &str = "‹";
+    pub const NEXT: &str = "›";
 }
 
 /// The one separator between inline fields.
