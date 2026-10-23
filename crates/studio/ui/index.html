@@ -16,7 +16,7 @@
     <span id="link-status" class="link-pill">not linked</span>
     <button id="toggle-comments" data-icon="comment">Comments <span id="comment-count" class="count">0</span></button>
     <span class="divider"></span><button id="undo" class="icon-button" data-icon="undo" aria-label="Undo" title="Undo (⌘/Ctrl+Z)"></button><button id="redo" class="icon-button" data-icon="redo" aria-label="Redo" title="Redo (⇧⌘/Ctrl+Z)"></button>
-    <button id="present" data-icon="play">Present</button><button id="export" class="primary" data-icon="export">Export</button>
+    <button id="present" data-icon="play">Present</button><div class="export-menu"><button id="export" class="primary" data-icon="export" aria-haspopup="menu" aria-expanded="false" aria-controls="export-menu">Export</button><div id="export-menu" class="popover" role="menu" aria-label="Export format" hidden><button role="menuitem" tabindex="-1" data-format="pptx">PowerPoint (.pptx)</button><button role="menuitem" tabindex="-1" data-format="pdf">PDF</button><button role="menuitem" tabindex="-1" data-format="png">PNG images (.zip)</button><button role="menuitem" tabindex="-1" data-format="html">HTML presentation</button><button role="menuitem" tabindex="-1" data-format="json">Deck JSON</button><button role="menuitem" tabindex="-1" id="export-to">Export to…</button></div></div>
   </header>
   <main>
     <section id="workspace">
@@ -33,6 +33,7 @@
     </section>
   </main>
   <dialog id="path-dialog"><form method="dialog"><h2 id="path-heading">Open deck</h2><label id="path-label" for="path-input">Path</label><input id="path-input" required autocomplete="off"><p id="path-hint"></p><div class="dialog-actions"><button value="cancel" formnovalidate>Cancel</button><button id="path-confirm" class="primary" value="ok">Open</button></div></form></dialog>
+  <dialog id="export-details" aria-labelledby="export-details-heading"><h2 id="export-details-heading">Export approximations</h2><ul id="export-warnings"></ul><form method="dialog"><div class="dialog-actions"><button value="close">Close</button></div></form></dialog>
   <div id="presentation" hidden><div id="present-stage"></div><aside id="presenter"><div class="presenter-label">Next step</div><div id="present-next"></div><div class="presenter-label">Speaker notes</div><div id="present-notes"></div><div id="present-timer">00:00</div></aside><span id="present-counter"></span><span id="present-jump"></span><span id="present-step"></span><button id="presenter-toggle">Presenter · P</button><button id="exit-present">Exit · Esc</button></div>
 </body>
 </html>

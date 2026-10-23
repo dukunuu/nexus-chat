@@ -25,10 +25,11 @@ function focusChanged() {
   lastFocus = key; clearTimeout(focusTimer);
   focusTimer = setTimeout(() => command({ command:'Focus', slide:state.slideId, blocks:[...state.selected] }), 300);
 }
-function toast(text, view) {
+function toast(text, view, actions = []) {
   const node = $('#status'); node.textContent = text; node.hidden = !text;
   if (view) { const action = document.createElement('button'); action.textContent = 'View'; action.onclick = () => { node.hidden = true; view(); }; node.append(document.createTextNode(' · '), action); }
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => node.hidden = true, 6000);
+  for (const [label, run] of actions) { const action = document.createElement('button'); action.textContent = label; action.onclick = run; node.append(document.createTextNode(' · '), action); }
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => node.hidden = true, actions.length ? 12000 : 6000);
 }
 function pump() {
   if (pending || !queue.length) return;
@@ -161,7 +162,14 @@ function handleEvent(event, reply) {
   } else {
     feedback.event(event);
     if (event.event === 'Error') { rollback(); toast(event.message); }
-    if (event.event === 'Exported') toast('Deck JSON exported. Keep the assets folder beside it when moving the deck.');
+    if (event.event === 'Exported') {
+      const warnings = event.warnings || [], actions = [['Reveal', () => command({ command:'Reveal', path:event.path })]];
+      if (warnings.length) actions.push([`${warnings.length} approximations · Details`, () => {
+        $('#export-warnings').replaceChildren(...warnings.map(text => { const item = document.createElement('li'); item.textContent = text; return item; }));
+        $('#export-details').showModal();
+      }]);
+      toast(`Exported ${event.path.split(/[\\/]/).pop()}`, null, actions);
+    }
   }
   finished?.complete?.(event); pump();
 }
@@ -249,7 +257,30 @@ $('#add-text').onclick = () => insert(textNode('Double-click to edit', { positio
 $('#add-shape').onclick = () => insert({ id:id('b'), kind:'shape', shape:'rect', fill:'accent', position:{ x:480, y:300 }, sizing:{ w:600, h:420 } });
 $('#add-image').onclick = () => ask('Import image', 'Image path', 'PNG, JPEG or WebP. A sanitized copy stays with the deck.', '', path => command({ command:'ImportAsset', path }, event => { if (event.event === 'Asset') insert({ id:id('b'), kind:'image', src:event.src, fit:'contain', position:{ x:240, y:180 }, sizing:{ w:1200, h:720 } }); }));
 $('#speaker-notes').onchange = event => { const slide = api.slide(), notes = event.target.value; if (slide) apply(() => [{ op:'set_notes', slide:slide.id, notes }]); };
-$('#export').onclick = () => ask('Export deck', 'Destination path', 'Exports deck JSON. Keep the deck’s assets folder beside the exported file.', `${state.deck.title.replace(/[^\w-]+/g, '-')}.deck.json`, path => command({ command:'ExportDeck', path }));
+let exportFormat = 'pptx';
+function exportMenu(open, focus = false) {
+  $('#export-menu').hidden = !open; $('#export').setAttribute('aria-expanded', String(open));
+  if (open && focus) $('#export-menu button').focus();
+}
+$('#export').onclick = () => exportMenu($('#export-menu').hidden, true);
+for (const item of document.querySelectorAll('#export-menu [data-format]')) item.onclick = () => {
+  exportFormat = item.dataset.format; exportMenu(false); $('#export').focus();
+  command({ command:'Export', format:exportFormat });
+};
+$('#export-to').onclick = () => {
+  exportMenu(false);
+  ask('Export to…', 'Destination path', `Enter an absolute path for ${exportFormat.toUpperCase()}. Existing names receive a numbered suffix.`, '', path => command({ command:'Export', format:exportFormat, path }));
+};
+document.addEventListener('pointerdown', event => { if (!event.target.closest('.export-menu')) exportMenu(false); });
+document.addEventListener('keydown', event => {
+  if ($('#export-menu').hidden) return;
+  const items = [...document.querySelectorAll('#export-menu button')], index = items.indexOf(document.activeElement);
+  if (['ArrowDown','ArrowUp','Home','End','Escape'].includes(event.key)) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (event.key === 'Escape') { exportMenu(false); $('#export').focus(); }
+    else items[event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length].focus();
+  } else if (event.key === 'Tab') exportMenu(false);
+});
 document.addEventListener('keydown', event => {
   if (playback.key(event)) return;
   const key = event.key.toLowerCase(), mod = event.metaKey || event.ctrlKey, editingField = event.target.closest('input,textarea,select,[contenteditable]');

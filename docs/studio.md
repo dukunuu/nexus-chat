@@ -394,6 +394,39 @@ light one; and a baseline can sit a pixel off a browser's rounding of the same
 font metrics. Remote images are drawn only when the vetted fetcher already
 cached them, and never fetched here.
 
+## Exports
+
+`deck::export` (core, no new dependencies) turns a checked deck into one file,
+offline and deterministically (same deck, same bytes). Studio's Export menu, the
+`Export {format, path?}` IPC command and `nexus deck export <deck> --format
+pptx|pdf|png|html|json [--out path]` all call it. The default destination is
+`<space files>/exports/<deck-slug>.<ext>`; an existing name gets ` (2)`, ` (3)`
+and so on, never an overwrite. `Exported {path, warnings}` lists every
+approximation; `Reveal {path}` only opens files this window exported, through an
+argv (`open -R`, `xdg-open <dir>`, `explorer /select,`), never a shell.
+
+- **PPTX** is hand-written OOXML. Every node sits at its resolved `layout_at`
+  rect (auto-layout is flattened to absolute positions; 1 slide px is
+  12192000/width EMU). Frames are groups with a background shape, text is
+  editable text boxes (Markdown paragraphs, real bullets and numbering, fonts
+  by family name, not embedded), images are pictures with `srcRect` crops, shapes
+  are preset geometry, tables are native tables, code is a mono text box and
+  charts are 2x PNG pictures. Slide transitions use `p:transition` inside
+  `mc:AlternateContent` for duration; `smart` becomes Morph with a fade
+  fallback. Builds become main-sequence timing (entrance, emphasis, exit; click,
+  with and after previous; fly, float, zoom, wipe, fade, appear, pulse);
+  item/line builds target paragraphs. Blur and typewriter become fade/appear,
+  shake becomes a pulse, word builds animate the whole box, easing curves are not
+  exported and group `clip` is not honoured.
+- **PDF** pages are 2x rasters (JPEG) with an invisible Helvetica text layer
+  (render mode 3, `ToUnicode` so any Unicode text copies out). It is not vector;
+  vector output would need an svg-to-pdf dependency.
+- **PNG** is a zip with `slide-001.png`, ... at 1920 px by default.
+- **HTML** is one file with the studio's own `helpers.js`, `render.js`,
+  `animations.js` and `playback.js` inlined (`include_str!`), assets and fonts as
+  data URIs, a strict CSP and keyboard navigation; notes are removed.
+- **JSON** is the deck itself; keep the assets folder beside it.
+
 ## The link
 
 A newline-delimited JSON protocol, version 1 (`deck::link`), one envelope per
@@ -489,9 +522,9 @@ rings or pulses.
   comments with suggested edits; the deck card in the TUI. This replaced the
   first S2 (a studio chat pane and `POST /v1/studio/suggest` on the host),
   which is removed.
-- **S3, import and export.** `.pptx` import and export, and PDF. Import and
-  export run through a sandboxed Python venv with `python-pptx`, the way skills
-  run. PDF comes from the webview's print path. Publish `nexus-studio` to
+- **S3, import and export.** Export is done in core (see *Exports*). `.pptx`
+  import remains, through a sandboxed Python venv with `python-pptx`, the way
+  skills run. Publish `nexus-studio` to
   crates.io and add it to the release workflow.
 - **S4, web app.** The web client's deck view speaks the link through the host
   and renders the same decks; the web editors plan in `docs/web-editors.md`.
@@ -584,7 +617,7 @@ variable}]}` uses the renderer's cached system font database plus deck faces.
 local paths to JavaScript, and returns the normal `Deck` event. Only font-data
 commands may exceed the normal deck-command limit; the decoded cap is 16 MB.
 
-It cannot yet export/import PowerPoint or PDF (S3), render WOFF2 in core PNGs,
+It cannot yet import PowerPoint or PDF (S3), render WOFF2 in core PNGs,
 or play animations anywhere but present mode. Smart text/font/color changes crossfade rather than interpolating glyphs or
 color channels, to keep playback compositor-only. Font previews use the
 webview's installed faces, so platform font availability still matters.

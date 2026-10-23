@@ -149,7 +149,7 @@ const versioned = (path, hash) => hash ? `${path}?v=${hash}` : path;
 export function ensureDeckFonts(theme, images = {}) {
   const rules = (theme.font_files || []).map(file => {
     const family = String(file.family).replace(/["'\\;{}<>]/g, '');
-    const src = versioned(`/${String(file.file).split('/').map(encodeURIComponent).join('/')}`, images[file.file]);
+    const src = file.file.startsWith('data:') ? file.file : versioned(`/${String(file.file).split('/').map(encodeURIComponent).join('/')}`, images[file.file]);
     return `@font-face{font-family:"${family}";src:url("${src}");font-weight:${Number(file.weight) || 400};font-style:${file.italic ? 'italic' : 'normal'};}`;
   }).join('\n');
   if (rules === fontCss) return;
@@ -190,7 +190,7 @@ export function renderNode(node, theme, images = {}, parent = { mode: 'none' }) 
     // Only the backend's origin can supply image bytes. Remote images are
     // resolved through the core fetcher and exposed by content hash.
     const path = node.src.startsWith('https://') ? `/asset/${images[node.src] || 'missing'}` : `/assets/${node.src.replace(/^assets\//, '')}`;
-    el.src = versioned(path, images[node.src.startsWith('https://') ? path : node.src]);
+    el.src = node.src.startsWith('data:') ? node.src : versioned(path, images[node.src.startsWith('https://') ? path : node.src]);
     el.alt = 'Slide image'; el.draggable = false;
     el.style.objectFit = node.fit || 'contain';
     naturalSize(el, node, theme, [640, 360], true);

@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "title": "Export motion",
+  "slides": [
+    {
+      "id": "motion",
+      "notes": "Pause here.\nThese notes stay out of HTML and PDF.",
+      "layout": {"mode": "column", "gap": 32, "padding": [100, 120, 100, 120], "cross": "stretch"},
+      "transition": {"type": "push", "direction": "left", "duration_ms": 600},
+      "builds": ["headline", "list", "chart"],
+      "children": [
+        {"id": "headline", "kind": "text", "text": "# A clearer story", "style": "heading", "animation": {"build_in": {"effect": "fade", "duration_ms": 200}}},
+        {"id": "row", "kind": "frame", "sizing": {"h": 500}, "fill": "bg", "stroke": {"color": "muted", "width": 2}, "radius": 24, "clip": true, "layout": {"mode": "row", "gap": 48, "padding": [24, 24, 24, 24], "cross": "stretch"}, "children": [
+          {"id": "list", "kind": "text", "text": "- Find **signal**\n- Keep *context*\n1. Use `evidence`\n2. Share clarity", "sizing": {"w": "fill"}, "animation": {"build_in": {"effect": "rise", "trigger": "with_previous", "by": "item", "delay_ms": 80}, "emphasis": {"effect": "shake", "trigger": "after_previous"}, "build_out": {"effect": "wipe", "direction": "right"}}},
+          {"id": "chart", "kind": "chart", "chart": "bar", "sizing": {"w": 640, "h": "fill"}, "labels": ["Start", "Build", "Grow"], "series": [{"name": "Example", "values": [3, 5, 8]}], "animation": {"build_in": {"effect": "scale", "trigger": "after_previous"}}}
+        ]}
+      ]
+    },
+    {
+      "id": "details",
+      "name": "Evidence",
+      "transition": {"type": "smart", "duration_ms": 500},
+      "children": [
+        {"id": "title", "kind": "text", "text": "## Evidence", "style": "heading", "position": {"x": 120, "y": 80}, "sizing": {"w": 1200, "h": 160}},
+        {"id": "table", "kind": "table", "rows": [["Phase", "Value"], ["Start", "3"], ["Grow", "8"]], "position": {"x": 120, "y": 300}, "sizing": {"w": 800, "h": 360}, "font": {"size": 36}},
+        {"id": "code", "kind": "code", "language": "rust", "source": "let evidence = 8;", "position": {"x": 1000, "y": 300}, "sizing": {"w": 760, "h": 200}},
+        {"id": "arrow", "kind": "shape", "shape": "arrow", "fill": "accent", "stroke": {"color": "accent", "width": 6}, "opacity": 0.7, "rotation": 15, "position": {"x": 1100, "y": 650}, "sizing": {"w": 500, "h": 100}}
+      ]
+    }
+  ]
+}

@@ -2,6 +2,7 @@
 //! editing operations. Slides are 1920 x 1080 px frames holding a tree of
 //! nodes; version-1 grid decks are migrated on load.
 
+pub mod export;
 pub mod feedback;
 pub mod layout;
 pub mod link;

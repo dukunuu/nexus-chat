@@ -302,6 +302,11 @@ pub enum Command {
         /// Session id, slug, or id prefix.
         session: String,
     },
+    /// Convert a local deck to `PowerPoint`, PDF, PNG images, HTML or JSON.
+    Deck {
+        #[command(subcommand)]
+        cmd: DeckCmd,
+    },
     /// Open the local slide editor in a separate desktop window.
     Studio {
         /// Deck to open (otherwise the most recent deck).
@@ -348,6 +353,20 @@ pub enum Command {
         /// Also verify configured provider keys with live calls.
         #[arg(long)]
         network: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DeckCmd {
+    /// Export offline; default output is <space files>/exports/<deck-slug>.<ext>.
+    Export {
+        /// Deck path, absolute or relative to the active space's files.
+        path: PathBuf,
+        #[arg(long, value_parser = ["pptx", "pdf", "png", "html", "json"])]
+        format: String,
+        /// Explicit output path; existing files are never overwritten.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -595,11 +614,59 @@ pub async fn run(cmd: Command) -> Result<()> {
             })
             .await
         }
+        Command::Deck { cmd } => {
+            let space = space::Space::open()?;
+            let db = db::Db::open(&space.db_path())?;
+            let files = space.files_dir(&resolve_space_name(&db, None)?);
+            deck_export(cmd, &files)
+        }
         Command::Studio { path } => launch_studio(path.as_deref()),
         Command::Update => update().await,
         Command::Status => status(),
         Command::Doctor { network } => doctor(network).await,
     }
+}
+
+fn deck_export(cmd: DeckCmd, files: &Path) -> Result<()> {
+    use nexus_core::deck::{Deck, export};
+    let DeckCmd::Export {
+        path,
+        format,
+        out: destination,
+    } = cmd;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        files.join(path)
+    };
+    let source = std::fs::read_to_string(&path)?;
+    let deck = Deck::check(&source).map_err(|errors| {
+        anyhow!(
+            "{}",
+            errors
+                .iter()
+                .map(|e| format!("{}: {}", e.path, e.message))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    let assets = path.parent().context("deck folder")?.join("assets");
+    let output = export::export(
+        &deck,
+        Some(&assets),
+        format.parse()?,
+        export::Options::default(),
+    )?;
+    let destination = destination
+        .as_deref()
+        .map(std::path::absolute)
+        .transpose()?;
+    let written = export::write_export(&output, files, destination.as_deref())?;
+    out(written.display());
+    for warning in &output.warnings {
+        out(format!("warning: {warning}"));
+    }
+    Ok(())
 }
 
 fn launch_studio(path: Option<&Path>) -> Result<()> {
@@ -3517,6 +3584,10 @@ fn human_size(bytes: u64) -> String {
     }
     format!("{:.1} GiB", mb / KB)
 }
+
+#[cfg(test)]
+#[path = "cli_deck_export_tests.rs"]
+mod deck_export_tests;
 
 #[cfg(test)]
 mod tests {

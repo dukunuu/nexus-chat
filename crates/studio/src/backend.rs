@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+mod exports;
 mod feedback;
 mod fonts;
 use nexus_core::deck::link::{ActivityState, Message as LinkMessage};
@@ -52,6 +53,13 @@ pub enum Command {
         data: String,
     },
     ExportDeck {
+        path: PathBuf,
+    },
+    Export {
+        format: deck::export::Format,
+        path: Option<PathBuf>,
+    },
+    Reveal {
         path: PathBuf,
     },
     Focus {
@@ -132,7 +140,11 @@ pub enum Event {
     Fonts {
         families: Vec<deck::text::FontFamily>,
     },
-    Exported {},
+    Exported {
+        path: PathBuf,
+        warnings: Vec<String>,
+    },
+    Revealed {},
     Error {
         message: String,
     },
@@ -173,6 +185,8 @@ pub struct Backend {
     theme_stamp: String,
     /// Animation data dropped while reading the deck from disk, reported once.
     load_notes: Vec<String>,
+    /// Reveal is limited to files exported by this window, never deck content.
+    exports: Vec<PathBuf>,
     /// Content hashes of deck assets by file, reused while the file's stamp
     /// is unchanged, so an edit doesn't re-read every image and font.
     asset_hashes: std::cell::RefCell<std::collections::HashMap<PathBuf, (Stamp, String)>>,
@@ -215,6 +229,7 @@ impl Backend {
             colors: theme_colors::load().colors,
             theme_stamp: theme_colors::source_stamp(),
             load_notes,
+            exports: Vec::new(),
             asset_hashes: std::cell::RefCell::default(),
         };
         if !backend.path.exists() {
@@ -429,9 +444,10 @@ impl Backend {
                 self.open_file(path)?;
             }
             Command::ExportDeck { path } => {
-                atomic_write(&absolute(&path)?, &serde_json::to_vec_pretty(&self.deck)?)?;
-                return Ok(Event::Exported {});
+                return self.export(deck::export::Format::Json, Some(&absolute(&path)?));
             }
+            Command::Export { format, path } => return self.export(format, path.as_deref()),
+            Command::Reveal { path } => return self.reveal(&path),
             Command::ImportAsset { path } => {
                 return Ok(Event::Asset {
                     src: self.import_asset(&path)?,

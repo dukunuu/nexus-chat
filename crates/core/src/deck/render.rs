@@ -456,6 +456,16 @@ pub fn render_slide_at(
         (32..=3200).contains(&width_px),
         "render width must be 32 to 3200"
     );
+    export_slide_at(deck, slide_id, width_px, assets)
+}
+
+/// Export-only raster path: 2× authored pixels, without the preview width cap.
+pub(super) fn export_slide_at(
+    deck: &Deck,
+    slide_id: &str,
+    width_px: u32,
+    assets: Option<&Path>,
+) -> Result<Vec<u8>> {
     let slide = deck
         .slides
         .iter()
@@ -473,7 +483,12 @@ pub fn render_deck_sheet(deck: &Deck, slides: &[String], cols: usize) -> Result<
     sheet_at(deck, slides, cols, None)
 }
 
-fn sheet_at(deck: &Deck, slides: &[String], cols: usize, assets: Option<&Path>) -> Result<Vec<u8>> {
+pub(super) fn sheet_at(
+    deck: &Deck,
+    slides: &[String],
+    cols: usize,
+    assets: Option<&Path>,
+) -> Result<Vec<u8>> {
     ensure!(
         !slides.is_empty() && slides.len() <= 200 && (1..=12).contains(&cols),
         "a contact sheet needs 1 to 200 slides and 1 to 12 columns"
