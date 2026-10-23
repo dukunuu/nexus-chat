@@ -6,6 +6,14 @@ use std::collections::HashMap;
 
 use ratatui::text::Line;
 
+/// A batch sub-card's wrapped rows, including any opened body and images.
+#[derive(Clone, Debug)]
+pub struct BatchRow {
+    pub owner: usize,
+    pub index: usize,
+    pub lines: std::ops::Range<usize>,
+}
+
 #[derive(Default)]
 pub struct HistoryCache {
     pub key: (Option<String>, usize, bool, bool, bool, bool, usize),
@@ -14,6 +22,7 @@ pub struct HistoryCache {
     pub image_generation: usize,
     pub lines: Vec<Line<'static>>,
     pub owner: Vec<Option<usize>>,
+    pub batch_rows: Vec<BatchRow>,
     pub code: Vec<Option<usize>>,
     pub blocks: Vec<String>,
     /// Fixed-height diagram regions alongside the text/copy metadata.

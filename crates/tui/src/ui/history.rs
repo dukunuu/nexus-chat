@@ -16,7 +16,7 @@ use ratatui::widgets::Paragraph;
 use super::cards::{
     push_assistant_stored, push_assistant_streaming, push_compaction, push_compaction_pending,
     push_error, push_research_plan, push_research_stage, push_session_link, push_skill,
-    push_survey_section, push_tool_call, push_user_card, push_user_command,
+    push_survey_section, push_tool_call_with_rows, push_user_card, push_user_command,
 };
 use super::welcome::render_welcome;
 use crate::app_view::AppView;
@@ -188,12 +188,18 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
         // absolute line index would instead land on content shifted by all
         // the growth above the viewport ("the view jumps way past the
         // messages").
-        let mut pinned = clicked.and_then(|(owner, old_start)| {
-            cache
-                .owner
-                .iter()
-                .position(|o| *o == Some(owner))
-                .map(|new_start| (prev_top + new_start).saturating_sub(old_start))
+        let mut pinned = clicked.and_then(|(owner, row, old_start)| {
+            let new_start = row.map_or_else(
+                || cache.owner.iter().position(|o| *o == Some(owner)),
+                |index| {
+                    cache
+                        .batch_rows
+                        .iter()
+                        .find(|row| row.owner == owner && row.index == index)
+                        .map(|row| row.lines.start)
+                },
+            );
+            new_start.map(|new_start| (prev_top + new_start).saturating_sub(old_start))
         });
         if pinned.is_none() && images_changed {
             // Images can grow inside the same message, above its answer.
@@ -445,8 +451,10 @@ fn sync_cache(app: &mut AppView, width: usize) {
     let session = app.session.as_ref().map(|s| s.id.clone());
     if app.tool_session != session {
         app.tool_session.clone_from(&session);
-        if !app.tool_open.is_empty() {
+        app.batch_focus = None;
+        if !app.tool_open.is_empty() || !app.batch_open.is_empty() {
             app.tool_open.clear();
+            app.batch_open.clear();
             app.tool_open_gen = app.tool_open_gen.wrapping_add(1);
         }
         app.tool_click_anchor = None;
@@ -549,7 +557,7 @@ fn sync_cache(app: &mut AppView, width: usize) {
         } else if m.role == "session_link" {
             push_session_link(&mut c.lines, &m.content, width, &theme);
         } else if m.role == "tool_call" {
-            push_tool_call(
+            push_tool_call_with_rows(
                 &mut c.lines,
                 &m.content,
                 app.tool_open
@@ -565,6 +573,12 @@ fn sync_cache(app: &mut AppView, width: usize) {
                     image_at_line: &mut c.image_at_line,
                     image_cache: &mut c.image_cache,
                 },
+                Some(super::cards::BatchRows {
+                    owner: i,
+                    open: &app.batch_open,
+                    focus: app.batch_focus,
+                    hits: &mut c.batch_rows,
+                }),
             );
         } else {
             push_assistant_stored(
@@ -612,22 +626,72 @@ pub(crate) fn toggle_tool_at_line(app: &mut AppView, line: usize) {
     {
         return;
     }
-    let open = app
-        .tool_open
-        .get(&owner)
-        .copied()
-        .unwrap_or(app.show_tool_detail);
-    app.tool_open.insert(owner, !open);
-    app.tool_open_gen = app.tool_open_gen.wrapping_add(1);
-    app.tool_click_anchor = app
+    if let Some(row) = app
         .history_cache
-        .owner
+        .batch_rows
         .iter()
-        .position(|o| *o == Some(owner))
-        .map(|start| (owner, start));
+        .find(|row| row.lines.contains(&line))
+    {
+        let key = (owner, row.index);
+        app.batch_focus = Some(key);
+        if !app.batch_open.insert(key) {
+            app.batch_open.remove(&key);
+        }
+        app.tool_click_anchor = Some((owner, Some(row.index), row.lines.start));
+    } else {
+        app.batch_focus = None;
+        let open = app
+            .tool_open
+            .get(&owner)
+            .copied()
+            .unwrap_or(app.show_tool_detail);
+        app.tool_open.insert(owner, !open);
+        app.tool_click_anchor = app
+            .history_cache
+            .owner
+            .iter()
+            .position(|o| *o == Some(owner))
+            .map(|start| (owner, None, start));
+    }
+    app.tool_open_gen = app.tool_open_gen.wrapping_add(1);
     app.pin_viewport_top = true;
     // A consumed card click must not turn its next click into word selection.
     app.sel.clear();
+}
+
+/// Enter folds the focused batch row without submitting an empty composer.
+pub(crate) fn toggle_focused_batch_row(app: &mut AppView) {
+    if let Some((owner, index)) = app.batch_focus
+        && let Some(line) = app
+            .history_cache
+            .batch_rows
+            .iter()
+            .find(|row| row.owner == owner && row.index == index)
+            .map(|row| row.lines.start)
+    {
+        toggle_tool_at_line(app, line);
+    }
+}
+
+/// Arrow keys move between the opened batch's rows after a row is focused.
+pub(crate) fn move_batch_focus(app: &mut AppView, down: bool) {
+    let Some((owner, index)) = app.batch_focus else {
+        return;
+    };
+    let next = if down {
+        index.saturating_add(1)
+    } else {
+        index.saturating_sub(1)
+    };
+    if app
+        .history_cache
+        .batch_rows
+        .iter()
+        .any(|row| row.owner == owner && row.index == next)
+    {
+        app.batch_focus = Some((owner, next));
+        app.tool_open_gen = app.tool_open_gen.wrapping_add(1);
+    }
 }
 
 /// A centered `── label ──` rule, used for day dividers and the welcome
@@ -1233,6 +1297,109 @@ mod tests {
             after.starts_with(&before[..before.len().min(24)]),
             "tool call landing above the viewport jumped: before={before:?} after={after:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn opened_batch_completion_above_a_streaming_viewport_does_not_jump() {
+        let reasoning = (0..60)
+            .map(|index| format!("reasoning line {index} with enough words to identify it"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = streaming_app(&reasoning, "answer line one\nanswer line two");
+        app.show_tool_detail = true;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        app.scroll = 10;
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let before = visible_snapshot(&terminal);
+        let args = serde_json::json!({"calls": (0..6).map(|index| serde_json::json!({"tool":"files","arguments":{"action":"read","name":format!("{index}.txt")}})).collect::<Vec<_>>()}).to_string();
+        let result = (0..6)
+            .map(|index| {
+                format!(
+                    "[{}/6] files/read {index}.txt\ncontents of file {index}",
+                    index + 1
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.on_chat_event(
+            1,
+            nexus_core::provider::StreamEvent::ToolCall {
+                id: "batch-complete".into(),
+                reasoning: None,
+                assistant_content: None,
+                name: "batch".into(),
+                arguments: args,
+                result,
+            },
+        )
+        .unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let after = visible_snapshot(&terminal);
+        assert!(
+            after.starts_with(&before[..24]),
+            "batch completion jumped: before={before:?}, after={after:?}"
+        );
+        assert_eq!(app.history_cache.batch_rows.len(), 6);
+    }
+
+    #[test]
+    fn opening_a_batch_row_keeps_its_screen_position_and_other_rows_closed() {
+        let mut app = test_app();
+        for index in 0..20 {
+            app.messages
+                .push(msg("assistant", &format!("Before batch message {index}.")));
+        }
+        app.messages.push(msg("tool_call", &serde_json::json!({
+            "name":"batch", "arguments":serde_json::json!({"calls":[
+                {"tool":"search","arguments":{"query":"needle"}},
+                {"tool":"fetch_url","arguments":{"url":"https://example.test"}}
+            ]}).to_string(),
+            "result":"[1/2] search  \"needle\"\n[1] A result\n    https://example.test\n    A result snippet.\n[2/2] fetch_url https://example.test\nA page preview"
+        }).to_string()));
+        for index in 0..30 {
+            app.messages
+                .push(msg("assistant", &format!("After batch message {index}.")));
+        }
+        app.show_tool_detail = true;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| render_history(frame, &mut app, frame.area()))
+            .unwrap();
+        let row = app.history_cache.batch_rows[0].lines.start;
+        app.scroll = app.max_scroll - (row - 5);
+        terminal
+            .draw(|frame| render_history(frame, &mut app, frame.area()))
+            .unwrap();
+        for open in [true, false] {
+            let line = app.sel.pos_at(4, 5).unwrap().0;
+            toggle_tool_at_line(&mut app, line);
+            terminal
+                .draw(|frame| render_history(frame, &mut app, frame.area()))
+                .unwrap();
+            let screen: String = (0..79)
+                .map(|x| terminal.backend().buffer()[(x, 5)].symbol())
+                .collect();
+            assert!(screen.contains("1  ◎ search \"needle\""), "{screen}");
+            assert!(screen.contains(if open { '▾' } else { '▸' }));
+            assert_eq!(app.batch_open.contains(&(20, 0)), open);
+            assert!(!app.batch_open.contains(&(20, 1)));
+            assert!(app.scroll > 0);
+        }
+        app.batch_open.insert((20, 0));
+        let space = app.active_space.id.clone();
+        app.session = Some(app.db.create_session("other", "m", &space, "chat").unwrap());
+        sync_cache(&mut app, 79);
+        assert!(app.batch_open.is_empty());
+        assert_eq!(app.batch_focus, None);
     }
 
     #[test]

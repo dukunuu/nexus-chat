@@ -696,7 +696,20 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
             app.set_input("");
             app.reply_to_survey_gate(&text);
         }
-        KeyCode::Enter => app.submit()?,
+        KeyCode::Enter if app.batch_focus.is_some() && app.input_text().is_empty() => {
+            ui::history::toggle_focused_batch_row(app);
+        }
+        KeyCode::Up | KeyCode::Down
+            if key.modifiers.is_empty()
+                && app.batch_focus.is_some()
+                && app.input_text().is_empty() =>
+        {
+            ui::history::move_batch_focus(app, key.code == KeyCode::Down);
+        }
+        KeyCode::Enter => {
+            app.batch_focus = None;
+            app.submit()?;
+        }
         // Ctrl+Shift+C copies the composer's selection for terminals that
         // forward it (a mouse selection copies on release everywhere).
         KeyCode::Char('a') if ctrl => app.input.select_all(),
@@ -708,6 +721,8 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
         KeyCode::Char('t') if ctrl => {
             app.show_tool_detail = !app.show_tool_detail;
             app.tool_open.clear();
+            app.batch_open.clear();
+            app.batch_focus = None;
             app.tool_open_gen = app.tool_open_gen.wrapping_add(1);
             app.tool_click_anchor = None;
             app.pin_viewport_top = true;
@@ -781,6 +796,10 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
         KeyCode::End if ctrl => app.scroll = 0,
         // Esc stops the streaming response or clears the composer. A parked
         // research job is stopped from the live view (Ctrl+↑, then Ctrl+X).
+        KeyCode::Esc if app.batch_focus.is_some() => {
+            app.batch_focus = None;
+            app.tool_open_gen = app.tool_open_gen.wrapping_add(1);
+        }
         KeyCode::Esc if app.viewing_stream() => app.stop_stream()?,
         KeyCode::Esc => {
             app.set_input("");
@@ -808,6 +827,9 @@ fn handle_input_mouse(app: &mut AppView, m: MouseEvent) {
         MouseEventKind::Down(MouseButton::Left) => {
             if over_input {
                 app.mouse_target = MouseTarget::Input;
+                if app.batch_focus.take().is_some() {
+                    app.tool_open_gen = app.tool_open_gen.wrapping_add(1);
+                }
                 app.sel.clear();
                 let count = app.composer_click_down((m.column, m.row));
                 composer_jump(app, m);
@@ -1606,6 +1628,55 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             },
         );
+    }
+
+    #[test]
+    fn batch_rows_click_enter_and_arrows_fold_independently() {
+        let mut app = tool_app();
+        app.messages[0].content = serde_json::json!({
+            "name":"batch",
+            "arguments":serde_json::json!({"calls":[
+                {"tool":"search", "arguments":{"query":"needle"}},
+                {"tool":"deck", "arguments":{"action":"edit","path":"a.deck.json"}}
+            ]}).to_string(),
+            "result":"[1/2] search  \"needle\"\n[1] A result\n    https://example.test\n    A snippet.\n[2/2] deck\ndeck failed: no block x"
+        }).to_string();
+        app.tool_open.insert(0, true);
+        let screen = draw(&mut app, 100, 40);
+        let row = u16::try_from(
+            screen
+                .iter()
+                .position(|line| line.contains("1  ◎ search"))
+                .unwrap(),
+        )
+        .unwrap();
+        history_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 4, row);
+        history_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 4, row);
+        assert_eq!(app.batch_focus, Some((0, 0)));
+        assert!(app.batch_open.contains(&(0, 0)));
+        assert_eq!(app.tool_open.get(&0), Some(&true));
+        assert!(!app.tool_open.contains_key(&1));
+        let screen = draw(&mut app, 100, 40);
+        assert!(screen.iter().any(|line| line.contains("A snippet.")));
+        handle_key(&mut app, KeyCode::Enter.into()).unwrap();
+        assert!(!app.batch_open.contains(&(0, 0)));
+        draw(&mut app, 100, 40);
+        handle_key(&mut app, KeyCode::Down.into()).unwrap();
+        handle_key(&mut app, KeyCode::Enter.into()).unwrap();
+        assert!(app.batch_open.contains(&(0, 1)));
+        assert!(!app.batch_open.contains(&(0, 0)));
+        let screen = draw(&mut app, 100, 40);
+        assert!(
+            screen
+                .iter()
+                .any(|line| line.contains("▎   deck failed: no block x"))
+        );
+        handle_key(&mut app, ctrl('t')).unwrap();
+        assert!(app.batch_open.is_empty());
+        assert_eq!(app.batch_focus, None);
+        app.batch_open.insert((0, 1));
+        app.apply_event(&nexus_core::app::AppEvent::ViewportReset);
+        assert!(app.batch_open.is_empty());
     }
 
     #[test]

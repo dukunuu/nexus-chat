@@ -387,6 +387,10 @@ pub struct AppView {
     pub show_tool_detail: bool,
     /// Per-message overrides of the global tool-detail flag.
     pub tool_open: HashMap<usize, bool>,
+    /// Individually opened batch sub-cards, keyed by message and call index.
+    pub batch_open: HashSet<(usize, usize)>,
+    /// Last focused batch row; Enter toggles it while the composer is empty.
+    pub batch_focus: Option<(usize, usize)>,
     /// Monotonic render generation for tool-card changes.
     pub tool_open_gen: usize,
     /// The linked studio window and the comments it sent (`crate::studio`).
@@ -394,7 +398,7 @@ pub struct AppView {
     /// Session whose message indices the overrides refer to.
     pub tool_session: Option<String>,
     /// Clicked message and its previous block start, for in-place folding.
-    pub tool_click_anchor: Option<(usize, usize)>,
+    pub tool_click_anchor: Option<(usize, Option<usize>, usize)>,
     pub notification_areas: Vec<(Rect, usize)>,
     /// The welcome screen's recent-session rows from the last frame, as
     /// (row rect, session id) — click targets, in `Alt+1…` order.
@@ -595,6 +599,8 @@ impl AppView {
             session_caches: HashMap::new(),
             show_tool_detail: false,
             tool_open: HashMap::new(),
+            batch_open: HashSet::new(),
+            batch_focus: None,
             tool_open_gen: 0,
             studio: crate::studio::Studio::default(),
             tool_session: None,
@@ -637,6 +643,8 @@ impl AppView {
                 self.prev_total = 0;
                 self.prev_tail.clear();
                 self.tool_open.clear();
+                self.batch_open.clear();
+                self.batch_focus = None;
                 self.tool_open_gen = self.tool_open_gen.wrapping_add(1);
                 self.tool_click_anchor = None;
                 self.diagrams.clear();

@@ -31,6 +31,25 @@ pub struct ToolView {
     pub images: Vec<(String, String)>,
     /// A call to an MCP connector (or its search): drawn with the connector glyph.
     pub connector: bool,
+    /// Sub-calls in argument order; missing capped results are retained as such.
+    pub batch: Vec<BatchEntry>,
+}
+
+/// One operation inside a batch, using the same presentation as a standalone call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchEntry {
+    pub tool: String,
+    /// The tool's action or search mode, if supplied.
+    pub action: String,
+    pub target: String,
+    /// None when the combined result cap omitted this operation's result.
+    pub status: Option<ToolOutcome>,
+    /// Short statistics on success, or the first error line otherwise.
+    pub outcome: String,
+    pub arguments: Value,
+    pub result: Option<String>,
+    pub truncated: bool,
+    pub view: ToolView,
 }
 
 /// One web search hit: what a reader scans for in a results list.
@@ -88,6 +107,7 @@ pub fn tool_call_view(name: &str, args: &str, result: &str) -> ToolView {
         sources: Vec::new(),
         images: Vec::new(),
         connector: false,
+        batch: Vec::new(),
     })
 }
 
@@ -156,6 +176,7 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
         sources: Vec::new(),
         images: Vec::new(),
         connector: false,
+        batch: Vec::new(),
     };
     if let Some(connector_view) = connector_view(name, &args, result, view.clone()) {
         return Some(connector_view);
@@ -166,6 +187,7 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
         .filter(|(tool, _)| matches!(*tool, "fs" | "shell" | "proc"))
         .unwrap_or((name, field("action").unwrap_or("")));
     match tool {
+        "batch" => return batch_view(&args, result, view),
         "fs" => {
             if !matches!(
                 action,
@@ -411,6 +433,199 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
     Some(view)
 }
 
+/// Parse both the original `[i/N] label` output and byte-framed results.
+/// Byte lengths keep header-looking fetched content inside its own result.
+#[allow(clippy::too_many_lines)] // argument/result alignment, then aggregate counts
+fn batch_view(args: &Value, result: &str, mut view: ToolView) -> Option<ToolView> {
+    let calls: Vec<_> = args
+        .get("calls")?
+        .as_array()?
+        .iter()
+        .filter_map(|call| {
+            let tool = call.get("tool")?.as_str().filter(|tool| !tool.is_empty())?;
+            Some((
+                tool,
+                call.get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({})),
+            ))
+        })
+        .collect();
+    if calls.is_empty() || calls.iter().any(|(tool, _)| *tool == "batch") {
+        return None;
+    }
+    let headers: Vec<_> = calls
+        .iter()
+        .enumerate()
+        .map(|(index, (tool, arguments))| {
+            let label: String = crate::tools::batch_call_label(tool, arguments)
+                .chars()
+                .take(120)
+                .collect();
+            format!("[{}/{}] {label}\n", index + 1, calls.len())
+        })
+        .collect();
+    let mut remaining = result;
+    for (index, (tool, arguments)) in calls.into_iter().enumerate() {
+        let (text, truncated) = take_batch_result(
+            &mut remaining,
+            &headers[index],
+            headers.get(index + 1).map(String::as_str),
+        );
+        let call_view = tool_call_view(tool, &arguments.to_string(), text.unwrap_or_default());
+        let status = text.map(|_| match call_view.outcome {
+            ToolOutcome::Denied => ToolOutcome::Blocked,
+            other => other,
+        });
+        let outcome = match status {
+            None => "result not shown".to_string(),
+            Some(ToolOutcome::Ok) if !call_view.stats.is_empty() => call_view.stats.join(" · "),
+            _ => text
+                .unwrap_or_default()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(80)
+                .collect(),
+        };
+        let target = if call_view.verb.is_empty() {
+            batch_target(&arguments)
+        } else {
+            call_view.target.clone()
+        };
+        view.batch.push(BatchEntry {
+            tool: tool.into(),
+            action: arguments
+                .get("action")
+                .or_else(|| arguments.get("mode"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .into(),
+            target,
+            status,
+            outcome,
+            arguments,
+            result: text.map(str::to_string),
+            truncated,
+            view: call_view,
+        });
+    }
+    view.verb = "batch".into();
+    let count = |status| {
+        view.batch
+            .iter()
+            .filter(|entry| entry.status == status)
+            .count()
+    };
+    view.stats = vec![
+        format!("{} calls", view.batch.len()),
+        format!("{} ok", count(Some(ToolOutcome::Ok))),
+    ];
+    for (status, label) in [
+        (Some(ToolOutcome::Failed), "failed"),
+        (Some(ToolOutcome::Blocked), "blocked"),
+        (None, "not shown"),
+    ] {
+        let n = count(status);
+        if n > 0 {
+            view.stats.push(format!("{n} {label}"));
+        }
+    }
+    let truncated = view.batch.iter().filter(|entry| entry.truncated).count();
+    if truncated > 0 {
+        view.stats.push(format!("{truncated} truncated"));
+    }
+    // A batch's first header hides errors in later operations from `outcome`.
+    view.outcome = if view
+        .batch
+        .iter()
+        .any(|entry| entry.status == Some(ToolOutcome::Failed))
+    {
+        ToolOutcome::Failed
+    } else if view
+        .batch
+        .iter()
+        .any(|entry| entry.status == Some(ToolOutcome::Blocked))
+    {
+        ToolOutcome::Blocked
+    } else {
+        ToolOutcome::Ok
+    };
+    if !result.is_empty() && view.batch.iter().all(|entry| entry.result.is_none()) {
+        view.output = Some(result.into());
+        view.outcome = outcome(result);
+        if view.outcome == ToolOutcome::Ok
+            && !result.starts_with(crate::tools::TOOL_RESULT_OMITTED_PREFIX)
+        {
+            view.outcome = ToolOutcome::Failed;
+        }
+    }
+    Some(view)
+}
+
+/// Length-framed results cannot be confused with headers in page/file text.
+/// Old sessions use the exact next argument-derived header as a best effort.
+fn take_batch_result<'a>(
+    remaining: &mut &'a str,
+    header: &str,
+    next: Option<&str>,
+) -> (Option<&'a str>, bool) {
+    let frame = remaining
+        .strip_prefix("[batch-result: ")
+        .and_then(|body| body.split_once(" bytes]\n"))
+        .and_then(|(bytes, body)| Some((bytes.parse::<usize>().ok()?, body)));
+    let (bytes, body) = frame.map_or((None, *remaining), |(bytes, body)| (Some(bytes), body));
+    let Some(body) = body.strip_prefix(header) else {
+        return (None, false);
+    };
+    let (text, truncated) = if let Some(bytes) = bytes {
+        if let Some(rest) = body
+            .get(bytes..)
+            .and_then(|rest| rest.strip_prefix("\n[/batch-result]"))
+        {
+            *remaining = rest.strip_prefix('\n').unwrap_or(rest);
+            (&body[..bytes], false)
+        } else {
+            *remaining = "";
+            (
+                body.strip_suffix("\n... (tool result truncated)")
+                    .unwrap_or(body),
+                true,
+            )
+        }
+    } else if let Some(end) = next.and_then(|next| body.find(&format!("\n{next}"))) {
+        *remaining = &body[end + 1..];
+        (&body[..end], false)
+    } else {
+        *remaining = "";
+        (body, next.is_some())
+    };
+    (
+        Some(text),
+        truncated || text.ends_with("... (tool result truncated)"),
+    )
+}
+
+fn batch_target(args: &Value) -> String {
+    for key in [
+        "query", "url", "path", "name", "video_id", "image_id", "source", "app", "prompt",
+    ] {
+        if let Some(target) = args
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            return if key == "query" {
+                format!("{target:?}")
+            } else {
+                target.chars().take(60).collect()
+            };
+        }
+    }
+    String::new()
+}
+
 /// The `deck` tool: `created deck`, `edited slide 3`, `viewed 4 slides`,
 /// `commented on slide 2`, with the rendered slides the result shows.
 fn deck_view(view: &mut ToolView, action: &str, path: Option<&str>, result: &str) -> Option<()> {
@@ -613,6 +828,141 @@ fn short_url(url: &str) -> String {
         format!("{}…", rest.chars().take(59).collect::<String>())
     } else {
         rest.to_string()
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_mixed_batches_reuse_standalone_cards() {
+        let calls = json!({"calls": [
+            {"tool":"search", "arguments":{"mode":"web", "query":"jev decision api"}},
+            {"tool":"fetch_url", "arguments":{"url":"https://arxiv.org/abs/123"}},
+            {"tool":"files", "arguments":{"action":"read", "name":"us_1.jpg"}},
+            {"tool":"deck", "arguments":{"action":"create", "path":"decks/a.deck.json"}},
+            {"tool":"media", "arguments":{"action":"generate_image", "prompt":"a landscape"}}
+        ]});
+        let result = "[1/5] search web \"jev decision api\"\n[1] Decision API\n    https://example.org/api\n    A decision endpoint.\n[2/5] fetch_url https://arxiv.org/abs/123\nPaper preview\n[3/5] files/read us_1.jpg\n![page](us_1.jpg)\n[4/5] deck\ncreated deck · decks/a.deck.json · 3 slides\n![3 slides](decks/.renders/a.png)\n[5/5] media/generate_image a landscape\n![landscape](landscape.png)";
+        let view = tool_call_view("batch", &calls.to_string(), result);
+        assert_eq!(view.summary(), "batch · 5 calls · 5 ok");
+        assert_eq!(
+            crate::app::tool_call_summary("batch", &calls.to_string(), result),
+            view.summary()
+        );
+        assert_eq!(view.batch.len(), 5);
+        for (entry, call) in view.batch.iter().zip(calls["calls"].as_array().unwrap()) {
+            assert_eq!(
+                entry.view,
+                tool_call_view(
+                    &entry.tool,
+                    &call["arguments"].to_string(),
+                    entry.result.as_deref().unwrap()
+                )
+            );
+            assert_eq!(entry.status, Some(ToolOutcome::Ok));
+        }
+        assert_eq!(view.batch[0].view.sources[0].domain, "example.org");
+        assert_eq!(view.batch[1].target, "arxiv.org/abs/123");
+        assert_eq!(view.batch[2].target, "us_1.jpg");
+        assert_eq!(view.batch[3].outcome, "3 slides");
+        assert_eq!(view.batch[3].view.images[0].1, "decks/.renders/a.png");
+        assert_eq!(view.batch[4].action, "generate_image");
+        assert_eq!(
+            view.batch[4].result.as_deref(),
+            Some("![landscape](landscape.png)")
+        );
+    }
+
+    #[test]
+    fn batch_failures_blocks_and_unknown_tools_are_not_successes() {
+        let args = json!({"calls": [
+            {"tool":"not_a_tool"},
+            {"tool":"skills", "arguments":{"action":"load", "name":"secret"}},
+            {"tool":"fetch_url", "arguments":{"url":"https://example.org"}}
+        ]});
+        let result = "[1/3] not_a_tool\nunknown tool: not_a_tool\n[2/3] skills/load secret\ndenied by the user\n[3/3] fetch_url https://example.org\nfetch failed: unavailable\ntry again later";
+        let view = tool_call_view("batch", &args.to_string(), result);
+        assert_eq!(
+            view.summary(),
+            "batch · 3 calls · 0 ok · 2 failed · 1 blocked"
+        );
+        assert_eq!(view.outcome, ToolOutcome::Failed);
+        assert_eq!(view.batch[0].outcome, "unknown tool: not_a_tool");
+        assert_eq!(view.batch[1].status, Some(ToolOutcome::Blocked));
+        assert_eq!(view.batch[1].target, "secret");
+        assert_eq!(view.batch[2].outcome, "fetch failed: unavailable");
+        let blocked = tool_call_view(
+            "batch",
+            r#"{"calls":[{"tool":"files","arguments":{"action":"read","name":"x"}}]}"#,
+            "[1/1] files/read x\npath escapes the space directory",
+        );
+        assert_eq!(blocked.batch[0].status, Some(ToolOutcome::Blocked));
+        assert_eq!(blocked.summary(), "batch · 1 calls · 0 ok · 1 blocked");
+    }
+
+    #[test]
+    fn byte_frames_do_not_split_header_looking_page_text() {
+        let args = json!({"calls": [
+            {"tool":"fetch_url", "arguments":{"url":"https://example.org"}},
+            {"tool":"files", "arguments":{"action":"read", "name":"x"}}
+        ]});
+        let page =
+            "Unicode: 日本語\n[2/2] files/read x\n[batch-result: 3 bytes]\nnot a separate result";
+        let result = format!(
+            "[batch-result: {} bytes]\n[1/2] fetch_url https://example.org\n{page}\n[/batch-result]\n[batch-result: 4 bytes]\n[2/2] files/read x\nreal\n[/batch-result]",
+            page.len()
+        );
+        let view = tool_call_view("batch", &args.to_string(), &result);
+        assert_eq!(view.batch[0].result.as_deref(), Some(page));
+        assert_eq!(view.batch[1].result.as_deref(), Some("real"));
+        assert_eq!(view.summary(), "batch · 2 calls · 2 ok");
+    }
+
+    #[test]
+    fn capped_batches_keep_partial_text_and_do_not_invent_missing_successes() {
+        let args = json!({"calls": [
+            {"tool":"files", "arguments":{"action":"read", "name":"one"}},
+            {"tool":"files", "arguments":{"action":"read", "name":"two"}},
+            {"tool":"files", "arguments":{"action":"read", "name":"three"}}
+        ]});
+        for result in [
+            "[batch-result: 5 bytes]\n[1/3] files/read one\nfirst\n[/batch-result]\n[batch-result: 200 bytes]\n[2/3] files/read two\npartial 日本語\n... (tool result truncated)",
+            "[1/3] files/read one\nfirst\n[2/3] files/read two\npartial 日本語\n... (tool result truncated)",
+        ] {
+            let view = tool_call_view("batch", &args.to_string(), result);
+            assert_eq!(view.batch.len(), 3);
+            assert_eq!(view.batch[0].result.as_deref(), Some("first"));
+            assert!(
+                view.batch[1]
+                    .result
+                    .as_deref()
+                    .unwrap()
+                    .contains("partial 日本語")
+            );
+            assert!(view.batch[1].truncated);
+            assert_eq!(view.batch[2].status, None);
+            assert_eq!(view.batch[2].result, None);
+            assert_eq!(view.batch[2].outcome, "result not shown");
+            assert!(view.summary().contains("1 not shown · 1 truncated"));
+        }
+    }
+
+    #[test]
+    fn a_whole_batch_denial_is_not_split_or_recursed() {
+        let args = r#"{"calls":[{"tool":"files","arguments":{"action":"read","name":"x"}}]}"#;
+        let view = tool_call_view("batch", args, "denied by policy");
+        assert_eq!(view.outcome, ToolOutcome::Denied);
+        assert_eq!(view.output.as_deref(), Some("denied by policy"));
+        assert_eq!(view.batch[0].status, None);
+        let nested = tool_call_view(
+            "batch",
+            r#"{"calls":[{"tool":"batch"}]}"#,
+            "nested batch calls are not allowed",
+        );
+        assert!(nested.batch.is_empty());
     }
 }
 

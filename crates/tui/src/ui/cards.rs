@@ -165,6 +165,7 @@ pub(super) struct CardEnv<'a> {
     pub image_cache: &'a mut HashMap<(String, usize), Vec<Line<'static>>>,
 }
 
+#[cfg(test)]
 pub(super) fn push_tool_call(
     out: &mut Vec<Line<'static>>,
     content: &str,
@@ -173,6 +174,28 @@ pub(super) fn push_tool_call(
     width: usize,
     theme: &crate::theme::Theme,
     env: CardEnv<'_>,
+) {
+    push_tool_call_with_rows(out, content, expanded, settings, width, theme, env, None);
+}
+
+/// Per-row folds and hit regions; shared by every transcript tool card.
+pub(super) struct BatchRows<'a> {
+    pub owner: usize,
+    pub open: &'a std::collections::HashSet<(usize, usize)>,
+    pub focus: Option<(usize, usize)>,
+    pub hits: &'a mut Vec<crate::history_cache::BatchRow>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_tool_call_with_rows(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    expanded: bool,
+    settings: &nexus_core::app::Settings,
+    width: usize,
+    theme: &crate::theme::Theme,
+    mut env: CardEnv<'_>,
+    rows: Option<BatchRows<'_>>,
 ) {
     let v: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
     let field = |k: &str| {
@@ -192,6 +215,15 @@ pub(super) fn push_tool_call(
     );
     let view = nexus_core::app::tool_call_view(&name, &args, &result);
     push_workspace_call(out, &view, expanded, settings, width, theme);
+    if !view.batch.is_empty() {
+        if expanded {
+            push_batch_body(out, &view, width, theme, &mut env, rows);
+            out.push(Line::default());
+        } else {
+            push_batch_digest(out, &view, width, theme);
+        }
+        return;
+    }
     if expanded {
         let args = serde_json::from_str(&args).unwrap_or_default();
         let body_width = width.saturating_sub(2).max(1);
@@ -222,6 +254,268 @@ pub(super) fn push_tool_call(
             "   open in studio · /studio",
             Style::default().fg(theme.fg_dim),
         )));
+    }
+}
+
+/// Collapsed batches have a grouped digest and, if needed, one error line.
+fn push_batch_digest(
+    out: &mut Vec<Line<'static>>,
+    view: &nexus_core::app::ToolView,
+    width: usize,
+    theme: &crate::theme::Theme,
+) {
+    let dim = Style::default().fg(theme.fg_dim);
+    let error = Style::default().fg(theme.error);
+    let mut groups: Vec<(&str, Vec<String>)> = Vec::new();
+    for entry in &view.batch {
+        let tool = match entry.tool.as_str() {
+            "fetch_url" => "fetch",
+            other => other,
+        };
+        let target = if entry.view.verb.is_empty() && !entry.action.is_empty() {
+            format!("{} {}", entry.action, entry.target)
+        } else {
+            entry.target.clone()
+        };
+        if let Some((_, targets)) = groups.iter_mut().find(|(name, _)| *name == tool) {
+            targets.push(target);
+        } else {
+            groups.push((tool, vec![target]));
+        }
+    }
+    let digest = groups
+        .into_iter()
+        .map(|(tool, targets)| {
+            let mut shown = targets
+                .iter()
+                .take(2)
+                .map(|target| {
+                    let text: String = target.chars().take(28).collect();
+                    if target.chars().count() > 28 {
+                        format!("{text}…")
+                    } else {
+                        text
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            if targets.len() > 2 {
+                shown.push_str(" …");
+            }
+            format!("{tool} ×{} {shown}", targets.len())
+        })
+        .collect::<Vec<_>>()
+        .join(style::SEP);
+    out.push(batch_line(&format!("   {digest}"), width, dim, theme));
+    let errors = view
+        .batch
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            entry
+                .status
+                .is_some_and(|status| status != nexus_core::app::ToolOutcome::Ok)
+        })
+        .map(|(index, entry)| format!("{} {}: {}", index + 1, entry.tool, entry.outcome))
+        .collect::<Vec<_>>()
+        .join(style::SEP);
+    let error_text = view
+        .output
+        .as_deref()
+        .unwrap_or(&errors)
+        .lines()
+        .next()
+        .unwrap_or_default();
+    if !error_text.is_empty() {
+        out.push(batch_line(&format!("   {error_text}"), width, error, theme));
+    }
+}
+
+fn batch_line(text: &str, width: usize, role: Style, theme: &crate::theme::Theme) -> Line<'static> {
+    let mut spans = Vec::new();
+    for line in super::diff::escaped_rows(text, usize::MAX, role, Style::default().fg(theme.fg_dim))
+    {
+        spans.extend(line.spans);
+    }
+    super::popups::chrome::fit_line(Line::from(spans), width)
+}
+
+fn batch_row_header(
+    entry: &nexus_core::app::BatchEntry,
+    index: usize,
+    width: usize,
+    theme: &crate::theme::Theme,
+    open: bool,
+    focused: bool,
+) -> Line<'static> {
+    use nexus_core::app::ToolOutcome;
+    let dim = Style::default().fg(theme.fg_dim);
+    let failed = entry.status.is_some_and(|status| status != ToolOutcome::Ok);
+    let role = Style::default().fg(if failed { theme.error } else { theme.accent2 });
+    let status = match entry.status {
+        Some(ToolOutcome::Ok) => "ok",
+        Some(ToolOutcome::Failed) => "failed",
+        Some(ToolOutcome::Denied | ToolOutcome::Blocked) => "blocked",
+        None => "not shown",
+    };
+    let detail = if failed {
+        format!("{status}: {}", entry.outcome)
+    } else {
+        status.into()
+    };
+    let detail = if entry.truncated {
+        format!("{detail} · truncated")
+    } else {
+        detail
+    };
+    let summary = if entry.result.is_some() {
+        entry.view.summary()
+    } else {
+        format!("{} {} {}", entry.tool, entry.action, entry.target)
+            .trim()
+            .to_string()
+    };
+    let summary = if entry.view.verb.is_empty()
+        || entry.view.verb.starts_with(&entry.tool)
+        || (entry.tool == "fetch_url" && entry.view.verb == "fetch")
+    {
+        summary
+    } else {
+        format!("{}{}{}", entry.tool, style::SEP, summary)
+    };
+    let mut head = vec![
+        Span::styled(format!("{:>2}  ", index + 1), dim),
+        Span::styled(format!("{} ", call_glyph(&entry.view, failed)), role),
+    ];
+    let text = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg)
+    };
+    head.extend(batch_line(&summary, usize::MAX, text, theme).spans);
+    // Leave room for the status and the row's fold affordance.
+    let detail = batch_line(
+        &detail,
+        width.saturating_sub(24).max(8),
+        if failed { role } else { dim },
+        theme,
+    );
+    let mut header =
+        super::popups::chrome::fit_line(Line::from(head), width.saturating_sub(detail.width() + 7));
+    header
+        .spans
+        .insert(0, Span::styled(format!("{} ", glyph::RAIL), role));
+    header.spans.push(Span::styled(style::SEP, dim));
+    header.spans.extend(detail.spans);
+    let padding = width.saturating_sub(header.width() + 1);
+    header.spans.push(Span::raw(" ".repeat(padding)));
+    header.spans.push(Span::styled(
+        if open {
+            glyph::EXPANDED
+        } else {
+            glyph::SELECTED
+        },
+        dim,
+    ));
+    super::popups::chrome::fit_line(header, width)
+}
+
+/// Each sub-call reuses its standalone body, capped independently of its peers.
+fn push_batch_body(
+    out: &mut Vec<Line<'static>>,
+    view: &nexus_core::app::ToolView,
+    width: usize,
+    theme: &crate::theme::Theme,
+    env: &mut CardEnv<'_>,
+    mut rows: Option<BatchRows<'_>>,
+) {
+    use nexus_core::app::ToolOutcome;
+    let dim = Style::default().fg(theme.fg_dim);
+    let body_width = width.saturating_sub(4).max(1);
+    if let Some(error) = &view.output {
+        out.push(batch_line(
+            error.lines().next().unwrap_or_default(),
+            width,
+            Style::default().fg(theme.error),
+            theme,
+        ));
+    }
+    for (index, entry) in view.batch.iter().enumerate() {
+        let start = out.len();
+        let open = rows
+            .as_ref()
+            .is_some_and(|rows| rows.open.contains(&(rows.owner, index)));
+        let focused = rows
+            .as_ref()
+            .is_some_and(|rows| rows.focus == Some((rows.owner, index)));
+        let failed = entry.status.is_some_and(|status| status != ToolOutcome::Ok);
+        let role = Style::default().fg(if failed { theme.error } else { theme.accent2 });
+        let rail = Span::styled(format!("{}   ", glyph::RAIL), role);
+        out.push(batch_row_header(entry, index, width, theme, open, focused));
+        if open {
+            let result = entry
+                .result
+                .as_deref()
+                .unwrap_or("result not shown (combined result cap)");
+            let visible_result = strip_markdown_images(result);
+            let body = if entry.result.is_some() {
+                expanded_tool_body(
+                    &entry.tool,
+                    &entry.arguments,
+                    &entry.view,
+                    &visible_result,
+                    body_width,
+                    theme,
+                )
+            } else {
+                vec![batch_line(result, body_width, dim, theme)]
+            };
+            let mut body = body
+                .into_iter()
+                .flat_map(|row| super::diff::styled_rows(&row, body_width, dim))
+                .collect();
+            cap_tool_body(&mut body, body_width, theme);
+            for mut row in body {
+                row.spans.insert(0, rail.clone());
+                out.push(row);
+            }
+            // Deck images have already been parsed; other tools can return
+            // Markdown image references (files/media, for example).
+            push_slide_thumbnails(
+                out,
+                &entry.view,
+                width.saturating_sub(2),
+                theme,
+                &rail,
+                CardEnv {
+                    files_dir: env.files_dir,
+                    studio_linked: env.studio_linked,
+                    image_at_line: env.image_at_line,
+                    image_cache: env.image_cache,
+                },
+            );
+            if entry.view.images.is_empty() {
+                render_markdown_images(
+                    out,
+                    result,
+                    body_width,
+                    theme,
+                    env.files_dir,
+                    env.image_at_line,
+                    env.image_cache,
+                    Some(&rail),
+                );
+            }
+        }
+        if let Some(rows) = &mut rows {
+            rows.hits.push(crate::history_cache::BatchRow {
+                owner: rows.owner,
+                index,
+                lines: start..out.len(),
+            });
+        }
     }
 }
 
@@ -322,6 +616,7 @@ fn push_round_preamble(
     }
 }
 
+#[allow(clippy::too_many_lines)] // shared header roles and per-tool collapsed previews
 fn push_workspace_call(
     out: &mut Vec<Line<'static>>,
     view: &nexus_core::app::ToolView,
@@ -343,9 +638,13 @@ fn push_workspace_call(
         }
     };
     append(
-        format!("{} {}", view.verb, view.target)
-            .trim_start()
-            .to_string(),
+        if view.batch.is_empty() {
+            format!("{} {}", view.verb, view.target)
+                .trim_start()
+                .to_string()
+        } else {
+            view.verb.clone()
+        },
         if view.verb.is_empty() {
             dim
         } else {
@@ -366,7 +665,9 @@ fn push_workspace_call(
             format!("{}{stat}", style::SEP),
             if failed
                 && (stat.starts_with("exit")
-                    || matches!(stat.as_str(), "failed" | "denied" | "blocked"))
+                    || matches!(stat.as_str(), "failed" | "denied" | "blocked")
+                    || (!view.batch.is_empty()
+                        && (stat.ends_with(" failed") || stat.ends_with(" blocked"))))
             {
                 Style::default().fg(theme.error)
             } else {
@@ -1658,6 +1959,224 @@ fn md_colors(theme: &crate::theme::Theme) -> crate::ui::markdown::MdColors {
         heading: theme.accent,
         rule: theme.border_dim,
         code: theme.warning,
+    }
+}
+
+#[cfg(test)]
+mod batch_card_tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    fn content() -> String {
+        json!({
+            "name":"batch",
+            "arguments":json!({"calls":[
+                {"tool":"search","arguments":{"mode":"web","query":"jev decision api"}},
+                {"tool":"search","arguments":{"mode":"web","query":"luna vs jev"}},
+                {"tool":"search","arguments":{"mode":"web","query":"pricing"}},
+                {"tool":"fetch_url","arguments":{"url":"https://arxiv.org/abs/123"}},
+                {"tool":"files","arguments":{"action":"read","name":"us_1.jpg"}},
+                {"tool":"deck","arguments":{"action":"edit","path":"decks/a.deck.json"}}
+            ]}).to_string(),
+            "result":"[1/6] search web \"jev decision api\"\n[1] Decision API\n    https://example.org/api\n    A decision endpoint.\n[2/6] search web \"luna vs jev\"\n[1] Comparison\n    https://example.org/compare\n    The comparison.\n[3/6] search web \"pricing\"\n[1] Pricing\n    https://example.org/pricing\n    The prices.\n[4/6] fetch_url https://arxiv.org/abs/123\nPaper preview\n[5/6] files/read us_1.jpg\nimage ready\n[6/6] deck\ndeck failed: no block \"x\""
+        }).to_string()
+    }
+
+    fn render(
+        expanded: bool,
+        open: &[usize],
+    ) -> (Vec<Line<'static>>, Vec<crate::history_cache::BatchRow>) {
+        let mut lines = Vec::new();
+        let mut hits = Vec::new();
+        let mut images = Vec::new();
+        let mut cache = HashMap::new();
+        let folds: HashSet<_> = open.iter().map(|index| (0, *index)).collect();
+        push_tool_call_with_rows(
+            &mut lines,
+            &content(),
+            expanded,
+            &nexus_core::app::Settings::default(),
+            140,
+            &crate::theme::Theme::default(),
+            CardEnv {
+                files_dir: std::path::Path::new("."),
+                studio_linked: false,
+                image_at_line: &mut images,
+                image_cache: &mut cache,
+            },
+            Some(BatchRows {
+                owner: 0,
+                open: &folds,
+                focus: None,
+                hits: &mut hits,
+            }),
+        );
+        (lines, hits)
+    }
+
+    /// Snapshot real terminal cells, normalizing only the right-aligned fold gap.
+    fn snapshot(lines: &[Line<'static>]) -> Vec<String> {
+        let mut terminal =
+            Terminal::new(TestBackend::new(140, u16::try_from(lines.len()).unwrap())).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new(lines.to_vec()), frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text: Vec<_> = (0..buffer.area.height)
+            .map(|y| {
+                let row: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                let row = row.trim_end();
+                if let Some(head) = row.strip_suffix('▸').or_else(|| row.strip_suffix('▾')) {
+                    format!("{} {}", head.trim_end(), row.chars().last().unwrap())
+                } else {
+                    row.to_string()
+                }
+            })
+            .collect();
+        while text.last().is_some_and(String::is_empty) {
+            text.pop();
+        }
+        text
+    }
+
+    fn header() -> &'static str {
+        "✗ batch · 6 calls · 5 ok · 1 failed"
+    }
+
+    fn opened() -> Vec<String> {
+        [
+            format!("{} ▾", header()),
+            "▎  1  ◎ search \"jev decision api\" · 1 result · ok ▸".into(),
+            "▎  2  ◎ search \"luna vs jev\" · 1 result · ok ▸".into(),
+            "▎  3  ◎ search \"pricing\" · 1 result · ok ▸".into(),
+            "▎  4  ◎ fetch arxiv.org/abs/123 · 13 chars · ok ▸".into(),
+            "▎  5  ⚒ files/read us_1.jpg → image ready · ok ▸".into(),
+            "▎  6  ✗ deck · edit decks/a.deck.json · failed · failed: deck failed: no block \"x\" ▸"
+                .into(),
+        ]
+        .into()
+    }
+
+    #[test]
+    fn collapsed_batch_snapshot_is_a_digest_not_concatenated_results() {
+        let (lines, hits) = render(false, &[]);
+        assert_eq!(snapshot(&lines), [
+            format!("{} ▸", header()),
+            "   search ×3 \"jev decision api\", \"luna vs jev\" … · fetch ×1 arxiv.org/abs/123 · files ×1 read us_1.jpg · deck ×1 decks/a.deck.json".into(),
+            "   6 deck: deck failed: no block \"x\"".into(),
+        ]);
+        assert!(hits.is_empty());
+        let theme = crate::theme::Theme::default();
+        assert!(lines[0].spans.iter().any(|span| span.content.contains("1 failed") && span.style.fg == Some(theme.error)));
+        assert!(
+            lines[2]
+                .spans
+                .iter()
+                .all(|span| span.style.fg == Some(theme.error))
+        );
+    }
+
+    #[test]
+    fn opened_batch_snapshot_is_one_numbered_row_per_call() {
+        let (lines, hits) = render(true, &[]);
+        assert_eq!(snapshot(&lines), opened());
+        assert_eq!(hits.len(), 6);
+        assert!(hits.iter().all(|hit| hit.lines.len() == 1));
+    }
+
+    #[test]
+    fn expanded_search_row_snapshot_uses_the_search_results_body() {
+        let (lines, hits) = render(true, &[0]);
+        let mut expected = opened();
+        expected[1] = expected[1].replace('▸', "▾");
+        expected.splice(
+            2..2,
+            [
+                format!("▎   ── results ──{}", "─".repeat(123)),
+                "▎     1  Decision API".into(),
+                "▎        example.org".into(),
+                "▎        A decision endpoint.".into(),
+            ],
+        );
+        assert_eq!(snapshot(&lines), expected);
+        assert_eq!(hits[0].lines.len(), 5);
+        assert_eq!(hits[1].lines.len(), 1);
+    }
+
+    #[test]
+    fn expanded_failed_row_snapshot_keeps_the_short_error() {
+        let (lines, hits) = render(true, &[5]);
+        let mut expected = opened();
+        expected[6] = expected[6].replace('▸', "▾");
+        expected.push("▎   deck failed: no block \"x\"".into());
+        assert_eq!(snapshot(&lines), expected);
+        assert_eq!(hits[5].lines.len(), 2);
+        let theme = crate::theme::Theme::default();
+        assert!(
+            lines[hits[5].lines.start]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("failed:") && span.style.fg == Some(theme.error))
+        );
+    }
+
+    #[test]
+    fn batch_deck_and_media_images_belong_only_to_their_open_row() {
+        let files =
+            std::env::temp_dir().join(format!("nexus-batch-images-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&files).unwrap();
+        image::RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3]))
+            .save(files.join("slide.png"))
+            .unwrap();
+        let content = json!({"name":"batch", "arguments":json!({"calls":[
+            {"tool":"deck", "arguments":{"action":"view","path":"a.deck.json"}},
+            {"tool":"media", "arguments":{"action":"generate_image","prompt":"a"}}
+        ]}).to_string(), "result":"[1/2] deck\nviewed 1 slides · a.deck.json\n![slide 1](slide.png)\n[2/2] media/generate_image a\n![image](slide.png)"}).to_string();
+        for open in [
+            HashSet::new(),
+            HashSet::from([(0, 0)]),
+            HashSet::from([(0, 1)]),
+        ] {
+            let mut lines = Vec::new();
+            let mut images = Vec::new();
+            let mut cache = HashMap::new();
+            let mut hits = Vec::new();
+            push_tool_call_with_rows(
+                &mut lines,
+                &content,
+                true,
+                &nexus_core::app::Settings::default(),
+                80,
+                &crate::theme::Theme::default(),
+                CardEnv {
+                    files_dir: &files,
+                    studio_linked: false,
+                    image_at_line: &mut images,
+                    image_cache: &mut cache,
+                },
+                Some(BatchRows {
+                    owner: 0,
+                    open: &open,
+                    focus: None,
+                    hits: &mut hits,
+                }),
+            );
+            assert_eq!(images.iter().any(Option::is_some), !open.is_empty());
+            for (line, image) in images
+                .iter()
+                .enumerate()
+                .filter(|(_, image)| image.is_some())
+            {
+                let hit = hits.iter().find(|hit| hit.lines.contains(&line)).unwrap();
+                assert!(open.contains(&(0, hit.index)));
+                assert!(image.as_deref().unwrap().ends_with("slide.png"));
+            }
+        }
+        std::fs::remove_dir_all(files).unwrap();
     }
 }
 

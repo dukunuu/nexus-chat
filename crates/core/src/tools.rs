@@ -2999,7 +2999,8 @@ impl ToolBox {
                         .collect();
                     let _ = write!(
                         out,
-                        "[{}/{}] {}\n{}",
+                        "[batch-result: {} bytes]\n[{}/{}] {}\n{}\n[/batch-result]",
+                        results[i].0.len(),
                         i + 1,
                         items.len(),
                         label,
@@ -4497,7 +4498,7 @@ pub fn is_read_only_tool(name: &str, args: &str) -> bool {
 
 /// Compact label for one `batch` sub-call, shown above its result so the
 /// model can tell which output belongs to which operation.
-fn batch_call_label(name: &str, v: &serde_json::Value) -> String {
+pub(crate) fn batch_call_label(name: &str, v: &serde_json::Value) -> String {
     let s = |k: &str| {
         v.get(k)
             .and_then(|x| x.as_str())
@@ -11058,6 +11059,33 @@ mod tests {
                 "{tool} {args} should be mutating"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn batch_frames_survive_real_sub_result_and_combined_caps() {
+        let (mut tb, dir) = skills_toolbox();
+        tb.space_scripts_dir = dir.join("space-scripts");
+        let text = format!("# 日本語\n{}", "x".repeat(10_000));
+        tb.run(
+            "scripts",
+            &serde_json::json!({"action":"write", "path":"large.sh", "content":text}).to_string(),
+        )
+        .await;
+        let args = serde_json::json!({"calls": (0..8).map(|_| serde_json::json!({
+            "tool":"scripts", "arguments":{"action":"read", "path":"large.sh"}
+        })).collect::<Vec<_>>()})
+        .to_string();
+        let result = tb.run("batch", &args).await.0;
+        assert!(result.contains("[batch-result: "));
+        assert!(result.contains("[/batch-result]"));
+        assert!(result.ends_with("... (tool result truncated)"));
+        let view = crate::app::tool_call_view("batch", &args, &result);
+        assert_eq!(view.batch.len(), 8);
+        assert!(view.batch[0].result.as_deref().unwrap().contains("日本語"));
+        assert!(view.batch[0].truncated, "each sub-result is capped too");
+        assert!(view.batch.iter().any(|entry| entry.result.is_none()));
+        assert_eq!(view.batch[7].status, None);
+        assert!(view.summary().contains("not shown"));
     }
 
     #[tokio::test]
