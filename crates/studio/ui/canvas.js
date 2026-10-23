@@ -92,7 +92,6 @@ export function canvasController(api) {
     const slide = api.slide(), nodes = selectedNodes().filter(n => !locked(n.id) && !hasSelectedAncestor(n.id));
     drag = { pointerId:event.pointerId, startX: event.clientX, startY: event.clientY, direction: handle?.dataset.direction, slide: slide.id,
       nodes: nodes.map(n => ({ node:n, rect:rectOf(n.id), free:isAbsolute(slide, n), parent:parentOf(slide, n.id).parent })), changes:new Map(), moved:false, scale:slideScale() };
-    canvas.setPointerCapture(event.pointerId);
   });
   function hasSelectedAncestor(nodeId) {
     for (let p = parentOf(api.slide(), nodeId)?.parent; p && p !== api.slide(); p = parentOf(api.slide(), p.id)?.parent) if (api.state.selected.has(p.id)) return true;
@@ -129,7 +128,9 @@ export function canvasController(api) {
     if (constrained === 'x') dy = 0; if (constrained === 'y') dx = 0;
     drag.moved ||= Math.abs(event.clientX - drag.startX) + Math.abs(event.clientY - drag.startY) > 2;
     if (!drag.moved) return;
-    canvas.classList.add('dragging'); canvas.querySelectorAll('.resize-handle').forEach(n => n.hidden = true);
+    // Capturing a click retargets dblclick to the canvas, preventing text editing.
+    if (!canvas.hasPointerCapture(event.pointerId)) canvas.setPointerCapture(event.pointerId);
+    canvas.classList.add('dragging'); canvas.querySelectorAll('.resize-handle').forEach(n => n.hidden = true); api.positionToolbar?.();
     drag.line?.remove(); drag.line = null; drag.drop = null;
     const size = slideSize(api.state.deck.theme), unit = px => `${px / size.w * 100}cqw`, absolute = event.ctrlKey || event.metaKey;
     const target = !drag.direction ? targetAt(event, absolute) : null;
@@ -197,7 +198,7 @@ export function canvasController(api) {
     if (!drag) return;
     const finished = drag; drag = null; canvas.classList.remove('dragging'); finished.line?.remove(); guides.clear();
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-    if (cancel || !finished.moved) { if (finished.moved) render(); else decorate(); return; }
+    if (cancel || !finished.moved) { if (finished.moved) render(); else decorate(); api.positionToolbar?.(); return; }
     const ops = [];
     if (finished.drop) {
       // Append first so insertion indices are computed after all dragged nodes
@@ -233,7 +234,7 @@ export function canvasController(api) {
     const node = findNode(api.slide(), element.dataset.id);
     element.textContent = node.text;
     element.contentEditable = 'plaintext-only';
-    element.classList.add('editing'); element.focus();
+    element.classList.add('editing'); element.focus(); api.positionToolbar?.();
     element.addEventListener('paste', paste => {
       paste.preventDefault(); document.execCommand('insertText', false, paste.clipboardData.getData('text/plain'));
     });
@@ -245,6 +246,7 @@ export function canvasController(api) {
       element.removeAttribute('contenteditable'); element.classList.remove('editing');
       if (text !== node.text) api.updateMany(slideId, [{ id: node.id, fields: { text } }]);
       else render();
+      api.positionToolbar?.();
     }, { once: true });
   });
   let menu;

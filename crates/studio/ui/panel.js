@@ -9,56 +9,205 @@ const TEXTY = ['text', 'code', 'table'];
 export function panelController(api) {
   const panel = document.querySelector('#properties'), toolbar = document.querySelector('#floating-toolbar');
   const nodes = () => { const slide = api.slide(); return slide ? allNodes(slide).filter(n => api.state.selected.has(n.id)) : []; };
-  const number = value => { const n = Number(value); return Number.isFinite(n) ? n : null; };
   const field = fields(api), fonts = fontController(api, field, nodes);
   const collapsed = new Set(), perSide = new Set(), limits = new Set(), sectionStates = new Map();
   /** Merge-patch every selected node. */
   const patch = fields => api.updateMany(api.slide().id, nodes().map(node => ({ id: node.id, fields: structuredClone(fields) })));
-  const font = fields => patch({ font: fields });
-  function mark(marker) {
-    api.updateMany(api.slide().id, nodes().filter(n => n.kind === 'text').map(n => ({ id: n.id, fields: { text: n.text.startsWith(marker) && n.text.endsWith(marker) ? n.text.slice(marker.length, -marker.length) : `${marker}${n.text}${marker}` } })));
-  }
   function reorder(nodeId, delta) {
     const at = parentOf(api.slide(), nodeId); if (!at) return;
     const to = Math.max(0, Math.min(childrenOf(at.parent).length - 1, at.index + delta));
     if (to !== at.index) api.apply(() => [{ op: 'move_node', id: nodeId, parent: at.parent.id, index: to }]);
   }
-  /** The color roles a selection can take, applied where its kind keeps color. */
-  function colors(container, labels = false) {
-    const selected = nodes();
-    const current = node => TEXTY.includes(node.kind) ? resolveFont(api.state.deck.theme, node.style, node.font).color : node.fill || 'fg';
-    const set = value => api.apply(() => selected.map(node => ({ op: 'update_node', id: node.id, fields: TEXTY.includes(node.kind) ? { font: { color: value } } : { fill: value }, base_hash: api.state.hashes[node.id] })));
-    for (const [role, label] of [['accent','Accent'], ['fg','Text'], ['muted','Muted']]) {
-      const node = button('check', `${label} color`, () => set(role), 'color-option'); node.replaceChildren(element('span', 'color-chip'));
-      node.setAttribute('aria-pressed', String(selected.length > 0 && selected.every(n => current(n) === role)));
-      if (labels) node.append(element('span', 'color-name', label));
-      node.style.setProperty('--swatch', api.state.deck.theme.colors[role]); container.append(node);
-    }
-    const custom = element('label', 'custom-color'); custom.title = 'Custom color';
-    custom.classList.toggle('selected', selected.length > 0 && selected.every(n => current(n).startsWith('#') && current(n) === current(selected[0])));
-    const picker = element('input', 'color-picker'); picker.type = 'color'; picker.title = 'Custom color'; picker.setAttribute('aria-label', 'Custom color'); picker.value = color(selected[0] ? current(selected[0]) : 'fg', api.state.deck.theme); picker.onchange = () => set(picker.value); custom.append(picker);
-    if (labels) custom.append(element('span', 'color-name', 'Custom'));
-    container.append(custom);
+  // The toolbar is outside the transformed slide: all geometry here is screen px.
+  const stage = document.querySelector('#stage'), recentColors = [];
+  const textNodes = () => nodes().filter(n => TEXTY.includes(n.kind));
+  const paintNodes = () => nodes().filter(n => [...TEXTY,'shape','frame'].includes(n.kind));
+  const resolved = node => resolveFont(api.state.deck.theme, node.style || (node.kind === 'code' ? 'code' : 'body'), node.font);
+  const textFont = font => api.updateMany(api.slide().id, textNodes().map(n => ({ id:n.id, fields:{ font } })));
+  const currentColor = node => TEXTY.includes(node.kind) ? resolved(node).color : node.fill || 'fg';
+  const bold = () => textFont({ weight:textNodes().every(n => resolved(n).weight >= 700) ? 400 : 700 });
+  const italic = () => textFont({ italic:!textNodes().every(n => resolved(n).italic) });
+  const order = delta => nodes().forEach(n => reorder(n.id, delta));
+  function comment() {
+    const node = nodes()[0], rect = api.rectOf(node.id), size = slideSize(api.state.deck.theme);
+    api.commentAt({ slide:api.slide().id, block:node.id, x:Math.max(0, Math.min(size.w - 1, Math.round(rect?.x || 0))), y:Math.max(0, Math.min(size.h - 1, Math.round(rect?.y || 0))) });
+  }
+  let toolbarKey, popup;
+  function closeToolbarMenu(focus = false) {
+    if (!popup) return;
+    const { anchor, element:menu } = popup; popup = null; anchor.setAttribute('aria-expanded', 'false'); menu.remove();
+    if (focus && anchor.isConnected) anchor.focus({ preventScroll:true });
+  }
+  const visibleStage = () => {
+    const r = stage.getBoundingClientRect();
+    return { left:Math.max(0, r.left) + 8, right:Math.min(innerWidth, r.right) - 8, top:Math.max(0, r.top) + 8, bottom:Math.min(innerHeight, r.bottom) - 8 };
+  };
+  function positionMenu() {
+    if (!popup) return;
+    const bounds = visibleStage(), r = popup.anchor.getBoundingClientRect(), menu = popup.element;
+    menu.style.maxWidth = `${bounds.right - bounds.left}px`; menu.style.maxHeight = `${bounds.bottom - bounds.top}px`;
+    const box = menu.getBoundingClientRect(), below = r.bottom + 4;
+    menu.style.left = `${Math.max(bounds.left, Math.min(bounds.right - box.width, r.left))}px`;
+    menu.style.top = `${Math.max(bounds.top, Math.min(bounds.bottom - box.height, below + box.height <= bounds.bottom ? below : r.top - box.height - 4))}px`;
+  }
+  function openToolbarMenu(anchor, name, draw, dialog = false) {
+    const root = toolbar.contains(anchor) ? anchor : popup?.anchor;
+    if (popup?.anchor === anchor && popup.element.dataset.toolbarMenu === name) { closeToolbarMenu(true); return; }
+    closeToolbarMenu();
+    const menu = element('div', 'toolbar-popover popover'); menu.dataset.toolbarMenu = name;
+    menu.id = 'toolbar-popover'; menu.setAttribute('role', dialog ? 'dialog' : 'menu'); menu.setAttribute('aria-label', name);
+    popup = { element:menu, anchor:root }; root.setAttribute('aria-expanded', 'true'); root.setAttribute('aria-controls', menu.id);
+    draw(menu); stage.append(menu); positionMenu();
+    menu.querySelector('button,input')?.focus({ preventScroll:true });
+  }
+  function menuItem(menu, title, action, glyph, shortcut = '', active) {
+    const control = button(glyph || 'check', title, () => { closeToolbarMenu(true); action(); });
+    control.title = `${title}${shortcut ? ` (${shortcut})` : ''}`;
+    control.setAttribute('role', active === undefined ? 'menuitem' : 'menuitemradio');
+    if (active !== undefined) control.setAttribute('aria-checked', String(active));
+    control.append(element('span', 'toolbar-menu-label', title));
+    if (shortcut) control.append(element('kbd', '', shortcut));
+    menu.append(control); return control;
+  }
+  function stylesMenu(anchor) {
+    openToolbarMenu(anchor, 'Text styles', menu => {
+      for (const name of Object.keys(api.state.deck.theme.text_styles)) menuItem(menu, name[0].toUpperCase() + name.slice(1), () => api.updateMany(api.slide().id, textNodes().map(n => ({ id:n.id, fields:{ style:name, font:null } }))), 'node-text', '', textNodes().every(n => (n.style || (n.kind === 'code' ? 'code' : 'body')) === name));
+    });
+  }
+  function alignMenu(anchor) {
+    openToolbarMenu(anchor, 'Text alignment', menu => {
+      for (const align of ['left','center','right']) menuItem(menu, `Align ${align}`, () => textFont({ align }), `align-${align}`, '', textNodes().every(n => resolved(n).align === align));
+    });
+  }
+  function colorsMenu(anchor) {
+    openToolbarMenu(anchor, 'Selection color', menu => {
+      const set = value => {
+        if (value.startsWith('#')) { const at = recentColors.indexOf(value); if (at >= 0) recentColors.splice(at, 1); recentColors.unshift(value); recentColors.length = Math.min(6, recentColors.length); }
+        api.updateMany(api.slide().id, paintNodes().map(n => ({ id:n.id, fields:TEXTY.includes(n.kind) ? { font:{ color:value } } : { fill:value } })));
+      };
+      const swatches = element('div', 'toolbar-swatches');
+      const swatch = (value, title) => {
+        const control = button('check', title, () => { closeToolbarMenu(true); set(value); });
+        control.replaceChildren(element('span', 'toolbar-swatch')); control.style.setProperty('--swatch', color(value, api.state.deck.theme));
+        control.setAttribute('aria-pressed', String(paintNodes().every(n => currentColor(n) === value))); swatches.append(control);
+      };
+      menu.append(element('div', 'toolbar-menu-heading', 'Theme colors'));
+      for (const role of Object.keys(api.state.deck.theme.colors)) swatch(role, `${role} color`);
+      menu.append(swatches);
+      if (recentColors.length) {
+        menu.append(element('div', 'toolbar-menu-heading', 'Recent colors'));
+        const recent = element('div', 'toolbar-swatches');
+        for (const value of recentColors) { swatch(value, value); recent.append(swatches.lastChild); } menu.append(recent);
+      }
+      const hex = field('Hex color', color(currentColor(paintNodes()[0]), api.state.deck.theme), value => {
+        if (popup?.element === menu && /^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i.test(value)) { closeToolbarMenu(true); set(value); }
+      });
+      hex.lastChild.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); hex.lastChild.onchange(); } };
+      menu.append(hex);
+    }, true);
+  }
+  function overflowMenu(anchor) {
+    openToolbarMenu(anchor, 'Selection actions', menu => {
+      for (const [group, title, open, glyph] of [['style','Text style',stylesMenu,'node-text'],['align','Text alignment',alignMenu,'align-left'],['colors','Selection color',colorsMenu,'opacity']]) {
+        if (!toolbar.querySelector(`[data-toolbar-group="${group}"]`)?.hidden) continue;
+        const item = menuItem(menu, title, () => {}, glyph); item.setAttribute('aria-haspopup', 'menu');
+        item.onclick = () => open(item);
+      }
+      menuItem(menu, 'Bring forward', () => order(1), 'forward', '⌘/Ctrl+]');
+      menuItem(menu, 'Send back', () => order(-1), 'back', '⌘/Ctrl+[');
+      menuItem(menu, 'Duplicate', api.duplicate, 'duplicate', '⌘/Ctrl+D');
+      menuItem(menu, 'Delete', api.remove, 'trash', '⌫ / Delete');
+      menuItem(menu, 'Comment on selection', comment, 'comment', 'C');
+    });
+  }
+  function toolbarButton(glyph, title, action, shortcut = '') {
+    const control = button(glyph, title, action); control.title = `${title}${shortcut ? ` (${shortcut})` : ''}`; return control;
+  }
+  function menuButton(glyph, title, open) {
+    const control = toolbarButton(glyph, title, () => open(control));
+    control.setAttribute('aria-haspopup', 'menu'); control.setAttribute('aria-expanded', 'false'); return control;
   }
   function renderToolbar() {
-    toolbar.replaceChildren();
-    const selected = nodes(), node = selected[0];
-    toolbar.hidden = !node || api.state.properties || api.state.mode === 'comment' || Boolean(api.state.preview);
-    if (toolbar.hidden) return;
-    if (selected.some(n => TEXTY.includes(n.kind))) {
-      const size = field('Text size', resolveFont(api.state.deck.theme, node.style, node.font).size, value => { const n = number(value); if (n > 0) font({ size: n }); }, null, 'number').lastChild;
-      size.setAttribute('aria-label', 'Text size in px'); size.min = 1; toolbar.append(size);
+    if (api.state.scrubbing) { positionToolbar(); return; }
+    const selected = nodes(), text = textNodes(), node = text[0];
+    const key = JSON.stringify([selected, api.state.deck?.theme]);
+    if (key !== toolbarKey) {
+      const focused = toolbar.contains(document.activeElement) ? document.activeElement.getAttribute('aria-label') : null;
+      closeToolbarMenu(); toolbar.replaceChildren(); toolbarKey = key;
+      const group = (name, ...controls) => { const row = element('div', 'toolbar-group'); row.dataset.toolbarGroup = name; row.append(...controls); toolbar.append(row); return row; };
+      if (node) {
+        const names = text.map(n => n.style || (n.kind === 'code' ? 'code' : 'body')), name = names.every(n => n === names[0]) ? names[0] : 'Mixed';
+        const style = menuButton('node-text', 'Selection text style', stylesMenu); style.replaceChildren(element('span', '', name[0].toUpperCase() + name.slice(1)), icon('chevron')); group('style', style);
+        const size = compact(field('Text size in px', text.map(n => resolved(n).size), n => { if (n > 0) textFont({ size:n }); }, null, 'number'), icon('node-text'));
+        size.classList.add('toolbar-size'); size.lastChild.title = 'Text size · ↑/↓ 1 · Shift 10 · Enter to apply';
+        const input = size.lastChild, step = input.onkeydown;
+        input.onkeydown = event => { step(event); if (event.key === 'Enter') { event.preventDefault(); input.onchange(); } };
+        const presets = menuButton('chevron', 'Text size presets', anchor => openToolbarMenu(anchor, 'Text size presets', menu => {
+          for (const n of [12,14,16,18,20,24,28,30,32,36,40,48,56,64,72,80,96,120,144,160,200]) menuItem(menu, String(n), () => textFont({ size:n }));
+        }));
+        group('size', size, presets);
+        const b = toolbarButton('bold', 'Bold', bold, '⌘/Ctrl+B'), i = toolbarButton('italic', 'Italic', italic, '⌘/Ctrl+I');
+        b.setAttribute('aria-pressed', String(text.every(n => resolved(n).weight >= 700))); i.setAttribute('aria-pressed', String(text.every(n => resolved(n).italic)));
+        group('emphasis', b, i); group('align', menuButton(`align-${resolved(node).align}`, 'Text alignment', alignMenu));
+      }
+      if (paintNodes().length) {
+        const swatch = menuButton('opacity', 'Selection color', colorsMenu); swatch.setAttribute('aria-haspopup', 'dialog'); swatch.replaceChildren(element('span', 'toolbar-swatch'));
+        swatch.style.setProperty('--swatch', color(currentColor(paintNodes()[0]), api.state.deck.theme)); group('colors', swatch);
+      }
+      group('order', toolbarButton('forward', 'Bring forward', () => order(1), '⌘/Ctrl+]'), toolbarButton('back', 'Send back', () => order(-1), '⌘/Ctrl+['));
+      group('duplicate', toolbarButton('duplicate', 'Duplicate', api.duplicate, '⌘/Ctrl+D'));
+      toolbar.append(menuButton('more', 'Selection actions', overflowMenu));
+      if (focused) [...toolbar.querySelectorAll('[aria-label]')].find(n => n.getAttribute('aria-label') === focused)?.focus({ preventScroll:true });
     }
-    if (selected.some(n => n.kind === 'text')) toolbar.append(button('bold', 'Bold', () => mark('**')), button('italic', 'Italic', () => mark('*')));
-    if (selected.some(n => TEXTY.includes(n.kind))) for (const align of ['left', 'center', 'right']) toolbar.append(button(`align-${align}`, `Align ${align}`, () => font({ align })));
-    toolbar.append(element('span', 'toolbar-divider')); colors(toolbar); toolbar.append(element('span', 'toolbar-divider'));
-    const rect = api.rectOf(node.id), size = slideSize(api.state.deck.theme);
-    toolbar.append(button('forward', 'Bring forward', () => reorder(node.id, 1)), button('back', 'Send back', () => reorder(node.id, -1)), button('duplicate', 'Duplicate', api.duplicate), button('trash', 'Delete', api.remove), button('comment', 'Comment on selection', () => api.commentAt({ slide: api.slide().id, block: node.id, x: Math.max(0, Math.min(size.w - 1, Math.round(rect?.x || 0))), y: Math.max(0, Math.min(size.h - 1, Math.round(rect?.y || 0))) })));
-    // Keep the toolbar above the selection, within the slide's horizontal bounds.
-    const wide = Math.max(1, document.querySelector('#canvas').clientWidth);
-    toolbar.style.left = `${Math.max(0, Math.min(100 - toolbar.scrollWidth / wide * 100, (rect?.x || 0) / size.w * 100))}%`;
-    toolbar.style.top = `${(rect?.y || 0) / size.h * 100 - 3}%`;
+    positionToolbar();
   }
+  function positionToolbar() {
+    // Keep a scrubbing label mounted and capturing its pointer until release.
+    toolbar.style.visibility = api.state.scrubbing ? 'hidden' : '';
+    if (api.state.scrubbing) { closeToolbarMenu(); return; }
+    const selected = [...document.querySelectorAll('#canvas .block.selected')], bounds = visibleStage();
+    toolbar.hidden = !selected.length || api.state.properties || api.state.mode !== 'edit' || Boolean(api.state.preview) || Boolean(document.querySelector('#canvas.dragging, #canvas .editing'));
+    if (toolbar.hidden) { closeToolbarMenu(); return; }
+    const boxes = selected.map(n => n.getBoundingClientRect());
+    const selection = { left:Math.min(...boxes.map(r => r.left)), right:Math.max(...boxes.map(r => r.right)), top:Math.min(...boxes.map(r => r.top)), bottom:Math.max(...boxes.map(r => r.bottom)) };
+    if (selection.right < bounds.left || selection.left > bounds.right || selection.bottom < bounds.top || selection.top > bounds.bottom) { toolbar.hidden = true; closeToolbarMenu(); return; }
+    const groups = [...toolbar.querySelectorAll('[data-toolbar-group]')], previous = groups.map(n => n.hidden).join(); groups.forEach(n => n.hidden = false);
+    for (const name of ['order','duplicate','align','colors','style']) {
+      if (toolbar.getBoundingClientRect().width <= bounds.right - bounds.left) break;
+      const group = groups.find(n => n.dataset.toolbarGroup === name); if (group) group.hidden = true;
+    }
+    if (previous !== groups.map(n => n.hidden).join()) closeToolbarMenu();
+    const box = toolbar.getBoundingClientRect();
+    const handles = [...document.querySelectorAll('#canvas .resize-handle:not([hidden])')].map(n => n.getBoundingClientRect());
+    const top = Math.min(selection.top, ...handles.map(r => r.top)), bottom = Math.max(selection.bottom, ...handles.map(r => r.bottom));
+    const y = top - 8 - box.height >= bounds.top ? top - 8 - box.height : bottom + 8;
+    // If neither side fits (or the viewport cannot hold the minimum row), stay out of the way.
+    if (box.width > bounds.right - bounds.left || y + box.height > bounds.bottom) { toolbar.hidden = true; closeToolbarMenu(); return; }
+    const clamp = x => Math.max(bounds.left, Math.min(bounds.right - box.width, x));
+    const center = clamp((selection.left + selection.right - box.width) / 2);
+    toolbar.style.left = `${center}px`; toolbar.style.top = `${y}px`; positionMenu();
+  }
+  document.addEventListener('pointerdown', event => { if (popup && !popup.element.contains(event.target) && !popup.anchor.contains(event.target)) closeToolbarMenu(); });
+  document.addEventListener('focusin', event => { if (popup && !popup.element.contains(event.target) && !popup.anchor.contains(event.target)) closeToolbarMenu(); });
+  document.addEventListener('keydown', event => {
+    const inMenu = popup?.element.contains(event.target), inToolbar = toolbar.contains(event.target);
+    if (!event.target.closest('input,textarea,select,[contenteditable],dialog') && !toolbar.hidden && !api.state.scrubbing) {
+      const mod = event.metaKey || event.ctrlKey, key = event.key.toLowerCase();
+      const action = mod && key === 'b' && textNodes().length ? bold : mod && key === 'i' && textNodes().length ? italic : mod && key === ']' ? () => order(1) : mod && key === '[' ? () => order(-1) : mod && key === 'd' ? api.duplicate : ['Delete','Backspace'].includes(event.key) ? api.remove : !mod && !event.altKey && key === 'c' ? comment : null;
+      if (action) { event.preventDefault(); event.stopImmediatePropagation(); closeToolbarMenu(true); action(); return; }
+    }
+    if (inMenu || inToolbar) {
+      if (event.key === 'Escape' && popup) { event.preventDefault(); closeToolbarMenu(true); }
+      else if (inMenu && ['ArrowDown','ArrowUp','Home','End'].includes(event.key)) {
+        event.preventDefault(); const items = [...popup.element.querySelectorAll('button,input')], at = items.indexOf(document.activeElement);
+        items[event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (at + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length]?.focus();
+      }
+      if (event.key !== 'Tab') event.stopImmediatePropagation();
+      return;
+    }
+  });
+  window.addEventListener('scroll', positionToolbar, true);
+  new ResizeObserver(() => { if (api.state.deck) positionToolbar(); }).observe(stage);
   // -- layers ----------------------------------------------------------------------
   function layerRows(slide, list, depth) {
     [...list].reverse().forEach(node => {
@@ -244,5 +393,5 @@ export function panelController(api) {
     }
     themeSection.append(swatches);
   }
-  return { render, renderToolbar };
+  return { render, renderToolbar, positionToolbar };
 }

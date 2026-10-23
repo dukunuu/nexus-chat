@@ -60,7 +60,7 @@ function apply(build) {
 }
 const api = {
   state, apply, command, toast, render, ask,
-  beginGesture() { state.scrubbing = true; gesture = { deck:structuredClone(state.deck), ops:[] }; },
+  beginGesture() { state.scrubbing = true; gesture = { deck:structuredClone(state.deck), ops:[] }; panel.positionToolbar(); },
   endGesture(cancel = false) {
     if (!gesture) return;
     const finished = gesture; gesture = null; state.scrubbing = false; state.deck = finished.deck;
@@ -74,6 +74,7 @@ const api = {
   renderAnimations:container => animationPanel.render(container),
   updateMany(slide, updates) { apply(() => updates.map(({ id, fields }) => ({ op:'update_node', id, fields, base_hash:state.hashes[id] || '' }))); },
   rectOf:nodeId => canvas.rectOf(nodeId),
+  positionToolbar:() => panel.positionToolbar(),
   selectionChanged() { canvas.decorate(); panel.render(true); panelKey = panelSignatures().props; feedback.render(); feedbackKey = feedbackSignature(); animationPanel.badges(); focusChanged(); },
   duplicate:() => canvas.duplicate(), remove:() => canvas.remove(),
   clearPreview:() => feedback.clearPreview(),
@@ -84,7 +85,7 @@ const animationPanel = animatePanelController(api), playback = playbackControlle
 for (const tab of ['design','animate']) $(`#tab-${tab}`).onclick = () => { state.panelTab = tab; render(); };
 let canvasKey, layersKey, panelKey, feedbackKey, ancillaryFrame, deckActivities;
 const currentCanvasKey = () => signature([api.slide(), state.deck.theme, slideAssets(api.slide(), state.deck.theme, state.images), state.preview]);
-function paintCanvas() { canvas.render(); canvasKey = currentCanvasKey(); }
+function paintCanvas() { canvas.render(); canvasKey = currentCanvasKey(); panel.positionToolbar(); }
 function deferAncillary() {
   if (ancillaryFrame) return;
   // The first frame paints the canvas; ancillary DOM work runs after it.
@@ -199,7 +200,7 @@ function applyViewport() {
   const scale = state.zoom === null ? 1 : state.zoom * nativeWidth / Math.max(1, parseFloat(getComputedStyle(wrap).width));
   wrap.style.transform = `translate(${state.panX}px,${state.panY}px) scale(${scale})`;
   $('#zoom-fit').textContent = state.zoom === null ? 'Fit' : `${Math.round(state.zoom * 100)}%`;
-  animationPanel.badges();
+  animationPanel.badges(); panel.positionToolbar();
 }
 function zoomTo(value, point) {
   const bounds = wrap.getBoundingClientRect();

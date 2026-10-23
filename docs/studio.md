@@ -651,6 +651,23 @@ insertion, zoom/pan and presenting remain available. D1 adds:
   beside X/Y, and min/max is behind “…” in the Layout / position header.
   Appearance pairs opacity/radius and exposes swatches with role-or-hex inputs.
   Chrome uses only terminal palette tokens, with labels/numbers at least 11 px.
+- **Floating selection toolbar:** one 32 px screen-space row, with 26 px controls
+  and a 48 px monospace size field. Text/code/table selections show a text-style
+  chip, scrubbable size with presets, active bold/italic toggles, one alignment
+  menu and one color swatch. Shapes/frames show fill color; images/charts omit
+  typography and paint. Mixed selections format only their text-capable layers.
+  Color opens theme roles, six session-recent hex colors and a hex field. The
+  overflow always offers layer order (Cmd/Ctrl+[ / ]), duplicate (Cmd/Ctrl+D),
+  delete and anchored comment (C). Cmd/Ctrl+B/I toggles text weight/italic.
+  As the visible stage narrows, groups collapse into overflow in this order:
+  layer order, duplicate, alignment, colors, style; size and emphasis stay.
+  Menus support Tab, arrows, Home/End and Escape (returning focus to the trigger).
+  Placement prefers 8 px above the selection handles, otherwise below, clamped
+  to the visible stage rather than the slide. Horizontal placement centres on
+  the selection and shifts sideways only to stay inside the stage; pan, scroll,
+  zoom and resize reposition without scaling controls. The bar hides during dragging/resizing/scrubbing or in-place text
+  editing, for off-stage selections, and when neither side or the minimum row
+  fits in the stage. Open the Design panel for controls in those tight spaces.
 - **Auto-layout:** none/down/right/wrap icon segments, a fixed gap with an auto
   (space-between) toggle, cross gap for wrapping, horizontal/vertical padding
   with a four-side toggle, and a direction-aware 3×3 alignment grid. Collapsing
@@ -797,5 +814,20 @@ webview's installed faces, so platform font availability still matters.
   inheritance, groups, crops, tables, charts, backgrounds, bullets, theme,
   gradients, custom paths, animations, SmartArt, limits, garbage input, unknown
   parts); the deck tool, studio's Open and the CLI have import tests too.
+- **Toolbar harness:** `node crates/studio/ui-dev/toolbar-shot.mjs` captures a
+  dense source-card grid at 1150/1280/1440 px in both terminal palettes, selecting
+  middle/top/right text at fit/50%/200% zoom. Assertions cover a 32 px single row,
+  controls ≤26 px, 48 px input, stage bounds, no selection/handle overlap,
+  the entire slide inside the stage at Fit, toolbar centring within 4 px unless
+  clamped, ordered narrow-stage collapse, overflow contents, keyboard menus/focus,
+  style/size/weight/italic/alignment/color edits, layer order/duplicate/delete/comment,
+  mixed selections, recent colors, one-undo scrubs, gesture/edit hiding and
+  scroll/resize repositioning. Fit shots select actual top/middle/right nodes
+  without panning; numeric-zoom shots pan to exercise stage-edge placement.
+  Before shots use HEAD's
+  unchanged UI, served in memory (no checkout). Outputs:
+  `ui-dev/shots/toolbar-before-1150-{default,light}.png`,
+  `toolbar-after-review-{1150,1280,1440}-{default,light}-{middle,top,right}-{fit,0.5,2}.png`, `toolbar-overflow-420-{default,light}.png` and
+  `toolbar-geometry.json`.
 - **Hermetic:** no network, and no windows opened in Rust tests. Browser harnesses
   use loopback-only static fixtures and mock IPC.
