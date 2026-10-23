@@ -1,5 +1,7 @@
 // Run: node crates/studio/ui-dev/smooth-shot.mjs
-// Hermetic 150 ms IPC / 4x CPU proof, including the HEAD (pre-fix) baseline.
+// Hermetic 150 ms IPC / 4x CPU proof, including the pre-fix baseline.
+// The baseline is the last commit before the optimistic-update fix (a28ac17).
+const BASELINE = process.env.SMOOTH_BASELINE || '40eb710';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -15,7 +17,7 @@ fixture.threads = [];
 fixture.deck.slides = Array.from({ length:7 }, (_, s) => ({ id:`s${s}`, notes:'', children:Array.from({ length:s ? 14 : 16 }, (_, i) => ({
   id:`n${s}-${i}`, kind:'shape', name:`Layer ${s}-${i}`, shape:'rect', fill:'accent', position:i === 0 && s === 0 ? { x:200, y:300 } : { x:900 + i % 4 * 200, y:100 + Math.floor(i / 4) * 200 }, sizing:{ w:140, h:80 },
 })) }));
-const baseline = new Map(['app.js','canvas.js','strip.js','render.js'].map(name => [name, execFileSync('git', ['show', `HEAD:crates/studio/ui/${name}`], { cwd:root })]));
+const baseline = new Map(['app.js','canvas.js','strip.js','render.js'].map(name => [name, execFileSync('git', ['show', `${BASELINE}:crates/studio/ui/${name}`], { cwd:root })]));
 const mock = fs.readFileSync(path.join(here, 'mock.js'), 'utf8');
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost'), before = url.pathname.startsWith('/before/');
