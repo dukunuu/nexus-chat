@@ -35,7 +35,6 @@ enum UserCommand {
     Interactive(String),
 }
 
-/// Parse a `!` line; `None` means an ordinary message.
 /// Whether a draft is a `!` shell line. A draft that opens with a Markdown
 /// image (`![alt](path)`, which is how a pasted image lands) is a message.
 pub fn is_shell_draft(text: &str) -> bool {
@@ -49,6 +48,7 @@ pub fn is_shell_draft(text: &str) -> bool {
     !markdown_image
 }
 
+/// Parse a `!` line; `None` means an ordinary message.
 fn parse_user_command(text: &str) -> Option<UserCommand> {
     let text = text.trim();
     if !is_shell_draft(text) {
@@ -396,9 +396,18 @@ impl AppView {
 
     // --- user-shell completion ---
 
+    /// Whether the composer holds a `!` shell line. `!` lines are an
+    /// agent-mode feature: in chat mode the same text is an ordinary message.
+    pub fn shell_draft(&self) -> bool {
+        self.work_mode.is_agent() && is_shell_draft(&self.input_text())
+    }
+
+    /// Up/Down recall shell history: agent mode, empty or `!` draft.
     pub fn shell_history_mode(&self) -> bool {
-        let text = self.input_text();
-        text.is_empty() || is_shell_draft(&text)
+        self.work_mode.is_agent() && {
+            let text = self.input_text();
+            text.is_empty() || is_shell_draft(&text)
+        }
     }
 
     fn cursor_byte(&self) -> usize {
@@ -432,10 +441,10 @@ impl AppView {
     }
 
     pub fn start_shell_completion(&mut self) {
-        let text = self.input_text();
-        if !is_shell_draft(&text) {
+        if !self.shell_draft() {
             return;
         }
+        let text = self.input_text();
         self.at_state = None;
         let cursor = self.cursor_byte();
         let cwd = self.user_command_cwd();
@@ -592,7 +601,7 @@ impl AppView {
     }
 
     pub fn refresh_at_matches(&mut self) {
-        if is_shell_draft(&self.input_text()) {
+        if self.shell_draft() {
             self.at_state = None;
             return;
         }
@@ -778,7 +787,12 @@ impl AppView {
         }
         if let Some(cmd) = text.strip_prefix('/') {
             self.run_command(cmd)?;
-        } else if let Some(command) = parse_user_command(text) {
+        } else if let Some(command) = self
+            .work_mode
+            .is_agent()
+            .then(|| parse_user_command(text))
+            .flatten()
+        {
             match command {
                 UserCommand::Empty => {}
                 UserCommand::Captured(cmd) => self.execute(AppCommand::RunUserCommand { cmd })?,
@@ -919,6 +933,13 @@ mod tests {
             root: std::env::temp_dir().join(format!("nexus-input-test-{}", uuid::Uuid::new_v4())),
         };
         AppView::new(App::new(db, Some("k"), space))
+    }
+
+    /// `!` shell lines are an agent-mode feature.
+    fn agent_app() -> AppView {
+        let mut app = test_app();
+        app.work_mode = nexus_core::app::WorkMode::Agent;
+        app
     }
 
     #[test]
@@ -1191,7 +1212,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_completion_replaces_a_quoted_word_at_a_unicode_cursor() {
-        let mut app = test_app();
+        let mut app = agent_app();
         let root = app.space.root.clone();
         let cwd = app.user_command_cwd();
         std::fs::write(cwd.join("foo bar"), "").unwrap();
@@ -1222,7 +1243,7 @@ mod tests {
 
     #[test]
     fn shell_history_is_session_first_unique_and_restores_the_bang_draft() {
-        let mut app = test_app();
+        let mut app = agent_app();
         let current = app
             .db
             .create_session("current", "a/one", &app.active_space.id, "chat")
@@ -1255,7 +1276,7 @@ mod tests {
 
     #[test]
     fn recent_shell_history_is_capped_at_two_hundred_unique_commands() {
-        let app = test_app();
+        let app = agent_app();
         let session = app
             .db
             .create_session("history", "a/one", &app.active_space.id, "chat")
@@ -1316,7 +1337,7 @@ mod tests {
 
     #[test]
     fn submitting_bang_lines_never_sends_them_to_the_model() {
-        let mut a = test_app();
+        let mut a = agent_app();
         a.current_model = Some("a/one".into());
         a.set_input("!");
         a.submit().unwrap();
@@ -1335,7 +1356,7 @@ mod tests {
 
     #[test]
     fn a_pasted_image_draft_is_a_message_not_a_shell_line() {
-        let mut a = test_app();
+        let mut a = agent_app();
         a.set_input("![pasted image](pasted-1.png) what is this?");
         assert!(!a.shell_history_mode());
         a.start_shell_completion();
@@ -1345,5 +1366,53 @@ mod tests {
         );
         a.set_input("!ls");
         assert!(a.shell_history_mode());
+    }
+
+    #[tokio::test]
+    async fn chat_mode_bang_draft_is_an_ordinary_message_with_no_shell_affordances() {
+        let mut a = test_app();
+        assert_eq!(a.work_mode, nexus_core::app::WorkMode::Chat);
+        a.current_model = Some("a/one".into());
+        a.set_input("!ls");
+        // The composer title, Tab completion and refresh_at_matches all key off
+        // `shell_draft`, which is false here.
+        assert!(!a.shell_draft());
+        assert!(!a.shell_history_mode());
+        a.start_shell_completion();
+        assert!(a.shell_completion_rx.is_none(), "Tab does not complete");
+        a.set_input("");
+        assert!(
+            !a.shell_history_mode(),
+            "an empty chat draft does not recall shell history"
+        );
+        a.set_input("!ls");
+        a.submit().unwrap();
+        assert!(a.pending_editor.is_none());
+        assert!(!a.user_command_running());
+        let sent = a.core.messages.last().expect("the line was sent");
+        assert_eq!((sent.role.as_str(), sent.content.as_str()), ("user", "!ls"));
+        // `!tty` and terminal programs are equally just text.
+        a.set_input("!tty vim x");
+        a.submit().unwrap();
+        assert!(a.pending_editor.is_none());
+    }
+
+    #[test]
+    fn agent_modes_keep_the_shell_affordances() {
+        for mode in [
+            nexus_core::app::WorkMode::Agent,
+            nexus_core::app::WorkMode::AgentAuto,
+        ] {
+            let mut a = test_app();
+            a.work_mode = mode;
+            a.set_input("!ls");
+            assert!(a.shell_draft());
+            assert!(a.shell_history_mode());
+            a.set_input("");
+            assert!(a.shell_history_mode());
+            a.set_input("hello");
+            assert!(!a.shell_draft());
+            assert!(!a.shell_history_mode());
+        }
     }
 }

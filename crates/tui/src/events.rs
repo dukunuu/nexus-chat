@@ -677,7 +677,7 @@ fn handle_normal(app: &mut AppView, key: KeyEvent) -> Result<()> {
                 .map(|workspace| workspace.root().to_string_lossy().into_owned());
             app.execute(AppCommand::SetWorkMode { mode, root })?;
         }
-        KeyCode::Tab if crate::composer::is_shell_draft(&app.input_text()) => {
+        KeyCode::Tab if app.shell_draft() => {
             app.start_shell_completion();
         }
         KeyCode::Enter if shift || ctrl => app.input.insert_newline(),
@@ -1120,6 +1120,13 @@ mod tests {
         std::fs::remove_dir_all(workspace).unwrap();
     }
 
+    /// `!` shell lines are an agent-mode feature.
+    fn agent_app() -> AppView {
+        let mut app = test_app();
+        app.work_mode = WorkMode::Agent;
+        app
+    }
+
     #[test]
     fn approval_popup_closes_when_its_pending_request_is_gone() {
         let mut app = test_app();
@@ -1192,7 +1199,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_dropdown_uses_tab_arrows_enter_and_escape_without_running() {
-        let mut app = test_app();
+        let mut app = agent_app();
         let root = app.space.root.clone();
         let cwd = app.user_command_cwd();
         for name in ["alpha", "alps"] {
@@ -1257,7 +1264,7 @@ mod tests {
 
     #[test]
     fn plain_arrows_recall_bang_commands_and_restore_empty_input() {
-        let mut app = test_app();
+        let mut app = agent_app();
         let root = app.space.root.clone();
         let session = app
             .db
@@ -1276,6 +1283,39 @@ mod tests {
             handle_normal(&mut app, KeyCode::Down.into()).unwrap();
             assert_eq!(app.input_text(), expected);
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn chat_mode_bang_draft_ignores_shell_tab_and_history_keys() {
+        let mut app = test_app();
+        let root = app.space.root.clone();
+        assert_eq!(app.work_mode, WorkMode::Chat);
+        let session = app
+            .db
+            .create_session("history", "a/one", &app.active_space.id, "chat")
+            .unwrap();
+        app.db
+            .add_user_command_message(
+                &session.id,
+                &serde_json::json!({"cmd": "first"}).to_string(),
+            )
+            .unwrap();
+        app.set_input("!cd al");
+        handle_normal(&mut app, KeyCode::Tab.into()).unwrap();
+        assert!(app.shell_completion_rx.is_none());
+        assert!(app.shell_state.is_none());
+        // Tab keeps its chat-mode meaning (a literal tab stop), not completion.
+        assert!(app.input_text().starts_with("!cd al"));
+        app.set_input("!cd al");
+        // Up/Down on a `!` draft or an empty draft never recall shell history.
+        handle_normal(&mut app, KeyCode::Up.into()).unwrap();
+        assert!(app.shell_recall.is_none());
+        assert_eq!(app.input_text(), "!cd al");
+        app.set_input("");
+        handle_normal(&mut app, KeyCode::Up.into()).unwrap();
+        assert!(app.shell_recall.is_none());
+        assert_eq!(app.input_text(), "");
         std::fs::remove_dir_all(root).unwrap();
     }
 

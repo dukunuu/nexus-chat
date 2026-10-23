@@ -358,11 +358,11 @@ pub enum AppCommand {
     /// `/undo` — restore the files the last agent turn changed.
     Undo,
     /// `!cmd` in the composer — run it as the user, output captured into the
-    /// conversation (terminal UI only).
+    /// conversation (terminal UI and agent modes only; chat mode refuses it).
     RunUserCommand { cmd: String },
     /// An interactive `!` command the terminal UI already ran on the real
     /// terminal — record its command and exit code, `None` when it was killed
-    /// or (`started: false`) never started (terminal UI only).
+    /// or (`started: false`) never started (terminal UI and agent modes only).
     RecordUserCommand {
         cmd: String,
         exit: Option<i32>,

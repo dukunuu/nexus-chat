@@ -4372,6 +4372,8 @@ fn turn_cache_reports_the_turn_not_its_last_request() {
 fn user_command_app() -> App {
     let mut app = app_with_key();
     app.interactive_ui = true;
+    // `!` commands are an agent-mode feature.
+    app.work_mode = WorkMode::Agent;
     // Captured-command tests never read the developer's real shell startup.
     app.user_shell
         .set(crate::usershell::UserShell {
@@ -4383,6 +4385,27 @@ fn user_command_app() -> App {
         })
         .unwrap();
     app
+}
+
+#[tokio::test]
+async fn user_commands_are_refused_in_chat_mode() {
+    let mut app = user_command_app();
+    app.work_mode = WorkMode::Chat;
+    app.execute(AppCommand::RunUserCommand { cmd: "ls".into() })
+        .unwrap();
+    assert_eq!(app.last_status(), "! commands run in agent mode");
+    assert!(!app.user_command_running());
+    assert!(app.session.is_none(), "no session or row is created");
+    assert!(app.messages.is_empty());
+    app.execute(AppCommand::RecordUserCommand {
+        cmd: "vim x".into(),
+        exit: Some(0),
+        started: true,
+    })
+    .unwrap();
+    assert_eq!(app.last_status(), "! commands run in agent mode");
+    assert!(app.session.is_none());
+    assert!(app.messages.is_empty());
 }
 
 fn insert_chat_task(app: &mut App, session_id: &str) {
@@ -4644,6 +4667,7 @@ async fn captured_user_command_scrubs_saved_secrets() {
 #[tokio::test]
 async fn user_commands_are_refused_headless_and_while_a_reply_streams() {
     let mut app = app_with_key();
+    app.work_mode = WorkMode::Agent;
     let root = app.space.root.clone();
     for command in [
         AppCommand::RunUserCommand { cmd: "ls".into() },

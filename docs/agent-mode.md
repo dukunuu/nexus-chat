@@ -222,8 +222,12 @@ propose the command to you (below).
 You can run anything yourself, including `sudo`. Commands you type are
 yours: no Decider, no gate, no sandbox.
 
-- **`!cmd` in the composer** runs `cmd` in the session's workspace root (or
-  the space dir in chat mode) as an `AppCommand::RunUserCommand`. Output is
+- **`!cmd` in the composer** is an agent-mode feature (`Agent` and
+  `AgentAuto`). It runs `cmd` in the session's workspace root as an
+  `AppCommand::RunUserCommand`. In chat mode a draft starting with `!` is an
+  ordinary message (no shell title, Tab completion or shell history on
+  Up/Down), and `RunUserCommand` itself only answers "! commands run in agent
+  mode", so the CLI and host cannot bypass it. Output is
   captured and added to the conversation as a user-run block, so the model
   sees it on its next turn: `! cargo test`, then "fix that".
 - **Interactive commands get the real terminal.** If the command is

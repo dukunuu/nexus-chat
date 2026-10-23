@@ -1351,7 +1351,10 @@ impl ToolBox {
         }
         if self.interactive_ui {
             defs.push(def(&spec::UI_CHECK, &["ui_check"]));
-            defs.push(def(&spec::PROPOSE_COMMAND, &["propose_command"]));
+            // `!` lines run only in agent mode, which is when a workspace is open.
+            if self.workspace.is_some() {
+                defs.push(def(&spec::PROPOSE_COMMAND, &["propose_command"]));
+            }
             defs.push(def(
                 &spec::TUI_APP,
                 &["list", "read", "write", "edit", "preview", "open"],
@@ -2149,6 +2152,12 @@ impl ToolBox {
                 if !self.interactive_ui {
                     return (
                         "propose_command needs the terminal UI · tell the user the exact command and why instead".to_string(),
+                        "blocked".to_string(),
+                    );
+                }
+                if self.workspace.is_none() {
+                    return (
+                        "propose_command runs in agent mode · tell the user the exact command and why instead".to_string(),
                         "blocked".to_string(),
                     );
                 }
@@ -9566,7 +9575,7 @@ mod tests {
 
     #[tokio::test]
     async fn propose_command_refuses_multiline_and_control_characters() {
-        let (mut toolbox, dir) = skills_toolbox();
+        let (mut toolbox, dir) = fs_toolbox();
         toolbox.interactive_ui = true;
         for cmd in ["make\nrm -rf x", "ls\u{1b}[2K"] {
             let args = json!({ "cmd": cmd, "reason": "r" }).to_string();
@@ -11979,6 +11988,11 @@ mod tests {
         let args = r#"{"cmd":"sudo make install","reason":"installs to /usr/local"}"#;
         assert!(!tool_names(&toolbox).contains(&"propose_command".to_string()));
         assert_eq!(toolbox.run("propose_command", args).await.1, "blocked");
+        // Chat mode (no workspace): `!` lines are agent-only, so no proposals.
+        toolbox.interactive_ui = true;
+        assert!(!tool_names(&toolbox).contains(&"propose_command".to_string()));
+        assert_eq!(toolbox.run("propose_command", args).await.1, "blocked");
+        let (mut toolbox, dir) = fs_toolbox();
         toolbox.interactive_ui = true;
         let def = toolbox
             .defs()
@@ -11999,6 +12013,7 @@ mod tests {
             "{result}"
         );
         assert_eq!(status, "invalid arguments");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

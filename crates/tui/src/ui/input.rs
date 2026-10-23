@@ -58,7 +58,7 @@ pub(super) fn render_input(f: &mut Frame, app: &mut AppView, area: Rect) {
             .fg(if busy { border_color } else { app.theme.accent })
             .add_modifier(Modifier::BOLD),
     )];
-    if crate::composer::is_shell_draft(&app.input_text()) {
+    if app.shell_draft() {
         title.push(Span::styled(
             format!(
                 "{} ",

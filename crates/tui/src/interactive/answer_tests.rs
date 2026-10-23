@@ -506,6 +506,8 @@ async fn choice_clicks_include_the_chip_blank_space_arrow_and_wrapped_continuati
 #[tokio::test(flavor = "current_thread")]
 async fn number_choices_are_blocked_while_a_user_command_is_running() {
     let mut app = app(&quiz("First"));
+    // `!` commands are an agent-mode feature.
+    app.work_mode = nexus_core::app::WorkMode::Agent;
     app.execute(AppCommand::RunUserCommand { cmd: "true".into() })
         .unwrap();
     // No await: the command task cannot start or touch the filesystem.

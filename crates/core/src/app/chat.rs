@@ -269,7 +269,7 @@ impl App {
     }
 
     /// Where `!` commands run: the workspace root in agent mode, else the
-    /// active space's directory (created if missing).
+    /// active space's directory (created if missing; `!` itself is agent-only).
     pub fn user_command_cwd(&self) -> std::path::PathBuf {
         if let Some(dir) = &self.user_command_dir {
             return dir.clone();
@@ -324,7 +324,12 @@ impl App {
     /// `!cmd`: run the user's shell as the user — full environment, no gate, no
     /// sandbox — on a background task. Its scrubbed, capped output becomes a
     /// `user_command` row the model sees next turn (`finish_user_command`).
+    /// Agent modes only: in chat mode it is refused with a status line.
     pub fn run_user_command(&mut self, cmd: String) -> Result<()> {
+        if !self.work_mode.is_agent() {
+            self.push_status(CHAT_MODE_BANG_STATUS);
+            return Ok(());
+        }
         if !self.interactive_ui {
             self.push_status("!commands run only in the terminal UI");
             return Ok(());
@@ -414,6 +419,10 @@ impl App {
         exit: Option<i32>,
         started: bool,
     ) -> Result<()> {
+        if !self.work_mode.is_agent() {
+            self.push_status(CHAT_MODE_BANG_STATUS);
+            return Ok(());
+        }
         if !self.interactive_ui {
             self.push_status("!commands run only in the terminal UI");
             return Ok(());
@@ -2726,6 +2735,9 @@ fn append_tool_call_history(
         }
     }
 }
+
+/// Status shown when a `!` command reaches chat mode.
+const CHAT_MODE_BANG_STATUS: &str = "! commands run in agent mode";
 
 /// A captured `!` command can run this long before its process group is killed.
 const USER_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
