@@ -513,6 +513,15 @@ impl App {
     /// ponytail: runs synchronously on the UI task — extraction of a huge PDF
     /// blocks a beat; move to a blocking task if that ever hurts.
     pub fn rescan_files(&mut self) {
+        if self.embed_rx.is_none()
+            && self
+                .embedding_backend
+                .as_ref()
+                .is_some_and(crate::provider::embedding::Embedder::is_ollama)
+        {
+            // Re-probe digests/capabilities on a fresh scan, not between files.
+            self.embedding_backend = None;
+        }
         self.rescan_files_with(&crate::extract::ExtractConfig::load());
     }
 
@@ -546,12 +555,18 @@ impl App {
                 .map_or(0, |d| d.as_secs() as i64);
             let disk_size = entry.metadata().map_or(0, |m| m.len() as i64);
             let existing = known.iter().find(|f| f.name == name);
+            let skip_image_ocr =
+                !self.automatic_image_ocr() && crate::extract::detect_path(&path).is_ocr_image();
+            let resume_image_ocr = !skip_image_ocr
+                && existing.is_some_and(|f| f.status.contains("image (direct embeddings)"));
             // Unchanged by stat: skip entirely — no read, no hash. This is what
             // keeps /files and space switches snappy with big filesets.
             if let Some(f) = existing
                 && f.size == disk_size
                 && f.mtime == mtime
                 && mtime != 0
+                && !resume_image_ocr
+                && !(skip_image_ocr && crate::extract::status_is_queued(&f.status))
             {
                 // Stale "ocr…"/"convert: …" (app quit mid-job) re-queues once
                 // no batch is in flight.  Do not let the stat fast path hide a
@@ -574,6 +589,8 @@ impl App {
                 && f.extractor >= version
                 && self.db.file_indexed(&f.id).unwrap_or(false)
                 && self.db.file_has_chunks(&f.id).unwrap_or(false)
+                && !resume_image_ocr
+                && !(skip_image_ocr && crate::extract::status_is_queued(&f.status))
             {
                 // Content unchanged (touched, or indexed before mtimes were
                 // tracked): just record the stat for next time.
@@ -596,6 +613,8 @@ impl App {
             // call for the same pages.
             if let Some(f) = existing.filter(|f| f.hash == hash)
                 && matches!(extracted.outcome, crate::extract::Outcome::NeedsOcr)
+                && !resume_image_ocr
+                && !skip_image_ocr
                 && {
                     let settled = if f.status.starts_with(EMBEDDING_STATUS) {
                         restored_status(&f.status)
@@ -610,7 +629,14 @@ impl App {
                 let _ = self.db.set_file_extractor(&f.id, version);
                 continue;
             }
-            let (status, chunks) = extracted.index(&name, size.unsigned_abs());
+            let (status, chunks) = if skip_image_ocr {
+                (
+                    "ok · image (direct embeddings)".to_string(),
+                    crate::extract::metadata_chunks(&name),
+                )
+            } else {
+                extracted.index(&name, size.unsigned_abs())
+            };
             match self
                 .db
                 .upsert_file(&self.active_space.id, &name, &hash, size, &status)
@@ -844,6 +870,7 @@ impl App {
     /// receive a small filename metadata chunk so they are still searchable.
     /// No-op without a provider, without an embedding model, or while a job is
     /// already in flight.
+    #[allow(clippy::too_many_lines)]
     pub fn start_embedding(&mut self) {
         if self.embed_rx.is_some() {
             return;
@@ -852,11 +879,34 @@ impl App {
         if model.is_empty() {
             return;
         }
-        let Some((provider, raw_model)) = self.resolve_model_backend(&model) else {
+        let Some(embedder) = self.file_embedder() else {
+            return;
+        };
+        // The toolbox's search path holds a clone that shares the probed
+        // profile, so it only needs rebuilding when the instance is new.
+        let new_instance = self
+            .embedding_backend
+            .as_ref()
+            .is_none_or(|b| !b.same_instance(&embedder));
+        self.embedding_backend = Some(embedder.clone());
+        if new_instance {
+            self.refresh_toolbox();
+        }
+        // The cache key (model digest, dimension, capabilities) is learned
+        // by a probe with synthetic content only; no file text goes out first.
+        let Some(identity) = embedder
+            .identity()
+            .map(crate::provider::embedding::EmbedIdentity::key)
+        else {
+            self.probe_embeddings(embedder);
             return;
         };
         let space_id = self.active_space.id.clone();
-        let Ok(missing) = self.db.files_missing_embeddings(&space_id) else {
+        let _ = self.db.invalidate_embedding_identity(&space_id, &identity);
+        let Ok(missing) = self
+            .db
+            .files_missing_embedding_identity(&space_id, &identity)
+        else {
             return;
         };
         let Some(file) = self.db.list_files(&space_id).ok().and_then(|files| {
@@ -865,6 +915,7 @@ impl App {
                     && !crate::extract::status_is_queued(&file.status)
             })
         }) else {
+            self.embedding_status = embedder.status();
             return;
         };
         // OCR owns files in this state.  They remain in the database work
@@ -907,17 +958,71 @@ impl App {
             self.files_cache = self.db.list_files(&space_id).unwrap_or_default();
         }
         let file_name = file.name;
+        let image_path = self
+            .space
+            .files_dir(&self.active_space.name)
+            .join(&file_name);
+        let is_image =
+            embedder.supports_images() && crate::extract::detect_path(&image_path).is_ocr_image();
+        let text = chunks
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.embedding_chunks = if is_image {
+            vec![("image".to_string(), file_name.clone())]
+        } else if embedder.is_gemma() {
+            crate::extract::embedding::chunk_text(&text, &file_name)
+        } else {
+            crate::extract::chunk_lines(&text)
+        };
+        if self.embedding_chunks.is_empty() {
+            // Blank text must still yield a vector, or the same file would be
+            // picked again forever.
+            self.embedding_chunks = crate::extract::metadata_chunks(&file_name);
+        }
+        let chunks = self
+            .embedding_chunks
+            .iter()
+            .enumerate()
+            .map(|(seq, (_, text))| (seq as i64, text.clone()))
+            .collect::<Vec<_>>();
+        self.embedding_status = format!(
+            "{} · indexing {} ({} files remaining)",
+            embedder.status(),
+            file_name,
+            missing.len()
+        );
+        self.push_status(self.embedding_status.clone());
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.embed_rx = Some(rx);
         handle.spawn(async move {
             let mut out: Vec<(i64, Vec<f32>)> = Vec::with_capacity(chunks.len());
             let mut err = None;
             for batch in chunks.chunks(64) {
-                let inputs: Vec<String> = batch
-                    .iter()
-                    .map(|(_, text)| format!("file: {file_name}\n{text}"))
-                    .collect();
-                match provider.embed(&raw_model, inputs).await {
+                let inputs = if is_image {
+                    let path = image_path.clone();
+                    let prepared = tokio::task::spawn_blocking(move || {
+                        crate::provider::embedding::image_input(&path)
+                    })
+                    .await;
+                    // A file the model cannot take (corrupt, over the size
+                    // bound) must not stall the queue: it stays findable by
+                    // name through its metadata chunk.
+                    match prepared {
+                        Ok(Ok(input)) => vec![input],
+                        _ => vec![embedder.document(
+                            &file_name,
+                            &crate::extract::metadata_chunks(&file_name)[0].1,
+                        )],
+                    }
+                } else {
+                    batch
+                        .iter()
+                        .map(|(_, text)| embedder.document(&file_name, text))
+                        .collect()
+                };
+                match embedder.embed(inputs).await {
                     Ok(vecs) if vecs.len() == batch.len() => out.extend(
                         batch
                             .iter()
@@ -956,6 +1061,11 @@ impl App {
             return;
         };
         self.embed_rx = None;
+        if file_id.is_empty() {
+            self.on_embedding_probe(result);
+            return;
+        }
+        let chunks = std::mem::take(&mut self.embedding_chunks);
         let restore_status = self
             .db
             .list_files(&space_id)
@@ -965,7 +1075,24 @@ impl App {
             .map(|file| restored_status(&file.status));
         match result {
             Ok(vecs) => {
-                let _ = self.db.set_chunk_embeddings(&file_id, &vecs);
+                let Some(key) = self
+                    .embedding_backend
+                    .as_ref()
+                    .and_then(|b| b.identity())
+                    .map(crate::provider::embedding::EmbedIdentity::key)
+                else {
+                    self.embedding_status = "embeddings: backend changed, will retry".to_string();
+                    return;
+                };
+                let _ = self.db.invalidate_embedding_identity(&space_id, &key);
+                if let Err(error) = self.db.set_file_embeddings(&file_id, &key, &chunks, &vecs) {
+                    self.embedding_status = format!("embeddings: {error}");
+                    self.push_status(self.embedding_status.clone());
+                    if let Some(status) = &restore_status {
+                        let _ = self.db.set_file_status(&file_id, status);
+                    }
+                    return;
+                }
                 if let Some(status) = &restore_status {
                     let _ = self.db.set_file_status(&file_id, status);
                 }
@@ -975,6 +1102,7 @@ impl App {
                 if let Some(status) = &restore_status {
                     let _ = self.db.set_file_status(&file_id, status);
                 }
+                self.embedding_status = format!("embeddings: {e} · keyword search available");
                 self.push_status(format!("embedding failed: {e}"));
             }
         }

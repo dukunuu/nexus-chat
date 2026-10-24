@@ -455,6 +455,17 @@ pub fn migrate_cache(conn: &Connection, schema: &str) -> Result<()> {
             cost REAL
         );",
     ))?;
+    let mut stmt = conn.prepare(&format!("PRAGMA {schema}.table_info(chunk_embeddings)"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for column in ["identity", "location", "text"] {
+        if !columns.iter().any(|existing| existing == column) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {schema}.chunk_embeddings ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+            ))?;
+        }
+    }
     let mut stmt = conn.prepare(&format!("PRAGMA {schema}.table_info(session_workspaces)"))?;
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))?
@@ -1198,6 +1209,7 @@ impl Db {
                 | "ocr_engine"
                 | "ocr_model"
                 | "local_ocr_model"
+                | "ocr_images"
                 // Per-device ui/timing state.
                 | "usage_range"
                 | "ui_background"
@@ -2281,6 +2293,62 @@ impl Db {
         Ok(())
     }
 
+    /// Remove stale vectors lazily, scoped to the space being indexed.
+    pub fn invalidate_embedding_identity(&self, space_id: &str, identity: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM cache.chunk_embeddings WHERE identity != ?2
+             AND file_id IN (SELECT id FROM files WHERE space_id = ?1)",
+            (space_id, identity),
+        )?;
+        Ok(())
+    }
+
+    /// Files without a complete, atomically stored set for this identity.
+    pub fn files_missing_embedding_identity(
+        &self,
+        space_id: &str,
+        identity: &str,
+    ) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM files WHERE space_id = ?1 AND NOT EXISTS (
+                 SELECT 1 FROM cache.chunk_embeddings WHERE file_id = files.id AND identity = ?2
+             ) ORDER BY name",
+        )?;
+        Ok(stmt
+            .query_map((space_id, identity), |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Store a complete file's vectors with their identity and source locators.
+    /// Embedding chunks are independent of reading/keyword chunks, so model
+    /// chunking changes never alter readable text or line numbering.
+    pub fn set_file_embeddings(
+        &self,
+        file_id: &str,
+        identity: &str,
+        chunks: &[(String, String)],
+        vectors: &[(i64, Vec<f32>)],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            chunks.len() == vectors.len(),
+            "embedding chunk count mismatch"
+        );
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM cache.chunk_embeddings WHERE file_id = ?1",
+            [file_id],
+        )?;
+        for ((location, text), (seq, vector)) in chunks.iter().zip(vectors) {
+            tx.execute(
+                "INSERT INTO cache.chunk_embeddings (file_id, seq, vec, identity, location, text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (file_id, seq, vec_to_blob(vector), identity, location, text),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Drop all device-local vectors.  Embeddings are model-specific; this is
     /// used when the configured embedding model changes so semantic search does
     /// not silently rank chunks with vectors from the old model.
@@ -2778,6 +2846,43 @@ pub fn semantic_chunks(
         hits.push((name, loc, text, score));
     }
     hits.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+    hits.truncate(limit);
+    Ok(hits)
+}
+
+/// Rank text and image locators together, accepting only the query's identity.
+/// Legacy vectors with no identity can never enter this search.
+pub fn semantic_chunks_for_identity(
+    conn: &Connection,
+    space_id: &str,
+    identity: &str,
+    query: &[f32],
+    limit: usize,
+) -> Result<Vec<(String, String, String, f32)>> {
+    let mut stmt = conn.prepare(
+        "SELECT files.name, e.location, e.text, e.vec FROM cache.chunk_embeddings e
+         JOIN files ON files.id = e.file_id WHERE files.space_id = ?1 AND e.identity = ?2",
+    )?;
+    let rows = stmt.query_map((space_id, identity), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Vec<u8>>(3)?,
+        ))
+    })?;
+    let mut hits = Vec::new();
+    for row in rows {
+        let (name, location, text, bytes) = row?;
+        let vector = blob_to_vec(&bytes);
+        if vector.len() == query.len() && vector.iter().all(|x| x.is_finite()) {
+            let score = cosine(query, &vector);
+            if score.is_finite() {
+                hits.push((name, location, text, score));
+            }
+        }
+    }
+    hits.sort_by(|a, b| b.3.total_cmp(&a.3));
     hits.truncate(limit);
     Ok(hits)
 }

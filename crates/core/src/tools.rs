@@ -292,8 +292,8 @@ pub struct ToolBox {
 pub struct FilesCtx {
     pub db_path: std::path::PathBuf,
     pub space_id: String,
-    /// (provider, embedding model) for semantic search; None = keyword only.
-    pub embedder: Option<(crate::provider::openrouter::OpenRouter, String)>,
+    /// Identity-aware embedding backend for semantic search; None = keyword only.
+    pub embedder: Option<crate::provider::embedding::Embedder>,
 }
 
 /// Where the app tools write: the active space's apps dir, plus the
@@ -5305,19 +5305,35 @@ async fn search_files_impl(ctx: &FilesCtx, query: &str) -> String {
         Err(e) => return format!("file search failed: {e}"),
     };
     let mut fell_back = false;
-    if let Some((provider, model)) = &ctx.embedder {
-        match provider.embed(model, vec![query.to_string()]).await {
-            Ok(mut vecs) if !vecs.is_empty() => {
-                if let Some(out) = semantic_snippets(&conn, &ctx.space_id, &vecs.remove(0)) {
-                    return out;
+    let mut embedding_error = None;
+    if let Some(embedder) = &ctx.embedder {
+        match embedder.query(query).await {
+            Ok(vector) => {
+                if let Some(identity) = embedder.identity()
+                    && let Ok(hits) = crate::db::semantic_chunks_for_identity(
+                        &conn,
+                        &ctx.space_id,
+                        &identity.key(),
+                        &vector,
+                        8,
+                    )
+                    && !hits.is_empty()
+                {
+                    return format_semantic_hits(&hits);
                 }
-                fell_back = true; // nothing embedded yet — keywords still help
+                fell_back = true;
             }
-            _ => fell_back = true, // endpoint down — degrade, don't die
+            Err(error) => {
+                fell_back = true;
+                embedding_error = Some(error.to_string());
+            }
         }
     }
     match crate::db::search_chunks(&conn, &ctx.space_id, query, 8) {
-        Ok(hits) if hits.is_empty() => "no matches".to_string(),
+        Ok(hits) if hits.is_empty() => embedding_error.map_or_else(
+            || "no matches".to_string(),
+            |error| format!("(keyword fallback · embeddings: {error})\nno matches"),
+        ),
         Ok(hits) => {
             let body = hits
                 .iter()
@@ -5325,7 +5341,10 @@ async fn search_files_impl(ctx: &FilesCtx, query: &str) -> String {
                 .collect::<Vec<_>>()
                 .join("\n");
             if fell_back {
-                format!("(keyword fallback)\n{body}")
+                embedding_error.map_or_else(
+                    || format!("(keyword fallback)\n{body}"),
+                    |error| format!("(keyword fallback · embeddings: {error})\n{body}"),
+                )
             } else {
                 body
             }
@@ -5336,22 +5355,28 @@ async fn search_files_impl(ctx: &FilesCtx, query: &str) -> String {
 
 /// Top cosine-ranked chunks formatted as `name (location): text` (truncated),
 /// or None when the space has no usable vectors.
+#[cfg(test)]
 fn semantic_snippets(conn: &rusqlite::Connection, space_id: &str, query: &[f32]) -> Option<String> {
     let hits = crate::db::semantic_chunks(conn, space_id, query, 8).ok()?;
     if hits.is_empty() {
         return None;
     }
-    Some(
-        hits.iter()
-            .map(|(name, loc, text, _)| {
-                let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                let cut: String = flat.chars().take(300).collect();
-                let ellipsis = if cut.len() < flat.len() { "…" } else { "" };
-                format!("{name} ({loc}): {cut}{ellipsis}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
+    Some(format_semantic_hits(&hits))
+}
+
+fn format_semantic_hits(hits: &[(String, String, String, f32)]) -> String {
+    hits.iter()
+        .map(|(name, loc, text, score)| {
+            if loc == "image" {
+                return format!("image · {name} · {score:.2}\n![{name}]({name})");
+            }
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let cut: String = flat.chars().take(300).collect();
+            let ellipsis = if cut.len() < flat.len() { "…" } else { "" };
+            format!("text · {name} ({loc}) · {score:.2}: {cut}{ellipsis}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Why `files read` has no text for `name`: unknown, still being processed,
@@ -11302,6 +11327,139 @@ mod tests {
         assert!(first.contains("short target"), "{first}");
         // The long chunk is truncated, not dumped whole.
         assert!(out.lines().nth(1).unwrap().len() < long.len(), "{out}");
+    }
+
+    /// A real file db with a text file and an image embedded through a mock
+    /// Ollama, so ranking and formatting run the production search path.
+    async fn embedded_space(
+        embedder: &crate::provider::embedding::Embedder,
+    ) -> (FilesCtx, crate::db::Db) {
+        use crate::provider::embedding::EmbedInput;
+        let dir = std::env::temp_dir().join(format!("nexus-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nexus.db");
+        let db = crate::db::Db::open(&path).unwrap();
+        let space = db.default_space_id().unwrap();
+        embedder.prepare().await.unwrap();
+        let key = embedder.identity().unwrap().key();
+        let notes = db.upsert_file(&space, "notes.md", "h1", 1, "ok").unwrap();
+        db.set_file_chunks(&notes, &[("lines 1-1".into(), "financial report".into())])
+            .unwrap();
+        let text = embedder
+            .embed(vec![embedder.document("notes.md", "financial report")])
+            .await
+            .unwrap();
+        db.set_file_embeddings(
+            &notes,
+            &key,
+            &[("lines 1-1".into(), "financial report".into())],
+            &[(0, text[0].clone())],
+        )
+        .unwrap();
+        let beach = db.upsert_file(&space, "beach.jpg", "h2", 1, "ok").unwrap();
+        let pixels = image::RgbImage::from_fn(64, 64, |x, y| image::Rgb([x as u8, y as u8, 9]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        pixels.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let image = embedder
+            .embed(vec![EmbedInput::Image {
+                bytes: png.into_inner(),
+                mime: "image/png".into(),
+            }])
+            .await
+            .unwrap();
+        db.set_file_embeddings(
+            &beach,
+            &key,
+            &[("image".into(), "beach.jpg".into())],
+            &[(0, image[0].clone())],
+        )
+        .unwrap();
+        // A vector from another identity must never be ranked.
+        let stale = db.upsert_file(&space, "stale.md", "h3", 1, "ok").unwrap();
+        db.set_file_embeddings(
+            &stale,
+            "old-identity",
+            &[("lines 1-1".into(), "beach".into())],
+            &[(0, text[0].clone())],
+        )
+        .unwrap();
+        (
+            FilesCtx {
+                db_path: path,
+                space_id: space,
+                embedder: Some(embedder.clone()),
+            },
+            db,
+        )
+    }
+
+    #[tokio::test]
+    async fn semantic_search_ranks_images_and_text_together_with_kind_labels() {
+        let mock = crate::provider::embedding::tests::MockOllama::start(true).await;
+        let embedder =
+            crate::provider::embedding::Embedder::ollama(&mock.endpoint, "embeddinggemma-2".into())
+                .unwrap();
+        let (ctx, _db) = embedded_space(&embedder).await;
+
+        let out = search_files_impl(&ctx, "beach").await;
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].starts_with("image · beach.jpg · 0.9"), "{out}");
+        assert_eq!(lines[1], "![beach.jpg](beach.jpg)", "{out}");
+        assert!(
+            lines[2].starts_with("text · notes.md (lines 1-1) · 0.00: financial report"),
+            "{out}"
+        );
+        assert!(!out.contains("stale.md"), "{out}");
+        assert!(!out.contains("keyword fallback"), "{out}");
+
+        let out = search_files_impl(&ctx, "financial").await;
+        assert!(
+            out.starts_with("text · notes.md (lines 1-1) · 1.00"),
+            "{out}"
+        );
+        assert!(out.contains("image · beach.jpg · 0.1"), "{out}");
+        // The query carried the search prefix exactly once.
+        let state = mock.state.lock().unwrap();
+        let queries: Vec<String> = state
+            .requests
+            .iter()
+            .filter(|(p, _)| p == "/api/embed")
+            .filter_map(|(_, b)| b["input"][0].as_str().map(str::to_owned))
+            .filter(|t| t.contains("query:"))
+            .collect();
+        assert!(
+            queries.contains(&"task: search result | query: financial".to_string()),
+            "{queries:?}"
+        );
+        assert!(
+            queries
+                .iter()
+                .all(|q| q.matches("task: search result").count() == 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn search_falls_back_to_keywords_with_a_reason_when_local_is_down() {
+        let (_, db, space) = files_toolbox();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let embedder =
+            crate::provider::embedding::Embedder::ollama(&endpoint, "embeddinggemma-2:270m".into())
+                .unwrap();
+        let ctx = FilesCtx {
+            db_path: PathBuf::from(db.raw().path().unwrap()),
+            space_id: space,
+            embedder: Some(embedder),
+        };
+        let out = search_files_impl(&ctx, "line 42").await;
+        assert!(
+            out.starts_with(
+                "(keyword fallback · embeddings: not reachable — is `ollama serve` running?)"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("report.md"), "{out}");
     }
 
     #[tokio::test]

@@ -1,3 +1,4 @@
+pub mod embedding;
 pub mod harmony;
 pub mod local;
 pub mod openrouter;

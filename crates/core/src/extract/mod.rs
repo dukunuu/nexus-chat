@@ -15,6 +15,7 @@
 //! hooks. Scanned PDFs and images are handed to the OCR pipeline.
 
 mod detect;
+pub mod embedding;
 pub mod external;
 pub mod formats;
 pub mod html;

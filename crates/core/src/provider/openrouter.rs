@@ -714,6 +714,11 @@ impl OpenRouter {
         Ok(provider)
     }
 
+    /// Non-secret backend/endpoint component of an embedding cache identity.
+    pub(super) fn embedding_backend_id(&self) -> String {
+        format!("{}:{}", self.backend_tag().key_prefix(), self.api_base())
+    }
+
     fn api_base(&self) -> &str {
         self.endpoint
             .as_deref()
@@ -1489,8 +1494,10 @@ impl OpenRouter {
             return Box::pin(delegate.embed(model, inputs)).await;
         }
         let (base, model) = self.opencode_route(model);
+        let count = inputs.len();
         let v = self
             .authenticate(self.client.post(format!("{base}/embeddings")))
+            .timeout(std::time::Duration::from_secs(120))
             .json(&serde_json::json!({ "model": model, "input": inputs }))
             .send()
             .await
@@ -1500,24 +1507,7 @@ impl OpenRouter {
             .json::<serde_json::Value>()
             .await
             .context("parsing embeddings")?;
-        let data = v
-            .get("data")
-            .and_then(|d| d.as_array())
-            .context("embeddings response has no data")?;
-        let mut out = Vec::with_capacity(data.len());
-        for item in data {
-            let emb = item
-                .get("embedding")
-                .and_then(|e| e.as_array())
-                .context("embeddings item has no vector")?;
-            out.push(
-                emb.iter()
-                    .filter_map(serde_json::Value::as_f64)
-                    .map(|f| f as f32)
-                    .collect(),
-            );
-        }
-        Ok(out)
+        super::embedding::indexed_vectors(&v, count, None)
     }
 
     /// Start a streaming completion. Spawns a task that pushes tokens over the

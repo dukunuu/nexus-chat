@@ -247,7 +247,7 @@ impl AppView {
         self.core.image_gen_model = self.core.image_gen_model.trim().to_string();
         let embedding_model = self.settings_inputs[6].trim().to_string();
         if self.core.embedding_model != embedding_model {
-            self.core.embed_rx = None;
+            self.core.reset_embedding_backend();
             self.core.db.clear_chunk_embeddings()?;
         }
         self.core.embedding_model = embedding_model;

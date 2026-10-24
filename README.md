@@ -318,6 +318,52 @@ discovery are not implemented yet. Tool calling depends on the runtime/model.
 Local utility fallback uses the selected/installed model rather than a cloud
 model name.
 
+### Local embeddings
+
+Semantic file search can run entirely on your machine with Google's
+EmbeddingGemma 2 through Ollama. File text and images never leave the
+machine when you choose it.
+
+```sh
+brew install ollama
+ollama serve                       # or let the Ollama app run it
+ollama pull embeddinggemma-2:270m  # text only (~270M parameters)
+# or, to search images too:
+ollama pull embeddinggemma-2       # multimodal tag
+```
+
+**Selecting it.** If Ollama answers on `http://127.0.0.1:11434` (or the
+endpoint in `[local]` when the runtime is Ollama), has one of those two tags
+installed, and you have never set an embedding model, Nexus uses it
+automatically (`embeddinggemma-2:270m` is preferred). Otherwise set it in
+`/settings` (embedding model) or over the host settings API:
+`embedding_model = "local:embeddinggemma-2:270m"` or
+`"local:embeddinggemma-2"`. An explicit choice, including a cloud model or a
+blank value, is never overridden. A `local:` choice never falls back to a cloud
+embedder; if Ollama is down, search degrades to keywords with the reason, and
+`/files` shows `embeddings: not reachable — is `ollama serve` running?`.
+
+**What is embedded.** Text, code, PDFs and office documents are embedded from
+the text Nexus already extracts, in windows of at most about 1,000 tokens
+(estimated conservatively, with overlap) using the model's own prefixes
+(`task: search result | query: …` for queries, `title: … | text: …` for
+documents). When the runtime reports image support, image files are embedded
+directly (downscaled to at most 768 px, up to 20 MiB) and returned by
+`files search` as `image · name · score` hits the model can look at. Audio and
+video are not embedded yet.
+
+**OCR and captions are optional now.** While images are embedded directly,
+Nexus no longer queues OCR or a vision caption for new images just to make them
+searchable. `Ctrl+F` in `/files` still runs OCR on a chosen file, and the
+`ocr_images` setting (`true`/`false`, blank for automatic) overrides the
+default. Text extraction for reading and keyword search is unchanged.
+
+**Switching and updating.** Each vector records the model's identity: backend,
+model, weights digest, dimension, prefix scheme and preprocessing version.
+Anything that changes it (a new `ollama pull`, switching models, a different
+endpoint) re-embeds a space lazily in the background, one file at a time, with
+progress on the first line of `/files`; stale vectors are never mixed in.
+
 ## Features
 
 - **Chat** over any configured backend: OpenRouter, OpenAI, OpenCode Zen/Go,

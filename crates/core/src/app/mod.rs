@@ -29,6 +29,7 @@ mod backends;
 mod chat;
 mod commands;
 mod compaction;
+mod embeddings;
 pub mod export;
 mod files;
 pub mod headless;
@@ -1118,6 +1119,15 @@ pub struct App {
     pub local_ocr_model: String,
     /// Embedding model for semantic file search (empty = keyword FTS only).
     pub embedding_model: String,
+    /// Probed runtime shared with file search; never contains cloud credentials in its identity.
+    pub embedding_backend: Option<crate::provider::embedding::Embedder>,
+    /// Runtime health and indexing progress for frontends.
+    pub embedding_status: String,
+    /// None preserves legacy OCR unless direct image embeddings are enabled.
+    pub ocr_images: Option<bool>,
+    embedding_chunks: Vec<(String, String)>,
+    embedding_discovery:
+        Option<std::sync::Arc<std::sync::OnceLock<(String, crate::provider::embedding::Embedder)>>>,
     /// Model used for AI image generation (empty = disabled).
     pub image_gen_model: String,
     /// Model used for AI video generation (empty = disabled).
@@ -1476,9 +1486,9 @@ impl App {
                 Some(crate::tools::FilesCtx {
                     db_path: space.db_path(),
                     space_id: active_space.id.clone(),
-                    embedder: (!embedding_model.is_empty())
-                        .then(|| backends.resolve(&embedding_model))
-                        .flatten(),
+                    embedder: backends
+                        .resolve(&embedding_model)
+                        .map(|(p, model)| crate::provider::embedding::Embedder::openai(p, model)),
                 }),
                 // No apps ctx yet — the app server starts after construction;
                 // main() calls refresh_toolbox() once it's up.
@@ -1560,6 +1570,11 @@ impl App {
             ocr_engine: "auto".to_string(),
             local_ocr_model: "glm-ocr".to_string(),
             embedding_model,
+            embedding_backend: None,
+            embedding_status: String::new(),
+            embedding_chunks: Vec::new(),
+            embedding_discovery: None,
+            ocr_images: None,
             image_gen_model,
             video_gen_model,
             base_system_prompt: config::BASE_SYSTEM_PROMPT.to_string(),
@@ -2009,6 +2024,13 @@ impl App {
             "ocr_engine" if OCR_ENGINES.contains(&v) => self.ocr_engine = v.to_string(),
             "local_ocr_model" => self.local_ocr_model = v.to_string(),
             "embedding_model" => self.embedding_model = v.to_string(),
+            "ocr_images" => {
+                self.ocr_images = match v {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => None,
+                };
+            }
             // Migrate the old defaults: flux-dev is no longer in
             // OpenRouter's image catalog, and Veo Lite is the lower
             // quality tier.
@@ -2145,9 +2167,7 @@ impl App {
             Some(crate::tools::FilesCtx {
                 db_path: self.space.db_path(),
                 space_id: self.active_space.id.clone(),
-                embedder: (!self.embedding_model.trim().is_empty())
-                    .then(|| self.backends.resolve(self.embedding_model.trim()))
-                    .flatten(),
+                embedder: self.file_embedder(),
             }),
             // App tools only exist while the server runs — an app(action=write) whose
             // link can never load is worse than no tool. Disabled in incognito.

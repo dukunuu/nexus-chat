@@ -70,6 +70,7 @@ The README has the full tree; the parts agents touch most:
 | `crates/core/src/provider/openrouter.rs` | the single client for all OpenAI-wire backends — message shapes, tool-call wire format, events are in `provider/mod.rs` |
 | `crates/core/src/provider/serve.rs` | managed local-provider servers: per-runtime launch commands, endpoint liveness probes, process-tree memory, and the advisory budget behind `/local start\|stop\|status` |
 | `crates/core/src/provider/local.rs`, `harmony.rs` | opt-in local runtimes: config + installed-model discovery, and the Harmony channel splitter for `gpt-oss` servers that leave framing in `content` |
+| `crates/core/src/provider/embedding.rs` | file-search embeddings: `EmbedInput` (text/image), `Embedder` (OpenAI-wire or Ollama native `/api/embed`), probed `EmbedIdentity` used as the vector cache key, strict response validation; `app/embeddings.rs` selects/probes it (local default only when reachable), `extract/embedding.rs` is the token-bounded chunker |
 | `crates/core/src/tools.rs` | the model's tools + the `ToolExecutor` seam (`defs`/`is_read_only`/`run`) |
 | `crates/core/src/connectors/` | MCP connectors (docs/connectors.md): `protocol`/`transport`/`client` speak both protocol families over HTTP and stdio, `registry` tracks status and what the model may see (naming, >30-tool meta-tool, policy, rug-pull pins), `exec` runs a call through the approval flow, `import`/`secrets`/`config` cover other tools' configs, the keychain and `[connectors.*]` |
 | `crates/core/src/db.rs` | SQLite (rusqlite bundled): sessions, messages, usage, citations, model prefs |
@@ -119,6 +120,17 @@ The README has the full tree; the parts agents touch most:
 - **Skills**: `crates/core/assets/find-skills-SKILL.md` is the model-facing skill for
   discovering/installing skills. Skills are SKILL.md packs with sandboxed
   Python virtualenvs (`src/skills.rs`).
+- **Local embeddings**: `local:embeddinggemma-2[:270m]` talks to Ollama's native
+  `/api/embed` (`brew install ollama`, `ollama serve`, `ollama pull
+  embeddinggemma-2:270m`, or the multimodal `embeddinggemma-2`). Vectors live in
+  `cache.chunk_embeddings` with the `EmbedIdentity` key plus their own
+  location/text, so any identity change re-embeds lazily and a vector from
+  another identity is never ranked. Prefixes are applied once, inside
+  `Embedder` (`document`/`query`), never in transport code. Images are embedded
+  directly when the probe shows the runtime accepts them; then
+  `App::automatic_image_ocr` is false and rescans do not queue OCR/captions for
+  images (`ocr_images` overrides; `reocr_file` is the explicit action). Tests
+  use `provider::embedding::tests::MockOllama`; never hit a real Ollama.
 - **Don't commit agent tooling**: `.claude/`, `.superpowers/`,
   `.pi-subagents/` are gitignored — leave them out of commits.
 

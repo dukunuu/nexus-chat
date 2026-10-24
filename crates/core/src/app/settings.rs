@@ -48,13 +48,9 @@ impl App {
             key == "embedding_model" && self.embedding_model.trim() != value.trim();
         self.apply_setting(key, value);
         if embedding_changed {
-            // Vectors have no model id of their own, so retaining them after a
-            // model change can make semantic search silently skip or mis-rank
-            // every file. Rebuild them with the new model instead. Dropping
-            // the receiver also prevents an old in-flight result from being
-            // written back after the clear.
-            self.embed_rx = None;
-            self.db.clear_chunk_embeddings()?;
+            // Detach old work immediately; identity-scoped invalidation and
+            // lazy re-embedding happen when the new runtime is ready.
+            self.reset_embedding_backend();
         }
         if key == "blocked_domains" {
             // Per-space (not a db setting): lives next to the space's other
@@ -70,6 +66,9 @@ impl App {
         if key == "embedding_model" {
             self.start_embedding();
         }
+        if key == "ocr_images" {
+            self.rescan_files();
+        }
         self.push_status(format!("{key} set"));
         Ok(())
     }
@@ -77,7 +76,7 @@ impl App {
 
 /// Every key `set_setting` accepts — the same keys `apply_setting` (and the
 /// `blocked_domains` special case) can actually apply.
-const SETTING_KEYS: [&str; 26] = [
+const SETTING_KEYS: [&str; 27] = [
     "remote_images",
     "show_stats",
     "show_reasoning",
@@ -92,6 +91,7 @@ const SETTING_KEYS: [&str; 26] = [
     "ocr_engine",
     "local_ocr_model",
     "embedding_model",
+    "ocr_images",
     "image_gen_model",
     "video_gen_model",
     "compact_threshold",
@@ -223,6 +223,7 @@ fn valid_popup_sizes(value: &str) -> bool {
 fn valid_setting_value(key: &str, value: &str) -> bool {
     match key {
         "remote_images" => matches!(value, "on" | "off"),
+        "ocr_images" => matches!(value, "" | "true" | "false"),
         "show_stats" | "show_reasoning" | "hide_hints" => matches!(value, "0" | "1"),
         "temperature" => {
             value.is_empty()

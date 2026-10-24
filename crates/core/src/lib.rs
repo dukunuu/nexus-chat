@@ -85,6 +85,7 @@ pub async fn boot(saved: config::SavedCreds) -> Result<app::App> {
         Err(error) => app.push_status(format!("connectors not loaded: {error:#}")),
     }
     app.rebuild_all_backends();
+    app.discover_embeddings();
     app.app_server = appserver::AppServer::start(app.space.spaces_root()).await;
     app.refresh_toolbox();
     Ok(app)
