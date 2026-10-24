@@ -592,6 +592,7 @@ impl App {
     /// compaction digest, then the effective conversation tail.
     /// User messages with images become multimodal parts for vision models, or
     /// get their stored descriptions appended as text for everything else.
+    #[allow(clippy::too_many_lines)]
     pub fn build_history(&mut self) -> Vec<ChatMessage> {
         let mut history: Vec<ChatMessage> = Vec::with_capacity(self.messages.len() + 3);
         history.push(ChatMessage::text("system", self.system_prompt()));
@@ -625,6 +626,28 @@ impl App {
         let mut seen_results: std::collections::HashMap<(String, String), String> =
             std::collections::HashMap::new();
         let effective = self.effective_messages();
+        let first_owner = self.messages.len() - effective.len();
+        let (ui_replay, ui_errors) = if self.interactive_ui {
+            ui_program_history(effective, first_owner)
+        } else {
+            (std::collections::BTreeMap::new(), Vec::new())
+        };
+        let ui_feedback_key = effective
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, m)| m.role == "assistant")
+            .map(|(index, m)| {
+                use std::hash::{Hash, Hasher};
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                m.content.hash(&mut hash);
+                format!(
+                    "{}:{}:{}",
+                    self.session.as_ref().map_or("", |s| s.id.as_str()),
+                    first_owner + index,
+                    hash.finish()
+                )
+            });
         let mask_through = if self.experiments.mask_tool_results {
             self.mask_through
                 .saturating_sub(self.messages.len() - effective.len())
@@ -685,6 +708,9 @@ impl App {
             // latest: a note that vanished once the turn aged would change
             // the replayed prefix and miss the prompt cache.
             if m.role == "assistant" {
+                if let Some(content) = ui_replay.get(&index) {
+                    cm.content.clone_from(content);
+                }
                 cm.content.push_str(&ui_failure_notes(&m.content));
             }
             if m.role == "user" && vision {
@@ -709,6 +735,15 @@ impl App {
             }
             history.push(cm);
             index += 1;
+        }
+        if !ui_errors.is_empty()
+            && let Some(key) = ui_feedback_key
+            && self.ui_feedback_seen.insert(key)
+        {
+            history.push(ChatMessage::text(
+                "system",
+                format!("nexus-ui errors: {}", serde_json::Value::Array(ui_errors)),
+            ));
         }
         self.mark_cache_breakpoints(&mut history);
         history
@@ -2200,6 +2235,10 @@ impl App {
     }
 }
 
+#[cfg(test)]
+#[path = "ui_language_tests.rs"]
+mod ui_language_tests;
+
 struct UiBlock {
     range: std::ops::Range<usize>,
     prefix: String,
@@ -2486,9 +2525,87 @@ fn repair_image_links(content: &str, messages: &[Message]) -> (String, usize) {
     (repaired, edits.len())
 }
 
+fn ui_program_history(
+    messages: &[Message],
+    first_owner: usize,
+) -> (
+    std::collections::BTreeMap<usize, String>,
+    Vec<serde_json::Value>,
+) {
+    use crate::interactive::{Document, edit_patch, merge_program, panel_id};
+    let mut panels = std::collections::BTreeMap::<String, String>::new();
+    let mut replay = std::collections::BTreeMap::new();
+    let mut errors = Vec::new();
+    for (owner, message) in messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "assistant")
+    {
+        errors.clear();
+        let mut content = message.content.clone();
+        let blocks = ui_blocks(&content);
+        let mut replacements = Vec::new();
+        for (ordinal, block) in blocks.into_iter().enumerate() {
+            let id = panel_id(first_owner + owner, ordinal);
+            let result = if let Some((target, patch)) = edit_patch(&block.source) {
+                let result = panels
+                    .get(target)
+                    .ok_or_else(|| anyhow::anyhow!("unknown panel {target}"))
+                    .and_then(|source| merge_program(source, patch));
+                if let Ok(source) = &result {
+                    panels.insert(target.into(), source.clone());
+                }
+                replacements.push((
+                    block.range,
+                    format!("Patch for nexus-ui panel {target}\n```nexus-ui\n{patch}```"),
+                ));
+                result.map(|_| ()).map_err(|error| {
+                    vec![crate::interactive::CheckError {
+                        path: "edit".into(),
+                        message: error.to_string(),
+                    }]
+                })
+            } else {
+                let result = Document::check(&block.source);
+                if result.is_ok() && !block.source.trim_start().starts_with('{') {
+                    panels.insert(id.clone(), block.source.clone());
+                    replacements.push((
+                        block.range,
+                        format!("nexus-ui panel {id}\n```nexus-ui\n{}```", block.source),
+                    ));
+                }
+                result.map(|_| ())
+            };
+            if let Err(failures) = result {
+                for error in failures.into_iter().take(10 - errors.len().min(10)) {
+                    errors.push(serde_json::json!({
+                        "source":"parser", "code": if error.path == "source" { "parse-failed" } else { "type-mismatch" },
+                        "statementId":id, "path":error.path, "message":format!("failed to render: {}", error.message.chars().take(220).collect::<String>()),
+                        "hint":"Use the terminal signatures and bounded nexus-ui syntax."
+                    }));
+                }
+            }
+        }
+        for (range, replacement) in replacements.into_iter().rev() {
+            content.replace_range(range, &replacement);
+        }
+        replay.insert(owner, content);
+    }
+    for (owner, content) in &mut replay {
+        for (ordinal, block) in ui_blocks(content).into_iter().enumerate().rev() {
+            let id = panel_id(first_owner + owner, ordinal);
+            if let Some(program) = panels.get(&id) {
+                content.replace_range(block.range, &format!("```nexus-ui\n{program}\n```"));
+            }
+        }
+    }
+    (replay, errors)
+}
+
 fn failing_ui_blocks(content: &str) -> Vec<(UiBlock, Vec<crate::interactive::CheckError>)> {
     ui_blocks(content)
         .into_iter()
+        .filter(|block| crate::interactive::edit_patch(&block.source).is_none())
         .filter_map(|block| {
             crate::interactive::Document::check(&block.source)
                 .err()

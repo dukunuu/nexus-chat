@@ -407,12 +407,9 @@ impl Session {
             return false;
         };
         fields.iter().all(|field| match field {
-            Node::Input {
-                key,
-                required,
-                invalid,
-                ..
-            } => !invalid && (!required || !self.value(key).trim().is_empty()),
+            Node::Input { key, rules, .. } => {
+                super::validation::error(rules, &self.value(key)).is_none()
+            }
             _ => true,
         })
     }

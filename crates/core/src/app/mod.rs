@@ -1184,6 +1184,7 @@ pub struct App {
     ui_repair_rx: mpsc::UnboundedReceiver<chat::UiRepairResult>,
     /// Session -> reply message id; a new turn disarms that session's repair.
     ui_repair_messages: HashMap<String, String>,
+    ui_feedback_seen: std::collections::HashSet<String>,
     /// Background compaction result: (session id, digest, messages-covered, pre-compaction %).
     pub compact_rx: Option<mpsc::UnboundedReceiver<(String, String, i64, u64)>>,
     /// Session currently being compacted. Kept separately from `compact_rx` so
@@ -1587,6 +1588,7 @@ impl App {
             ui_repair_tx,
             ui_repair_rx,
             ui_repair_messages: HashMap::new(),
+            ui_feedback_seen: std::collections::HashSet::new(),
             compact_rx: None,
             compact_error: Arc::default(),
             compacting_session_id: None,

@@ -254,7 +254,13 @@ impl Entry {
         match result {
             Ok(message) => {
                 self.error.clear();
-                message
+                message.map(|message| {
+                    session
+                        .assistant_payload()
+                        .map_or(message.clone(), |payload| {
+                            format!("{message}\ncontext and form values = {payload}")
+                        })
+                })
             }
             Err(error) => {
                 self.error = error.to_string();
@@ -419,7 +425,10 @@ impl Entry {
             .map_or_else(|_| Vec::new(), |session| node_regions(session, width));
         let height = self.session.as_ref().map_or(6, |_| card_height(&regions));
         let choices = self.choices().len().min(9);
-        let hint = if choices > 0 {
+        let pending_url = self.session.as_ref().ok().and_then(Session::pending_url);
+        let hint = if let Some(url) = pending_url {
+            format!("Open {url}? Enter confirm · Esc cancel")
+        } else if choices > 0 {
             format!("1–{choices} pick · F2 keyboard")
         } else if focused {
             "Tab next · Enter press · Esc done".into()
@@ -591,6 +600,11 @@ impl Entry {
                             Rect::new(region.x + offset, region.y, region.width - offset, 1),
                             buffer,
                         );
+                    if let Some(error) = session.input_error(key) {
+                        Paragraph::new(error)
+                            .style(Style::default().fg(theme.error))
+                            .render(Rect::new(region.x, region.y + 1, region.width, 1), buffer);
+                    }
                     hits.push((region, control));
                     control += 1;
                 }
@@ -1075,7 +1089,13 @@ fn branch_regions(session: &Session, nodes: &[Node], area: Rect) -> Vec<Rect> {
                         .max()
                         .unwrap_or(1)
                 }
-                Node::Input { .. } => 1,
+                Node::Input { rules, .. } => {
+                    if rules.is_empty() {
+                        1
+                    } else {
+                        2
+                    }
+                }
                 _ => layout_lines(node, session, width, &Theme::default()).map_or_else(
                     || node.rows(),
                     |lines| u16::try_from(lines.len()).unwrap_or(u16::MAX).max(1),
@@ -2235,6 +2255,8 @@ pub struct Widgets {
     layout: Option<(Rect, usize, Vec<Placement>)>,
     /// Set by a click on an image (or `v` on a focused one); the app takes it.
     pending_image: Option<PendingImage>,
+    pending_status: Option<String>,
+    applied_patches: std::collections::HashSet<Key>,
 }
 impl Widgets {
     /// Discard all local state and stale hit areas on a viewport/session reset.
@@ -2297,6 +2319,52 @@ impl Widgets {
             },
         );
     }
+    fn reconcile_patches(&mut self, placements: &[Placement]) {
+        let mut targets = HashMap::new();
+        for placement in placements.iter().filter(|p| p.complete) {
+            let key = placement.key();
+            let Some((id, patch)) = nexus_core::interactive::edit_patch(&placement.source) else {
+                targets.insert(
+                    nexus_core::interactive::panel_id(placement.owner, placement.ordinal),
+                    key,
+                );
+                continue;
+            };
+            if !self.applied_patches.insert(key.clone()) {
+                continue;
+            }
+            let result = (|| {
+                let target = targets
+                    .get(id)
+                    .ok_or_else(|| anyhow::anyhow!("unknown panel {id}"))?;
+                self.register(target);
+                let entry = self
+                    .entries
+                    .get_mut(target)
+                    .ok_or_else(|| anyhow::anyhow!("panel limit reached"))?;
+                let session = entry
+                    .session
+                    .as_mut()
+                    .map_err(|error| anyhow::anyhow!(error.clone()))?;
+                session.patch(patch)?;
+                Document::parse(&format!(
+                    "root = Panel(\"Panel updated\", [Text({})])",
+                    serde_json::to_string(&format!("Updated {id}"))?
+                ))
+                .and_then(Session::new)
+            })()
+            .map_err(|error: anyhow::Error| error.to_string());
+            self.entries.insert(
+                key,
+                Entry {
+                    session: result,
+                    focus: 0,
+                    error: String::new(),
+                    scroll: 0,
+                },
+            );
+        }
+    }
     /// Keep transcript reservations in sync with locally edited, wrapping content.
     pub(crate) fn reflow(
         &mut self,
@@ -2304,6 +2372,7 @@ impl Widgets {
         top: usize,
         height: u16,
     ) {
+        self.reconcile_patches(&cache.widgets);
         for index in 0..cache.widgets.len() {
             let placement = &cache.widgets[index];
             if placement.complete
@@ -2362,6 +2431,7 @@ impl Widgets {
         theme: &Theme,
         active: bool,
     ) {
+        self.reconcile_patches(placements);
         self.screen = Some(f.area());
         self.layout = Some((viewport, top, placements.to_vec()));
         self.previews.retain(|&(owner, ordinal), _| {
@@ -2627,10 +2697,31 @@ impl Widgets {
             entry.edit(text, false);
         }
     }
+    #[allow(clippy::too_many_lines)]
     fn key(&mut self, key: KeyEvent, can_send: bool) -> (bool, Option<String>) {
         if key.kind != KeyEventKind::Press
             || !key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
         {
+            return (false, None);
+        }
+        if let Some(Ok(session)) = self
+            .focused
+            .as_ref()
+            .and_then(|key| self.entries.get_mut(key))
+            .map(|entry| &mut entry.session)
+            && session.pending_url().is_some()
+        {
+            if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+                self.pending_status = Some(
+                    match session.confirm_url(key.code == KeyCode::Enter, |url| {
+                        open::that_detached(url).map_err(Into::into)
+                    }) {
+                        Ok(Some(status)) => status,
+                        Ok(None) => "URL opening cancelled".into(),
+                        Err(error) => format!("URL opening failed: {error}"),
+                    },
+                );
+            }
             return (false, None);
         }
         if matches!(key.code, KeyCode::Esc | KeyCode::F(2)) {
@@ -2975,6 +3066,9 @@ pub fn key(app: &mut AppView, event: KeyEvent) {
         app.popup = Popup::None;
     }
     respond(app, message);
+    if let Some(status) = app.interactive.pending_status.take() {
+        app.push_status(status);
+    }
     open_pending_image(app);
 }
 /// Render a keyboard-accessible enlarged view of the same inline state.
@@ -2993,6 +3087,10 @@ pub fn render_popup(f: &mut Frame, app: &mut AppView) {
             .paint(f, viewport, top, &placements, &app.theme, true);
     }
 }
+
+#[cfg(test)]
+#[path = "interactive/power_tests.rs"]
+mod power_tests;
 
 #[cfg(test)]
 mod tests;

@@ -67,7 +67,7 @@ impl StreamParser {
                 symbols.insert(name, expression);
             }
         }
-        let value = library::materialize(&symbols, true).ok()?;
+        let value = library::materialize(&symbols, true, None).ok()?;
         Document::check_value(value)
             .ok()
             .map(Document::inert_preview)
@@ -111,6 +111,22 @@ fn legacy(source: &str) -> Result<Value> {
 }
 
 fn program(source: &str) -> Result<Value> {
+    program_state(source, None)
+}
+
+pub(super) fn program_state(
+    source: &str,
+    state: Option<&serde_json::Map<String, Value>>,
+) -> Result<Value> {
+    let symbols = statements(source)?
+        .into_iter()
+        .map(|(name, (_, expr))| (name, expr))
+        .collect();
+    library::materialize(&symbols, false, state)
+}
+
+fn statements(source: &str) -> Result<BTreeMap<String, (String, Expr)>> {
+    ensure!(source.len() <= MAX_SOURCE, "UI document exceeds 16 KiB");
     let (mut ends, _) = syntax::boundaries(source);
     if ends.last() != Some(&source.len()) {
         ends.push(source.len());
@@ -127,11 +143,74 @@ fn program(source: &str) -> Result<Value> {
                 symbols.len() < 128 || symbols.contains_key(&name),
                 "UI exceeds 128 statements"
             );
-            symbols.insert(name, expression);
+            symbols.insert(name, (statement.trim().to_string(), expression));
         }
         start = end;
     }
-    library::materialize(&symbols, false)
+    Ok(symbols)
+}
+
+/// Merge a completed patch by statement name and validate it atomically.
+/// A top-level null deletes; unreachable value statements are pruned.
+/// # Errors
+/// Returns syntax, reference, schema or budget failures without changing input.
+pub fn merge_program(source: &str, patch: &str) -> Result<String> {
+    let mut merged = statements(source)?;
+    for (name, statement) in statements(patch)? {
+        if matches!(statement.1, Expr::Literal(Value::Null)) {
+            merged.remove(&name);
+        } else {
+            merged.insert(name, statement);
+        }
+    }
+    if merged.contains_key("root") {
+        let mut reachable = std::collections::BTreeSet::new();
+        let mut pending = vec!["root".to_string()];
+        pending.extend(merged.keys().filter(|name| name.starts_with('$')).cloned());
+        while let Some(name) = pending.pop() {
+            if reachable.insert(name.clone())
+                && let Some((_, expression)) = merged.get(&name)
+            {
+                references(expression, &mut pending);
+            }
+        }
+        merged.retain(|name, _| reachable.contains(name));
+    }
+    let program = merged
+        .values()
+        .map(|(source, _)| source.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Document::parse(&program)?;
+    Ok(program)
+}
+
+fn references(expression: &Expr, names: &mut Vec<String>) {
+    match expression {
+        Expr::Ref(name) => names.push(name.clone()),
+        Expr::State(name) => names.push(format!("${name}")),
+        Expr::Array(items) | Expr::Call(_, items) => {
+            for item in items {
+                references(item, names);
+            }
+        }
+        Expr::Object(fields) => {
+            for (_, item) in fields {
+                references(item, names);
+            }
+        }
+        Expr::Member(value, _) | Expr::Unary(_, value) => references(value, names),
+        Expr::Index(a, b) | Expr::Binary(_, a, b) => {
+            references(a, names);
+            references(b, names);
+        }
+        Expr::Conditional(a, b, c) => {
+            references(a, names);
+            references(b, names);
+            references(c, names);
+        }
+        Expr::Literal(_) => {}
+    }
 }
 
 pub(super) fn preview(source: &str) -> Option<Document> {

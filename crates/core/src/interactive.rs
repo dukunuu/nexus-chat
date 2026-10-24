@@ -10,8 +10,10 @@ use serde_json::{Map, Value, json};
 
 mod components;
 pub use components::{ChartKind, ChartSeries, Section, Tab, TableState, TimelineEvent};
+mod data;
 mod stream;
-pub use stream::{StreamParser, component_signatures};
+mod validation;
+pub use stream::{StreamParser, component_signatures, merge_program};
 
 /// Model guidance with positional signatures derived from the native library.
 #[must_use]
@@ -29,6 +31,20 @@ pub const LAYOUTS: &str = include_str!("../assets/prompts/layouts.md");
 /// The `interactive` reply style: a card for nearly every reply, with
 /// follow-up answer buttons.
 pub const INTERACTIVE_FIRST: &str = include_str!("../assets/prompts/interactive-first.md");
+
+/// Stable transcript-local panel identifier, shared by replay and the TUI.
+#[must_use]
+pub fn panel_id(owner: usize, ordinal: usize) -> String {
+    format!("p{}-{}", owner + 1, ordinal + 1)
+}
+
+/// Split the host's completed patch marker from its statement text.
+#[must_use]
+pub fn edit_patch(source: &str) -> Option<(&str, &str)> {
+    let (line, body) = source.trim_start().split_once('\n')?;
+    let id = line.trim().strip_prefix("edit ")?.trim();
+    (!id.is_empty() && !id.contains(char::is_whitespace)).then_some((id, body))
+}
 
 /// Maximum serialized UI document size.
 pub const MAX_SOURCE: usize = 16 * 1024;
@@ -335,12 +351,9 @@ pub enum Node {
         key: String,
         /// Visible field label.
         label: String,
-        /// Block form submission when empty.
+        /// Optional bounded validation rules.
         #[serde(default)]
-        required: bool,
-        /// Block form submission when invalid.
-        #[serde(default)]
-        invalid: bool,
+        rules: Map<String, Value>,
     },
     /// Aligned label/value template pairs.
     Kv {
@@ -661,8 +674,19 @@ enum Step {
     Call {
         action: String,
     },
+    Reset {
+        keys: Vec<String>,
+    },
+    OpenUrl {
+        url: Value,
+    },
     Send {
         text: String,
+    },
+    ToAssistant {
+        text: String,
+        #[serde(default)]
+        context: Option<Value>,
     },
     /// Sends the clicked button's label. Models often add the label here
     /// too; it is accepted and ignored — the button's label is what's sent.
@@ -700,8 +724,8 @@ pub struct CheckError {
 
 /// Valid presentation node types, shared by validation and tool reports.
 pub const NODE_TYPES: &str = "hero, image, columns, cards, stats, steps, callout, quote, divider, text, buttons, input, kv, table, progress, bars, sparkline, checklist, select, stepper, toggle, tabs, accordion, chart, form, timeline, rating, code, badge, meter, slider";
-const ACTION_OPS: &str = "set, call, send, answer";
-const EXPR_OPS: &str = "get, random, not, number, if, add, sub, mul, div, mod, eq, lt, gt, and, or";
+const ACTION_OPS: &str = "set, call, send, answer, reset, open_url, to_assistant";
+const EXPR_OPS: &str = "get, random, not, number, if, add, sub, mul, div, mod, eq, lt, gt, and, or, literal, object, array, field, index, count, first, last, sum, avg, min, max, filter, sort, round, abs, floor, ceil";
 const MAX_ERRORS: usize = 10;
 
 fn check_result(errors: &mut Vec<CheckError>, path: &str, result: Result<()>) {
@@ -819,7 +843,7 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
                 ("node", "divider") => "label:?string",
                 ("node", "text") => "text:string tone:tone rows:u16",
                 ("node", "buttons") => "items:button[] rows:u16",
-                ("node", "input") => "key:string label:string required:bool invalid:bool",
+                ("node", "input") => "key:string label:string rules:value",
                 ("node", "toggle") => "key:string label:string",
                 ("node", "kv") => "items:pair[]",
                 ("node", "table") => {
@@ -845,7 +869,10 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
                 ("step", "set") => "key:string value:value",
                 ("step", "call") => "action:string",
                 ("step", "send") => "text:string",
+                ("step", "to_assistant") => "text:string context:value",
                 ("step", "answer") => "",
+                ("step", "reset") => "keys:string[]",
+                ("step", "open_url") => "url:value",
                 _ => {
                     check_result(
                         errors,
@@ -922,7 +949,7 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
         | "tabs" | "accordion" | "timeline" => "items",
         "callout" => "tone text",
         "image" => "src",
-        "quote" | "text" | "column_item" | "send" | "badge" => "text",
+        "quote" | "text" | "column_item" | "send" | "badge" | "to_assistant" => "text",
         "input" | "toggle" | "check" | "rating" => "key label",
         "table" => "columns rows_data",
         "progress" | "bar" | "meter" => "label value",
@@ -938,6 +965,8 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
         "code" => "source",
         "set" => "key value",
         "call" => "action",
+        "reset" => "keys",
+        "open_url" => "url",
         "button" => "label action",
         "card" => "title text",
         "stat" => "value label",
@@ -995,6 +1024,7 @@ pub struct Document {
     actions: BTreeMap<String, Vec<Step>>,
     sending: BTreeSet<String>,
     answering: BTreeSet<String>,
+    program: Option<String>,
 }
 
 impl Document {
@@ -1062,7 +1092,11 @@ impl Document {
         if !errors.is_empty() {
             return Err(errors);
         }
-        Self::check_value(stream::decode(source)?)
+        let mut document = Self::check_value(stream::decode(source)?)?;
+        if !source.trim_start().starts_with('{') {
+            document.program = Some(source.into());
+        }
+        Ok(document)
     }
 
     /// Validated, inert snapshot of the complete elements received so far.
@@ -1179,6 +1213,7 @@ impl Document {
             actions,
             sending: BTreeSet::new(),
             answering: BTreeSet::new(),
+            program: None,
         };
         check_result(
             &mut errors,
@@ -1224,8 +1259,8 @@ impl Document {
                 (|| {
                     identifier(key)?;
                     ensure!(
-                        !value.is_object() || value.get("random").is_some(),
-                        "initial state must be scalar or a random choice"
+                        !value.is_array(),
+                        "legacy initial state must be scalar or an expression"
                     );
                     validate_expr(value, &doc.state, &mut budget, 0)
                 })(),
@@ -1265,7 +1300,29 @@ impl Document {
                                     doc.actions.keys().cloned().collect::<Vec<_>>().join(", ")
                                 );
                             }
+                            Step::Reset { keys } => {
+                                ensure!(
+                                    !keys.is_empty() && keys.len() <= 32,
+                                    "reset needs 1–32 fields"
+                                );
+                                ensure!(
+                                    keys.iter().all(|key| doc.state.contains_key(key)),
+                                    "unknown reset field"
+                                );
+                            }
+                            Step::OpenUrl { url } => {
+                                validate_expr(url, &doc.state, &mut budget, 0)?;
+                                if let Some(url) = url.as_str() {
+                                    https_url(url)?;
+                                }
+                            }
                             Step::Send { text } => Self::template_ok(text)?,
+                            Step::ToAssistant { text, context } => {
+                                Self::template_ok(text)?;
+                                if let Some(context) = context {
+                                    validate_expr(context, &doc.state, &mut budget, 0)?;
+                                }
+                            }
                             Step::Answer { .. } => {}
                         }
                         Ok(())
@@ -1420,7 +1477,8 @@ impl Document {
                 binding_ok(&self.state, key, Value::is_number)?;
                 controls += 1;
             }
-            Node::Input { key, label, .. } => {
+            Node::Input { key, label, rules } => {
+                validation::check(rules)?;
                 ensure!(
                     self.state.contains_key(key),
                     "unknown input field: {key} — valid: {}",
@@ -1658,10 +1716,10 @@ impl Document {
         for step in &self.actions[action] {
             spend(budget)?;
             let (message, answer) = match step {
-                Step::Send { .. } => (true, false),
+                Step::Send { .. } | Step::ToAssistant { .. } => (true, false),
                 Step::Answer { .. } => (true, true),
                 Step::Call { action } => self.action_sends(action, seen, depth + 1, budget)?,
-                Step::Set { .. } => (false, false),
+                Step::Set { .. } | Step::Reset { .. } | Step::OpenUrl { .. } => (false, false),
             };
             // An answer can't be combined with another message. Two `send`s
             // stay a runtime error (documents written before answers parse
@@ -1770,6 +1828,16 @@ pub struct Session {
     document: Document,
     state: Map<String, Value>,
     components: components::ComponentState,
+    defaults: Map<String, Value>,
+    pending_url: Option<String>,
+    assistant_payload: Option<Value>,
+}
+
+#[derive(Default)]
+struct Effects {
+    message: Option<String>,
+    url: Option<String>,
+    payload: Option<Value>,
 }
 
 impl Session {
@@ -1783,12 +1851,15 @@ impl Session {
         }
         let mut session = Self {
             document,
-            state,
             components: components::ComponentState::default(),
+            defaults: state.clone(),
+            state,
+            pending_url: None,
+            assistant_payload: None,
         };
         let mut state = session.state.clone();
         session.bindings_ok(&mut state)?;
-        session.state = state;
+        session.commit(state)?;
         Ok(session)
     }
     fn plain_node(&self, node: &Node) -> Vec<String> {
@@ -2025,8 +2096,7 @@ impl Session {
         let mut next = self.state.clone();
         next.insert(key.into(), Value::String(value));
         self.bindings_ok(&mut next)?;
-        self.state = next;
-        Ok(())
+        self.commit(next)
     }
     /// Evaluate a numeric presentation expression against current state.
     /// # Errors
@@ -2059,8 +2129,7 @@ impl Session {
         let mut next = self.state.clone();
         next.insert(key.into(), json!(!boolean(&self.state[key])?));
         self.bindings_ok(&mut next)?;
-        self.state = next;
-        Ok(())
+        self.commit(next)
     }
     /// Cycle one select node, wrapping within its fixed options.
     /// # Errors
@@ -2088,8 +2157,7 @@ impl Session {
         let mut next = self.state.clone();
         next.insert(key.clone(), json!(options[index]));
         self.bindings_ok(&mut next)?;
-        self.state = next;
-        Ok(())
+        self.commit(next)
     }
     /// Adjust one stepper locally by its step, clamping at either bound.
     /// # Errors
@@ -2118,8 +2186,7 @@ impl Session {
         let mut next = self.state.clone();
         next.insert(key.clone(), json!(value.clamp(*min, *max)));
         self.bindings_ok(&mut next)?;
-        self.state = next;
-        Ok(())
+        self.commit(next)
     }
     /// Current normalized table index (zero for an empty table).
     #[must_use]
@@ -2148,7 +2215,7 @@ impl Session {
             json!(row.min(rows_data.len().saturating_sub(1))),
         );
         self.bindings_ok(&mut next)?;
-        self.state = next;
+        self.commit(next)?;
         if let Some(Node::Table {
             page_size: Some(size),
             ..
@@ -2195,31 +2262,62 @@ impl Session {
     fn activate_action(&mut self, action: &str) -> Result<Option<String>> {
         ensure!(self.document.actions.contains_key(action), "unknown action");
         let mut next = self.state.clone();
-        let mut message = None;
-        self.run(action, &mut next, &mut message, &mut 1024)?;
+        let mut effects = Effects::default();
+        self.run(action, &mut next, &mut effects, &mut 1024)?;
         self.bindings_ok(&mut next)?;
-        self.state = next;
-        Ok(message)
+        self.commit(next)?;
+        self.pending_url = effects.url;
+        self.assistant_payload = effects.payload;
+        Ok(effects.message)
     }
     fn run(
         &self,
         action: &str,
         state: &mut Map<String, Value>,
-        message: &mut Option<String>,
+        effects: &mut Effects,
         budget: &mut usize,
     ) -> Result<()> {
         for step in &self.document.actions[action] {
             spend(budget)?;
             match step {
                 Step::Set { key, value } => {
+                    self.validate_reads(value, state)?;
                     let value = eval(value, state, budget)?;
                     state.insert(key.clone(), value);
                 }
-                Step::Call { action } => self.run(action, state, message, budget)?,
-                Step::Answer { .. } => {}
-                Step::Send { text } => {
-                    ensure!(message.is_none(), "an action may send only one message");
-                    *message = Some(format!(
+                Step::Call { action } => self.run(action, state, effects, budget)?,
+                Step::Reset { keys } => {
+                    for key in keys {
+                        state.insert(key.clone(), self.defaults[key].clone());
+                    }
+                }
+                Step::OpenUrl { url: expression } => {
+                    self.validate_reads(expression, state)?;
+                    let target = eval(expression, state, budget)?;
+                    let target = target
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("URL must be a string"))?;
+                    https_url(target)?;
+                    ensure!(effects.url.is_none(), "only one URL per activation");
+                    effects.url = Some(target.into());
+                }
+                Step::Answer { .. } => {
+                    self.validate_form(state)?;
+                }
+                Step::Send { text } | Step::ToAssistant { text, .. } => {
+                    self.validate_form(state)?;
+                    ensure!(
+                        effects.message.is_none(),
+                        "an action may send only one message"
+                    );
+                    if let Step::ToAssistant { context, .. } = step {
+                        let context = context
+                            .as_ref()
+                            .map(|context| eval(context, state, budget))
+                            .transpose()?;
+                        effects.payload = Some(json!({"context":context,"state":state}));
+                    }
+                    effects.message = Some(format!(
                         "UI response — {}\n{}",
                         self.document.title,
                         expand(text, state)?
@@ -2229,6 +2327,129 @@ impl Session {
         }
         Ok(())
     }
+    fn commit(&mut self, state: Map<String, Value>) -> Result<()> {
+        data::value_ok(&Value::Object(state.clone()), &mut 4096, 0)?;
+        if let Some(source) = &self.document.program {
+            let value = stream::program_state(source, Some(&state))?;
+            let mut document = Document::check_value(value)
+                .map_err(|errors| anyhow::anyhow!(errors[0].message.clone()))?;
+            document.program = Some(source.clone());
+            self.document = document;
+        }
+        self.state = state;
+        Ok(())
+    }
+
+    /// Replace a program after a completed edit, retaining surviving state names.
+    /// # Errors
+    /// Invalid merged programs leave this session unchanged.
+    pub fn patch(&mut self, patch: &str) -> Result<()> {
+        let source = self
+            .document
+            .program
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("legacy panels cannot be patched"))?;
+        let source = merge_program(source, patch)?;
+        self.replace_program(&source)
+    }
+
+    /// Install a validated program revision, retaining surviving state names.
+    /// # Errors
+    /// Invalid revisions leave the previous document and state untouched.
+    pub fn replace_program(&mut self, source: &str) -> Result<()> {
+        let mut next = Self::new(Document::parse(source)?)?;
+        let mut state = next.state.clone();
+        state.extend(self.state.clone());
+        ensure!(
+            state.len() <= 32,
+            "too many retained UI state fields — maximum: 32"
+        );
+        next.bindings_ok(&mut state)?;
+        next.commit(state)?;
+        *self = next;
+        Ok(())
+    }
+
+    /// Context and page/form state captured at the most recent send step.
+    /// Frontends append this JSON to the reviewed user turn, not to answers.
+    #[must_use]
+    pub const fn assistant_payload(&self) -> Option<&Value> {
+        self.assistant_payload.as_ref()
+    }
+
+    /// URL awaiting a separate user confirmation. Parsing never sets this.
+    #[must_use]
+    pub fn pending_url(&self) -> Option<&str> {
+        self.pending_url.as_deref()
+    }
+
+    /// Consume a pending URL, opening it only when explicitly confirmed.
+    /// The injected opener lets frontends and tests control OS interaction.
+    /// # Errors
+    /// Returns opener failures; the pending confirmation is always consumed.
+    pub fn confirm_url(
+        &mut self,
+        confirmed: bool,
+        opener: impl FnOnce(&str) -> Result<()>,
+    ) -> Result<Option<String>> {
+        let Some(url) = self.pending_url.take() else {
+            return Ok(None);
+        };
+        if !confirmed {
+            return Ok(None);
+        }
+        https_url(&url)?;
+        opener(&url)?;
+        Ok(Some(format!("Opened {url}")))
+    }
+
+    /// Current inline validation message for an input.
+    #[must_use]
+    pub fn input_error(&self, key: &str) -> Option<String> {
+        self.field_error(key, &self.state)
+    }
+    fn field_error(&self, key: &str, state: &Map<String, Value>) -> Option<String> {
+        self.document.view.iter().find_map(|node| match node {
+            Node::Input {
+                key: field, rules, ..
+            } if field == key => {
+                validation::error(rules, state.get(key).and_then(Value::as_str).unwrap_or(""))
+            }
+            _ => None,
+        })
+    }
+    fn validate_form(&self, state: &Map<String, Value>) -> Result<()> {
+        for node in &self.document.view {
+            if let Node::Input { key, .. } = node
+                && let Some(error) = self.field_error(key, state)
+            {
+                bail!("{key}: {error}");
+            }
+        }
+        Ok(())
+    }
+    fn validate_reads(&self, value: &Value, state: &Map<String, Value>) -> Result<()> {
+        if let Some(key) = value.get("get").and_then(Value::as_str)
+            && let Some(error) = self.field_error(key, state)
+        {
+            bail!("{key}: {error}");
+        }
+        match value {
+            Value::Object(object) => {
+                for value in object.values() {
+                    self.validate_reads(value, state)?;
+                }
+            }
+            Value::Array(array) => {
+                for value in array {
+                    self.validate_reads(value, state)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn bindings_ok(&self, state: &mut Map<String, Value>) -> Result<()> {
         for node in self.document.all_nodes() {
             match node {
@@ -2301,6 +2522,19 @@ impl Session {
     }
 }
 
+fn https_url(url: &str) -> Result<()> {
+    line_ok(url, MAX_VALUE)?;
+    let parsed = reqwest::Url::parse(url)?;
+    ensure!(
+        parsed.scheme() == "https"
+            && parsed.has_host()
+            && parsed.username().is_empty()
+            && parsed.password().is_none(),
+        "OpenUrl requires an HTTPS URL without credentials"
+    );
+    Ok(())
+}
+
 fn item_count(count: usize, min: usize, max: usize) -> Result<()> {
     ensure!(
         (min..=max).contains(&count),
@@ -2345,7 +2579,8 @@ fn numeric_expr(value: &Value, state: &Map<String, Value>) -> bool {
         "add" | "sub" | "mul" | "div" | "mod" => arg
             .as_array()
             .is_some_and(|args| args.iter().all(|v| numeric_expr(v, state))),
-        "number" => true,
+        "number" | "count" | "sum" | "avg" | "min" | "max" | "round" | "abs" | "floor" | "ceil"
+        | "field" | "index" => true,
         _ => false,
     }
 }
@@ -2418,6 +2653,13 @@ fn validate_expr(
 ) -> Result<()> {
     spend(budget)?;
     ensure!(depth <= 12, "UI expression is too deep");
+    if let Some(items) = value.as_array() {
+        ensure!(items.len() <= 200, "UI array exceeds 200 items");
+        for item in items {
+            validate_expr(item, state, budget, depth + 1)?;
+        }
+        return Ok(());
+    }
     if !value.is_object() {
         return scalar_ok(value);
     }
@@ -2440,7 +2682,37 @@ fn validate_expr(
                 scalar_ok(value)?;
             }
         }
-        "not" | "number" => validate_expr(arg, state, budget, depth + 1)?,
+        "literal" => data::value_ok(arg, budget, depth + 1)?,
+        "object" => {
+            let fields = arg
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("object needs fields"))?;
+            ensure!(fields.len() <= 200, "object exceeds 200 fields");
+            for (key, value) in fields {
+                text_ok(key, MAX_VALUE)?;
+                validate_expr(value, state, budget, depth + 1)?;
+            }
+        }
+        "field" | "index" => {
+            let args = arg
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("access needs arguments"))?;
+            ensure!(args.len() == 2, "access needs two arguments");
+            for value in args {
+                validate_expr(value, state, budget, depth + 1)?;
+            }
+        }
+        "count" | "first" | "last" | "sum" | "avg" | "min" | "max" | "filter" | "sort"
+        | "round" | "abs" | "floor" | "ceil" => {
+            let args = arg
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("builtin needs arguments"))?;
+            data::arity(op, args.len())?;
+            for value in args {
+                validate_expr(value, state, budget, depth + 1)?;
+            }
+        }
+        "not" | "number" | "array" => validate_expr(arg, state, budget, depth + 1)?,
         "add" | "sub" | "mul" | "div" | "mod" | "eq" | "lt" | "gt" | "and" | "or" | "if" => {
             let args = arg
                 .as_array()
@@ -2457,14 +2729,73 @@ fn validate_expr(
     }
     Ok(())
 }
+#[allow(clippy::too_many_lines)]
 fn eval(value: &Value, state: &Map<String, Value>, budget: &mut usize) -> Result<Value> {
     spend(budget)?;
+    if let Some(items) = value.as_array() {
+        return items
+            .iter()
+            .map(|value| eval(value, state, budget))
+            .collect();
+    }
     if !value.is_object() {
         scalar_ok(value)?;
         return Ok(value.clone());
     }
     let (op, arg) = operator(value)?;
     match op {
+        "literal" => return Ok(arg.clone()),
+        "array" => return eval(arg, state, budget),
+        "object" => {
+            return arg
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("invalid object"))?
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), eval(value, state, budget)?)))
+                .collect::<Result<Map<_, _>>>()
+                .map(Value::Object);
+        }
+        "field" | "index" => {
+            let args = arg
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("invalid access"))?;
+            ensure!(args.len() == 2, "invalid access arity");
+            let value = eval(&args[0], state, budget)?;
+            let key = eval(&args[1], state, budget)?;
+            return Ok(if op == "field" {
+                data::field(&value, key.as_str().unwrap_or(""))
+            } else if let Some(key) = key.as_str() {
+                value
+                    .as_object()
+                    .and_then(|o| o.get(key))
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            } else {
+                key.as_f64()
+                    .and_then(|index| {
+                        value.as_array().and_then(|items| {
+                            items.iter().enumerate().find_map(|(i, item)| {
+                                (f64::from(u32::try_from(i).ok()?).partial_cmp(&index)
+                                    == Some(std::cmp::Ordering::Equal))
+                                .then(|| item.clone())
+                            })
+                        })
+                    })
+                    .unwrap_or(Value::Null)
+            });
+        }
+        "count" | "first" | "last" | "sum" | "avg" | "min" | "max" | "filter" | "sort"
+        | "round" | "abs" | "floor" | "ceil" => {
+            let args = arg
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("invalid builtin arguments"))?
+                .iter()
+                .map(|v| eval(v, state, budget))
+                .collect::<Result<Vec<_>>>()?;
+            let value = data::evaluate(op, &args)?;
+            data::value_ok(&value, budget, 0)?;
+            return Ok(value);
+        }
         "get" => {
             return state
                 .get(arg.as_str().unwrap_or(""))
@@ -2574,6 +2905,10 @@ fn expand(template: &str, state: &Map<String, Value>) -> Result<String> {
     ensure!(result.len() <= MAX_TEXT, "expanded UI text exceeds budget");
     Ok(result)
 }
+
+#[cfg(test)]
+#[path = "interactive/power_tests.rs"]
+mod power_tests;
 
 #[cfg(test)]
 mod check_tests;

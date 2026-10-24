@@ -133,7 +133,7 @@ fn accordion_expansion_is_independent_and_defaults_are_respected() {
 
 #[test]
 fn form_blocks_empty_or_invalid_fields_and_submits_current_values_transactionally() {
-    let node = json!({"type":"form","title":"Profile","fields":[{"type":"input","key":"name","label":"Name","required":true}],"submit_label":"Save","action":"save"});
+    let node = json!({"type":"form","title":"Profile","fields":[{"type":"input","key":"name","label":"Name","rules":{"required":true}}],"submit_label":"Save","action":"save"});
     let mut session = session(node.clone(), json!({"name":"","saved":false}));
     assert!(!session.form_valid(0));
     assert!(session.submit_form(0).is_err());
@@ -145,7 +145,7 @@ fn form_blocks_empty_or_invalid_fields_and_submits_current_values_transactionall
     session.submit_form(0).unwrap();
     assert_eq!(session.value("saved"), "true");
     let mut invalid = node;
-    invalid["fields"][0]["invalid"] = true.into();
+    invalid["fields"][0]["rules"] = json!({"required": true, "minLength": 5});
     let session = self::session(invalid, json!({"name":"Ada","saved":false}));
     assert!(!session.form_valid(0));
 }

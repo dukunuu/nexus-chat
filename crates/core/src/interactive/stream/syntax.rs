@@ -9,6 +9,9 @@ pub(super) enum Expr {
     Ref(String),
     State(String),
     Array(Vec<Self>),
+    Object(Vec<(String, Self)>),
+    Member(Box<Self>, String),
+    Index(Box<Self>, Box<Self>),
     Call(String, Vec<Self>),
     Unary(char, Box<Self>),
     Binary(String, Box<Self>, Box<Self>),
@@ -148,6 +151,21 @@ impl Reader<'_> {
         if self.take("[") {
             return Ok(Expr::Array(self.arguments("]", depth + 1)?));
         }
+        if self.take("{") {
+            let mut fields = Vec::new();
+            while !self.take("}") {
+                self.space();
+                let key = if self.rest().starts_with(['\'', '"']) {
+                    self.string()?
+                } else {
+                    self.name()?
+                };
+                ensure!(self.take(":"), "expected ':' in object");
+                fields.push((key, self.expression(0, depth + 1)?));
+                self.take(",");
+            }
+            return Ok(Expr::Object(fields));
+        }
         if self.take("(") {
             let expr = self.expression(0, depth + 1)?;
             ensure!(self.take(")"), "expected ')'");
@@ -207,6 +225,16 @@ impl Reader<'_> {
     }
     fn expression(&mut self, minimum: u8, depth: usize) -> Result<Expr> {
         let mut left = self.primary(depth)?;
+        while self.take(".") || self.rest().starts_with('[') {
+            if self.take("[") {
+                let index = self.expression(0, depth + 1)?;
+                ensure!(self.take("]"), "expected ']' after index");
+                left = Expr::Index(Box::new(left), Box::new(index));
+            } else {
+                left = Expr::Member(Box::new(left), self.name()?);
+            }
+            spend_postfix(&mut self.budget)?;
+        }
         loop {
             self.space();
             let operator = [
@@ -242,6 +270,12 @@ impl Reader<'_> {
     }
 }
 
+fn spend_postfix(budget: &mut usize) -> Result<()> {
+    ensure!(*budget > 0, "expression exceeds parsing budget");
+    *budget -= 1;
+    Ok(())
+}
+
 /// Statement boundaries and the minimal suffix for a pending string/call.
 /// Comments and delimiters in strings cannot corrupt the boundary scan.
 pub(super) fn boundaries(source: &str) -> (Vec<usize>, String) {
@@ -274,7 +308,8 @@ pub(super) fn boundaries(source: &str) -> (Vec<usize>, String) {
             '\'' | '"' => quote = Some(ch),
             '(' => stack.push(')'),
             '[' => stack.push(']'),
-            ')' | ']' if stack.last() == Some(&ch) => {
+            '{' => stack.push('}'),
+            ')' | ']' | '}' if stack.last() == Some(&ch) => {
                 stack.pop();
             }
             '\n' if stack.is_empty() => ends.push(index + 1),

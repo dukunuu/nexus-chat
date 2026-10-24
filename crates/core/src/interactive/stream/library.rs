@@ -26,7 +26,7 @@ const COMPONENTS: &[(&str, &str, &str)] = &[
     ("Divider", "divider", "label?"),
     ("Buttons", "buttons", "items rows?"),
     ("Button", "", "label action primary? body? image? alt?"),
-    ("Input", "input", "key label"),
+    ("Input", "input", "key label rules?"),
     ("Kv", "kv", "items"),
     (
         "Table",
@@ -71,26 +71,48 @@ pub(super) fn signatures() -> String {
         .join("\n")
 }
 
-pub(super) fn materialize(symbols: &BTreeMap<String, Expr>, partial: bool) -> Result<Value> {
+pub(super) fn materialize(
+    symbols: &BTreeMap<String, Expr>,
+    partial: bool,
+    current: Option<&Map<String, Value>>,
+) -> Result<Value> {
     let mut context = Context {
         symbols,
         partial,
         visiting: BTreeSet::new(),
         budget: 4096,
         actions: Map::new(),
+        state: Map::new(),
+        locals: BTreeMap::new(),
     };
+    let mut state = Map::new();
+    for (name, expression) in symbols {
+        if let Some(key) = name.strip_prefix('$') {
+            let value = context.lower(expression, 0)?.unwrap_or(Value::Null);
+            let initial = if let Some(value) = current.and_then(|state| state.get(key)) {
+                value.clone()
+            } else {
+                crate::interactive::data::initial(&value)?
+            };
+            context.state.insert(key.into(), initial);
+            state.insert(
+                key.into(),
+                if value.is_array() {
+                    json!({"array":value})
+                } else {
+                    value
+                },
+            );
+        }
+    }
+    if let Some(current) = current {
+        context.state.clone_from(current);
+    }
     let root = Expr::Ref("root".into());
     let mut value = context
         .lower(&root, 0)?
         .ok_or_else(|| anyhow::anyhow!("root is not available yet"))?;
     ensure!(value.get("view").is_some(), "root must be a Panel");
-    let mut state = Map::new();
-    for (name, expression) in symbols {
-        if let Some(key) = name.strip_prefix('$') {
-            let value = context.lower(expression, 0)?.unwrap_or(Value::Null);
-            state.insert(key.into(), value);
-        }
-    }
     value["version"] = 1.into();
     value["state"] = state.into();
     value["actions"] = context.actions.into();
@@ -166,8 +188,11 @@ struct Context<'a> {
     visiting: BTreeSet<String>,
     budget: usize,
     actions: Map<String, Value>,
+    state: Map<String, Value>,
+    locals: BTreeMap<String, Value>,
 }
 impl Context<'_> {
+    #[allow(clippy::too_many_lines)]
     fn lower(&mut self, expression: &Expr, depth: usize) -> Result<Option<Value>> {
         ensure!(
             depth < 32 && self.budget > 0,
@@ -178,6 +203,9 @@ impl Context<'_> {
             Expr::Literal(value) => value.clone(),
             Expr::State(name) => json!({"get":name}),
             Expr::Ref(name) => {
+                if let Some(value) = self.locals.get(name) {
+                    return Ok(Some(json!({"literal": value})));
+                }
                 if !self.visiting.insert(name.clone()) {
                     ensure!(self.partial, "cyclic reference: {name}");
                     return Ok(None);
@@ -195,6 +223,9 @@ impl Context<'_> {
                 let mut values = Vec::new();
                 for item in items {
                     match self.lower(item, depth + 1) {
+                        Ok(Some(value)) if self.is_each(item, 0) => {
+                            values.extend(value.as_array().into_iter().flatten().cloned());
+                        }
                         Ok(Some(value)) => values.push(value),
                         Ok(None) => {}
                         Err(_) if self.partial => {}
@@ -202,6 +233,25 @@ impl Context<'_> {
                     }
                 }
                 values.into()
+            }
+            Expr::Object(fields) => {
+                let mut object = Map::new();
+                for (key, expression) in fields {
+                    object.insert(
+                        key.clone(),
+                        self.lower(expression, depth + 1)?.unwrap_or(Value::Null),
+                    );
+                }
+                json!({"object":object})
+            }
+            Expr::Member(expression, field) => {
+                let value = self.lower(expression, depth + 1)?.unwrap_or(Value::Null);
+                json!({"field":[value,field]})
+            }
+            Expr::Index(expression, index) => {
+                let value = self.lower(expression, depth + 1)?.unwrap_or(Value::Null);
+                let index = self.lower(index, depth + 1)?.unwrap_or(Value::Null);
+                json!({"index":[value,index]})
             }
             Expr::Call(name, args) => return self.call(name, args, depth + 1),
             Expr::Unary(operator, expression) => {
@@ -256,6 +306,19 @@ impl Context<'_> {
                 json!({"if":[condition,yes,no]})
             }
         }))
+    }
+    fn is_each(&self, expression: &Expr, depth: usize) -> bool {
+        if depth >= 32 {
+            return false;
+        }
+        match expression {
+            Expr::Call(name, _) => name == "@Each",
+            Expr::Ref(name) => self
+                .symbols
+                .get(name)
+                .is_some_and(|expr| self.is_each(expr, depth + 1)),
+            _ => false,
+        }
     }
     fn binding(expression: &Expr) -> Result<String> {
         match expression {
@@ -313,6 +376,9 @@ impl Context<'_> {
                 ))
             }
             Expr::Ref(name) => {
+                if let Some(value) = self.locals.get(name) {
+                    return Ok(Some(crate::interactive::scalar_text(value).into()));
+                }
                 ensure!(
                     self.visiting.insert(name.clone()),
                     "cyclic template reference: {name}"
@@ -328,9 +394,13 @@ impl Context<'_> {
             Expr::Literal(Value::Null) => Ok(Some(Value::Null)),
             Expr::Literal(Value::String(text)) => Ok(Some(text.clone().into())),
             Expr::Literal(value) => Ok(Some(value.to_string().into())),
-            _ => bail!(
-                "text supports literals, $state and string concatenation; use Progress/Bars for numeric expressions"
-            ),
+            _ => {
+                let Some(value) = self.lower(expression, depth + 1)? else {
+                    return Ok(None);
+                };
+                let value = crate::interactive::eval(&value, &self.state, &mut 1024)?;
+                Ok(Some(crate::interactive::scalar_text(&value).into()))
+            }
         }
     }
     fn call(&mut self, name: &str, args: &[Expr], depth: usize) -> Result<Option<Value>> {
@@ -382,6 +452,10 @@ impl Context<'_> {
             ) || name == "Stat" && key == "value"
             {
                 self.template(expression, depth + 1)?
+            } else if key == "rules" {
+                self.lower(expression, depth + 1)?
+                    .map(|value| crate::interactive::eval(&value, &self.state, &mut 1024))
+                    .transpose()?
             } else {
                 self.lower(expression, depth + 1)?
             };
@@ -412,24 +486,83 @@ impl Context<'_> {
         }
         Ok(Some(object.into()))
     }
+    #[allow(clippy::too_many_lines)]
     fn function(&mut self, name: &str, args: &[Expr], depth: usize) -> Result<Option<Value>> {
+        if name == "@Each" {
+            ensure!(args.len() == 3, "@Each expects 3 arguments");
+            let array = self.lower(&args[0], depth + 1)?.unwrap_or(Value::Null);
+            let array = crate::interactive::eval(&array, &self.state, &mut 4096)?;
+            let Expr::Literal(Value::String(var)) = &args[1] else {
+                bail!("@Each variable must be a string")
+            };
+            crate::interactive::identifier(var)?;
+            let items = array.as_array().map_or(&[][..], Vec::as_slice);
+            ensure!(items.len() <= 200, "@Each exceeds 200 items");
+            let previous = self.locals.get(var).cloned();
+            let result = (|| {
+                let mut result = Vec::new();
+                for item in items {
+                    self.locals.insert(var.clone(), item.clone());
+                    if let Some(value) = self.lower(&args[2], depth + 1)? {
+                        result.push(value);
+                    }
+                }
+                Ok(Some(result.into()))
+            })();
+            if let Some(previous) = previous {
+                self.locals.insert(var.clone(), previous);
+            } else {
+                self.locals.remove(var);
+            }
+            return result;
+        }
+        if name == "@Reset" {
+            ensure!(!args.is_empty(), "@Reset needs state variables");
+            let keys = args.iter().map(Self::binding).collect::<Result<Vec<_>>>()?;
+            return Ok(Some(json!({"op":"reset", "keys":keys})));
+        }
+        if let Some(op) = crate::interactive::data::builtin(name) {
+            crate::interactive::data::arity(op, args.len())?;
+            let mut values = Vec::new();
+            for arg in args {
+                values.push(self.lower(arg, depth + 1)?.unwrap_or(Value::Null));
+            }
+            return Ok(Some(json!({op:values})));
+        }
         let count = match name {
             "@Answer" => 0,
             "@Set" => 2,
             "@If" => 3,
-            "Action" | "@ToAssistant" | "@Number" | "@Random" => 1,
+            "Action" | "@ToAssistant" | "@OpenUrl" | "@Number" | "@Random" => 1,
             _ => bail!(
                 "unsupported function {name}; valid: @Set, @Answer, @ToAssistant, @Number, @Random, @If, Action"
             ),
         };
-        ensure!(args.len() == count, "{name} expects {count} arguments");
+        ensure!(
+            args.len() == count || name == "@ToAssistant" && args.len() == 2,
+            "{name} expects {count} arguments"
+        );
         if name == "@Answer" {
             return Ok(Some(json!({"op":"answer"})));
         }
-        if name == "@ToAssistant" {
+        if name == "@OpenUrl" {
             return Ok(self
-                .template(&args[0], depth + 1)?
-                .map(|text| json!({"op":"send","text":text})));
+                .lower(&args[0], depth + 1)?
+                .map(|url| json!({"op":"open_url","url":url})));
+        }
+        if name == "@ToAssistant" {
+            let context = args
+                .get(1)
+                .map(|arg| self.lower(arg, depth + 1))
+                .transpose()?
+                .flatten();
+            return Ok(self.template(&args[0], depth + 1)?.map(|text| {
+                let mut step = json!({"op":"to_assistant","text":text});
+                if let Some(context) = context {
+                    step["context"] = context;
+                }
+                step
+            }));
         }
         if name == "@Set" {
             let key = Self::binding(&args[0])?;

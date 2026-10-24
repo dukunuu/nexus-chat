@@ -72,6 +72,7 @@ pub struct Rendered {
     pub diagrams: Vec<crate::diagrams::Placement>,
     /// Model-authored UI regions, rendered and hit-tested separately from text.
     pub widgets: Vec<crate::interactive::Placement>,
+    ui_count: usize,
 }
 
 impl Rendered {
@@ -194,8 +195,11 @@ fn visible_controls(text: &str) -> String {
 }
 
 fn render_ui(r: &mut Rendered, source: &str, complete: bool, width: usize, colors: MdColors) {
+    let ordinal = r.ui_count;
+    r.ui_count += 1;
     let document = nexus_core::interactive::Document::check(source);
-    let fallback = width < 8 || (complete && document.is_err());
+    let patch = nexus_core::interactive::edit_patch(source).is_some();
+    let fallback = width < 8 || (complete && document.is_err() && !patch);
     if fallback {
         // A finished block that doesn't parse: show up to three errors, then show
         // the source as written — no card placeholder rows, and only control
@@ -234,7 +238,7 @@ fn render_ui(r: &mut Rendered, source: &str, complete: bool, width: usize, color
             row: r.lines.len(),
             width: card_width,
             owner: 0,
-            ordinal: r.widgets.len(),
+            ordinal,
             height,
             source: source.into(),
             complete,

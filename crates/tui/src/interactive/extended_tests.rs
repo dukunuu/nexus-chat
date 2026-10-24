@@ -158,15 +158,15 @@ fn rich_table_snapshots_show_sort_page_search_and_original_selection() {
 #[test]
 fn form_submit_snapshots_and_actions_respect_required_values_and_send_readiness() {
     let mut entry = entry(
-        json!({"type":"form","title":"Profile","fields":[{"type":"input","key":"name","label":"Name","required":true}],"submit_label":"Save","action":"save"}),
+        json!({"type":"form","title":"Profile","fields":[{"type":"input","key":"name","label":"Name","rules":{"required":true}}],"submit_label":"Save","action":"save"}),
         json!({"name":""}),
     );
-    assert_eq!(content(&entry, 36).0, "Profile\nName\n[ Save ↵ ]");
+    assert_eq!(content(&entry, 36).0, "Profile\nName\n\n[ Save ↵ ]");
     assert!(entry.activate(0, true, true).is_none());
     assert!(entry.error.contains("required"));
     entry.focus = 1;
     entry.edit("Ada", false);
-    assert_eq!(content(&entry, 36).0, "Profile\nName  Ada▁\n[ Save ↵ ]");
+    assert_eq!(content(&entry, 36).0, "Profile\nName  Ada▁\n\n[ Save ↵ ]");
     assert!(entry.activate(0, false, true).is_none());
     assert!(entry.error.contains("draft"));
     assert_eq!(
@@ -432,7 +432,7 @@ fn table_mouse_header_footer_search_and_form_mouse_submission_work() {
 
     let mut widgets = Widgets::default();
     let src = source(
-        json!({"type":"form","title":"F","fields":[{"type":"input","key":"name","label":"Name","required":true}],"submit_label":"Save","action":"save"}),
+        json!({"type":"form","title":"F","fields":[{"type":"input","key":"name","label":"Name","rules":{"required":true}}],"submit_label":"Save","action":"save"}),
         json!({"name":""}),
     );
     draw(&mut widgets, &src);
