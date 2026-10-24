@@ -367,11 +367,25 @@ terminal UI,” “Quiz me,” or “Give me an interactive calculator.” The T
 its capabilities and asks models to prefer interactive output when useful and
 representable. There are no game-specific commands or built-in game rules.
 
-A model-authored `nexus-ui` JSON fence becomes an inline panel with themed text,
-buttons, optional ASCII artwork, editable string fields and local state/actions.
+A model-authored `nexus-ui` fence uses a native Rust, OpenUI-style component
+language—not a JSON tree. A root-first layout fills in as named elements and
+even unfinished text stream in:
+
+```nexus-ui
+root = Panel("Your next adventure", [heading, highlights, next])
+heading = Hero("A little further from ordinary", "Three days. A fresh perspective.", "WEEKEND EDIT")
+highlights = Stats([Stat("3", "days away"), Stat("2", "new places"), Stat("1", "great escape")])
+next = Buttons([Button("Help me plan the trip", @Answer())])
+```
+
+The themed panel supports buttons, optional ASCII artwork, editable string
+fields and local state/actions. Existing JSON panels remain readable. This is a
+bounded terminal dialect, not the full web OpenUI runtime.
 Click controls directly, or press `F2` to focus the newest visible panel and use
 Tab/arrows + Enter. `Esc`/`Ctrl+C` returns to chat without changing your draft.
-New panels activate when the reply finishes; local changes never resize a panel.
+New panels display progressively but activate only when the reply finishes.
+Text reflows at the available width; streamed previews never execute actions.
+Validation happens automatically, with no preflight tool call.
 
 Local actions make no model calls. Buttons that propose a response are marked
 `[review]`: they prepare text in an empty composer for you to inspect/edit and

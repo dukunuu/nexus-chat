@@ -107,7 +107,7 @@ fn prompt_example_is_valid_and_generic() {
     // bar computed from state, and a primary action that proposes a message.
     let mut ui = session(source);
     assert_eq!(ui.value("days"), "5");
-    let message = ui.activate("save").unwrap().unwrap();
+    let message = ui.activate_button(3, 0).unwrap().unwrap();
     assert!(message.contains("Plan 5 days"), "{message}");
 }
 

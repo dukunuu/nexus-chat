@@ -905,9 +905,44 @@ pub(crate) fn card_height(regions: &[Rect]) -> u16 {
         .map_or(4, |rect| rect.bottom().saturating_add(2))
 }
 pub(crate) fn source_height(source: &str, width: u16) -> u16 {
-    Document::parse(source)
-        .and_then(Session::new)
-        .map_or(6, |session| card_height(&node_regions(&session, width)))
+    Document::preview(source)
+        .and_then(|document| Session::new(document).ok())
+        .map_or(4, |session| card_height(&node_regions(&session, width)))
+}
+
+/// In-flight panels are disposable drawings, never registered UI instances.
+fn streaming_buffer(document: Option<Document>, width: u16, theme: &Theme) -> Buffer {
+    let session = document.and_then(|document| Session::new(document).ok());
+    let Some(session) = session else {
+        let mut buffer = card_buffer(width, 4, "Designing your interface", theme, "");
+        Paragraph::new("◌ Waiting for the first element…")
+            .style(Style::default().fg(theme.fg_dim))
+            .render(Rect::new(2, 2, width.saturating_sub(4), 1), &mut buffer);
+        return buffer;
+    };
+    let regions = node_regions(&session, width);
+    let height = card_height(&regions);
+    let mut buffer = document_buffer(width, height, &session, theme, "");
+    render_nodes(&session, &regions, theme, None, false, &mut buffer);
+    // Replace final-panel affordances with an explicit, inert streaming status.
+    if width >= 8 {
+        Paragraph::new(" ◌ ")
+            .style(Style::default().fg(theme.accent2))
+            .render(Rect::new(width - 4, 0, 3, 1), &mut buffer);
+    }
+    let count = session.document().nodes().len();
+    let status = format!(
+        "◌ composing · {count} element{}",
+        if count == 1 { "" } else { "s" }
+    );
+    let status = clipped(&status, width.saturating_sub(6));
+    Paragraph::new(format!(" {status} "))
+        .style(Style::default().fg(theme.fg_dim))
+        .render(
+            Rect::new(2, height - 1, width.saturating_sub(4), 1),
+            &mut buffer,
+        );
+    buffer
 }
 pub(crate) fn card_buffer(
     width: u16,
@@ -1039,7 +1074,11 @@ fn join_columns(columns: &[Vec<Line<'static>>], widths: &[u16], gap: u16) -> Vec
                 let line = column.get(row).cloned().unwrap_or_default();
                 let used = line.width();
                 let style = line.style;
-                spans.extend(line.spans.into_iter().map(|span| span.patch_style(style)));
+                spans.extend(
+                    line.spans
+                        .into_iter()
+                        .map(|span| Span::styled(span.content, style.patch(span.style))),
+                );
                 if index + 1 < columns.len() {
                     let cell = usize::from(widths.get(index).copied().unwrap_or(0) + gap);
                     spans.push(Span::raw(" ".repeat(cell.saturating_sub(used))));
@@ -1058,7 +1097,7 @@ fn prefixed(lines: Vec<Line<'static>>, prefix: &str, style: Style) -> Vec<Line<'
             spans.extend(
                 line.spans
                     .into_iter()
-                    .map(|span| span.patch_style(line_style)),
+                    .map(|span| Span::styled(span.content, line_style.patch(span.style))),
             );
             Line::from(spans)
         })
@@ -1134,7 +1173,7 @@ fn hero_lines(
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let accent = accent_color(session.document(), theme);
-    let badge = badge.map(|s| format!("[ {} ]", display(session, s)));
+    let badge = badge.map(|s| format!(" {} ", display(session, s)));
     let badge_width = badge
         .as_ref()
         .map_or(0, |s| u16::try_from(s.width()).unwrap_or(u16::MAX));
@@ -1153,10 +1192,14 @@ fn hero_lines(
         first.spans.push(Span::raw(" ".repeat(padding)));
         first.spans.push(Span::styled(
             clipped(&badge, width),
-            Style::default().fg(accent),
+            Style::default()
+                .fg(theme.bg)
+                .bg(accent)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     if let Some(subtitle) = subtitle {
+        lines.push(Line::default());
         lines.extend(styled_text(
             session,
             subtitle,
@@ -1178,7 +1221,7 @@ fn card_head(item: &Card, session: &Session, width: u16, theme: &Theme) -> Vec<L
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     );
     if let Some(badge) = &item.badge {
-        let badge = format!("[ {} ]", display(session, badge));
+        let badge = format!(" {} ", display(session, badge));
         let badge_width = u16::try_from(badge.width()).unwrap_or(u16::MAX);
         // On the title row when both fit, so a badge costs no height.
         let single_title = content.len() == 1;
@@ -1191,9 +1234,13 @@ fn card_head(item: &Card, session: &Session, width: u16, theme: &Theme) -> Vec<L
                 title.spans.push(Span::raw(" ".repeat(gap)));
                 title
                     .spans
-                    .push(Span::styled(badge, Style::default().fg(color)));
+                    .push(Span::styled(badge, Style::default().fg(theme.bg).bg(color)));
             }
-            _ => content.extend(wrapped_text(&badge, inner, Style::default().fg(color))),
+            _ => content.extend(wrapped_text(
+                &badge,
+                inner,
+                Style::default().fg(theme.bg).bg(color),
+            )),
         }
     }
     content
@@ -1218,6 +1265,7 @@ fn card_lines(
             theme,
         ));
     }
+    content.push(Line::default());
     content.extend(styled_text(
         session,
         &item.text,
@@ -1225,9 +1273,9 @@ fn card_lines(
         Style::default().fg(theme.fg),
     ));
     content.resize(content.len().max(rows), Line::default());
-    let border = Style::default().fg(theme.border_dim);
+    let border = Style::default().fg(theme.border_dim).bg(theme.raised);
     let mut lines = vec![Line::from(Span::styled(
-        format!("┌{}┐", "─".repeat(usize::from(width.saturating_sub(2)))),
+        format!("╭{}╮", "─".repeat(usize::from(width.saturating_sub(2)))),
         border,
     ))];
     for line in content {
@@ -1235,10 +1283,10 @@ fn card_lines(
         let mut row = prefixed(vec![line], "│ ", border).remove(0);
         row.spans.push(Span::raw(" ".repeat(padding)));
         row.spans.push(Span::styled("│", border));
-        lines.push(row);
+        lines.push(row.style(Style::default().bg(theme.raised)));
     }
     lines.push(Line::from(Span::styled(
-        format!("└{}┘", "─".repeat(usize::from(width.saturating_sub(2)))),
+        format!("╰{}╯", "─".repeat(usize::from(width.saturating_sub(2)))),
         border,
     )));
     lines
@@ -1931,6 +1979,7 @@ fn visible_rows(rect: Rect, first: usize, limit: usize) -> Option<(usize, usize)
 #[derive(Default)]
 pub struct Widgets {
     entries: HashMap<Key, Entry>,
+    previews: HashMap<(usize, usize), nexus_core::interactive::StreamParser>,
     hits: Vec<Hit>,
     visible: Vec<Key>,
     focused: Option<Key>,
@@ -2071,6 +2120,15 @@ impl Widgets {
     ) {
         self.screen = Some(f.area());
         self.layout = Some((viewport, top, placements.to_vec()));
+        self.previews.retain(|&(owner, ordinal), _| {
+            placements.iter().any(|p| {
+                !p.complete
+                    && p.owner == owner
+                    && p.ordinal == ordinal
+                    && p.row < top.saturating_add(usize::from(viewport.height))
+                    && p.row.saturating_add(usize::from(p.height)) > top
+            })
+        });
         if self
             .focused
             .as_ref()
@@ -2090,9 +2148,6 @@ impl Widgets {
         let mut ordered: Vec<_> = placements.iter().collect();
         ordered.sort_by_key(|p| self.pinned && self.focused.as_ref() == Some(&p.key()));
         for placement in ordered {
-            if !placement.complete {
-                continue;
-            }
             let key = placement.key();
             let pinned = self.pinned && self.focused.as_ref() == Some(&key);
             let row = if pinned { top } else { placement.row };
@@ -2104,21 +2159,33 @@ impl Widgets {
             if first >= end || width == 0 {
                 continue;
             }
-            self.register(&key);
-            let Some(entry) = self.entries.get(&key) else {
-                let y = viewport.y + u16::try_from(row.saturating_sub(top)).unwrap_or(0);
-                f.render_widget(
-                    Paragraph::new("UI instance limit reached; start a new session.")
-                        .style(Style::default().fg(theme.error)),
-                    Rect::new(viewport.x + 2, y, width, 1),
-                );
-                continue;
-            };
-            if entry.is_interactive() {
-                self.visible.push(key.clone());
-            }
             let focused = self.focused.as_ref() == Some(&key);
-            let (mut canvas, hits) = entry.canvas(width, theme, focused, self.send_ready);
+            let (mut canvas, hits) = if placement.complete {
+                self.register(&key);
+                let Some(entry) = self.entries.get(&key) else {
+                    let y = viewport.y + u16::try_from(row.saturating_sub(top)).unwrap_or(0);
+                    f.render_widget(
+                        Paragraph::new("UI instance limit reached; start a new session.")
+                            .style(Style::default().fg(theme.error)),
+                        Rect::new(viewport.x + 2, y, width, 1),
+                    );
+                    continue;
+                };
+                if entry.is_interactive() {
+                    self.visible.push(key.clone());
+                }
+                entry.canvas(width, theme, focused, self.send_ready)
+            } else {
+                let document = if placement.source.trim_start().starts_with('{') {
+                    Document::preview(&placement.source)
+                } else {
+                    self.previews
+                        .entry((placement.owner, placement.ordinal))
+                        .or_default()
+                        .set(&placement.source)
+                };
+                (streaming_buffer(document, width, theme), Vec::new())
+            };
             let end = end.min(usize::from(canvas.area.height));
             if pinned {
                 let overlay = Rect::new(
@@ -2145,7 +2212,7 @@ impl Widgets {
                         canvas[(x, u16::try_from(offset).unwrap_or(0))].clone();
                 }
             }
-            if active {
+            if active && placement.complete {
                 let limit = end.saturating_sub(usize::from(pinned));
                 let screen = |rect: Rect, low: usize, high: usize| {
                     Rect::new(
@@ -2168,7 +2235,12 @@ impl Widgets {
                 }
                 // After the controls: an image button's corner tag must win
                 // over the button it sits on.
-                for target in entry.image_targets(width) {
+                for target in self
+                    .entries
+                    .get(&key)
+                    .into_iter()
+                    .flat_map(|entry| entry.image_targets(width))
+                {
                     if let Some((low, high)) = visible_rows(target.rect, first, limit) {
                         self.hits.push(Hit {
                             rect: screen(target.rect, low, high),
@@ -2690,3 +2762,7 @@ mod failure_band_tests {
 #[cfg(test)]
 #[path = "interactive/image_tests.rs"]
 mod image_tests;
+
+#[cfg(test)]
+#[path = "interactive/stream_tests.rs"]
+mod stream_tests;

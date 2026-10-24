@@ -1741,7 +1741,7 @@ impl App {
         }
         if self.interactive_ui {
             parts.push(Self::rendering_section());
-            parts.push(crate::interactive::INSTRUCTIONS.to_string());
+            parts.push(crate::interactive::instructions());
             if let Some(layouts) = self.layout_guidance() {
                 parts.push(layouts);
             }
@@ -2229,13 +2229,17 @@ fn ui_blocks(content: &str) -> Vec<UiBlock> {
             let count = trimmed.chars().take_while(|ch| *ch == marker).count();
             if count >= length && trimmed[count..].trim().is_empty() {
                 if ui {
-                    let title = serde_json::from_str::<serde_json::Value>(&source)
-                        .ok()
-                        .and_then(|value| {
-                            value
-                                .get("title")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_string)
+                    let title = crate::interactive::Document::preview(&source)
+                        .map(|document| document.title().to_string())
+                        .or_else(|| {
+                            serde_json::from_str::<serde_json::Value>(&source)
+                                .ok()
+                                .and_then(|value| {
+                                    value
+                                        .get("title")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_string)
+                                })
                         })
                         .filter(|title| !title.is_empty())
                         .unwrap_or_else(|| format!("#{}", blocks.len() + 1));
@@ -2502,7 +2506,7 @@ fn ui_failure_notes(content: &str) -> String {
         let path = error.path.replace(['\n', '\r'], " ");
         let _ = write!(
             notes,
-            "\n[nexus: the nexus-ui block {title:?} failed to render — {path}: {message}. Run ui_check and resend it if the user still needs it.]"
+            "\n[nexus: the nexus-ui block {title:?} failed to render — {path}: {message}. Correct the reported errors and resend it if the user still needs it.]"
         );
     }
     notes
@@ -2538,7 +2542,7 @@ fn ui_repair_history(
             "system",
             format!(
                 "{}\nIf multiple blocks need repair, return one corrected fenced block per input block, in the same order.",
-                crate::interactive::INSTRUCTIONS,
+                crate::interactive::instructions(),
             ),
         ),
         ChatMessage::text("assistant", source),
@@ -3123,7 +3127,7 @@ mod tests {
             .filter(|message| message.role == "assistant")
             .collect();
         let noted = format!(
-            "{bad}\n[nexus: the nexus-ui block \"Quiz\" failed to render — view[0]: unknown node type \"radio\" — valid: {}. Run ui_check and resend it if the user still needs it.]",
+            "{bad}\n[nexus: the nexus-ui block \"Quiz\" failed to render — view[0]: unknown node type \"radio\" — valid: {}. Correct the reported errors and resend it if the user still needs it.]",
             crate::interactive::NODE_TYPES
         );
         // Every broken turn carries its note, so an older turn replays the

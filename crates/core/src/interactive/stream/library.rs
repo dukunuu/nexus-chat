@@ -1,0 +1,415 @@
+//! Positional contracts for the terminal component library. Argument order is
+//! persistent data: append optional parameters, never reorder existing ones.
+
+use super::syntax::Expr;
+use anyhow::{Result, bail, ensure};
+use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, BTreeSet};
+
+// Name, internal node tag (empty for data items), ordered parameters.
+const COMPONENTS: &[(&str, &str, &str)] = &[
+    ("Panel", "panel", "title view frame? accent?"),
+    ("Hero", "hero", "title subtitle? badge? image? alt?"),
+    ("Text", "text", "text tone? rows?"),
+    ("Image", "image", "src alt? rows?"),
+    ("Columns", "columns", "items"),
+    ("Column", "", "title items"),
+    ("Item", "", "text mark?"),
+    ("Cards", "cards", "items"),
+    ("Card", "", "title text badge? tone? image? alt?"),
+    ("Stats", "stats", "items"),
+    ("Stat", "", "value label delta? tone?"),
+    ("Steps", "steps", "items"),
+    ("Step", "", "title text? state?"),
+    ("Callout", "callout", "tone text title?"),
+    ("Quote", "quote", "text by?"),
+    ("Divider", "divider", "label?"),
+    ("Buttons", "buttons", "items rows?"),
+    ("Button", "", "label action primary? body? image? alt?"),
+    ("Input", "input", "key label"),
+    ("Kv", "kv", "items"),
+    ("Table", "table", "columns rows_data select?"),
+    ("Progress", "progress", "label value max?"),
+    ("Bars", "bars", "items"),
+    ("Bar", "", "label value"),
+    ("Sparkline", "sparkline", "values rows?"),
+    ("Checklist", "checklist", "items"),
+    ("Check", "", "label key"),
+    ("Select", "select", "key label options"),
+    ("Stepper", "stepper", "key label min max step"),
+    ("Toggle", "toggle", "key label"),
+];
+
+pub(super) fn signatures() -> String {
+    COMPONENTS
+        .iter()
+        .map(|(name, _, fields)| {
+            format!(
+                "{name}({})",
+                fields.split_whitespace().collect::<Vec<_>>().join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(super) fn materialize(symbols: &BTreeMap<String, Expr>, partial: bool) -> Result<Value> {
+    let mut context = Context {
+        symbols,
+        partial,
+        visiting: BTreeSet::new(),
+        budget: 4096,
+        actions: Map::new(),
+    };
+    let root = Expr::Ref("root".into());
+    let mut value = context
+        .lower(&root, 0)?
+        .ok_or_else(|| anyhow::anyhow!("root is not available yet"))?;
+    ensure!(value.get("view").is_some(), "root must be a Panel");
+    let mut state = Map::new();
+    for (name, expression) in symbols {
+        if let Some(key) = name.strip_prefix('$') {
+            let value = context.lower(expression, 0)?.unwrap_or(Value::Null);
+            state.insert(key.into(), value);
+        }
+    }
+    value["version"] = 1.into();
+    value["state"] = state.into();
+    value["actions"] = context.actions.into();
+    if partial {
+        retain_valid_nodes(&mut value);
+    }
+    Ok(value)
+}
+
+// Validate each arriving sibling against the same runtime contract. A malformed
+// component or not-yet-declared binding cannot blank already valid elements.
+fn retain_valid_nodes(value: &mut Value) {
+    let nodes = value["view"].take();
+    let Some(nodes) = nodes.as_array() else {
+        return;
+    };
+    let actions = value["actions"].take();
+    value["view"] = Value::Array(Vec::new());
+    for node in nodes {
+        value["view"]
+            .as_array_mut()
+            .expect("view array")
+            .push(node.clone());
+        value["actions"] = used_actions(&value["view"], &actions);
+        if crate::interactive::Document::check_value(value.clone()).is_err() {
+            value["view"].as_array_mut().expect("view array").pop();
+        }
+    }
+    value["actions"] = used_actions(&value["view"], &actions);
+}
+
+fn used_actions(view: &Value, actions: &Value) -> Value {
+    let mut used = Map::new();
+    for node in view.as_array().into_iter().flatten() {
+        if node["type"].as_str() == Some("buttons") {
+            for button in node["items"].as_array().into_iter().flatten() {
+                if let Some(name) = button["action"].as_str()
+                    && let Some(action) = actions.get(name)
+                {
+                    used.insert(name.into(), action.clone());
+                }
+            }
+        }
+    }
+    used.into()
+}
+
+struct Context<'a> {
+    symbols: &'a BTreeMap<String, Expr>,
+    partial: bool,
+    visiting: BTreeSet<String>,
+    budget: usize,
+    actions: Map<String, Value>,
+}
+impl Context<'_> {
+    fn lower(&mut self, expression: &Expr, depth: usize) -> Result<Option<Value>> {
+        ensure!(
+            depth < 32 && self.budget > 0,
+            "UI reference expansion exceeds budget"
+        );
+        self.budget -= 1;
+        Ok(Some(match expression {
+            Expr::Literal(value) => value.clone(),
+            Expr::State(name) => json!({"get":name}),
+            Expr::Ref(name) => {
+                if !self.visiting.insert(name.clone()) {
+                    ensure!(self.partial, "cyclic reference: {name}");
+                    return Ok(None);
+                }
+                let result = if let Some(expression) = self.symbols.get(name) {
+                    self.lower(expression, depth + 1)
+                } else {
+                    ensure!(self.partial, "unresolved reference: {name}");
+                    Ok(None)
+                };
+                self.visiting.remove(name);
+                return result;
+            }
+            Expr::Array(items) => {
+                let mut values = Vec::new();
+                for item in items {
+                    match self.lower(item, depth + 1) {
+                        Ok(Some(value)) => values.push(value),
+                        Ok(None) => {}
+                        Err(_) if self.partial => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                values.into()
+            }
+            Expr::Call(name, args) => return self.call(name, args, depth + 1),
+            Expr::Unary(operator, expression) => {
+                let Some(value) = self.lower(expression, depth + 1)? else {
+                    return Ok(None);
+                };
+                if *operator == '!' {
+                    json!({"not":value})
+                } else if let Some(number) = value.as_f64() {
+                    json!(-number)
+                } else {
+                    json!({"sub":[0,value]})
+                }
+            }
+            Expr::Binary(operator, left, right) => {
+                let Some(left) = self.lower(left, depth + 1)? else {
+                    return Ok(None);
+                };
+                let Some(right) = self.lower(right, depth + 1)? else {
+                    return Ok(None);
+                };
+                let op = match operator.as_str() {
+                    "+" => "add",
+                    "-" => "sub",
+                    "*" => "mul",
+                    "/" => "div",
+                    "%" => "mod",
+                    "==" | "!=" => "eq",
+                    "<" | ">=" => "lt",
+                    ">" | "<=" => "gt",
+                    "&&" => "and",
+                    "||" => "or",
+                    _ => bail!("unknown operator"),
+                };
+                let value = json!({op:[left,right]});
+                if matches!(operator.as_str(), "!=" | ">=" | "<=") {
+                    json!({"not":value})
+                } else {
+                    value
+                }
+            }
+            Expr::Conditional(condition, yes, no) => {
+                let Some(condition) = self.lower(condition, depth + 1)? else {
+                    return Ok(None);
+                };
+                let Some(yes) = self.lower(yes, depth + 1)? else {
+                    return Ok(None);
+                };
+                let Some(no) = self.lower(no, depth + 1)? else {
+                    return Ok(None);
+                };
+                json!({"if":[condition,yes,no]})
+            }
+        }))
+    }
+    fn binding(expression: &Expr) -> Result<String> {
+        match expression {
+            Expr::State(name) => Ok(name.clone()),
+            _ => bail!("binding must be a $state variable"),
+        }
+    }
+    fn is_textual(&mut self, expression: &Expr, depth: usize) -> bool {
+        if depth >= 32 || self.budget == 0 {
+            return false;
+        }
+        self.budget -= 1;
+        match expression {
+            Expr::Literal(Value::String(_)) => true,
+            Expr::Ref(name) => self
+                .symbols
+                .get(name)
+                .is_some_and(|expr| self.is_textual(expr, depth + 1)),
+            Expr::State(name) => self
+                .symbols
+                .get(&format!("${name}"))
+                .is_some_and(|expr| self.is_textual(expr, depth + 1)),
+            Expr::Binary(operator, left, right) if operator == "+" => {
+                self.is_textual(left, depth + 1) || self.is_textual(right, depth + 1)
+            }
+            _ => false,
+        }
+    }
+    fn template(&mut self, expression: &Expr, depth: usize) -> Result<Option<Value>> {
+        ensure!(
+            depth < 32 && self.budget > 0,
+            "template exceeds expansion budget"
+        );
+        self.budget -= 1;
+        match expression {
+            Expr::State(name) => Ok(Some(format!("{{{{{name}}}}}").into())),
+            Expr::Binary(operator, left, right) if operator == "+" => {
+                ensure!(
+                    self.is_textual(left, 0) || self.is_textual(right, 0),
+                    "numeric arithmetic in text is unsupported; use Progress/Bars or a scalar state value"
+                );
+                let Some(left) = self.template(left, depth + 1)? else {
+                    return Ok(None);
+                };
+                let Some(right) = self.template(right, depth + 1)? else {
+                    return Ok(None);
+                };
+                Ok(Some(
+                    format!(
+                        "{}{}",
+                        left.as_str().unwrap_or_default(),
+                        right.as_str().unwrap_or_default()
+                    )
+                    .into(),
+                ))
+            }
+            Expr::Ref(name) => {
+                ensure!(
+                    self.visiting.insert(name.clone()),
+                    "cyclic template reference: {name}"
+                );
+                let result = match self.symbols.get(name) {
+                    Some(expression) => self.template(expression, depth + 1),
+                    None if self.partial => Ok(None),
+                    None => bail!("unresolved reference: {name}"),
+                };
+                self.visiting.remove(name);
+                result
+            }
+            Expr::Literal(Value::Null) => Ok(Some(Value::Null)),
+            Expr::Literal(Value::String(text)) => Ok(Some(text.clone().into())),
+            Expr::Literal(value) => Ok(Some(value.to_string().into())),
+            _ => bail!(
+                "text supports literals, $state and string concatenation; use Progress/Bars for numeric expressions"
+            ),
+        }
+    }
+    fn call(&mut self, name: &str, args: &[Expr], depth: usize) -> Result<Option<Value>> {
+        if name.starts_with('@') || name == "Action" {
+            return self.function(name, args, depth);
+        }
+        let Some((_, tag, fields)) = COMPONENTS
+            .iter()
+            .find(|(component, _, _)| *component == name)
+        else {
+            bail!(
+                "unknown component {name}; supported signatures:\n{}",
+                signatures()
+            );
+        };
+        let fields: Vec<_> = fields.split_whitespace().collect();
+        ensure!(args.len() <= fields.len(), "too many arguments for {name}");
+        let mut object = Map::new();
+        if !tag.is_empty() && *tag != "panel" {
+            object.insert("type".into(), (*tag).into());
+        }
+        for (index, field) in fields.iter().enumerate() {
+            let key = field.trim_end_matches('?');
+            let optional = field.ends_with('?');
+            let Some(expression) = args.get(index) else {
+                if self.partial && !optional {
+                    return Ok(None);
+                }
+                ensure!(optional, "{name} requires {key}");
+                continue;
+            };
+            if optional && matches!(expression, Expr::Literal(Value::Null)) {
+                continue;
+            }
+            let value = if key == "key" || key == "select" {
+                Some(Self::binding(expression)?.into())
+            } else if matches!(
+                key,
+                "title" | "subtitle" | "text" | "label" | "badge" | "by" | "delta"
+            ) || name == "Stat" && key == "value"
+            {
+                self.template(expression, depth + 1)?
+            } else {
+                self.lower(expression, depth + 1)?
+            };
+            let Some(mut value) = value else {
+                if optional {
+                    continue;
+                }
+                return Ok(None);
+            };
+            if name == "Button" && key == "action" {
+                let steps = if value.get("op").is_some() {
+                    vec![value]
+                } else {
+                    value
+                        .as_array()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Button action must be @Set, @Answer, @ToAssistant or Action"
+                            )
+                        })?
+                        .clone()
+                };
+                let id = format!("action_{}", self.actions.len());
+                self.actions.insert(id.clone(), steps.into());
+                value = id.into();
+            }
+            object.insert(key.into(), value);
+        }
+        Ok(Some(object.into()))
+    }
+    fn function(&mut self, name: &str, args: &[Expr], depth: usize) -> Result<Option<Value>> {
+        let count = match name {
+            "@Answer" => 0,
+            "@Set" => 2,
+            "@If" => 3,
+            "Action" | "@ToAssistant" | "@Number" | "@Random" => 1,
+            _ => bail!(
+                "unsupported function {name}; valid: @Set, @Answer, @ToAssistant, @Number, @Random, @If, Action"
+            ),
+        };
+        ensure!(args.len() == count, "{name} expects {count} arguments");
+        if name == "@Answer" {
+            return Ok(Some(json!({"op":"answer"})));
+        }
+        if name == "@ToAssistant" {
+            return Ok(self
+                .template(&args[0], depth + 1)?
+                .map(|text| json!({"op":"send","text":text})));
+        }
+        if name == "@Set" {
+            let key = Self::binding(&args[0])?;
+            return Ok(self
+                .lower(&args[1], depth + 1)?
+                .map(|value| json!({"op":"set","key":key,"value":value})));
+        }
+        let mut values = Vec::new();
+        for expression in args {
+            let Some(value) = self.lower(expression, depth + 1)? else {
+                return Ok(None);
+            };
+            values.push(value);
+        }
+        Ok(Some(match name {
+            "Action" => {
+                let steps = values.remove(0);
+                ensure!(
+                    steps
+                        .as_array()
+                        .is_some_and(|steps| steps.iter().all(|step| step.get("op").is_some())),
+                    "Action expects an array of action calls"
+                );
+                steps
+            }
+            "@Number" => json!({"number":values.remove(0)}),
+            "@Random" => json!({"random":values.remove(0)}),
+            "@If" => json!({"if":values}),
+            _ => unreachable!("validated function"),
+        }))
+    }
+}

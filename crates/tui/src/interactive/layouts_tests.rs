@@ -262,23 +262,23 @@ fn cards_form_a_bordered_responsive_grid() {
     let text = rows.join("\n");
     assert!(rows[0].starts_with("╔═ Overview "), "{text}");
     // 80 columns fit three cards per row; four cards balance into a 2x2 grid.
-    let tops: Vec<_> = rows.iter().filter(|row| row.contains('┌')).collect();
+    let tops: Vec<_> = rows.iter().filter(|row| row.contains('╭')).collect();
     assert_eq!(tops.len(), 2, "{text}");
-    assert_eq!(tops[0].matches('┌').count(), 2, "{text}");
-    assert_eq!(tops[1].matches('┌').count(), 2, "{text}");
-    assert!(text.contains("[ fast ]"), "{text}");
+    assert_eq!(tops[0].matches('╭').count(), 2, "{text}");
+    assert_eq!(tops[1].matches('╭').count(), 2, "{text}");
+    assert!(text.contains(" fast "), "{text}");
     assert!(text.contains("Builds finish in"), "{text}");
     let narrow = render_at(&cards(), 30).1;
     assert!(
         narrow
             .iter()
-            .filter(|row| row.contains('┌'))
-            .all(|row| row.matches('┌').count() == 1)
+            .filter(|row| row.contains('╭'))
+            .all(|row| row.matches('╭').count() == 1)
     );
     let theme = Theme::default();
     let (canvas, _) = entry(&cards()).canvas(80, &theme, false, true);
-    let top = rows.iter().position(|row| row.contains('┌')).unwrap();
-    let x = u16::try_from(rows[top].chars().position(|c| c == '┌').unwrap()).unwrap();
+    let top = rows.iter().position(|row| row.contains('╭')).unwrap();
+    let x = u16::try_from(rows[top].chars().position(|c| c == '╭').unwrap()).unwrap();
     assert_eq!(
         canvas[(x, u16::try_from(top).unwrap())].fg,
         theme.border_dim
@@ -302,7 +302,7 @@ fn hero_with_badge_places_the_badge_on_the_right() {
     );
     let title = rows.iter().find(|row| row.contains("Nexus 0.2")).unwrap();
     assert!(
-        title.trim_end_matches(['╎', ' ']).ends_with("[ NEW ]"),
+        title.trim_end_matches(['╎', ' ']).ends_with("NEW"),
         "{title}"
     );
     assert!(text.contains("Designed replies land today"), "{text}");
@@ -484,22 +484,19 @@ fn cards_in_a_row_share_one_height_and_badges_sit_on_the_title_row() {
     let tops: Vec<_> = lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| line.matches('┌').count() == 2)
+        .filter(|(_, line)| line.matches('╭').count() == 2)
         .map(|(row, _)| row)
         .collect();
     let bottoms: Vec<_> = lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| line.matches('└').count() == 2)
+        .filter(|(_, line)| line.matches('╰').count() == 2)
         .map(|(row, _)| row)
         .collect();
     assert_eq!(tops.len(), 2, "{lines:#?}");
     assert_eq!(bottoms.len(), 2, "{lines:#?}");
     let speed = lines.iter().find(|line| line.contains("Speed")).unwrap();
-    assert!(
-        speed.contains("[ fast ]"),
-        "badge on the title row: {speed}"
-    );
+    assert!(speed.contains(" fast "), "badge on the title row: {speed}");
 }
 
 #[test]

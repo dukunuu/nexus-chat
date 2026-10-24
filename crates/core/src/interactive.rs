@@ -8,6 +8,18 @@ use anyhow::{Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+mod stream;
+pub use stream::{StreamParser, component_signatures};
+
+/// Model guidance with positional signatures derived from the native library.
+#[must_use]
+pub fn instructions() -> String {
+    format!(
+        "{INSTRUCTIONS}\n### Terminal component signatures\n{}",
+        component_signatures()
+    )
+}
+
 /// Model instructions advertised only by clients with an interactive renderer.
 pub const INSTRUCTIONS: &str = include_str!("../assets/prompts/interactive-ui.md");
 /// Display-only layout guidance, advertised according to reply style.
@@ -883,28 +895,38 @@ impl Document {
         if !errors.is_empty() {
             return Err(errors);
         }
-        let mut stream = serde_json::Deserializer::from_str(source).into_iter::<Value>();
-        let mut value = match stream
-            .next()
-            .unwrap_or_else(|| serde_json::from_str(source))
-        {
-            Ok(value) => value,
-            Err(error) => {
-                return Err(vec![CheckError {
-                    path: "$".into(),
-                    message: error.to_string(),
-                }]);
-            }
-        };
-        if !source[stream.byte_offset()..]
-            .chars()
-            .all(|ch| ch.is_whitespace() || matches!(ch, '}' | ']'))
-        {
-            return Err(vec![CheckError {
-                path: "$".into(),
-                message: "trailing characters after UI document".into(),
-            }]);
+        Self::check_value(stream::decode(source)?)
+    }
+
+    /// Validated, inert snapshot of the complete elements received so far.
+    /// An unfinished or invalid element never enters the preview. Random initial
+    /// state uses its first choice until the final document is initialized.
+    #[must_use]
+    pub fn preview(source: &str) -> Option<Self> {
+        if source.len() > MAX_SOURCE {
+            return None;
         }
+        Self::check(source)
+            .ok()
+            .or_else(|| stream::preview(source))
+            .map(Self::inert_preview)
+    }
+
+    fn inert_preview(mut self) -> Self {
+        for value in self.state.values_mut() {
+            if let Some(first) = value
+                .get("random")
+                .and_then(Value::as_array)
+                .and_then(|v| v.first())
+            {
+                *value = first.clone();
+            }
+        }
+        self
+    }
+
+    fn check_value(mut value: Value) -> std::result::Result<Self, Vec<CheckError>> {
+        let mut errors = Vec::new();
         if let Some(actions) = value.get_mut("actions").and_then(Value::as_object_mut) {
             for steps in actions.values_mut().filter_map(Value::as_array_mut) {
                 for step in steps {

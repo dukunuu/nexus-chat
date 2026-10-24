@@ -429,7 +429,7 @@ impl App {
         }
         if self.interactive_ui {
             instructions_chars += Self::rendering_section().chars().count()
-                + crate::interactive::INSTRUCTIONS.chars().count()
+                + crate::interactive::instructions().chars().count()
                 + self.layout_guidance().map_or(0, |s| s.chars().count());
         }
         instructions_chars +=

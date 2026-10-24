@@ -113,3 +113,28 @@ fn a_broken_block_shows_its_reason_and_readable_source_without_placeholder_rows(
         .collect::<String>();
     assert!(!reason.contains("version"), "{reason}");
 }
+
+#[test]
+fn native_programs_reserve_live_elements_and_keep_the_original_source_copyable() {
+    let source = "root = Panel(\"Live\", [heading])\nheading = Hero(\"Welcome to your weekend";
+    let open = format!("```nexus-ui\n{source}");
+    let before = render(&open, 72, colors());
+    assert_eq!(before.widgets.len(), 1);
+    assert!(!before.widgets[0].complete);
+    assert!(before.widgets[0].height > 4);
+    assert_eq!(before.blocks, [source]);
+    assert!(!plain(&before).contains("root ="));
+    let after = render(&format!("{open}\")\n```"), 72, colors());
+    assert!(after.widgets[0].complete);
+    assert_eq!(before.widgets[0].height, after.widgets[0].height);
+    assert_eq!(before.lines.len(), after.lines.len());
+}
+
+#[test]
+fn invalid_finished_programs_report_a_diagnostic_instead_of_becoming_active() {
+    let source = "root = Panel(\"Bad\", [NotAComponent(\"Oops\")])";
+    let rendered = render(&format!("```nexus-ui\n{source}\n```"), 72, colors());
+    assert!(rendered.widgets.is_empty());
+    assert!(plain(&rendered).contains("unknown component NotAComponent"));
+    assert_eq!(rendered.blocks, [source]);
+}

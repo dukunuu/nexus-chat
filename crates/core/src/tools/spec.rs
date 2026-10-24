@@ -364,25 +364,6 @@ pub(super) static SKILLS: ToolSpec = ToolSpec {
     ],
 };
 
-pub(super) static UI_CHECK: ToolSpec = ToolSpec {
-    name: "ui_check",
-    purpose: "Validate exact nexus-ui JSON before emitting it. Returns located errors and valid alternatives, or ok with counts and a plain preview. Fix errors and check again; emit only the checked source.",
-    selector: None,
-    params: &[Param {
-        name: "source",
-        kind: Kind::StrOrEmpty,
-        doc: "exact JSON inside the nexus-ui fence (fence lines also accepted)",
-    }],
-    actions: &[ActionSpec {
-        name: "ui_check",
-        summary: "Check a UI document without side effects",
-        required: &["source"],
-        optional: &[],
-        read_only: true,
-        internal: "ui_check",
-    }],
-};
-
 pub(super) static TUI_APP: ToolSpec = ToolSpec {
     name: "tui_app",
     purpose: "Sandboxed Rhai terminal apps in tui_apps/<name>/app.rhai. Export init()->map, update(state,event)->map, view(state)->#{title,view:[nexus-ui nodes or canvas]}. Canvas: #{type:canvas,rows:1-16,cells:[[x,y,char,tone]]}. state.tick_ms>=100 enables ticks. No host access. Preview before open; read gives hash-lines. Names: [a-z0-9-]{1,32}.",
@@ -1517,7 +1498,6 @@ const TOOLS: &[&ToolSpec] = &[
     &SKILLS,
     &SCRIPTS,
     &TUI_APP,
-    &UI_CHECK,
     &SEARCH,
     &FETCH_URL,
     &FS,
@@ -1641,7 +1621,6 @@ mod tests {
             "deck_export",
         ),
         ("task", r#"{"prompt":"x"}"#, "task"),
-        ("ui_check", r#"{"source":"{}"}"#, "ui_check"),
         ("skills", r#"{"action":"load","name":"x"}"#, "skill"),
         (
             "skills",
@@ -1904,7 +1883,6 @@ mod tests {
             "tui_app_list",
             "tui_app_read",
             "tui_app_preview",
-            "ui_check",
             "list_references",
             "fs_list",
             "fs_glob",
@@ -2084,7 +2062,6 @@ mod tests {
                 "fetch_url" => json!(["url"]),
                 "research_lookup" => json!(["scope"]),
                 "task" => json!(["prompt"]),
-                "ui_check" => json!(["source"]),
                 _ => json!(["action"]),
             };
             assert_eq!(def.parameters["required"], expected, "{}", tool.name);

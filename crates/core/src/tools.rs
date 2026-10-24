@@ -253,7 +253,7 @@ pub struct ToolBox {
     client: reqwest::Client,
     discussions: Arc<DiscussionSearch>,
     image_search: ImageSearch,
-    /// Safe image verifier, sharing the device-local preview cache.
+    /// Remote-image preference shared with image-consuming tools.
     pub remote_images: Option<Arc<crate::remote_image::Fetcher>>,
     /// Test seam: the downloader the `deck` tool uses for https images. Normally
     /// absent, and each deck gets one rooted at its own `assets/` folder.
@@ -750,7 +750,7 @@ impl ToolExecutor for ToolBox {
                 exec: true,
                 ..Effect::barrier()
             },
-            Ok("shell_log" | "proc_read" | "proc_list" | "ui_check") => Effect::read_only(),
+            Ok("shell_log" | "proc_read" | "proc_list") => Effect::read_only(),
             Ok("proc_kill") => Effect::barrier(),
             Ok(
                 action @ ("fs_list" | "fs_glob" | "fs_grep" | "fs_read" | "fs_edit" | "fs_write"
@@ -1359,7 +1359,6 @@ impl ToolBox {
             defs.push(def(&spec::TASK, &["task"]));
         }
         if self.interactive_ui {
-            defs.push(def(&spec::UI_CHECK, &["ui_check"]));
             // `!` lines run only in agent mode, which is when a workspace is open.
             if self.workspace.is_some() {
                 defs.push(def(&spec::PROPOSE_COMMAND, &["propose_command"]));
@@ -2085,63 +2084,6 @@ impl ToolBox {
                     Ok(report) => (report, "Sub-agent finished".into()),
                     Err(error) => (format!("sub-agent failed: {error}"), "blocked".into()),
                 };
-            }
-            "ui_check" => {
-                if !self.interactive_ui {
-                    return ("ui_check needs the terminal UI".into(), "blocked".into());
-                }
-                let value: serde_json::Value =
-                    serde_json::from_str(args).expect("validated ui_check arguments");
-                let source = ui_check_source(value["source"].as_str().expect("validated source"));
-                let mut image_note = String::new();
-                let checked = match crate::interactive::Document::check(source) {
-                    Ok(document) => {
-                        let (errors, note) = check_ui_images(
-                            document.images(),
-                            self.remote_images.as_ref(),
-                            Duration::from_secs(8),
-                        )
-                        .await;
-                        image_note = note;
-                        if errors.is_empty() {
-                            Ok(document)
-                        } else {
-                            Err(errors)
-                        }
-                    }
-                    Err(errors) => Err(errors),
-                };
-                match checked {
-                    Ok(document) => (
-                        format!(
-                            "ok · {:?} · {} controls, {} actions · {}{image_note}\npreview:\n{}",
-                            document.title(),
-                            document.control_count(),
-                            document.action_count(),
-                            if document.is_static() {
-                                "static"
-                            } else {
-                                "interactive"
-                            },
-                            document.plain_text().chars().take(800).collect::<String>()
-                        ),
-                        "UI check ok".into(),
-                    ),
-                    Err(errors) => (
-                        format!(
-                            "{} error{}\n{}\nValid node types: {}{image_note}",
-                            errors.len(),
-                            if errors.len() == 1 { "" } else { "s" },
-                            errors
-                                .iter()
-                                .map(|error| format!("{}: {}", error.path, error.message))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                            crate::interactive::NODE_TYPES
-                        ),
-                        format!("UI check · {} errors", errors.len()),
-                    ),
-                }
             }
             "tui_app_list" | "tui_app_read" | "tui_app_write" | "tui_app_edit"
             | "tui_app_preview" | "tui_app_open" => {
@@ -7279,59 +7221,6 @@ fn format_image_results(query: &str, hits: &[ImageHit]) -> String {
         .join("\n\n")
 }
 
-async fn check_ui_images(
-    images: Vec<(String, &str)>,
-    fetcher: Option<&Arc<crate::remote_image::Fetcher>>,
-    budget: Duration,
-) -> (Vec<crate::interactive::CheckError>, String) {
-    use futures_util::StreamExt as _;
-    if images.is_empty() {
-        return (Vec::new(), String::new());
-    }
-    let Some(fetcher) = fetcher.filter(|fetcher| fetcher.enabled()) else {
-        return (Vec::new(), "\nimages skipped · remote_images off".into());
-    };
-    let mut seen = std::collections::HashSet::new();
-    let images: Vec<_> = images
-        .into_iter()
-        .filter(|(_, url)| seen.insert(*url))
-        .collect();
-    let mut note = if images.len() > 8 {
-        "\nwarning · only the first 8 images were checked".into()
-    } else {
-        String::new()
-    };
-    let mut pending: futures_util::stream::FuturesUnordered<_> = images
-        .into_iter()
-        .take(8)
-        .map(|(path, url)| async move { (path, fetcher.fetch(url).await) })
-        .collect();
-    let deadline = tokio::time::Instant::now() + budget;
-    let mut errors = Vec::new();
-    loop {
-        match tokio::time::timeout_at(deadline, pending.next()).await {
-            Ok(Some((path, Err(error)))) => {
-                let reason = error.to_string();
-                if reason.contains("elapsed") || reason.contains("deadline") {
-                    let _ = write!(note, "\nwarning · {path}: image check timed out");
-                } else {
-                    errors.push(crate::interactive::CheckError {
-                        path,
-                        message: format!("image did not load ({reason}) — copy the URL exactly from a search result, use search mode \"images\", or remove the image"),
-                    });
-                }
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => break,
-            Err(_) => {
-                note.push_str("\nwarning · image check timed out");
-                break;
-            }
-        }
-    }
-    (errors, note)
-}
-
 /// Normalize a source URL for dedup: lowercase the host only (path/query
 /// case is preserved — some servers are case-sensitive there), strip
 /// `utm_*`/`fbclid` query params, and drop a trailing `/` and any fragment.
@@ -7820,28 +7709,6 @@ fn build_lighting_filter(preset: &str, intensity: f64) -> String {
         }
         _ => String::new(),
     }
-}
-
-/// Accept a complete fence pasted into `ui_check` as well as bare JSON.
-pub(crate) fn ui_check_source(source: &str) -> &str {
-    let trimmed = source.trim();
-    if let Some((opening, body)) = trimmed.split_once('\n') {
-        let fence = opening.chars().next().unwrap_or_default();
-        let count = opening.chars().take_while(|ch| *ch == fence).count();
-        if matches!(fence, '`' | '~')
-            && count >= 3
-            && opening[count..]
-                .split_whitespace()
-                .next()
-                .is_some_and(|lang| lang.eq_ignore_ascii_case("nexus-ui"))
-            && let Some((source, closing)) = body.rsplit_once('\n')
-            && closing.trim().chars().all(|ch| ch == fence)
-            && closing.trim().len() >= count
-        {
-            return source;
-        }
-    }
-    source
 }
 
 #[cfg(test)]
@@ -11917,81 +11784,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ui_check_is_terminal_only_read_only_and_reports_preview_or_all_errors() {
-        let mut toolbox = bare_toolbox();
-        let source = r#"{"version":1,"title":"Quiz","view":[{"type":"buttons","items":[{"label":"A","action":"pick"}]}],"actions":{"pick":[{"op":"answer"}]}}"#;
-        let args = json!({"source":source}).to_string();
-        assert!(!tool_names(&toolbox).contains(&"ui_check".into()));
-        let (result, status) = toolbox.run("ui_check", &args).await;
-        assert_eq!(result, "ui_check needs the terminal UI");
-        assert_eq!(status, "blocked");
-        toolbox.interactive_ui = true;
-        toolbox.require_approval = true;
-        assert!(tool_names(&toolbox).contains(&"ui_check".into()));
-        let def = toolbox
-            .defs()
-            .into_iter()
-            .find(|def| def.name == "ui_check")
-            .unwrap();
-        assert_eq!(def.parameters["required"], json!(["source"]));
-        assert_eq!(def.parameters["properties"].as_object().unwrap().len(), 1);
-        assert!(is_read_only_tool("ui_check", &args));
-        assert_eq!(toolbox.effect("ui_check", &args), Effect::read_only());
-        let (result, _) = toolbox.run("ui_check", &args).await;
-        assert_eq!(
-            result,
-            "ok · \"Quiz\" · 1 controls, 1 actions · interactive\npreview:\nQuiz\nA"
-        );
-        for fence in ["```nexus-ui", "~~~NeXuS-Ui"] {
-            let args = json!({"source":format!("{fence}\n{source}\n{}", &fence[..3])}).to_string();
-            assert_eq!(toolbox.run("ui_check", &args).await.0, result);
+    async fn ui_check_is_neither_advertised_nor_executable() {
+        for interactive_ui in [false, true] {
+            let mut toolbox = bare_toolbox();
+            toolbox.interactive_ui = interactive_ui;
+            assert!(!tool_names(&toolbox).contains(&"ui_check".into()));
+            let args = json!({"source":"root = Panel(\"Summary\", [Text(\"Hello\")])"}).to_string();
+            assert!(!is_read_only_tool("ui_check", &args));
+            let (result, _) = toolbox.run("ui_check", &args).await;
+            assert_eq!(result, "unknown tool: ui_check");
         }
-        let labeled = source.replace(r#"{"op":"answer"}"#, r#"{"op":"answer","label":"x"}"#);
-        assert_eq!(
-            toolbox
-                .run("ui_check", &json!({"source":labeled}).to_string())
-                .await
-                .0,
-            result
-        );
-        let source = r#"{"version":1,"title":"Quiz","view":[{"type":"radio"},{"type":"text","text":"Hi","invented":true}],"actions":{"pick":[{"op":"answer","label":"x"}]}}"#;
-        let (errors, _) = toolbox
-            .run("ui_check", &json!({"source":source}).to_string())
-            .await;
-        assert!(errors.starts_with("2 errors\n"), "{errors}");
-        for text in [
-            "view[0]: unknown node type \"radio\"",
-            "view[1]: unknown field \"invented\"",
-            "Valid node types:",
-        ] {
-            assert!(errors.contains(text), "{errors}");
-        }
-        let source = r#"{"version":1,"title":"Summary","view":[{"type":"text","text":"Hi"}]}"#;
-        assert!(
-            toolbox
-                .run("ui_check", &json!({"source":source}).to_string())
-                .await
-                .0
-                .starts_with(
-                    "ok · \"Summary\" · 0 controls, 0 actions · static\npreview:\nSummary\nHi"
-                )
-        );
-        let source =
-            json!({"version":1,"title":"Long","view":[{"type":"text","text":"é".repeat(1000)}]})
-                .to_string();
-        let result = toolbox
-            .run("ui_check", &json!({"source":source}).to_string())
-            .await
-            .0;
-        assert_eq!(
-            result.split_once("preview:\n").unwrap().1.chars().count(),
-            800
-        );
-        let args = json!({"calls":[{"tool":"ui_check","arguments":{"source":"{}"}},{"tool":"ui_check","arguments":{"source":"{"}}]}).to_string();
-        let result = toolbox.run("batch", &args).await.0;
-        assert!(result.contains("[1/2]"), "{result}");
-        assert!(result.contains("[2/2]"), "{result}");
-        assert!(!result.contains("needs approval"), "{result}");
     }
 
     #[tokio::test]

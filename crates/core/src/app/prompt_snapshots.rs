@@ -79,27 +79,13 @@ fn tui_prompt_snapshot() {
 }
 
 #[test]
-fn ui_check_tool_def_snapshot() {
-    let mut toolbox = crate::tools::ToolBox::new(
-        std::path::PathBuf::new(),
-        None,
-        None,
-        "auto".into(),
-        Vec::new(),
-        None,
-        None,
-        None,
-    );
-    toolbox.interactive_ui = true;
-    let definition = toolbox
-        .defs()
-        .into_iter()
-        .find(|tool| tool.name == "ui_check")
-        .unwrap();
-    assert_snapshot(
-        "ui-check-def.json",
-        &(serde_json::to_string_pretty(&definition).unwrap() + "\n"),
-    );
+fn terminal_ui_prompt_streams_without_a_preflight_tool() {
+    let mut a = fixture_app();
+    a.interactive_ui = true;
+    let prompt = a.system_prompt();
+    assert!(prompt.contains(crate::interactive::INSTRUCTIONS));
+    assert!(prompt.contains("no preflight tool call is needed"));
+    assert!(!prompt.contains("ui_check"));
 }
 
 #[test]
@@ -129,7 +115,7 @@ fn chat_prompt_and_tool_defs_fit_the_token_budget() {
 
 /// Field and operator names from the `nexus-ui` schema (`interactive-ui.md`), not tools.
 const NEXUS_UI_SCHEMA_WORDS: &[&str] = &[
-    "version", "title", "state", "view", "body", "actions", "number",
+    "version", "title", "state", "view", "body", "actions", "number", "null", "true",
 ];
 
 #[test]

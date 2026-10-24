@@ -293,6 +293,7 @@ fn choice_list_card_at_80_columns_has_chips_labels_and_right_edge_arrows() {
         format!("╭{} ⤢ ╮", "─".repeat(75)),
         frame(""),
         frame(" A little memory nook"),
+        frame(""),
         frame(" Pick one thread, and we'll follow it gently."),
         frame(""),
         format!(
@@ -313,8 +314,8 @@ fn choice_list_card_at_80_columns_has_chips_labels_and_right_edge_arrows() {
     assert_eq!(rows(&canvas), expected);
     assert_eq!(canvas[(2, 2)].fg, theme.accent2);
     assert!(canvas[(2, 2)].modifier.contains(Modifier::BOLD));
-    assert_eq!(canvas[(2, 3)].fg, theme.fg_dim);
-    for (item, y) in (5..8).enumerate() {
+    assert_eq!(canvas[(2, 4)].fg, theme.fg_dim);
+    for (item, y) in (6..9).enumerate() {
         assert_eq!(hits[item], (Rect::new(2, y, 76, 1), item));
         assert_eq!(canvas[(3, y)].bg, theme.control);
         assert_ne!(canvas[(3, y)].bg, theme.bg);
@@ -322,11 +323,11 @@ fn choice_list_card_at_80_columns_has_chips_labels_and_right_edge_arrows() {
         assert_eq!(canvas[(77, y)].fg, theme.fg_dim);
     }
     let (focused, _) = entry(&nook()).canvas(80, &theme, true, true);
-    assert_eq!(focused[(6, 5)].fg, theme.accent);
+    assert_eq!(focused[(6, 6)].fg, theme.accent);
     for x in 5..78 {
-        assert_eq!(focused[(x, 5)].bg, theme.selection);
+        assert_eq!(focused[(x, 6)].bg, theme.selection);
     }
-    assert_eq!(focused[(6, 6)].bg, theme.bg);
+    assert_eq!(focused[(6, 7)].bg, theme.bg);
     assert!(rows(&focused).last().unwrap().contains("1–3 pick"));
 }
 
@@ -350,13 +351,13 @@ fn long_choices_wrap_under_the_label_and_reserve_exactly_the_drawn_height() {
         assert_eq!(hits[1].0.width, width - 4);
         assert_eq!(hits[1].0.x, 2);
         if width == 80 {
-            assert_eq!(hits[1].0, Rect::new(2, 6, 76, 2));
+            assert_eq!(hits[1].0, Rect::new(2, 7, 76, 2));
             let text = rows(&canvas);
-            assert!(text[6].starts_with("│  2  I want to tell you about dinner"));
-            assert!(text[7].starts_with("│     home afterwards."));
-            assert_eq!(canvas[(77, 6)].symbol(), "→");
-            assert_eq!(canvas[(77, 7)].symbol(), " ");
-            assert_eq!(hits[2].0.y, 8);
+            assert!(text[7].starts_with("│  2  I want to tell you about dinner"));
+            assert!(text[8].starts_with("│     home afterwards."));
+            assert_eq!(canvas[(77, 7)].symbol(), "→");
+            assert_eq!(canvas[(77, 8)].symbol(), " ");
+            assert_eq!(hits[2].0.y, 9);
         }
     }
 }
