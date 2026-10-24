@@ -5925,10 +5925,10 @@ fn helper_of(a: &App) -> Option<(BackendTag, String)> {
 #[test]
 fn auto_helper_table_has_one_entry_per_backend() {
     for (tag, expected) in [
-        (BackendTag::OpenRouter, "google/gemini-2.5-flash-lite"),
-        (BackendTag::OpenAi, "gpt-4.1-mini"),
-        (BackendTag::Codex, "gpt-5.6-luna"),
-        (BackendTag::OpencodeGo, "deepseek-v4-flash"),
+        (BackendTag::OpenRouter, "openai/gpt-6-luna"),
+        (BackendTag::OpenAi, "gpt-6-luna"),
+        (BackendTag::Codex, "gpt-6-luna"),
+        (BackendTag::OpencodeGo, "gpt-6-luna"),
         // A local runtime serves whatever the user installed: no cheap pick.
         (BackendTag::Local, ""),
     ] {
@@ -5943,25 +5943,25 @@ fn auto_helper_is_the_cheap_model_of_the_active_backend() {
             OpenRouter::openrouter_flavor("k".into()),
             "a/chat",
             BackendTag::OpenRouter,
-            "google/gemini-2.5-flash-lite",
+            "openai/gpt-6-luna",
         ),
         (
             OpenRouter::openai("k".into()),
             "openai:gpt-5",
             BackendTag::OpenAi,
-            "gpt-4.1-mini",
+            "gpt-6-luna",
         ),
         (
             OpenRouter::openai_codex("k".into()),
             "codex:gpt-5.5",
             BackendTag::Codex,
-            "gpt-5.6-luna",
+            "gpt-6-luna",
         ),
         (
             OpenRouter::opencode_go("k".into()),
             "opencode:kimi-k2.7-code",
             BackendTag::OpencodeGo,
-            "deepseek-v4-flash",
+            "gpt-6-luna",
         ),
     ] {
         let a = app_on(provider, chat);
@@ -5977,22 +5977,19 @@ fn auto_helper_follows_the_session_backend_and_never_switches_providers() {
         .set(BackendTag::OpenAi, OpenRouter::openai("k".into()));
     assert_eq!(
         helper_of(&a),
-        Some((
-            BackendTag::OpenRouter,
-            "google/gemini-2.5-flash-lite".into()
-        ))
+        Some((BackendTag::OpenRouter, "openai/gpt-6-luna".into()))
     );
     a.current_model = Some("openai:gpt-5".into());
     assert_eq!(
         helper_of(&a),
-        Some((BackendTag::OpenAi, "gpt-4.1-mini".into()))
+        Some((BackendTag::OpenAi, "gpt-6-luna".into()))
     );
     // A picked id on a backend that is not configured resolves like auto,
     // on the session's backend, instead of reaching for the other provider.
     a.helper_model = "codex:gpt-5.6-luna".into();
     assert_eq!(
         helper_of(&a),
-        Some((BackendTag::OpenAi, "gpt-4.1-mini".into()))
+        Some((BackendTag::OpenAi, "gpt-6-luna".into()))
     );
     // A picked id on a configured backend wins.
     a.helper_model = "google/gemini-2.5-flash".into();
@@ -6026,10 +6023,53 @@ fn auto_helper_falls_back_to_the_session_model_without_a_cheap_option() {
     assert_eq!(helper_of(&a), Some((BackendTag::Codex, "gpt-5.5".into())));
     // ... and the cheap model again once the catalog lists it.
     a.models
-        .push(catalog_model(BackendTag::Codex, "gpt-5.6-luna"));
+        .push(catalog_model(BackendTag::Codex, "gpt-6-luna"));
     assert_eq!(
         helper_of(&a),
-        Some((BackendTag::Codex, "gpt-5.6-luna".into()))
+        Some((BackendTag::Codex, "gpt-6-luna".into()))
+    );
+}
+
+#[test]
+fn auto_helper_moves_up_to_the_newest_listed_version_of_its_family() {
+    let mut a = app_on(OpenRouter::openai_codex("k".into()), "codex:gpt-5.5");
+    a.models = vec![
+        catalog_model(BackendTag::Codex, "gpt-5.5"),
+        catalog_model(BackendTag::Codex, "gpt-6-luna"),
+        catalog_model(BackendTag::Codex, "gpt-6.1-luna"),
+        // Other families and variants are not upgrades.
+        catalog_model(BackendTag::Codex, "gpt-6.2-sol"),
+        catalog_model(BackendTag::Codex, "gpt-6.9-luna-pro"),
+        // Another backend's newer luna is not this backend's.
+        catalog_model(BackendTag::OpenAi, "gpt-7-luna"),
+    ];
+    assert_eq!(
+        helper_of(&a),
+        Some((BackendTag::Codex, "gpt-6.1-luna".into()))
+    );
+    // Versions compare as numbers, not text.
+    a.models
+        .push(catalog_model(BackendTag::Codex, "gpt-6.10-luna"));
+    assert_eq!(
+        helper_of(&a),
+        Some((BackendTag::Codex, "gpt-6.10-luna".into()))
+    );
+    // Only the built-in floor listed: the floor.
+    a.models = vec![catalog_model(BackendTag::Codex, "gpt-6-luna")];
+    assert_eq!(
+        helper_of(&a),
+        Some((BackendTag::Codex, "gpt-6-luna".into()))
+    );
+    // A backend-prefixed OpenRouter id keeps its prefix.
+    let mut a = app_on(OpenRouter::openrouter_flavor("k".into()), "a/chat");
+    a.models = vec![
+        catalog_model(BackendTag::OpenRouter, "openai/gpt-6-luna"),
+        catalog_model(BackendTag::OpenRouter, "openai/gpt-6-luna:batch"),
+        catalog_model(BackendTag::OpenRouter, "openai/gpt-6.5-luna"),
+    ];
+    assert_eq!(
+        helper_of(&a),
+        Some((BackendTag::OpenRouter, "openai/gpt-6.5-luna".into()))
     );
 }
 

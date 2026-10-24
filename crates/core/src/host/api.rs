@@ -2149,7 +2149,9 @@ fn handle_actor_request(app: &mut App, admin: &mut super::admin::State, request:
                             // A local runtime has no cheap default of its own.
                             match provider.default_utility_model() {
                                 "" => String::new(),
-                                model => public_model_id_for_backend(tag, model),
+                                model => {
+                                    public_model_id_for_backend(tag, &app.newest_listed(tag, model))
+                                }
                             }
                         }),
                         model_count: app

@@ -182,13 +182,15 @@ never moves to another provider:
 
 | Active backend | Auto helper model |
 |---|---|
-| OpenRouter | `google/gemini-2.5-flash-lite` |
-| OpenAI | `gpt-4.1-mini` |
-| Codex | `gpt-5.6-luna` |
-| OpenCode Go | `deepseek-v4-flash` |
+| OpenRouter | `openai/gpt-6-luna` |
+| OpenAI | `gpt-6-luna` |
+| Codex | `gpt-6-luna` |
+| OpenCode Go | `gpt-6-luna` |
 | Local | your session's installed model (a local runtime has no cheap default) |
 
-When a backend's catalog no longer lists its cheap model, auto uses the
+These are floors: when the backend's live catalog lists a newer version of the
+same model (`gpt-6.1-luna`, `gpt-7-luna`), auto uses that instead, so it keeps
+up between nexus releases. When a backend's catalog lists neither, auto uses the
 session's own model there. Everything else is automatic: embeddings (local
 EmbeddingGemma 2 when Ollama has it, else the backend's embedding model, else
 keyword search), OCR (`tesseract` when installed, else the helper model's

@@ -1358,7 +1358,7 @@ mod tests {
         // Auto: the OpenRouter helper default.
         match a.ocr_backend() {
             Some(OcrBackend::Router(_, model)) => {
-                assert_eq!(model, "google/gemini-2.5-flash-lite");
+                assert_eq!(model, "openai/gpt-6-luna");
             }
             _ => panic!("expected the auto helper model"),
         }
@@ -1380,7 +1380,7 @@ mod tests {
         let mut a = openrouter_app();
         match a.image_backend() {
             Some(OcrBackend::Router(_, model)) => {
-                assert_eq!(model, "google/gemini-2.5-flash-lite");
+                assert_eq!(model, "openai/gpt-6-luna");
             }
             _ => panic!("expected the auto helper model"),
         }

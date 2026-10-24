@@ -967,15 +967,15 @@ impl OpenRouter {
     /// judge) uses when the user hasn't picked one. This is the one place the
     /// per-backend choice lives. Empty means the backend has no cheap option
     /// of its own (local runtimes serve whatever the user installed), so the
-    /// caller falls back to the session's chat model on that backend.
+    /// caller falls back to the session's chat model on that backend. These
+    /// are floors: `App::newest_listed` upgrades each to the newest version
+    /// of the same family the live catalog lists (`gpt-6-luna` → `gpt-6.1-luna`).
     #[must_use]
     pub const fn default_helper_for(tag: crate::provider::BackendTag) -> &'static str {
         use crate::provider::BackendTag;
         match tag {
-            BackendTag::OpenRouter => "google/gemini-2.5-flash-lite",
-            BackendTag::OpenAi => "gpt-4.1-mini",
-            BackendTag::Codex => "gpt-5.6-luna",
-            BackendTag::OpencodeGo => "deepseek-v4-flash",
+            BackendTag::OpenRouter => "openai/gpt-6-luna",
+            BackendTag::OpenAi | BackendTag::Codex | BackendTag::OpencodeGo => "gpt-6-luna",
             BackendTag::Local => "",
         }
     }
@@ -986,10 +986,9 @@ impl OpenRouter {
 
     pub const fn default_research_model(&self) -> &'static str {
         match self.flavor {
-            ProviderFlavor::OpenRouter => "google/gemini-2.5-flash",
-            ProviderFlavor::OpenAi => "gpt-4.1",
-            ProviderFlavor::OpenAiCodex => "gpt-5.5",
-            ProviderFlavor::OpencodeGo => "kimi-k2.7-code",
+            ProviderFlavor::OpenRouter => "openai/gpt-6-sol",
+            ProviderFlavor::OpenAi | ProviderFlavor::OpenAiCodex => "gpt-6-sol",
+            ProviderFlavor::OpencodeGo => "glm-5.3",
         }
     }
 

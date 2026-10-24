@@ -10,6 +10,26 @@ use super::{App, ModelPickTarget, Popup};
 
 const ROUTER_MODEL_IDS: &[&str] = &["typesafe/jev-router", "openrouter/auto"];
 
+/// Split a model id around its first version number: `openai/gpt-6.1-luna`
+/// → (`openai/gpt-`, `6.1`, `-luna`). `None` when the id has no digits.
+fn split_version(id: &str) -> Option<(&str, &str, &str)> {
+    let start = id.find(|c: char| c.is_ascii_digit())?;
+    let len = id[start..]
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(id.len() - start);
+    let version = id[start..start + len].trim_end_matches('.');
+    let end = start + version.len();
+    Some((&id[..start], version, &id[end..]))
+}
+
+/// A version string as comparable numbers: `6.10` sorts above `6.9`.
+fn version_key(version: &str) -> Vec<u64> {
+    version
+        .split('.')
+        .map(|part| part.parse().unwrap_or(0))
+        .collect()
+}
+
 impl App {
     /// Rebuild every backend from the on-disk saved credentials (after boot,
     /// or after a settings change). Keeps `saved` and `backends` in sync.
@@ -327,7 +347,8 @@ impl App {
             return Some((provider, raw));
         }
         let tag = provider.backend_tag();
-        let auto = default(&provider);
+        let auto = self.newest_listed(tag, default(&provider));
+        let auto = auto.as_str();
         let listed =
             self.models.is_empty() || self.models.iter().any(|m| m.backend == tag && m.id == auto);
         if auto.is_empty() || !listed {
@@ -344,6 +365,28 @@ impl App {
             }
         }
         (!auto.is_empty()).then(|| (provider, auto.to_string()))
+    }
+
+    /// `base` upgraded to the newest version of its family that `tag`'s live
+    /// catalog lists: same text around the version number, higher number
+    /// (`gpt-6-luna` → `gpt-6.1-luna` or `gpt-7-luna`, never `gpt-6-luna-pro`).
+    /// Built-in defaults go stale between releases; this keeps auto current.
+    /// Returns `base` unchanged when nothing newer is listed.
+    pub fn newest_listed(&self, tag: BackendTag, base: &str) -> String {
+        let Some((prefix, version, suffix)) = split_version(base) else {
+            return base.to_string();
+        };
+        let floor = version_key(version);
+        self.models
+            .iter()
+            .filter(|m| m.backend == tag)
+            .filter_map(|m| {
+                let (p, v, s) = split_version(&m.id)?;
+                (p == prefix && s == suffix).then(|| (version_key(v), &m.id))
+            })
+            .filter(|(key, _)| *key > floor)
+            .max_by(|a, b| a.0.cmp(&b.0))
+            .map_or_else(|| base.to_string(), |(_, id)| id.clone())
     }
 
     /// Whether a resolved feature model id actually exists in the catalog

@@ -118,7 +118,20 @@ pub(super) fn legacy_helper_model(stored: &[(String, String)]) -> Option<String>
     (!is_default_helper_id(legacy)).then(|| legacy.to_string())
 }
 
-/// Whether `id` (bare or backend-prefixed) is some backend's auto helper.
+/// Memory-model defaults older builds wrote into `memory_model` (before the
+/// helper table moved to current models). Stored copies of these are auto too.
+const PAST_HELPER_DEFAULTS: [(crate::provider::BackendTag, &str); 4] = {
+    use crate::provider::BackendTag;
+    [
+        (BackendTag::OpenRouter, "google/gemini-2.5-flash-lite"),
+        (BackendTag::OpenAi, "gpt-4.1-mini"),
+        (BackendTag::Codex, "gpt-5.6-luna"),
+        (BackendTag::OpencodeGo, "deepseek-v4-flash"),
+    ]
+};
+
+/// Whether `id` (bare or backend-prefixed) is some backend's auto helper,
+/// current or past.
 fn is_default_helper_id(id: &str) -> bool {
     use crate::provider::BackendTag;
     use crate::provider::openrouter::OpenRouter;
@@ -129,10 +142,9 @@ fn is_default_helper_id(id: &str) -> bool {
         BackendTag::OpencodeGo,
     ]
     .into_iter()
-    .any(|tag| {
-        let default = OpenRouter::default_helper_for(tag);
-        id == default || id == format!("{}{default}", tag.key_prefix())
-    })
+    .map(|tag| (tag, OpenRouter::default_helper_for(tag)))
+    .chain(PAST_HELPER_DEFAULTS)
+    .any(|(tag, default)| id == default || id == format!("{}{default}", tag.key_prefix()))
 }
 
 /// Narrowest and widest the conversation column can be set to, in cells.
