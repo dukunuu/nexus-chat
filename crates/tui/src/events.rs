@@ -229,7 +229,6 @@ async fn run_loop(
                     AppEvent::SkillInstall(r) => app.on_skill_install_result(r),
                     AppEvent::Ocr(r) => app.on_ocr_done(r),
                     AppEvent::Embed(r) => app.on_embed_done(r),
-                    AppEvent::OcrPull(r) => app.on_ocr_pull(r),
                     AppEvent::LocalServers(r) => app.on_local_status(r),
                     AppEvent::Research(r) => {
                         app.on_research_done(r);

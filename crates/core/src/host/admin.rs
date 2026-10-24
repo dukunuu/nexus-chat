@@ -120,7 +120,6 @@ pub(super) fn dispatch(
             settings["show_stats"] = json!(app.settings.show_stats);
             settings["show_reasoning"] = json!(app.settings.show_reasoning);
             settings["hide_hints"] = json!(app.settings.hide_hints);
-            settings["local_ocr_model"] = json!(app.local_ocr_model);
             settings["usage_range"] = json!(app.usage_range.key());
             Ok(settings)
         }
@@ -135,7 +134,11 @@ pub(super) fn dispatch(
             if input.space_id != app.active_space.id {
                 bail!("active space changed; refresh settings");
             }
-            // Don't echo secrets or credential-bearing URLs in validation errors.
+            // A removed key gets a clear error; other failures stay generic so
+            // secrets and credential-bearing URLs are not echoed back.
+            if crate::app::is_removed_setting(&input.key) {
+                bail!("{}", crate::app::removed_setting_message(&input.key));
+            }
             app.set_setting(&input.key, input.value.trim())
                 .map_err(|_| anyhow!("setting could not be saved; check the value"))?;
             Ok(json!({ "ok": true }))
@@ -249,6 +252,61 @@ mod tests {
             "first edit"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn settings_api_accepts_helper_model_and_rejects_removed_model_keys() {
+        let root = std::env::temp_dir().join(format!("nexus-admin-{}", uuid::Uuid::new_v4()));
+        let mut app = App::new(
+            crate::db::Db::open_in_memory().unwrap(),
+            None,
+            crate::space::Space { root: root.clone() },
+        );
+        let mut state = State::default();
+        let put = |app: &mut App, state: &mut State, key: &str, value: &str| {
+            let body = serde_json::to_vec(
+                &json!({"key": key, "value": value, "space_id": app.active_space.id}),
+            )
+            .unwrap();
+            dispatch(app, state, "PUT", "/v1/settings", "", &body)
+        };
+
+        put(&mut app, &mut state, "helper_model", " some/model ").unwrap();
+        assert_eq!(app.helper_model, "some/model");
+        let settings = dispatch(&mut app, &mut state, "GET", "/v1/settings", "", b"").unwrap();
+        assert_eq!(settings["helper_model"], "some/model");
+        for removed in [
+            "memory_model",
+            "transcriber_model",
+            "ocr_model",
+            "ocr_engine",
+            "local_ocr_model",
+            "embedding_model",
+            "image_gen_model",
+            "video_gen_model",
+        ] {
+            assert!(
+                settings.get(removed).is_none(),
+                "{removed} is still reported"
+            );
+            let error = put(&mut app, &mut state, removed, "x")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(removed) && error.contains("removed"),
+                "{removed}: {error}"
+            );
+            assert!(
+                app.db.setting(removed).is_none(),
+                "{removed} must not be stored"
+            );
+        }
+        // Other bad keys keep the generic, non-echoing error.
+        let error = put(&mut app, &mut state, "nonsense", "x")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "setting could not be saved; check the value");
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

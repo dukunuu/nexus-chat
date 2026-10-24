@@ -2146,7 +2146,11 @@ fn handle_actor_request(app: &mut App, admin: &mut super::admin::State, request:
                         gateway_supported: true,
                         gateway_error: None,
                         default_model: provider.map_or_else(String::new, |provider| {
-                            public_model_id_for_backend(tag, provider.default_utility_model())
+                            // A local runtime has no cheap default of its own.
+                            match provider.default_utility_model() {
+                                "" => String::new(),
+                                model => public_model_id_for_backend(tag, model),
+                            }
                         }),
                         model_count: app
                             .models
@@ -2295,7 +2299,6 @@ fn apply_domain_event(app: &mut App, event: AppEvent) {
         AppEvent::SkillInstall(result) => app.on_skill_install_result(result),
         AppEvent::Ocr(result) => app.on_ocr_done(result),
         AppEvent::Embed(result) => app.on_embed_done(result),
-        AppEvent::OcrPull(result) => app.on_ocr_pull(result),
         AppEvent::Research(result) => app.on_research_done(result),
         AppEvent::ResearchTopic(result) => app.on_research_topic_derived(result),
         AppEvent::Login(result) => app.on_login_result(result),
@@ -2322,7 +2325,6 @@ fn clear_closed_source(app: &mut App, event: &AppEvent) {
         AppEvent::SkillInstall(None) => app.skills_rx = None,
         AppEvent::Ocr(None) => app.ocr_rx = None,
         AppEvent::Embed(None) => app.embed_rx = None,
-        AppEvent::OcrPull(None) => app.ocr_pull_rx = None,
         AppEvent::Research(None) => app.research_rx = None,
         AppEvent::ResearchTopic(None) => app.research_topic_rx = None,
         AppEvent::Login(None) => app.login_rx = None,

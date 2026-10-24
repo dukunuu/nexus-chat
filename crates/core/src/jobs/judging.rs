@@ -93,14 +93,7 @@ async fn evaluate(
             ))
         }
         ModelDecider::Llm => {
-            let (provider, model) = if app.memory_model.trim().is_empty() {
-                app.current_model
-                    .as_deref()
-                    .and_then(|id| app.resolve_model_backend(id))
-            } else {
-                app.resolve_utility_model_backend(&app.memory_model)
-            }
-            .context("no utility model backend")?;
+            let (provider, model) = app.helper_backend().context("no helper model backend")?;
             let response = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 provider.complete_with_params(&model, vec![

@@ -75,8 +75,6 @@ pub enum WireEvent {
     Ocr(Option<(String, String, WireOcrUpdate)>),
     /// One file's chunk-embedding job finished (or the channel closed).
     Embed(Option<WireEmbedMsg>),
-    /// A local-`OCR`-model pull finished: model name or error.
-    OcrPull(Option<Result<String, String>>),
     /// A deep-research pipeline update, or `None` when its channel closed.
     Research(Option<WireResearchMsg>),
     /// `/research` with no topic: a distilled topic from recent chat, or an
@@ -354,7 +352,6 @@ impl From<AppEvent> for WireEvent {
                 o.map(|(file, session, update)| (file, session, WireOcrUpdate::from(update))),
             ),
             AppEvent::Embed(e) => Self::Embed(e),
-            AppEvent::OcrPull(p) => Self::OcrPull(p),
             AppEvent::LocalServers(s) => Self::LocalServers(s),
             AppEvent::Research(r) => {
                 Self::Research(r.map(|(session_id, space_id, space_name, update)| {
@@ -669,7 +666,6 @@ mod tests {
                 "f1".into(),
                 Ok(vec![(0, vec![0.1, 0.2])]),
             ))),
-            WireEvent::OcrPull(Some(Err("pull failed".into()))),
             WireEvent::Research(Some((
                 "s1".into(),
                 "sp1".into(),
@@ -758,10 +754,6 @@ mod tests {
                 WireEvent::SkillInstall(Some(Err("no model".into()))),
             ),
             (
-                AppEvent::OcrPull(Some(Ok("glm-ocr".into()))),
-                WireEvent::OcrPull(Some(Ok("glm-ocr".into()))),
-            ),
-            (
                 AppEvent::ResearchTopic(Some(Err("offline".into()))),
                 WireEvent::ResearchTopic(Some(Err("offline".into()))),
             ),
@@ -789,7 +781,6 @@ mod tests {
             AppEvent::SkillInstall(None),
             AppEvent::Ocr(None),
             AppEvent::Embed(None),
-            AppEvent::OcrPull(None),
             AppEvent::Research(None),
             AppEvent::ResearchTopic(None),
             AppEvent::UpdateCheck(None),

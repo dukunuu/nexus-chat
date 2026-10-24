@@ -173,10 +173,6 @@ pub fn dispatch(
                     )?;
                     Ok(serde_json::json!({ "queued": true }))
                 }
-                "ocr_install" => {
-                    app.ocr_local_install(action.name.as_deref().unwrap_or(""));
-                    Ok(serde_json::json!({ "queued": true, "model": action.name }))
-                }
                 _ => bail!("invalid media action"),
             }
         }

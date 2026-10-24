@@ -1207,9 +1207,6 @@ impl Db {
                 "searxng_url"
                 | "langsearch_key"
                 | "search_provider"
-                | "ocr_engine"
-                | "ocr_model"
-                | "local_ocr_model"
                 | "ocr_images"
                 // Per-device ui/timing state.
                 | "usage_range"
@@ -5751,9 +5748,7 @@ mod tests {
             "searxng_url",
             "langsearch_key",
             "search_provider",
-            "ocr_engine",
-            "ocr_model",
-            "local_ocr_model",
+            "ocr_images",
             "usage_range",
             "ui_background",
             "column_width",
@@ -5771,15 +5766,14 @@ mod tests {
             "show_reasoning",
             "hide_hints",
             "verbosity",
-            "memory_model",
-            "embedding_model",
+            "helper_model",
         ] {
             assert!(!Db::setting_is_local(sync), "{sync} should sync");
         }
 
         let db = Db::open_in_memory().unwrap();
         db.set_setting("temperature", "0.7").unwrap();
-        db.set_setting("ocr_engine", "tesseract").unwrap();
+        db.set_setting("ocr_images", "true").unwrap();
         let scope = |key: &str| -> String {
             db.raw()
                 .query_row(
@@ -5790,7 +5784,7 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(scope("temperature"), "sync");
-        assert_eq!(scope("ocr_engine"), "local");
+        assert_eq!(scope("ocr_images"), "local");
     }
 
     #[test]

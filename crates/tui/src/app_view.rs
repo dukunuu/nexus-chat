@@ -317,7 +317,7 @@ pub struct AppView {
     pub local_from_login: bool,
     pub settings_selected: usize,
     /// Text edit buffers for the numeric settings (temperature, `top_p`, `max_tokens`).
-    pub settings_inputs: [String; 8],
+    pub settings_inputs: [String; 7],
     /// Indices into `SETTINGS_GROUPS` currently collapsed (hidden fields).
     pub settings_collapsed: HashSet<usize>,
     pub model_filter: FilterInput,
@@ -777,14 +777,9 @@ impl AppView {
             | SettingsField::ShowStats
             | SettingsField::ShowReasoning
             | SettingsField::HideHints
-            | SettingsField::MemoryModel
+            | SettingsField::HelperModel
             | SettingsField::Verbosity
             | SettingsField::SearchProvider
-            | SettingsField::TranscriberModel
-            | SettingsField::OcrModel
-            | SettingsField::OcrEngine
-            | SettingsField::ImageGenModel
-            | SettingsField::VideoGenModel
             | SettingsField::ReplyStyle
             | SettingsField::ImageViewer
             | SettingsField::ColumnWidth => None,
@@ -794,8 +789,7 @@ impl AppView {
             SettingsField::CompactThreshold => Some(3),
             SettingsField::SearxngUrl => Some(4),
             SettingsField::LangsearchKey => Some(5),
-            SettingsField::BlockedDomains => Some(7),
-            SettingsField::EmbeddingModel => Some(6),
+            SettingsField::BlockedDomains => Some(6),
         }
     }
 

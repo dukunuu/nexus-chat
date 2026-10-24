@@ -179,7 +179,7 @@ async fn same_identity_is_not_reembedded_but_a_new_digest_is() {
 }
 
 #[tokio::test]
-async fn switching_to_the_local_model_replaces_old_vectors_lazily() {
+async fn discovering_the_local_model_replaces_old_vectors_lazily() {
     let mock = MockOllama::start(false).await;
     let mut app = app_with_key();
     point_at(&mut app, &mock.endpoint);
@@ -202,11 +202,12 @@ async fn switching_to_the_local_model_replaces_old_vectors_lazily() {
         )
         .unwrap();
 
-    app.set_setting("embedding_model", "local:embeddinggemma-2:270m")
-        .unwrap();
+    // Ollama gaining the model is the only way the embedder changes now.
+    app.discover_embeddings();
     // Nothing blocks: the switch only started a background probe.
     assert!(app.embed_rx.is_some());
     drain(&mut app).await;
+    assert_eq!(app.embedding_model, "local:embeddinggemma-2:270m");
     let rows = stored(&app);
     assert!(!rows.is_empty());
     assert!(rows.iter().all(|row| row.2 != "old-identity"), "{rows:?}");
@@ -247,7 +248,7 @@ async fn image_ocr_is_automatic_only_when_images_are_not_embedded() {
 }
 
 #[tokio::test]
-async fn default_is_local_only_when_reachable_and_not_explicitly_configured() {
+async fn default_is_local_only_when_reachable() {
     let mock = MockOllama::start(false).await;
     let mut app = app_with_key();
     point_at(&mut app, &mock.endpoint);
@@ -263,16 +264,23 @@ async fn default_is_local_only_when_reachable_and_not_explicitly_configured() {
             .all(|(k, _)| k != "embedding_model")
     );
 
-    // An explicit choice, even the cloud one, is never overridden.
-    let mut explicit = app_with_key();
-    point_at(&mut explicit, &mock.endpoint);
-    explicit
-        .db
-        .set_setting("embedding_model", "openai/text-embedding-3-small")
-        .unwrap();
-    explicit.discover_embeddings();
-    assert!(explicit.embed_rx.is_none());
-    assert_eq!(explicit.embedding_model, "openai/text-embedding-3-small");
+    // A stored `embedding_model` row (an older build's explicit choice, or one
+    // synced from another device) is ignored: discovery still runs and wins.
+    for stored_choice in ["", "openai/text-embedding-3-small"] {
+        let mut stale = app_with_key();
+        point_at(&mut stale, &mock.endpoint);
+        stale
+            .db
+            .set_setting("embedding_model", stored_choice)
+            .unwrap();
+        stale.discover_embeddings();
+        assert!(
+            stale.embed_rx.is_some(),
+            "a stored {stored_choice:?} must not block discovery"
+        );
+        drain(&mut stale).await;
+        assert_eq!(stale.embedding_model, "local:embeddinggemma-2:270m");
+    }
 
     // Nothing reachable: behave as before.
     let mut unreachable = app_with_key();

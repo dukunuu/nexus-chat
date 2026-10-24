@@ -9,49 +9,25 @@
 )]
 use anyhow::{Result, bail};
 
-use super::{App, OCR_ENGINES, SEARCH_PROVIDERS, VERBOSITY_LEVELS};
+use super::{App, SEARCH_PROVIDERS, VERBOSITY_LEVELS};
 
 impl App {
-    /// Advance the OCR engine auto → tesseract → vlm → local → auto,
-    /// persisted. Cycling into "local" pulls the configured model via ollama
-    /// in the background — `ocr_local_install` itself flips the engine to "local" and persists it
-    /// once the pull actually succeeds, so a failed pull doesn't leave the
-    /// engine silently pointed at a model that was never fetched.
-    pub fn cycle_ocr_engine(&mut self) -> Result<()> {
-        let i = super::OCR_ENGINES
-            .iter()
-            .position(|&e| e == self.ocr_engine)
-            .unwrap_or(0);
-        let next = super::OCR_ENGINES[(i + 1) % super::OCR_ENGINES.len()];
-        if next == "local" {
-            self.ocr_local_install("");
-            return Ok(());
-        }
-        self.ocr_engine = next.to_string();
-        self.db.set_setting("ocr_engine", &self.ocr_engine)?;
-        Ok(())
-    }
-
     /// Set one named setting by key, persisting it and applying it live —
     /// the host's `SetSetting` command. Unlike
     /// `load_settings` (which ignores unknown persisted rows), this fails
     /// fast: an unknown key or an invalid value for a constrained key is an
     /// error, never a silent no-op reported as success.
     pub fn set_setting(&mut self, key: &str, value: &str) -> Result<()> {
+        if is_removed_setting(key) {
+            bail!("{}", removed_setting_message(key));
+        }
         if !SETTING_KEYS.contains(&key) {
             bail!("unknown setting: {key}");
         }
         if !valid_setting_value(key, value) {
             bail!("invalid value for {key}: {value:?}");
         }
-        let embedding_changed =
-            key == "embedding_model" && self.embedding_model.trim() != value.trim();
         self.apply_setting(key, value);
-        if embedding_changed {
-            // Detach old work immediately; identity-scoped invalidation and
-            // lazy re-embedding happen when the new runtime is ready.
-            self.reset_embedding_backend();
-        }
         if key == "blocked_domains" {
             // Per-space (not a db setting): lives next to the space's other
             // config files so it travels with the space.
@@ -63,9 +39,6 @@ impl App {
             self.db.set_setting(key, value)?;
         }
         self.refresh_toolbox();
-        if key == "embedding_model" {
-            self.start_embedding();
-        }
         if key == "ocr_images" {
             self.rescan_files();
         }
@@ -76,7 +49,7 @@ impl App {
 
 /// Every key `set_setting` accepts — the same keys `apply_setting` (and the
 /// `blocked_domains` special case) can actually apply.
-const SETTING_KEYS: [&str; 27] = [
+const SETTING_KEYS: [&str; 20] = [
     "remote_images",
     "show_stats",
     "show_reasoning",
@@ -85,15 +58,8 @@ const SETTING_KEYS: [&str; 27] = [
     "temperature",
     "top_p",
     "max_tokens",
-    "memory_model",
-    "transcriber_model",
-    "ocr_model",
-    "ocr_engine",
-    "local_ocr_model",
-    "embedding_model",
+    "helper_model",
     "ocr_images",
-    "image_gen_model",
-    "video_gen_model",
     "compact_threshold",
     "searxng_url",
     "verbosity",
@@ -105,6 +71,69 @@ const SETTING_KEYS: [&str; 27] = [
     "popup_sizes",
     "image_viewer",
 ];
+
+/// Per-feature model settings that earlier builds accepted and that are now
+/// automatic. Stored values are ignored on read (other devices' sync data may
+/// still carry them) and rejected on set.
+const REMOVED_SETTING_KEYS: [&str; 8] = [
+    "memory_model",
+    "transcriber_model",
+    "ocr_model",
+    "ocr_engine",
+    "local_ocr_model",
+    "embedding_model",
+    "image_gen_model",
+    "video_gen_model",
+];
+
+/// Whether `key` is one of the removed per-feature model settings.
+#[must_use]
+pub fn is_removed_setting(key: &str) -> bool {
+    REMOVED_SETTING_KEYS.contains(&key)
+}
+
+/// The error for setting a removed key, naming what replaced it.
+#[must_use]
+pub fn removed_setting_message(key: &str) -> String {
+    let now = match key {
+        "memory_model" | "transcriber_model" | "ocr_model" => "use helper_model",
+        "ocr_engine" | "local_ocr_model" => "OCR now picks tesseract or the helper model itself",
+        "embedding_model" => "embeddings are chosen automatically",
+        _ => "media generation uses the active backend's default model",
+    };
+    format!("setting {key} was removed: {now}")
+}
+
+/// The helper model a pre-`helper_model` database implies: its
+/// `memory_model`, when `helper_model` is not set yet and the stored value was
+/// a deliberate pick. Builds before this one wrote the backend's default into
+/// `memory_model` the first time `/config` closed, so a value equal to a
+/// default is auto, not a choice.
+pub(super) fn legacy_helper_model(stored: &[(String, String)]) -> Option<String> {
+    let get = |key: &str| stored.iter().find(|(k, _)| k == key).map(|(_, v)| v.trim());
+    if get("helper_model").is_some_and(|v| !v.is_empty()) {
+        return None;
+    }
+    let legacy = get("memory_model").filter(|v| !v.is_empty())?;
+    (!is_default_helper_id(legacy)).then(|| legacy.to_string())
+}
+
+/// Whether `id` (bare or backend-prefixed) is some backend's auto helper.
+fn is_default_helper_id(id: &str) -> bool {
+    use crate::provider::BackendTag;
+    use crate::provider::openrouter::OpenRouter;
+    [
+        BackendTag::OpenRouter,
+        BackendTag::OpenAi,
+        BackendTag::Codex,
+        BackendTag::OpencodeGo,
+    ]
+    .into_iter()
+    .any(|tag| {
+        let default = OpenRouter::default_helper_for(tag);
+        id == default || id == format!("{}{default}", tag.key_prefix())
+    })
+}
 
 /// Narrowest and widest the conversation column can be set to, in cells.
 pub const COLUMN_WIDTH_MIN: u16 = 60;
@@ -242,7 +271,6 @@ fn valid_setting_value(key: &str, value: &str) -> bool {
         "usage_range" => crate::db::UsageRange::CYCLE
             .iter()
             .any(|r| r.key() == value),
-        "ocr_engine" => OCR_ENGINES.contains(&value),
         "verbosity" => VERBOSITY_LEVELS.contains(&value),
         "reply_style" => super::REPLY_STYLES.contains(&value),
         "image_viewer" => super::IMAGE_VIEWERS.contains(&value),

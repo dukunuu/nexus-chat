@@ -77,7 +77,13 @@ pub fn render(f: &mut Frame, app: &AppView) {
             SettingsField::Temperature => numeric(&app.settings_inputs[0]),
             SettingsField::TopP => numeric(&app.settings_inputs[1]),
             SettingsField::MaxTokens => numeric(&app.settings_inputs[2]),
-            SettingsField::MemoryModel => numeric(&app.memory_model),
+            SettingsField::HelperModel => {
+                if app.helper_model.trim().is_empty() {
+                    Span::styled("auto", Style::default().fg(app.theme.accent))
+                } else {
+                    numeric(&app.helper_model)
+                }
+            }
             SettingsField::CompactThreshold => numeric(&app.settings_inputs[3]),
             SettingsField::SearxngUrl => numeric(&app.settings_inputs[4]),
             SettingsField::Verbosity => {
@@ -89,16 +95,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 app.search_provider.clone(),
                 Style::default().fg(app.theme.accent),
             ),
-            SettingsField::TranscriberModel => numeric(&app.transcriber_model),
-            SettingsField::OcrModel => numeric(&app.ocr_model),
-            SettingsField::OcrEngine => Span::styled(
-                app.ocr_engine.clone(),
-                Style::default().fg(app.theme.accent),
-            ),
-            SettingsField::EmbeddingModel => numeric(&app.settings_inputs[6]),
-            SettingsField::BlockedDomains => numeric(&app.settings_inputs[7]),
-            SettingsField::ImageGenModel => numeric(&app.image_gen_model),
-            SettingsField::VideoGenModel => numeric(&app.video_gen_model),
+            SettingsField::BlockedDomains => numeric(&app.settings_inputs[6]),
         }
     };
 
@@ -167,35 +164,13 @@ pub fn render(f: &mut Frame, app: &AppView) {
 
 pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
     use nexus_core::app::SettingsField;
-    // Model rows are picked, not typed: Enter opens the same model picker
-    // /model uses, Backspace clears it.
-    let picker = matches!(
-        app.settings_field(),
-        Some(
-            SettingsField::MemoryModel
-                | SettingsField::TranscriberModel
-                | SettingsField::OcrModel
-                | SettingsField::ImageGenModel
-                | SettingsField::VideoGenModel
-        )
-    );
-    if picker {
+    // The helper model is picked, not typed: Enter opens the same model
+    // picker /model uses, Backspace returns it to auto.
+    if app.settings_field() == Some(SettingsField::HelperModel) {
         match key.code {
             KeyCode::Esc => app.save_settings()?,
-            KeyCode::Enter => match app.settings_field() {
-                Some(SettingsField::MemoryModel) => app.open_model_picker_for_memory(),
-                Some(SettingsField::OcrModel) => app.open_model_picker_for_ocr(),
-                Some(SettingsField::ImageGenModel) => app.open_model_picker_for_image_gen(),
-                Some(SettingsField::VideoGenModel) => app.open_model_picker_for_video_gen(),
-                _ => app.open_model_picker_for_transcriber(),
-            },
-            KeyCode::Backspace => match app.settings_field() {
-                Some(SettingsField::MemoryModel) => app.clear_memory_model()?,
-                Some(SettingsField::OcrModel) => app.clear_ocr_model()?,
-                Some(SettingsField::ImageGenModel) => app.clear_image_gen_model()?,
-                Some(SettingsField::VideoGenModel) => app.clear_video_gen_model()?,
-                _ => app.clear_transcriber_model()?,
-            },
+            KeyCode::Enter => app.open_model_picker_for_helper(),
+            KeyCode::Backspace => app.clear_helper_model()?,
             KeyCode::Up => app.move_settings_selection(-1),
             KeyCode::Down | KeyCode::Tab => app.move_settings_selection(1),
             KeyCode::PageUp => app.move_settings_selection(-10),

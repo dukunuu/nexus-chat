@@ -244,6 +244,44 @@ impl App {
         self.backends.resolve(id)
     }
 
+    /// The model every background job runs on: the picked `helper_model`, or
+    /// "auto" when it is blank. Auto is the cheap model of the backend the
+    /// session is on (`OpenRouter::default_helper_for`), or the session's own
+    /// model there when that backend has no cheap option. It never moves to
+    /// another backend on its own.
+    pub fn helper_backend(&self) -> Option<(OpenRouter, String)> {
+        self.resolve_utility_model_backend(&self.helper_model)
+    }
+
+    /// The default generation model of the active backend (`default` is
+    /// `default_image_gen_model` or `default_video_gen_model`), or `None` when
+    /// that backend has none or is a local runtime. Generation follows the
+    /// session's backend and never silently reaches for another provider.
+    pub fn generation_backend(
+        &self,
+        default: fn(&OpenRouter) -> &'static str,
+    ) -> Option<(OpenRouter, String)> {
+        let provider = self.active_provider()?;
+        if provider.backend_tag() == BackendTag::Local {
+            return None;
+        }
+        let model = default(&provider);
+        (!model.is_empty()).then(|| (provider, model.to_string()))
+    }
+
+    /// The provider of the session's model, else the first configured backend.
+    fn active_provider(&self) -> Option<OpenRouter> {
+        self.current_model
+            .as_deref()
+            .and_then(|id| self.resolve_model_backend(id).map(|(provider, _)| provider))
+            .or_else(|| {
+                self.backends
+                    .configured_tags()
+                    .first()
+                    .and_then(|tag| self.backends.get(*tag).cloned())
+            })
+    }
+
     /// Resolve a feature (non-session) model that may be a bare wire id or a
     /// composite id. Feature models default to the session provider's
     /// research-class default; a composite id picks its own backend.
@@ -270,16 +308,7 @@ impl App {
             return Some((provider, raw));
         }
 
-        let provider = self
-            .current_model
-            .as_deref()
-            .and_then(|id| self.resolve_model_backend(id).map(|(provider, _)| provider))
-            .or_else(|| {
-                self.backends
-                    .configured_tags()
-                    .first()
-                    .and_then(|tag| self.backends.get(*tag).cloned())
-            })?;
+        let provider = self.active_provider()?;
         if provider.backend_tag() == BackendTag::Local {
             // Local runtimes do not have cloud default model names. Only use
             // an installed model, preferring the current chat selection.
@@ -297,7 +326,24 @@ impl App {
                 })?;
             return Some((provider, raw));
         }
-        Some((provider.clone(), default(&provider).to_string()))
+        let tag = provider.backend_tag();
+        let auto = default(&provider);
+        let listed =
+            self.models.is_empty() || self.models.iter().any(|m| m.backend == tag && m.id == auto);
+        if auto.is_empty() || !listed {
+            // No cheap option here (or the catalog no longer lists it): use
+            // the session's own model on this same backend, if it has one.
+            if let Some(raw) = self
+                .current_model
+                .as_deref()
+                .and_then(|id| self.resolve_model_backend(id))
+                .filter(|(backend, _)| backend.backend_tag() == tag)
+                .map(|(_, raw)| raw)
+            {
+                return Some((provider, raw));
+            }
+        }
+        (!auto.is_empty()).then(|| (provider, auto.to_string()))
     }
 
     /// Whether a resolved feature model id actually exists in the catalog
@@ -496,7 +542,14 @@ impl App {
                 if self.current_model.as_deref() != Some(id) {
                     self.bump_cache_epoch();
                 }
+                let before = self.active_provider().map(|p| p.backend_tag());
                 self.current_model = Some(id.to_string());
+                let backend_changed = before != self.active_provider().map(|p| p.backend_tag());
+                if backend_changed && !self.is_streaming() {
+                    // Media generation and the helper model follow the
+                    // session's backend, so the toolbox is rebuilt for it.
+                    self.refresh_toolbox();
+                }
                 if let Some(session) = &self.session {
                     self.db.set_session_model(&session.id, id)?;
                 }
@@ -509,30 +562,10 @@ impl App {
                     self.push_status("router models pick a model per request · prompt caching is less effective · compare with nexus eval --compare-model first");
                 }
             }
-            ModelPickTarget::Memory => {
-                self.memory_model = id.to_string();
-                self.db.set_setting("memory_model", id)?;
-                self.push_status(format!("memory model: {id}"));
-            }
-            ModelPickTarget::Transcriber => {
-                self.transcriber_model = id.to_string();
-                self.db.set_setting("transcriber_model", id)?;
-                self.push_status(format!("image model: {id}"));
-            }
-            ModelPickTarget::Ocr => {
-                self.ocr_model = id.to_string();
-                self.db.set_setting("ocr_model", id)?;
-                self.push_status(format!("OCR model: {id}"));
-            }
-            ModelPickTarget::ImageGen => {
-                self.image_gen_model = id.to_string();
-                self.db.set_setting("image_gen_model", id)?;
-                self.push_status(format!("image gen model: {id}"));
-            }
-            ModelPickTarget::VideoGen => {
-                self.video_gen_model = id.to_string();
-                self.db.set_setting("video_gen_model", id)?;
-                self.push_status(format!("video gen model: {id}"));
+            ModelPickTarget::Helper => {
+                self.helper_model = id.to_string();
+                self.db.set_setting("helper_model", id)?;
+                self.push_status(format!("helper model: {id}"));
             }
             ModelPickTarget::SwarmPersona(row) => {
                 if let Some(p) = self.swarm_cache.get_mut(row) {
@@ -547,7 +580,7 @@ impl App {
         if self.work_mode == super::WorkMode::AgentAuto
             && matches!(
                 self.model_pick_target,
-                ModelPickTarget::Session | ModelPickTarget::Memory
+                ModelPickTarget::Session | ModelPickTarget::Helper
             )
         {
             self.refresh_toolbox();
@@ -560,57 +593,19 @@ impl App {
     pub fn popup_after_pick(target: ModelPickTarget) -> Popup {
         match target {
             ModelPickTarget::Session => Popup::None,
-            ModelPickTarget::Memory
-            | ModelPickTarget::Transcriber
-            | ModelPickTarget::Ocr
-            | ModelPickTarget::ImageGen
-            | ModelPickTarget::VideoGen => Popup::Settings,
+            ModelPickTarget::Helper => Popup::Settings,
             ModelPickTarget::SwarmPersona(_) => Popup::Swarm,
         }
     }
 
-    /// Disable memory extraction entirely (Backspace on the memory-model row
-    /// in `/config`).
-    pub fn clear_memory_model(&mut self) -> Result<()> {
-        self.memory_model.clear();
-        self.db.set_setting("memory_model", "")?;
-        self.push_status("memory model cleared — extraction disabled".to_string());
+    /// Return the helper model to auto (Backspace on its row in `/config`).
+    pub fn clear_helper_model(&mut self) -> Result<()> {
+        self.helper_model.clear();
+        self.db.set_setting("helper_model", "")?;
+        self.push_status("helper model: auto".to_string());
         if self.work_mode == super::WorkMode::AgentAuto {
             self.refresh_toolbox();
         }
-        Ok(())
-    }
-
-    /// Clear the image model so image files fall back to the OCR model
-    /// (Backspace on the image-model row in `/config`).
-    pub fn clear_transcriber_model(&mut self) -> Result<()> {
-        self.transcriber_model.clear();
-        self.db.set_setting("transcriber_model", "")?;
-        self.push_status("image model cleared — image descriptions disabled".to_string());
-        Ok(())
-    }
-
-    /// Disable VLM OCR (Backspace on the OCR-model row in `/config`).
-    pub fn clear_ocr_model(&mut self) -> Result<()> {
-        self.ocr_model.clear();
-        self.db.set_setting("ocr_model", "")?;
-        self.push_status("OCR model cleared — scanned PDFs use tesseract".to_string());
-        Ok(())
-    }
-
-    /// Disable image generation (Backspace on the image gen model row in `/config`).
-    pub fn clear_image_gen_model(&mut self) -> Result<()> {
-        self.image_gen_model.clear();
-        self.db.set_setting("image_gen_model", "")?;
-        self.push_status("image gen model cleared — generation disabled".to_string());
-        Ok(())
-    }
-
-    /// Disable video generation (Backspace on the video gen model row in `/config`).
-    pub fn clear_video_gen_model(&mut self) -> Result<()> {
-        self.video_gen_model.clear();
-        self.db.set_setting("video_gen_model", "")?;
-        self.push_status("video gen model cleared — generation disabled".to_string());
         Ok(())
     }
 
@@ -671,7 +666,7 @@ mod router_tests {
     fn router_note_is_once_per_run_and_only_for_session_selection() {
         for router in ["typesafe/jev-router", "openrouter/auto"] {
             let mut app = crate::app::tests::app_with_key();
-            app.model_pick_target = ModelPickTarget::Memory;
+            app.model_pick_target = ModelPickTarget::Helper;
             app.pick_model(router).unwrap();
             assert!(!app.router_note_shown);
             app.model_pick_target = ModelPickTarget::Session;

@@ -264,7 +264,6 @@ impl AppView {
                         Some(
                             SettingsField::SearxngUrl
                                 | SettingsField::LangsearchKey
-                                | SettingsField::EmbeddingModel
                                 | SettingsField::BlockedDomains
                         )
                     );
@@ -1054,7 +1053,16 @@ mod tests {
     fn paste_into_url_settings_field_keeps_full_text() {
         let mut a = test_app();
         a.popup = Popup::Settings;
-        a.settings_selected = 15; // SearxngUrl (free text)
+        a.settings_selected = a
+            .settings_rows()
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    nexus_core::app::SettingsRow::Field(nexus_core::app::SettingsField::SearxngUrl)
+                )
+            })
+            .unwrap(); // free text
         a.paste("http://localhost:8080");
         assert_eq!(a.settings_inputs[4], "http://localhost:8080");
     }

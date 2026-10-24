@@ -37,7 +37,6 @@ impl AppView {
             self.core.settings.compact_threshold.to_string(),
             self.core.searxng_url.clone(),
             self.core.langsearch_key.clone(),
-            self.core.embedding_model.clone(),
             std::fs::read_to_string(
                 self.core
                     .space
@@ -153,9 +152,6 @@ impl AppView {
                     self.core.search_provider =
                         SEARCH_PROVIDERS[(i + 1) % SEARCH_PROVIDERS.len()].to_string();
                 }
-                SettingsField::OcrEngine => {
-                    let _ = self.core.cycle_ocr_engine();
-                }
                 SettingsField::ColumnWidth => {
                     let _ = self.cycle_column_width(1);
                 }
@@ -208,7 +204,6 @@ impl AppView {
             Some(
                 SettingsField::SearxngUrl
                     | SettingsField::LangsearchKey
-                    | SettingsField::EmbeddingModel
                     | SettingsField::BlockedDomains
             )
         );
@@ -236,21 +231,11 @@ impl AppView {
             self.settings_inputs[3].trim().parse().unwrap_or(0).min(100);
 
         let flag = |on: bool| if on { "1" } else { "0" }.to_string();
-        self.core.memory_model = self.core.memory_model.trim().to_string();
-        self.core.transcriber_model = self.core.transcriber_model.trim().to_string();
         self.core.searxng_url = self.settings_inputs[4]
             .trim()
             .trim_end_matches('/')
             .to_string();
         self.core.langsearch_key = self.settings_inputs[5].trim().to_string();
-        self.core.ocr_model = self.core.ocr_model.trim().to_string();
-        self.core.image_gen_model = self.core.image_gen_model.trim().to_string();
-        let embedding_model = self.settings_inputs[6].trim().to_string();
-        if self.core.embedding_model != embedding_model {
-            self.core.reset_embedding_backend();
-            self.core.db.clear_chunk_embeddings()?;
-        }
-        self.core.embedding_model = embedding_model;
 
         // Write only what changed: every write bumps the row's sync version,
         // so rewriting untouched settings would make this device win LWW
@@ -266,16 +251,10 @@ impl AppView {
                 "compact_threshold",
                 self.core.settings.compact_threshold.to_string(),
             ),
-            ("memory_model", self.core.memory_model.clone()),
-            ("transcriber_model", self.core.transcriber_model.clone()),
             ("searxng_url", self.core.searxng_url.clone()),
             ("verbosity", self.core.verbosity.clone()),
             ("langsearch_key", self.core.langsearch_key.clone()),
             ("search_provider", self.core.search_provider.clone()),
-            ("ocr_model", self.core.ocr_model.clone()),
-            ("ocr_engine", self.core.ocr_engine.clone()),
-            ("embedding_model", self.core.embedding_model.clone()),
-            ("image_gen_model", self.core.image_gen_model.clone()),
         ];
         let stored: std::collections::HashMap<String, String> =
             self.core.db.load_settings()?.into_iter().collect();
@@ -292,7 +271,7 @@ impl AppView {
             .core
             .space
             .blocked_domains_path(&self.core.active_space.name);
-        let blocked = self.settings_inputs[7].trim();
+        let blocked = self.settings_inputs[6].trim();
         if std::fs::read_to_string(&blocked_path)
             .unwrap_or_default()
             .trim()
@@ -341,7 +320,11 @@ mod tests {
         assert!(a.core.toolbox.defs().iter().any(|t| t.name == "search"));
 
         a.popup = Popup::Settings;
-        a.settings_selected = 15; // SearxngUrl
+        a.settings_selected = a
+            .settings_rows()
+            .iter()
+            .position(|row| matches!(row, SettingsRow::Field(SettingsField::SearxngUrl)))
+            .unwrap();
         for c in "http://localhost:8080/".chars() {
             a.settings_input_char(c);
         }
@@ -468,6 +451,35 @@ mod tests {
                 .any(|(k, v)| k == "temperature" && v == "0.7")
         );
         assert!(reloaded.iter().any(|(k, v)| k == "show_stats" && v == "1"));
+    }
+
+    /// Saving /config never writes the removed per-feature model keys, and a
+    /// stored one (an older build's, or another device's) is left untouched.
+    #[test]
+    fn saving_settings_writes_no_removed_model_keys() {
+        let mut a = test_app();
+        a.core.db.set_setting("ocr_model", "old/ocr").unwrap();
+        a.open_settings();
+        a.settings_inputs[0] = "0.3".into();
+        a.save_settings().unwrap();
+        let stored = a.core.db.load_settings().unwrap();
+        assert!(stored.iter().any(|(k, v)| k == "temperature" && v == "0.3"));
+        for removed in [
+            "memory_model",
+            "transcriber_model",
+            "ocr_engine",
+            "embedding_model",
+            "image_gen_model",
+            "video_gen_model",
+        ] {
+            assert!(stored.iter().all(|(k, _)| k != removed), "{removed}");
+        }
+        assert!(
+            stored
+                .iter()
+                .any(|(k, v)| k == "ocr_model" && v == "old/ocr"),
+            "a stored legacy row is left alone"
+        );
     }
 
     /// Closing /config without edits rewrites nothing (each write bumps the

@@ -88,7 +88,7 @@ impl Fixture {
             ),
             ..Backends::default()
         };
-        self.app.memory_model.clear();
+        self.app.memory_extraction = false;
         self.app.saved.agent.allow = vec!["fs write **".into()];
         self.app.saved.agent.decider = Some(crate::config::ModelDecider::Rules);
         tokio::spawn(async move {

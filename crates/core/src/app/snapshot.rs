@@ -81,13 +81,9 @@ pub struct SettingsSnapshot {
     pub top_p: Option<f32>,
     pub max_tokens: Option<u32>,
     pub compact_threshold: u8,
-    pub memory_model: String,
-    pub transcriber_model: String,
-    pub ocr_model: String,
-    pub ocr_engine: String,
-    pub embedding_model: String,
-    pub image_gen_model: String,
-    pub video_gen_model: String,
+    /// The helper model for background jobs; empty means auto.
+    #[serde(default)]
+    pub helper_model: String,
     pub blocked_domains: Vec<String>,
 }
 
@@ -201,13 +197,7 @@ impl App {
                 top_p: self.settings.top_p,
                 max_tokens: self.settings.max_tokens,
                 compact_threshold: self.settings.compact_threshold,
-                memory_model: self.memory_model.clone(),
-                transcriber_model: self.transcriber_model.clone(),
-                ocr_model: self.ocr_model.clone(),
-                ocr_engine: self.ocr_engine.clone(),
-                embedding_model: self.embedding_model.clone(),
-                image_gen_model: self.image_gen_model.clone(),
-                video_gen_model: self.video_gen_model.clone(),
+                helper_model: self.helper_model.clone(),
                 blocked_domains: self.blocked_domains(),
             },
             tasks: self
@@ -276,13 +266,7 @@ mod tests {
                 top_p: None,
                 max_tokens: None,
                 compact_threshold: 60,
-                memory_model: String::new(),
-                transcriber_model: String::new(),
-                ocr_model: String::new(),
-                ocr_engine: "router".into(),
-                embedding_model: String::new(),
-                image_gen_model: String::new(),
-                video_gen_model: String::new(),
+                helper_model: String::new(),
                 blocked_domains: Vec::new(),
             },
             tasks: vec![TaskSnapshot {
@@ -299,7 +283,7 @@ mod tests {
         let json = serde_json::to_string(&snap).expect("snapshot serializes");
         assert_eq!(
             json,
-            r#"{"active_session_id":"s1","active_space_id":"sp1","active_space_name":"Default","sessions":[{"id":"s1","title":"hello","slug":"hello","model":"openrouter:anthropic/claude-sonnet-4","kind":"chat","web_mode":false,"created_at":"2025-01-01T00:00:00Z"}],"models":[{"id":"openrouter:anthropic/claude-sonnet-4","name":"Claude Sonnet 4","context_length":200000,"favorite":true}],"settings":{"show_stats":false,"show_reasoning":false,"hide_hints":false,"model":"openrouter:anthropic/claude-sonnet-4","verbosity":"high","web_mode":false,"incognito":false,"searxng_url":"","langsearch_configured":false,"search_provider":"searxng","temperature":0.7,"top_p":null,"max_tokens":null,"compact_threshold":60,"memory_model":"","transcriber_model":"","ocr_model":"","ocr_engine":"router","embedding_model":"","image_gen_model":"","video_gen_model":"","blocked_domains":[]},"tasks":[{"id":1,"session_id":"s1","session_title":"hello","model":"openrouter:anthropic/claude-sonnet-4","backend":"OpenRouter","status":"streaming","buffer_chars":12,"buffer":""}]}"#
+            r#"{"active_session_id":"s1","active_space_id":"sp1","active_space_name":"Default","sessions":[{"id":"s1","title":"hello","slug":"hello","model":"openrouter:anthropic/claude-sonnet-4","kind":"chat","web_mode":false,"created_at":"2025-01-01T00:00:00Z"}],"models":[{"id":"openrouter:anthropic/claude-sonnet-4","name":"Claude Sonnet 4","context_length":200000,"favorite":true}],"settings":{"show_stats":false,"show_reasoning":false,"hide_hints":false,"model":"openrouter:anthropic/claude-sonnet-4","verbosity":"high","web_mode":false,"incognito":false,"searxng_url":"","langsearch_configured":false,"search_provider":"searxng","temperature":0.7,"top_p":null,"max_tokens":null,"compact_threshold":60,"helper_model":"","blocked_domains":[]},"tasks":[{"id":1,"session_id":"s1","session_title":"hello","model":"openrouter:anthropic/claude-sonnet-4","backend":"OpenRouter","status":"streaming","buffer_chars":12,"buffer":""}]}"#
         );
         // The golden string must also parse back into the same shape.
         let back: CoreSnapshot = serde_json::from_str(&json).expect("golden parses");

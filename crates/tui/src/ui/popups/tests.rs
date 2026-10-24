@@ -1128,6 +1128,80 @@ fn settings_popup_renders_selected_field_detail() {
 }
 
 #[test]
+fn settings_popup_has_one_model_row_that_defaults_to_auto() {
+    let mut app = test_app();
+    app.open_settings();
+    // Tall enough that every row is on screen.
+    let screen = render_to_string(120, 60, |f| super::settings::render(f, &app));
+
+    let model_rows: Vec<&str> = screen
+        .lines()
+        .filter(|line| line.to_lowercase().contains("model"))
+        .collect();
+    assert_eq!(
+        model_rows.len(),
+        1,
+        "exactly one model row on screen:\n{screen}"
+    );
+    assert!(
+        model_rows[0].contains("helper model") && model_rows[0].contains("auto"),
+        "{screen}"
+    );
+    for gone in [
+        "memory model",
+        "image model",
+        "OCR",
+        "embedding",
+        "image gen",
+        "video gen",
+        "Voice & Vision",
+        "Image Generation",
+        "Video Generation",
+    ] {
+        assert!(!screen.contains(gone), "{gone} should be gone:\n{screen}");
+    }
+
+    // A picked helper model replaces "auto" on the row.
+    app.helper_model = "x/helper".into();
+    let screen = render_to_string(120, 60, |f| super::settings::render(f, &app));
+    assert!(screen.contains("x/helper"), "{screen}");
+}
+
+#[test]
+fn settings_helper_row_picks_with_enter_and_returns_to_auto_with_backspace() {
+    use crossterm::event::KeyCode;
+    let mut app = test_app();
+    app.core.models = vec![nexus_core::provider::Model {
+        id: "a/one".into(),
+        name: "One".into(),
+        reasoning_efforts: Vec::new(),
+        context_length: None,
+        supports_images: false,
+        supports_image_generation: false,
+        supports_video_generation: false,
+        backend: nexus_core::provider::BackendTag::OpenRouter,
+        pricing: None,
+    }];
+    select_settings_field(&mut app, SettingsField::HelperModel);
+
+    press(&mut app, KeyCode::Enter);
+    assert!(app.popup == nexus_core::app::Popup::Model);
+    assert!(app.model_pick_target == nexus_core::app::ModelPickTarget::Helper);
+    let screen = render_to_string(160, 30, |f| super::model::render(f, &mut app));
+    assert!(screen.contains("picking helper model"), "{screen}");
+
+    app.pick_model_at(nexus_core::app::ModelPanel::Available, 0)
+        .unwrap();
+    assert_eq!(app.helper_model, "a/one");
+    assert!(app.popup == nexus_core::app::Popup::Settings);
+
+    select_settings_field(&mut app, SettingsField::HelperModel);
+    press(&mut app, KeyCode::Backspace);
+    assert!(app.helper_model.is_empty(), "Backspace returns to auto");
+    assert_eq!(app.db.setting("helper_model").as_deref(), Some(""));
+}
+
+#[test]
 fn completed_chat_notification_is_rendered_as_a_click_target() {
     let mut app = test_app();
     let session = app

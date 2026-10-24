@@ -31,7 +31,6 @@ fn tool(id: &str, name: &str, result: &str) -> Message {
 
 fn app(db: Db, root: std::path::PathBuf) -> App {
     let mut app = App::new(db, None, Space { root });
-    app.memory_model.clear();
     app.settings.compact_threshold = 0;
     app.models = vec![Model {
         id: "a/one".into(),

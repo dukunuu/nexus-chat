@@ -962,13 +962,26 @@ impl OpenRouter {
         anyhow::bail!("video generation timed out after 6 minutes");
     }
 
-    pub const fn default_utility_model(&self) -> &'static str {
-        match self.flavor {
-            ProviderFlavor::OpenRouter => "google/gemini-2.5-flash-lite",
-            ProviderFlavor::OpenAi => "gpt-4.1-mini",
-            ProviderFlavor::OpenAiCodex => "gpt-5.6-luna",
-            ProviderFlavor::OpencodeGo => "deepseek-v4-flash",
+    /// The "auto" helper model for `tag`: the cheap model every background job
+    /// (memory, compaction, image descriptions, vision OCR, the auto-approval
+    /// judge) uses when the user hasn't picked one. This is the one place the
+    /// per-backend choice lives. Empty means the backend has no cheap option
+    /// of its own (local runtimes serve whatever the user installed), so the
+    /// caller falls back to the session's chat model on that backend.
+    #[must_use]
+    pub const fn default_helper_for(tag: crate::provider::BackendTag) -> &'static str {
+        use crate::provider::BackendTag;
+        match tag {
+            BackendTag::OpenRouter => "google/gemini-2.5-flash-lite",
+            BackendTag::OpenAi => "gpt-4.1-mini",
+            BackendTag::Codex => "gpt-5.6-luna",
+            BackendTag::OpencodeGo => "deepseek-v4-flash",
+            BackendTag::Local => "",
         }
+    }
+
+    pub const fn default_utility_model(&self) -> &'static str {
+        Self::default_helper_for(self.backend_tag())
     }
 
     pub const fn default_research_model(&self) -> &'static str {

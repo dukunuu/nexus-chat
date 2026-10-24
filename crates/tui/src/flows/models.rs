@@ -46,36 +46,10 @@ impl AppView {
         self.open_model_picker_impl();
     }
 
-    /// Open the same model picker, but a confirmed pick sets the memory model
+    /// Open the same model picker, but a confirmed pick sets the helper model
     /// (in `/config`) instead of the active session's model.
-    pub fn open_model_picker_for_memory(&mut self) {
-        self.core.model_pick_target = ModelPickTarget::Memory;
-        self.open_model_picker_impl();
-    }
-
-    /// Open the same model picker, but a confirmed pick sets the image model
-    /// (`transcriber_model`, in `/config`) instead of the active session's model.
-    pub fn open_model_picker_for_transcriber(&mut self) {
-        self.core.model_pick_target = ModelPickTarget::Transcriber;
-        self.open_model_picker_impl();
-    }
-
-    /// Open the same model picker, but a confirmed pick sets the image
-    /// generation model (in `/config`) instead of the active session's model.
-    pub fn open_model_picker_for_image_gen(&mut self) {
-        self.core.model_pick_target = ModelPickTarget::ImageGen;
-        self.open_model_picker_impl();
-    }
-
-    pub fn open_model_picker_for_video_gen(&mut self) {
-        self.core.model_pick_target = ModelPickTarget::VideoGen;
-        self.open_model_picker_impl();
-    }
-
-    /// Open the same model picker, but a confirmed pick sets the OCR model
-    /// (in `/config`) instead of the active session's model.
-    pub fn open_model_picker_for_ocr(&mut self) {
-        self.core.model_pick_target = ModelPickTarget::Ocr;
+    pub fn open_model_picker_for_helper(&mut self) {
+        self.core.model_pick_target = ModelPickTarget::Helper;
         self.open_model_picker_impl();
     }
 
@@ -290,20 +264,6 @@ impl AppView {
             .models
             .iter()
             .filter(|m| self.model_backend_filter.is_none_or(|t| m.backend == t))
-            .filter(|m| {
-                if self.core.model_pick_target == ModelPickTarget::ImageGen {
-                    m.supports_image_generation
-                } else {
-                    true
-                }
-            })
-            .filter(|m| {
-                if self.core.model_pick_target == ModelPickTarget::VideoGen {
-                    m.supports_video_generation
-                } else {
-                    true
-                }
-            })
             .filter(|m| {
                 self.core
                     .favorites
@@ -775,22 +735,22 @@ mod tests {
     }
 
     #[test]
-    fn picking_memory_model_sets_it_and_returns_to_settings() {
+    fn picking_helper_model_sets_it_and_returns_to_settings() {
         let mut a = test_app();
         let original_model = a.current_model.clone();
-        a.open_model_picker_for_memory();
+        a.open_model_picker_for_helper();
         assert_eq!(a.popup, Popup::Model);
-        assert!(a.model_pick_target == ModelPickTarget::Memory);
+        assert!(a.model_pick_target == ModelPickTarget::Helper);
 
         a.pick_model_at(ModelPanel::Available, 0).unwrap();
-        assert_eq!(a.memory_model, "a/one");
+        assert_eq!(a.helper_model, "a/one");
         assert_eq!(a.popup, Popup::Settings); // back to /config, not closed
         assert_eq!(a.current_model, original_model); // session model untouched
         assert_eq!(
             a.db.load_settings()
                 .unwrap()
                 .iter()
-                .find(|(k, _)| k == "memory_model")
+                .find(|(k, _)| k == "helper_model")
                 .map(|(_, v)| v.clone()),
             Some("a/one".to_string())
         );

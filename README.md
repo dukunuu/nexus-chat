@@ -141,13 +141,14 @@ agent on macOS and prints the activation command.
 - Rust 1.91+ (only needed to build/install — no runtime dependency)
 - A modern terminal (truecolor recommended)
 - Extra tooling, all optional:
-  - `tesseract` — local OCR (scanned PDFs and images)
+  - `tesseract` (with `poppler`) — local OCR for scanned PDFs and images; without
+    it the helper model reads them
   - `ffmpeg` — video transforms for `media`; with `ffprobe` and a local
     `whisper`, audio/video files get metadata and transcripts
   - `pandoc`, `libreoffice` (`soffice`), `antiword`/`catdoc` — richer reads of
     markup and legacy office files (docx, odt, epub, rtf, org, rst, … work
     without them; `.doc`/`.xls`/`.ppt`/`.key` need one of these)
-  - `ollama` — local embeddings/OCR
+  - `ollama` — local embeddings
 
 Files are read by content, not extension: HTML becomes clean Markdown, PDFs,
 office/ODF/EPUB, RTF, mail, notebooks, subtitles and CSV are converted, and a
@@ -171,6 +172,33 @@ key is enough; models are fetched from the catalogs.
 | system prompt overrides | `~/.config/nexus-chat/system_prompt.md` |
 | custom banner | `~/.config/nexus-chat/banner.txt` |
 | spaces (db, files, scripts, apps, media) | `~/.local/share/nexus-chat/spaces/<space>/` |
+
+**One model setting.** `/config` has a single model row, the *helper model*
+(`helper_model` over the host settings API). It runs every background job that
+needs a model: memory, compaction summaries, image descriptions, vision OCR and
+the auto-approval judge. It starts on `auto` (Enter picks one, Backspace goes
+back to `auto`). Auto is a cheap model on the backend your session is using and
+never moves to another provider:
+
+| Active backend | Auto helper model |
+|---|---|
+| OpenRouter | `google/gemini-2.5-flash-lite` |
+| OpenAI | `gpt-4.1-mini` |
+| Codex | `gpt-5.6-luna` |
+| OpenCode Go | `deepseek-v4-flash` |
+| Local | your session's installed model (a local runtime has no cheap default) |
+
+When a backend's catalog no longer lists its cheap model, auto uses the
+session's own model there. Everything else is automatic: embeddings (local
+EmbeddingGemma 2 when Ollama has it, else the backend's embedding model, else
+keyword search), OCR (`tesseract` when installed, else the helper model's
+vision) and image/video generation (the active backend's default generation
+model; backends without one, such as Codex, have no `media` generation). The
+per-feature model settings of older builds (`memory_model`, `transcriber_model`,
+`ocr_model`, `ocr_engine`, `local_ocr_model`, `embedding_model`,
+`image_gen_model`, `video_gen_model`) are ignored if present and rejected by the
+settings API; a `memory_model` you had chosen carries over to `helper_model`
+once.
 
 ## Local inference (experimental)
 
@@ -332,16 +360,15 @@ ollama pull embeddinggemma-2:270m  # text only (~270M parameters)
 ollama pull embeddinggemma-2       # multimodal tag
 ```
 
-**Selecting it.** If Ollama answers on `http://127.0.0.1:11434` (or the
-endpoint in `[local]` when the runtime is Ollama), has one of those two tags
-installed, and you have never set an embedding model, Nexus uses it
-automatically (`embeddinggemma-2:270m` is preferred). Otherwise set it in
-`/settings` (embedding model) or over the host settings API:
-`embedding_model = "local:embeddinggemma-2:270m"` or
-`"local:embeddinggemma-2"`. An explicit choice, including a cloud model or a
-blank value, is never overridden. A `local:` choice never falls back to a cloud
-embedder; if Ollama is down, search degrades to keywords with the reason, and
-`/files` shows `embeddings: not reachable — is `ollama serve` running?`.
+**Selecting it.** There is no embedding setting; the choice is automatic. If
+Ollama answers on `http://127.0.0.1:11434` (or the endpoint in `[local]` when
+the runtime is Ollama) and has one of those two tags installed, Nexus uses it
+(`embeddinggemma-2:270m` is preferred). Otherwise it uses the signed-in
+backend's own embedding model (OpenRouter and OpenAI have one), and where the
+backend has none (Codex, OpenCode Go) search is keyword-only. `/files` shows
+which. A `local:` choice never falls back to a cloud embedder; if Ollama is
+down, search degrades to keywords with the reason, and `/files` shows
+`embeddings: not reachable — is `ollama serve` running?`.
 
 **What is embedded.** Text, code, PDFs and office documents are embedded from
 the text Nexus already extracts, in windows of at most about 1,000 tokens
@@ -355,8 +382,10 @@ video are not embedded yet.
 **OCR and captions are optional now.** While images are embedded directly,
 Nexus no longer queues OCR or a vision caption for new images just to make them
 searchable. `Ctrl+F` in `/files` still runs OCR on a chosen file, and the
-`ocr_images` setting (`true`/`false`, blank for automatic) overrides the
-default. Text extraction for reading and keyword search is unchanged.
+`ocr_images` host setting (`true`/`false`, blank for automatic) overrides the
+default. Text extraction for reading and keyword search is unchanged. When OCR
+does run, scanned PDFs use `tesseract` if it is installed and the helper model's
+vision otherwise; images try `tesseract`, then the helper model describes them.
 
 **Switching and updating.** Each vector records the model's identity: backend,
 model, weights digest, dimension, prefix scheme and preprocessing version.
@@ -466,7 +495,7 @@ Type `/` in the composer for autocomplete. Aliases in parentheses.
 | `/skills` | manage skills (app + project/user/global Agent Skills) |
 | `/usage` (`analytics`, `costs`) | token/cache/cost analytics by backend & model (←/→ for 24h/7d/30d/all windows) |
 | `/compact` (`summarize`) | summarize old messages into a digest |
-| `/config` (`settings`, `stats`) | settings, footer toggles, sampling params |
+| `/config` (`settings`, `stats`) | settings, footer toggles, sampling params, the helper model |
 | `/web` | toggle search-first cited answering |
 | `/export` (`save-report`) | write the research report + sources to a file |
 | `/incognito` | toggle no-persistence mode |

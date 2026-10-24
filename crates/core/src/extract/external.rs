@@ -111,6 +111,12 @@ impl ExtractConfig {
             .find(|h| (!ext.is_empty() && h.key == ext) || h.key == mime)
     }
 
+    /// Whether scanned PDFs can be OCR'd locally: `pdftoppm` (poppler) renders
+    /// the pages and `tesseract` reads them.
+    pub fn ocr_tools_installed(&self) -> bool {
+        self.find("tesseract").is_some() && self.find("pdftoppm").is_some()
+    }
+
     fn has_any(&self, programs: &[&str]) -> bool {
         programs.iter().any(|p| self.find(p).is_some())
     }

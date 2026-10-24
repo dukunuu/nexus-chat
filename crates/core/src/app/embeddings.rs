@@ -58,13 +58,13 @@ impl App {
             .map_or("http://127.0.0.1:11434", |c| c.endpoint())
     }
 
-    /// Probe for an installed local default without blocking startup or sending
-    /// file content. Any persisted value, including blank, is an explicit choice.
+    /// Pick the embedding model automatically, without blocking startup or
+    /// sending file content: local `EmbeddingGemma` 2 when Ollama has it
+    /// installed, otherwise the backend default chosen at construction
+    /// (`default_embedding_model`, empty where a backend has none, which leaves
+    /// keyword search only). There is no setting to override this.
     pub fn discover_embeddings(&mut self) {
         if self.embed_rx.is_some()
-            || self.db.load_settings().map_or(true, |settings| {
-                settings.iter().any(|(k, _)| k == "embedding_model")
-            })
             || self
                 .saved
                 .local

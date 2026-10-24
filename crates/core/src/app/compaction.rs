@@ -149,33 +149,27 @@ impl App {
             return; // only the existing digest or excluded UI rows remain
         }
 
-        // A saved utility-model id may belong to a backend that is no longer
-        // configured (especially for sessions created before the backend
-        // prefixes were introduced). Resolve it like every other background
-        // utility job, falling back to the active session backend/model.
-        let requested_model = if self.memory_model.trim().is_empty() {
-            let Some(model) = self.current_model.clone() else {
-                self.push_status("pick a model first with /model".to_string());
-                return;
-            };
-            model
-        } else {
-            self.memory_model.trim().to_string()
+        // The helper model summarizes (auto = a cheap model on the active
+        // backend). A picked id may belong to a backend that is no longer
+        // configured; it then resolves like auto does.
+        let Some(session_model) = self.current_model.clone() else {
+            self.push_status("pick a model first with /model".to_string());
+            return;
         };
-        // The session's own model is the fallback when the utility model's
-        // backend rejects the request (an id from another backend, no credit).
-        let fallback = self
-            .current_model
-            .as_deref()
-            .and_then(|id| self.resolve_model_backend(id))
-            .filter(|_| self.current_model.as_deref() != Some(requested_model.as_str()));
-        let Some((provider, raw_model)) = self.resolve_utility_model_backend(&requested_model)
-        else {
+        let Some((provider, raw_model)) = self.helper_backend() else {
             self.push_status(format!(
-                "model backend unavailable: {requested_model} — pick another with /model"
+                "model backend unavailable: {session_model} — pick another with /model"
             ));
             return;
         };
+        // The session's own model is the fallback when the helper model's
+        // backend rejects the request (an id from another backend, no credit).
+        let fallback =
+            self.resolve_model_backend(&session_model)
+                .filter(|(session_provider, session_raw)| {
+                    session_provider.backend_tag() != provider.backend_tag()
+                        || *session_raw != raw_model
+                });
         let new_through = end as i64;
         let prompt = compaction_prompt(
             prior_summary.as_deref(),

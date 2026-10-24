@@ -70,7 +70,7 @@ The README has the full tree; the parts agents touch most:
 | `crates/core/src/provider/openrouter.rs` | the single client for all OpenAI-wire backends — message shapes, tool-call wire format, events are in `provider/mod.rs` |
 | `crates/core/src/provider/serve.rs` | managed local-provider servers: per-runtime launch commands, endpoint liveness probes, process-tree memory, and the advisory budget behind `/local start\|stop\|status` |
 | `crates/core/src/provider/local.rs`, `harmony.rs` | opt-in local runtimes: config + installed-model discovery, and the Harmony channel splitter for `gpt-oss` servers that leave framing in `content` |
-| `crates/core/src/provider/embedding.rs` | file-search embeddings: `EmbedInput` (text/image), `Embedder` (OpenAI-wire or Ollama native `/api/embed`), probed `EmbedIdentity` used as the vector cache key, strict response validation; `app/embeddings.rs` selects/probes it (local default only when reachable), `extract/embedding.rs` is the token-bounded chunker |
+| `crates/core/src/provider/embedding.rs` | file-search embeddings: `EmbedInput` (text/image), `Embedder` (OpenAI-wire or Ollama native `/api/embed`), probed `EmbedIdentity` used as the vector cache key, strict response validation; `app/embeddings.rs` selects/probes it automatically (local default only when reachable, no setting), `extract/embedding.rs` is the token-bounded chunker |
 | `crates/core/src/tools.rs` | the model's tools + the `ToolExecutor` seam (`defs`/`is_read_only`/`run`) |
 | `crates/core/src/connectors/` | MCP connectors (docs/connectors.md): `protocol`/`transport`/`client` speak both protocol families over HTTP and stdio, `registry` tracks status and what the model may see (naming, >30-tool meta-tool, policy, rug-pull pins), `exec` runs a call through the approval flow, `import`/`secrets`/`config` cover other tools' configs, the keychain and `[connectors.*]` |
 | `crates/core/src/db.rs` | SQLite (rusqlite bundled): sessions, messages, usage, citations, model prefs |
@@ -132,6 +132,20 @@ The README has the full tree; the parts agents touch most:
   `App::automatic_image_ocr` is false and rescans do not queue OCR/captions for
   images (`ocr_images` overrides; `reocr_file` is the explicit action). Tests
   use `provider::embedding::tests::MockOllama`; never hit a real Ollama.
+- **One model setting, the rest automatic**: `/config` has one model row,
+  `helper_model` (blank = auto). `App::helper_backend` is where every background
+  job (memory, compaction, image descriptions, vision OCR, the `LlmDecider`)
+  gets its model: the pick, else `OpenRouter::default_helper_for(tag)` on the
+  session's backend, else the session's own model there (local runtimes, or a
+  catalog that dropped the default); it never crosses backends. Embeddings
+  (`app/embeddings.rs`: local EmbeddingGemma 2 → backend default → none), OCR
+  (`App::ocr_backend`: tesseract if installed, else the helper) and media
+  generation (`App::generation_backend`, the backend's `default_*_gen_model`)
+  are computed, not configured. The removed keys (`settings::is_removed_setting`)
+  are ignored on read and rejected on set; `memory_model` migrates once into
+  `helper_model` (`settings::legacy_helper_model`). `App::embedding_model` is
+  runtime state, not a setting. New background jobs call `helper_backend()`;
+  do not add a per-feature model row.
 - **Don't commit agent tooling**: `.claude/`, `.superpowers/`,
   `.pi-subagents/` are gitignored — leave them out of commits.
 

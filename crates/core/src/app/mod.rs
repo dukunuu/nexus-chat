@@ -50,8 +50,8 @@ mod scripts;
 mod sessions;
 mod settings;
 pub use settings::{
-    COLUMN_WIDTH_MAX, COLUMN_WIDTH_MIN, POPUP_IDS, POPUP_SIZE_MAX, POPUP_SIZE_MIN, popup_size,
-    with_popup_size,
+    COLUMN_WIDTH_MAX, COLUMN_WIDTH_MIN, POPUP_IDS, POPUP_SIZE_MAX, POPUP_SIZE_MIN,
+    is_removed_setting, popup_size, removed_setting_message, with_popup_size,
 };
 mod connectors;
 mod skills_popup;
@@ -531,20 +531,15 @@ impl CacheTally {
 }
 
 /// What a confirmed model picker selection is for: the active session's model,
-/// or one of the feature models in `/config`.
+/// the helper model in `/config`, or one row of the swarm roster.
 #[derive(PartialEq, Eq, Clone, Copy, Default)]
 pub enum ModelPickTarget {
     #[default]
     Session,
-    Memory,
-    Transcriber,
-    Ocr,
+    /// The helper model every background job uses (`/config`).
+    Helper,
     /// Picking the model for one row of the active session's `/swarm` roster.
     SwarmPersona(usize),
-    /// Model used for AI image generation.
-    ImageGen,
-    /// Model used for AI video generation.
-    VideoGen,
 }
 
 /// Editable rows in the nerd-config popup.
@@ -557,26 +552,20 @@ pub enum SettingsField {
     Temperature,
     TopP,
     MaxTokens,
-    MemoryModel,
+    HelperModel,
     CompactThreshold,
     SearxngUrl,
     Verbosity,
     LangsearchKey,
     SearchProvider,
-    TranscriberModel,
-    OcrModel,
-    OcrEngine,
-    EmbeddingModel,
     BlockedDomains,
-    ImageGenModel,
-    VideoGenModel,
     ReplyStyle,
     ColumnWidth,
     ImageViewer,
 }
 
 impl SettingsField {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 17] = [
         Self::RemoteImages,
         Self::ShowStats,
         Self::ShowReasoning,
@@ -584,19 +573,13 @@ impl SettingsField {
         Self::Temperature,
         Self::TopP,
         Self::MaxTokens,
-        Self::MemoryModel,
+        Self::HelperModel,
         Self::CompactThreshold,
         Self::SearxngUrl,
         Self::Verbosity,
         Self::LangsearchKey,
         Self::SearchProvider,
-        Self::TranscriberModel,
-        Self::OcrModel,
-        Self::OcrEngine,
-        Self::EmbeddingModel,
         Self::BlockedDomains,
-        Self::ImageGenModel,
-        Self::VideoGenModel,
         Self::ReplyStyle,
         Self::ColumnWidth,
         Self::ImageViewer,
@@ -618,7 +601,9 @@ impl SettingsField {
             Self::Temperature => "temperature",
             Self::TopP => "top_p",
             Self::MaxTokens => "max_tokens",
-            Self::MemoryModel => "memory model (Enter to pick, Backspace clears)",
+            Self::HelperModel => {
+                "helper model (Enter to pick, Backspace for auto; auto = a cheap model on your active backend, for memory, summaries and image reading)"
+            }
             Self::CompactThreshold => "auto-compact at (% of context, 0 disables)",
             Self::SearxngUrl => "web search URL (SearXNG instance, blank disables)",
             Self::Verbosity => "answer length (Space cycles normal/concise/caveman)",
@@ -626,27 +611,15 @@ impl SettingsField {
             Self::SearchProvider => {
                 "search provider (Space cycles auto/langsearch/searxng/duckduckgo)"
             }
-            Self::TranscriberModel => "image model (Enter to pick, Backspace clears)",
-            Self::OcrModel => "OCR model (Enter to pick, Backspace clears)",
-            Self::OcrEngine => {
-                "OCR engine (Space cycles auto/tesseract/vlm/local; local pulls via ollama)"
-            }
-            Self::EmbeddingModel => "embedding model (file search, blank disables)",
             Self::BlockedDomains => "blocked domains (comma-separated, always excluded; per-space)",
-            Self::ImageGenModel => {
-                "image gen model (Enter to pick, Backspace clears; blank = disabled)"
-            }
-            Self::VideoGenModel => {
-                "video gen model (Enter to pick, Backspace clears; blank = disabled)"
-            }
         }
     }
 }
 
 /// A functional group of settings fields, shown as a collapsible section in
 /// the nerd-config popup — grouped by what part of the pipeline the fields
-/// configure (chat display, sampling, memory, research, web search, or
-/// voice/vision input), not by widget type.
+/// configure (chat display, sampling, the helper model and context, web
+/// search, or reply layout), not by widget type.
 pub struct SettingsGroup {
     pub name: &'static str,
     pub fields: &'static [SettingsField],
@@ -671,12 +644,8 @@ pub const SETTINGS_GROUPS: &[SettingsGroup] = &[
         ],
     },
     SettingsGroup {
-        name: "Memory & Context",
-        fields: &[
-            SettingsField::MemoryModel,
-            SettingsField::CompactThreshold,
-            SettingsField::EmbeddingModel,
-        ],
+        name: "Helper & Context",
+        fields: &[SettingsField::HelperModel, SettingsField::CompactThreshold],
     },
     SettingsGroup {
         name: "Web Search",
@@ -686,22 +655,6 @@ pub const SETTINGS_GROUPS: &[SettingsGroup] = &[
             SettingsField::LangsearchKey,
             SettingsField::BlockedDomains,
         ],
-    },
-    SettingsGroup {
-        name: "Voice & Vision",
-        fields: &[
-            SettingsField::TranscriberModel,
-            SettingsField::OcrModel,
-            SettingsField::OcrEngine,
-        ],
-    },
-    SettingsGroup {
-        name: "Image Generation",
-        fields: &[SettingsField::ImageGenModel],
-    },
-    SettingsGroup {
-        name: "Video Generation",
-        fields: &[SettingsField::VideoGenModel],
     },
     SettingsGroup {
         name: "Reply Layouts",
@@ -727,7 +680,6 @@ pub const REPLY_STYLES: [&str; 4] = ["interactive", "auto", "rich", "plain"];
 /// the terminal's graphics support makes sensible (`auto`).
 pub const IMAGE_VIEWERS: [&str; 3] = ["auto", "terminal", "system"];
 pub const VERBOSITY_LEVELS: [&str; 3] = ["normal", "concise", "caveman"];
-pub const OCR_ENGINES: [&str; 4] = ["auto", "tesseract", "vlm", "local"];
 pub const SEARCH_PROVIDERS: [&str; 4] = ["auto", "langsearch", "searxng", "duckduckgo"];
 
 /// Nerd config: footer toggles + core sampling parameters.
@@ -1057,8 +1009,6 @@ pub enum AppEvent {
     Ocr(Option<(String, String, files::OcrUpdate)>),
     /// One file's chunk-embedding job finished (or the channel closed).
     Embed(Option<EmbedMsg>),
-    /// A local-OCR-model pull finished: model name or error.
-    OcrPull(Option<Result<String, String>>),
     /// A deep-research pipeline update, or `None` when its channel closed.
     Research(Option<ResearchMsg>),
     /// `/research` with no topic: a distilled topic from recent chat, or an error.
@@ -1096,8 +1046,16 @@ pub struct App {
 
     /// The space the current/next session belongs to.
     pub active_space: SpaceRow,
-    /// Model used for background memory extraction (empty = disabled).
-    pub memory_model: String,
+    /// The one model every background job uses: memory extraction,
+    /// compaction summaries, image descriptions, vision OCR, the
+    /// auto-approval judge. Empty = auto, a cheap model on the active
+    /// backend (`App::helper_backend`); never switches backends silently.
+    pub helper_model: String,
+    /// Whether finished replies feed background memory extraction. Always on
+    /// in the product (there is no setting for it; incognito turns, which
+    /// never reach it, are the opt-out). Tests that serve a scripted mock
+    /// backend turn it off so the helper call cannot consume their responses.
+    pub(crate) memory_extraction: bool,
     /// Memory contents captured when the active session/cache epoch began.
     /// Background extraction may update the space file without changing this
     /// snapshot during the active run.
@@ -1111,16 +1069,9 @@ pub struct App {
     /// `{{datetime}}` expansion stable prevents a clock tick from invalidating
     /// the entire serialized prefix on every request.
     pub(crate) prompt_datetime: String,
-    /// Image model: describes image files (empty = the OCR model does).
-    pub transcriber_model: String,
-    /// Vision model for scanned-PDF OCR (empty = tesseract only).
-    pub ocr_model: String,
-    /// OCR engine choice: "auto" (vlm when `ocr_model` set), "tesseract",
-    /// "vlm", or "local" (Ollama on 127.0.0.1:11434, set up by cycling to it in /config).
-    pub ocr_engine: String,
-    /// Ollama model name for the "local" OCR engine.
-    pub local_ocr_model: String,
-    /// Embedding model for semantic file search (empty = keyword FTS only).
+    /// Embedding model for semantic file search, chosen automatically (local
+    /// `EmbeddingGemma` 2 when Ollama has it, else the backend's default, else
+    /// empty = keyword search only). Runtime state, not a setting.
     pub embedding_model: String,
     /// Probed runtime shared with file search; never contains cloud credentials in its identity.
     pub embedding_backend: Option<crate::provider::embedding::Embedder>,
@@ -1131,10 +1082,6 @@ pub struct App {
     embedding_chunks: Vec<(String, String)>,
     embedding_discovery:
         Option<std::sync::Arc<std::sync::OnceLock<(String, crate::provider::embedding::Embedder)>>>,
-    /// Model used for AI image generation (empty = disabled).
-    pub image_gen_model: String,
-    /// Model used for AI video generation (empty = disabled).
-    pub video_gen_model: String,
     /// Base URL of a `SearXNG` instance for the web-search tool, or empty to
     /// disable it. Configured in-app (`/config`), not a config file.
     pub searxng_url: String,
@@ -1282,8 +1229,6 @@ pub struct App {
     pub ocr_rx: Option<mpsc::UnboundedReceiver<(String, String, files::OcrUpdate)>>,
     /// One in-flight chunk-embedding job: (space id, file id, vectors or error).
     pub embed_rx: Option<mpsc::UnboundedReceiver<EmbedMsg>>,
-    /// A running local-OCR-model pull: model name on success, error text on failure.
-    pub ocr_pull_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
     /// Local provider servers Nexus started with `/local start`. Owning them
     /// is what lets `/local stop` and the exit path reclaim their memory;
     /// servers started outside Nexus are detected but never stopped.
@@ -1455,18 +1400,10 @@ impl App {
                 },
             )
         };
-        let utility_model = default_model_id(
-            OpenRouter::default_utility_model,
-            "google/gemini-2.5-flash-lite",
-        );
         let embedding_model = default_model_id(
             OpenRouter::default_embedding_model,
             "openai/text-embedding-3-small",
         );
-        let image_gen_model =
-            default_model_id(OpenRouter::default_image_gen_model, "openai/gpt-image-2");
-        let video_gen_model =
-            default_model_id(OpenRouter::default_video_gen_model, "google/veo-3.1");
         let skills_dir = crate::skills::skills_dir(&space.root);
         let skill_dirs = crate::skills::app_skill_roots(&space.root);
         let skills = crate::skills::load_skills_from_dirs(&skill_dirs);
@@ -1541,7 +1478,6 @@ impl App {
             skills_rx: None,
             ocr_rx: None,
             embed_rx: None,
-            ocr_pull_rx: None,
             local_servers: crate::provider::serve::ManagedServers::default(),
             local_status: Vec::new(),
             local_status_rx: None,
@@ -1563,23 +1499,18 @@ impl App {
             usage_range: crate::db::UsageRange::default(),
             harness: None,
             active_space,
-            memory_model: utility_model.clone(),
+            helper_model: String::new(),
+            memory_extraction: true,
             memory_snapshot: String::new(),
             cache_epoch: 0,
             context_warned: false,
             prompt_datetime: Utc::now().format("%Y-%m-%d %H:%M UTC, %A").to_string(),
-            transcriber_model: utility_model.clone(),
-            ocr_model: utility_model,
-            ocr_engine: "auto".to_string(),
-            local_ocr_model: "glm-ocr".to_string(),
             embedding_model,
             embedding_backend: None,
             embedding_status: String::new(),
             embedding_chunks: Vec::new(),
             embedding_discovery: None,
             ocr_images: None,
-            image_gen_model,
-            video_gen_model,
             base_system_prompt: config::BASE_SYSTEM_PROMPT.to_string(),
             system_prompt_overlay: String::new(),
             interactive_ui: false,
@@ -2000,8 +1931,15 @@ impl App {
         let Ok(kv) = self.db.load_settings() else {
             return;
         };
+        let legacy = settings::legacy_helper_model(&kv);
         for (k, v) in kv {
             self.apply_setting(&k, &v);
+        }
+        if let Some(model) = legacy {
+            // One-time migration: a deliberately chosen `memory_model` becomes
+            // the helper model. Persisting it makes this a no-op next boot.
+            self.helper_model.clone_from(&model);
+            let _ = self.db.set_setting("helper_model", &model);
         }
         self.refresh_toolbox();
     }
@@ -2021,33 +1959,17 @@ impl App {
             "temperature" => self.settings.temperature = v.parse().ok(),
             "top_p" => self.settings.top_p = v.parse().ok(),
             "max_tokens" => self.settings.max_tokens = v.parse().ok(),
-            "memory_model" => self.memory_model = v.to_string(),
-            "transcriber_model" => self.transcriber_model = v.to_string(),
-            "ocr_model" => self.ocr_model = v.to_string(),
-            "ocr_engine" if OCR_ENGINES.contains(&v) => self.ocr_engine = v.to_string(),
-            "local_ocr_model" => self.local_ocr_model = v.to_string(),
-            "embedding_model" => self.embedding_model = v.to_string(),
+            // Empty = auto. Rows for the removed per-feature model settings
+            // (see `settings::is_removed_setting`) fall through to `_`:
+            // other devices' sync data may still carry them, and they are
+            // ignored, never deleted.
+            "helper_model" => self.helper_model = v.trim().to_string(),
             "ocr_images" => {
                 self.ocr_images = match v {
                     "true" => Some(true),
                     "false" => Some(false),
                     _ => None,
                 };
-            }
-            // Migrate the old defaults: flux-dev is no longer in
-            // OpenRouter's image catalog, and Veo Lite is the lower
-            // quality tier.
-            "image_gen_model" => {
-                self.image_gen_model = match v {
-                    "black-forest-labs/flux-dev" => "openai/gpt-image-2".to_string(),
-                    _ => v.to_string(),
-                }
-            }
-            "video_gen_model" => {
-                self.video_gen_model = match v {
-                    "google/veo-3.1-lite" => "google/veo-3.1".to_string(),
-                    _ => v.to_string(),
-                }
             }
             "compact_threshold" => {
                 if let Ok(t) = v.parse() {
@@ -2114,13 +2036,7 @@ impl App {
                     context,
                 })],
                 ModelDecider::Llm => {
-                    let backend = if self.memory_model.trim().is_empty() {
-                        self.current_model
-                            .as_deref()
-                            .and_then(|id| self.resolve_model_backend(id))
-                    } else {
-                        self.resolve_utility_model_backend(&self.memory_model)
-                    };
+                    let backend = self.helper_backend();
                     vec![Arc::new(LlmDecider { backend, context })]
                 }
                 ModelDecider::Rules => Vec::new(),
@@ -2199,12 +2115,8 @@ impl App {
         {
             toolbox = toolbox.with_research_session(session_id);
         }
-        toolbox.image_gen_backend = (!self.image_gen_model.trim().is_empty())
-            .then(|| self.backends.resolve(self.image_gen_model.trim()))
-            .flatten();
-        toolbox.video_gen_backend = (!self.video_gen_model.trim().is_empty())
-            .then(|| self.backends.resolve(self.video_gen_model.trim()))
-            .flatten();
+        toolbox.image_gen_backend = self.generation_backend(OpenRouter::default_image_gen_model);
+        toolbox.video_gen_backend = self.generation_backend(OpenRouter::default_video_gen_model);
         toolbox.space_files_dir = self.space.files_dir(&self.active_space.name);
         toolbox.space_apps_dir = self.space.apps_dir(&self.active_space.name);
         toolbox.space_scripts_dir = self.space.scripts_dir(&self.active_space.name);
@@ -2654,12 +2566,6 @@ impl App {
                 }
             } => AppEvent::Embed(r),
             r = async {
-                match self.ocr_pull_rx.as_mut() {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => AppEvent::OcrPull(r),
-            r = async {
                 match self.local_status_rx.as_mut() {
                     Some(rx) => rx.recv().await,
                     None => std::future::pending().await,
@@ -2744,13 +2650,6 @@ impl App {
     }
 
     // --- nerd config (settings popup) ---
-
-    /// Whether scanned PDFs should OCR through the `OpenRouter` vision model:
-    /// explicit "vlm", or "auto" with an OCR model configured. ("local" and
-    /// "tesseract" route elsewhere.)
-    pub fn vlm_ocr_enabled(&self) -> bool {
-        !self.ocr_model.trim().is_empty() && matches!(self.ocr_engine.as_str(), "vlm" | "auto")
-    }
 }
 
 impl App {
@@ -3117,21 +3016,21 @@ mod model_decider_tests {
             model.backend = BackendTag::Local;
         }
         app.current_model = Some("local:session".into());
-        app.memory_model.clear();
+        app.helper_model.clear();
         app.work_mode = WorkMode::AgentAuto;
         app.incognito = true;
         app.workspace = Some(Arc::new(
             crate::workspace::Workspace::open(&root, Vec::new()).unwrap(),
         ));
         app.refresh_toolbox();
-        app.model_pick_target = ModelPickTarget::Memory;
+        app.model_pick_target = ModelPickTarget::Helper;
         app.pick_model("local:utility").unwrap();
         for path in ["one", "two", "three"] {
             let args = serde_json::json!({"action": "write", "path": path, "content": "ok"});
             let (result, _) = app.toolbox.run("fs", &args.to_string()).await;
             assert!(result.starts_with("wrote "), "{result}");
             if path == "one" {
-                app.clear_memory_model().unwrap();
+                app.clear_helper_model().unwrap();
             } else if path == "two" {
                 app.model_pick_target = ModelPickTarget::Session;
                 app.pick_model("local:utility").unwrap();

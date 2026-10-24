@@ -28,7 +28,7 @@ impl Fixture {
                 root: root.join("data"),
             },
         );
-        app.memory_model.clear();
+        app.memory_extraction = false;
         app.current_model = Some("local:fake".into());
         app.saved.agent.decider = Some(ModelDecider::Rules);
         Self { root, app }

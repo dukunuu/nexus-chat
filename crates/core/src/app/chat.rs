@@ -1712,7 +1712,7 @@ impl App {
             .current_model
             .as_deref()
             .and_then(|model| self.resolve_model_backend(model))
-            .or_else(|| self.resolve_utility_model_backend(&self.memory_model))
+            .or_else(|| self.helper_backend())
         else {
             return;
         };

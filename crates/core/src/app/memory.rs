@@ -62,15 +62,14 @@ impl App {
         format!("{session_id}:{}", self.cache_epoch)
     }
 
-    /// After an assistant reply, ask the memory model for ADD/UPDATE/DELETE ops
-    /// against the space's fact file. No-op if extraction is disabled or the
+    /// After an assistant reply, ask the helper model for ADD/UPDATE/DELETE ops
+    /// against the space's fact file. No-op if no backend is signed in or the
     /// last exchange is unavailable.
     pub fn maybe_extract_memory(&mut self) {
-        if self.memory_model.trim().is_empty() {
+        if !self.memory_extraction {
             return;
         }
-        let Some((provider, raw_model)) = self.resolve_utility_model_backend(&self.memory_model)
-        else {
+        let Some((provider, raw_model)) = self.helper_backend() else {
             return;
         };
         let Some((user_msg, assistant_msg)) = latest_memory_exchange(&self.messages) else {

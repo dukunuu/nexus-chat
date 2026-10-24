@@ -21,13 +21,9 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     // Short title + the pick target as a footer hint, so the model picker
     // reads the same from any feature that opens it.
     let picking = match app.model_pick_target {
-        nexus_core::app::ModelPickTarget::Memory => "picking memory model",
-        nexus_core::app::ModelPickTarget::Transcriber => "picking image model",
-        nexus_core::app::ModelPickTarget::Ocr => "picking OCR model",
+        nexus_core::app::ModelPickTarget::Helper => "picking helper model",
         nexus_core::app::ModelPickTarget::Session => "picking chat model",
         nexus_core::app::ModelPickTarget::SwarmPersona(_) => "picking persona model",
-        nexus_core::app::ModelPickTarget::ImageGen => "picking image gen model",
-        nexus_core::app::ModelPickTarget::VideoGen => "picking video gen model",
     };
     let fav_title = chrome::popup_title(app, "favorites");
     let fav_hint = if app.favorite_models().is_empty() {
@@ -213,11 +209,7 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
         // Cancelling a memory-model pick returns to /config, same as picking one.
         KeyCode::Esc => {
             app.popup = match app.model_pick_target {
-                nexus_core::app::ModelPickTarget::Memory
-                | nexus_core::app::ModelPickTarget::Transcriber
-                | nexus_core::app::ModelPickTarget::Ocr
-                | nexus_core::app::ModelPickTarget::ImageGen
-                | nexus_core::app::ModelPickTarget::VideoGen => Popup::Settings,
+                nexus_core::app::ModelPickTarget::Helper => Popup::Settings,
                 nexus_core::app::ModelPickTarget::SwarmPersona(_) => Popup::Swarm,
                 nexus_core::app::ModelPickTarget::Session => Popup::None,
             };

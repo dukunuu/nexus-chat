@@ -1707,28 +1707,6 @@ async fn retry_in_incognito_touches_no_rows() {
     a.stop_stream().unwrap();
 }
 
-#[test]
-fn ocr_settings_defaults_gate_and_cycle() {
-    let db = Db::open_in_memory().unwrap();
-    let mut a = App::new(db, Some("sk-or-test"), test_space());
-    assert_eq!(a.ocr_model, "google/gemini-2.5-flash-lite");
-    assert_eq!(a.ocr_engine, "auto");
-    assert_eq!(a.embedding_model, "openai/text-embedding-3-small");
-    assert!(a.vlm_ocr_enabled()); // auto + model configured
-    a.cycle_ocr_engine().unwrap(); // auto → tesseract
-    assert_eq!(a.ocr_engine, "tesseract");
-    assert!(!a.vlm_ocr_enabled());
-    a.cycle_ocr_engine().unwrap(); // tesseract → vlm
-    assert!(a.vlm_ocr_enabled());
-    a.cycle_ocr_engine().unwrap(); // vlm → local
-    assert_eq!(a.ocr_engine, "local");
-    assert!(!a.vlm_ocr_enabled()); // local routes to ollama, not OpenRouter
-    a.cycle_ocr_engine().unwrap(); // local → auto
-    assert_eq!(a.ocr_engine, "auto");
-    a.clear_ocr_model().unwrap();
-    assert!(!a.vlm_ocr_enabled()); // no model, auto can't use vlm
-}
-
 #[tokio::test]
 async fn stream_is_tagged_with_its_origin_session() {
     let mut a = app_with_key();
@@ -2775,43 +2753,27 @@ fn memory_snapshot_stays_stable_until_refresh() {
 }
 
 #[test]
-fn clear_memory_model_disables_extraction() {
+fn clear_helper_model_returns_to_auto() {
     let mut a = app_with_key();
-    a.memory_model = "some/model".into();
-    a.clear_memory_model().unwrap();
-    assert!(a.memory_model.is_empty());
+    a.helper_model = "some/model".into();
+    a.clear_helper_model().unwrap();
+    assert!(a.helper_model.is_empty());
     assert_eq!(
         a.db.load_settings()
             .unwrap()
             .iter()
-            .find(|(k, _)| k == "memory_model")
+            .find(|(k, _)| k == "helper_model")
             .map(|(_, v)| v.clone()),
         Some(String::new())
     );
 }
 
 #[test]
-fn transcriber_model_defaults_and_persists() {
-    let mut a = app_with_key();
-    assert_eq!(a.transcriber_model, "google/gemini-2.5-flash-lite");
-    a.transcriber_model = "some/vision-model".to_string();
-    a.db.set_setting("transcriber_model", &a.transcriber_model)
-        .unwrap();
-    let kv = a.db.load_settings().unwrap();
-    assert!(
-        kv.iter()
-            .any(|(k, v)| k == "transcriber_model" && v == "some/vision-model")
-    );
-}
-
-#[test]
-fn utility_defaults_are_prefixed_for_non_openrouter_bootstrap_backend() {
+fn embedding_default_is_prefixed_for_non_openrouter_bootstrap_backend() {
     let db = Db::open_in_memory().unwrap();
     let a = App::new(db, Some("sk-openai-test-key"), test_space());
 
-    assert_eq!(a.memory_model, "openai:gpt-4.1-mini");
-    assert_eq!(a.transcriber_model, "openai:gpt-4.1-mini");
-    assert_eq!(a.ocr_model, "openai:gpt-4.1-mini");
+    assert!(a.helper_model.is_empty(), "the helper model starts on auto");
     assert_eq!(a.embedding_model, "openai:text-embedding-3-small");
 }
 
@@ -3767,7 +3729,7 @@ fn swarm_progress_and_errors_are_visible_in_transcript() {
 #[tokio::test]
 async fn swarm_synthesis_triggers_post_reply_jobs_like_normal_chat() {
     let mut a = app_with_key();
-    a.memory_model.clear(); // isolate this test from memory extraction network work
+    a.memory_extraction = false; // isolate this test from memory extraction network work
     a.settings.compact_threshold = 0;
     a.current_model = Some("a/one".into());
     let space = a.active_space.id.clone();
@@ -5279,7 +5241,7 @@ async fn ui_repair_app(
     app.backends.set(BackendTag::OpenRouter, provider);
     app.interactive_ui = true;
     app.incognito = incognito;
-    app.memory_model.clear();
+    app.memory_extraction = false;
     app.settings.compact_threshold = 0;
     // Repair must use the finished task's model, not a newly selected model.
     app.current_model = Some("b/two".into());
@@ -5927,4 +5889,378 @@ async fn chat_toolbox_connector_writes_reach_the_existing_app_approval_channel()
     app.answer_approval(Decision::Deny);
     assert!(call.await.unwrap().0.starts_with("denied by the user"));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+// --- the helper model and the automatic defaults behind the removed rows ---
+
+fn catalog_model(backend: BackendTag, id: &str) -> Model {
+    Model {
+        id: id.into(),
+        name: id.into(),
+        reasoning_efforts: Vec::new(),
+        context_length: None,
+        supports_images: false,
+        supports_image_generation: false,
+        supports_video_generation: false,
+        backend,
+        pricing: None,
+    }
+}
+
+/// An app whose only backend is `provider` and whose session is on
+/// `chat_model` (a composite id), with an unknown (not yet fetched) catalog.
+fn app_on(provider: OpenRouter, chat_model: &str) -> App {
+    let mut a = App::new(Db::open_in_memory().unwrap(), None, test_space());
+    a.backends = Backends::default();
+    a.backends.set(provider.backend_tag(), provider);
+    a.current_model = Some(chat_model.to_string());
+    a
+}
+
+fn helper_of(a: &App) -> Option<(BackendTag, String)> {
+    a.helper_backend()
+        .map(|(provider, raw)| (provider.backend_tag(), raw))
+}
+
+#[test]
+fn auto_helper_table_has_one_entry_per_backend() {
+    for (tag, expected) in [
+        (BackendTag::OpenRouter, "google/gemini-2.5-flash-lite"),
+        (BackendTag::OpenAi, "gpt-4.1-mini"),
+        (BackendTag::Codex, "gpt-5.6-luna"),
+        (BackendTag::OpencodeGo, "deepseek-v4-flash"),
+        // A local runtime serves whatever the user installed: no cheap pick.
+        (BackendTag::Local, ""),
+    ] {
+        assert_eq!(OpenRouter::default_helper_for(tag), expected, "{tag:?}");
+    }
+}
+
+#[test]
+fn auto_helper_is_the_cheap_model_of_the_active_backend() {
+    for (provider, chat, tag, expected) in [
+        (
+            OpenRouter::openrouter_flavor("k".into()),
+            "a/chat",
+            BackendTag::OpenRouter,
+            "google/gemini-2.5-flash-lite",
+        ),
+        (
+            OpenRouter::openai("k".into()),
+            "openai:gpt-5",
+            BackendTag::OpenAi,
+            "gpt-4.1-mini",
+        ),
+        (
+            OpenRouter::openai_codex("k".into()),
+            "codex:gpt-5.5",
+            BackendTag::Codex,
+            "gpt-5.6-luna",
+        ),
+        (
+            OpenRouter::opencode_go("k".into()),
+            "opencode:kimi-k2.7-code",
+            BackendTag::OpencodeGo,
+            "deepseek-v4-flash",
+        ),
+    ] {
+        let a = app_on(provider, chat);
+        assert!(a.helper_model.is_empty(), "{tag:?} starts on auto");
+        assert_eq!(helper_of(&a), Some((tag, expected.to_string())), "{tag:?}");
+    }
+}
+
+#[test]
+fn auto_helper_follows_the_session_backend_and_never_switches_providers() {
+    let mut a = app_on(OpenRouter::openrouter_flavor("k".into()), "a/chat");
+    a.backends
+        .set(BackendTag::OpenAi, OpenRouter::openai("k".into()));
+    assert_eq!(
+        helper_of(&a),
+        Some((
+            BackendTag::OpenRouter,
+            "google/gemini-2.5-flash-lite".into()
+        ))
+    );
+    a.current_model = Some("openai:gpt-5".into());
+    assert_eq!(
+        helper_of(&a),
+        Some((BackendTag::OpenAi, "gpt-4.1-mini".into()))
+    );
+    // A picked id on a backend that is not configured resolves like auto,
+    // on the session's backend, instead of reaching for the other provider.
+    a.helper_model = "codex:gpt-5.6-luna".into();
+    assert_eq!(
+        helper_of(&a),
+        Some((BackendTag::OpenAi, "gpt-4.1-mini".into()))
+    );
+    // A picked id on a configured backend wins.
+    a.helper_model = "google/gemini-2.5-flash".into();
+    assert_eq!(
+        helper_of(&a),
+        Some((BackendTag::OpenRouter, "google/gemini-2.5-flash".into()))
+    );
+    // Nothing signed in: nothing to run on.
+    a.backends = Backends::default();
+    assert_eq!(helper_of(&a), None);
+}
+
+#[test]
+fn auto_helper_falls_back_to_the_session_model_without_a_cheap_option() {
+    // Local runtimes have no cheap default: the session's installed model,
+    // else the first installed one.
+    let local = OpenRouter::local("http://127.0.0.1:9/v1").unwrap();
+    let mut a = app_on(local, "local:big");
+    a.models = vec![
+        catalog_model(BackendTag::Local, "small"),
+        catalog_model(BackendTag::Local, "big"),
+    ];
+    assert_eq!(helper_of(&a), Some((BackendTag::Local, "big".into())));
+    a.current_model = None;
+    assert_eq!(helper_of(&a), Some((BackendTag::Local, "small".into())));
+
+    // A backend whose catalog no longer lists its cheap model uses the
+    // session's own model on that same backend.
+    let mut a = app_on(OpenRouter::openai_codex("k".into()), "codex:gpt-5.5");
+    a.models = vec![catalog_model(BackendTag::Codex, "gpt-5.5")];
+    assert_eq!(helper_of(&a), Some((BackendTag::Codex, "gpt-5.5".into())));
+    // ... and the cheap model again once the catalog lists it.
+    a.models
+        .push(catalog_model(BackendTag::Codex, "gpt-5.6-luna"));
+    assert_eq!(
+        helper_of(&a),
+        Some((BackendTag::Codex, "gpt-5.6-luna".into()))
+    );
+}
+
+fn stored_pairs(rows: &[(&str, &str)]) -> Vec<(String, String)> {
+    rows.iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect()
+}
+
+#[test]
+fn a_chosen_memory_model_migrates_once_into_helper_model() {
+    let mut a = app_with_key();
+    a.db.set_setting("memory_model", "my/pinned-model").unwrap();
+    a.load_settings();
+    assert_eq!(a.helper_model, "my/pinned-model");
+    assert_eq!(
+        a.db.setting("helper_model").as_deref(),
+        Some("my/pinned-model")
+    );
+
+    // Once: a later pick is never overwritten by the stale legacy row.
+    a.helper_model = "other/model".into();
+    a.db.set_setting("helper_model", "other/model").unwrap();
+    a.load_settings();
+    assert_eq!(a.helper_model, "other/model");
+}
+
+#[test]
+fn legacy_memory_model_that_was_only_a_default_stays_auto() {
+    // Older builds wrote the backend default into memory_model the first
+    // time /config closed; that was never a choice.
+    for default in [
+        "google/gemini-2.5-flash-lite",
+        "openai:gpt-4.1-mini",
+        "gpt-4.1-mini",
+        "codex:gpt-5.6-luna",
+        "opencode:deepseek-v4-flash",
+        "",
+    ] {
+        assert_eq!(
+            settings::legacy_helper_model(&stored_pairs(&[("memory_model", default)])),
+            None,
+            "{default:?}"
+        );
+    }
+    assert_eq!(
+        settings::legacy_helper_model(&stored_pairs(&[("memory_model", "my/model")])),
+        Some("my/model".to_string())
+    );
+    // An existing helper_model always wins.
+    assert_eq!(
+        settings::legacy_helper_model(&stored_pairs(&[
+            ("memory_model", "my/model"),
+            ("helper_model", "newer/model"),
+        ])),
+        None
+    );
+    // An empty helper_model row (auto) does not block the migration.
+    assert_eq!(
+        settings::legacy_helper_model(&stored_pairs(&[
+            ("memory_model", "my/model"),
+            ("helper_model", ""),
+        ])),
+        Some("my/model".to_string())
+    );
+}
+
+#[test]
+fn removed_model_settings_are_ignored_on_read_and_rejected_on_set() {
+    let removed = [
+        ("memory_model", "x/mem"),
+        ("transcriber_model", "x/vision"),
+        ("ocr_model", "x/ocr"),
+        ("ocr_engine", "tesseract"),
+        ("local_ocr_model", "glm-ocr"),
+        ("embedding_model", ""),
+        ("image_gen_model", "x/img"),
+        ("video_gen_model", "x/vid"),
+    ];
+    let mut a = app_with_key();
+    let embedding_before = a.embedding_model.clone();
+    for (key, value) in removed {
+        a.db.set_setting(key, value).unwrap();
+    }
+    // Reading them (including a legacy blank embedding_model) must not crash
+    // or change anything but the one-time memory_model migration.
+    a.load_settings();
+    assert_eq!(a.embedding_model, embedding_before);
+    assert_eq!(a.helper_model, "x/mem");
+    let stored = a.db.load_settings().unwrap();
+    for (key, value) in removed {
+        assert!(
+            stored.iter().any(|(k, v)| k == key && v == value),
+            "{key} must be left alone for other devices' sync data"
+        );
+    }
+
+    // Setting them is an error that names the replacement, and stores nothing.
+    for (key, _) in removed {
+        let error = a.set_setting(key, "new").unwrap_err().to_string();
+        assert!(error.contains(key) && error.contains("removed"), "{error}");
+        assert!(is_removed_setting(key));
+    }
+    assert_eq!(a.helper_model, "x/mem");
+    assert_eq!(a.db.setting("ocr_model").as_deref(), Some("x/ocr"));
+    // The one model setting that replaced them is accepted.
+    a.set_setting("helper_model", "y/helper").unwrap();
+    assert_eq!(a.helper_model, "y/helper");
+    assert!(!is_removed_setting("helper_model"));
+    // Unknown keys are still just unknown.
+    assert!(
+        !a.set_setting("nonsense", "1")
+            .unwrap_err()
+            .to_string()
+            .contains("removed")
+    );
+}
+
+#[test]
+fn the_settings_popup_has_exactly_one_model_row() {
+    let model_rows: Vec<_> = SETTINGS_GROUPS
+        .iter()
+        .flat_map(|group| group.fields)
+        .filter(|field| {
+            field
+                .label()
+                .split(" (")
+                .next()
+                .unwrap_or("")
+                .ends_with("model")
+        })
+        .collect();
+    assert!(model_rows == [&SettingsField::HelperModel]);
+    assert!(SettingsField::ALL.contains(&SettingsField::HelperModel));
+    assert_eq!(
+        SettingsField::ALL
+            .iter()
+            .filter(|field| field
+                .label()
+                .split(" (")
+                .next()
+                .unwrap_or("")
+                .ends_with("model"))
+            .count(),
+        1
+    );
+    // Every field is reachable through a group.
+    for field in SettingsField::ALL {
+        assert!(
+            SETTINGS_GROUPS.iter().any(|g| g.fields.contains(&field)),
+            "{}",
+            field.label()
+        );
+    }
+}
+
+#[test]
+fn generation_follows_the_active_backends_default_model() {
+    let image = OpenRouter::default_image_gen_model;
+    let video = OpenRouter::default_video_gen_model;
+    let pair = |a: &App, f: fn(&OpenRouter) -> &'static str| {
+        a.generation_backend(f)
+            .map(|(provider, model)| (provider.backend_tag(), model))
+    };
+
+    let a = app_on(OpenRouter::openrouter_flavor("k".into()), "a/chat");
+    assert_eq!(
+        pair(&a, image),
+        Some((BackendTag::OpenRouter, "openai/gpt-image-2".into()))
+    );
+    assert_eq!(
+        pair(&a, video),
+        Some((BackendTag::OpenRouter, "google/veo-3.1".into()))
+    );
+
+    // OpenAI generates images only.
+    let a = app_on(OpenRouter::openai("k".into()), "openai:gpt-5");
+    assert_eq!(
+        pair(&a, image),
+        Some((BackendTag::OpenAi, "dall-e-3".into()))
+    );
+    assert_eq!(pair(&a, video), None);
+
+    // Backends without a generation model, and local runtimes, have none.
+    for (provider, chat) in [
+        (OpenRouter::openai_codex("k".into()), "codex:gpt-5.5"),
+        (
+            OpenRouter::opencode_go("k".into()),
+            "opencode:kimi-k2.7-code",
+        ),
+        (
+            OpenRouter::local("http://127.0.0.1:9/v1").unwrap(),
+            "local:m",
+        ),
+    ] {
+        let a = app_on(provider, chat);
+        assert_eq!(pair(&a, image), None, "{chat}");
+        assert_eq!(pair(&a, video), None, "{chat}");
+    }
+
+    // It follows the session across configured backends, never silently
+    // reaching for another provider's model.
+    let mut a = app_on(OpenRouter::openrouter_flavor("k".into()), "a/chat");
+    a.backends
+        .set(BackendTag::Codex, OpenRouter::openai_codex("k".into()));
+    a.current_model = Some("codex:gpt-5.5".into());
+    assert_eq!(pair(&a, image), None);
+}
+
+#[test]
+fn the_media_tool_exists_only_where_the_active_backend_can_generate() {
+    let media_actions = |a: &App| {
+        a.toolbox
+            .defs()
+            .into_iter()
+            .find(|tool| tool.name == "media")
+            .map(|tool| tool.parameters.to_string())
+    };
+    let mut a = app_on(OpenRouter::openrouter_flavor("k".into()), "a/chat");
+    a.refresh_toolbox();
+    let actions = media_actions(&a).expect("OpenRouter generates media");
+    assert!(actions.contains("generate_image") && actions.contains("generate_video"));
+
+    a.backends
+        .set(BackendTag::Codex, OpenRouter::openai_codex("k".into()));
+    a.models = vec![catalog_model(BackendTag::Codex, "gpt-5.5")];
+    a.pick_model("codex:gpt-5.5").unwrap();
+    assert!(
+        media_actions(&a).is_none(),
+        "picking a Codex session model rebuilds the toolbox without media"
+    );
+    a.pick_model("a/chat").unwrap();
+    assert!(media_actions(&a).is_some());
 }
