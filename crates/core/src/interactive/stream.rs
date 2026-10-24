@@ -67,7 +67,7 @@ impl StreamParser {
                 symbols.insert(name, expression);
             }
         }
-        let value = library::materialize(&symbols, true, None).ok()?;
+        let value = library::materialize(&symbols, true, None, None).ok()?;
         Document::check_value(value)
             .ok()
             .map(Document::inert_preview)
@@ -111,18 +111,19 @@ fn legacy(source: &str) -> Result<Value> {
 }
 
 fn program(source: &str) -> Result<Value> {
-    program_state(source, None)
+    program_state(source, None, None)
 }
 
 pub(super) fn program_state(
     source: &str,
     state: Option<&serde_json::Map<String, Value>>,
+    results: Option<&serde_json::Map<String, Value>>,
 ) -> Result<Value> {
     let symbols = statements(source)?
         .into_iter()
         .map(|(name, (_, expr))| (name, expr))
         .collect();
-    library::materialize(&symbols, false, state)
+    library::materialize(&symbols, false, state, results)
 }
 
 fn statements(source: &str) -> Result<BTreeMap<String, (String, Expr)>> {
@@ -166,7 +167,10 @@ pub fn merge_program(source: &str, patch: &str) -> Result<String> {
     if merged.contains_key("root") {
         let mut reachable = std::collections::BTreeSet::new();
         let mut pending = vec!["root".to_string()];
-        pending.extend(merged.keys().filter(|name| name.starts_with('$')).cloned());
+        pending.extend(merged.iter().filter(|(name, (_, expr))| {
+            name.starts_with('$')
+                || matches!(expr, Expr::Call(kind, _) if kind == "Query" || kind == "Mutation")
+        }).map(|(name, _)| name.clone()));
         while let Some(name) = pending.pop() {
             if reachable.insert(name.clone())
                 && let Some((_, expression)) = merged.get(&name)

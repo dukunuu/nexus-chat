@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
 
 mod components;
+pub(crate) mod live;
 
 /// Fixed image reservation with a visible, centered failure placeholder.
 pub(crate) fn image_lines(
@@ -99,6 +100,7 @@ enum Control {
     Rating(usize),
     Slider(usize),
     Copy(usize),
+    Load,
 }
 struct Entry {
     session: Result<Session, String>,
@@ -153,6 +155,7 @@ impl Entry {
                         Node::Code { .. } => vec![Control::Copy(index)],
                         _ => Vec::new(),
                     })
+                    .chain(session.needs_data_load().then_some(Control::Load))
                     .collect()
             },
         )
@@ -242,6 +245,10 @@ impl Entry {
                 };
                 let value = u16::try_from(session.selected_row(key)).unwrap_or(0);
                 session.rate(node, (value + 1) % (max + 1)).map(|()| None)
+            }
+            Control::Load => {
+                session.load_data(std::time::Instant::now());
+                return None;
             }
             Control::Copy(node) => {
                 session.copy_code(node);
@@ -426,7 +433,9 @@ impl Entry {
         let height = self.session.as_ref().map_or(6, |_| card_height(&regions));
         let choices = self.choices().len().min(9);
         let pending_url = self.session.as_ref().ok().and_then(Session::pending_url);
-        let hint = if let Some(url) = pending_url {
+        let hint = if let Some(status) = self.session.as_ref().ok().and_then(Session::data_hint) {
+            status.into()
+        } else if let Some(url) = pending_url {
             format!("Open {url}? Enter confirm · Esc cancel")
         } else if choices > 0 {
             format!("1–{choices} pick · F2 keyboard")
@@ -466,6 +475,19 @@ impl Entry {
             can_send,
             &mut buffer,
         );
+        if session.needs_data_load() {
+            let rect = Rect::new(
+                2,
+                height.saturating_sub(1),
+                width.saturating_sub(4).min(30),
+                1,
+            );
+            let control = session_controls(session).saturating_sub(1);
+            Paragraph::new(" Load data (may cost) ")
+                .style(control_style(theme, focused && self.focus == control))
+                .render(rect, &mut buffer);
+            hits.push((rect, control));
+        }
         if width >= 8 && !session.document().is_static() {
             let expand = Rect::new(width - 4, 0, 3, 1);
             if focused && self.focus == session_controls(session) {
@@ -820,7 +842,8 @@ fn session_controls(session: &Session) -> usize {
         .visible_nodes()
         .iter()
         .map(|(_, node)| components::control_count(node))
-        .sum()
+        .sum::<usize>()
+        + usize::from(session.needs_data_load())
 }
 fn button_label(session: &Session, button: &Button) -> String {
     format!(
@@ -2241,6 +2264,7 @@ fn visible_rows(rect: Rect, first: usize, limit: usize) -> Option<(usize, usize)
 
 /// Disposable UI instances and this frame's hit areas. No filesystem writes.
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)] // Independent input, layout and OS-focus flags.
 pub struct Widgets {
     entries: HashMap<Key, Entry>,
     previews: HashMap<(usize, usize), nexus_core::interactive::StreamParser>,
@@ -2257,11 +2281,22 @@ pub struct Widgets {
     pending_image: Option<PendingImage>,
     pending_status: Option<String>,
     applied_patches: std::collections::HashSet<Key>,
+    data_calls: HashMap<String, usize>,
+    data_running: Option<live::Running>,
+    window_unfocused: bool,
 }
 impl Widgets {
     /// Discard all local state and stale hit areas on a viewport/session reset.
     pub fn clear(&mut self) {
-        *self = Self::default();
+        let calls = std::mem::take(&mut self.data_calls);
+        let data_running = self.data_running.take();
+        let window_unfocused = self.window_unfocused;
+        *self = Self {
+            data_calls: calls,
+            data_running,
+            window_unfocused,
+            ..Self::default()
+        };
     }
     /// Rebuild visible instances/hits and submission readiness for this frame.
     pub fn begin_frame(&mut self, send_ready: bool) {
@@ -2282,6 +2317,14 @@ impl Widgets {
     /// Focus the last visible document, if any.
     pub fn focus_latest(&mut self) -> bool {
         self.focused = self.visible.last().cloned();
+        if let Some(session) = self
+            .focused
+            .as_ref()
+            .and_then(|key| self.entries.get_mut(key))
+            .and_then(|entry| entry.session.as_mut().ok())
+        {
+            session.interact_data(std::time::Instant::now());
+        }
         self.expanded = false;
         self.pinned = false;
         self.focused.is_some()
@@ -2601,6 +2644,9 @@ impl Widgets {
             self.pinned = false;
         }
         self.focused = Some(hit.key.clone());
+        if let Ok(session) = &mut entry.session {
+            session.interact_data(std::time::Instant::now());
+        }
         match hit.control.and_then(|index| {
             entry
                 .controls()
@@ -2608,7 +2654,7 @@ impl Widgets {
                 .cloned()
                 .map(|control| (index, control))
         }) {
-            Some((index, Control::Action(_))) => (
+            Some((index, Control::Action(_) | Control::Load)) => (
                 true,
                 entry.activate(index, can_send, self.answer_blocked.is_none()),
             ),
@@ -2694,6 +2740,9 @@ impl Widgets {
             .as_ref()
             .and_then(|key| self.entries.get_mut(key))
         {
+            if let Ok(session) = &mut entry.session {
+                session.interact_data(std::time::Instant::now());
+            }
             entry.edit(text, false);
         }
     }
@@ -2735,6 +2784,9 @@ impl Widgets {
         else {
             return (true, None);
         };
+        if let Ok(session) = &mut entry.session {
+            session.interact_data(std::time::Instant::now());
+        }
         let controls = entry.controls();
         let count = controls.len() + 1;
         entry.focus %= count;
@@ -3087,6 +3139,10 @@ pub fn render_popup(f: &mut Frame, app: &mut AppView) {
             .paint(f, viewport, top, &placements, &app.theme, true);
     }
 }
+
+#[cfg(test)]
+#[path = "interactive/data_tests.rs"]
+mod data_tests;
 
 #[cfg(test)]
 #[path = "interactive/power_tests.rs"]

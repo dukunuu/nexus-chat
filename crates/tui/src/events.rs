@@ -119,6 +119,7 @@ async fn run_loop(
         let welcome = app.is_welcome();
         let status_deadline = app.status_deadline();
         let tui_app_deadline = ui::popups::tui_app::deadline(app);
+        let panel_data = app.interactive.data_pending();
         let images = std::sync::Arc::clone(&app.remote_images);
         let studio_wake = app.studio_wake();
         let studio_retry = app.studio.has_queued();
@@ -142,6 +143,8 @@ async fn run_loop(
                         app.push_status(format!("error: {e:#}"));
                     }
                 }
+                Some(Ok(Event::FocusGained)) => app.interactive.window_focus(true),
+                Some(Ok(Event::FocusLost)) => app.interactive.window_focus(false),
                 Some(Ok(Event::Mouse(m))) => {
                     let size = terminal.size()?;
                     if let Err(e) = handle_mouse(app, m, Rect::new(0, 0, size.width, size.height)) {
@@ -286,6 +289,13 @@ async fn run_loop(
                     std::future::pending::<()>().await;
                 }
             } => {}
+            () = async {
+                if panel_data {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => crate::interactive::live::tick(app),
             _ = jobs_poll.tick() => {
                 if let Err(error) = app.collect_job_notifications() {
                     app.push_status(format!("jobs notifications: {error}"));

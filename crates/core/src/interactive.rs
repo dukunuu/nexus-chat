@@ -1,6 +1,6 @@
 //! Bounded, model-authored interactive UI documents. This is data, not code:
 //! scalar state, a small expression language, controls and transactional actions.
-//! No filesystem, network, HTML, processes, timers or provider access exist here.
+//! Tool access is isolated in the explicitly activated, bounded live-data host.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,6 +11,7 @@ use serde_json::{Map, Value, json};
 mod components;
 pub use components::{ChartKind, ChartSeries, Section, Tab, TableState, TimelineEvent};
 mod data;
+pub mod live;
 mod stream;
 mod validation;
 pub use stream::{StreamParser, component_signatures, merge_program};
@@ -674,6 +675,9 @@ enum Step {
     Call {
         action: String,
     },
+    Run {
+        id: String,
+    },
     Reset {
         keys: Vec<String>,
     },
@@ -700,6 +704,8 @@ enum Step {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Definition {
+    #[serde(default)]
+    calls: Vec<live::Definition>,
     version: u8,
     title: String,
     #[serde(default)]
@@ -724,7 +730,7 @@ pub struct CheckError {
 
 /// Valid presentation node types, shared by validation and tool reports.
 pub const NODE_TYPES: &str = "hero, image, columns, cards, stats, steps, callout, quote, divider, text, buttons, input, kv, table, progress, bars, sparkline, checklist, select, stepper, toggle, tabs, accordion, chart, form, timeline, rating, code, badge, meter, slider";
-const ACTION_OPS: &str = "set, call, send, answer, reset, open_url, to_assistant";
+const ACTION_OPS: &str = "set, call, run, send, answer, reset, open_url, to_assistant";
 const EXPR_OPS: &str = "get, random, not, number, if, add, sub, mul, div, mod, eq, lt, gt, and, or, literal, object, array, field, index, count, first, last, sum, avg, min, max, filter, sort, round, abs, floor, ceil";
 const MAX_ERRORS: usize = 10;
 
@@ -802,7 +808,7 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
     let (owner, fields) = match shape {
         "document" => (
             shape,
-            "version:u8 title:string frame:frame accent:accent state:state view:node[] actions:actions",
+            "version:u8 title:string frame:frame accent:accent state:state view:node[] actions:actions calls:value",
         ),
         "state" | "actions" => {
             for (key, value) in object {
@@ -868,6 +874,7 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
                 ("node", "meter") => "label:string value:value max:value tone:tone",
                 ("step", "set") => "key:string value:value",
                 ("step", "call") => "action:string",
+                ("step", "run") => "id:string",
                 ("step", "send") => "text:string",
                 ("step", "to_assistant") => "text:string context:value",
                 ("step", "answer") => "",
@@ -965,6 +972,7 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
         "code" => "source",
         "set" => "key value",
         "call" => "action",
+        "run" => "id",
         "reset" => "keys",
         "open_url" => "url",
         "button" => "label action",
@@ -1015,6 +1023,7 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
 /// A validated version-1 UI document. Construction is through `parse` or `check`.
 #[derive(Clone, Debug)]
 pub struct Document {
+    calls: Vec<live::Definition>,
     version: u8,
     title: String,
     frame: Frame,
@@ -1151,6 +1160,7 @@ impl Document {
         // they can never escape because the collected errors reject the document.
         let definition =
             serde_json::from_value::<Definition>(value.clone()).unwrap_or_else(|_| Definition {
+                calls: Vec::new(),
                 version: serde_json::from_value(value["version"].clone()).unwrap_or(1),
                 title: serde_json::from_value(value["title"].clone())
                     .unwrap_or_else(|_| "UI".into()),
@@ -1195,6 +1205,7 @@ impl Document {
         mut errors: Vec<CheckError>,
     ) -> std::result::Result<Self, Vec<CheckError>> {
         let Definition {
+            calls,
             version,
             title,
             frame,
@@ -1204,6 +1215,7 @@ impl Document {
             actions,
         } = definition;
         let mut doc = Self {
+            calls,
             version,
             title,
             frame,
@@ -1266,6 +1278,28 @@ impl Document {
                 })(),
             );
         }
+        check_result(
+            &mut errors,
+            "calls",
+            (|| {
+                ensure!(doc.calls.len() <= 32, "maximum 32 data calls");
+                ensure!(
+                    doc.calls.iter().filter(|d| d.refresh.is_some()).count() <= 5,
+                    "maximum 5 refresh timers"
+                );
+                for call in &doc.calls {
+                    identifier(&call.id)?;
+                    ensure!(
+                        call.refresh.is_none_or(
+                            |seconds| seconds.is_finite() && (15.0..=1e12).contains(&seconds)
+                        ),
+                        "refresh must be at least 15 seconds"
+                    );
+                    data::value_ok(&call.defaults, &mut 4096, 0)?;
+                }
+                Ok(())
+            })(),
+        );
         doc.check_view(&mut errors);
         let mut steps = 0;
         for (name, action) in &doc.actions {
@@ -1292,6 +1326,12 @@ impl Document {
                                     doc.state.keys().cloned().collect::<Vec<_>>().join(", ")
                                 );
                                 validate_expr(value, &doc.state, &mut budget, 0)?;
+                            }
+                            Step::Run { id } => {
+                                ensure!(
+                                    doc.calls.iter().any(|call| call.id == *id),
+                                    "unknown data reference: {id}"
+                                );
                             }
                             Step::Call { action } => {
                                 ensure!(
@@ -1719,7 +1759,9 @@ impl Document {
                 Step::Send { .. } | Step::ToAssistant { .. } => (true, false),
                 Step::Answer { .. } => (true, true),
                 Step::Call { action } => self.action_sends(action, seen, depth + 1, budget)?,
-                Step::Set { .. } | Step::Reset { .. } | Step::OpenUrl { .. } => (false, false),
+                Step::Set { .. } | Step::Reset { .. } | Step::OpenUrl { .. } | Step::Run { .. } => {
+                    (false, false)
+                }
             };
             // An answer can't be combined with another message. Two `send`s
             // stay a runtime error (documents written before answers parse
@@ -1787,7 +1829,7 @@ impl Document {
     /// Whether this is a display-only layout, with neither actions nor controls.
     #[must_use]
     pub fn is_static(&self) -> bool {
-        self.actions.is_empty() && self.control_count() == 0
+        self.calls.is_empty() && self.actions.is_empty() && self.control_count() == 0
     }
     /// Readable plain rendering using initial state, without JSON or markup.
     #[must_use]
@@ -1831,6 +1873,8 @@ pub struct Session {
     defaults: Map<String, Value>,
     pending_url: Option<String>,
     assistant_payload: Option<Value>,
+    live: live::Panel,
+    continuation: Option<(String, Vec<(String, usize)>)>,
 }
 
 #[derive(Default)]
@@ -1838,6 +1882,9 @@ struct Effects {
     message: Option<String>,
     url: Option<String>,
     payload: Option<Value>,
+    requests: Vec<String>,
+    waiting: Option<String>,
+    remaining: Vec<(String, usize)>,
 }
 
 impl Session {
@@ -1849,6 +1896,7 @@ impl Session {
         for (key, value) in &document.state {
             state.insert(key.clone(), eval(value, &Map::new(), &mut 1024)?);
         }
+        let live = live::Panel::new(&document.calls);
         let mut session = Self {
             document,
             components: components::ComponentState::default(),
@@ -1856,6 +1904,8 @@ impl Session {
             state,
             pending_url: None,
             assistant_payload: None,
+            live,
+            continuation: None,
         };
         let mut state = session.state.clone();
         session.bindings_ok(&mut state)?;
@@ -2261,14 +2311,14 @@ impl Session {
     }
     fn activate_action(&mut self, action: &str) -> Result<Option<String>> {
         ensure!(self.document.actions.contains_key(action), "unknown action");
+        ensure!(self.continuation.is_none(), "mutation is still loading");
+        self.interact_data(std::time::Instant::now());
         let mut next = self.state.clone();
         let mut effects = Effects::default();
         self.run(action, &mut next, &mut effects, &mut 1024)?;
         self.bindings_ok(&mut next)?;
         self.commit(next)?;
-        self.pending_url = effects.url;
-        self.assistant_payload = effects.payload;
-        Ok(effects.message)
+        self.apply_effects(effects)
     }
     fn run(
         &self,
@@ -2277,13 +2327,35 @@ impl Session {
         effects: &mut Effects,
         budget: &mut usize,
     ) -> Result<()> {
-        for step in &self.document.actions[action] {
+        self.run_steps(action, 0, state, effects, budget)
+    }
+    fn run_steps(
+        &self,
+        action: &str,
+        start: usize,
+        state: &mut Map<String, Value>,
+        effects: &mut Effects,
+        budget: &mut usize,
+    ) -> Result<()> {
+        for (index, step) in self.document.actions[action].iter().enumerate().skip(start) {
             spend(budget)?;
             match step {
                 Step::Set { key, value } => {
                     self.validate_reads(value, state)?;
                     let value = eval(value, state, budget)?;
                     state.insert(key.clone(), value);
+                }
+                Step::Run { id } => {
+                    let call = self
+                        .document
+                        .calls
+                        .iter()
+                        .find(|call| call.id == *id)
+                        .ok_or_else(|| anyhow::anyhow!("unknown data call"))?;
+                    effects.requests.push(id.clone());
+                    if !call.query {
+                        effects.waiting = Some(id.clone());
+                    }
                 }
                 Step::Call { action } => self.run(action, state, effects, budget)?,
                 Step::Reset { keys } => {
@@ -2324,13 +2396,26 @@ impl Session {
                     ));
                 }
             }
+            if effects.waiting.is_some() {
+                effects.remaining.push((action.into(), index + 1));
+                break;
+            }
         }
         Ok(())
+    }
+    fn apply_effects(&mut self, effects: Effects) -> Result<Option<String>> {
+        for id in effects.requests {
+            self.live.request(&id)?;
+        }
+        self.continuation = effects.waiting.map(|id| (id, effects.remaining));
+        self.pending_url = effects.url;
+        self.assistant_payload = effects.payload;
+        Ok(effects.message)
     }
     fn commit(&mut self, state: Map<String, Value>) -> Result<()> {
         data::value_ok(&Value::Object(state.clone()), &mut 4096, 0)?;
         if let Some(source) = &self.document.program {
-            let value = stream::program_state(source, Some(&state))?;
+            let value = stream::program_state(source, Some(&state), Some(&self.live.values()))?;
             let mut document = Document::check_value(value)
                 .map_err(|errors| anyhow::anyhow!(errors[0].message.clone()))?;
             document.program = Some(source.clone());
@@ -2366,8 +2451,98 @@ impl Session {
         );
         next.bindings_ok(&mut state)?;
         next.commit(state)?;
+        next.live = std::mem::take(&mut self.live);
+        next.live.revise(&next.document.calls);
         *self = next;
         Ok(())
+    }
+
+    /// Explicit user activation; restored and merely rendered panels stay inert.
+    pub fn interact_data(&mut self, now: std::time::Instant) {
+        self.live.interact(now);
+    }
+
+    /// Consent to the first potentially paid query calls in this panel.
+    pub fn load_data(&mut self, now: std::time::Instant) {
+        self.live.load(now);
+    }
+
+    /// Whether this program declares live data work.
+    #[must_use]
+    pub fn has_data(&self) -> bool {
+        !self.document.calls.is_empty()
+    }
+
+    /// Whether the host should offer an explicit Load button.
+    #[must_use]
+    pub fn needs_data_load(&self) -> bool {
+        self.live.needs_load(&self.document.calls, &self.state)
+    }
+
+    /// Subtle host status, separate from the query's data shape.
+    #[must_use]
+    pub fn data_hint(&self) -> Option<&str> {
+        self.live.hint()
+    }
+
+    /// Schedule at most one call. The host supplies visibility, focus and stream
+    /// readiness by calling this only when all three permit execution.
+    /// # Errors
+    /// Returns argument validation and budget failures, without running a tool.
+    pub fn next_data_call(
+        &mut self,
+        now: std::time::Instant,
+        session_calls: &mut usize,
+    ) -> Result<Option<live::Call>> {
+        let call = self
+            .live
+            .next(&self.document.calls, &self.state, now, session_calls)?;
+        if call.is_some() {
+            self.commit(self.state.clone())?;
+        }
+        Ok(call)
+    }
+
+    /// Apply a completion only to its live revision and current arguments.
+    /// Awaited mutation actions continue only on success; failure drops the tail.
+    /// # Errors
+    /// Invalid result-derived views retain their last valid rendering.
+    pub fn finish_data_call(
+        &mut self,
+        call: &live::Call,
+        outcome: &live::Outcome,
+        now: std::time::Instant,
+    ) -> Result<Option<String>> {
+        let current = self.document.calls.iter().find(|d| d.id == call.id);
+        let accepted = self.live.finish(call, outcome, current, &self.state, now)?;
+        self.commit(self.state.clone())?;
+        if accepted
+            && self
+                .continuation
+                .as_ref()
+                .is_some_and(|(id, _)| *id == call.id)
+        {
+            let (_, steps) = self.continuation.take().expect("matched continuation");
+            if outcome.success {
+                let mut state = self.state.clone();
+                let mut effects = Effects::default();
+                for (index, (action, start)) in steps.iter().enumerate() {
+                    ensure!(
+                        self.document.actions.contains_key(action),
+                        "continued action is no longer visible"
+                    );
+                    self.run_steps(action, *start, &mut state, &mut effects, &mut 1024)?;
+                    if effects.waiting.is_some() {
+                        effects.remaining.extend_from_slice(&steps[index + 1..]);
+                        break;
+                    }
+                }
+                self.bindings_ok(&mut state)?;
+                self.commit(state)?;
+                return self.apply_effects(effects);
+            }
+        }
+        Ok(None)
     }
 
     /// Context and page/form state captured at the most recent send step.

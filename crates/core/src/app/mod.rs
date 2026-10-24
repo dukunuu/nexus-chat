@@ -1138,6 +1138,8 @@ pub struct App {
     pub interactive_ui: bool,
     /// Whether a frontend can ask the user for workspace permissions.
     pub interactive_approvals: bool,
+    /// Shared interactive channel for panel mutations, independent of work mode.
+    pub panel_approver: Option<Arc<dyn Approver>>,
     /// Eval permissions survive toolbox refreshes without interactive prompts.
     pub eval_approver: Option<Arc<dyn Approver>>,
     /// Unattended job gate, retained across toolbox refreshes.
@@ -1564,6 +1566,7 @@ impl App {
             system_prompt_overlay: String::new(),
             interactive_ui: false,
             interactive_approvals: false,
+            panel_approver: None,
             eval_approver: None,
             job_approver: None,
             research_job_lock: None,
@@ -2203,13 +2206,16 @@ impl App {
         self.pending_approval_request = None;
         self.approval_queue.clear();
         self.approval_rx = None;
+        self.panel_approver = None;
         if let Some(approver) = &self.job_approver {
             toolbox.approver = Some(approver.clone());
         } else if let Some(approver) = &self.eval_approver {
             toolbox.approver = Some(approver.clone());
         } else if self.interactive_approvals {
             let (sender, receiver) = mpsc::unbounded_channel();
-            toolbox.approver = Some(Arc::new(ChannelApprover::new(sender)));
+            let approver: Arc<dyn Approver> = Arc::new(ChannelApprover::new(sender));
+            toolbox.approver = Some(Arc::clone(&approver));
+            self.panel_approver = Some(approver);
             self.approval_rx = Some(receiver);
         }
         toolbox.workspace = self
@@ -2471,6 +2477,56 @@ impl App {
     #[doc(hidden)]
     pub fn drain_composer_sets(&mut self) -> Vec<String> {
         self.drain_ui_events().0
+    }
+
+    /// Redaction context for panel tool arguments, outputs and approval previews.
+    #[must_use]
+    pub fn panel_scrubber(&self) -> crate::trace::Scrubber {
+        crate::trace::Scrubber::new(self.saved_secrets())
+    }
+
+    /// Persist a panel operation using the same compact tool cards as model calls.
+    /// # Errors
+    /// Returns database failures; incognito conversations remain memory-only.
+    pub fn record_panel_call(
+        &mut self,
+        session_id: &str,
+        incognito: bool,
+        panel: &str,
+        call: &crate::interactive::live::Call,
+        outcome: &crate::interactive::live::Outcome,
+    ) -> Result<()> {
+        let scrubber = self.panel_scrubber();
+        let content = serde_json::json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "panel": panel,
+            "name": scrubber.scrub(&call.tool),
+            "arguments": crate::interactive::live::redacted_arguments(&call.arguments, &scrubber),
+            "result": scrubber.scrub(&outcome.text),
+        })
+        .to_string();
+        if !incognito {
+            self.db.add_tool_call_message(session_id, &content)?;
+        }
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.id == session_id)
+        {
+            self.messages.push(Message {
+                role: "tool_call".into(),
+                content,
+                model: None,
+                reasoning: None,
+                tokens: None,
+                secs: None,
+                cost: None,
+                phrase: None,
+                persona: None,
+                created_at: None,
+            });
+        }
+        Ok(())
     }
 
     /// Next background event from either the streaming task or a model fetch.

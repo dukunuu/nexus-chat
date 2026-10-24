@@ -62,7 +62,8 @@ async fn main() -> Result<()> {
     let _ = crossterm::execute!(
         std::io::stdout(),
         crossterm::event::EnableMouseCapture,
-        crossterm::event::EnableBracketedPaste
+        crossterm::event::EnableBracketedPaste,
+        crossterm::event::EnableFocusChange
     );
     // Enhanced keys so the terminal reports Ctrl+Backspace etc. distinctly
     // (without this, most terminals send the same byte for Backspace).
@@ -128,7 +129,8 @@ async fn main() -> Result<()> {
     let _ = crossterm::execute!(
         std::io::stdout(),
         crossterm::event::DisableMouseCapture,
-        crossterm::event::DisableBracketedPaste
+        crossterm::event::DisableBracketedPaste,
+        crossterm::event::DisableFocusChange
     );
     ratatui::restore();
     result

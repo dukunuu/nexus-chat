@@ -75,6 +75,7 @@ pub(super) fn materialize(
     symbols: &BTreeMap<String, Expr>,
     partial: bool,
     current: Option<&Map<String, Value>>,
+    results: Option<&Map<String, Value>>,
 ) -> Result<Value> {
     let mut context = Context {
         symbols,
@@ -84,6 +85,7 @@ pub(super) fn materialize(
         actions: Map::new(),
         state: Map::new(),
         locals: BTreeMap::new(),
+        results,
     };
     let mut state = Map::new();
     for (name, expression) in symbols {
@@ -108,6 +110,58 @@ pub(super) fn materialize(
     if let Some(current) = current {
         context.state.clone_from(current);
     }
+    let mut calls = Vec::new();
+    for (id, expr) in symbols {
+        if let Expr::Call(kind, args) = expr
+            && matches!(kind.as_str(), "Query" | "Mutation")
+        {
+            ensure!(
+                !id.starts_with('$'),
+                "data calls need a plain reference name"
+            );
+            let query = kind == "Query";
+            let arity = if query { 3..=4 } else { 2..=2 };
+            ensure!(arity.contains(&args.len()), "invalid {kind} arguments");
+            let tool = context.lower(&args[0], 0)?.unwrap_or(Value::Null);
+            let tool = crate::interactive::eval(&tool, &context.state, &mut 4096)?;
+            let tool = tool
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("data tool must be a name"))?;
+            let arguments = context.lower(&args[1], 0)?.unwrap_or(Value::Null);
+            let defaults = if query {
+                context.data_default(args, 0)?
+            } else {
+                Value::Null
+            };
+            let refresh = args
+                .get(3)
+                .map(|expr| -> Result<Option<f64>> {
+                    let value = context.lower(expr, 0)?.unwrap_or(Value::Null);
+                    let value = crate::interactive::eval(&value, &context.state, &mut 4096)?;
+                    if value.is_null() {
+                        return Ok(None);
+                    }
+                    let seconds = value
+                        .as_f64()
+                        .ok_or_else(|| anyhow::anyhow!("refresh must be seconds"))?;
+                    Ok(Some(seconds.max(15.0)))
+                })
+                .transpose()?
+                .flatten();
+            let mut dependencies = Vec::new();
+            literal_states(&args[1], &mut dependencies);
+            calls.push(json!({"id":id,"tool":tool,"query":query,"args":arguments,"defaults":defaults,"refresh":refresh,"dependencies":dependencies}));
+        }
+    }
+    ensure!(calls.len() <= 32, "maximum 32 data calls per panel");
+    ensure!(
+        calls
+            .iter()
+            .filter(|call| !call["refresh"].is_null())
+            .count()
+            <= 5,
+        "maximum 5 refresh timers per panel"
+    );
     let root = Expr::Ref("root".into());
     let mut value = context
         .lower(&root, 0)?
@@ -116,6 +170,7 @@ pub(super) fn materialize(
     value["version"] = 1.into();
     value["state"] = state.into();
     value["actions"] = context.actions.into();
+    value["calls"] = calls.into();
     if partial {
         retain_valid_nodes(&mut value);
     }
@@ -182,6 +237,33 @@ fn used_actions(view: &Value, actions: &Value) -> Value {
     used.into()
 }
 
+fn literal_states(expr: &Expr, names: &mut Vec<String>) {
+    match expr {
+        Expr::State(name) => names.push(name.clone()),
+        Expr::Array(items) | Expr::Call(_, items) => {
+            for item in items {
+                literal_states(item, names);
+            }
+        }
+        Expr::Object(fields) => {
+            for (_, value) in fields {
+                literal_states(value, names);
+            }
+        }
+        Expr::Member(value, _) | Expr::Unary(_, value) => literal_states(value, names),
+        Expr::Index(a, b) | Expr::Binary(_, a, b) => {
+            literal_states(a, names);
+            literal_states(b, names);
+        }
+        Expr::Conditional(a, b, c) => {
+            literal_states(a, names);
+            literal_states(b, names);
+            literal_states(c, names);
+        }
+        Expr::Literal(_) | Expr::Ref(_) => {}
+    }
+}
+
 struct Context<'a> {
     symbols: &'a BTreeMap<String, Expr>,
     partial: bool,
@@ -190,6 +272,7 @@ struct Context<'a> {
     actions: Map<String, Value>,
     state: Map<String, Value>,
     locals: BTreeMap<String, Value>,
+    results: Option<&'a Map<String, Value>>,
 }
 impl Context<'_> {
     #[allow(clippy::too_many_lines)]
@@ -203,7 +286,11 @@ impl Context<'_> {
             Expr::Literal(value) => value.clone(),
             Expr::State(name) => json!({"get":name}),
             Expr::Ref(name) => {
-                if let Some(value) = self.locals.get(name) {
+                if let Some(value) = self
+                    .locals
+                    .get(name)
+                    .or_else(|| self.results.and_then(|values| values.get(name)))
+                {
                     return Ok(Some(json!({"literal": value})));
                 }
                 if !self.visiting.insert(name.clone()) {
@@ -211,7 +298,25 @@ impl Context<'_> {
                     return Ok(None);
                 }
                 let result = if let Some(expression) = self.symbols.get(name) {
-                    self.lower(expression, depth + 1)
+                    if let Expr::Call(kind, args) = expression
+                        && matches!(kind.as_str(), "Query" | "Mutation")
+                    {
+                        let value = if kind == "Query" {
+                            self.data_default(args, depth + 1)?
+                        } else {
+                            json!({"status":"idle","data":null,"error":null})
+                        };
+                        Ok(Some(json!({"literal":value})))
+                    } else {
+                        self.lower(expression, depth + 1)
+                    }
+                } else if matches!(
+                    name.as_str(),
+                    "__openui_loading" | "__openui_refetching" | "__openui_errors"
+                ) {
+                    let flags: Map<String, Value> = self.symbols.iter().filter(|(_, expr)| matches!(expr, Expr::Call(kind, _) if kind == "Query" || kind == "Mutation"))
+                        .map(|(id, _)| (id.clone(), if name == "__openui_errors" { Value::Null } else { false.into() })).collect();
+                    Ok(Some(json!({"literal":flags})))
                 } else {
                     ensure!(self.partial, "unresolved reference: {name}");
                     Ok(None)
@@ -384,6 +489,12 @@ impl Context<'_> {
                     "cyclic template reference: {name}"
                 );
                 let result = match self.symbols.get(name) {
+                    Some(Expr::Call(kind, _)) if matches!(kind.as_str(), "Query" | "Mutation") => {
+                        self.visiting.remove(name);
+                        let value = self.lower(expression, depth + 1)?.unwrap_or(Value::Null);
+                        let value = crate::interactive::eval(&value, &self.state, &mut 4096)?;
+                        Ok(Some(crate::interactive::scalar_text(&value).into()))
+                    }
                     Some(expression) => self.template(expression, depth + 1),
                     None if self.partial => Ok(None),
                     None => bail!("unresolved reference: {name}"),
@@ -402,6 +513,13 @@ impl Context<'_> {
                 Ok(Some(crate::interactive::scalar_text(&value).into()))
             }
         }
+    }
+    fn data_default(&mut self, args: &[Expr], depth: usize) -> Result<Value> {
+        let expr = args
+            .get(2)
+            .ok_or_else(|| anyhow::anyhow!("Query requires defaults"))?;
+        let value = self.lower(expr, depth + 1)?.unwrap_or(Value::Null);
+        crate::interactive::eval(&value, &self.state, &mut 4096)
     }
     fn call(&mut self, name: &str, args: &[Expr], depth: usize) -> Result<Option<Value>> {
         if name.starts_with('@') || name == "Action" {
@@ -515,6 +633,17 @@ impl Context<'_> {
                 self.locals.remove(var);
             }
             return result;
+        }
+        if name == "@Run" {
+            ensure!(args.len() == 1, "@Run expects one reference");
+            let Expr::Ref(id) = &args[0] else {
+                bail!("@Run needs a Query/Mutation reference")
+            };
+            ensure!(
+                matches!(self.symbols.get(id), Some(Expr::Call(kind, _)) if kind == "Query" || kind == "Mutation"),
+                "@Run needs a Query/Mutation reference"
+            );
+            return Ok(Some(json!({"op":"run", "id":id})));
         }
         if name == "@Reset" {
             ensure!(!args.is_empty(), "@Reset needs state variables");

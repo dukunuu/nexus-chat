@@ -214,7 +214,16 @@ pub(super) fn push_tool_call_with_rows(
         theme,
     );
     let view = nexus_core::app::tool_call_view(&name, &args, &result);
+    let header = out.len();
     push_workspace_call(out, &view, expanded, settings, width, theme);
+    if let Some(panel) = v.get("panel").and_then(serde_json::Value::as_str)
+        && let Some(line) = out.get_mut(header)
+    {
+        line.spans.insert(
+            0,
+            Span::styled(format!("{panel} · "), Style::default().fg(theme.fg_dim)),
+        );
+    }
     if !view.batch.is_empty() {
         if expanded {
             push_batch_body(out, &view, width, theme, &mut env, rows);

@@ -104,7 +104,7 @@ A Button takes an explicit action:
 
 New elements appear progressively but remain inert until the fence closes and
 this reply finishes. Older local panels still work during generation. No model
-requests occur on loading, rendering, typing, or local actions. The renderer
+requests occur for local-only panels. Live data runs only after activation. The renderer
 validates arriving elements and the completed program automatically. Stream
 directly; no preflight tool call is needed. Correct any reported validation
 errors and resend the panel. Never invent components/functions.
@@ -148,9 +148,18 @@ bytes; scalar strings ≤1024; titles/labels/art lines ≤120; identifiers ≤32
 letters/digits/underscores; finite numbers ≤1e12. Keep UIs compact.
 
 Data arrays/objects ≤200 entries, depth ≤12, bounded evaluation work.
-No Query, Mutation, network access, timers, arbitrary functions or browser APIs
-other than the confirmed OpenUrl action. This is a terminal dialect, not the full web OpenUI
-runtime. Unsupported applications may need scripts or /apps; explain limitations.
+Live data: Query(tool, args, defaults, refreshSeconds?) runs after reply completion
+AND user activation; literal $vars in args refetch after 300ms. Refresh ≥15s, ≤5
+per panel; pauses off-screen/unfocused, stops after 30min idle. Defaults/last data
+stay visible. __openui_loading.q, __openui_refetching.q, __openui_errors.q expose
+query q's status. Query allow-list (only if advertised and read-only): search,
+fetch_url, files, fs, deck, connectors and exposed connector tools. Search, files
+search and connectors may cost: user must press Load first. No shell/proc/task/
+batch/media or LLM queries. Mutation(tool,args) runs only via @Run(ref); writes
+always ask approval. Value: {status,data,error}; idle/loading/success/error.
+@Run(query) refetches. Calls are capped, timed out and logged as tool cards.
+Never put credentials in args.
+No arbitrary functions or browser APIs other than confirmed OpenUrl.
 Existing version-1 JSON panels remain readable, but do not generate new JSON.
 
 Example app (state → controls → computed progress → reviewed plan):
@@ -163,6 +172,13 @@ days = Stepper($days, "Days", 1, 30, 1)
 activities = Checklist([Check("Beach (2 days)", $beach), Check("Hiking (3 days)", $hiking)])
 planned = Progress("Planned days", @If($beach, 2, 0) + @If($hiking, 3, 0), $days)
 save = Buttons([Button("Save plan", @ToAssistant("Plan {{days}} days: beach={{beach}}, hiking={{hiking}}"), true)])
+```
+
+Live-data example:
+```nexus-ui
+root = Panel("Search", [Input($query,"Search"), Text(q.text), Buttons([Button("Refresh",@Run(q))])])
+$query = "Rust"
+q = Query("search", {mode:"web",query:$query}, {text:"No results"})
 ```
 
 ### Terminal component signatures
