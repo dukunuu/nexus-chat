@@ -3,7 +3,7 @@ use super::*;
 const SOURCE: &str = include_str!("../../../../core/tests/fixtures/interactive/counter.json");
 #[test]
 fn fallback_shows_only_the_first_three_located_errors() {
-    let source = r#"{"version":1,"title":"Broken","view":[{"type":"radio"},{"type":"slider"},{"type":"canvas"},{"type":"tabs"}]}"#;
+    let source = r#"{"version":1,"title":"Broken","view":[{"type":"radio"},{"type":"dial"},{"type":"canvas"},{"type":"marquee"}]}"#;
     let rendered = render(&format!("```nexus-ui\n{source}\n```"), 240, colors());
     assert!(rendered.widgets.is_empty());
     let text = plain(&rendered);

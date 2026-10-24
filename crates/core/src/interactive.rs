@@ -8,6 +8,8 @@ use anyhow::{Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+mod components;
+pub use components::{ChartKind, ChartSeries, Section, Tab, TableState, TimelineEvent};
 mod stream;
 pub use stream::{StreamParser, component_signatures};
 
@@ -333,6 +335,12 @@ pub enum Node {
         key: String,
         /// Visible field label.
         label: String,
+        /// Block form submission when empty.
+        #[serde(default)]
+        required: bool,
+        /// Block form submission when invalid.
+        #[serde(default)]
+        invalid: bool,
     },
     /// Aligned label/value template pairs.
     Kv {
@@ -349,6 +357,14 @@ pub enum Node {
         /// Optional numeric state field holding the selected index.
         #[serde(default)]
         select: Option<String>,
+        /// Enable local column sorting.
+        #[serde(default)]
+        sortable: bool,
+        /// Visible page size, at most eight rows.
+        page_size: Option<usize>,
+        /// Enable local text filtering.
+        #[serde(default)]
+        search: bool,
     },
     /// A clamped numeric bar with a label.
     Progress {
@@ -400,6 +416,98 @@ pub enum Node {
         /// Positive increment or decrement.
         step: f64,
     },
+    /// Switchable child views.
+    Tabs {
+        /// One to eight labelled views.
+        items: Vec<Tab>,
+        /// Optional numeric selected-tab binding.
+        key: Option<String>,
+    },
+    /// Independently expandable child views.
+    Accordion {
+        /// One to eight sections.
+        items: Vec<Section>,
+    },
+    /// A terminal chart with themed series.
+    Chart {
+        /// Plot geometry.
+        kind: ChartKind,
+        /// One to six series of at most sixty-four samples.
+        series: Vec<ChartSeries>,
+        /// Optional sample labels.
+        #[serde(default)]
+        labels: Vec<String>,
+        /// Fixed plot height, four to twelve rows.
+        #[serde(default = "six")]
+        rows: u16,
+    },
+    /// Controls submitted together through a transactional action.
+    Form {
+        /// Group title.
+        title: String,
+        /// Bound controls.
+        fields: Vec<Node>,
+        /// Submit button label.
+        submit_label: String,
+        /// Named action.
+        action: String,
+    },
+    /// A chronological event list.
+    Timeline {
+        /// One to eight events.
+        items: Vec<TimelineEvent>,
+    },
+    /// A numeric star rating.
+    Rating {
+        /// Bound numeric field.
+        key: String,
+        /// Visible label.
+        label: String,
+        /// Maximum stars, one to ten.
+        #[serde(default = "components::five")]
+        max: u16,
+    },
+    /// Literal syntax-highlighted source with a copy control.
+    Code {
+        /// Literal source, not a template.
+        source: String,
+        /// Optional language token.
+        lang: Option<String>,
+    },
+    /// Compact inline emphasis.
+    Badge {
+        /// Text template.
+        text: String,
+        /// Theme role.
+        #[serde(default)]
+        tone: Tone,
+    },
+    /// A clamped themed gauge.
+    Meter {
+        /// Label template.
+        label: String,
+        /// Numeric expression.
+        value: Value,
+        /// Numeric maximum.
+        #[serde(default = "unit")]
+        max: Value,
+        /// Theme role.
+        #[serde(default)]
+        tone: Tone,
+    },
+    /// A numeric range control.
+    Slider {
+        /// Numeric binding.
+        key: String,
+        /// Label template.
+        label: String,
+        /// Lower bound.
+        min: f64,
+        /// Upper bound.
+        max: f64,
+        /// Positive step.
+        step: f64,
+    },
     /// A locally toggleable boolean field.
     Toggle {
         /// Bound boolean state field.
@@ -447,6 +555,11 @@ impl Node {
                 | Self::Callout { .. }
                 | Self::Quote { .. }
                 | Self::Divider { .. }
+                | Self::Chart { .. }
+                | Self::Timeline { .. }
+                | Self::Code { .. }
+                | Self::Badge { .. }
+                | Self::Meter { .. }
         )
     }
 
@@ -489,12 +602,43 @@ impl Node {
             }
             Self::Stats { .. } | Self::Input { .. } => 3,
             Self::Kv { items } => u16::try_from(items.len()).unwrap_or(u16::MAX),
-            Self::Table { rows_data, .. } => {
-                u16::try_from(rows_data.len().saturating_add(1)).unwrap_or(u16::MAX)
-            }
+            Self::Table {
+                rows_data,
+                page_size,
+                search,
+                ..
+            } => bounded_rows(
+                page_size
+                    .unwrap_or(rows_data.len())
+                    .saturating_add(1)
+                    .saturating_add(usize::from(*search))
+                    .saturating_add(usize::from(page_size.is_some())),
+            ),
+            Self::Tabs { items, .. } => items
+                .iter()
+                .map(|item| components::view_rows(&item.view))
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+            Self::Accordion { items } => items.iter().fold(0u16, |rows, item| {
+                rows.saturating_add(components::view_rows(&item.view).saturating_add(1))
+            }),
+            Self::Form { fields, .. } => components::view_rows(fields).saturating_add(2),
+            Self::Chart { rows, .. } => *rows,
+            Self::Timeline { items } => bounded_rows(
+                items
+                    .iter()
+                    .map(|item| 1 + usize::from(item.text.is_some()))
+                    .sum(),
+            ),
+            Self::Code { source, .. } => bounded_rows(source.lines().count().max(1) + 1),
             Self::Bars { items } => u16::try_from(items.len()).unwrap_or(u16::MAX),
             Self::Checklist { items } => u16::try_from(items.len()).unwrap_or(u16::MAX),
-            Self::Divider { .. }
+            Self::Rating { .. }
+            | Self::Badge { .. }
+            | Self::Meter { .. }
+            | Self::Slider { .. }
+            | Self::Divider { .. }
             | Self::Progress { .. }
             | Self::Select { .. }
             | Self::Stepper { .. }
@@ -555,7 +699,7 @@ pub struct CheckError {
 }
 
 /// Valid presentation node types, shared by validation and tool reports.
-pub const NODE_TYPES: &str = "hero, image, columns, cards, stats, steps, callout, quote, divider, text, buttons, input, kv, table, progress, bars, sparkline, checklist, select, stepper, toggle";
+pub const NODE_TYPES: &str = "hero, image, columns, cards, stats, steps, callout, quote, divider, text, buttons, input, kv, table, progress, bars, sparkline, checklist, select, stepper, toggle, tabs, accordion, chart, form, timeline, rating, code, badge, meter, slider";
 const ACTION_OPS: &str = "set, call, send, answer";
 const EXPR_OPS: &str = "get, random, not, number, if, add, sub, mul, div, mod, eq, lt, gt, and, or";
 const MAX_ERRORS: usize = 10;
@@ -617,6 +761,7 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
         "u16" => typed!(u16),
         "number" => typed!(f64),
         "tone" => typed!(Tone),
+        "chart_kind" => typed!(ChartKind),
         "frame" => typed!(Frame),
         "accent" => typed!(Accent),
         "mark" => typed!(Mark),
@@ -674,17 +819,29 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
                 ("node", "divider") => "label:?string",
                 ("node", "text") => "text:string tone:tone rows:u16",
                 ("node", "buttons") => "items:button[] rows:u16",
-                ("node", "input" | "toggle") => "key:string label:string",
+                ("node", "input") => "key:string label:string required:bool invalid:bool",
+                ("node", "toggle") => "key:string label:string",
                 ("node", "kv") => "items:pair[]",
                 ("node", "table") => {
-                    "columns:string[] rows_data:string[][] rows:string[][] select:?string"
+                    "columns:string[] rows_data:string[][] rows:string[][] select:?string sortable:bool page_size:?u16 search:bool"
                 }
                 ("node", "progress") => "label:string value:value max:value",
                 ("node", "bars") => "items:bar[]",
                 ("node", "sparkline") => "values:value[] rows:u16",
                 ("node", "checklist") => "items:check[]",
                 ("node", "select") => "key:string label:string options:string[]",
-                ("node", "stepper") => "key:string label:string min:number max:number step:number",
+                ("node", "stepper" | "slider") => {
+                    "key:string label:string min:number max:number step:number"
+                }
+                ("node", "tabs") => "items:tab[] key:?string",
+                ("node", "accordion") => "items:section[]",
+                ("node", "chart") => "kind:chart_kind series:series[] labels:string[] rows:u16",
+                ("node", "form") => "title:string fields:node[] submit_label:string action:string",
+                ("node", "timeline") => "items:event[]",
+                ("node", "rating") => "key:string label:string max:u16",
+                ("node", "code") => "source:string lang:?string",
+                ("node", "badge") => "text:string tone:tone",
+                ("node", "meter") => "label:string value:value max:value tone:tone",
                 ("step", "set") => "key:string value:value",
                 ("step", "call") => "action:string",
                 ("step", "send") => "text:string",
@@ -712,6 +869,10 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
         ),
         "stat" => (shape, "value:string label:string delta:?string tone:?tone"),
         "display_step" => (shape, "title:string text:?string state:step_state"),
+        "tab" => (shape, "label:string view:node[]"),
+        "section" => (shape, "title:string view:node[] open:bool"),
+        "series" => (shape, "name:string values:value[] tone:tone"),
+        "event" => (shape, "time:string title:string text:?string tone:tone"),
         "bar" => (shape, "label:string value:value"),
         "check" => (shape, "label:string key:string"),
         _ => unreachable!("known schema shape"),
@@ -757,18 +918,24 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
                 "title items"
             }
         }
-        "columns" | "cards" | "stats" | "steps" | "buttons" | "kv" | "bars" | "checklist" => {
-            "items"
-        }
+        "columns" | "cards" | "stats" | "steps" | "buttons" | "kv" | "bars" | "checklist"
+        | "tabs" | "accordion" | "timeline" => "items",
         "callout" => "tone text",
         "image" => "src",
-        "quote" | "text" | "column_item" | "send" => "text",
-        "input" | "toggle" | "check" => "key label",
+        "quote" | "text" | "column_item" | "send" | "badge" => "text",
+        "input" | "toggle" | "check" | "rating" => "key label",
         "table" => "columns rows_data",
-        "progress" | "bar" => "label value",
+        "progress" | "bar" | "meter" => "label value",
         "sparkline" => "values",
         "select" => "key label options",
-        "stepper" => "key label min max step",
+        "stepper" | "slider" => "key label min max step",
+        "tab" => "label view",
+        "section" => "title view",
+        "chart" => "kind series",
+        "series" => "name values",
+        "event" => "time title",
+        "form" => "title fields submit_label action",
+        "code" => "source",
         "set" => "key value",
         "call" => "action",
         "button" => "label action",
@@ -1159,6 +1326,7 @@ impl Document {
         }) {
             check_result(errors, "view", self.validate_view_budget());
         }
+        check_result(errors, "view", components::tree_ok(&self.view, 0, &mut 128));
         let mut budget = 1024;
         for (index, node) in self.view.iter().enumerate() {
             check_result(
@@ -1171,12 +1339,12 @@ impl Document {
 
     fn validate_view_budget(&self) -> Result<()> {
         ensure!(
-            !self.view.is_empty() && self.view.len() <= 16,
+            !self.view.is_empty() && components::max_visible(&self.view) <= 16,
             "UI needs 1–16 view nodes"
         );
         let rows: u32 = self.view.iter().map(|node| u32::from(node.rows())).sum();
         let controls = self.control_count();
-        let cap = if self.view.iter().any(Node::is_display) {
+        let cap = if self.all_nodes().into_iter().any(Node::is_display) {
             LAYOUT_ROWS
         } else {
             ROWS
@@ -1192,10 +1360,11 @@ impl Document {
         let max_rows = match node {
             Node::Columns { .. } => 27,
             Node::Cards { .. } => 30,
-            Node::Image { .. } => 12,
+            Node::Image { .. } | Node::Table { .. } | Node::Chart { .. } => 12,
             Node::Buttons { .. } => 14,
-            Node::Steps { .. } => 16,
-            Node::Hero { .. } | Node::Table { .. } => 9,
+            Node::Steps { .. } | Node::Timeline { .. } => 16,
+            Node::Hero { .. } | Node::Code { .. } => 9,
+            Node::Tabs { .. } | Node::Accordion { .. } | Node::Form { .. } => 45,
             _ => 8,
         };
         ensure!(
@@ -1233,6 +1402,13 @@ impl Document {
                 min,
                 max,
                 step,
+            }
+            | Node::Slider {
+                key,
+                label,
+                min,
+                max,
+                step,
             } => {
                 Self::template_ok(label)?;
                 for value in [min, max, step] {
@@ -1244,7 +1420,7 @@ impl Document {
                 binding_ok(&self.state, key, Value::is_number)?;
                 controls += 1;
             }
-            Node::Input { key, label } => {
+            Node::Input { key, label, .. } => {
                 ensure!(
                     self.state.contains_key(key),
                     "unknown input field: {key} — valid: {}",
@@ -1344,6 +1520,9 @@ impl Document {
     }
 
     fn validate_component(&self, node: &Node, budget: &mut usize) -> Result<usize> {
+        if let Some(controls) = self.validate_new_component(node, budget)? {
+            return Ok(controls);
+        }
         if node.is_display() {
             Self::validate_display(node)?;
             return Ok(0);
@@ -1361,9 +1540,15 @@ impl Document {
                 columns,
                 rows_data,
                 select,
+                sortable,
+                page_size,
+                search,
             } => {
                 item_count(columns.len(), 1, 6)?;
-                item_count(rows_data.len(), 0, 8)?;
+                item_count(rows_data.len(), 0, if page_size.is_some() { 64 } else { 8 })?;
+                if let Some(size) = page_size {
+                    item_count(*size, 1, 8)?;
+                }
                 for header in columns {
                     Self::template_ok(header)?;
                 }
@@ -1375,8 +1560,10 @@ impl Document {
                 }
                 if let Some(key) = select {
                     binding_ok(&self.state, key, Value::is_number)?;
-                    return Ok(1);
                 }
+                return Ok(usize::from(
+                    select.is_some() || *sortable || page_size.is_some() || *search,
+                ));
             }
             Node::Progress { label, value, max } => {
                 Self::template_ok(label)?;
@@ -1508,18 +1695,28 @@ impl Document {
     /// Number of independently focusable controls.
     #[must_use]
     pub fn control_count(&self) -> usize {
-        self.view
-            .iter()
+        self.all_nodes()
+            .into_iter()
             .map(|node| match node {
                 Node::Buttons { items, .. } => items.len(),
                 Node::Checklist { items } => items.len(),
-                Node::Input { .. }
+                Node::Tabs { .. }
+                | Node::Rating { .. }
+                | Node::Code { .. }
+                | Node::Slider { .. }
+                | Node::Form { .. }
+                | Node::Input { .. }
                 | Node::Select { .. }
                 | Node::Stepper { .. }
-                | Node::Toggle { .. }
-                | Node::Table {
-                    select: Some(_), ..
-                } => 1,
+                | Node::Toggle { .. } => 1,
+                Node::Accordion { items } => items.len(),
+                Node::Table {
+                    select,
+                    sortable,
+                    page_size,
+                    search,
+                    ..
+                } => usize::from(select.is_some() || *sortable || page_size.is_some() || *search),
                 _ => 0,
             })
             .sum()
@@ -1532,22 +1729,7 @@ impl Document {
     /// Whether this is a display-only layout, with neither actions nor controls.
     #[must_use]
     pub fn is_static(&self) -> bool {
-        self.actions.is_empty()
-            && !self.view.iter().any(|node| {
-                matches!(
-                    node,
-                    Node::Buttons { .. }
-                        | Node::Input { .. }
-                        | Node::Checklist { .. }
-                        | Node::Select { .. }
-                        | Node::Stepper { .. }
-                        | Node::Toggle { .. }
-                        | Node::Table {
-                            select: Some(_),
-                            ..
-                        }
-                )
-            })
+        self.actions.is_empty() && self.control_count() == 0
     }
     /// Readable plain rendering using initial state, without JSON or markup.
     #[must_use]
@@ -1587,6 +1769,7 @@ impl Document {
 pub struct Session {
     document: Document,
     state: Map<String, Value>,
+    components: components::ComponentState,
 }
 
 impl Session {
@@ -1598,7 +1781,11 @@ impl Session {
         for (key, value) in &document.state {
             state.insert(key.clone(), eval(value, &Map::new(), &mut 1024)?);
         }
-        let mut session = Self { document, state };
+        let mut session = Self {
+            document,
+            state,
+            components: components::ComponentState::default(),
+        };
         let mut state = session.state.clone();
         session.bindings_ok(&mut state)?;
         session.state = state;
@@ -1686,10 +1873,11 @@ impl Session {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn plain_component(&self, node: &Node) -> Vec<String> {
         let text = |s: &str| self.text(s).unwrap_or_default();
         match node {
-            Node::Text { text: body, .. } => vec![text(body)],
+            Node::Text { text: body, .. } | Node::Badge { text: body, .. } => vec![text(body)],
             Node::Buttons { items, .. } => items
                 .iter()
                 .flat_map(|item| {
@@ -1700,10 +1888,12 @@ impl Session {
                         }))
                 })
                 .collect(),
-            Node::Input { key, label }
+            Node::Input { key, label, .. }
             | Node::Select { key, label, .. }
             | Node::Stepper { key, label, .. }
-            | Node::Toggle { key, label } => {
+            | Node::Toggle { key, label }
+            | Node::Rating { key, label, .. }
+            | Node::Slider { key, label, .. } => {
                 vec![format!("{}: {}", text(label), self.value(key))]
             }
             Node::Kv { items } => items
@@ -1716,7 +1906,10 @@ impl Session {
                 .chain(rows_data)
                 .map(|row| row.iter().map(|s| text(s)).collect::<Vec<_>>().join(" | "))
                 .collect(),
-            Node::Progress { label, value, max } => {
+            Node::Progress { label, value, max }
+            | Node::Meter {
+                label, value, max, ..
+            } => {
                 let (value, max) = self.progress(value, max).unwrap_or_default();
                 vec![format!("{}: {value}/{max}", text(label))]
             }
@@ -1751,6 +1944,52 @@ impl Session {
                     )
                 })
                 .collect(),
+            Node::Tabs { items, .. } => items
+                .iter()
+                .flat_map(|item| {
+                    std::iter::once(text(&item.label))
+                        .chain(item.view.iter().flat_map(|node| self.plain_node(node)))
+                })
+                .collect(),
+            Node::Accordion { items } => items
+                .iter()
+                .flat_map(|item| {
+                    std::iter::once(text(&item.title))
+                        .chain(item.view.iter().flat_map(|node| self.plain_node(node)))
+                })
+                .collect(),
+            Node::Form {
+                title,
+                fields,
+                submit_label,
+                ..
+            } => std::iter::once(text(title))
+                .chain(fields.iter().flat_map(|node| self.plain_node(node)))
+                .chain(std::iter::once(text(submit_label)))
+                .collect(),
+            Node::Chart { series, .. } => series
+                .iter()
+                .map(|series| {
+                    format!(
+                        "{}: {}",
+                        text(&series.name),
+                        series
+                            .values
+                            .iter()
+                            .map(|value| self.number(value).unwrap_or_default().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .collect(),
+            Node::Timeline { items } => items
+                .iter()
+                .flat_map(|item| {
+                    std::iter::once(format!("{} {}", text(&item.time), text(&item.title)))
+                        .chain(item.text.iter().map(|value| text(value)))
+                })
+                .collect(),
+            Node::Code { source, .. } => vec![source.clone()],
             _ => Vec::new(),
         }
     }
@@ -1777,8 +2016,8 @@ impl Session {
     pub fn input(&mut self, key: &str, value: String) -> Result<()> {
         ensure!(
             self.document
-                .view
-                .iter()
+                .all_nodes()
+                .into_iter()
                 .any(|n| matches!(n, Node::Input { key: k, .. } if k == key)),
             "not an input field"
         );
@@ -1807,11 +2046,14 @@ impl Session {
     /// Rejects undeclared controls or invalid resulting bindings.
     pub fn toggle(&mut self, key: &str) -> Result<()> {
         ensure!(
-            self.document.view.iter().any(|node| match node {
-                Node::Toggle { key: k, .. } => k == key,
-                Node::Checklist { items } => items.iter().any(|item| item.key == key),
-                _ => false,
-            }),
+            self.document
+                .all_nodes()
+                .into_iter()
+                .any(|node| match node {
+                    Node::Toggle { key: k, .. } => k == key,
+                    Node::Checklist { items } => items.iter().any(|item| item.key == key),
+                    _ => false,
+                }),
             "not a boolean control"
         );
         let mut next = self.state.clone();
@@ -1824,7 +2066,7 @@ impl Session {
     /// # Errors
     /// Rejects non-select nodes or invalid resulting bindings.
     pub fn cycle(&mut self, node: usize, forward: bool) -> Result<()> {
-        let Some(Node::Select { key, options, .. }) = self.document.view.get(node) else {
+        let Some(Node::Select { key, options, .. }) = self.document.node(node) else {
             bail!("not a select control");
         };
         let index = options
@@ -1853,13 +2095,22 @@ impl Session {
     /// # Errors
     /// Rejects non-stepper nodes or invalid resulting bindings.
     pub fn step(&mut self, node: usize, forward: bool) -> Result<()> {
-        let Some(Node::Stepper {
-            key,
-            min,
-            max,
-            step,
-            ..
-        }) = self.document.view.get(node)
+        let Some(
+            Node::Stepper {
+                key,
+                min,
+                max,
+                step,
+                ..
+            }
+            | Node::Slider {
+                key,
+                min,
+                max,
+                step,
+                ..
+            },
+        ) = self.document.node(node)
         else {
             bail!("not a stepper control");
         };
@@ -1887,7 +2138,7 @@ impl Session {
             select: Some(key),
             rows_data,
             ..
-        }) = self.document.view.get(node)
+        }) = self.document.node(node)
         else {
             bail!("not a selectable table");
         };
@@ -1898,6 +2149,14 @@ impl Session {
         );
         self.bindings_ok(&mut next)?;
         self.state = next;
+        if let Some(Node::Table {
+            page_size: Some(size),
+            ..
+        }) = self.document.node(node)
+            && let Some(position) = self.table_rows(node).iter().position(|index| *index == row)
+        {
+            self.follow_table_row(node, position / size);
+        }
         Ok(())
     }
     /// Execute an action transactionally. At most one explicit message is
@@ -1916,7 +2175,7 @@ impl Session {
     /// # Errors
     /// Rejects non-buttons, invalid rendered answer labels or failed actions.
     pub fn activate_button(&mut self, node: usize, item: usize) -> Result<Option<String>> {
-        let Some(Node::Buttons { items, .. }) = self.document.view.get(node) else {
+        let Some(Node::Buttons { items, .. }) = self.document.node(node) else {
             bail!("answer actions require a button");
         };
         let button = items
@@ -1971,7 +2230,7 @@ impl Session {
         Ok(())
     }
     fn bindings_ok(&self, state: &mut Map<String, Value>) -> Result<()> {
-        for node in &self.document.view {
+        for node in self.document.all_nodes() {
             match node {
                 Node::Input { key, .. } => input_ok(&state[key])?,
                 Node::Toggle { key, .. } => {
@@ -1990,9 +2249,37 @@ impl Session {
                         "select value must be an option"
                     );
                 }
-                Node::Stepper { key, min, max, .. } => {
+                Node::Stepper { key, min, max, .. } | Node::Slider { key, min, max, .. } => {
                     let value = number(&state[key])?.clamp(*min, *max);
                     state.insert(key.clone(), json!(value));
+                }
+                Node::Tabs {
+                    key: Some(key),
+                    items,
+                } => {
+                    let max = u32::try_from(items.len().saturating_sub(1))?;
+                    let value = number(&state[key])?.clamp(0.0, f64::from(max));
+                    state.insert(
+                        key.clone(),
+                        json!(
+                            (0..=max)
+                                .rev()
+                                .find(|index| f64::from(*index) <= value)
+                                .unwrap_or(0)
+                        ),
+                    );
+                }
+                Node::Rating { key, max, .. } => {
+                    let value = number(&state[key])?.clamp(0.0, f64::from(*max));
+                    state.insert(
+                        key.clone(),
+                        json!(
+                            (0..=*max)
+                                .rev()
+                                .find(|index| f64::from(*index) <= value)
+                                .unwrap_or(0)
+                        ),
+                    );
                 }
                 Node::Table {
                     select: Some(key),
@@ -2308,6 +2595,10 @@ mod image_tests;
 #[cfg(test)]
 #[path = "interactive/components_tests.rs"]
 mod components_tests;
+
+#[cfg(test)]
+#[path = "interactive/extended_tests.rs"]
+mod extended_tests;
 
 #[cfg(test)]
 #[path = "interactive/stepper_tests.rs"]

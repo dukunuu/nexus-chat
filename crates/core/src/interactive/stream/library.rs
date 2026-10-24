@@ -28,7 +28,11 @@ const COMPONENTS: &[(&str, &str, &str)] = &[
     ("Button", "", "label action primary? body? image? alt?"),
     ("Input", "input", "key label"),
     ("Kv", "kv", "items"),
-    ("Table", "table", "columns rows_data select?"),
+    (
+        "Table",
+        "table",
+        "columns rows_data select? sortable? page_size? search?",
+    ),
     ("Progress", "progress", "label value max?"),
     ("Bars", "bars", "items"),
     ("Bar", "", "label value"),
@@ -38,6 +42,20 @@ const COMPONENTS: &[(&str, &str, &str)] = &[
     ("Select", "select", "key label options"),
     ("Stepper", "stepper", "key label min max step"),
     ("Toggle", "toggle", "key label"),
+    ("Tabs", "tabs", "items key?"),
+    ("Tab", "", "label view"),
+    ("Accordion", "accordion", "items"),
+    ("Section", "", "title view open?"),
+    ("Chart", "chart", "kind series labels? rows?"),
+    ("Series", "", "name values tone?"),
+    ("Form", "form", "title fields submit_label action"),
+    ("Timeline", "timeline", "items"),
+    ("Event", "", "time title text? tone?"),
+    ("Rating", "rating", "key label max?"),
+    ("Code", "code", "source lang?"),
+    ("Badge", "badge", "text tone?"),
+    ("Meter", "meter", "label value max? tone?"),
+    ("Slider", "slider", "key label min max step"),
 ];
 
 pub(super) fn signatures() -> String {
@@ -107,6 +125,28 @@ fn retain_valid_nodes(value: &mut Value) {
 fn used_actions(view: &Value, actions: &Value) -> Value {
     let mut used = Map::new();
     for node in view.as_array().into_iter().flatten() {
+        for child in node["items"].as_array().into_iter().flatten() {
+            used.extend(
+                used_actions(&child["view"], actions)
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .map(|(k, v)| (k.clone(), v.clone())),
+            );
+        }
+        used.extend(
+            used_actions(&node["fields"], actions)
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
+        if node["type"].as_str() == Some("form")
+            && let Some(name) = node["action"].as_str()
+            && let Some(action) = actions.get(name)
+        {
+            used.insert(name.into(), action.clone());
+        }
         if node["type"].as_str() == Some("buttons") {
             for button in node["items"].as_array().into_iter().flatten() {
                 if let Some(name) = button["action"].as_str()
@@ -329,7 +369,16 @@ impl Context<'_> {
                 Some(Self::binding(expression)?.into())
             } else if matches!(
                 key,
-                "title" | "subtitle" | "text" | "label" | "badge" | "by" | "delta"
+                "title"
+                    | "subtitle"
+                    | "text"
+                    | "label"
+                    | "badge"
+                    | "by"
+                    | "delta"
+                    | "submit_label"
+                    | "time"
+                    | "name"
             ) || name == "Stat" && key == "value"
             {
                 self.template(expression, depth + 1)?
@@ -342,7 +391,7 @@ impl Context<'_> {
                 }
                 return Ok(None);
             };
-            if name == "Button" && key == "action" {
+            if matches!(name, "Button" | "Form") && key == "action" {
                 let steps = if value.get("op").is_some() {
                     vec![value]
                 } else {

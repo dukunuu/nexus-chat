@@ -151,7 +151,7 @@ fn actions_clamp_numeric_stepper_values_and_roll_back_wrong_types() {
 #[test]
 fn check_diagnostics_include_stepper_and_its_fields() {
     let mut source = source();
-    source["view"][0]["type"] = json!("slider");
+    source["view"][0]["type"] = json!("dial");
     let errors = Document::check(&source.to_string()).unwrap_err();
     assert_eq!(errors[0].path, "view[0]");
     assert!(errors[0].message.contains("stepper"));

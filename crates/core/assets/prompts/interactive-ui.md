@@ -26,7 +26,7 @@ For an app, tool, planner, calculator, tracker or game, build state → controls
 derived displays → actions. Use at least two control kinds and show computed
 progress, bars, metrics or text. Answer-only lists are for quizzes and polls,
 not substitutes for apps. Put the UI first, then at most a few sentences that
-do not repeat the panel. Keep tasks shallow: no tabs or deep navigation.
+do not repeat the panel. Keep navigation shallow.
 
 ### State, expressions and actions
 
@@ -87,11 +87,22 @@ Image/src arguments must be real HTTPS URLs copied exactly from search mode
 "images" or tool results, never invented or templated. Include alt text. Pictures
 reserve fixed height and may load late/fail; text must stand alone.
 
+Tabs: Tab(label, view) children; arrows/click switch, optional numeric key.
+Accordion: Section(title, view, open?) children; Enter/click expands.
+Chart: line|area|scatter|bar|pie; Series samples, labels and theme tones.
+Table: sortable?, page_size? (1–8), search?; s/arrows sort, PgUp/PgDn page, / filter.
+Form: bound fields; submit action reads current state; required/invalid inputs block it.
+Timeline: Event(time, title, text?, tone?) entries.
+Rating: numeric stars; arrows/click edit.
+Code: literal source, optional language, Copy button.
+Badge: compact themed text. Meter: themed gauge.
+Slider: numeric range; arrows/click adjust by step.
+
 Source ≤16 KiB; ≤128 named statements; ≤16 visible nodes; ≤32 scalar state fields,
 32 controls/actions and 128 action steps. Interactive-only panels have 21 declared
 node rows; display layouts have 45. Text and buttons declare 1–8 rows; text wraps
 at actual width. Image rows 4–12. Lists are bounded: buttons/checks/bars/steps ≤8,
-cards/stats ≤6, table ≤6 columns and 8 rows, sparkline ≤64 samples. Text ≤4096
+cards/stats ≤6, table ≤6 columns (8 rows, or 64 with pagination), sparkline/chart ≤64 samples. Text ≤4096
 bytes; scalar strings ≤1024; titles/labels/art lines ≤120; identifiers ≤32 ASCII
 letters/digits/underscores; finite numbers ≤1e12. Keep UIs compact.
 

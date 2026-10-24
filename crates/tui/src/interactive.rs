@@ -22,6 +22,8 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Sparkline, 
 use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
 
+mod components;
+
 /// Fixed image reservation with a visible, centered failure placeholder.
 pub(crate) fn image_lines(
     url: &str,
@@ -91,6 +93,12 @@ enum Control {
     Select(usize),
     Stepper(usize),
     Table(usize, String),
+    Tabs(usize),
+    Section(usize, usize),
+    Form(usize),
+    Rating(usize),
+    Slider(usize),
+    Copy(usize),
 }
 struct Entry {
     session: Result<Session, String>,
@@ -110,10 +118,8 @@ impl Entry {
             |_| Vec::new(),
             |session| {
                 session
-                    .document()
-                    .nodes()
-                    .iter()
-                    .enumerate()
+                    .visible_nodes()
+                    .into_iter()
                     .flat_map(|(index, node)| match node {
                         Node::Buttons { items, .. } => items
                             .iter()
@@ -129,8 +135,22 @@ impl Entry {
                         Node::Select { .. } => vec![Control::Select(index)],
                         Node::Stepper { .. } => vec![Control::Stepper(index)],
                         Node::Table {
-                            select: Some(key), ..
-                        } => vec![Control::Table(index, key.clone())],
+                            select,
+                            sortable,
+                            page_size,
+                            search,
+                            ..
+                        } if select.is_some() || *sortable || page_size.is_some() || *search => {
+                            vec![Control::Table(index, select.clone().unwrap_or_default())]
+                        }
+                        Node::Tabs { .. } => vec![Control::Tabs(index)],
+                        Node::Accordion { items } => (0..items.len())
+                            .map(|section| Control::Section(index, section))
+                            .collect(),
+                        Node::Form { .. } => vec![Control::Form(index)],
+                        Node::Rating { .. } => vec![Control::Rating(index)],
+                        Node::Slider { .. } => vec![Control::Slider(index)],
+                        Node::Code { .. } => vec![Control::Copy(index)],
                         _ => Vec::new(),
                     })
                     .collect()
@@ -148,7 +168,7 @@ impl Entry {
                 let Control::Action((node, _)) = value else {
                     return None;
                 };
-                let Node::Buttons { items, .. } = &session.document().nodes()[*node] else {
+                let Some(Node::Buttons { items, .. }) = session.document().node(*node) else {
                     return None;
                 };
                 choice_list(session.document(), items).then_some(control)
@@ -160,7 +180,7 @@ impl Entry {
             return false;
         };
         self.session.as_ref().is_ok_and(|session| {
-            let Node::Buttons { items, .. } = &session.document().nodes()[node] else {
+            let Some(Node::Buttons { items, .. }) = session.document().node(node) else {
                 return false;
             };
             session.document().answers(&items[item].action)
@@ -174,7 +194,7 @@ impl Entry {
         };
         let result = match control {
             Control::Action((node, item)) => {
-                let Node::Buttons { items, .. } = &session.document().nodes()[node] else {
+                let Some(Node::Buttons { items, .. }) = session.document().node(node) else {
                     return None;
                 };
                 let action = &items[item].action;
@@ -193,7 +213,43 @@ impl Entry {
             }
             Control::Toggle(key) => session.toggle(&key).map(|()| None),
             Control::Select(node) => session.cycle(node, true).map(|()| None),
-            Control::Input(_) | Control::Stepper(_) | Control::Table(..) => return None,
+            Control::Tabs(node) => session
+                .select_tab(
+                    node,
+                    (session.tab(node) + 1)
+                        % match session.document().node(node) {
+                            Some(Node::Tabs { items, .. }) => items.len(),
+                            _ => 1,
+                        },
+                )
+                .map(|()| None),
+            Control::Section(node, section) => session.expand_section(node, section).map(|()| None),
+            Control::Form(node) => {
+                let Some(Node::Form { action, .. }) = session.document().node(node) else {
+                    return None;
+                };
+                if session.document().sends(action) && !can_send {
+                    self.error =
+                        "Finish the reply and clear your draft before reviewing a UI response."
+                            .into();
+                    return None;
+                }
+                session.submit_form(node)
+            }
+            Control::Rating(node) => {
+                let Some(Node::Rating { key, max, .. }) = session.document().node(node) else {
+                    return None;
+                };
+                let value = u16::try_from(session.selected_row(key)).unwrap_or(0);
+                session.rate(node, (value + 1) % (max + 1)).map(|()| None)
+            }
+            Control::Copy(node) => {
+                session.copy_code(node);
+                return None;
+            }
+            Control::Input(_) | Control::Stepper(_) | Control::Table(..) | Control::Slider(_) => {
+                return None;
+            }
         };
         match result {
             Ok(message) => {
@@ -206,6 +262,7 @@ impl Entry {
             }
         }
     }
+    #[allow(clippy::too_many_lines)]
     fn navigate(&mut self, code: KeyCode) -> bool {
         let Some(control) = self.controls().get(self.focus).cloned() else {
             return false;
@@ -217,19 +274,95 @@ impl Entry {
             (Control::Select(node), KeyCode::Left | KeyCode::Right) => {
                 session.cycle(node, code == KeyCode::Right)
             }
-            (Control::Stepper(node), KeyCode::Left | KeyCode::Right) => {
+            (Control::Stepper(node) | Control::Slider(node), KeyCode::Left | KeyCode::Right) => {
                 session.step(node, code == KeyCode::Right)
             }
-            (Control::Table(node, key), KeyCode::Up | KeyCode::Down) => {
-                let row = session.selected_row(&key);
-                session.select_row(
+            (Control::Tabs(node), KeyCode::Left | KeyCode::Right) => {
+                let Some(Node::Tabs { items, .. }) = session.document().node(node) else {
+                    return false;
+                };
+                let count = items.len();
+                session.select_tab(
                     node,
-                    if code == KeyCode::Down {
-                        row.saturating_add(1)
+                    (session.tab(node) + if code == KeyCode::Right { 1 } else { count - 1 })
+                        % count,
+                )
+            }
+            (Control::Section(node, section), KeyCode::Left | KeyCode::Right) => {
+                if session.section_open(node, section) == (code == KeyCode::Right) {
+                    Ok(())
+                } else {
+                    session.expand_section(node, section)
+                }
+            }
+            (Control::Rating(node), KeyCode::Left | KeyCode::Right) => {
+                let Some(Node::Rating { key, .. }) = session.document().node(node) else {
+                    return false;
+                };
+                let value = u16::try_from(session.selected_row(key)).unwrap_or(0);
+                session.rate(
+                    node,
+                    if code == KeyCode::Right {
+                        value.saturating_add(1)
                     } else {
-                        row.saturating_sub(1)
+                        value.saturating_sub(1)
                     },
                 )
+            }
+            (Control::Table(node, key), KeyCode::Up | KeyCode::Down) if !key.is_empty() => {
+                let rows = session.table_rows(node);
+                let row = rows
+                    .iter()
+                    .position(|row| *row == session.selected_row(&key))
+                    .unwrap_or(0);
+                let next = if code == KeyCode::Down {
+                    row.saturating_add(1)
+                } else {
+                    row.saturating_sub(1)
+                }
+                .min(rows.len().saturating_sub(1));
+                rows.get(next)
+                    .map_or(Ok(()), |row| session.select_row(node, *row))
+            }
+            (Control::Table(node, _), KeyCode::PageUp | KeyCode::PageDown) => {
+                session.page_table(node, code == KeyCode::PageDown)
+            }
+            (Control::Table(node, _), KeyCode::Left | KeyCode::Right | KeyCode::Char('s'))
+                if !session.table_state(node).searching =>
+            {
+                let Some(Node::Table { columns, .. }) = session.document().node(node) else {
+                    return false;
+                };
+                let column = session.table_state(node).sort.map_or(0, |(column, _)| {
+                    if code == KeyCode::Char('s') {
+                        column
+                    } else {
+                        (column
+                            + if code == KeyCode::Right {
+                                1
+                            } else {
+                                columns.len() - 1
+                            })
+                            % columns.len()
+                    }
+                });
+                session.sort_table(node, column)
+            }
+            (Control::Table(node, _), KeyCode::Char('/') | KeyCode::Enter) => {
+                let state = session.table_state(node);
+                session.search_table(node, state.query, !state.searching)
+            }
+            (Control::Table(node, _), KeyCode::Char(ch)) if session.table_state(node).searching => {
+                let mut query = session.table_state(node).query;
+                query.push(ch);
+                session.search_table(node, query, true)
+            }
+            (Control::Table(node, _), KeyCode::Backspace)
+                if session.table_state(node).searching =>
+            {
+                let mut query = session.table_state(node).query;
+                query.pop();
+                session.search_table(node, query, true)
             }
             _ => return false,
         };
@@ -239,10 +372,27 @@ impl Entry {
         true
     }
     fn edit(&mut self, text: &str, backspace: bool) {
-        let Some(Control::Input(key)) = self.controls().get(self.focus).cloned() else {
+        let control = self.controls().get(self.focus).cloned();
+        let Ok(session) = &mut self.session else {
             return;
         };
-        let Ok(session) = &mut self.session else {
+        if let Some(Control::Table(node, _)) = control {
+            let state = session.table_state(node);
+            if state.searching {
+                let mut query = state.query;
+                if backspace {
+                    query.pop();
+                } else {
+                    query.extend(text.chars().filter(|ch| !ch.is_control()).take(1024));
+                }
+                self.error = session
+                    .search_table(node, query, true)
+                    .err()
+                    .map_or_else(String::new, |error| error.to_string());
+            }
+            return;
+        }
+        let Some(Control::Input(key)) = control else {
             return;
         };
         let mut value = session.value(&key);
@@ -349,9 +499,32 @@ impl Entry {
         can_send: bool,
         buffer: &mut Buffer,
     ) -> Vec<(Rect, usize)> {
+        Self::branch(
+            session.document().nodes(),
+            session,
+            regions,
+            theme,
+            focus,
+            can_send,
+            buffer,
+            &mut 0,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn branch(
+        nodes: &[Node],
+        session: &Session,
+        regions: &[Rect],
+        theme: &Theme,
+        focus: Option<usize>,
+        can_send: bool,
+        buffer: &mut Buffer,
+        next_control: &mut usize,
+    ) -> Vec<(Rect, usize)> {
         let mut hits = Vec::new();
-        let mut control = 0;
-        for (index, (node, region)) in session.document().nodes().iter().zip(regions).enumerate() {
+        let mut control = *next_control;
+        for (node, region) in nodes.iter().zip(regions) {
+            let index = session.document().node_index(node);
             let region = *region;
             match node {
                 Node::Text { text, tone, .. } => {
@@ -377,7 +550,7 @@ impl Entry {
                     ));
                     control += items.len();
                 }
-                Node::Input { key, label } => {
+                Node::Input { key, label, .. } => {
                     let selected = focus == Some(control);
                     let label = clipped(
                         &safe(label),
@@ -422,13 +595,26 @@ impl Entry {
                     control += 1;
                 }
                 _ => {
-                    let new_hits =
-                        render_component(node, session, region, theme, focus, control, buffer);
-                    control += new_hits.len();
-                    hits.extend(new_hits);
+                    if let Some((count, new_hits)) = components::render(
+                        node,
+                        session,
+                        region,
+                        theme,
+                        (focus, control, can_send),
+                        buffer,
+                    ) {
+                        control += count;
+                        hits.extend(new_hits);
+                    } else {
+                        let new_hits =
+                            render_component(node, session, region, theme, focus, control, buffer);
+                        control += new_hits.len();
+                        hits.extend(new_hits);
+                    }
                 }
             }
         }
+        *next_control = control;
         hits
     }
 }
@@ -446,7 +632,7 @@ pub(crate) fn document_images(document: &Document) -> Vec<DocImage> {
         button: None,
     };
     let mut out = Vec::new();
-    for (index, node) in document.nodes().iter().enumerate() {
+    for (index, node) in document.all_nodes().into_iter().enumerate() {
         match node {
             Node::Image { src, .. } => out.push(plain(src)),
             Node::Hero {
@@ -519,10 +705,16 @@ fn card_image_rects(items: &[Card], session: &Session, region: Rect) -> Vec<(Rec
     out
 }
 pub(crate) fn image_targets(session: &Session, width: u16) -> Vec<ImageTarget> {
-    let regions = node_regions(session, width);
-    let mut found: Vec<(Rect, String, bool)> = Vec::new();
-    for (node, region) in session.document().nodes().iter().zip(&regions) {
-        let region = *region;
+    let mut targets = Vec::new();
+    for (node, region) in components::visible_regions(session, width) {
+        let base: usize = session
+            .document()
+            .all_nodes()
+            .into_iter()
+            .take(session.document().node_index(node))
+            .map(components::image_count)
+            .sum();
+        let mut found = Vec::new();
         match node {
             Node::Image { src, .. } => found.push((region, src.clone(), false)),
             Node::Hero {
@@ -551,12 +743,18 @@ pub(crate) fn image_targets(session: &Session, width: u16) -> Vec<ImageTarget> {
             }
             _ => {}
         }
+        targets.extend(
+            found
+                .into_iter()
+                .enumerate()
+                .map(|(index, (rect, url, _))| ImageTarget {
+                    rect,
+                    url,
+                    index: base + index,
+                }),
+        );
     }
-    found
-        .into_iter()
-        .enumerate()
-        .map(|(index, (rect, url, _))| ImageTarget { rect, url, index })
-        .collect()
+    targets
 }
 /// Render validated nodes into their measured, padded regions.
 pub(crate) fn render_nodes(
@@ -580,8 +778,8 @@ fn text_lines(session: &Session, text: &str, width: u16) -> Vec<Line<'static>> {
 fn primary_button(document: &Document) -> Option<(usize, usize)> {
     let buttons = || {
         document
-            .nodes()
-            .iter()
+            .all_nodes()
+            .into_iter()
             .enumerate()
             .flat_map(|(node, value)| {
                 let items = match value {
@@ -605,21 +803,9 @@ fn primary_button(document: &Document) -> Option<(usize, usize)> {
 }
 fn session_controls(session: &Session) -> usize {
     session
-        .document()
-        .nodes()
+        .visible_nodes()
         .iter()
-        .map(|node| match node {
-            Node::Buttons { items, .. } => items.len(),
-            Node::Checklist { items } => items.len(),
-            Node::Input { .. }
-            | Node::Toggle { .. }
-            | Node::Select { .. }
-            | Node::Stepper { .. }
-            | Node::Table {
-                select: Some(_), ..
-            } => 1,
-            _ => 0,
-        })
+        .map(|(_, node)| components::control_count(node))
         .sum()
 }
 fn button_label(session: &Session, button: &Button) -> String {
@@ -652,9 +838,11 @@ fn render_button_group(
     let mut hits = Vec::new();
     let primary = primary_button(session.document());
     let choices = choice_list(session.document(), items);
-    let choice: usize = session.document().nodes()[..index]
-        .iter()
-        .filter_map(|node| match node {
+    let choice: usize = session
+        .visible_nodes()
+        .into_iter()
+        .take_while(|(node_index, _)| *node_index < index)
+        .filter_map(|(_, node)| match node {
             Node::Buttons { items, .. } if choice_list(session.document(), items) => {
                 Some(items.len())
             }
@@ -857,12 +1045,17 @@ fn button_regions(session: &Session, items: &[Button], area: Rect) -> Vec<(usize
 }
 /// Measure actual content at the available width; declared rows remain core caps.
 pub(crate) fn node_regions(session: &Session, width: u16) -> Vec<Rect> {
-    let width = width.saturating_sub(4);
-    let mut y: u16 = 2;
+    branch_regions(
+        session,
+        session.document().nodes(),
+        Rect::new(2, 2, width.saturating_sub(4), u16::MAX),
+    )
+}
+fn branch_regions(session: &Session, nodes: &[Node], area: Rect) -> Vec<Rect> {
+    let width = area.width;
+    let mut y = area.y;
     let mut previous_text = false;
-    session
-        .document()
-        .nodes()
+    nodes
         .iter()
         .enumerate()
         .map(|(index, node)| {
@@ -871,7 +1064,7 @@ pub(crate) fn node_regions(session: &Session, width: u16) -> Vec<Rect> {
                 y = y.saturating_add(1);
             }
             previous_text = text;
-            let height = match node {
+            let height = components::height(node, session, width).unwrap_or_else(|| match node {
                 Node::Text { text, .. } => u16::try_from(text_lines(session, text, width).len())
                     .unwrap_or(u16::MAX)
                     .max(1),
@@ -887,9 +1080,9 @@ pub(crate) fn node_regions(session: &Session, width: u16) -> Vec<Rect> {
                     || node.rows(),
                     |lines| u16::try_from(lines.len()).unwrap_or(u16::MAX).max(1),
                 ),
-            };
+            });
             let region = Rect::new(
-                2,
+                area.x,
                 y,
                 width,
                 height.min(u16::MAX.saturating_sub(y.saturating_add(2))),
@@ -1715,16 +1908,23 @@ fn render_component(
             render_stepper(node, session, region, theme, focus == Some(control), buffer);
             hits.push((region, control));
         }
-        Node::Table { select, .. } => {
+        Node::Table {
+            select,
+            sortable,
+            page_size,
+            search,
+            ..
+        } => {
             render_table(
                 node,
                 session,
                 region,
                 theme,
-                focus == Some(control) && select.is_some(),
+                focus == Some(control)
+                    && (select.is_some() || *sortable || page_size.is_some() || *search),
                 buffer,
             );
-            if select.is_some() {
+            if select.is_some() || *sortable || page_size.is_some() || *search {
                 hits.push((region, control));
             }
         }
@@ -1770,21 +1970,45 @@ fn render_table(
         columns,
         rows_data,
         select,
+        sortable,
+        page_size,
+        search,
     } = node
     else {
         return;
     };
     let count = u16::try_from(columns.len()).unwrap_or(1);
     let selected = select.as_ref().map(|key| session.selected_row(key));
-    for (row, cells) in std::iter::once(columns).chain(rows_data.iter()).enumerate() {
-        let is_selected = row > 0 && selected == Some(row - 1);
+    let index = session.document().node_index(node);
+    let state = session.table_state(index);
+    let rows = session.table_rows(index);
+    let size = page_size.unwrap_or(rows_data.len()).max(1);
+    let page = state.page.min(rows.len().div_ceil(size).saturating_sub(1));
+    let mut data = vec![(None, columns)];
+    data.extend(
+        rows.iter()
+            .skip(page * size)
+            .take(size)
+            .map(|row| (Some(*row), &rows_data[*row])),
+    );
+    if *search {
+        Paragraph::new(format!(
+            "/ Search: {}{}",
+            state.query,
+            if state.searching { "▁" } else { "" }
+        ))
+        .style(control_style(theme, focused))
+        .render(Rect::new(area.x, area.y, area.width, 1), buffer);
+    }
+    for (row, (original, cells)) in data.into_iter().enumerate() {
+        let is_selected = original.is_some() && selected == original;
         let style = if row == 0 {
             Style::default().fg(theme.fg_dim)
         } else {
             control_style(theme, focused && is_selected)
         };
         let marker = if is_selected { glyph::SELECTED } else { " " };
-        let y = area.y + u16::try_from(row).unwrap_or(0);
+        let y = area.y + u16::from(*search) + u16::try_from(row).unwrap_or(0);
         let lead = u16::from(select.is_some()).min(area.width);
         if lead > 0 {
             buffer.set_string(area.x, y, marker, style);
@@ -1795,10 +2019,30 @@ fn render_table(
             let x = width * column / count;
             let end = width * (column + 1) / count;
             let cell_width = (end - x).saturating_sub(u16::from(column + 1 < count));
-            Paragraph::new(clipped(&display(session, cell), cell_width))
+            let mut text = display(session, cell);
+            if row == 0
+                && *sortable
+                && let Some((sorted, descending)) = state.sort
+                && sorted == usize::from(column)
+            {
+                text.push_str(if descending { " ▾" } else { " ▴" });
+            }
+            Paragraph::new(clipped(&text, cell_width))
                 .style(style)
                 .render(Rect::new(area.x + lead + x, y, cell_width, 1), buffer);
         }
+    }
+    if page_size.is_some() {
+        Paragraph::new(format!(
+            "‹ {}/{} › · PgUp/PgDn",
+            page + 1,
+            rows.len().div_ceil(size).max(1)
+        ))
+        .style(Style::default().fg(theme.fg_dim))
+        .render(
+            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+            buffer,
+        );
     }
 }
 fn render_bar(
@@ -2254,6 +2498,7 @@ impl Widgets {
             }
         }
     }
+    #[allow(clippy::too_many_lines)]
     fn click(&mut self, mouse: MouseEvent, screen: Rect, can_send: bool) -> (bool, Option<String>) {
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) || self.screen != Some(screen) {
             return (false, None);
@@ -2305,8 +2550,11 @@ impl Widgets {
             Some((index, Control::Stepper(node))) => {
                 entry.focus = index;
                 if let Ok(session) = &entry.session
-                    && let Some(arrows) =
-                        stepper_arrows(&session.document().nodes()[node], session, hit.rect)
+                    && let Some(arrows) = stepper_arrows(
+                        session.document().node(node).expect("control node"),
+                        session,
+                        hit.rect,
+                    )
                     && let Some(direction) = arrows.iter().position(|rect| rect.contains(pos))
                 {
                     entry.navigate(if direction == 0 {
@@ -2322,14 +2570,37 @@ impl Widgets {
                 self.focused = Some(hit.key);
                 if let Ok(session) = &mut entry.session {
                     let row = hit.row_offset + mouse.row - hit.rect.y;
-                    if row > 0 {
-                        let result = session.select_row(node, usize::from(row - 1));
-                        entry.error = result
-                            .err()
-                            .map_or_else(String::new, |error| error.to_string());
-                    }
+                    let result = components::click_table(
+                        session,
+                        node,
+                        row,
+                        mouse.column - hit.rect.x,
+                        hit.rect,
+                    );
+                    entry.error = result
+                        .err()
+                        .map_or_else(String::new, |error| error.to_string());
                 }
                 (true, None)
+            }
+            Some((
+                index,
+                control @ (Control::Tabs(_)
+                | Control::Section(..)
+                | Control::Form(_)
+                | Control::Rating(_)
+                | Control::Slider(_)
+                | Control::Copy(_)),
+            )) => {
+                entry.focus = index;
+                if components::click(entry, &control, pos, hit.rect) {
+                    (true, None)
+                } else {
+                    (
+                        true,
+                        entry.activate(index, can_send, self.answer_blocked.is_none()),
+                    )
+                }
             }
             Some((index, Control::Toggle(_) | Control::Select(_))) => {
                 self.focused = Some(hit.key);
@@ -2381,7 +2652,9 @@ impl Widgets {
             self.expanded = true;
             return (false, None);
         }
+        let searching = matches!(controls.get(entry.focus), Some(Control::Table(node, _)) if entry.session.as_ref().is_ok_and(|session| session.table_state(*node).searching));
         if let KeyCode::Char(ch @ '1'..='9') = key.code
+            && !searching
             && let Some(control) = entry.choices().get(ch as usize - '1' as usize)
         {
             return (
@@ -2392,7 +2665,7 @@ impl Widgets {
         if let Some(Control::Action((node, item))) = controls.get(entry.focus)
             && matches!(key.code, KeyCode::Up | KeyCode::Down)
             && let Ok(session) = &entry.session
-            && let Node::Buttons { items, .. } = &session.document().nodes()[*node]
+            && let Some(Node::Buttons { items, .. }) = session.document().node(*node)
             && choice_list(session.document(), items)
         {
             let next = if key.code == KeyCode::Down {
@@ -2560,6 +2833,17 @@ fn review(app: &mut AppView, message: Option<String>) {
     }
 }
 fn respond(app: &mut AppView, message: Option<String>) {
+    if let Some(source) = app
+        .interactive
+        .focused
+        .as_ref()
+        .and_then(|key| app.interactive.entries.get_mut(key))
+        .and_then(|entry| entry.session.as_mut().ok())
+        .and_then(Session::take_copy)
+    {
+        let status = crate::composer::copy_to_clipboard(&mut app.clipboard, &source);
+        app.push_status(status);
+    }
     let entry = app
         .interactive
         .focused
@@ -2665,15 +2949,21 @@ pub fn key(app: &mut AppView, event: KeyEvent) {
     {
         return;
     }
+    let table_focused = app
+        .interactive
+        .focused
+        .as_ref()
+        .and_then(|key| app.interactive.entries.get(key))
+        .is_some_and(|entry| matches!(entry.controls().get(entry.focus), Some(Control::Table(node, _)) if entry.session.as_ref().is_ok_and(|session| matches!(session.document().node(*node), Some(Node::Table { page_size: Some(_), .. })))));
     match event.code {
-        KeyCode::PageUp => {
+        KeyCode::PageUp if !table_focused => {
             app.scroll = app
                 .scroll
                 .saturating_add(app.history_page())
                 .min(app.max_scroll);
             return;
         }
-        KeyCode::PageDown => {
+        KeyCode::PageDown if !table_focused => {
             app.scroll = app.scroll.saturating_sub(app.history_page());
             return;
         }
@@ -2766,3 +3056,7 @@ mod image_tests;
 #[cfg(test)]
 #[path = "interactive/stream_tests.rs"]
 mod stream_tests;
+
+#[cfg(test)]
+#[path = "interactive/extended_tests.rs"]
+mod extended_tests;
