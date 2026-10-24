@@ -24,6 +24,8 @@ use unicode_width::UnicodeWidthStr;
 
 mod components;
 pub(crate) mod live;
+mod persist;
+pub(crate) use persist::{flush, open_pinned, pin_focused, sync_saved};
 
 /// Fixed image reservation with a visible, centered failure placeholder.
 pub(crate) fn image_lines(
@@ -436,7 +438,7 @@ impl Entry {
         let hint = if let Some(status) = self.session.as_ref().ok().and_then(Session::data_hint) {
             status.into()
         } else if let Some(url) = pending_url {
-            format!("Open {url}? Enter confirm · Esc cancel")
+            persist::url_prompt(url, usize::from(width))
         } else if choices > 0 {
             format!("1–{choices} pick · F2 keyboard")
         } else if focused {
@@ -2284,6 +2286,8 @@ pub struct Widgets {
     data_calls: HashMap<String, usize>,
     data_running: Option<live::Running>,
     window_unfocused: bool,
+    /// Saved-state bookkeeping and pinned apps; see `persist`.
+    store: persist::Store,
 }
 impl Widgets {
     /// Discard all local state and stale hit areas on a viewport/session reset.
@@ -2291,10 +2295,12 @@ impl Widgets {
         let calls = std::mem::take(&mut self.data_calls);
         let data_running = self.data_running.take();
         let window_unfocused = self.window_unfocused;
+        let store = std::mem::take(&mut self.store).retained();
         *self = Self {
             data_calls: calls,
             data_running,
             window_unfocused,
+            store,
             ..Self::default()
         };
     }
@@ -2333,7 +2339,7 @@ impl Widgets {
         if self.entries.contains_key(key) {
             return;
         }
-        let session = Document::parse(&key.source)
+        let mut session = Document::parse(&key.source)
             .and_then(Session::new)
             .map_err(|error| error.to_string());
         // Layouts are inert, so they do not count against the interactive-panel limit.
@@ -2352,6 +2358,9 @@ impl Widgets {
         if count >= if is_static { 512 } else { 64 } {
             return;
         }
+        if let Ok(session) = &mut session {
+            self.restore_message_panel(key, session);
+        }
         self.entries.insert(
             key.clone(),
             Entry {
@@ -2363,6 +2372,7 @@ impl Widgets {
         );
     }
     fn reconcile_patches(&mut self, placements: &[Placement]) {
+        self.index_occurrences(placements);
         let mut targets = HashMap::new();
         for placement in placements.iter().filter(|p| p.complete) {
             let key = placement.key();
@@ -2486,11 +2496,9 @@ impl Widgets {
                     && p.row.saturating_add(usize::from(p.height)) > top
             })
         });
-        if self
-            .focused
-            .as_ref()
-            .is_some_and(|key| !placements.iter().any(|p| p.complete && p.key() == *key))
-        {
+        if self.focused.as_ref().is_some_and(|key| {
+            !self.is_app(key) && !placements.iter().any(|p| p.complete && p.key() == *key)
+        }) {
             self.unfocus();
         }
         if self.focused.as_ref().is_some_and(|key| {
@@ -2611,8 +2619,18 @@ impl Widgets {
             }
         }
     }
-    #[allow(clippy::too_many_lines)]
     fn click(&mut self, mouse: MouseEvent, screen: Rect, can_send: bool) -> (bool, Option<String>) {
+        let result = self.handle_click(mouse, screen, can_send);
+        self.open_trusted();
+        result
+    }
+    #[allow(clippy::too_many_lines)]
+    fn handle_click(
+        &mut self,
+        mouse: MouseEvent,
+        screen: Rect,
+        can_send: bool,
+    ) -> (bool, Option<String>) {
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) || self.screen != Some(screen) {
             return (false, None);
         }
@@ -2746,30 +2764,21 @@ impl Widgets {
             entry.edit(text, false);
         }
     }
-    #[allow(clippy::too_many_lines)]
     fn key(&mut self, key: KeyEvent, can_send: bool) -> (bool, Option<String>) {
+        let result = self.handle_key(key, can_send);
+        self.open_trusted();
+        result
+    }
+    #[allow(clippy::too_many_lines)]
+    fn handle_key(&mut self, key: KeyEvent, can_send: bool) -> (bool, Option<String>) {
         if key.kind != KeyEventKind::Press
             || !key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
         {
             return (false, None);
         }
-        if let Some(Ok(session)) = self
-            .focused
-            .as_ref()
-            .and_then(|key| self.entries.get_mut(key))
-            .map(|entry| &mut entry.session)
-            && session.pending_url().is_some()
-        {
-            if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
-                self.pending_status = Some(
-                    match session.confirm_url(key.code == KeyCode::Enter, |url| {
-                        open::that_detached(url).map_err(Into::into)
-                    }) {
-                        Ok(Some(status)) => status,
-                        Ok(None) => "URL opening cancelled".into(),
-                        Err(error) => format!("URL opening failed: {error}"),
-                    },
-                );
+        if self.pending_url_focused() {
+            if matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('a')) {
+                self.resolve_url(key.code);
             }
             return (false, None);
         }
@@ -2796,6 +2805,13 @@ impl Widgets {
             return (false, None);
         }
         let searching = matches!(controls.get(entry.focus), Some(Control::Table(node, _)) if entry.session.as_ref().is_ok_and(|session| session.table_state(*node).searching));
+        if key.code == KeyCode::Char('p')
+            && !searching
+            && !matches!(controls.get(entry.focus), Some(Control::Input(_)))
+        {
+            self.store.pending_pin = true;
+            return (false, None);
+        }
         if let KeyCode::Char(ch @ '1'..='9') = key.code
             && !searching
             && let Some(control) = entry.choices().get(ch as usize - '1' as usize)
@@ -3117,6 +3133,9 @@ pub fn key(app: &mut AppView, event: KeyEvent) {
     if closed {
         app.popup = Popup::None;
     }
+    if app.interactive.take_pin_request() {
+        pin_focused(app, None);
+    }
     respond(app, message);
     if let Some(status) = app.interactive.pending_status.take() {
         app.push_status(status);
@@ -3125,7 +3144,12 @@ pub fn key(app: &mut AppView, event: KeyEvent) {
 }
 /// Render a keyboard-accessible enlarged view of the same inline state.
 pub fn render_popup(f: &mut Frame, app: &mut AppView) {
-    let Some((viewport, top, placements)) = app.interactive.layout.clone() else {
+    let Some((viewport, top, placements)) = app.interactive.layout.clone().or_else(|| {
+        // A pinned app owns the whole view and needs no transcript layout.
+        app.interactive
+            .focused_app()
+            .then(|| (f.area(), 0, Vec::new()))
+    }) else {
         return;
     };
     if app.interactive.expanded {
@@ -3143,6 +3167,10 @@ pub fn render_popup(f: &mut Frame, app: &mut AppView) {
 #[cfg(test)]
 #[path = "interactive/data_tests.rs"]
 mod data_tests;
+
+#[cfg(test)]
+#[path = "interactive/persist_tests.rs"]
+mod persist_tests;
 
 #[cfg(test)]
 #[path = "interactive/power_tests.rs"]

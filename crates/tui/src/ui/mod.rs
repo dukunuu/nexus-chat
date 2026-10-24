@@ -39,6 +39,7 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
     app.popup_hit.set(None);
     let send_ready = crate::interactive::can_send(app);
     app.interactive.begin_frame(send_ready);
+    crate::interactive::sync_saved(app);
     // The image viewer keeps the focused document for when it closes.
     let viewing_from_ui = app.popup == Popup::ImageViewer
         && app.image_viewer.return_to() == crate::image_viewer::Return::Interactive;

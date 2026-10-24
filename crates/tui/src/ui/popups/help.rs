@@ -65,6 +65,7 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
             ("F2", "focus the newest visible UI"),
             ("Tab/arrows · Enter", "select a control · activate"),
             ("type · Backspace · Ctrl+V", "edit a focused input"),
+            ("p", "pin the focused UI as a mini-app (open it from /apps)"),
             ("Esc", "return to chat; keep local UI state"),
         ],
     ),

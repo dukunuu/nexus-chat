@@ -220,6 +220,13 @@ pub fn open(app: &mut AppView, name: &str) {
         .space
         .scripts_dir(&app.active_space.name)
         .with_file_name("tui_apps");
+    // A pinned panel answers to its name when no script app does.
+    if name != "rps"
+        && !nexus_core::tui_apps::app_path(&root, name).is_ok_and(|path| path.is_file())
+        && crate::interactive::open_pinned(app, name)
+    {
+        return;
+    }
     app.tui_app = Some(Box::new(TuiApp::new(nexus_core::tui_apps::load(
         &root, name, true,
     ))));

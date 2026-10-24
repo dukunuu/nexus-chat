@@ -5,7 +5,7 @@ use super::{
     spend, text_ok,
 };
 use anyhow::{Result, bail, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -291,6 +291,28 @@ impl Document {
     }
 }
 
+/// Persisted local presentation state: selected tabs, open sections and table
+/// sort/page/filter. Everything is re-validated against the program on restore.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewSnapshot {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    tabs: BTreeMap<usize, usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    open: Vec<(usize, usize, bool)>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    tables: BTreeMap<usize, TableSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct TableSnapshot {
+    #[serde(default)]
+    sort: Option<(usize, bool)>,
+    #[serde(default)]
+    page: usize,
+    #[serde(default)]
+    query: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct ComponentState {
     tabs: BTreeMap<usize, usize>,
@@ -312,6 +334,93 @@ pub struct TableState {
 }
 
 impl Session {
+    pub(super) fn view_snapshot(&self) -> ViewSnapshot {
+        ViewSnapshot {
+            tabs: self.components.tabs.clone(),
+            open: self
+                .components
+                .open
+                .iter()
+                .map(|(&(node, section), &open)| (node, section, open))
+                .collect(),
+            tables: self
+                .components
+                .tables
+                .iter()
+                .filter(|(_, table)| {
+                    table.sort.is_some() || table.page > 0 || !table.query.is_empty()
+                })
+                .map(|(&node, table)| {
+                    (
+                        node,
+                        TableSnapshot {
+                            sort: table.sort,
+                            page: table.page,
+                            query: table.query.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Apply only the entries that still name a matching component; a revised
+    /// program silently drops presentation state it can no longer honor.
+    pub(super) fn restore_view(&mut self, view: &ViewSnapshot) {
+        let mut next = ComponentState::default();
+        for (&node, &tab) in &view.tabs {
+            if matches!(self.document.node(node), Some(Node::Tabs { key: None, .. })) {
+                next.tabs.insert(node, tab);
+            }
+        }
+        for &(node, section, open) in &view.open {
+            if matches!(self.document.node(node), Some(Node::Accordion { items }) if section < items.len())
+            {
+                next.open.insert((node, section), open);
+            }
+        }
+        self.components = next;
+        for (&node, table) in &view.tables {
+            let Some(Node::Table {
+                columns,
+                sortable,
+                page_size,
+                search,
+                ..
+            }) = self.document.node(node)
+            else {
+                continue;
+            };
+            let sort = table
+                .sort
+                .filter(|&(column, _)| *sortable && column < columns.len());
+            let query = if *search && table.query.len() <= MAX_VALUE {
+                table.query.clone()
+            } else {
+                String::new()
+            };
+            self.components.tables.insert(
+                node,
+                TableState {
+                    sort,
+                    page: 0,
+                    query,
+                    searching: false,
+                },
+            );
+            if let Some(size) = page_size {
+                let max = self
+                    .table_rows(node)
+                    .len()
+                    .div_ceil(*size)
+                    .saturating_sub(1);
+                if let Some(state) = self.components.tables.get_mut(&node) {
+                    state.page = table.page.min(max);
+                }
+            }
+        }
+    }
+
     /// Queue literal code for the frontend's existing clipboard helper.
     pub fn copy_code(&mut self, node: usize) {
         if let Some(Node::Code { source, .. }) = self.document.node(node) {
@@ -350,6 +459,7 @@ impl Session {
             self.state = next;
         } else {
             self.components.tabs.insert(node, tab);
+            self.revision += 1;
         }
         Ok(())
     }
@@ -369,6 +479,7 @@ impl Session {
         self.components
             .open
             .insert((node, section), !self.section_open(node, section));
+        self.revision += 1;
         Ok(())
     }
     /// Visible nodes in preorder, retaining stable indices for hidden branches.
@@ -464,6 +575,7 @@ impl Session {
     }
     pub(super) fn follow_table_row(&mut self, node: usize, page: usize) {
         self.components.tables.entry(node).or_default().page = page;
+        self.revision += 1;
     }
     /// Current local table presentation state.
     #[must_use]
@@ -519,6 +631,7 @@ impl Session {
                 .is_some_and(|(old, descending)| old == column && !descending),
         ));
         state.page = 0;
+        self.revision += 1;
         Ok(())
     }
     /// Change the table page, clamped to filtered data.
@@ -543,6 +656,7 @@ impl Session {
         } else {
             state.page.saturating_sub(1)
         };
+        self.revision += 1;
         Ok(())
     }
     /// Edit the local table filter without changing bound selection.
@@ -561,6 +675,7 @@ impl Session {
         state.query = query;
         state.searching = editing;
         state.page = 0;
+        self.revision += 1;
         Ok(())
     }
 }

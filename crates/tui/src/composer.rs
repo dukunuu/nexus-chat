@@ -239,7 +239,9 @@ impl AppView {
             Popup::Skills if self.skills_mode == SkillsMode::Install => {
                 self.skills_edit.push_str(text);
             }
-            Popup::Apps if self.apps_mode == AppsMode::EditFile => self.apps_edit.push_str(text),
+            Popup::Apps if matches!(self.apps_mode, AppsMode::EditFile | AppsMode::RenamePanel) => {
+                self.apps_edit.push_str(text);
+            }
             Popup::Files if self.files_mode == FilesMode::Add => {
                 self.files_edit.push_str(text);
             }
@@ -881,6 +883,13 @@ impl AppView {
                 }
             }
             AppCommand::OpenTuiApp(name) => crate::ui::popups::tui_app::open(self, &name),
+            AppCommand::PinPanel { name } => {
+                if self.core.incognito {
+                    self.push_status("pinning is not available in incognito mode");
+                } else {
+                    crate::interactive::pin_focused(self, name.as_deref());
+                }
+            }
             AppCommand::OpenImage { target } => self.open_image_command(&target),
             AppCommand::OpenStudio { deck } => {
                 if let Err(error) = self.open_studio(deck.as_deref()) {

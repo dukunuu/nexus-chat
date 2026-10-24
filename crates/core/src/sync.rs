@@ -361,6 +361,38 @@ pub const TABLES: &[TableSpec] = &[
         cursor: Cursor::UpdatedAt,
     },
     TableSpec {
+        name: "panel_states",
+        columns: &["session_id", "panel_key", "record", "updated_at"],
+        apply_columns: &["session_id", "panel_key", "record", "updated_at"],
+        pk: &["session_id", "panel_key"],
+        cursor: Cursor::UpdatedAt,
+    },
+    TableSpec {
+        name: "pinned_panels",
+        columns: &[
+            "id",
+            "space_id",
+            "name",
+            "title",
+            "program",
+            "record",
+            "created_at",
+            "updated_at",
+        ],
+        apply_columns: &[
+            "id",
+            "space_id",
+            "name",
+            "title",
+            "program",
+            "record",
+            "created_at",
+            "updated_at",
+        ],
+        pk: &["id"],
+        cursor: Cursor::UpdatedAt,
+    },
+    TableSpec {
         name: "messages",
         columns: &[
             "id",
@@ -1458,7 +1490,7 @@ fn insert_file_row(conn: &Connection, row: &serde_json::Value) -> Result<()> {
 fn row_version_for_tombstone(db: &Db, table: &str, row_id: &str) -> Result<Option<String>> {
     let conn = db.conn();
     let (table, id_column, version_column, id) = match table {
-        "sessions" | "model_prefs" | "spaces" | "files" | "watches" => {
+        "sessions" | "model_prefs" | "spaces" | "files" | "watches" | "pinned_panels" => {
             (table, "id", "updated_at", row_id)
         }
         "app_settings" => (table, "key", "updated_at", row_id),
@@ -1546,6 +1578,7 @@ fn apply_tombstone(
             | "citations"
             | "swarm_personas"
             | "app_settings"
+            | "pinned_panels"
     ) {
         summary
             .warnings
@@ -1589,6 +1622,10 @@ fn apply_tombstone(
         }
         "sessions" => {
             conn.execute("DELETE FROM messages WHERE session_id = ?1", [&t.row_id])?;
+            conn.execute(
+                "DELETE FROM panel_states WHERE session_id = ?1",
+                [&t.row_id],
+            )?;
             conn.execute(
                 "DELETE FROM session_sources WHERE session_id = ?1",
                 [&t.row_id],
@@ -1636,6 +1673,10 @@ fn apply_tombstone(
         }
         "watches" => {
             conn.execute("DELETE FROM watches WHERE id = ?1", [&t.row_id])?;
+            Ok(true)
+        }
+        "pinned_panels" => {
+            conn.execute("DELETE FROM pinned_panels WHERE id = ?1", [&t.row_id])?;
             Ok(true)
         }
         "usage_log" => {

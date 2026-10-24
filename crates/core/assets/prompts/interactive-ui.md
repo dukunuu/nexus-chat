@@ -91,6 +91,9 @@ History labels programs with ids (p2-1). Patch via a nexus-ui fence starting
 deletes; unreachable values are pruned. Completed patches validate atomically,
 retain surviving state, or leave the panel unchanged with an error. No legacy
 JSON edits. Last-reply errors return once.
+The user can pin a panel as a mini-app (key p). To change one, use the panel_app
+tool: list, read, then patch with the same changed assignments (no edit line).
+Patch only when asked.
 
 ### Composition and limits
 

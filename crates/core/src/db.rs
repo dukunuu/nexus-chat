@@ -924,6 +924,7 @@ impl Db {
                 PRIMARY KEY (peer_id, table_name)
             );",
         )?;
+        crate::panels::migrate(&self.conn)?;
         for (column, ddl) in [
             (
                 "kind",
@@ -1581,6 +1582,8 @@ impl Db {
             .execute("DELETE FROM messages WHERE session_id = ?1", [id])?;
         self.conn
             .execute("DELETE FROM swarm_personas WHERE session_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM panel_states WHERE session_id = ?1", [id])?;
         self.conn
             .execute("DELETE FROM sessions WHERE id = ?1", [id])?;
         self.tombstone("sessions", id)?;

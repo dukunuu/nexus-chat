@@ -151,8 +151,13 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "tuiapp",
-        desc: "run a scripted terminal app from this space",
+        desc: "run a scripted terminal app, or open a pinned panel, from this space",
         aliases: &[],
+    },
+    Command {
+        name: "pin-panel",
+        desc: "pin the focused panel as a mini-app: [name] | unpin <name> | rename <name> <new>",
+        aliases: &["pin", "unpin", "unpin-panel", "rename-panel"],
     },
     Command {
         name: "research",
@@ -400,8 +405,16 @@ pub enum AppCommand {
     /// `/connectors import [claude-desktop|claude-code|cursor]` — bring over
     /// MCP servers from other tools (`names` empty = every new one).
     ImportConnectors { source: String, names: Vec<String> },
-    /// Open a sandboxed space-local terminal app.
+    /// Open a sandboxed space-local terminal app, or a pinned panel.
     OpenTuiApp(String),
+    /// `/pin-panel [name]` — save the focused interactive panel (program and
+    /// state) as a mini-app in this space. View-owned: only the terminal UI
+    /// knows which panel has focus.
+    PinPanel { name: Option<String> },
+    /// `/unpin-panel <name>` — remove a pinned panel app (name or id).
+    UnpinPanel { name: String },
+    /// `/rename-panel <name> <new name>` — rename a pinned panel app.
+    RenamePanel { from: String, to: String },
     /// `/studio [deck]` — open or focus the linked slide canvas (view-owned).
     OpenStudio { deck: Option<String> },
     /// `/view <path|url>` — show an image in the in-terminal viewer (or the
@@ -555,6 +568,7 @@ impl App {
             }),
             "connectors" => parse_connectors(&rest(cmd, token)),
             "tuiapp" => Ok(AppCommand::OpenTuiApp(rest(cmd, token))),
+            "pin-panel" => parse_pin_panel(token, &rest(cmd, token)),
             "research" => Ok(AppCommand::RunResearch {
                 topic: rest(cmd, token),
                 gated: true,
@@ -637,6 +651,7 @@ impl App {
             | AppCommand::OpenApps
             | AppCommand::OpenConnectors
             | AppCommand::OpenTuiApp(_)
+            | AppCommand::PinPanel { .. }
             | AppCommand::OpenStudio { .. }
             | AppCommand::OpenImage { .. }
             | AppCommand::OpenUsage
@@ -644,6 +659,8 @@ impl App {
             | AppCommand::OpenProcs
             | AppCommand::OpenHelp
             | AppCommand::Watch { .. } => {}
+            AppCommand::UnpinPanel { name } => self.unpin_panel(&name)?,
+            AppCommand::RenamePanel { from, to } => self.rename_panel(&from, &to)?,
             AppCommand::AddConnector {
                 name,
                 url,
@@ -828,6 +845,39 @@ impl App {
 }
 
 /// `/connectors [add|remove|enable|disable|allow|ask|deny|default|import] …`.
+/// `/pin-panel [name]`, `/pin-panel unpin <name>`, `/pin-panel rename <name>
+/// <new>`; `/unpin-panel` and `/rename-panel` are the verbs as aliases.
+fn parse_pin_panel(token: &str, rest: &str) -> std::result::Result<AppCommand, String> {
+    let mut words = rest.split_whitespace().collect::<Vec<_>>();
+    let verb = match token {
+        "unpin-panel" | "unpin" => Some("unpin"),
+        "rename-panel" => Some("rename"),
+        _ => words
+            .first()
+            .copied()
+            .filter(|word| matches!(*word, "unpin" | "rename"))
+            .inspect(|_| {
+                words.remove(0);
+            }),
+    };
+    match (verb, words.as_slice()) {
+        (Some("unpin"), [name]) => Ok(AppCommand::UnpinPanel {
+            name: (*name).into(),
+        }),
+        (Some("rename"), [from, to]) => Ok(AppCommand::RenamePanel {
+            from: (*from).into(),
+            to: (*to).into(),
+        }),
+        (Some("unpin"), _) => Err("usage: /pin-panel unpin <name>".into()),
+        (Some(_), _) => Err("usage: /pin-panel rename <name> <new name>".into()),
+        (None, []) => Ok(AppCommand::PinPanel { name: None }),
+        (None, [name]) => Ok(AppCommand::PinPanel {
+            name: Some((*name).into()),
+        }),
+        (None, _) => Err("usage: /pin-panel [name]".into()),
+    }
+}
+
 fn parse_connectors(rest: &str) -> std::result::Result<AppCommand, String> {
     const USAGE: &str = "usage: /connectors [add <name> <url|command…> | remove <name> | enable|disable <name> | allow|ask|deny|default <name> <tool> | import [source]]";
     let mut words = rest.split_whitespace();

@@ -40,6 +40,7 @@ mod improve_tests;
 mod masking_tests;
 mod memory;
 mod models;
+mod panels;
 #[cfg(test)]
 mod prompt_snapshots;
 #[cfg(test)]
@@ -362,6 +363,8 @@ pub enum AppsMode {
     Browse,
     ConfirmDelete,
     EditFile,
+    /// Typing a new name for the highlighted pinned panel.
+    RenamePanel,
 }
 
 /// What the watch picker is doing: browsing or confirming removal of the

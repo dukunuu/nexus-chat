@@ -1367,6 +1367,9 @@ impl ToolBox {
                 &spec::TUI_APP,
                 &["list", "read", "write", "edit", "preview", "open"],
             ));
+            if self.files.is_some() {
+                defs.push(def(&spec::PANEL_APP, &["list", "read", "patch"]));
+            }
         }
         if self.workspace.is_none() && self.approver.is_some() {
             defs.push(def(&spec::REQUEST_WORKSPACE, &["request_workspace"]));
@@ -2101,6 +2104,16 @@ impl ToolBox {
                 )
                 .unwrap_or_else(|error| format!("tui_app error: {error}"));
                 (result, format!("Terminal app {action}…"))
+            }
+            "panel_app_list" | "panel_app_read" | "panel_app_patch" => {
+                let Some(files) = self.files.as_ref().filter(|_| self.interactive_ui) else {
+                    return ("panel_app needs the terminal UI".into(), "blocked".into());
+                };
+                let args = serde_json::from_str(args).unwrap_or_default();
+                let action = name.strip_prefix("panel_app_").expect("panel app action");
+                let result = crate::panels::tool(&files.db_path, &files.space_id, action, &args)
+                    .unwrap_or_else(|error| format!("panel_app error: {error}"));
+                (result, format!("Pinned panel {action}…"))
             }
             "propose_command" => {
                 if !self.interactive_ui {

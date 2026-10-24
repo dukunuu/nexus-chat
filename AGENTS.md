@@ -75,6 +75,7 @@ The README has the full tree; the parts agents touch most:
 | `crates/core/src/connectors/` | MCP connectors (docs/connectors.md): `protocol`/`transport`/`client` speak both protocol families over HTTP and stdio, `registry` tracks status and what the model may see (naming, >30-tool meta-tool, policy, rug-pull pins), `exec` runs a call through the approval flow, `import`/`secrets`/`config` cover other tools' configs, the keychain and `[connectors.*]` |
 | `crates/core/src/db.rs` | SQLite (rusqlite bundled): sessions, messages, usage, citations, model prefs |
 | `crates/core/src/sync.rs` | Phase 3 merge engine: changeset types, per-table registry (cursor + apply rules), build/apply/ack, file blobs + zip bundles |
+| `crates/core/src/panels.rs` | durable nexus-ui panel storage: per-panel saved state (`panel_states`) and panels pinned as space mini-apps (`pinned_panels`), the `panel_app` tool's list/read/patch; both tables sync (`sync.rs`). Records are `interactive::PanelSnapshot` (versioned, ≤48 KiB). Terminal half: `crates/tui/src/interactive/persist.rs` |
 | `crates/core/src/appserver.rs` | localhost static server for model-created apps (port 8642) |
 | `crates/core/src/host/` | `nexus host` HTTP/SSE API, OpenAI-wire gateway, sync/worker routes, Cloudflare setup, tunnel and sleep guard |
 | `crates/tui/src/app_view.rs` | `AppView`: wraps `App` (Deref) with all view state — composer, popup chrome/caches, render state, theme, status line |

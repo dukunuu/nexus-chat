@@ -108,6 +108,28 @@ impl Panel {
         })
     }
 
+    /// Last successful query results, for persistence. Mutation status is
+    /// transient and never saved.
+    pub fn query_data(&self, definitions: &[Definition]) -> BTreeMap<String, Value> {
+        definitions
+            .iter()
+            .filter(|d| d.query)
+            .filter_map(|d| Some((d.id.clone(), self.states.get(&d.id)?.data.clone()?)))
+            .collect()
+    }
+
+    /// Install (or clear) cached query results without scheduling any call:
+    /// a restored panel stays inert until the person activates it.
+    pub fn set_query_data(&mut self, definitions: &[Definition], data: &BTreeMap<String, Value>) {
+        for definition in definitions.iter().filter(|d| d.query) {
+            let mut value = data.get(&definition.id).cloned();
+            if let Some(value) = &mut value {
+                bound(value, &mut 4096, 0);
+            }
+            self.states.entry(definition.id.clone()).or_default().data = value;
+        }
+    }
+
     pub fn request(&mut self, id: &str) -> Result<()> {
         let state = self.states.entry(id.into()).or_default();
         ensure!(

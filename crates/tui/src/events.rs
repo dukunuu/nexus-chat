@@ -100,6 +100,7 @@ async fn run_loop(
     let mut theme_poll = tokio::time::interval(std::time::Duration::from_secs(2));
     let mut jobs_poll = tokio::time::interval(std::time::Duration::from_secs(60));
     loop {
+        crate::interactive::flush(app);
         app.sync_approval_popup();
         take_proposed_command(app);
         ui::popups::tui_app::take_pending(app);

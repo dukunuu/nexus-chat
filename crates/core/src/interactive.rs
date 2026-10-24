@@ -12,8 +12,11 @@ mod components;
 pub use components::{ChartKind, ChartSeries, Section, Tab, TableState, TimelineEvent};
 mod data;
 pub mod live;
+mod persist;
 mod stream;
 mod validation;
+pub use components::ViewSnapshot;
+pub use persist::{MAX_RECORD, PanelSnapshot, panel_key, url_host};
 pub use stream::{StreamParser, component_signatures, merge_program};
 
 /// Model guidance with positional signatures derived from the native library.
@@ -1875,6 +1878,12 @@ pub struct Session {
     assistant_payload: Option<Value>,
     live: live::Panel,
     continuation: Option<(String, Vec<(String, usize)>)>,
+    /// Saved state names the current program does not declare (yet): kept so
+    /// a replayed patch that introduces them again finds their saved values.
+    held: Map<String, Value>,
+    /// Bumped by every state or presentation change; frontends use it to
+    /// notice what needs saving.
+    revision: u64,
 }
 
 #[derive(Default)]
@@ -1906,6 +1915,8 @@ impl Session {
             assistant_payload: None,
             live,
             continuation: None,
+            held: Map::new(),
+            revision: 0,
         };
         let mut state = session.state.clone();
         session.bindings_ok(&mut state)?;
@@ -2422,6 +2433,7 @@ impl Session {
             self.document = document;
         }
         self.state = state;
+        self.revision += 1;
         Ok(())
     }
 
@@ -2445,6 +2457,14 @@ impl Session {
         let mut next = Self::new(Document::parse(source)?)?;
         let mut state = next.state.clone();
         state.extend(self.state.clone());
+        let mut held = Map::new();
+        for (key, value) in &self.held {
+            if next.defaults.contains_key(key) {
+                state.insert(key.clone(), value.clone());
+            } else {
+                held.insert(key.clone(), value.clone());
+            }
+        }
         ensure!(
             state.len() <= 32,
             "too many retained UI state fields — maximum: 32"
@@ -2453,6 +2473,8 @@ impl Session {
         next.commit(state)?;
         next.live = std::mem::take(&mut self.live);
         next.live.revise(&next.document.calls);
+        next.held = held;
+        next.revision = self.revision + 1;
         *self = next;
         Ok(())
     }
@@ -3109,6 +3131,10 @@ mod components_tests;
 #[cfg(test)]
 #[path = "interactive/extended_tests.rs"]
 mod extended_tests;
+
+#[cfg(test)]
+#[path = "interactive/persist_tests.rs"]
+mod persist_tests;
 
 #[cfg(test)]
 #[path = "interactive/stepper_tests.rs"]

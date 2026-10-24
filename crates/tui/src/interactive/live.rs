@@ -93,7 +93,8 @@ pub(crate) fn tick(app: &mut AppView) {
     let Some(session_id) = app.session.as_ref().map(|session| session.id.clone()) else {
         return;
     };
-    let keys = app.interactive.visible.clone();
+    let mut keys = app.interactive.visible.clone();
+    keys.extend(app.interactive.app_keys());
     for key in keys {
         let count = app
             .interactive

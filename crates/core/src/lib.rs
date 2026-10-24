@@ -27,6 +27,7 @@ pub mod host;
 pub mod interactive;
 pub mod jobs;
 pub mod markdown;
+pub mod panels;
 pub mod prompts;
 pub mod provider;
 pub mod remote_image;

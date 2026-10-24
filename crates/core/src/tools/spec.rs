@@ -452,6 +452,50 @@ pub(super) static TUI_APP: ToolSpec = ToolSpec {
     ],
 };
 
+pub(super) static PANEL_APP: ToolSpec = ToolSpec {
+    name: "panel_app",
+    purpose: "Panels the user pinned as mini-apps in this space. Patch with edit-mode assignments only (no `edit` line); state survives by name.",
+    selector: Some("action"),
+    params: &[
+        Param {
+            name: "app",
+            kind: Kind::Str,
+            doc: "pinned app id or name",
+        },
+        Param {
+            name: "patch",
+            kind: Kind::Str,
+            doc: "changed nexus-ui assignments; `name = null` deletes",
+        },
+    ],
+    actions: &[
+        ActionSpec {
+            name: "list",
+            summary: "List pinned apps",
+            required: &[],
+            optional: &[],
+            read_only: true,
+            internal: "panel_app_list",
+        },
+        ActionSpec {
+            name: "read",
+            summary: "Read program",
+            required: &["app"],
+            optional: &[],
+            read_only: true,
+            internal: "panel_app_read",
+        },
+        ActionSpec {
+            name: "patch",
+            summary: "Patch program",
+            required: &["app", "patch"],
+            optional: &[],
+            read_only: false,
+            internal: "panel_app_patch",
+        },
+    ],
+};
+
 pub(super) static SCRIPTS: ToolSpec = ToolSpec {
     name: "scripts",
     purpose: "Manage confined space scripts, run skill or space scripts, and install packages.",
@@ -1513,8 +1557,17 @@ const TOOLS: &[&ToolSpec] = &[
 /// through the same validation and read-only classes as `TOOLS`.
 const USER_BRIDGES: &[&ToolSpec] = &[&PROPOSE_COMMAND, &REQUEST_WORKSPACE];
 
+/// Tools only a terminal UI offers, beyond the shared table: they reach state
+/// the person owns (pinned panels) and share the table's validation and
+/// read-only classes.
+const TERMINAL_TOOLS: &[&ToolSpec] = &[&PANEL_APP];
+
 fn all_tools() -> impl Iterator<Item = &'static ToolSpec> {
-    TOOLS.iter().chain(USER_BRIDGES).copied()
+    TOOLS
+        .iter()
+        .chain(USER_BRIDGES)
+        .chain(TERMINAL_TOOLS)
+        .copied()
 }
 
 #[cfg(test)]

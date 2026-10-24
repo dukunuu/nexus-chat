@@ -282,6 +282,8 @@ pub struct AppView {
     pub apps_selected: usize,
     pub apps_mode: AppsMode,
     pub apps_edit: String,
+    /// Panels pinned as mini-apps, listed after the web apps in `/apps`.
+    pub pinned_apps: Vec<nexus_core::panels::Pinned>,
     pub watch_selected: usize,
     pub watch_mode: WatchMode,
     pub swarm_selected: usize,
@@ -545,6 +547,7 @@ impl AppView {
             apps_selected: 0,
             apps_mode: AppsMode::Browse,
             apps_edit: String::new(),
+            pinned_apps: Vec::new(),
             watch_selected: 0,
             watch_mode: WatchMode::Browse,
             swarm_selected: 0,
