@@ -173,6 +173,24 @@ key is enough; models are fetched from the catalogs.
 | custom banner | `~/.config/nexus-chat/banner.txt` |
 | spaces (db, files, scripts, apps, media) | `~/.local/share/nexus-chat/spaces/<space>/` |
 
+### Web search: zero setup
+
+`search` works without a search key or instance URL. In `auto` mode it tries
+LangSearch (if a key is set), SearXNG (if a URL is set), public keyless Exa,
+the session backend's built-in search, DuckDuckGo, then Brave, continuing past
+errors and empty results. `/config` also offers explicit `exa` and `provider`
+choices; the LangSearch key and SearXNG URL are optional extras.
+
+The provider fallback stays on your session's backend and uses its auto helper
+model (upgraded to the newest listed version, or the session model if needed).
+OpenRouter web search costs **$0.007 per request plus model tokens**; reported
+usage/cost is recorded with other helper calls. Codex uses your ChatGPT
+subscription; OpenAI Responses web search is billed at OpenAI's search/tool
+and token rates. OpenCode Go and local runtimes have no built-in search and
+are skipped. Exa has no recency filter: when requested, the result header says
+it was not applied. HTML scrapers remain last-resort fallbacks and may return
+bot challenges.
+
 **One model setting.** `/config` has a single model row, the *helper model*
 (`helper_model` over the host settings API). It runs every background job that
 needs a model: memory, compaction summaries, image descriptions, vision OCR and

@@ -183,9 +183,13 @@ enum ProviderFlavor {
     OpencodeGo,
 }
 
+mod search;
+
 #[derive(Clone)]
 pub struct OpenRouter {
     client: reqwest::Client,
+    #[cfg(test)]
+    search_endpoint: Option<String>,
     key: String,
     flavor: ProviderFlavor,
     endpoint: Option<String>,
@@ -665,6 +669,8 @@ impl OpenRouter {
     pub fn openrouter_flavor(key: String) -> Self {
         Self {
             client: openrouter_client(),
+            #[cfg(test)]
+            search_endpoint: None,
             key,
             flavor: ProviderFlavor::OpenRouter,
             endpoint: None,
@@ -677,6 +683,8 @@ impl OpenRouter {
             client: reqwest::Client::new(),
             key,
             flavor: ProviderFlavor::OpenAi,
+            #[cfg(test)]
+            search_endpoint: None,
             endpoint: None,
             local_config: None,
         }
@@ -738,6 +746,8 @@ impl OpenRouter {
             client: reqwest::Client::new(),
             key,
             flavor: ProviderFlavor::OpencodeGo,
+            #[cfg(test)]
+            search_endpoint: None,
             endpoint: None,
             local_config: None,
         }
@@ -748,6 +758,8 @@ impl OpenRouter {
             client: reqwest::Client::new(),
             key,
             flavor: ProviderFlavor::OpenAiCodex,
+            #[cfg(test)]
+            search_endpoint: None,
             endpoint: None,
             local_config: None,
         }

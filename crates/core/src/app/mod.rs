@@ -603,11 +603,11 @@ impl SettingsField {
                 "helper model (Enter to pick, Backspace for auto; auto = a cheap model on your active backend, for memory, summaries and image reading)"
             }
             Self::CompactThreshold => "auto-compact at (% of context, 0 disables)",
-            Self::SearxngUrl => "web search URL (SearXNG instance, blank disables)",
+            Self::SearxngUrl => "optional SearXNG URL (auto search needs no setup)",
             Self::Verbosity => "answer length (Space cycles normal/concise/caveman)",
-            Self::LangsearchKey => "LangSearch API key (langsearch.com/dashboard, free)",
+            Self::LangsearchKey => "optional LangSearch key (langsearch.com/dashboard, free)",
             Self::SearchProvider => {
-                "search provider (Space cycles auto/langsearch/searxng/duckduckgo)"
+                "search provider (auto works without setup; Space cycles auto/langsearch/searxng/exa/provider/duckduckgo)"
             }
             Self::BlockedDomains => "blocked domains (comma-separated, always excluded; per-space)",
         }
@@ -678,7 +678,14 @@ pub const REPLY_STYLES: [&str; 4] = ["interactive", "auto", "rich", "plain"];
 /// the terminal's graphics support makes sensible (`auto`).
 pub const IMAGE_VIEWERS: [&str; 3] = ["auto", "terminal", "system"];
 pub const VERBOSITY_LEVELS: [&str; 3] = ["normal", "concise", "caveman"];
-pub const SEARCH_PROVIDERS: [&str; 4] = ["auto", "langsearch", "searxng", "duckduckgo"];
+pub const SEARCH_PROVIDERS: [&str; 6] = [
+    "auto",
+    "langsearch",
+    "searxng",
+    "exa",
+    "provider",
+    "duckduckgo",
+];
 
 /// Nerd config: footer toggles + core sampling parameters.
 #[derive(Debug, Clone)]
@@ -2042,7 +2049,7 @@ impl App {
 
     /// Rebuild the toolbox from the current `searxng_url`, so a settings
     /// change takes effect immediately (no restart). Web search tries the
-    /// configured backends first and has keyless HTML fallbacks.
+    /// configured backends first, then keyless Exa and the session provider.
     #[allow(clippy::too_many_lines)] // Keep the toolbox's capability wiring together.
     pub fn refresh_toolbox(&mut self) {
         let url =
@@ -2107,6 +2114,8 @@ impl App {
         {
             toolbox = toolbox.with_research_session(session_id);
         }
+        toolbox.search_backend = self.resolve_utility_model_backend("");
+        toolbox.search_space_id.clone_from(&self.active_space.id);
         toolbox.image_gen_backend = self.generation_backend(OpenRouter::default_image_gen_model);
         toolbox.video_gen_backend = self.generation_backend(OpenRouter::default_video_gen_model);
         toolbox.space_files_dir = self.space.files_dir(&self.active_space.name);

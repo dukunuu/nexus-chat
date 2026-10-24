@@ -104,6 +104,23 @@ The README has the full tree; the parts agents touch most:
 > app URLs. Keep tunnel and Cloudflare setup paths opt-in; tests must remain
 > network-free and must not launch sidecars.
 
+## Web search
+
+`search(mode=web)` needs no search key or instance URL. Auto failover order is
+LangSearch (configured key) → SearXNG (configured URL) → public keyless Exa →
+the session provider's native web search → DuckDuckGo → Brave. Explicit `exa`
+and `provider` settings are available; LangSearch/SearXNG remain optional.
+Exa calls share a two-permit toolbox budget; tests inject loopback endpoints,
+and default search endpoints use dead local ports under `cfg(test)`.
+
+Native search uses the session backend's auto helper (`default_helper_for` +
+`newest_listed`, else its session model), never another provider or a helper
+picked on another backend. OpenRouter uses its server search tool ($0.007 per
+request plus tokens); record response-reported usage/cost. Codex uses the
+ChatGPT subscription Responses route; OpenAI uses billed Responses web search
+(tool and token rates). Go/local skip native search. Exa ignores recency and
+reports that in the result header when a filter was requested.
+
 ## Things to know before changing code
 
 - **One UI pass**: the popups share a chrome system (`ui/popups/chrome.rs`) —

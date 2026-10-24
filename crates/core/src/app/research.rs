@@ -2026,13 +2026,18 @@ impl super::App {
             (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
         let langsearch_key = (!self.langsearch_key.trim().is_empty())
             .then(|| self.langsearch_key.trim().to_string());
-        let toolbox = Arc::new(ToolBox::research(
+        let mut toolbox = ToolBox::research(
             searxng_url,
             langsearch_key,
             self.search_provider.clone(),
             self.blocked_domains(),
             Some(self.space.db_path()),
-        ));
+        );
+        toolbox.search_backend = self.resolve_utility_model_backend("");
+        toolbox.search_space_id.clone_from(&self.active_space.id);
+        toolbox.session_id.clone_from(&session.id);
+        toolbox.record_events = !self.incognito;
+        let toolbox = Arc::new(toolbox);
 
         let (tx, rx) = mpsc::unbounded_channel();
         self.research_rx = Some(rx);

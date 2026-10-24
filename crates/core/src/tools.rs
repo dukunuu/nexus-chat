@@ -8,8 +8,11 @@ mod effect;
 #[cfg(test)]
 mod image_tests;
 #[cfg(test)]
+mod keyless_search_tests;
+#[cfg(test)]
 mod search_tests;
 mod spec;
+mod web_search;
 
 pub use effect::{Effect, plan_waves};
 
@@ -223,9 +226,13 @@ pub struct ToolBox {
     pub searxng_url: Option<String>,
     /// `LangSearch` API key (free tier, no card): <https://langsearch.com/dashboard>
     pub langsearch_key: Option<String>,
-    /// Which backend `search(mode=web)` prefers: "auto" (`LangSearch`, then `SearXNG`,
-    /// `DuckDuckGo`, and Brave), or an explicit "langsearch"/"searxng"/"duckduckgo".
+    /// Preferred web search backend; auto tries configured services, Exa,
+    /// the session provider, then HTML scrapers.
     pub search_provider: String,
+    web_search: Arc<web_search::WebSearch>,
+    /// Auto helper resolved on the session's backend, never another provider.
+    pub(crate) search_backend: Option<(OpenRouter, String)>,
+    pub(crate) search_space_id: String,
     /// When true, `defs()`/`run()` restrict to `search`/`fetch_url` only —
     /// used for deep-research searcher agents, which must never reach
     /// `scripts`/`app`/`media` tools even if hallucinated.
@@ -945,6 +952,9 @@ impl ToolBox {
             searxng_url,
             langsearch_key,
             search_provider,
+            web_search: Arc::default(),
+            search_backend: None,
+            search_space_id: String::new(),
             research_only: false,
             blocked_domains,
             db_path,
@@ -1023,6 +1033,9 @@ impl ToolBox {
             searxng_url: self.searxng_url.clone(),
             langsearch_key: self.langsearch_key.clone(),
             search_provider: self.search_provider.clone(),
+            web_search: self.web_search.clone(),
+            search_backend: self.search_backend.clone(),
+            search_space_id: self.search_space_id.clone(),
             research_only: self.research_only,
             blocked_domains: self.blocked_domains.clone(),
             db_path: self.db_path.clone(),
@@ -1147,74 +1160,6 @@ impl ToolBox {
             .unsigned_abs()
     }
 
-    /// Resolve which backend to actually use for this call. An explicit
-    /// choice ("langsearch"/"searxng"/"duckduckgo") is used as-is — if it's
-    /// not configured, that's a clear error rather than a silent swap to
-    /// something else the user didn't pick. "auto" (the default) tries
-    /// `LangSearch`, `SearXNG`, `DuckDuckGo`, and finally Brave, continuing past
-    /// transport errors, bot challenges, and empty result pages.
-    async fn search(
-        &self,
-        query: &str,
-        recency: Option<&str>,
-        include_domains: &[String],
-        exclude_domains: &[String],
-    ) -> anyhow::Result<Vec<SearchHit>> {
-        let query = rewrite_query_with_domains(query, include_domains, exclude_domains);
-        match self.search_provider.as_str() {
-            "langsearch" => match &self.langsearch_key {
-                Some(key) => langsearch_search(&self.client, key, &query, recency).await,
-                None => anyhow::bail!("LangSearch selected but no API key is configured"),
-            },
-            "searxng" => match &self.searxng_url {
-                Some(url) => searxng_search(&self.client, url, &query, recency).await,
-                None => anyhow::bail!("SearXNG selected but no instance URL is configured"),
-            },
-            "duckduckgo" => duckduckgo_search(&self.client, &query).await,
-            // Auto mode is deliberately failover-based. A configured hosted
-            // backend can still be unavailable (for example, LangSearch's
-            // API host has occasionally had TLS/DNS problems), and a single
-            // outage should not turn an otherwise usable search tool into an
-            // error.
-            _ => {
-                let mut failures = Vec::new();
-
-                if let Some(key) = &self.langsearch_key {
-                    match langsearch_search(&self.client, key, &query, recency).await {
-                        Ok(hits) if !hits.is_empty() => return Ok(hits),
-                        Ok(_) => failures.push("LangSearch returned no results".to_string()),
-                        Err(error) => failures.push(format!("LangSearch: {error}")),
-                    }
-                }
-                if let Some(url) = &self.searxng_url {
-                    match searxng_search(&self.client, url, &query, recency).await {
-                        Ok(hits) if !hits.is_empty() => return Ok(hits),
-                        Ok(_) => failures.push("SearXNG returned no results".to_string()),
-                        Err(error) => failures.push(format!("SearXNG: {error}")),
-                    }
-                }
-
-                match duckduckgo_search(&self.client, &query).await {
-                    Ok(hits) if !hits.is_empty() => return Ok(hits),
-                    Ok(_) => failures.push("DuckDuckGo returned no results".to_string()),
-                    Err(error) => failures.push(format!("DuckDuckGo: {error}")),
-                }
-
-                // HTML search endpoints increasingly return bot-challenge
-                // pages with a successful HTTP status. Treat an empty parse as
-                // a backend failure and give auto mode one more independent,
-                // keyless search source before reporting no results.
-                match brave_search(&self.client, &query).await {
-                    Ok(hits) => Ok(hits),
-                    Err(error) => {
-                        failures.push(format!("Brave: {error}"));
-                        anyhow::bail!("all web search backends failed: {}", failures.join("; "))
-                    }
-                }
-            }
-        }
-    }
-
     /// Fetch through the cache: serve a fresh (<24h) cached copy unless
     /// `force_fresh`, else live-fetch and write through. Cache read/write
     /// failures degrade to a live fetch — a broken db must never block a
@@ -1248,7 +1193,7 @@ impl ToolBox {
 
     /// Tool definitions to attach to the request, or empty to send a plain
     /// request (keeps models that don't support tools working). `search` always works —
-    /// it prefers configured API backends, then uses keyless HTML fallbacks
+    /// it prefers configured API backends, then Exa and session-provider search
     /// when those are unavailable, so it needs no setup.
     pub fn defs(&self) -> Vec<ToolDef> {
         self.tool_definitions(false)
@@ -2686,10 +2631,7 @@ impl ToolBox {
                 let mut exclude = str_list("exclude_domains");
                 exclude.extend(self.blocked_domains.iter().cloned());
                 let status = "Searching the web…".to_string();
-                let web = tokio::time::timeout(
-                    SEARCH_TIMEOUT,
-                    self.search(&query, recency.as_deref(), &include, &exclude),
-                );
+                let web = self.search(&query, recency.as_deref(), &include, &exclude);
                 let discussions = async {
                     if is_opinion_query(&query) {
                         discussion_search(&self.client, &query, &self.discussions).await
@@ -2699,9 +2641,8 @@ impl ToolBox {
                 };
                 let (web, discussions) = tokio::join!(web, discussions);
                 let result = match web {
-                    Ok(Ok(hits)) => format_web_results(&query, hits, &discussions),
-                    Ok(Err(e)) => format!("search failed: {e}"),
-                    Err(_) => "search failed: timed out after 30 seconds".to_string(),
+                    Ok(results) => results.format(&query, &discussions),
+                    Err(e) => format!("search failed: {e}"),
                 };
                 (result, status)
             }
@@ -5920,6 +5861,7 @@ struct LangsearchResult {
 /// reachable; auto mode falls back when its endpoint is unavailable.
 async fn langsearch_search(
     client: &reqwest::Client,
+    endpoint: &str,
     key: &str,
     query: &str,
     recency: Option<&str>,
@@ -5935,10 +5877,7 @@ async fn langsearch_search(
         };
         body["freshness"] = serde_json::json!(freshness);
     }
-    let req = client
-        .post("https://api.langsearch.com/v1/web-search")
-        .bearer_auth(key)
-        .json(&body);
+    let req = client.post(endpoint).bearer_auth(key).json(&body);
     let resp = send_and_parse::<LangsearchResponse>(req).await?;
     Ok(resp
         .data
@@ -5955,11 +5894,7 @@ async fn langsearch_search(
         .collect())
 }
 
-/// Zero-setup fallback used when no `SearXNG` instance is configured: scrapes
-/// `DuckDuckGo`'s plain HTML search page (no JS, no API, no key) the same way
-/// LM Studio/Open `WebUI`'s built-in `DuckDuckGo` tools do. Unofficial — `DuckDuckGo`
-/// can change this markup or rate-limit it at any time; `SearXNG` is the more
-/// durable option if this stops working for you.
+/// Last-resort HTML scraper; bot challenges are backend failures.
 /// `DuckDuckGo`'s HTML endpoint; tests point it at a dead local port so the
 /// `auto` fallback never reaches the network from a test.
 #[cfg(not(test))]
@@ -5969,10 +5904,11 @@ const DUCKDUCKGO_HTML: &str = "http://127.0.0.1:1/html/";
 
 async fn duckduckgo_search(
     client: &reqwest::Client,
+    endpoint: &str,
     query: &str,
 ) -> anyhow::Result<Vec<SearchHit>> {
     let html = client
-        .get(DUCKDUCKGO_HTML)
+        .get(endpoint)
         .header("User-Agent", "Mozilla/5.0 (compatible; nexus-chat)")
         .query(&[("q", query)])
         .send()
@@ -5986,12 +5922,14 @@ async fn duckduckgo_search(
     Ok(parse_ddg_html(&html).into_iter().take(8).collect())
 }
 
-/// Last-resort zero-setup fallback. Brave's HTML endpoint currently remains
-/// usable when `DuckDuckGo` serves its bot challenge, so keep this behind the
-/// configured/API backends and only use it in auto mode.
-async fn brave_search(client: &reqwest::Client, query: &str) -> anyhow::Result<Vec<SearchHit>> {
+/// Last-resort HTML scraper, used only after API backends fail.
+async fn brave_search(
+    client: &reqwest::Client,
+    endpoint: &str,
+    query: &str,
+) -> anyhow::Result<Vec<SearchHit>> {
     let response = client
-        .get("https://search.brave.com/search")
+        .get(endpoint)
         .header(
             "User-Agent",
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
