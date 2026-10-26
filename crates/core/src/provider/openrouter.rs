@@ -30,8 +30,10 @@ const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api";
 /// The Codex CLI release whose catalog shape `parse_codex_catalog` reads; the
-/// backend filters its model list by this version.
-const CODEX_CLIENT_VERSION: &str = "0.158.0";
+/// backend filters its model list by this version, so newer models stay
+/// hidden from an older one. A newer installed CLI's version wins
+/// (`codex_client_version`).
+const CODEX_CLIENT_VERSION: &str = "0.163.0";
 /// The general Zen catalog: free-tier and pay-per-token models, plus
 /// whatever a Go subscription adds. This is the default/fallback base.
 const OPENCODE_ZEN_BASE: &str = "https://opencode.ai/zen/v1";
@@ -1111,10 +1113,20 @@ impl OpenRouter {
             // covers a failed fetch. Codex models stay unmerged with
             // OpenRouter's (Ctrl+P switches backends): a few hundred entries
             // would bury them alphabetically.
-            return Ok(match self.fetch_codex_catalog().await {
-                Ok(models) if !models.is_empty() => models,
-                _ => codex_fallback_models(),
-            });
+            let cache = read_codex_cache();
+            return Ok(
+                match self
+                    .fetch_codex_catalog(&codex_client_version(cache.as_ref()))
+                    .await
+                {
+                    Ok(models) if !models.is_empty() => models,
+                    _ => cache
+                        .as_ref()
+                        .map(parse_codex_catalog)
+                        .filter(|models| !models.is_empty())
+                        .unwrap_or_else(codex_fallback_models),
+                },
+            );
         }
         if self.flavor == ProviderFlavor::OpencodeGo {
             // Two distinct catalogs behind the same account key: Zen
@@ -2211,11 +2223,11 @@ impl OpenRouter {
 
     /// GET the ChatGPT-sign-in model catalog the Codex CLI reads
     /// (`/codex/models`), filtered for this client version.
-    async fn fetch_codex_catalog(&self) -> Result<Vec<Model>> {
+    async fn fetch_codex_catalog(&self, client_version: &str) -> Result<Vec<Model>> {
         let body: serde_json::Value = self
             .client
             .get(format!(
-                "{}/codex/models?client_version={CODEX_CLIENT_VERSION}",
+                "{}/codex/models?client_version={client_version}",
                 self.flavor.base()
             ))
             .headers(self.codex_headers(false)?)
@@ -3864,15 +3876,47 @@ fn parse_codex_catalog(body: &serde_json::Value) -> Vec<Model> {
         .collect()
 }
 
-/// The Codex catalog as of client 0.158.0 (2026-09-26), for when the live
-/// fetch fails.
+/// The Codex CLI's own catalog cache (`$CODEX_HOME/models_cache.json`, by
+/// default under `~/.codex`), which the CLI keeps fresh. None in tests, so
+/// they never read the developer's real cache.
+fn codex_cache_path() -> Option<std::path::PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|home| home.join(".codex")))
+        .map(|dir| dir.join("models_cache.json"))
+}
+
+fn read_codex_cache() -> Option<serde_json::Value> {
+    serde_json::from_slice(&std::fs::read(codex_cache_path()?).ok()?).ok()
+}
+
+/// The client version to ask the catalog for: ours, or the installed Codex
+/// CLI's (from its cache) when that is newer.
+fn codex_client_version(cache: Option<&serde_json::Value>) -> String {
+    let parts = |v: &str| -> Vec<u64> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
+    cache
+        .and_then(|c| c.get("client_version")?.as_str())
+        .filter(|v| parts(v) > parts(CODEX_CLIENT_VERSION))
+        .unwrap_or(CODEX_CLIENT_VERSION)
+        .to_string()
+}
+
+/// The Codex catalog as of client 0.163.0 (2026-10-26), for when neither the
+/// live fetch nor the Codex CLI's cache is available.
 fn codex_fallback_models() -> Vec<Model> {
     use ReasoningEffort as E;
     let model = |id: &str, name: &str, efforts: &[E]| Model {
         id: id.into(),
         name: name.into(),
         reasoning_efforts: efforts.to_vec(),
-        context_length: Some(272_000),
+        context_length: Some(if id == "gpt-6.1-sol" {
+            500_000
+        } else {
+            272_000
+        }),
         supports_images: true,
         supports_image_generation: false,
         supports_video_generation: false,
@@ -3881,18 +3925,14 @@ fn codex_fallback_models() -> Vec<Model> {
     };
     let full = [E::Low, E::Medium, E::High, E::XHigh, E::Max];
     vec![
+        model("gpt-6.1-sol", "GPT-6.1-Sol", &full),
         model("gpt-6-astra", "GPT-6-Astra", &full),
         model("gpt-6-sol", "GPT-6-Sol", &full),
-        model("gpt-6-luna", "GPT-6-Luna", &full),
         model("gpt-reserve", "GPT-Reserve", &full),
+        model("gpt-6-luna", "GPT-6-Luna", &full),
         model("gpt-5.6-sol", "GPT-5.6-Sol", &full),
         model("gpt-5.6-terra", "GPT-5.6-Terra", &full),
         model("gpt-5.6-luna", "GPT-5.6-Luna", &full),
-        model(
-            "gpt-5.5",
-            "GPT-5.5",
-            &[E::Low, E::Medium, E::High, E::XHigh],
-        ),
     ]
 }
 
@@ -4536,22 +4576,42 @@ mod tests {
     }
 
     #[test]
+    fn codex_catalog_asks_for_the_newer_installed_client_version() {
+        let cache = |v: &str| serde_json::json!({ "client_version": v, "models": [] });
+        assert_eq!(codex_client_version(None), CODEX_CLIENT_VERSION);
+        assert_eq!(codex_client_version(Some(&cache("0.170.2"))), "0.170.2");
+        assert_eq!(
+            codex_client_version(Some(&cache("0.9.0"))),
+            CODEX_CLIENT_VERSION
+        );
+        assert_eq!(
+            codex_client_version(Some(&cache("garbage"))),
+            CODEX_CLIENT_VERSION
+        );
+        assert_eq!(
+            codex_client_version(Some(&serde_json::json!({}))),
+            CODEX_CLIENT_VERSION
+        );
+    }
+
+    #[test]
     fn codex_fallback_lists_the_current_models() {
         let models = codex_fallback_models();
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(
             ids,
             [
+                "gpt-6.1-sol",
                 "gpt-6-astra",
                 "gpt-6-sol",
-                "gpt-6-luna",
                 "gpt-reserve",
+                "gpt-6-luna",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
-                "gpt-5.5",
             ]
         );
+        assert_eq!(models[0].context_length, Some(500_000));
         assert!(models.iter().all(|m| {
             m.backend == crate::provider::BackendTag::Codex && !m.reasoning_efforts.is_empty()
         }));
