@@ -33,7 +33,7 @@ qrcode = "0.14.1"
 rand = "0.10.2"
 ratatui = "0.30.2"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
-resvg = { version = "0.47.0", default-features = false, features = ["text", "system-fonts"] }
+resvg = { version = "0.47.0", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls"] }
 reqwest-eventsource = "0.6.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }

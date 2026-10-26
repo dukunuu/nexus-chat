@@ -812,3 +812,35 @@ fn deck_constructors_are_valid_and_laid_out() {
     }
     assert_eq!(Deck::titled("Hello").slides[0].children.len(), 1);
 }
+
+// -- raster images ---------------------------------------------------------------
+
+#[test]
+fn renders_draw_photos_not_an_empty_spot() {
+    // A photo the model placed must show in the render it sees; without
+    // resvg's raster decoding the spot came back as plain background, and
+    // models rebuilt the picture out of shapes.
+    let dir = std::env::temp_dir().join(format!("nexus-raster-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let photo = image::RgbImage::from_pixel(8, 8, image::Rgb([220, 20, 30]));
+    photo.save(dir.join("photo.jpg")).unwrap();
+    let mut doc = value();
+    doc["slides"][0]["fill"] = json!("#ffffff");
+    doc["slides"][0]["layout"] = json!({"mode": "none"});
+    doc["slides"][0]["children"] = json!([{
+        "id": "im", "kind": "image", "src": "photo.jpg", "fit": "cover",
+        "position": {"x": 0, "y": 0}, "sizing": {"w": 1920, "h": 1080}
+    }]);
+    let deck = check(&doc).unwrap();
+    let id = deck.slides[0].id.clone();
+    let png = render::render_slide_at(&deck, &id, 320, Some(&dir)).unwrap();
+    let pixel = *image::load_from_memory(&png)
+        .unwrap()
+        .to_rgba8()
+        .get_pixel(160, 90);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(
+        pixel[0] > 180 && pixel[1] < 80 && pixel[2] < 80,
+        "the photo is drawn: {pixel:?}"
+    );
+}
