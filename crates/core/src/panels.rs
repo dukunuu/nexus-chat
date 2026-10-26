@@ -16,10 +16,16 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 use uuid::Uuid;
 
 use crate::interactive::{Document, MAX_SOURCE, PanelSnapshot, Session};
-use crate::tui_apps::valid_name;
 
 /// Most panels one space can pin.
 pub const MAX_PINNED: usize = 64;
+
+fn valid_name(name: &str) -> bool {
+    (1..=32).contains(&name.len())
+        && name
+            .bytes()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-')
+}
 
 /// A panel saved as a named mini-app: its program and the state it was left in.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,7 +34,7 @@ pub struct Pinned {
     pub id: String,
     /// Owning space.
     pub space_id: String,
-    /// Space-unique name, `[a-z0-9-]{1,32}` like terminal apps.
+    /// Space-unique name, `[a-z0-9-]{1,32}`.
     pub name: String,
     /// The panel's own title, for display.
     pub title: String,

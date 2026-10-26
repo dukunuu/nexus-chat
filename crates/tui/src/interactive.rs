@@ -795,7 +795,7 @@ pub(crate) fn image_targets(session: &Session, width: u16) -> Vec<ImageTarget> {
     targets
 }
 /// Render validated nodes into their measured, padded regions.
-pub(crate) fn render_nodes(
+fn render_nodes(
     session: &Session,
     regions: &[Rect],
     theme: &Theme,
@@ -1083,7 +1083,7 @@ fn button_regions(session: &Session, items: &[Button], area: Rect) -> Vec<(usize
     regions
 }
 /// Measure actual content at the available width; declared rows remain core caps.
-pub(crate) fn node_regions(session: &Session, width: u16) -> Vec<Rect> {
+fn node_regions(session: &Session, width: u16) -> Vec<Rect> {
     branch_regions(
         session,
         session.document().nodes(),
@@ -1137,7 +1137,7 @@ fn branch_regions(session: &Session, nodes: &[Node], area: Rect) -> Vec<Rect> {
         })
         .collect()
 }
-pub(crate) fn card_height(regions: &[Rect]) -> u16 {
+fn card_height(regions: &[Rect]) -> u16 {
     regions
         .last()
         .map_or(4, |rect| rect.bottom().saturating_add(2))
@@ -1182,13 +1182,7 @@ fn streaming_buffer(document: Option<Document>, width: u16, theme: &Theme) -> Bu
         );
     buffer
 }
-pub(crate) fn card_buffer(
-    width: u16,
-    height: u16,
-    title: &str,
-    theme: &Theme,
-    hint: &str,
-) -> Buffer {
+fn card_buffer(width: u16, height: u16, title: &str, theme: &Theme, hint: &str) -> Buffer {
     let area = Rect::new(0, 0, width, height);
     let mut buffer = Buffer::empty(area);
     buffer.set_style(area, theme.background_style());
@@ -1831,8 +1825,8 @@ fn render_toggle(
         .style(style)
         .render(area, buffer);
 }
-/// Arrow hit regions for a stepper, shared by inline and scripted apps.
-pub(crate) fn stepper_arrows(node: &Node, session: &Session, area: Rect) -> Option<[Rect; 2]> {
+/// Arrow hit regions for an inline stepper.
+fn stepper_arrows(node: &Node, session: &Session, area: Rect) -> Option<[Rect; 2]> {
     let Node::Stepper { key, label, .. } = node else {
         return None;
     };

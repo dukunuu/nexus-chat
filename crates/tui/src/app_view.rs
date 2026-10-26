@@ -249,8 +249,6 @@ pub struct AppView {
     pub approval_delay: std::time::Duration,
     /// Model-authored UI state, isolated by message and source revision.
     pub interactive: crate::interactive::Widgets,
-    /// One disposable scripted terminal app instance.
-    pub tui_app: Option<Box<crate::ui::popups::tui_app::TuiApp>>,
     pub spaces_cache: Vec<SpaceRow>,
     pub space_selected: usize,
     pub space_filter: FilterInput,
@@ -466,7 +464,6 @@ impl AppView {
     #[allow(clippy::too_many_lines)]
     pub fn new(mut core: App) -> Self {
         core.interactive_ui = true;
-        core.tui_app_renderer = Some(crate::ui::popups::tui_app::preview);
         core.interactive_approvals = true;
         // Rebuild with the approver and `propose_command` this frontend offers.
         core.refresh_toolbox();
@@ -520,7 +517,6 @@ impl AppView {
                 std::time::Duration::from_millis(400)
             },
             interactive: crate::interactive::Widgets::default(),
-            tui_app: None,
             spaces_cache: Vec::new(),
             space_selected: 0,
             space_filter: FilterInput::default(),

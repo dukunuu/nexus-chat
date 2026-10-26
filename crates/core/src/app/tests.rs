@@ -3844,6 +3844,20 @@ fn interactive_ui_is_advertised_only_by_capable_clients() {
 }
 
 #[test]
+fn scripted_terminal_app_command_is_removed_but_apps_remains_available() {
+    let a = app_with_key();
+    assert!(
+        !super::COMMANDS
+            .iter()
+            .any(|command| command.name == "tuiapp")
+    );
+    for command in ["tuiapp", "tuiapp rps"] {
+        assert!(a.parse_command(command).is_err(), "{command}");
+    }
+    assert_eq!(a.parse_command("apps").unwrap(), AppCommand::OpenApps);
+}
+
+#[test]
 fn parse_command_maps_the_slash_catalog_into_the_seam() {
     let a = app_with_key();
     assert_eq!(a.parse_command("new").unwrap(), AppCommand::NewSession);

@@ -150,11 +150,6 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["deck", "slides"],
     },
     Command {
-        name: "tuiapp",
-        desc: "run a scripted terminal app, or open a pinned panel, from this space",
-        aliases: &[],
-    },
-    Command {
         name: "pin-panel",
         desc: "pin the focused panel as a mini-app: [name] | unpin <name> | rename <name> <new>",
         aliases: &["pin", "unpin", "unpin-panel", "rename-panel"],
@@ -405,8 +400,6 @@ pub enum AppCommand {
     /// `/connectors import [claude-desktop|claude-code|cursor]` — bring over
     /// MCP servers from other tools (`names` empty = every new one).
     ImportConnectors { source: String, names: Vec<String> },
-    /// Open a sandboxed space-local terminal app, or a pinned panel.
-    OpenTuiApp(String),
     /// `/pin-panel [name]` — save the focused interactive panel (program and
     /// state) as a mini-app in this space. View-owned: only the terminal UI
     /// knows which panel has focus.
@@ -567,7 +560,6 @@ impl App {
                 deck: Some(rest(cmd, token)).filter(|deck| !deck.is_empty()),
             }),
             "connectors" => parse_connectors(&rest(cmd, token)),
-            "tuiapp" => Ok(AppCommand::OpenTuiApp(rest(cmd, token))),
             "pin-panel" => parse_pin_panel(token, &rest(cmd, token)),
             "research" => Ok(AppCommand::RunResearch {
                 topic: rest(cmd, token),
@@ -650,7 +642,6 @@ impl App {
             | AppCommand::OpenFiles { .. }
             | AppCommand::OpenApps
             | AppCommand::OpenConnectors
-            | AppCommand::OpenTuiApp(_)
             | AppCommand::PinPanel { .. }
             | AppCommand::OpenStudio { .. }
             | AppCommand::OpenImage { .. }

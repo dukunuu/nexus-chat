@@ -517,56 +517,40 @@ same proposal doesn't come back next week.
 
 ### Loop 3: Build terminal UI
 
-The model gets three levels of UI authorship, cheapest and safest first.
+The model authors terminal interfaces through native interactive panels.
+There is no separate script interpreter or scripted terminal-app runtime.
 
-**Level A — declarative blocks (`nexus-ui`).** The model emits a fenced
-`nexus-ui` JSON block (or calls a `ui.show` tool), rendered by a fixed set
-of components drawn in the `ui/style.rs` vocabulary:
+**Interactive panels (`nexus-ui`).** The model streams an OpenUI-style
+component program inside a `nexus-ui` fence. Root-first composition and
+forward references let elements appear as their definitions arrive:
 
-| Component | Use |
-|---|---|
-| `card` | titled box with body and footer metadata |
-| `table` | sortable columns, row selection |
-| `kv` | key-value summary |
-| `progress`, `sparkline`, `bars` | job status, small charts |
-| `checklist` | plans and task lists, toggleable |
-| `choices`, `buttons` | ask the user to pick |
-| `form` | text, select, toggle fields |
+```nexus-ui
+root = Panel("Plan your next step", [heading, choices])
+heading = Hero("A small plan, made yours", "Choose where to start")
+choices = Buttons([Button("Explore the options", @Answer())])
+```
 
-Inline blocks reuse the fixed-height slot work from the Mermaid previews, so
-viewport pinning holds; larger ones open as a popup on chrome.rs.
-Interactive elements emit `AppCommand::UiEvent { block, action, value }`,
-which becomes a turn the model sees, so a button press continues the
-conversation. No code runs; the model can only arrange known components.
-Invalid JSON falls back to the source as a code block, like Mermaid errors.
+Known components cover cards, tables, key-value summaries, charts, progress,
+checklists, inputs, steppers, toggles and buttons. Local state and bounded
+expressions make quizzes, calculators and small apps work without a model
+round trip. The renderer validates partial and completed programs; no
+preflight tool is needed. Invalid final programs retain a source fallback.
+Existing JSON panels remain readable.
 
-**Level B — scripted terminal apps.** For things a static block can't do
-(games, live dashboards, editors), the model writes a small script in the
-space (`tui_apps/<name>/app.rhai`) exporting `init()`, `update(state,
-event)`, and `view(state)`. `view` returns the Level A component tree plus a
-`canvas` primitive (ratatui `Canvas`) for free drawing. It runs inside the
-existing `MiniApp` popup and tick loop (`events.rs`), so there is still only
-one event loop.
+Panels render inline or expand into the shared popup chrome. Local actions
+stay local; explicit answer buttons continue the conversation, while reviewed
+responses go through the composer. New previews remain inert during generation.
+Panel state is saved with its conversation outside incognito. `/pin-panel`
+keeps a panel as a reusable mini-app, reopened through `/apps`; `panel_app`
+lets the model list, read and patch pinned panels. Neither interface executes
+arbitrary scripts. Applications beyond these declarative capabilities can use
+the existing script or web-app tools instead.
 
-- **Embedded interpreter, no machine runtime.** Rhai is pure Rust, has no
-  file, network, or process access unless a function is registered, and
-  enforces operation and memory limits. Capabilities (call a model, read a
-  space file) are opt-in through a manifest and granted at a gate.
-- **The model sees its own UI.** `tui_app { action: preview }` renders
-  `view()` to a ratatui `TestBackend` buffer and returns the text grid, with
-  script errors and the event trace. That closes the loop: write → preview →
-  fix, without a human in between. The same mechanism turns into snapshot
-  tests for saved apps.
-- **Proof of sufficiency:** port rock-paper-scissors to a script and keep
-  both. If the script version can't match the native one, the runtime is
-  missing something.
-- Hash-line editing, `list`/`write`/`patch`/`run` actions, same as scripts.
-
-**Level C — changing the harness itself.** Agent mode pointed at the nexus
-repo: a worktree, `scripts/check.sh` as the acceptance test, the result a
-branch you review. This is how a Level B app that proved itself becomes a
-native popup, or a recurring Loop 2 proposal becomes code. The running
-binary is never patched in place.
+**Changing the harness itself.** Agent mode pointed at the nexus repo:
+a worktree, `scripts/check.sh` as the acceptance test, the result a branch
+you review. This is how a proven interface becomes a native popup, or a
+recurring Loop 2 proposal becomes code. The running binary is never patched
+in place.
 
 `/improve <what>` implements this workflow. Configure the source checkout in
 machine-local `config.toml` first (otherwise the command refuses):
@@ -592,10 +576,11 @@ neither applies the result nor replaces the running binary.
 
 - Model-authored UI text goes through the same sanitizing as history:
   control characters and escape sequences stripped, clipped to its slot.
-  A script can't write raw bytes to the terminal.
+  Authored text cannot write raw bytes to the terminal.
 - The emoji ban and color roles apply to the component renderer, not to
   what the model writes, so components look native whatever the model does.
-- Scripts never see keys, env, or paths outside their app directory.
+- Panels expose only their declared state and bounded host capabilities, not
+  keys, environment variables or arbitrary filesystem/process access.
 - None of this goes through the host's web UI or `appserver.rs`; the `app`
   tool and its web apps are unchanged.
 
@@ -765,13 +750,13 @@ external program the harness runs as a job (in agent mode, through
 
 | Surface | Additions |
 |---|---|
-| TUI | mode in status line, Shift+Tab, diff cards, live command tail, wave-approval gate, `/undo` `/rewind`, `procs` `jobs` `harness` popups (chrome.rs), `nexus-ui` blocks, scripted terminal apps, recording marker, model-profile editor |
+| TUI | mode in status line, Shift+Tab, diff cards, live command tail, wave-approval gate, `/undo` `/rewind`, `procs` `jobs` `harness` popups (chrome.rs), streamed `nexus-ui` panels and pinned mini-apps, recording marker, model-profile editor |
 | CLI | `nexus agent --cwd . [--auto] "…"`, `nexus jobs ls|add|stop|logs`, `nexus eval`, `nexus train export` |
 | Host | headless only: `/jobs` endpoints, SSE for job progress, gate approval over the API (phone can approve a parked job). No web UI changes. |
 
 ## 12. Phases
 
-Phases 1–16 are implemented, with the deviations noted below.
+Phases 1–16 are implemented or superseded, with the deviations noted below.
 Acceptance remains `scripts/check.sh` for each phase.
 
 1. **Done — fix the security bugs.** Env scrub for every spawn; canonical
@@ -810,7 +795,7 @@ Acceptance remains `scripts/check.sh` for each phase.
    to measure them. They remain **off by default pending evals** showing no
    lost passes for the model tiers in use (cost research "experiment first"
    #8–#10, #12).
-10. **Done — `nexus-ui` Level A blocks** and the `/harness` popup, ranking
+10. **Done — `nexus-ui` panels** and the `/harness` popup, ranking
     recent tool failures with links to their latest transcripts.
 11. **Done — Decider + `agent·auto`.** Rule, Jev, LLM implementations, offline
     degradation; decisions log; sandbox tiers.
@@ -821,10 +806,10 @@ Acceptance remains `scripts/check.sh` for each phase.
     proposal jobs remain deferred.
 14. **Done — export and Loop 4.** `nexus train export`, license and stale-schema
     filtering, eval decontamination, and an MLX LoRA job recipe.
-15. **Done — scripted terminal apps (Level B)** with sandboxed Rhai,
-    capability grants, preview, and a bundled RPS example app. There was no
-    native RPS implementation to port or preserve.
-16. **Done — sub-agents, Level C self-modification, Jev Router.** Task
+15. **Superseded — native interactive panels.** The separate script runtime,
+    preview tool, popup and bundled example were removed in favor of streamed
+    `nexus-ui` programs and pinned panels opened through `/apps`.
+16. **Done — sub-agents, harness self-modification, Jev Router.** Task
     sub-agents run nested loops and return only their reports. Router ids
     are normal session model choices with a one-time cache warning;
     `nexus eval --compare-model A B` compares models using the same
@@ -832,7 +817,7 @@ Acceptance remains `scripts/check.sh` for each phase.
     models automatically per step: routing evidence is single-turn only,
     and every underlying model switch starts a cold cache. Use a router
     for a session only if cost per passed task improves without losing
-    passes. Level C's `/improve` uses `[agent].nexus_repo` to open an isolated
+    passes. `/improve` uses `[agent].nexus_repo` to open an isolated
     review worktree, seeds the request with recent harness failures, and
     requires `scripts/check.sh`; the user reviews, merges, and removes the
     worktree. The running binary is never patched.
@@ -856,11 +841,11 @@ Hermetic as always: temp-dir workspaces, `Db::open_in_memory`, no network.
   mocks); rule precedence over model allow.
 - Jobs: scheduler with an injected clock; park-on-gate.
 - Prompts: the snapshot, tool-name, placeholder, and budget tests in §7.
-- `nexus-ui`: each component snapshot-tested on `TestBackend` like the
-  popups; malformed JSON falls back to source; viewport pinning holds with a
-  block streaming in above the viewport.
-- Scripted apps: op-limit and memory-limit enforcement, no registered I/O
-  without a manifest grant, RPS script parity with the native game.
+- `nexus-ui`: positional contracts and components tested on `TestBackend`;
+  partial programs remain inert, invalid final programs fall back to source,
+  and viewport pinning holds while elements stream in.
+- Pinned panels: saved state survives reopening; `/apps` opens, renames and
+  unpins panels without a separate runtime.
 - Traces: a configured key's value never appears in any stored blob;
   incognito and training-off spaces record nothing; a retried step
   survives with a rejected label; export golden files per format; eval
@@ -880,12 +865,6 @@ Hermetic as always: temp-dir workspaces, `Db::open_in_memory`, no network.
 - **Jev price and latency.** Not published on the docs pages; a Decider call
   sits in front of every risky wave, so measure before making it the default.
   The endpoint is `/api/alpha/`, so expect shape changes.
-- **Script language for Level B.** Rhai is pure Rust and sandboxed by
-  default, but models have seen little of it. Luau (via `mlua`, vendored)
-  has a built-in sandbox mode and models know Lua well, at the cost of a
-  C build dependency and another `cargo audit` surface. Settle with a
-  spike: have two models build the same small app in each and compare
-  first-try success.
 - **Which local stack and base model** to fine-tune: MLX on this Mac is the
   obvious trainer, but the base model decides license, context, and
   tool-calling quality. Pick it from `nexus eval` runs, not size.

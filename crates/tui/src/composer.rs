@@ -222,7 +222,6 @@ impl AppView {
             }
             Popup::ImageViewer => self.viewer_drop(text),
             Popup::InteractiveUi => self.interactive.paste(text),
-            Popup::TuiApp => crate::ui::popups::tui_app::paste(self, text),
             Popup::Key => self.key_input.push_str(text),
             Popup::Connectors => crate::ui::popups::connectors::paste(self, text),
             Popup::Jobs => {
@@ -881,7 +880,6 @@ impl AppView {
                     self.open_apps_popup();
                 }
             }
-            AppCommand::OpenTuiApp(name) => crate::ui::popups::tui_app::open(self, &name),
             AppCommand::PinPanel { name } => {
                 if self.core.incognito {
                     self.push_status("pinning is not available in incognito mode");

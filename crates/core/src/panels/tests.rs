@@ -124,7 +124,16 @@ fn names_are_validated_unique_and_bounded() {
     let conn = db.conn();
     let session = edited();
     let program = session.program().unwrap();
-    for bad in ["", "Has Space", "UPPER", &"a".repeat(33)] {
+    for bad in [
+        "",
+        "Has Space",
+        "UPPER",
+        "../escape",
+        "bad/name",
+        "under_score",
+        "café",
+        &"a".repeat(33),
+    ] {
         assert!(
             pin(conn, "s", bad, program, &session.snapshot()).is_err(),
             "{bad:?}"

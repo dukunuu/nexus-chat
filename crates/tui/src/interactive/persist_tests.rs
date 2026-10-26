@@ -282,9 +282,11 @@ fn a_pinned_app_opens_full_size_with_its_state_and_keeps_changes() {
     // The opened app is not the transcript panel it came from.
     assert_eq!(value(&app, &p, "count"), "0");
 
-    // It also opens by name from the command line.
+    // The /apps command keeps the pinned panel available without a script runtime.
     app.interactive.unfocus();
-    app.run_command("tuiapp counter").unwrap();
+    app.run_command("apps").unwrap();
+    assert_eq!(app.popup, Popup::Apps);
+    app.open_selected_app();
     assert_eq!(app.popup, Popup::InteractiveUi);
     assert!(!open_pinned(&mut app, "missing"));
 }

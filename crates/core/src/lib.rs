@@ -39,7 +39,6 @@ pub mod theme_colors;
 pub mod tools;
 pub mod trace;
 pub mod train;
-pub mod tui_apps;
 pub mod update;
 pub mod usershell;
 pub mod workspace;

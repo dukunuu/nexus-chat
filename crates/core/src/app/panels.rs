@@ -66,10 +66,7 @@ impl App {
             panels::suggest_name(conn, &self.active_space.id, &title)?
         };
         let app = panels::pin(conn, &self.active_space.id, &name, program, snapshot)?;
-        self.push_status(format!(
-            "pinned panel as {} · /apps or /tuiapp {}",
-            app.name, app.name
-        ));
+        self.push_status(format!("pinned panel as {} · open it from /apps", app.name));
         Ok(app)
     }
 

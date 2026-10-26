@@ -41,7 +41,7 @@ Implement a bounded Rust dialect with the actual assignment/call/reference
 syntax, root-first composition, positional component contracts, local state,
 numeric expressions and explicit actions. Reuse the existing validated document
 and transactional runtime internally; do not expose JSON as the authoring format.
-Keep old JSON fences readable for existing transcripts and scripted apps.
+Keep old JSON fences readable for existing transcripts.
 
 This is a terminal component library, not a port of React components, and not a
 claim of complete OpenUI 1.0 conformance. No Query/Mutation/network execution,

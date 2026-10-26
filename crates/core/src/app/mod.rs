@@ -312,8 +312,6 @@ pub enum Popup {
     Apps,
     /// Focused model-authored interactive output (opened from the transcript).
     InteractiveUi,
-    /// A space-local sandboxed Rhai terminal app.
-    TuiApp,
     Watch,
     ResearchLive,
     Swarm,
@@ -1120,12 +1118,8 @@ pub struct App {
     pub approval_rx: Option<mpsc::UnboundedReceiver<(ApprovalRequest, oneshot::Sender<Decision>)>>,
     /// A `propose_command` (`!<cmd>`) the view moves into an empty composer.
     pub proposed_command: Option<String>,
-    /// Tool-to-view open request, shared across toolbox refreshes.
-    pub pending_tui_app: crate::tui_apps::PendingOpen,
     /// Session-local canvas focus and deck edit notifications, shared with tools.
     pub deck_link: Arc<std::sync::Mutex<crate::deck::link::Context>>,
-    /// Interactive frontend's `TestBackend` renderer.
-    pub tui_app_renderer: Option<crate::tui_apps::PreviewRenderer>,
     /// An approved `request_workspace` root, applied when its chat task finishes.
     pub(crate) queued_workspace: Option<(ChatTaskId, String)>,
     /// The running captured `!` command's result, at most one at a time.
@@ -1525,9 +1519,7 @@ impl App {
             approval_shown: 0,
             approval_rx: None,
             proposed_command: None,
-            pending_tui_app: Arc::default(),
             deck_link: Arc::default(),
-            tui_app_renderer: None,
             queued_workspace: None,
             user_command_rx: None,
             user_command_dir: None,
@@ -2130,13 +2122,7 @@ impl App {
         self.configure_auto_policy(&mut toolbox);
         toolbox.remote_images = Some(Arc::clone(&self.image_fetcher));
         toolbox.interactive_ui = self.interactive_ui;
-        toolbox.pending_tui_app = Arc::clone(&self.pending_tui_app);
         toolbox.deck_link = Arc::clone(&self.deck_link);
-        toolbox.tui_app_renderer = self.tui_app_renderer;
-        toolbox.space_tui_apps_dir = self
-            .space
-            .space_dir(&self.active_space.name)
-            .join("tui_apps");
         self.pending_approval = None;
         self.pending_approval_request = None;
         self.approval_queue.clear();

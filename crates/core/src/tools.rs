@@ -211,14 +211,8 @@ pub struct ToolBox {
     pub approver: Option<Arc<dyn Approver>>,
     /// Offer `propose_command`: only a terminal UI has a composer to put it in.
     pub interactive_ui: bool,
-    /// Terminal renderer supplied only by the interactive frontend.
-    pub tui_app_renderer: Option<crate::tui_apps::PreviewRenderer>,
-    /// Open requests consumed by the terminal event loop.
-    pub pending_tui_app: crate::tui_apps::PendingOpen,
     /// Session-local studio focus and pending tool edit notifications.
     pub deck_link: Arc<Mutex<crate::deck::link::Context>>,
-    /// Space-local scripted terminal apps.
-    pub space_tui_apps_dir: PathBuf,
     /// App-managed destination for newly created or downloaded skills.
     pub skills_dir: PathBuf,
     /// Skill roots in precedence order. These include the app-managed root and
@@ -945,10 +939,7 @@ impl ToolBox {
             require_approval: false,
             approver: None,
             interactive_ui: false,
-            tui_app_renderer: None,
-            pending_tui_app: Arc::default(),
             deck_link: Arc::default(),
-            space_tui_apps_dir: PathBuf::new(),
             skill_dirs: vec![skills_dir.clone()],
             skills_dir,
             searxng_url,
@@ -1026,10 +1017,7 @@ impl ToolBox {
             require_approval: self.require_approval,
             approver: self.approver.clone(),
             interactive_ui: self.interactive_ui,
-            tui_app_renderer: self.tui_app_renderer,
-            pending_tui_app: self.pending_tui_app.clone(),
             deck_link: self.deck_link.clone(),
-            space_tui_apps_dir: self.space_tui_apps_dir.clone(),
             skills_dir: self.skills_dir.clone(),
             skill_dirs: self.skill_dirs.clone(),
             searxng_url: self.searxng_url.clone(),
@@ -1363,10 +1351,6 @@ impl ToolBox {
             if self.workspace.is_some() {
                 defs.push(def(&spec::PROPOSE_COMMAND, &["propose_command"]));
             }
-            defs.push(def(
-                &spec::TUI_APP,
-                &["list", "read", "write", "edit", "preview", "open"],
-            ));
             if self.files.is_some() {
                 defs.push(def(&spec::PANEL_APP, &["list", "read", "patch"]));
             }
@@ -2087,23 +2071,6 @@ impl ToolBox {
                     Ok(report) => (report, "Sub-agent finished".into()),
                     Err(error) => (format!("sub-agent failed: {error}"), "blocked".into()),
                 };
-            }
-            "tui_app_list" | "tui_app_read" | "tui_app_write" | "tui_app_edit"
-            | "tui_app_preview" | "tui_app_open" => {
-                if !self.interactive_ui {
-                    return ("tui_app needs the terminal UI".into(), "blocked".into());
-                }
-                let args = serde_json::from_str(args).unwrap_or_default();
-                let action = name.strip_prefix("tui_app_").expect("app action");
-                let result = crate::tui_apps::tool(
-                    &self.space_tui_apps_dir,
-                    action,
-                    &args,
-                    self.tui_app_renderer,
-                    &self.pending_tui_app,
-                )
-                .unwrap_or_else(|error| format!("tui_app error: {error}"));
-                (result, format!("Terminal app {action}…"))
             }
             "panel_app_list" | "panel_app_read" | "panel_app_patch" => {
                 let Some(files) = self.files.as_ref().filter(|_| self.interactive_ui) else {
@@ -11983,15 +11950,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ui_check_is_neither_advertised_nor_executable() {
+    async fn removed_ui_tools_are_neither_advertised_nor_executable() {
         for interactive_ui in [false, true] {
             let mut toolbox = bare_toolbox();
             toolbox.interactive_ui = interactive_ui;
-            assert!(!tool_names(&toolbox).contains(&"ui_check".into()));
-            let args = json!({"source":"root = Panel(\"Summary\", [Text(\"Hello\")])"}).to_string();
-            assert!(!is_read_only_tool("ui_check", &args));
-            let (result, _) = toolbox.run("ui_check", &args).await;
-            assert_eq!(result, "unknown tool: ui_check");
+            for name in [
+                "ui_check",
+                "tui_app",
+                "tui_app_list",
+                "tui_app_read",
+                "tui_app_write",
+                "tui_app_edit",
+                "tui_app_preview",
+                "tui_app_open",
+            ] {
+                assert!(!tool_names(&toolbox).iter().any(|tool| tool == name));
+                let args = json!({"action":"write","name":"retired","content":"legacy script","source":"root = Panel(\"Summary\", [Text(\"Hello\")])"}).to_string();
+                assert!(!is_read_only_tool(name, &args));
+                let (result, _) = toolbox.run(name, &args).await;
+                assert_eq!(result, format!("unknown tool: {name}"));
+            }
         }
     }
 

@@ -2192,7 +2192,6 @@ fn every_popup_renders_at_the_minimum_resize_size_without_panicking() {
             Popup::Skills,
             Popup::Files,
             Popup::Apps,
-            Popup::TuiApp,
             Popup::Watch,
             Popup::ResearchLive,
             Popup::Swarm,
@@ -2210,7 +2209,7 @@ fn every_popup_renders_at_the_minimum_resize_size_without_panicking() {
                 .set_setting(
                     "popup_sizes",
                     "model:20x20,session:20x20,copy:20x20,key:20x20,settings:20x20,space:20x20,\
-                     skills:20x20,files:20x20,apps:20x20,terminal:20x20,watches:20x20,\
+                     skills:20x20,files:20x20,apps:20x20,watches:20x20,\
                      research:20x20,swarm:20x20,usage:20x20,jobs:20x20,harness:20x20,\
                      procs:20x20,login:20x20,local:20x20,help:20x20,connectors:20x20",
                 )
