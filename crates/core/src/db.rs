@@ -314,16 +314,6 @@ const LEGACY_COLUMN_ADDS: &[(&str, &str, &str)] = &[
         "prompt_convention",
         "ALTER TABLE usage_log ADD COLUMN prompt_convention TEXT",
     ),
-    (
-        "usage_log",
-        "kind",
-        "ALTER TABLE usage_log ADD COLUMN kind TEXT",
-    ),
-    (
-        "usage_log",
-        "tools",
-        "ALTER TABLE usage_log ADD COLUMN tools TEXT",
-    ),
 ];
 
 /// The device-local cache db living next to the durable db: `cache.db` in
@@ -950,6 +940,16 @@ impl Db {
             ("topic", "ALTER TABLE jobs ADD COLUMN topic TEXT"),
         ] {
             if !has_column(&self.conn, "jobs", column)? {
+                self.conn.execute(ddl, [])?;
+            }
+        }
+        // Added after SCHEMA_VERSION 3, so dbs already at that version need
+        // them too: the gated LEGACY_COLUMN_ADDS below never run for them.
+        for (column, ddl) in [
+            ("kind", "ALTER TABLE usage_log ADD COLUMN kind TEXT"),
+            ("tools", "ALTER TABLE usage_log ADD COLUMN tools TEXT"),
+        ] {
+            if !has_column(&self.conn, "usage_log", column)? {
                 self.conn.execute(ddl, [])?;
             }
         }

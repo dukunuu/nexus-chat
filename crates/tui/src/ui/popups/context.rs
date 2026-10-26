@@ -125,12 +125,6 @@ pub fn render(f: &mut Frame, app: &AppView) {
 
 fn session_lines(app: &AppView, width: u16) -> Vec<Line<'static>> {
     let width = usize::from(width.saturating_sub(2)).max(1);
-    let requests = app
-        .session
-        .as_ref()
-        .filter(|_| !app.incognito)
-        .and_then(|s| app.db.usage_for_session(&s.id).ok())
-        .unwrap_or_default();
     let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(
@@ -138,6 +132,20 @@ fn session_lines(app: &AppView, width: u16) -> Vec<Line<'static>> {
             Style::default().fg(app.theme.fg_dim),
         )),
     ];
+    // A failed query says so rather than passing for an empty session.
+    let requests = match app.session.as_ref().filter(|_| !app.incognito) {
+        Some(s) => match app.db.usage_for_session(&s.id) {
+            Ok(rows) => rows,
+            Err(e) => {
+                lines.push(Line::from(Span::styled(
+                    format!("could not load requests: {e}"),
+                    Style::default().fg(app.theme.error),
+                )));
+                return lines;
+            }
+        },
+        None => Vec::new(),
+    };
     for line in nexus_core::app::usage::session_usage_lines(&requests) {
         lines.extend(
             textwrap::wrap(&line, width)
