@@ -65,7 +65,7 @@ The README has the full tree; the parts agents touch most:
 | `crates/core/src/app/chat.rs` | request lifecycle: history build, streaming, tool loop |
 | `crates/core/src/app/research.rs` | research pipeline: survey → plan → searchers → synthesis → critic → verifier → writer |
 | `crates/core/src/app/swarm.rs`, `watches.rs` | roundtable / standing jobs |
-| `crates/core/src/app/usage.rs` | usage & cost analytics (`/usage`); Ctrl+G shows tool-definition context tokens and all session requests with costs; `nexus usage --session <id> [--json]` prints the same list and total |
+| `crates/core/src/app/usage.rs` | usage & cost analytics (`/usage`); Ctrl+G shows tool-definition context tokens and the session's total cost, requests and tokens; `nexus usage --session <id> [--json]` prints every request and the total |
 | `crates/core/src/app/sessions.rs`, `spaces.rs`, `models.rs`, `memory.rs` | state backends |
 | `crates/core/src/provider/openrouter.rs` | the single client for all OpenAI-wire backends — message shapes, tool-call wire format, events are in `provider/mod.rs` |
 | `crates/core/src/provider/serve.rs` | managed local-provider servers: per-runtime launch commands, endpoint liveness probes, process-tree memory, and the advisory budget behind `/local start\|stop\|status` |

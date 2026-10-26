@@ -14,11 +14,10 @@ use super::chrome;
 mod tests;
 
 /// Context breakdown popup (Ctrl+G): estimated tokens spent on system
-/// instructions, memory, skills, tools, and conversation, plus session requests.
+/// instructions, memory, skills, tools, and conversation, plus what the
+/// session has spent so far.
 pub fn render(f: &mut Frame, app: &AppView) {
     let b = app.context_breakdown();
-    let screen = f.area();
-    let width = (screen.width * 96 / 100).clamp(40.min(screen.width), screen.width);
     let dim = Style::default().fg(app.theme.fg_dim);
     let total = b.system_tokens
         + b.memory_tokens
@@ -85,14 +84,16 @@ pub fn render(f: &mut Frame, app: &AppView) {
     ]));
 
     lines.extend(cache_lines(app));
-    lines.extend(session_lines(app, width));
+    lines.extend(session_lines(app));
 
     let hint = if b.compacted {
-        "↑↓ PgUp/PgDn scroll · v digest · Esc close"
+        "v digest · Esc close"
     } else {
-        "↑↓ PgUp/PgDn scroll · Ctrl+G toggle · Esc close"
+        "Ctrl+G toggle · Esc close"
     };
     // Sized to the content rather than a fixed share of the screen.
+    let screen = f.area();
+    let width = (screen.width * chrome::SMALL.0 / 100).clamp(40.min(screen.width), screen.width);
     let height = u16::try_from(lines.len() + 2)
         .unwrap_or(u16::MAX)
         .min(screen.height);
@@ -111,49 +112,69 @@ pub fn render(f: &mut Frame, app: &AppView) {
         true,
         chrome::Tone::Normal,
     );
-    let max_scroll = lines.len().saturating_sub(usize::from(inner.height));
-    app.context_max_scroll.set(max_scroll);
-    let top = app.context_scroll.get().min(max_scroll);
-    app.context_scroll.set(top);
-    let visible = lines
-        .into_iter()
-        .skip(top)
-        .take(usize::from(inner.height))
-        .collect::<Vec<_>>();
-    f.render_widget(Paragraph::new(visible), inner);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn session_lines(app: &AppView, width: u16) -> Vec<Line<'static>> {
-    let width = usize::from(width.saturating_sub(2)).max(1);
-    let mut lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "Session requests · input / cached / output · USD",
-            Style::default().fg(app.theme.fg_dim),
-        )),
-    ];
-    // A failed query says so rather than passing for an empty session.
-    let requests = match app.session.as_ref().filter(|_| !app.incognito) {
-        Some(s) => match app.db.usage_for_session(&s.id) {
-            Ok(rows) => rows,
-            Err(e) => {
-                lines.push(Line::from(Span::styled(
-                    format!("could not load requests: {e}"),
-                    Style::default().fg(app.theme.error),
-                )));
-                return lines;
-            }
-        },
-        None => Vec::new(),
+/// What the session has spent so far: cost and requests, then tokens.
+/// Per-request figures already sit on each message.
+fn session_lines(app: &AppView) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(app.theme.fg_dim);
+    let label = Span::styled(
+        "Session      ",
+        Style::default()
+            .fg(app.theme.fg)
+            .add_modifier(Modifier::BOLD),
+    );
+    let Some(session) = app.session.as_ref().filter(|_| !app.incognito) else {
+        return Vec::new();
     };
-    for line in nexus_core::app::usage::session_usage_lines(&requests) {
-        lines.extend(
-            textwrap::wrap(&line, width)
-                .into_iter()
-                .map(|part| Line::from(part.into_owned())),
-        );
-    }
-    lines
+    let rows = match app.db.usage_for_session(&session.id) {
+        Ok(rows) => rows,
+        // A failed query says so rather than passing for an empty session.
+        Err(e) => {
+            return vec![
+                Line::from(""),
+                Line::from(vec![
+                    label,
+                    Span::styled(
+                        format!("could not load usage: {e}"),
+                        Style::default().fg(app.theme.error),
+                    ),
+                ]),
+            ];
+        }
+    };
+    let t = nexus_core::app::usage::SessionUsageTotals::from_rows(&rows);
+    let cost = match t.cost {
+        Some(c) if t.unknown_cost_requests > 0 => {
+            format!("${c:.4} + {} unpriced", t.unknown_cost_requests)
+        }
+        Some(c) => format!("${c:.4}"),
+        None if t.requests > 0 => "no cost reported".to_string(),
+        None => "$0".to_string(),
+    };
+    let requests = match t.requests {
+        1 => "1 request".to_string(),
+        n => format!("{n} requests"),
+    };
+    let h = crate::ui::humanize;
+    vec![
+        Line::from(""),
+        Line::from(vec![
+            label,
+            Span::styled(cost, Style::default().fg(app.theme.warning)),
+            Span::styled(format!(" · {requests}"), dim),
+        ]),
+        Line::from(Span::styled(
+            format!(
+                "             {} in · {} cached · {} out",
+                h(t.prompt_tokens),
+                h(t.cache_read_tokens),
+                h(t.completion_tokens)
+            ),
+            dim,
+        )),
+    ]
 }
 
 /// The turn's and the last request's cache hit rates, when either is known.
@@ -204,20 +225,5 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) {
             .contains(crossterm::event::KeyModifiers::CONTROL);
     if key.code == KeyCode::Esc || ctrl_g {
         app.popup = Popup::None;
-        app.context_scroll.set(0);
-        return;
     }
-    let delta = match key.code {
-        KeyCode::Up | KeyCode::Char('k') => -1,
-        KeyCode::Down | KeyCode::Char('j') => 1,
-        KeyCode::PageUp => -10,
-        KeyCode::PageDown => 10,
-        _ => 0,
-    };
-    app.context_scroll.set(
-        app.context_scroll
-            .get()
-            .saturating_add_signed(delta)
-            .min(app.context_max_scroll.get()),
-    );
 }

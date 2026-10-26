@@ -565,7 +565,7 @@ Type `/` in the composer for autocomplete. Aliases in parentheses.
 | `Alt+1`–`Alt+4` | reopen a recent session from the start screen |
 | `Ctrl+R` | expand/collapse reasoning traces |
 | `Ctrl+T` | expand/collapse tool-call detail blocks |
-| `Ctrl+G` | context breakdown (system/memory/skills/tools/conversation), plus every session request and its cost (↑/↓, PgUp/PgDn to scroll) |
+| `Ctrl+G` | context breakdown (system/memory/skills/tools/conversation), plus the session's total cost, requests and tokens |
 | `Ctrl+N` | start a new regular session |
 | `Ctrl+Shift+N` | start a new incognito session |
 | `Ctrl+O` | open a session-link message under the selection |

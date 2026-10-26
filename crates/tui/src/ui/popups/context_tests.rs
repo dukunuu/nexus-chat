@@ -30,8 +30,36 @@ fn screen(app: &AppView) -> String {
     text
 }
 
+fn log(app: &AppView, session: &str, cost: Option<f64>) {
+    app.db
+        .log_usage(
+            "OpenRouter",
+            "test-model",
+            100_000,
+            2_000,
+            80_000,
+            0,
+            Default::default(),
+            cost,
+            cost.is_some(),
+            Some(session),
+            Some(&app.active_space.id),
+        )
+        .unwrap();
+}
+
+fn with_session(app: &mut AppView) -> String {
+    let session = app
+        .db
+        .create_session("costs", "model", &app.active_space.id, "chat")
+        .unwrap();
+    let id = session.id.clone();
+    app.session = Some(session);
+    id
+}
+
 #[test]
-fn context_snapshot_has_real_tools_estimate_and_empty_session_state() {
+fn context_shows_the_real_tools_estimate() {
     let mut app = fixture();
     app.popup = Popup::Context;
     let text = screen(&app);
@@ -46,8 +74,6 @@ fn context_snapshot_has_real_tools_estimate_and_empty_session_state() {
     .unwrap();
     assert_eq!(app.context_breakdown().tools_tokens, expected);
     assert!(tools.contains(&crate::ui::humanize(expected)), "{text}");
-    assert!(text.contains("No requests in this session."), "{text}");
-    assert!(text.contains("Total: 0 requests"), "{text}");
     handle_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
@@ -57,64 +83,39 @@ fn context_snapshot_has_real_tools_estimate_and_empty_session_state() {
 }
 
 #[test]
-fn session_requests_render_oldest_first_and_scroll_through_hundreds() {
+fn session_spend_is_one_summary_not_a_request_list() {
     let mut app = fixture();
-    let session = app
-        .db
-        .create_session("costs", "model", &app.active_space.id, "chat")
-        .unwrap();
-    for index in 0..200 {
-        let id = app
-            .db
-            .log_usage(
-                "OpenRouter",
-                "test-model",
-                100,
-                20,
-                40,
-                0,
-                Default::default(),
-                Some(0.01),
-                true,
-                Some(&session.id),
-                Some(&app.active_space.id),
-            )
-            .unwrap();
-        app.db
-            .set_usage_kind(id, &format!("request-{index:03}"))
-            .unwrap();
-        if index == 0 {
-            app.db.add_usage_tool(id, "fs").unwrap();
-        }
+    let session = with_session(&mut app);
+    for _ in 0..200 {
+        log(&app, &session, Some(0.01));
     }
-    app.session = Some(session);
+    log(&app, "another-session", Some(9.0));
     app.popup = Popup::Context;
-    let first = screen(&app);
-    assert!(first.contains("request-000 · fs"), "{first}");
-    assert!(first.contains("100 / 40 / 20  $0.0100"), "{first}");
-    assert!(!first.contains("request-199"));
-    for _ in 0..100 {
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
-        );
-        let _ = screen(&app);
-    }
-    let last = screen(&app);
-    assert!(last.contains("request-199"), "{last}");
+    let text = screen(&app);
+    let line = text.lines().find(|l| l.contains("Session")).unwrap();
+    assert!(line.contains("$2.0000 · 200 requests"), "{text}");
+    let h = crate::ui::humanize;
     assert!(
-        last.contains("Total: 200 requests · 24000 tokens · $2.0000"),
-        "{last}"
+        text.contains(&format!(
+            "{} in · {} cached · {} out",
+            h(20_000_000),
+            h(16_000_000),
+            h(400_000)
+        )),
+        "{text}"
     );
-    let end = app.context_scroll.get();
-    handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-    assert_eq!(app.context_scroll.get(), end - 1);
-    handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(app.context_scroll.get(), end);
-    handle_key(&mut app, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
-    assert_eq!(app.context_scroll.get(), end - 10);
-    handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(app.popup == Popup::None);
-    assert_eq!(app.context_scroll.get(), 0);
+    assert!(!text.contains("test-model"), "{text}");
+    std::fs::remove_dir_all(&app.space.root).unwrap();
+}
+
+#[test]
+fn session_spend_names_unpriced_requests() {
+    let mut app = fixture();
+    let session = with_session(&mut app);
+    log(&app, &session, None);
+    app.popup = Popup::Context;
+    assert!(screen(&app).contains("no cost reported · 1 request"));
+    log(&app, &session, Some(0.5));
+    assert!(screen(&app).contains("$0.5000 + 1 unpriced · 2 requests"));
     std::fs::remove_dir_all(&app.space.root).unwrap();
 }
