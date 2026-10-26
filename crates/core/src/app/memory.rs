@@ -83,6 +83,7 @@ impl App {
             .map(|session| format!("memory:{}", self.prompt_cache_key_for(&session.id)));
         let (tx, rx) = mpsc::unbounded_channel();
         self.memory_rx = Some(rx);
+        let provider = provider.usage_kind("memory");
         tokio::spawn(async move {
             let truncate = |s: &str| s.chars().take(2000).collect::<String>();
             let prompt = prompts::render(

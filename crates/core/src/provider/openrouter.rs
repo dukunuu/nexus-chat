@@ -194,6 +194,7 @@ pub struct OpenRouter {
     flavor: ProviderFlavor,
     endpoint: Option<String>,
     local_config: Option<super::local::LocalConfig>,
+    usage_log: Option<Box<(crate::db::UsageLog, String)>>,
 }
 
 /// Non-generative Decisions API answers, retaining optional provider cost.
@@ -656,6 +657,59 @@ fn openrouter_client() -> reqwest::Client {
 }
 
 impl OpenRouter {
+    pub(crate) fn logged(mut self, log: Option<crate::db::UsageLog>, kind: &str) -> Self {
+        self.usage_log = log.map(|log| Box::new((log, kind.to_string())));
+        self
+    }
+
+    pub(crate) fn for_usage_session(mut self, session: &str) -> Self {
+        if let Some((log, _)) = self.usage_log.as_deref_mut() {
+            log.session_id = Some(session.to_string());
+        }
+        self
+    }
+
+    pub(crate) fn usage_kind(mut self, kind: &str) -> Self {
+        if let Some((_, label)) = self.usage_log.as_deref_mut() {
+            *label = kind.to_string();
+        }
+        self
+    }
+
+    /// Whether the interactive chat task records this client's usage itself.
+    fn app_logs_usage(&self) -> bool {
+        self.usage_log
+            .as_deref()
+            .is_some_and(|(_, kind)| kind == "chat")
+    }
+
+    /// The client a turn's sub-agents run on: unlogged under interactive chat
+    /// (their usage is forwarded to the chat task, which logs it), else logged
+    /// as `subagent`.
+    pub(crate) fn subagent_client(&self) -> Self {
+        if self.app_logs_usage() {
+            self.clone().logged(None, "")
+        } else {
+            self.clone().usage_kind("subagent")
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn usage_label(&self) -> Option<&str> {
+        self.usage_log.as_deref().map(|(_, kind)| kind.as_str())
+    }
+
+    fn record_usage(&self, model: &str, usage: Option<Usage>) {
+        if let Some((log, kind)) = self.usage_log.as_deref() {
+            log.record(
+                self.backend_tag().name(),
+                model,
+                usage.unwrap_or_default(),
+                kind,
+            );
+        }
+    }
+
     pub fn from_key_auto(key: String) -> Self {
         if looks_like_openrouter_key(&key) {
             Self::openrouter_flavor(key)
@@ -675,6 +729,7 @@ impl OpenRouter {
             flavor: ProviderFlavor::OpenRouter,
             endpoint: None,
             local_config: None,
+            usage_log: None,
         }
     }
 
@@ -687,6 +742,7 @@ impl OpenRouter {
             search_endpoint: None,
             endpoint: None,
             local_config: None,
+            usage_log: None,
         }
     }
 
@@ -750,6 +806,7 @@ impl OpenRouter {
             search_endpoint: None,
             endpoint: None,
             local_config: None,
+            usage_log: None,
         }
     }
 
@@ -762,6 +819,7 @@ impl OpenRouter {
             search_endpoint: None,
             endpoint: None,
             local_config: None,
+            usage_log: None,
         }
     }
 
@@ -791,7 +849,8 @@ impl OpenRouter {
     pub async fn decide(&self, body: &serde_json::Value) -> Result<DecisionsResponse> {
         anyhow::ensure!(self.is_openrouter(), "decisions require OpenRouter");
         let base = self.api_base().trim_end_matches("/v1");
-        self.authenticate(self.client.post(format!("{base}/alpha/decisions")))
+        let response: DecisionsResponse = self
+            .authenticate(self.client.post(format!("{base}/alpha/decisions")))
             .timeout(std::time::Duration::from_secs(10))
             .json(body)
             .send()
@@ -801,7 +860,15 @@ impl OpenRouter {
             .context("decisions failed")?
             .json()
             .await
-            .context("parsing decisions")
+            .context("parsing decisions")?;
+        self.record_usage(
+            body["model"].as_str().unwrap_or_default(),
+            Some(Usage {
+                cost: response.usage.cost,
+                ..Usage::default()
+            }),
+        );
+        Ok(response)
     }
 
     /// Video gen is OpenRouter-only (not OpenAI/Codex/OpenCode).
@@ -940,6 +1007,9 @@ impl OpenRouter {
                         .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
 
+                    self.clone()
+                        .usage_kind("generate video")
+                        .record_usage(&model, status.get("usage").and_then(parse_usage_value));
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
                     let content = self
@@ -1253,6 +1323,17 @@ impl OpenRouter {
         messages: Vec<ChatMessage>,
         params: &ChatParams,
     ) -> Result<Completion> {
+        let completion = self.complete_unlogged(model, messages, params).await?;
+        self.record_usage(model, completion.usage);
+        Ok(completion)
+    }
+
+    async fn complete_unlogged(
+        &self,
+        model: &str,
+        messages: Vec<ChatMessage>,
+        params: &ChatParams,
+    ) -> Result<Completion> {
         // ChatGPT's Codex endpoint is stream-oriented: non-streaming requests
         // are rejected or can return no usable output. Utility jobs (titles,
         // memory, compaction, research metadata) still need a one-shot string,
@@ -1300,13 +1381,6 @@ impl OpenRouter {
         }
         add_cache_ttl_1h(&mut body, model, params.cache_ttl_1h);
         self.post_completion_with_usage(body).await
-    }
-
-    /// POST a completions body and pull the first choice's message text.
-    async fn post_completion(&self, body: serde_json::Value) -> Result<String> {
-        self.post_completion_with_usage(body)
-            .await
-            .map(|completion| completion.text)
     }
 
     /// POST a non-streaming completions body while retaining usage accounting.
@@ -1377,8 +1451,18 @@ impl OpenRouter {
 
     /// One-shot, non-streaming vision call: describe `image_data_url` with `model`.
     pub async fn describe_image(&self, model: &str, image_data_url: &str) -> Result<String> {
-        self.post_completion(vision_body(model, image_data_url))
-            .await
+        let completion = self
+            .post_completion_with_usage(vision_body(model, image_data_url))
+            .await?;
+        if let Some((log, _)) = self.usage_log.as_deref() {
+            log.record(
+                self.backend_tag().name(),
+                model,
+                completion.usage.unwrap_or_default(),
+                "describe image",
+            );
+        }
+        Ok(completion.text)
     }
 
     /// Generate an image via `OpenRouter`'s dedicated `/api/v1/images` endpoint.
@@ -1439,6 +1523,9 @@ impl OpenRouter {
             .json::<serde_json::Value>()
             .await
             .context("parsing image generation response")?;
+        self.clone()
+            .usage_kind("generate image")
+            .record_usage(model.as_str(), v.get("usage").and_then(parse_usage_value));
         let data = v
             .get("data")
             .and_then(|d| d.as_array())
@@ -1508,7 +1595,18 @@ impl OpenRouter {
 
     /// One-shot, non-streaming vision call: transcribe a scanned page image.
     pub async fn ocr_page(&self, model: &str, image_data_url: &str) -> Result<String> {
-        self.post_completion(ocr_body(model, image_data_url)).await
+        let completion = self
+            .post_completion_with_usage(ocr_body(model, image_data_url))
+            .await?;
+        if let Some((log, _)) = self.usage_log.as_deref() {
+            log.record(
+                self.backend_tag().name(),
+                model,
+                completion.usage.unwrap_or_default(),
+                "ocr",
+            );
+        }
+        Ok(completion.text)
     }
 
     /// Embed `inputs` with `model` (OpenAI-format /embeddings endpoint);
@@ -1531,6 +1629,11 @@ impl OpenRouter {
             .json::<serde_json::Value>()
             .await
             .context("parsing embeddings")?;
+        if let Some((log, _)) = self.usage_log.as_deref()
+            && let Some(usage) = v.get("usage").and_then(parse_usage_value)
+        {
+            log.record(self.backend_tag().name(), &model, usage, "embed");
+        }
         super::embedding::indexed_vectors(&v, count, None)
     }
 
@@ -1577,10 +1680,15 @@ impl OpenRouter {
         max_tool_iters: usize,
         tx: &mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<()> {
+        // Interactive chat persists accounting in App (including its two-event
+        // compatibility path and the usage sub-agents forward on `tx`), so
+        // neither its rounds nor its sub-agents log here; other callers'
+        // sub-agents log independently.
+        let app_logs = self.app_logs_usage();
         let toolbox = toolbox
             .clone()
             .with_subagents(Arc::new(crate::subagent::Context::new(
-                self.clone(),
+                self.subagent_client(),
                 model.clone(),
                 params.clone(),
                 tx.clone(),
@@ -1594,6 +1702,11 @@ impl OpenRouter {
         // history stays byte-identical to what the next turn's replay will
         // rebuild (prompt-cache continuity).
         let mut seen_results = super::seed_tool_result_dedup(&messages);
+        let stream_provider = if app_logs {
+            self.clone().logged(None, "")
+        } else {
+            self.clone()
+        };
         for iter in 0..=max_tool_iters {
             // Keep the tool schema stable while the loop grows. On the final
             // request, disable selection without removing the schemas or
@@ -1601,7 +1714,7 @@ impl OpenRouter {
             // reconstruct the same message prefix.
             let request_len = messages.len();
             let started = std::time::Instant::now();
-            let finish = self
+            let finish = stream_provider
                 .run_stream(
                     &model,
                     &messages,
@@ -1886,6 +1999,28 @@ impl OpenRouter {
             ))
             .await;
         }
+        let finish = self
+            .run_stream_unlogged(model, messages, params, tools, disable_tool_choice, tx)
+            .await?;
+        match &finish {
+            Finish::Done(output) | Finish::ToolCalls(_, output) => {
+                self.record_usage(model, output.usage);
+            }
+            Finish::Errored => {}
+        }
+        Ok(finish)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn run_stream_unlogged(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        params: &ChatParams,
+        tools: &[ToolDef],
+        disable_tool_choice: bool,
+        tx: &mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<Finish> {
         if self.flavor == ProviderFlavor::OpenAiCodex {
             return self
                 .run_codex_stream(model, messages, params, tools, disable_tool_choice, tx)
@@ -2059,7 +2194,11 @@ impl OpenRouter {
 
     fn openrouter_delegate_for_model(&self, model: &str) -> Option<Self> {
         if self.flavor == ProviderFlavor::OpenAiCodex && model.contains('/') {
-            crate::config::load_openrouter_key_only().map(Self::openrouter_flavor)
+            crate::config::load_openrouter_key_only().map(|key| {
+                let mut delegate = Self::openrouter_flavor(key);
+                delegate.usage_log.clone_from(&self.usage_log);
+                delegate
+            })
         } else {
             None
         }

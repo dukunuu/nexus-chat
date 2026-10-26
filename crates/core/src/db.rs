@@ -314,6 +314,16 @@ const LEGACY_COLUMN_ADDS: &[(&str, &str, &str)] = &[
         "prompt_convention",
         "ALTER TABLE usage_log ADD COLUMN prompt_convention TEXT",
     ),
+    (
+        "usage_log",
+        "kind",
+        "ALTER TABLE usage_log ADD COLUMN kind TEXT",
+    ),
+    (
+        "usage_log",
+        "tools",
+        "ALTER TABLE usage_log ADD COLUMN tools TEXT",
+    ),
 ];
 
 /// The device-local cache db living next to the durable db: `cache.db` in
@@ -910,6 +920,7 @@ impl Db {
             );
             CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at);
             CREATE INDEX IF NOT EXISTS idx_usage_log_model ON usage_log(model);
+            CREATE INDEX IF NOT EXISTS idx_usage_log_session ON usage_log(session_id, created_at);
             CREATE TABLE IF NOT EXISTS sync_tombstones (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 table_name TEXT NOT NULL,
@@ -3163,8 +3174,8 @@ pub struct UsageByModel {
     pub cost: f64,
 }
 
-/// One logged request, newest first.
-#[derive(Default)]
+/// One logged request.
+#[derive(Default, serde::Serialize)]
 pub struct UsageRow {
     pub created_at: String,
     pub backend: String,
@@ -3180,7 +3191,118 @@ pub struct UsageRow {
     pub cost: Option<f64>,
 }
 
+/// One session request, including content-free purpose and called tool names.
+#[derive(serde::Serialize)]
+pub struct SessionUsageRow {
+    #[serde(flatten)]
+    pub usage: UsageRow,
+    pub kind: Option<String>,
+    pub tools: Option<String>,
+}
+
+fn usage_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRow> {
+    Ok(UsageRow {
+        created_at: r.get(0)?,
+        backend: r.get(1)?,
+        model: r.get(2)?,
+        prompt_tokens: r.get::<_, i64>(3)? as u64,
+        completion_tokens: r.get::<_, i64>(4)? as u64,
+        cache_read_tokens: r.get::<_, i64>(5)? as u64,
+        cache_creation_tokens: r.get::<_, i64>(6)? as u64,
+        prompt_convention: r.get::<_, Option<String>>(7)?.as_deref().map_or(
+            crate::provider::PromptConvention::Unknown,
+            crate::provider::PromptConvention::from_str_or_unknown,
+        ),
+        cost: r.get(8)?,
+    })
+}
+
+/// Content-free attribution captured when a background request starts.
+#[derive(Clone)]
+pub(crate) struct UsageLog {
+    pub path: std::path::PathBuf,
+    pub session_id: Option<String>,
+    pub space_id: String,
+}
+
+impl UsageLog {
+    pub fn record(&self, backend: &str, model: &str, usage: crate::provider::Usage, kind: &str) {
+        if let Ok(db) = Db::open(&self.path) {
+            let _ = db.record_usage(backend, model, usage, self, kind);
+        }
+    }
+}
+
 impl Db {
+    /// Record provider accounting with a cache-aware catalog fallback.
+    pub(crate) fn record_usage(
+        &self,
+        backend: &str,
+        model: &str,
+        usage: crate::provider::Usage,
+        log: &UsageLog,
+        kind: &str,
+    ) -> Result<i64> {
+        let cost = usage.cost.or_else(|| {
+            self.request_cost(
+                model,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+            )
+        });
+        let id = self.log_usage(
+            backend,
+            model,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            usage.cache_read_tokens,
+            usage.cache_creation_tokens,
+            usage.prompt_convention,
+            cost,
+            usage.cost.is_some(),
+            log.session_id.as_deref(),
+            Some(&log.space_id),
+        )?;
+        self.set_usage_kind(id, kind)?;
+        Ok(id)
+    }
+
+    /// Attribute an existing accounting row without retaining any content.
+    pub fn set_usage_kind(&self, id: i64, kind: &str) -> Result<()> {
+        self.conn
+            .execute("UPDATE usage_log SET kind = ?2 WHERE id = ?1", (id, kind))?;
+        Ok(())
+    }
+
+    /// Append only a called tool's name to its chat request's accounting row.
+    pub fn add_usage_tool(&self, id: i64, name: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE usage_log SET tools = CASE WHEN tools IS NULL THEN ?2 ELSE tools || ',' || ?2 END,
+             updated_at = ?3 WHERE id = ?1",
+            (id, name, Utc::now().to_rfc3339()),
+        )?;
+        Ok(())
+    }
+
+    /// All requests attributed to a session, oldest first (including synced rows).
+    pub fn usage_for_session(&self, session_id: &str) -> Result<Vec<SessionUsageRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT created_at, backend, model, prompt_tokens, completion_tokens,
+             cache_read_tokens, cache_creation_tokens, prompt_convention, cost, kind, tools
+             FROM usage_log WHERE session_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([session_id], |r| {
+            Ok(SessionUsageRow {
+                usage: usage_row(r)?,
+                kind: r.get(9)?,
+                tools: r.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Record one completed API request's usage. Content-free — only
     /// backend/model/tokens — so it never leaks conversation text.
     #[allow(clippy::too_many_arguments)]
@@ -3616,24 +3738,7 @@ impl Db {
         } else {
             sql.push_str(" ORDER BY id DESC LIMIT ?1");
         }
-        let map = |r: &rusqlite::Row| {
-            Ok(UsageRow {
-                created_at: r.get(0)?,
-                backend: r.get(1)?,
-                model: r.get(2)?,
-                prompt_tokens: r.get::<_, i64>(3)? as u64,
-                completion_tokens: r.get::<_, i64>(4)? as u64,
-                cache_read_tokens: r.get::<_, i64>(5)? as u64,
-                cache_creation_tokens: r.get::<_, i64>(6)? as u64,
-                prompt_convention: r
-                    .get::<_, Option<String>>(7)?
-                    .as_deref()
-                    .map_or(crate::provider::PromptConvention::Unknown, |value| {
-                        crate::provider::PromptConvention::from_str_or_unknown(value)
-                    }),
-                cost: r.get(8)?,
-            })
-        };
+        let map = usage_row;
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = match since {
             Some(s) => stmt.query_map(rusqlite::params![s, limit as i64], map),

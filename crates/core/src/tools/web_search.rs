@@ -222,27 +222,17 @@ impl ToolBox {
         let Ok(db) = crate::db::Db::open(path) else {
             return;
         };
-        let cost = usage.cost.or_else(|| {
-            db.request_cost(
-                model,
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                usage.cache_read_tokens,
-                usage.cache_creation_tokens,
-            )
-        });
-        let _ = db.log_usage(
+        let log = crate::db::UsageLog {
+            path: path.clone(),
+            session_id: Some(self.session_id.clone()),
+            space_id: self.search_space_id.clone(),
+        };
+        let _ = db.record_usage(
             provider.backend_tag().name(),
             model,
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            usage.cache_read_tokens,
-            usage.cache_creation_tokens,
-            usage.prompt_convention,
-            cost,
-            usage.cost.is_some(),
-            Some(&self.session_id),
-            Some(&self.search_space_id),
+            usage,
+            &log,
+            "web search",
         );
     }
 }

@@ -195,6 +195,9 @@ pub enum Command {
     },
     /// Token/cache/cost analytics, like /usage.
     Usage {
+        /// Show every request for this session id, oldest first.
+        #[arg(long)]
+        session: Option<String>,
         /// Window: 24h, 7d, 30d, or all.
         #[arg(long, default_value = "all")]
         range: String,
@@ -575,11 +578,12 @@ pub async fn run(cmd: Command) -> Result<()> {
         Command::Jobs { cmd } => jobs(cmd).await,
         Command::Watch { cmd } => watch(cmd).await,
         Command::Usage {
+            session,
             range,
             json,
             top,
             by_day,
-        } => usage(&range, json, top, by_day),
+        } => usage(&range, json, top, by_day, session.as_deref()),
         Command::Sessions { space, json, cmd } => sessions(space.as_deref(), json, cmd),
         Command::Spaces { json } => spaces(json),
         Command::Export {
@@ -1766,10 +1770,14 @@ async fn watch_run(watch_ref: Option<&str>, all: bool) -> Result<()> {
 
 // --- read-only commands ---
 
-fn usage(range_key: &str, json: bool, top: u64, by_day: bool) -> Result<()> {
+fn usage(range_key: &str, json: bool, top: u64, by_day: bool, session: Option<&str>) -> Result<()> {
     let space = space::Space::open()?;
     let mut db = db::Db::open(&space.db_path())?;
     let _ = db.backfill_usage_costs(); // price rows logged before pricing existed
+    if let Some(session) = session {
+        out(session_usage_output(&db, session, json)?);
+        return Ok(());
+    }
     let range = db::UsageRange::from_key(range_key);
     let since = range.since().map(|t| t.to_rfc3339());
     let totals = db.usage_totals(since.as_deref())?;
@@ -1852,6 +1860,26 @@ fn usage(range_key: &str, json: bool, top: u64, by_day: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[path = "cli_usage_tests.rs"]
+mod usage_tests;
+
+fn session_usage_output(db: &db::Db, session: &str, json: bool) -> Result<String> {
+    use nexus_core::app::usage::{SessionUsageTotals, session_usage_lines};
+    let requests = db.usage_for_session(session)?;
+    if json {
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "session_id": session,
+            "totals": SessionUsageTotals::from_rows(&requests),
+            "requests": requests,
+        }))?);
+    }
+    Ok(format!(
+        "usage — session {session}\ninput / cached / output · USD\n{}",
+        session_usage_lines(&requests).join("\n")
+    ))
 }
 
 /// The headline block: counts, cost, and the hit rate over the rows that can

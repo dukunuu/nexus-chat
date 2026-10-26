@@ -24,9 +24,9 @@ impl App {
         {
             return Embedder::ollama(self.embedding_endpoint(), raw.to_string()).ok();
         }
-        self.backends
-            .resolve(model)
-            .map(|(p, model)| Embedder::openai(p, model))
+        self.backends.resolve(model).map(|(p, model)| {
+            Embedder::openai(p.logged(self.background_usage_log(), "embed"), model)
+        })
     }
 
     pub(super) fn file_embedder(&self) -> Option<Embedder> {
@@ -36,7 +36,8 @@ impl App {
                 .as_ref()
                 .filter(|b| b.same_route(&configured))
                 .cloned()
-                .unwrap_or(configured),
+                .unwrap_or(configured)
+                .logged(self.background_usage_log()),
         )
     }
 
@@ -92,6 +93,7 @@ impl App {
     }
 
     pub(super) fn probe_embeddings(&mut self, embedder: Embedder) {
+        let embedder = embedder.logged(self.background_usage_log());
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };

@@ -182,6 +182,7 @@ impl App {
         self.compacting_session_id = Some(session_id.clone());
         let error_slot = std::sync::Arc::clone(&self.compact_error);
         *error_slot.lock().expect("compaction error slot") = None;
+        let usage_log = self.usage_log();
         // The history pane gets a transient "compacting" block immediately;
         // the input bar also keeps its compact status while the request runs.
         tokio::spawn(async move {
@@ -194,6 +195,7 @@ impl App {
             attempts.extend(fallback);
             let mut errors = Vec::new();
             for (provider, model) in attempts {
+                let provider = provider.logged(usage_log.clone(), "compaction");
                 match provider
                     .complete_with_params(&model, msgs.clone(), &params)
                     .await
@@ -410,7 +412,7 @@ impl App {
         self.push_history_invalidated();
     }
 
-    /// System/memory/conversation token estimate for the context breakdown
+    /// System/memory/skills/tools/conversation token estimate for the context breakdown
     /// popup (Ctrl+G). Each bucket is a ~4-chars/token estimate, same method
     /// `context_used` falls back to, so the parts add up to (roughly) the whole.
     pub fn context_breakdown(&self) -> ContextBreakdown {
@@ -456,6 +458,8 @@ impl App {
             system_tokens: (instructions_chars / 4) as u64,
             memory_tokens: (memory_chars / 4) as u64,
             skills_tokens: (skills_chars / 4) as u64,
+            tools_tokens: serde_json::to_string(&self.chat_tool_defs())
+                .map_or(0, |defs| (defs.chars().count() / 4) as u64),
             conversation_tokens: (conversation_chars / 4) as u64,
             limit: self.context_limit(),
             compacted: self

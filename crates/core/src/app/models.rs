@@ -271,6 +271,7 @@ impl App {
     /// another backend on its own.
     pub fn helper_backend(&self) -> Option<(OpenRouter, String)> {
         self.resolve_utility_model_backend(&self.helper_model)
+            .map(|(p, model)| (self.usage_provider(p, "helper"), model))
     }
 
     /// The default generation model of the active backend (`default` is
@@ -286,7 +287,12 @@ impl App {
             return None;
         }
         let model = default(&provider);
-        (!model.is_empty()).then(|| (provider, model.to_string()))
+        (!model.is_empty()).then(|| {
+            (
+                self.usage_provider(provider.clone(), "media"),
+                model.to_string(),
+            )
+        })
     }
 
     /// The provider of the session's model, else the first configured backend.

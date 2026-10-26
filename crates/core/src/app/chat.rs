@@ -173,6 +173,7 @@ impl App {
         }
         let id = s.id.clone();
         self.session = Some(s);
+        self.rebuild_toolbox();
         Ok(id)
     }
 
@@ -832,11 +833,7 @@ impl App {
         let mut params = self.chat_params(reasoning_effort, provider.backend_tag());
         params.parallel_tool_calls = (!profile.parallel_calls).then_some(false);
         params.tool_result_cap = profile.result_cap;
-        let tools = if profile.compact_tools {
-            self.toolbox.defs_compact()
-        } else {
-            self.toolbox.defs()
-        };
+        let tools = self.chat_tool_defs();
         if provider.backend_tag() == crate::provider::BackendTag::Local
             && !self.context_warned
             && let Some(limit) = self.context_limit()
@@ -865,7 +862,8 @@ impl App {
                 .unwrap_or_default();
             *self.decision_context.lock().expect("decision context") = (session.id.clone(), task);
         }
-        let (rx, abort) = provider.stream_chat(
+        let backend = provider.backend_tag();
+        let (rx, abort) = self.usage_provider(provider, "chat").stream_chat(
             raw_model.clone(),
             history,
             params,
@@ -876,7 +874,6 @@ impl App {
         let Some(session) = self.session.clone() else {
             return Ok(());
         };
-        let backend = provider.backend_tag();
         let (thinking_idx, spinner_color) = pick_flavor();
         let task_id = self.next_chat_task_id;
         self.next_chat_task_id = self.next_chat_task_id.wrapping_add(1);
@@ -922,6 +919,16 @@ impl App {
         // resets its scroll/pinning baseline (AppEvent::ViewportReset).
         self.push_viewport_reset();
         Ok(())
+    }
+
+    /// Exact tool definitions sent by the next chat request.
+    #[must_use]
+    pub fn chat_tool_defs(&self) -> Vec<crate::provider::ToolDef> {
+        if self.model_profile().compact_tools {
+            self.toolbox.defs_compact()
+        } else {
+            self.toolbox.defs()
+        }
     }
 
     /// Build the main chat's parameters without starting a provider request.
@@ -1111,6 +1118,7 @@ impl App {
                         if let Ok(id) = id
                             && let Some(task) = self.chat_tasks.get_mut(&task_id)
                         {
+                            let _ = self.db.set_usage_kind(id, "chat");
                             task.usage_row_id = Some(id);
                         }
                     } else if let Some(row_id) = row_id {
@@ -1153,6 +1161,11 @@ impl App {
                 let Some(task) = self.chat_tasks.get_mut(&task_id) else {
                     return Ok(());
                 };
+                if !task.incognito
+                    && let Some(id) = task.usage_row_id
+                {
+                    let _ = self.db.add_usage_tool(id, &name);
+                }
                 // What streamed before this round's calls now lives in the
                 // round's first tool row, so the transcript reads thinking →
                 // calls → thinking → answer, and the final reply carries only
@@ -1608,27 +1621,16 @@ impl App {
         if !target.incognito
             && let Some(usage) = usage
         {
-            let cost = usage.cost.or_else(|| {
-                self.db.request_cost(
-                    &target.model_id,
-                    usage.prompt_tokens,
-                    usage.completion_tokens,
-                    usage.cache_read_tokens,
-                    usage.cache_creation_tokens,
-                )
-            });
-            let _ = self.db.log_usage(
+            let _ = self.db.record_usage(
                 target.backend.name(),
                 &target.model_id,
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                usage.cache_read_tokens,
-                usage.cache_creation_tokens,
-                usage.prompt_convention,
-                cost,
-                usage.cost.is_some(),
-                Some(&target.session_id),
-                Some(&target.space_id),
+                usage,
+                &crate::db::UsageLog {
+                    path: self.space.db_path(),
+                    session_id: Some(target.session_id.clone()),
+                    space_id: target.space_id.clone(),
+                },
+                "ui repair",
             );
         }
         if self.ui_repair_messages.get(&target.session_id) != Some(&target.message_id) {
@@ -1736,6 +1738,7 @@ impl App {
         let session_id = session.id.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         self.title_rx = Some(rx);
+        let provider = self.usage_provider(provider, "title");
         tokio::spawn(async move {
             let prompt = prompts::render(prompts::TITLE, &[("conversation", &convo)]);
             let msgs = vec![ChatMessage::text("user", prompt)];

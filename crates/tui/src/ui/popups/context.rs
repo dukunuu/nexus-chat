@@ -9,12 +9,22 @@ use nexus_core::app::Popup;
 
 use super::chrome;
 
+#[cfg(test)]
+#[path = "context_tests.rs"]
+mod tests;
+
 /// Context breakdown popup (Ctrl+G): estimated tokens spent on system
-/// instructions, memory, skills, and conversation.
+/// instructions, memory, skills, tools, and conversation, plus session requests.
 pub fn render(f: &mut Frame, app: &AppView) {
     let b = app.context_breakdown();
+    let screen = f.area();
+    let width = (screen.width * 96 / 100).clamp(40.min(screen.width), screen.width);
     let dim = Style::default().fg(app.theme.fg_dim);
-    let total = b.system_tokens + b.memory_tokens + b.skills_tokens + b.conversation_tokens;
+    let total = b.system_tokens
+        + b.memory_tokens
+        + b.skills_tokens
+        + b.tools_tokens
+        + b.conversation_tokens;
     // Bars scale against the context window, or the total when it's unknown.
     let scale = b.limit.filter(|&l| l > 0).unwrap_or(total).max(1);
 
@@ -48,6 +58,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
         row("System", b.system_tokens, app.theme.accent),
         row("Memory", b.memory_tokens, app.theme.accent2),
         row("Skills", b.skills_tokens, app.theme.warning),
+        row("Tools", b.tools_tokens, app.theme.accent2),
         row("Conversation", b.conversation_tokens, app.theme.success),
     ];
     if b.compacted {
@@ -74,15 +85,14 @@ pub fn render(f: &mut Frame, app: &AppView) {
     ]));
 
     lines.extend(cache_lines(app));
+    lines.extend(session_lines(app, width));
 
     let hint = if b.compacted {
-        "v digest · Esc close"
+        "↑↓ PgUp/PgDn scroll · v digest · Esc close"
     } else {
-        "Ctrl+G toggle · Esc close"
+        "↑↓ PgUp/PgDn scroll · Ctrl+G toggle · Esc close"
     };
     // Sized to the content rather than a fixed share of the screen.
-    let screen = f.area();
-    let width = (screen.width * chrome::SMALL.0 / 100).clamp(40.min(screen.width), screen.width);
     let height = u16::try_from(lines.len() + 2)
         .unwrap_or(u16::MAX)
         .min(screen.height);
@@ -101,7 +111,41 @@ pub fn render(f: &mut Frame, app: &AppView) {
         true,
         chrome::Tone::Normal,
     );
-    f.render_widget(Paragraph::new(lines), inner);
+    let max_scroll = lines.len().saturating_sub(usize::from(inner.height));
+    app.context_max_scroll.set(max_scroll);
+    let top = app.context_scroll.get().min(max_scroll);
+    app.context_scroll.set(top);
+    let visible = lines
+        .into_iter()
+        .skip(top)
+        .take(usize::from(inner.height))
+        .collect::<Vec<_>>();
+    f.render_widget(Paragraph::new(visible), inner);
+}
+
+fn session_lines(app: &AppView, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width.saturating_sub(2)).max(1);
+    let requests = app
+        .session
+        .as_ref()
+        .filter(|_| !app.incognito)
+        .and_then(|s| app.db.usage_for_session(&s.id).ok())
+        .unwrap_or_default();
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "Session requests · input / cached / output · USD",
+            Style::default().fg(app.theme.fg_dim),
+        )),
+    ];
+    for line in nexus_core::app::usage::session_usage_lines(&requests) {
+        lines.extend(
+            textwrap::wrap(&line, width)
+                .into_iter()
+                .map(|part| Line::from(part.into_owned())),
+        );
+    }
+    lines
 }
 
 /// The turn's and the last request's cache hit rates, when either is known.
@@ -152,5 +196,20 @@ pub fn handle_key(app: &mut AppView, key: KeyEvent) {
             .contains(crossterm::event::KeyModifiers::CONTROL);
     if key.code == KeyCode::Esc || ctrl_g {
         app.popup = Popup::None;
+        app.context_scroll.set(0);
+        return;
     }
+    let delta = match key.code {
+        KeyCode::Up | KeyCode::Char('k') => -1,
+        KeyCode::Down | KeyCode::Char('j') => 1,
+        KeyCode::PageUp => -10,
+        KeyCode::PageDown => 10,
+        _ => 0,
+    };
+    app.context_scroll.set(
+        app.context_scroll
+            .get()
+            .saturating_add_signed(delta)
+            .min(app.context_max_scroll.get()),
+    );
 }

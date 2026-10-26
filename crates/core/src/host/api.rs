@@ -2267,18 +2267,16 @@ fn handle_actor_request(app: &mut App, admin: &mut super::admin::State, request:
             let usage = usage.into_usage();
             let result = app
                 .db
-                .log_usage(
+                .record_usage(
                     route.tag.name(),
                     &route.model,
-                    usage.prompt_tokens,
-                    usage.completion_tokens,
-                    usage.cache_read_tokens,
-                    usage.cache_creation_tokens,
-                    usage.prompt_convention,
-                    usage.cost,
-                    usage.cost.is_some(),
-                    None,
-                    Some(&app.active_space.id),
+                    usage,
+                    &crate::db::UsageLog {
+                        path: app.space.db_path(),
+                        session_id: None,
+                        space_id: app.active_space.id.clone(),
+                    },
+                    "gateway",
                 )
                 .map(|_| ())
                 .map_err(|error| error.to_string());

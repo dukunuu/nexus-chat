@@ -588,7 +588,6 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::db::Db;
 use crate::provider::openrouter::OpenRouter;
 use crate::provider::{ChatParams, StreamEvent, Usage};
 use crate::tools::{ToolBox, ToolExecutor};
@@ -618,39 +617,18 @@ impl ResearchUsage {
         }
     }
 
-    fn record(&self, model: &str, usage: Usage) {
-        // Cost-only trailing events are merged by the interactive task;
-        // background streams have no request boundary for that event, so do
-        // not create a zero-token duplicate row here.
-        if usage.prompt_tokens == 0 && usage.completion_tokens == 0 {
-            return;
+    fn log(&self) -> Option<crate::db::UsageLog> {
+        (!self.session_id.is_empty()).then(|| crate::db::UsageLog {
+            path: self.db_path.clone(),
+            session_id: Some(self.session_id.clone()),
+            space_id: self.space_id.clone(),
+        })
+    }
+
+    fn record(&self, model: &str, usage: Usage, kind: &str) {
+        if let Some(log) = self.log() {
+            log.record(self.backend, model, usage, kind);
         }
-        let Ok(db) = Db::open(&self.db_path) else {
-            return;
-        };
-        let cost_is_provider = usage.cost.is_some();
-        let cost = usage.cost.or_else(|| {
-            db.request_cost(
-                model,
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                usage.cache_read_tokens,
-                usage.cache_creation_tokens,
-            )
-        });
-        let _ = db.log_usage(
-            self.backend,
-            model,
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            usage.cache_read_tokens,
-            usage.cache_creation_tokens,
-            usage.prompt_convention,
-            cost,
-            cost_is_provider,
-            Some(&self.session_id),
-            Some(&self.space_id),
-        );
     }
 }
 
@@ -688,15 +666,14 @@ async fn complete_text(
     model: &str,
     messages: Vec<ChatMessage>,
     usage: &ResearchUsage,
+    kind: &str,
 ) -> Result<String, String> {
     let params = usage.chat_params();
     provider
         .complete_with_params(model, messages, &params)
         .await
         .map(|completion| {
-            if let Some(reported) = completion.usage {
-                usage.record(model, reported);
-            }
+            usage.record(model, completion.usage.unwrap_or_default(), kind);
             completion.text.trim().to_string()
         })
         .map_err(|e| e.to_string())
@@ -713,7 +690,15 @@ async fn complete_agent(
     ids: &(String, String, String),
     label: &str,
 ) -> Result<String, String> {
-    match complete_text(provider, model, messages, usage).await {
+    match complete_text(
+        provider,
+        model,
+        messages,
+        usage,
+        &format!("research:{label}"),
+    )
+    .await
+    {
         Ok(text) => Ok(text),
         Err(e) => {
             send_stage(tx, ids, label, format!("error — {e}"));
@@ -735,6 +720,7 @@ async fn plan(
         model,
         planner_messages_with_context(topic, answers, known),
         usage,
+        "research:planner",
     )
     .await?;
     let qs = parse_plan_blocks(&text);
@@ -804,7 +790,12 @@ async fn run_searcher(
         ChatMessage::text("user", prompt),
     ];
     let tools = ctx.toolbox.defs();
-    let (mut rx, abort) = provider.stream_chat(
+    let kind = if slot.batch == "web survey" {
+        "research:web survey"
+    } else {
+        "research:searcher"
+    };
+    let (mut rx, abort) = provider.clone().logged(ctx.usage.log(), kind).stream_chat(
         model.to_string(),
         messages,
         ctx.usage.chat_params(),
@@ -833,9 +824,8 @@ async fn run_searcher(
                 send_stage(ctx.tx, ctx.ids, &label, format!("error — {e}"));
                 return format!("[search agent error on \"{display}\": {e}]");
             }
-            StreamEvent::Usage(reported) => ctx.usage.record(model, reported),
             StreamEvent::Done => break,
-            StreamEvent::Reasoning(_) => {}
+            StreamEvent::Usage(_) | StreamEvent::Reasoning(_) => {}
         }
     }
     let text = buf.trim();
@@ -870,14 +860,17 @@ async fn verify_with_quote_check(
     ids: &(String, String, String),
 ) -> String {
     let tools = cache_only_toolbox.defs();
-    let (mut rx, abort) = provider.stream_chat(
-        model.to_string(),
-        messages,
-        usage.chat_params(),
-        tools,
-        cache_only_toolbox,
-        RESEARCH_SEARCHER_MAX_ITERS,
-    );
+    let (mut rx, abort) = provider
+        .clone()
+        .logged(usage.log(), "research:verifier")
+        .stream_chat(
+            model.to_string(),
+            messages,
+            usage.chat_params(),
+            tools,
+            cache_only_toolbox,
+            RESEARCH_SEARCHER_MAX_ITERS,
+        );
     let _abort = super::AbortOnDrop(abort);
     let mut buf = String::new();
     let mut failed = false;
@@ -899,9 +892,8 @@ async fn verify_with_quote_check(
                 send_stage(tx, ids, "verifier", format!("error — {e}"));
                 break;
             }
-            StreamEvent::Usage(reported) => usage.record(model, reported),
             StreamEvent::Done => break,
-            StreamEvent::Reasoning(_) => {}
+            StreamEvent::Usage(_) | StreamEvent::Reasoning(_) => {}
         }
     }
     if !failed {
@@ -1004,6 +996,7 @@ pub struct ResearchOptions {
     pub embedding_provider: OpenRouter,
     pub embedding_model: String,
     pub db_path: std::path::PathBuf,
+    pub incognito: bool,
     pub topic: String,
     pub reply_rx: Option<mpsc::UnboundedReceiver<String>>,
     pub steer_rx: mpsc::UnboundedReceiver<String>,
@@ -1105,7 +1098,7 @@ async fn run_user_survey(
 ) -> Result<Vec<(String, String)>, String> {
     let mut rounds: Vec<(String, String)> = Vec::new();
     let mut history = survey_messages(topic, &[]);
-    let initial = complete_text(provider, model, history.clone(), usage)
+    let initial = complete_text(provider, model, history.clone(), usage, "research:survey")
         .await
         .map_err(|e| format!("survey agent failed: {e}"))?;
     history.push(ChatMessage::text("assistant", initial.clone()));
@@ -1147,7 +1140,7 @@ async fn run_user_survey(
                     "user",
                     format!("Questions asked:\n{asked}\nUser answer: {reply}"),
                 ));
-                raw = complete_text(provider, model, history.clone(), usage)
+                raw = complete_text(provider, model, history.clone(), usage, "research:survey")
                     .await
                     .map_err(|e| format!("survey follow-up failed: {e}"))?;
                 history.push(ChatMessage::text("assistant", raw.clone()));
@@ -1215,6 +1208,7 @@ async fn await_plan_approval(
             model,
             plan_approval_messages(topic, questions, &reply),
             usage,
+            "research:plan approval",
         )
         .await
         .map_err(|e| format!("plan approval agent failed: {e}"))?;
@@ -1259,6 +1253,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         embedding_provider,
         embedding_model,
         db_path,
+        incognito,
         topic,
         reply_rx,
         steer_rx,
@@ -1269,7 +1264,11 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
     let db_path = db_path.as_path();
     let usage = Arc::new(ResearchUsage {
         db_path: db_path.to_path_buf(),
-        session_id: ids.0.clone(),
+        session_id: if *incognito {
+            String::new()
+        } else {
+            ids.0.clone()
+        },
         prompt_cache_key,
         cache_ttl_1h,
         space_id: ids.1.clone(),
@@ -1280,7 +1279,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
     // the ground truth arrives, so the plan targets real gaps. The two
     // gatherers also run concurrently with each other.
     let gather_task = {
-        let provider = embedding_provider.clone();
+        let provider = embedding_provider.clone().logged(usage.log(), "embed");
         let model = embedding_model.clone();
         let db_path = db_path.to_path_buf();
         let space_id = ids.1.clone();
@@ -1737,6 +1736,7 @@ async fn run_research_inner(opts: &mut ResearchOptions) -> Result<String, String
         research_model,
         writer_messages(topic, &verified, &pinned),
         &usage,
+        "research:writer",
     )
     .await
     {
@@ -1862,6 +1862,7 @@ impl super::App {
         }
         let (tx, rx) = mpsc::unbounded_channel();
         self.research_topic_rx = Some(rx);
+        let provider = self.usage_provider(provider, "research:topic");
         self.push_status("scoping a research topic from this chat…".to_string());
         tokio::spawn(async move {
             let prompt = prompts::render(
@@ -2089,6 +2090,7 @@ impl super::App {
             embedding_provider,
             embedding_model: raw_embedding_model,
             db_path: self.space.db_path(),
+            incognito: self.incognito,
             topic,
             reply_rx,
             steer_rx,

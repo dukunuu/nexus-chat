@@ -46,6 +46,8 @@ mod panels;
 mod prompt_snapshots;
 #[cfg(test)]
 mod reply_style_tests;
+#[cfg(test)]
+mod request_usage_tests;
 mod research;
 mod scripts;
 mod sessions;
@@ -432,6 +434,7 @@ pub struct ContextBreakdown {
     pub system_tokens: u64,
     pub memory_tokens: u64,
     pub skills_tokens: u64,
+    pub tools_tokens: u64,
     pub conversation_tokens: u64,
     pub limit: Option<u64>,
     /// Whether the session has ever been auto-compacted.
@@ -2040,11 +2043,17 @@ impl App {
             let following: Vec<Arc<dyn Decider>> = match self.saved.agent.selected_decider(has_key)
             {
                 ModelDecider::Jev => vec![Arc::new(JevDecider {
-                    provider: self.backends.get(BackendTag::OpenRouter).cloned(),
+                    provider: self
+                        .backends
+                        .get(BackendTag::OpenRouter)
+                        .cloned()
+                        .map(|p| self.usage_provider(p, "decider")),
                     context,
                 })],
                 ModelDecider::Llm => {
-                    let backend = self.helper_backend();
+                    let backend = self
+                        .helper_backend()
+                        .map(|(p, m)| (p.usage_kind("decider"), m));
                     vec![Arc::new(LlmDecider { backend, context })]
                 }
                 ModelDecider::Rules => Vec::new(),
@@ -2059,8 +2068,13 @@ impl App {
     /// Rebuild the toolbox from the current `searxng_url`, so a settings
     /// change takes effect immediately (no restart). Web search tries the
     /// configured backends first, then keyless Exa and the session provider.
-    #[allow(clippy::too_many_lines)] // Keep the toolbox's capability wiring together.
     pub fn refresh_toolbox(&mut self) {
+        self.rebuild_toolbox();
+        self.reload_skills();
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep the toolbox's capability wiring together.
+    fn rebuild_toolbox(&mut self) {
         let url =
             (!self.searxng_url.trim().is_empty()).then(|| self.searxng_url.trim().to_string());
         let key = (!self.langsearch_key.trim().is_empty())
@@ -2181,7 +2195,6 @@ impl App {
         } else {
             Arc::new(toolbox)
         };
-        self.reload_skills();
     }
 
     /// Whether the active session is a research session.

@@ -75,6 +75,9 @@ async fn evaluate(
                 .backends
                 .get(BackendTag::OpenRouter)
                 .context("no OpenRouter backend")?
+                .clone()
+                .logged(app.usage_log(), "judge")
+                .for_usage_session(session)
                 .decide(&json!({
                     "model": app.saved.agent.decider_model,
                     "state": state,
@@ -94,6 +97,7 @@ async fn evaluate(
         }
         ModelDecider::Llm => {
             let (provider, model) = app.helper_backend().context("no helper model backend")?;
+            let provider = provider.usage_kind("judge").for_usage_session(session);
             let response = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 provider.complete_with_params(&model, vec![

@@ -106,8 +106,16 @@ impl App {
         self.push_status("swarm: starting…".to_string());
 
         let swarm_session_id = session.id.clone();
+        let mut backends = self.backends.clone();
+        for tag in backends.configured_tags() {
+            if let Some(provider) = backends.get(tag).cloned() {
+                backends.set(tag, self.usage_provider(provider, "swarm"));
+            }
+        }
+        let meta_provider = self.usage_provider(meta_provider, "swarm");
+        let default_provider = self.usage_provider(default_provider, "swarm");
         let task = tokio::spawn(run_swarm_turn(SwarmTurnOptions {
-            backends: self.backends.clone(),
+            backends,
             meta_provider,
             raw_meta_model,
             personas,

@@ -293,6 +293,9 @@ pub struct AppView {
     /// The `/usage` popup: aggregates snapshot + recent-list cursor.
     pub usage_data: Option<nexus_core::app::usage::UsageData>,
     pub usage_scroll: usize,
+    /// Context popup line offset, clamped after every render.
+    pub context_scroll: std::cell::Cell<usize>,
+    pub context_max_scroll: std::cell::Cell<usize>,
     /// Selected failure mode in the `/harness` popup.
     pub harness_selected: usize,
     pub jobs_popup: crate::ui::popups::jobs::JobsPopup,
@@ -553,6 +556,8 @@ impl AppView {
             skills_edit: String::new(),
             usage_data: None,
             usage_scroll: 0,
+            context_scroll: std::cell::Cell::new(0),
+            context_max_scroll: std::cell::Cell::new(0),
             harness_selected: 0,
             jobs_popup: crate::ui::popups::jobs::JobsPopup::default(),
             connectors_popup: crate::ui::popups::connectors::ConnectorsPopup::default(),

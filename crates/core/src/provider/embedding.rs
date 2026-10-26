@@ -109,6 +109,13 @@ impl Embedder {
         })
     }
 
+    pub(crate) fn logged(mut self, log: Option<crate::db::UsageLog>) -> Self {
+        if let Backend::OpenAi(provider) = &mut self.backend {
+            *provider = provider.clone().logged(log, "embed");
+        }
+        self
+    }
+
     /// True when both handles share one probed profile (the same live instance).
     #[must_use]
     pub fn same_instance(&self, other: &Self) -> bool {
