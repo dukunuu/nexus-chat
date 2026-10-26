@@ -27,6 +27,7 @@ use crate::space::Space;
 mod apps;
 mod backends;
 mod chat;
+mod chats;
 mod commands;
 mod compaction;
 mod embeddings;
@@ -903,7 +904,8 @@ pub struct ChatNotification {
     pub success: bool,
 }
 
-/// One file's embedding result: (space id, file id, (seq, vector) pairs or error).
+/// Shared embedding result: (space id, file id or `chats` job marker,
+/// (seq, vector) pairs or error). An empty id denotes a capability probe.
 pub type EmbedMsg = (
     String,
     String,
@@ -1085,6 +1087,10 @@ pub struct App {
     /// None preserves legacy OCR unless direct image embeddings are enabled.
     pub ocr_images: Option<bool>,
     embedding_chunks: Vec<(String, String)>,
+    embedding_chat_job: Option<chats::ChatEmbedJob>,
+    next_chat_index: std::time::Instant,
+    /// Device-local conversation indexing progress for the files popup.
+    pub chat_index_status: String,
     embedding_discovery:
         Option<std::sync::Arc<std::sync::OnceLock<(String, crate::provider::embedding::Embedder)>>>,
     /// Base URL of a `SearXNG` instance for the web-search tool, or empty to
@@ -1228,7 +1234,7 @@ pub struct App {
     pub skills_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
     /// Background OCR updates: (`space_id`, file name, progress or final result).
     pub ocr_rx: Option<mpsc::UnboundedReceiver<(String, String, files::OcrUpdate)>>,
-    /// One in-flight chunk-embedding job: (space id, file id, vectors or error).
+    /// One in-flight file/chat embedding job, or embedder capability probe.
     pub embed_rx: Option<mpsc::UnboundedReceiver<EmbedMsg>>,
     /// Local provider servers Nexus started with `/local start`. Owning them
     /// is what lets `/local stop` and the exit path reclaim their memory;
@@ -1510,6 +1516,9 @@ impl App {
             embedding_backend: None,
             embedding_status: String::new(),
             embedding_chunks: Vec::new(),
+            embedding_chat_job: None,
+            next_chat_index: std::time::Instant::now() + std::time::Duration::from_secs(5),
+            chat_index_status: String::new(),
             embedding_discovery: None,
             ocr_images: None,
             base_system_prompt: config::BASE_SYSTEM_PROMPT.to_string(),
@@ -2468,6 +2477,10 @@ impl App {
             return ev;
         }
         tokio::select! {
+            () = tokio::time::sleep_until(self.next_chat_index.into()), if self.embed_rx.is_none() => {
+                self.start_embedding();
+                AppEvent::Status(self.embedding_status.clone())
+            },
             request = async {
                 match self.approval_rx.as_mut() {
                     Some(receiver) => receiver.recv().await,

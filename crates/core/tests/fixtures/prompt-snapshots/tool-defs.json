@@ -269,7 +269,7 @@
   },
   {
     "name": "search",
-    "description": "Search general web sources, recent reporting (web with recency), papers, or Reddit and Hacker News threads. Use discussion for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments.\n- mode=web: Search general sources; use recency for recent news reporting. Needs query; optional recency, include_domains, exclude_domains.\n- mode=academic: Search academic papers with Semantic Scholar, preserving scholarly metadata. Needs query; optional limit.\n- mode=discussion: Search Reddit and Hacker News threads for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments. Needs query.\n- mode=images: Direct picture URLs for cards and replies; copy one exactly into image/src. Needs query.",
+    "description": "Search general web sources, recent reporting (web with recency), papers, or Reddit and Hacker News threads (discussion: opinions, experiences, recommendations, comparisons, troubleshooting).\n- mode=web: Search general sources; use recency for recent news reporting. Needs query; optional recency, include_domains, exclude_domains.\n- mode=academic: Search academic papers with Semantic Scholar, preserving scholarly metadata. Needs query; optional limit.\n- mode=discussion: Reddit and Hacker News threads; fetch_url a thread to read its comments. Needs query.\n- mode=images: Direct picture URLs for cards and replies; copy one exactly into image/src. Needs query.\n- mode=chats: Earlier chats the user refers to; fetch_url a hit's chat: URL. Needs query; optional limit.",
     "parameters": {
       "properties": {
         "exclude_domains": {
@@ -287,7 +287,7 @@
           "type": "array"
         },
         "limit": {
-          "description": "maximum academic results (default 10, max 20)",
+          "description": "maximum academic/chats results (default 10, max 20)",
           "type": "integer"
         },
         "mode": {
@@ -295,7 +295,8 @@
             "web",
             "academic",
             "discussion",
-            "images"
+            "images",
+            "chats"
           ],
           "type": "string"
         },
@@ -323,7 +324,7 @@
   },
   {
     "name": "fetch_url",
-    "description": "Fetch readable, paged text from URLs, PDFs, or YouTube transcripts, using the 24-hour cache and respecting verifier cache-only mode.\n- fetch_url: Fetch a page of text. Needs url; optional offset, limit, fresh.",
+    "description": "Fetch readable, paged text from URLs, chat: URLs, PDFs, or YouTube transcripts, using the 24-hour cache and respecting verifier cache-only mode.\n- fetch_url: Fetch a page of text. Needs url; optional offset, limit, fresh.",
     "parameters": {
       "properties": {
         "fresh": {

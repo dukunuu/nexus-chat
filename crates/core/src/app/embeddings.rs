@@ -48,6 +48,7 @@ impl App {
         self.embedding_backend = None;
         self.embedding_discovery = None;
         self.embedding_chunks.clear();
+        self.embedding_chat_job = None;
         self.embedding_status.clear();
     }
 
@@ -131,6 +132,8 @@ impl App {
                 }
                 self.push_status(self.embedding_status.clone());
                 self.refresh_toolbox();
+                // The identity is known now: chat backfill need not wait a tick.
+                self.next_chat_index = std::time::Instant::now();
                 // Images held during the probe can now use the actual capability.
                 self.rescan_files_with(&crate::extract::ExtractConfig::load());
             }

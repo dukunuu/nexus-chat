@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 use crate::provider::ModelPricing;
 
+pub(crate) mod chats;
+
 /// Stored per-model preferences.
 #[derive(Debug, Clone)]
 pub struct ModelPref {
@@ -345,6 +347,7 @@ pub fn open_attached(db_path: &std::path::Path) -> Result<Connection> {
     // while other connections read.
     let _ = conn.pragma_update(Some("cache"), "journal_mode", "WAL");
     migrate_cache(&conn, "cache")?;
+    chats::install_cleanup(&conn)?;
     Ok(conn)
 }
 
@@ -377,6 +380,7 @@ fn apply_pragmas(conn: &Connection) {
 /// on a standalone cache-only connection.
 #[allow(clippy::too_many_lines)]
 pub fn migrate_cache(conn: &Connection, schema: &str) -> Result<()> {
+    chats::migrate(conn, schema)?;
     conn.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS {schema}.web_cache (
             url_norm   TEXT PRIMARY KEY,
@@ -593,6 +597,7 @@ impl Db {
         let conn = open_attached(path).with_context(|| format!("opening db {}", path.display()))?;
         let mut db = Self { conn };
         db.migrate()?;
+        chats::install_cleanup(&db.conn)?;
         Ok(db)
     }
 
@@ -604,6 +609,7 @@ impl Db {
         migrate_cache(&conn, "cache")?;
         let mut db = Db { conn };
         db.migrate()?;
+        chats::install_cleanup(&db.conn)?;
         Ok(db)
     }
 

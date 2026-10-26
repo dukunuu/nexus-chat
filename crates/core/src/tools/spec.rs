@@ -532,7 +532,7 @@ pub(super) static SCRIPTS: ToolSpec = ToolSpec {
 
 pub(super) static SEARCH: ToolSpec = ToolSpec {
     name: "search",
-    purpose: "Search general web sources, recent reporting (web with recency), papers, or Reddit and Hacker News threads. Use discussion for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments.",
+    purpose: "Search general web sources, recent reporting (web with recency), papers, or Reddit and Hacker News threads (discussion: opinions, experiences, recommendations, comparisons, troubleshooting).",
     selector: Some("mode"),
     params: &[
         Param {
@@ -558,7 +558,7 @@ pub(super) static SEARCH: ToolSpec = ToolSpec {
         Param {
             name: "limit",
             kind: Kind::Int,
-            doc: "maximum academic results (default 10, max 20)",
+            doc: "maximum academic/chats results (default 10, max 20)",
         },
     ],
     actions: &[
@@ -580,7 +580,7 @@ pub(super) static SEARCH: ToolSpec = ToolSpec {
         },
         ActionSpec {
             name: "discussion",
-            summary: "Search Reddit and Hacker News threads for opinions, experiences, recommendations, comparisons and troubleshooting; then fetch_url a thread to read its comments",
+            summary: "Reddit and Hacker News threads; fetch_url a thread to read its comments",
             required: &["query"],
             optional: &[],
             read_only: true,
@@ -594,12 +594,20 @@ pub(super) static SEARCH: ToolSpec = ToolSpec {
             read_only: true,
             internal: "image_search",
         },
+        ActionSpec {
+            name: "chats",
+            summary: "Earlier chats the user refers to; fetch_url a hit's chat: URL",
+            required: &["query"],
+            optional: &["limit"],
+            read_only: true,
+            internal: "search_chats",
+        },
     ],
 };
 
 pub(super) static FETCH_URL: ToolSpec = ToolSpec {
     name: "fetch_url",
-    purpose: "Fetch readable, paged text from URLs, PDFs, or YouTube transcripts, using the 24-hour cache and respecting verifier cache-only mode.",
+    purpose: "Fetch readable, paged text from URLs, chat: URLs, PDFs, or YouTube transcripts, using the 24-hour cache and respecting verifier cache-only mode.",
     selector: None,
     params: &[
         Param {
@@ -1523,7 +1531,7 @@ mod tests {
         );
         assert_eq!(
             FETCH_URL.def_compact(&["fetch_url"]).description,
-            "Fetch readable, paged text from URLs, PDFs, or YouTube transcripts, using the 24-hour cache and respecting verifier cache-only mode.\n- fetch_url (needs url)"
+            "Fetch readable, paged text from URLs, chat: URLs, PDFs, or YouTube transcripts, using the 24-hour cache and respecting verifier cache-only mode.\n- fetch_url (needs url)"
         );
         assert!(
             SKILLS.def_compact(&["create"]).parameters["properties"]
@@ -1612,6 +1620,7 @@ mod tests {
         ),
         ("search", r#"{"mode":"web","query":"x"}"#, "web_search"),
         ("search", r#"{"mode":"images","query":"x"}"#, "image_search"),
+        ("search", r#"{"mode":"chats","query":"x"}"#, "search_chats"),
         (
             "search",
             r#"{"mode":"academic","query":"x"}"#,
@@ -1813,6 +1822,7 @@ mod tests {
             "search_sources",
             "list_citations",
             "search_files",
+            "search_chats",
             "read_file",
             "read_pdf_page",
             "read_script",
@@ -1911,7 +1921,7 @@ mod tests {
             (
                 "search",
                 r#"{"mode":"nope"}"#,
-                "invalid mode for search: \"nope\" · valid: web, academic, discussion, images",
+                "invalid mode for search: \"nope\" · valid: web, academic, discussion, images, chats",
             ),
             (
                 "research_lookup",

@@ -170,23 +170,22 @@ fn render_files(f: &mut Frame, app: &AppView) {
     };
     let mut inner = chrome::render_hinted(f, area, title, &hint, app, true, tone);
     // Embedding health and re-index progress, one dim line above the list.
-    if app.files_mode == FilesMode::Browse && !app.embedding_status.is_empty() && inner.height > 3 {
-        let status = Rect { height: 1, ..inner };
-        f.render_widget(
-            ratatui::widgets::Paragraph::new(Span::styled(
-                chrome::truncate(
-                    &app.embedding_status,
-                    inner.width.saturating_sub(2) as usize,
-                ),
-                dim,
-            )),
-            status,
-        );
-        inner = Rect {
-            y: inner.y + 1,
-            height: inner.height - 1,
-            ..inner
-        };
+    for text in [&app.embedding_status, &app.chat_index_status] {
+        if app.files_mode == FilesMode::Browse && !text.is_empty() && inner.height > 3 {
+            let status = Rect { height: 1, ..inner };
+            f.render_widget(
+                ratatui::widgets::Paragraph::new(Span::styled(
+                    chrome::truncate(text, inner.width.saturating_sub(2) as usize),
+                    dim,
+                )),
+                status,
+            );
+            inner = Rect {
+                y: inner.y + 1,
+                height: inner.height - 1,
+                ..inner
+            };
+        }
     }
     let list = chrome::standard_list(items, &app.theme);
     let mut state = ListState::default();

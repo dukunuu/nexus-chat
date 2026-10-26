@@ -149,6 +149,17 @@ reports that in the result header when a filter was requested.
   `App::automatic_image_ocr` is false and rescans do not queue OCR/captions for
   images (`ocr_images` overrides; `reocr_file` is the explicit action). Tests
   use `provider::embedding::tests::MockOllama`; never hit a real Ollama.
+- **Past-chat search**: `db/chats.rs` maintains rebuildable FTS5 message chunks
+  and `(message_id, seq, EmbedIdentity)` vectors in device-local `cache.db` only.
+  Index persisted user/assistant content, never tool/system/reasoning text or
+  incognito. Synced messages enter the same newest-first backfill; connection-local
+  TEMP triggers remove cached rows on message/session deletion or message edits,
+  including sync deletes. `app/chats.rs` uses the existing `AppEvent::Embed`
+  channel and exactly the file embedder (local files means local chats), behind
+  files, with bounded batches and progress in `/files`. `tools/chats.rs` implements
+  `search mode=chats` (read-only hybrid RRF, active space only) and the `chat:` URL
+  transcript that `fetch_url` pages; a separate tool would not fit the chat prompt
+  token ceiling. Never in research searcher toolboxes.
 - **One model setting, the rest automatic**: `/config` has one model row,
   `helper_model` (blank = auto). `App::helper_backend` is where every background
   job (memory, compaction, image descriptions, vision OCR, the `LlmDecider`)

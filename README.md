@@ -413,6 +413,30 @@ Anything that changes it (a new `ollama pull`, switching models, a different
 endpoint) re-embeds a space lazily in the background, one file at a time, with
 progress on the first line of `/files`; stale vectors are never mixed in.
 
+### Searching past chats
+
+When someone refers to an earlier conversation, the model uses
+`search(mode=chats, query=...)`. It merges keyword and semantic rankings, skips
+the current chat, and only looks in the active space (another space's chats stay
+out of reach, even by id). Each hit has the chat's title, date, role, a snippet
+and a `chat:<session>#<message>` URL; `fetch_url` on that URL reads the
+conversation, starting two messages ahead of the hit, paged by line like any
+other page. Tool calls and results show as one line each.
+
+Only persisted user and assistant **content** is indexed: no tool results,
+system text or reasoning. Incognito conversations are never persisted or indexed.
+Synced-in messages are indexed on this device too. The rebuildable FTS5 keyword
+index and identity-keyed message/chunk vectors live only in the device-local
+`cache.db`, not in the durable or synced schema. Deleting messages or sessions
+removes their cached index rows.
+
+Chats share exactly the file embedder described above: local EmbeddingGemma 2
+when available, otherwise the active backend's default, otherwise keywords only.
+Chat text never falls back to cloud embeddings when files use a local embedder.
+History backfills newest first, behind files, in bounded background batches;
+`/files` shows `chats: N of M indexed`. An identity change re-embeds lazily.
+Chat search is available in chat and agent mode, never in research searcher toolboxes.
+
 ## Features
 
 - **Chat** over any configured backend: OpenRouter, OpenAI, OpenCode Zen/Go,

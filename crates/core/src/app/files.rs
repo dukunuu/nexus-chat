@@ -687,6 +687,12 @@ impl App {
         if self.embed_rx.is_some() {
             return;
         }
+        // Chat backfill runs on its own timer only, never inline with the
+        // rescans that follow every turn, so it stays behind foreground work.
+        let chats_due = std::time::Instant::now() >= self.next_chat_index;
+        if chats_due {
+            self.index_chats();
+        }
         let model = self.embedding_model.trim().to_string();
         if model.is_empty() {
             return;
@@ -728,6 +734,9 @@ impl App {
             })
         }) else {
             self.embedding_status = embedder.status();
+            if chats_due {
+                self.start_chat_embedding(embedder, identity);
+            }
             return;
         };
         // OCR owns files in this state.  They remain in the database work
@@ -870,9 +879,14 @@ impl App {
     pub fn on_embed_done(&mut self, r: Option<crate::app::EmbedMsg>) {
         let Some((space_id, file_id, result)) = r else {
             self.embed_rx = None;
+            self.embedding_chat_job = None;
             return;
         };
         self.embed_rx = None;
+        if self.embedding_chat_job.is_some() {
+            self.on_chat_embed_done(result);
+            return;
+        }
         if file_id.is_empty() {
             self.on_embedding_probe(result);
             return;
@@ -914,6 +928,8 @@ impl App {
                 if let Some(status) = &restore_status {
                     let _ = self.db.set_file_status(&file_id, status);
                 }
+                self.next_chat_index =
+                    std::time::Instant::now() + std::time::Duration::from_secs(60);
                 self.embedding_status = format!("embeddings: {e} · keyword search available");
                 self.push_status(format!("embedding failed: {e}"));
             }

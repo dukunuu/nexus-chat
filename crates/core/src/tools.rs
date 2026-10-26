@@ -3,6 +3,7 @@
 //! `research_lookup`, `files`, `app`, `media`) that dispatch onto a larger
 //! set of specialized implementations below, behind the `ToolExecutor` seam.
 
+mod chats;
 mod deck;
 mod effect;
 #[cfg(test)]
@@ -1275,10 +1276,11 @@ impl ToolBox {
                 "export",
             ],
         ));
-        defs.push(def(
-            &spec::SEARCH,
-            &["web", "academic", "discussion", "images"],
-        ));
+        let mut search_modes = vec!["web", "academic", "discussion", "images"];
+        if self.files.is_some() {
+            search_modes.push("chats");
+        }
+        defs.push(def(&spec::SEARCH, &search_modes));
         defs.push(def(&spec::FETCH_URL, &["fetch_url"]));
         if self.workspace.is_some() {
             defs.push(def(
@@ -2653,13 +2655,10 @@ impl ToolBox {
                     .and_then(|u| u.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let offset = usize::try_from(
-                    v.get("offset")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(1)
-                        .max(1),
-                )
-                .unwrap_or(1);
+                let explicit_offset = v
+                    .get("offset")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|n| usize::try_from(n.max(1)).unwrap_or(1));
                 let limit = v
                     .get("limit")
                     .and_then(serde_json::Value::as_u64)
@@ -2670,8 +2669,19 @@ impl ToolBox {
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 let status = format!("Fetching {url}…");
-                let result = match self.fetch_cached(&url, fresh).await {
-                    Ok(text) => {
+                // `chat:<session>#<message>` reads a past conversation of this
+                // space, starting near the message unless an offset is given.
+                let fetched = if url.starts_with("chat:") {
+                    match &self.files {
+                        Some(ctx) if !self.research_only => chats::transcript(ctx, &url),
+                        _ => Err(anyhow::anyhow!("chat history unavailable")),
+                    }
+                } else {
+                    self.fetch_cached(&url, fresh).await.map(|text| (text, 1))
+                };
+                let result = match fetched {
+                    Ok((text, start_line)) => {
+                        let offset = explicit_offset.unwrap_or(start_line);
                         let lines: Vec<&str> = text.lines().collect();
                         let total = lines.len();
                         let start = (offset - 1).min(total);
@@ -2929,6 +2939,19 @@ impl ToolBox {
                     );
                 }
                 (out, status)
+            }
+            "search_chats" => {
+                let value = serde_json::from_str(args).unwrap_or_default();
+                let result = match &self.files {
+                    Some(ctx) if !self.research_only => {
+                        chats::search(ctx, &self.session_id, &value).await
+                    }
+                    _ => Err(anyhow::anyhow!("chat history unavailable")),
+                };
+                (
+                    result.unwrap_or_else(|error| format!("chat lookup failed: {error}")),
+                    "Reading past chats".to_string(),
+                )
             }
             "search_files" => {
                 let query = serde_json::from_str::<serde_json::Value>(args)
