@@ -52,13 +52,14 @@ pub enum Launch {
 pub struct LaunchOptions {
     /// Context window to request when the runtime supports it.
     pub context_length: Option<u32>,
-    /// Use Ollama's `q8_0` KV cache with flash attention.
+    /// Use a `q8_0` KV cache with flash attention (Ollama and llama.cpp).
     pub kv_cache_q8: bool,
 }
 
 impl LocalRuntime {
     /// Whether starting this runtime's server requires naming a model.
-    /// Ollama, mlx-serve and LM Studio load models on demand through their own API;
+    /// Ollama, llama.cpp (router mode), mlx-serve and LM Studio load models on
+    /// demand through their own API;
     /// mlx-lm and edge0 each serve exactly one model, chosen at launch.
     #[must_use]
     pub const fn serves_one_model(self) -> bool {
@@ -143,6 +144,10 @@ impl LocalRuntime {
                     port.to_string(),
                 ],
                 stop: vec!["lms".into(), "server".into(), "stop".into()],
+            },
+            Self::LlamaCpp => Launch::Owned {
+                argv: llama_server_argv(port, options),
+                env: Vec::new(),
             },
         })
     }
@@ -563,9 +568,90 @@ pub async fn budget_kb(configured: Option<&LocalConfig>) -> Option<u64> {
     Some((total as f64 * DEFAULT_BUDGET_FRACTION) as u64)
 }
 
+/// `llama-server` in router mode: no model at launch; it serves every cached
+/// model and loads the requested one on demand. nexus is not a browser, so
+/// CORS is narrowed to the server itself instead of `*`.
+fn llama_server_argv(port: u16, options: LaunchOptions) -> Vec<String> {
+    let mut argv: Vec<String> = vec![
+        "llama-server".into(),
+        "--host".into(),
+        "127.0.0.1".into(),
+        "--port".into(),
+        port.to_string(),
+        "--cors-origins".into(),
+        format!("http://127.0.0.1:{port}"),
+        "--no-cors-credentials".into(),
+    ];
+    if let Some(context_length) = options.context_length {
+        argv.extend(["--ctx-size".into(), context_length.to_string()]);
+    }
+    if options.kv_cache_q8 {
+        argv.extend(
+            [
+                "--cache-type-k",
+                "q8_0",
+                "--cache-type-v",
+                "q8_0",
+                "--flash-attn",
+                "on",
+            ]
+            .map(String::from),
+        );
+    }
+    argv
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llama_cpp_launches_a_router_closed_to_other_origins() {
+        assert!(!LocalRuntime::LlamaCpp.serves_one_model());
+        let Launch::Owned { argv, env } = LocalRuntime::LlamaCpp
+            .launch(None, 9931, LaunchOptions::default())
+            .unwrap()
+        else {
+            panic!("llama-server is an owned server");
+        };
+        assert!(env.is_empty());
+        assert_eq!(
+            argv,
+            [
+                "llama-server",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "9931",
+                "--cors-origins",
+                "http://127.0.0.1:9931",
+                "--no-cors-credentials",
+            ]
+        );
+        let Launch::Owned { argv, .. } = LocalRuntime::LlamaCpp
+            .launch(
+                None,
+                9931,
+                LaunchOptions {
+                    context_length: Some(65_536),
+                    kv_cache_q8: true,
+                },
+            )
+            .unwrap()
+        else {
+            panic!("llama-server is an owned server");
+        };
+        assert!(argv.ends_with(&[
+            "--ctx-size".to_string(),
+            "65536".into(),
+            "--cache-type-k".into(),
+            "q8_0".into(),
+            "--cache-type-v".into(),
+            "q8_0".into(),
+            "--flash-attn".into(),
+            "on".into(),
+        ]));
+    }
 
     #[test]
     fn launch_commands_carry_the_port_and_require_a_model_where_it_is_served() {

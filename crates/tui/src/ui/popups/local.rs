@@ -36,6 +36,7 @@ fn row(index: usize, current: Option<&LocalConfig>) -> (String, String, String, 
                 LocalRuntime::MlxServe => "mlx-serve list",
                 LocalRuntime::Lmstudio => "lms ls --json",
                 LocalRuntime::Edge0 => "edge0 models",
+                LocalRuntime::LlamaCpp => "llama-server --cache-list",
             }
             .to_string(),
             LocalConfig::for_runtime(runtime, current)

@@ -224,7 +224,7 @@ once.
 ## Local inference (experimental)
 
 Pick a runtime from inside the TUI with `/local` (also the last row of
-`/login`), or name one directly: `/ollama`, `/mlx`, `/mlx-serve`,
+`/login`), or name one directly: `/ollama`, `/llama-cpp`, `/mlx`, `/mlx-serve`,
 `/lmstudio`, `/edge0`, `/local mlx-serve http://localhost:11234/v1`, `/local off`. Either way the choice is
 written to `~/.config/nexus-chat/config.toml` and the catalog reloads
 immediately — no restart.
@@ -233,23 +233,27 @@ The same block can be written by hand:
 
 ```toml
 [local]
-provider = "ollama" # or "mlx", "mlx_serve", "lmstudio", "edge0"
+provider = "ollama" # or "llama_cpp", "mlx", "mlx_serve", "lmstudio", "edge0"
 # endpoint = "http://localhost:11434/v1" # optional inference URL override
 # context_length = 32768 # Ollama default; minimum 2048 tokens
-# kv_cache_q8 = true # optional Ollama KV-cache quantization; default false
+# kv_cache_q8 = true # optional Ollama/llama.cpp KV-cache quantization; default false
 # parallel_tool_calls = false # enable only if the local model supports parallel calls
 # tier = "small" # small (default), medium, or large; small uses compact tool definitions
 ```
 
 `context_length` is reported for every model discovered through this runtime,
 enabling automatic compaction. Ollama defaults to 32,768 tokens; Nexus passes
-that window as `OLLAMA_CONTEXT_LENGTH` when starting its server. Other runtimes
-have no assumed window: set this key to their actual server context size. It
-does not resize mlx-lm, mlx-serve, LM Studio or edge0 servers.
+that window as `OLLAMA_CONTEXT_LENGTH` when starting its server, and passes a
+set `context_length` to llama.cpp as `--ctx-size` (unset, llama.cpp uses each
+model's own window). Other runtimes have no assumed window: set this key to
+their actual server context size. It does not resize mlx-lm, mlx-serve, LM
+Studio or edge0 servers.
 
 For Ollama, `kv_cache_q8 = true` enables `OLLAMA_KV_CACHE_TYPE=q8_0` and
 `OLLAMA_FLASH_ATTENTION=1`, roughly halving KV-cache memory compared with the
-default f16 cache for long contexts. Other runtimes ignore this launch option.
+default f16 cache for long contexts; for llama.cpp it passes `--cache-type-k
+q8_0 --cache-type-v q8_0 --flash-attn on`. Other runtimes ignore this launch
+option.
 Use `/local restart` to apply launch settings to a managed server; configure
 servers started elsewhere yourself so their window matches this setting.
 
@@ -272,12 +276,17 @@ Nexus runs the runtime's discovery command when loading/refreshing `/model`:
 | Runtime | Discovery | Default inference URL |
 | --- | --- | --- |
 | `ollama` | `ollama list` | `http://localhost:11434/v1` |
+| `llama_cpp` | `llama-server --cache-list` | `http://localhost:9931/v1` |
 | `lmstudio` | `lms ls --json` | `http://localhost:1234/v1` |
 | `mlx` (mlx-lm) | `python3` running a bundled, offline Hugging Face cache scanner | `http://localhost:8080/v1` |
 | `mlx_serve` | `mlx-serve list` | `http://localhost:11234/v1` |
 | `edge0` | `edge0 models` | `http://localhost:8000/v1` |
 
-These are **installed models**, not an online download catalog. The legacy
+These are **installed models**, not an online download catalog. llama.cpp
+lists the GGUF models in its cache (download one with `llama-server -hf
+<user>/<repo>:<quant>` or `llama-cli -hf …`); `/local start` runs
+`llama-server` in router mode, which serves every cached model and loads the
+one a request names on demand, with CORS limited to the server's own origin. The legacy
 `mlx` runtime uses mlx-lm, which has no list command: the scanner lists cached
 repositories with `config.json` and safetensors weights, respecting
 `HF_HOME`/`HF_HUB_CACHE`. These are candidates, not a guarantee of MLX

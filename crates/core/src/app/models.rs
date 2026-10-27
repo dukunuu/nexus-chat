@@ -74,7 +74,7 @@ impl App {
                     config.provider.label(),
                     config.endpoint()
                 ),
-                None => "local inference is off — /local <ollama|mlx|mlx-serve|lmstudio|edge0>"
+                None => "local inference is off — /local <ollama|llama-cpp|mlx|mlx-serve|lmstudio|edge0>"
                     .to_string(),
             };
             self.push_status(status);
@@ -111,7 +111,7 @@ impl App {
                 .as_ref()
                 .map(|config| config.provider)
                 .context(
-                    "local inference is off — /local <ollama|mlx|mlx-serve|lmstudio|edge0> first",
+                    "local inference is off — /local <ollama|llama-cpp|mlx|mlx-serve|lmstudio|edge0> first",
                 )?
         } else {
             LocalRuntime::parse(runtime.trim())

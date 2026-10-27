@@ -17,7 +17,10 @@ const ROWS: [(&str, &str); 5] = [
     ("OpenCode Go", "paste a key, or reads $OPENCODE_API_KEY"),
     ("OpenAI", "paste a key, or reads $OPENAI_API_KEY"),
     ("Codex", "ChatGPT subscription — device-code login"),
-    ("Local runtime", "Ollama / MLX / LM Studio / edge0 — no key"),
+    (
+        "Local runtime",
+        "Ollama / llama.cpp / MLX / LM Studio / edge0 — no key",
+    ),
 ];
 
 pub fn render(f: &mut Frame, app: &AppView) {

@@ -18,16 +18,18 @@ pub enum LocalRuntime {
     MlxServe,
     Lmstudio,
     Edge0,
+    LlamaCpp,
 }
 
 impl LocalRuntime {
     /// Every runtime, in the order `/local` lists them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Ollama,
         Self::Mlx,
         Self::MlxServe,
         Self::Lmstudio,
         Self::Edge0,
+        Self::LlamaCpp,
     ];
 
     /// Human-readable runtime name, shown in model names and the picker.
@@ -39,6 +41,7 @@ impl LocalRuntime {
             Self::MlxServe => "mlx-serve",
             Self::Lmstudio => "LM Studio",
             Self::Edge0 => "edge0",
+            Self::LlamaCpp => "llama.cpp",
         }
     }
 
@@ -52,6 +55,7 @@ impl LocalRuntime {
             Self::MlxServe => "mlx-serve",
             Self::Lmstudio => "lmstudio",
             Self::Edge0 => "edge0",
+            Self::LlamaCpp => "llama-cpp",
         }
     }
 
@@ -69,6 +73,7 @@ impl LocalRuntime {
             "mlxserve" => Some(Self::MlxServe),
             "lmstudio" | "lms" => Some(Self::Lmstudio),
             "edge0" | "edge" => Some(Self::Edge0),
+            "llamacpp" | "llama" | "llamaserver" | "llama.cpp" => Some(Self::LlamaCpp),
             _ => None,
         }
     }
@@ -87,10 +92,11 @@ pub struct LocalConfig {
     /// Unset means a fraction of physical memory. Advisory only: Nexus warns,
     /// it never stops a server on its own.
     pub memory_budget_mb: Option<u64>,
-    /// Context window in tokens; Ollama defaults to 32,768 when unset.
+    /// Context window in tokens; Ollama defaults to 32,768 when unset, and
+    /// llama.cpp to the model's own window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u32>,
-    /// Use Ollama's `q8_0` KV cache with flash attention.
+    /// Use a `q8_0` KV cache with flash attention (Ollama and llama.cpp).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub kv_cache_q8: bool,
     /// Whether the local model can request parallel tool calls; defaults to false.
@@ -111,6 +117,8 @@ impl LocalConfig {
             LocalRuntime::MlxServe => "http://localhost:11234/v1",
             LocalRuntime::Lmstudio => "http://localhost:1234/v1",
             LocalRuntime::Edge0 => "http://localhost:8000/v1",
+            // llama-server's own default port since its router release.
+            LocalRuntime::LlamaCpp => "http://localhost:9931/v1",
         })
     }
 
@@ -191,7 +199,7 @@ impl LocalConfig {
         }
         let provider = LocalRuntime::parse(runtime).with_context(|| {
             format!(
-                "unknown local runtime {runtime:?} — expected ollama, mlx, mlx-serve, lmstudio, edge0 or off"
+                "unknown local runtime {runtime:?} — expected ollama, llama-cpp, mlx, mlx-serve, lmstudio, edge0 or off"
             )
         })?;
         let mut config = Self::for_runtime(provider, current);
@@ -215,6 +223,7 @@ impl LocalConfig {
             LocalRuntime::Lmstudio => vec!["lms".into(), "ls".into(), "--json".into()],
             LocalRuntime::Edge0 => vec!["edge0".into(), "models".into()],
             LocalRuntime::MlxServe => vec!["mlx-serve".into(), "list".into()],
+            LocalRuntime::LlamaCpp => vec!["llama-server".into(), "--cache-list".into()],
             LocalRuntime::Mlx => vec![
                 "python3".into(),
                 "-c".into(),
@@ -244,6 +253,7 @@ impl LocalConfig {
                 LocalRuntime::Lmstudio => parse_lmstudio(&output)?,
                 LocalRuntime::Edge0 => parse_edge0(&output)?,
                 LocalRuntime::MlxServe => parse_mlx_serve(&output)?,
+                LocalRuntime::LlamaCpp => parse_llama_cpp(&output)?,
                 LocalRuntime::Mlx => unreachable!("mlx takes the line-per-id path"),
             }
         };
@@ -308,6 +318,25 @@ async fn run_command(argv: &[String]) -> Result<String> {
             }
         }
     }
+}
+
+/// `llama-server --cache-list` prints a count line, then `  N. <user>/<repo>:<quant>`
+/// per downloaded model: the same ids its router mode serves and loads on demand.
+fn parse_llama_cpp(output: &str) -> Result<Vec<String>> {
+    anyhow::ensure!(
+        output
+            .lines()
+            .any(|line| line.trim_start().starts_with("Number of models in cache")),
+        "unexpected llama-server --cache-list output"
+    );
+    Ok(output
+        .lines()
+        .filter_map(|line| {
+            let (number, id) = line.trim().split_once(". ")?;
+            (number.chars().all(|c| c.is_ascii_digit()) && !id.trim().is_empty())
+                .then(|| id.trim().to_string())
+        })
+        .collect())
 }
 
 /// `mlx-serve list` prints NAME TYPE SIZE; incomplete downloads are marked
@@ -424,6 +453,51 @@ mod tests {
         );
         assert!(parse_edge0("").unwrap().is_empty());
         assert!(parse_edge0("  experts=128\n").is_err());
+        // Shape of llama-server 0.7.0's `--cache-list`.
+        assert_eq!(
+            parse_llama_cpp(concat!(
+                "Number of models in cache: 2\n",
+                "   1. deucebucket/Qwen3.6-35B-A3B-Cerebellum-GGUF:Q3_K_M\n",
+                "   2. ggml-org/gemma-3-1b-it-GGUF:Q4_K_M\n",
+            ))
+            .unwrap(),
+            [
+                "deucebucket/Qwen3.6-35B-A3B-Cerebellum-GGUF:Q3_K_M",
+                "ggml-org/gemma-3-1b-it-GGUF:Q4_K_M"
+            ]
+        );
+        assert!(
+            parse_llama_cpp("Number of models in cache: 0\n")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(parse_llama_cpp("error: unknown argument\n").is_err());
+    }
+
+    #[test]
+    fn llama_cpp_runtime_is_selectable_and_lists_through_llama_server() {
+        for token in [
+            "llama-cpp",
+            "llamacpp",
+            "llama.cpp",
+            "llama",
+            "llama-server",
+        ] {
+            assert_eq!(
+                LocalRuntime::parse(token),
+                Some(LocalRuntime::LlamaCpp),
+                "{token}"
+            );
+        }
+        let config: LocalConfig = toml::from_str("provider = 'llama_cpp'").unwrap();
+        assert_eq!(config.endpoint(), "http://localhost:9931/v1");
+        assert_eq!(config.command(), ["llama-server", "--cache-list"]);
+        assert_eq!(config.effective_context(), None);
+        let custom = LocalConfig::from_spec("llama-cpp http://127.0.0.1:8080/v1", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(custom.provider, LocalRuntime::LlamaCpp);
+        assert_eq!(custom.port(), Some(8080));
     }
 
     #[test]

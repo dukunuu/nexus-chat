@@ -91,6 +91,8 @@ pub const COMMANDS: &[Command] = &[
             "mlx-serve",
             "lmstudio",
             "edge0",
+            "llama-cpp",
+            "llamacpp",
             "offline",
             "runtime",
             "serve",

@@ -930,7 +930,7 @@ fn login_popup_offers_the_local_runtime_row() {
 
     let screen = render_to_string(80, 30, |f| super::login::render(f, &app));
     assert!(screen.contains("Local runtime"), "{screen}");
-    assert!(screen.contains("Ollama / MLX"), "{screen}");
+    assert!(screen.contains("Ollama / llama.cpp / MLX"), "{screen}");
 }
 
 #[test]
