@@ -10,11 +10,12 @@ use std::collections::{BTreeSet, VecDeque};
 use std::io::{BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
-use nexus_core::deck::link::{ActivityState, Line, Message, WaitingReason};
+use nexus_core::deck::link::{ActivityState, Kind as FileKind, Line, Message, WaitingReason};
 use nexus_core::deck::{Deck, Kind, feedback, render, same_file};
+use nexus_core::doc::{self, Doc};
 use tokio::sync::{Notify, mpsc};
 
 use crate::app_view::AppView;
@@ -30,6 +31,8 @@ struct Canvas {
     input: ChildStdin,
     messages: mpsc::UnboundedReceiver<Message>,
     deck: PathBuf,
+    /// Set when the window speaks another link version ("update nexus-studio").
+    problem: Arc<Mutex<Option<String>>>,
 }
 
 impl Canvas {
@@ -60,8 +63,11 @@ impl Drop for Canvas {
 #[derive(Clone, PartialEq, Eq)]
 struct Focus {
     deck: PathBuf,
+    /// A slide id, or for a doc the block in view.
     slide: String,
+    /// Selected nodes of a slide, or for a doc the selected text (at most one entry).
     blocks: Vec<String>,
+    doc: bool,
 }
 
 #[derive(Clone)]
@@ -76,6 +82,9 @@ struct CommentTurn {
     task: nexus_core::app::ChatTaskId,
     slides: Vec<(String, String)>,
     edited: BTreeSet<usize>,
+    /// For a doc: each block with its JSON, and the ids that changed in this turn.
+    blocks: Vec<(String, String)>,
+    edited_blocks: BTreeSet<String>,
     replies: usize,
     replied: bool,
 }
@@ -83,6 +92,18 @@ struct CommentTurn {
 impl CommentTurn {
     fn summary(&self) -> String {
         let mut parts = Vec::new();
+        if !self.edited_blocks.is_empty() {
+            let ids = self.edited_blocks.iter().cloned().collect::<Vec<_>>();
+            parts.push(if ids.len() <= 8 {
+                format!(
+                    "edited block{} {}",
+                    if ids.len() == 1 { "" } else { "s" },
+                    ids.join(", ")
+                )
+            } else {
+                format!("edited {} blocks", ids.len())
+            });
+        }
         if !self.edited.is_empty() {
             let numbers = self
                 .edited
@@ -120,14 +141,59 @@ fn slide_revisions(path: &Path) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// Each block of a doc file with its JSON, to tell which ones a turn edited.
+fn block_revisions(path: &Path) -> Vec<(String, String)> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|source| Doc::check(&source).ok())
+        .map(|doc| {
+            doc.blocks
+                .iter()
+                .map(|block| {
+                    (
+                        block.id.clone(),
+                        serde_json::to_string(block).expect("block JSON"),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn is_doc(path: &Path) -> bool {
+    FileKind::of_path(path) == FileKind::Doc
+}
+
 fn model_replies(comment: &StudioComment) -> usize {
+    let model = |role: &feedback::Role| matches!(role, feedback::Role::Model);
+    if is_doc(&comment.deck) {
+        return doc::feedback::load(&comment.deck)
+            .unwrap_or_default()
+            .iter()
+            .filter(|thread| thread.id == comment.thread)
+            .flat_map(|thread| &thread.messages)
+            .filter(|message| model(&message.role))
+            .count();
+    }
     feedback::load(&comment.deck)
         .unwrap_or_default()
         .iter()
         .filter(|thread| thread.id == comment.thread)
         .flat_map(|thread| &thread.messages)
-        .filter(|message| matches!(message.role, feedback::Role::Model))
+        .filter(|message| model(&message.role))
         .count()
+}
+
+/// `paragraph`, `heading 2`, `list`… for a block, as the comment message names it.
+fn block_kind(block: &doc::Block) -> String {
+    match &block.kind {
+        doc::Kind::Heading { level, .. } => format!("heading {level}"),
+        doc::Kind::PageBreak => "page_break".into(),
+        other => serde_json::to_value(other)
+            .ok()
+            .and_then(|value| value["kind"].as_str().map(str::to_string))
+            .unwrap_or_else(|| "block".into()),
+    }
 }
 
 /// Terminal-side link state; lives on `AppView`.
@@ -179,6 +245,7 @@ impl AppView {
         }
         let files = self.files_dir();
         std::fs::create_dir_all(files.join("decks"))?;
+        std::fs::create_dir_all(files.join("docs"))?;
         let path = match deck {
             Some(deck) if Path::new(deck).is_absolute() => PathBuf::from(deck),
             Some(deck) => files.join(deck),
@@ -209,17 +276,25 @@ impl AppView {
         }
     }
 
-    /// The deck for `/studio` without an argument: the last one, else the
-    /// newest file in decks/, else a new untitled deck.
+    /// The file for `/studio` without an argument: the last one the model
+    /// touched or studio showed, else the newest deck or doc, else a new
+    /// untitled deck.
     fn default_deck(&self, files: &Path) -> PathBuf {
         if let Some(last) = &self.studio.last_deck {
             return last.clone();
         }
-        std::fs::read_dir(files.join("decks"))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".deck.json"))
+        ["decks", "docs"]
+            .iter()
+            .flat_map(|folder| {
+                std::fs::read_dir(files.join(folder))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+            })
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.ends_with(".deck.json") || name.ends_with(".doc.json")
+            })
             .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
             .max()
             .map_or_else(|| files.join("decks/untitled.deck.json"), |(_, path)| path)
@@ -234,6 +309,12 @@ impl AppView {
     /// Apply one message from studio.
     pub fn handle_studio_message(&mut self, message: Message) -> Result<()> {
         match message {
+            message @ (Message::DocFocus { .. } | Message::DocComment { .. }) => {
+                return self.handle_doc_message(message);
+            }
+            message @ Message::Reply { .. } if message.path().is_some_and(is_doc) => {
+                return self.handle_doc_message(message);
+            }
             Message::Hello { deck_path } => self.studio.last_deck = Some(deck_path),
             Message::Focus {
                 deck_path,
@@ -246,6 +327,7 @@ impl AppView {
                     deck: deck_path,
                     slide,
                     blocks,
+                    doc: false,
                 });
             }
             Message::Comment {
@@ -284,6 +366,64 @@ impl AppView {
                 }
             }
             Message::Open { .. } | Message::Theme { .. } | Message::Activity { .. } => {}
+        }
+        Ok(())
+    }
+
+    /// What a doc window says: the block in view, and comments and replies on text.
+    fn handle_doc_message(&mut self, message: Message) -> Result<()> {
+        match message {
+            Message::DocFocus {
+                deck_path,
+                block,
+                selection,
+            } => {
+                let block = block.unwrap_or_default();
+                let selected: Vec<String> = selection.into_iter().collect();
+                self.deck_link.lock().expect("deck link").focus =
+                    Some((deck_path.clone(), block.clone(), selected.clone()));
+                self.studio.focus = Some(Focus {
+                    deck: deck_path,
+                    slide: block,
+                    blocks: selected,
+                    doc: true,
+                });
+            }
+            Message::DocComment {
+                deck_path,
+                thread_id,
+                block,
+                quote,
+                text,
+                ..
+            } => {
+                let built = self.doc_comment_text(&deck_path, &thread_id, &block, &quote, &text);
+                self.enqueue_studio_comment(deck_path, thread_id, built)?;
+            }
+            Message::Reply {
+                deck_path,
+                thread_id,
+                text,
+            } if is_doc(&deck_path) => {
+                let threads = match doc::feedback::load(&deck_path) {
+                    Ok(threads) => threads,
+                    Err(error) => {
+                        self.studio_failure(deck_path, thread_id);
+                        return Err(error);
+                    }
+                };
+                let Some(thread) = threads.iter().find(|t| t.id == thread_id) else {
+                    self.studio_failure(deck_path, thread_id);
+                    bail!("studio replied in a thread that no longer exists");
+                };
+                let (block, quote) = (
+                    thread.anchor.block.clone().unwrap_or_default(),
+                    thread.anchor.quote.clone(),
+                );
+                let built = self.doc_comment_text(&deck_path, &thread_id, &block, &quote, &text);
+                self.enqueue_studio_comment(deck_path, thread_id, built)?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -327,7 +467,18 @@ impl AppView {
         block: Option<&str>,
         text: &str,
     ) -> Result<()> {
-        let text = match self.comment_text(&deck, &thread, slide, block, text) {
+        let built = self.comment_text(&deck, &thread, slide, block, text);
+        self.enqueue_studio_comment(deck, thread, built)
+    }
+
+    /// Queue a comment's message for the conversation, or report that it could not be built.
+    fn enqueue_studio_comment(
+        &mut self,
+        deck: PathBuf,
+        thread: String,
+        built: Result<String>,
+    ) -> Result<()> {
+        let text = match built {
             Ok(text) => text,
             Err(error) => {
                 self.studio_failure(deck, thread);
@@ -428,14 +579,59 @@ impl AppView {
         ))
     }
 
+    /// `Comment on docs/q3.doc.json · b4 "Ship the docs canvas": text`, the thread id
+    /// the model replies with, the doc's revision, and the anchored block's text, so
+    /// the model can edit without a `read`. No page image: the text is enough.
+    fn doc_comment_text(
+        &self,
+        path: &Path,
+        thread: &str,
+        block: &str,
+        quote: &str,
+        text: &str,
+    ) -> Result<String> {
+        let source = std::fs::read_to_string(path)
+            .with_context(|| format!("studio doc {} is gone", path.display()))?;
+        let doc = Doc::check(&source)
+            .map_err(|_| anyhow::anyhow!("studio doc {} is invalid", path.display()))?;
+        let found = doc
+            .block(block)
+            .context("the commented block no longer exists")?;
+        let flat = |text: &str, limit: usize| -> String {
+            text.chars()
+                .map(|c| if c == '\n' { ' ' } else { c })
+                .take(limit)
+                .collect()
+        };
+        let plain = found.plain_text();
+        let named = if quote.is_empty() { &plain } else { quote };
+        let shown = path
+            .strip_prefix(self.files_dir())
+            .unwrap_or(path)
+            .display();
+        let revision = doc.revision();
+        Ok(format!(
+            "Comment on {shown} · {block} \"{}\": {text}\nthread {thread} · revision {}\nblock {block} {}: \"{}\"",
+            flat(named, SUMMARY_CHARS),
+            &revision[..12],
+            block_kind(found),
+            flat(&plain, NODE_TEXT_CHARS),
+        ))
+    }
+
     /// Run from the event loop: apply studio's messages, tell it what the
     /// model changed, and send a queued comment once nothing is in the way.
     pub fn poll_studio(&mut self) {
         let mut received = Vec::new();
+        let mut problem = None;
         if let Some(canvas) = &mut self.studio.canvas {
             while let Ok(message) = canvas.messages.try_recv() {
                 received.push(message);
             }
+            problem = canvas.problem.lock().expect("studio problem").take();
+        }
+        if let Some(problem) = problem {
+            self.push_status(format!("studio: {problem}"));
         }
         for message in received {
             if let Err(error) = self.handle_studio_message(message) {
@@ -453,10 +649,18 @@ impl AppView {
                         deck_path: path.clone(),
                     });
                 }
-                canvas.send(Message::Focus {
-                    deck_path: path,
-                    slide,
-                    blocks: Vec::new(),
+                canvas.send(if is_doc(&path) {
+                    Message::DocFocus {
+                        deck_path: path,
+                        block: Some(slide).filter(|block| !block.is_empty()),
+                        selection: None,
+                    }
+                } else {
+                    Message::Focus {
+                        deck_path: path,
+                        slide,
+                        blocks: Vec::new(),
+                    }
                 });
             }
         }
@@ -469,6 +673,34 @@ impl AppView {
             return;
         };
         if !same_file(path, &turn.comment.deck) {
+            return;
+        }
+        if is_doc(path) {
+            let next = block_revisions(path);
+            let before = turn.edited_blocks.clone();
+            for (id, revision) in &next {
+                if !turn
+                    .blocks
+                    .iter()
+                    .any(|(old, rev)| old == id && rev == revision)
+                {
+                    turn.edited_blocks.insert(id.clone());
+                }
+            }
+            for (id, _) in &turn.blocks {
+                if !next.iter().any(|(next_id, _)| next_id == id) {
+                    turn.edited_blocks.insert(id.clone());
+                }
+            }
+            // A change that touches no block (the title, the design) still counts.
+            if turn.edited_blocks == before && !slide.is_empty() {
+                turn.edited_blocks.insert(slide.to_string());
+            }
+            turn.blocks = next;
+            if turn.edited_blocks != before {
+                let (comment, summary) = (turn.comment.clone(), turn.summary());
+                self.studio_activity(&comment, ActivityState::Progress, Some(summary));
+            }
             return;
         }
         let next = slide_revisions(path);
@@ -574,7 +806,11 @@ impl AppView {
         }
         let text = self.studio.queued.pop_front().expect("a queued comment");
         let comment = self.studio.comments.pop_front().expect("queued identity");
-        let slides = slide_revisions(&comment.deck);
+        let (slides, blocks) = if is_doc(&comment.deck) {
+            (Vec::new(), block_revisions(&comment.deck))
+        } else {
+            (slide_revisions(&comment.deck), Vec::new())
+        };
         let replies = model_replies(&comment);
         let text = self.with_studio_context(text);
         if let Err(error) = self.core.send_message(text) {
@@ -592,6 +828,8 @@ impl AppView {
                 task,
                 slides,
                 edited: BTreeSet::new(),
+                blocks,
+                edited_blocks: BTreeSet::new(),
                 replies,
                 replied: false,
             });
@@ -610,6 +848,19 @@ impl AppView {
         };
         if self.studio.told.as_ref() == Some(&focus) {
             return text;
+        }
+        if focus.doc {
+            let line = match (focus.slide.is_empty(), focus.blocks.first()) {
+                (true, _) => return text,
+                (false, None) => format!("studio: viewing {}", focus.slide),
+                (false, Some(selected)) => format!(
+                    "studio: viewing {}, selected {:?}",
+                    focus.slide,
+                    selected.chars().take(NODE_TEXT_CHARS).collect::<String>()
+                ),
+            };
+            self.studio.told = Some(focus);
+            return format!("{text}\n\n{line}");
         }
         let number = std::fs::read_to_string(&focus.deck)
             .ok()
@@ -665,14 +916,25 @@ fn attach(mut child: Child, deck: &Path, wake: Arc<Notify>) -> Result<Canvas> {
     let input = child.stdin.take().context("studio stdin")?;
     let output = child.stdout.take().context("studio stdout")?;
     let (sender, messages) = mpsc::unbounded_channel();
+    let problem = Arc::new(Mutex::new(None));
+    let seen = Arc::clone(&problem);
     std::thread::spawn(move || {
         for line in std::io::BufReader::new(output).lines() {
             let Ok(line) = line else { break };
-            if let Ok(message) = Line::decode(&line) {
-                if sender.send(message).is_err() {
-                    return;
+            match Line::decode(&line) {
+                Ok(message) => {
+                    if sender.send(message).is_err() {
+                        return;
+                    }
+                    wake.notify_one();
                 }
-                wake.notify_one();
+                // A window on another link version says so once, instead of
+                // seeming to ignore comments.
+                Err(error) if error.to_string().contains("update nexus") => {
+                    *seen.lock().expect("studio problem") = Some(error.to_string());
+                    wake.notify_one();
+                }
+                Err(_) => {}
             }
         }
         let _ = sender.send(Message::Bye);
@@ -683,6 +945,7 @@ fn attach(mut child: Child, deck: &Path, wake: Arc<Notify>) -> Result<Canvas> {
         input,
         messages,
         deck: deck.to_path_buf(),
+        problem,
     })
 }
 
@@ -1229,5 +1492,312 @@ mod tests {
         app.poll_studio();
         assert!(app.deck_link.lock().unwrap().changed.is_empty());
         assert_eq!(app.studio.last_deck, Some(path));
+    }
+    // -- docs ---------------------------------------------------------------------------
+
+    fn doc_file(app: &AppView) -> PathBuf {
+        let path = app.files_dir().join("docs/test.doc.json");
+        let mut doc = Doc::from_design("Test", &nexus_core::design::Design::default());
+        doc.blocks = doc::markdown::parse_document(
+            "# Test\n\nShip the docs canvas this quarter.\n\n- one\n- two\n",
+            true,
+        )
+        .blocks;
+        let doc = Doc::check(&serde_json::to_string(&doc).unwrap()).unwrap();
+        nexus_core::deck::write_atomic(&path, &serde_json::to_vec(&doc).unwrap()).unwrap();
+        path
+    }
+
+    fn doc_comment(path: PathBuf, text: &str) -> Message {
+        Message::DocComment {
+            deck_path: path,
+            thread_id: "t1".into(),
+            block: "b2".into(),
+            range: Some(doc::feedback::Range { start: 0, end: 4 }),
+            quote: "Ship".into(),
+            text: text.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_doc_comment_becomes_a_queued_message_with_the_block_text_and_no_image() {
+        let dir = temp();
+        let mut app = view(&dir.0);
+        let path = doc_file(&app);
+        app.handle_studio_message(doc_comment(path.clone(), "Say which quarter"))
+            .unwrap();
+        assert!(app.studio.has_queued());
+        let queued = app.studio.queued[0].clone();
+        assert!(
+            queued.starts_with("Comment on docs/test.doc.json · b2 \"Ship\": Say which quarter\n"),
+            "{queued}"
+        );
+        let doc = Doc::check(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            queued.contains(&format!("thread t1 · revision {}\n", &doc.revision()[..12])),
+            "{queued}"
+        );
+        assert!(
+            queued.ends_with("block b2 paragraph: \"Ship the docs canvas this quarter.\""),
+            "{queued}"
+        );
+        assert!(
+            !queued.contains("!["),
+            "no page image rides along: {queued}"
+        );
+        // With no quote (a whole-block comment) the block's own text names it, clipped.
+        let mut whole = doc_comment(path.clone(), "Tighten");
+        if let Message::DocComment { quote, range, .. } = &mut whole {
+            quote.clear();
+            *range = None;
+        }
+        app.studio.queued.clear();
+        app.handle_studio_message(whole).unwrap();
+        assert!(
+            app.studio.queued[0].starts_with(
+                "Comment on docs/test.doc.json · b2 \"Ship the docs canvas this quarter.\": Tighten"
+            ),
+            "{}",
+            app.studio.queued[0]
+        );
+        // The block text is bounded, and a missing block fails the comment.
+        let long = "word ".repeat(200);
+        let mut doc = doc;
+        doc.blocks[1] = doc::Block {
+            id: "b2".into(),
+            style: None,
+            kind: doc::Kind::Paragraph { text: long },
+        };
+        nexus_core::deck::write_atomic(&path, &serde_json::to_vec(&doc).unwrap()).unwrap();
+        app.studio.queued.clear();
+        app.handle_studio_message(doc_comment(path.clone(), "Long"))
+            .unwrap();
+        let line = app.studio.queued[0].lines().last().unwrap().to_string();
+        assert!(
+            line.chars().count() <= "block b2 paragraph: \"\"".chars().count() + 300,
+            "{line}"
+        );
+        let mut gone = doc_comment(path, "Where");
+        if let Message::DocComment { block, .. } = &mut gone {
+            *block = "b99".into();
+        }
+        assert!(app.handle_studio_message(gone).is_err());
+        assert_eq!(
+            activities(&app, "t1").last().unwrap().0,
+            ActivityState::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reply_in_a_doc_thread_reads_the_doc_sidecar() {
+        let dir = temp();
+        let mut app = view(&dir.0);
+        let path = doc_file(&app);
+        let thread = doc::feedback::Thread {
+            id: "t1".into(),
+            anchor: doc::feedback::Anchor {
+                block: Some("b2".into()),
+                range: Some(doc::feedback::Range { start: 0, end: 4 }),
+                quote: "Ship".into(),
+            },
+            severity: feedback::Severity::Consider,
+            created: feedback::now(),
+            resolved: None,
+            messages: vec![doc::feedback::Message::new_for(
+                feedback::Role::You,
+                "First".into(),
+                vec![],
+            )],
+        };
+        doc::feedback::save(&path, &[thread]).unwrap();
+        app.handle_studio_message(Message::Reply {
+            deck_path: path.clone(),
+            thread_id: "t1".into(),
+            text: "And the next one?".into(),
+        })
+        .unwrap();
+        assert!(
+            app.studio.queued[0]
+                .starts_with("Comment on docs/test.doc.json · b2 \"Ship\": And the next one?"),
+            "{}",
+            app.studio.queued[0]
+        );
+        assert!(
+            app.handle_studio_message(Message::Reply {
+                deck_path: path,
+                thread_id: "ghost".into(),
+                text: "x".into(),
+            })
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_doc_focus_is_told_once_per_change_with_the_selection() {
+        let dir = temp();
+        let mut app = view(&dir.0);
+        let path = doc_file(&app);
+        let focus = |block: Option<&str>, selection: Option<&str>| Message::DocFocus {
+            deck_path: path.clone(),
+            block: block.map(Into::into),
+            selection: selection.map(Into::into),
+        };
+        app.handle_studio_message(focus(Some("b2"), Some("docs canvas")))
+            .unwrap();
+        let shared = app.deck_link.lock().unwrap().focus.clone();
+        assert_eq!(
+            shared,
+            Some((path.clone(), "b2".into(), vec!["docs canvas".into()]))
+        );
+        assert_eq!(
+            app.with_studio_context("hi".into()),
+            "hi",
+            "no window, no news"
+        );
+        let cat = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        app.studio.canvas = Some(attach(cat, &path, app.studio_wake()).unwrap());
+        assert_eq!(
+            app.with_studio_context("hi".into()),
+            "hi\n\nstudio: viewing b2, selected \"docs canvas\""
+        );
+        assert_eq!(app.with_studio_context("again".into()), "again");
+        app.handle_studio_message(focus(Some("b4"), None)).unwrap();
+        assert_eq!(
+            app.with_studio_context("next".into()),
+            "next\n\nstudio: viewing b4"
+        );
+        app.handle_studio_message(focus(None, None)).unwrap();
+        assert_eq!(app.with_studio_context("quiet".into()), "quiet");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_model_editing_a_doc_opens_it_and_focuses_the_first_changed_block() {
+        let dir = temp();
+        let mut app = view(&dir.0);
+        let path = doc_file(&app);
+        let other = deck_file(&app);
+        let cat = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let wake = app.studio_wake();
+        // The window is showing a deck, so the doc edit must open the doc first.
+        app.studio.canvas = Some(attach(cat, &other, Arc::clone(&wake)).unwrap());
+        app.deck_link
+            .lock()
+            .unwrap()
+            .changed
+            .push((path.clone(), "b2".into()));
+        app.poll_studio();
+        assert_eq!(app.studio.last_deck, Some(path.clone()));
+        // `cat` echoes what was sent: the doc focus comes back as a `DocFocus`.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                wake.notified().await;
+                app.poll_studio();
+                if app.studio.focus.as_ref().is_some_and(|f| f.doc) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the window echoed the focus");
+        let focus = app.deck_link.lock().unwrap().focus.clone().unwrap();
+        assert_eq!((focus.0, focus.1), (path, "b2".into()));
+        assert!(
+            app.studio
+                .canvas
+                .as_ref()
+                .unwrap()
+                .deck
+                .ends_with("test.doc.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn doc_comment_activity_reports_the_blocks_the_model_edited() {
+        let dir = temp();
+        let mut app = view(&dir.0);
+        let path = doc_file(&app);
+        ready(&mut app);
+        app.handle_studio_message(doc_comment(path.clone(), "Fix this"))
+            .unwrap();
+        let task = start_comment_turn(&mut app);
+        let mut doc = Doc::check(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        doc.blocks[1] = doc::Block {
+            id: "b2".into(),
+            style: None,
+            kind: doc::Kind::Paragraph {
+                text: "Ship the docs canvas in Q3.".into(),
+            },
+        };
+        nexus_core::deck::write_atomic(&path, &serde_json::to_vec(&doc).unwrap()).unwrap();
+        app.deck_link
+            .lock()
+            .unwrap()
+            .changed
+            .push((path.clone(), "b2".into()));
+        app.poll_studio();
+        assert_eq!(
+            activities(&app, "t1").last(),
+            Some(&(ActivityState::Progress, Some("edited block b2")))
+        );
+        doc.blocks[2] = doc::Block {
+            id: "b3".into(),
+            style: None,
+            kind: doc::Kind::Divider,
+        };
+        nexus_core::deck::write_atomic(&path, &serde_json::to_vec(&doc).unwrap()).unwrap();
+        app.deck_link
+            .lock()
+            .unwrap()
+            .changed
+            .push((path, "b3".into()));
+        app.poll_studio();
+        app.core
+            .on_chat_event(task, nexus_core::provider::StreamEvent::Done)
+            .unwrap();
+        app.poll_studio();
+        assert_eq!(
+            activities(&app, "t1").last(),
+            Some(&(ActivityState::Done, Some("edited blocks b2, b3")))
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_window_on_another_link_version_is_reported_once() {
+        let dir = temp();
+        let mut app = view(&dir.0);
+        let path = deck_file(&app);
+        let old = Command::new("sh")
+            .arg("-c")
+            .arg("echo '{\"version\":1,\"type\":\"Hello\",\"deck_path\":\"a\"}'; cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let wake = app.studio_wake();
+        app.studio.canvas = Some(attach(old, &path, Arc::clone(&wake)).unwrap());
+        tokio::time::timeout(std::time::Duration::from_secs(5), wake.notified())
+            .await
+            .expect("the old window spoke");
+        app.poll_studio();
+        let status = app.core.last_status();
+        assert!(
+            status.contains("update nexus-studio"),
+            "the status line tells the user to update nexus-studio: {status}"
+        );
+        assert!(
+            app.studio.last_deck.is_none(),
+            "the old Hello was not believed"
+        );
     }
 }

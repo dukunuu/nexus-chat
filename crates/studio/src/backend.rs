@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+mod doc;
+mod doc_comments;
 mod exports;
 mod feedback;
 mod fonts;
@@ -94,6 +96,43 @@ pub enum Command {
         owner: String,
         edit: String,
     },
+    /// A new, empty doc in the space's `docs/` folder.
+    NewDoc {
+        title: String,
+    },
+    /// One undo step: a batch of doc operations (`doc::Op`), checked together.
+    DocApply {
+        ops: Vec<serde_json::Value>,
+    },
+    DocApplyDesign {
+        design: Option<String>,
+    },
+    DocExport {
+        format: String,
+        path: Option<PathBuf>,
+    },
+    DocCommentCreate {
+        anchor: nexus_core::doc::feedback::Anchor,
+        text: String,
+        send: bool,
+    },
+    /// Accept (one undo step) or reject every pending suggestion.
+    DocResolveEdits {
+        accept: bool,
+    },
+    /// Paginate and serve the pages of the open doc as `/pages/…` images.
+    DocPages {},
+    DocDesigns {},
+    /// An image pasted or dropped: hex bytes, stored by content in the assets.
+    DocImportAsset {
+        name: String,
+        data: String,
+    },
+    /// The block in view and the selected text.
+    DocFocus {
+        block: Option<String>,
+        selection: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -130,6 +169,47 @@ pub enum Event {
     },
     Focus {
         slide: String,
+    },
+    /// The open file is a doc.
+    Doc {
+        doc: nexus_core::doc::Doc,
+        colors: ThemeColors,
+        revision: String,
+        /// `docs/q3.doc.json`, for display.
+        relative: String,
+        threads: Vec<nexus_core::doc::feedback::Thread>,
+        linked: bool,
+        activities: BTreeMap<String, ThreadActivity>,
+        changed: Vec<String>,
+        notice: Option<String>,
+        /// Content hashes of the doc's images and fonts, by name.
+        assets: BTreeMap<String, String>,
+        design: doc::DesignState,
+        can_undo: bool,
+        can_redo: bool,
+    },
+    DocFeedback {
+        threads: Vec<nexus_core::doc::feedback::Thread>,
+        activities: BTreeMap<String, ThreadActivity>,
+        notes: Vec<String>,
+    },
+    /// What a suggestion would change, without changing it.
+    DocPreview {
+        owner: String,
+        edit: String,
+        title: Option<String>,
+        changed: Vec<nexus_core::doc::Block>,
+        removed: Vec<String>,
+    },
+    DocFocus {
+        block: Option<String>,
+    },
+    Designs {
+        available: Vec<doc::DesignInfo>,
+    },
+    Pages {
+        revision: String,
+        pages: Vec<doc::PageInfo>,
     },
     Theme {
         colors: ThemeColors,
@@ -170,6 +250,8 @@ impl Event {
 
 pub struct Backend {
     pub deck: Deck,
+    /// Set while a doc, not a deck, is open (`deck` is then an unused placeholder).
+    doc: Option<doc::DocSession>,
     path: PathBuf,
     files_dir: PathBuf,
     recent: PathBuf,
@@ -208,7 +290,10 @@ impl Backend {
             .and_then(|bytes| serde_json::from_slice::<PathBuf>(&bytes).ok())
             .filter(|p| p.is_absolute() && p.is_file());
         let mut import_warnings = Vec::new();
-        let path = match path.or(remembered.as_deref()) {
+        let chosen = path.or(remembered.as_deref());
+        let opens_doc = chosen.is_some_and(doc::is_doc_path);
+        let path = match chosen {
+            Some(path) if opens_doc => absolute(path)?,
             Some(path) if is_pptx(path) => {
                 let imported =
                     deck::import::import_pptx_file(&absolute(path)?, &decks_dir(files_dir)?, None)?;
@@ -218,7 +303,7 @@ impl Backend {
             Some(path) => absolute(path)?,
             None => new_path(files_dir)?,
         };
-        let (deck, load_notes) = if path.exists() {
+        let (deck, load_notes) = if path.exists() && !opens_doc {
             read_deck_noted(&path)?
         } else {
             (Deck::new_from_layouts("Untitled"), Vec::new())
@@ -226,6 +311,7 @@ impl Backend {
         let mut backend = Self {
             fetcher: Fetcher::new(asset_root(&path)?),
             deck,
+            doc: None,
             path,
             files_dir: files_dir.into(),
             recent,
@@ -245,6 +331,16 @@ impl Backend {
             exports: Vec::new(),
             asset_hashes: std::cell::RefCell::default(),
         };
+        if opens_doc {
+            let doc = if backend.path.exists() {
+                doc::read_doc(&backend.path)?
+            } else {
+                doc::create_doc_file(files_dir, &backend.path, "Untitled")?
+            };
+            let path = backend.path.clone();
+            backend.enter_doc(path, doc)?;
+            return Ok(backend);
+        }
         if !backend.path.exists() {
             backend.save()?;
         }
@@ -256,6 +352,9 @@ impl Backend {
     }
 
     pub fn event(&self) -> Event {
+        if self.doc.is_some() {
+            return self.doc_event();
+        }
         Event::Deck {
             threads: self.feedback.clone(),
             linked: self.linked,
@@ -337,16 +436,29 @@ impl Backend {
             let command: Command = serde_json::from_str(source).context("invalid command")?;
             ensure!(
                 source.len() <= deck::MAX_SOURCE + 64 * 1024
-                    || matches!(command, Command::ImportFontData { .. }),
+                    || matches!(
+                        command,
+                        Command::ImportFontData { .. } | Command::DocImportAsset { .. }
+                    ),
                 "command too large"
             );
             // The file wins: when the deck changed under the page, show that
             // instead of applying an edit made against the old one.
-            if let (Some(mut event), true) = self.sync()? {
-                if let (Event::Deck { notice, .. }, false) =
-                    (&mut event, matches!(command, Command::Load {}))
-                {
-                    *notice = Some("The deck changed on disk first, so your last action was not applied. Undo takes the change back.".into());
+            // Doc requests that only report (a focus, a comment) leave the
+            // file check to the 500 ms poll, which delivers the reload with
+            // its changed blocks.
+            let guarded = self.doc.is_none()
+                || Self::doc_mutates(&command)
+                || matches!(command, Command::Load {});
+            if guarded && let (Some(mut event), true) = self.sync()? {
+                match &mut event {
+                    Event::Deck { notice, .. } if !matches!(command, Command::Load {}) => {
+                        *notice = Some("The deck changed on disk first, so your last action was not applied. Undo takes the change back.".into());
+                    }
+                    Event::Doc { notice, .. } if Self::doc_mutates(&command) => {
+                        *notice = Some("The doc changed on disk first, so your last action was not applied. Undo takes the change back.".into());
+                    }
+                    _ => {}
                 }
                 return Ok(event);
             }
@@ -378,7 +490,15 @@ impl Backend {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn execute(&mut self, command: Command) -> Result<Event> {
+        if let Some(event) = self.switch_document(&command)? {
+            return Ok(event);
+        }
+        if self.doc.is_some() {
+            return self.doc_execute(command);
+        }
+        Self::refuse_doc_command(&command)?;
         match command {
             Command::CommentCreate { anchor, text, send } => {
                 return self.comment_create(anchor, text, send);
@@ -454,12 +574,7 @@ impl Backend {
                     ));
                 }
             }
-            Command::NewDeck { title } => {
-                let deck = checked(&Deck::new_from_layouts(&title))?;
-                let path = new_path(&self.files_dir)?;
-                atomic_write(&path, &serde_json::to_vec_pretty(&deck)?)?;
-                self.open_document(path, deck)?;
-            }
+            Command::NewDeck { title } => self.new_deck_file(&title)?,
             Command::Open { path } => {
                 self.open_path(absolute(&path)?)?;
             }
@@ -473,12 +588,21 @@ impl Backend {
                     src: self.import_asset(&path)?,
                 });
             }
+            // `refuse_doc_command` turned every doc-only command away above.
+            _ => unreachable!("doc commands are refused without a doc"),
         }
         self.known_revision = self.deck.revision();
         self.deck_stamp = stamp(&self.path);
         self.recheck_feedback();
         self.persist_feedback()?;
         Ok(self.event())
+    }
+
+    fn new_deck_file(&mut self, title: &str) -> Result<()> {
+        let deck = checked(&Deck::new_from_layouts(title))?;
+        let path = new_path(&self.files_dir)?;
+        atomic_write(&path, &serde_json::to_vec_pretty(&deck)?)?;
+        self.open_document(path, deck)
     }
 
     fn replace(&mut self, next: Deck) -> Result<()> {
@@ -509,6 +633,9 @@ impl Backend {
 
     /// The event for what changed on disk, and whether the deck itself was reloaded.
     fn sync(&mut self) -> Result<(Option<Event>, bool)> {
+        if self.doc.is_some() {
+            return self.doc_sync();
+        }
         let deck_stamp = stamp(&self.path);
         let comments_stamp = stamp(&nexus_core::deck::feedback::sidecar(&self.path));
         let mut changed = Vec::new();
@@ -586,12 +713,20 @@ impl Backend {
                 })
             }
             LinkMessage::Open { deck_path } => {
-                // Opening the deck that is already open must not drop its undo history.
+                // Opening the document that is already open must not drop its undo history.
                 if !same_file(&deck_path, &self.path) {
                     let path = absolute(&deck_path)?;
-                    self.open_file(path)?;
+                    if self
+                        .switch_document(&Command::Open { path: path.clone() })?
+                        .is_none()
+                    {
+                        self.open_file(path)?;
+                    }
                 }
                 Ok(self.event())
+            }
+            message @ LinkMessage::DocFocus { .. } if self.doc.is_some() => {
+                Ok(self.doc_receive_link(&message))
             }
             LinkMessage::Focus {
                 deck_path, slide, ..
@@ -709,6 +844,9 @@ impl Backend {
         if let Some((mime, source)) = embedded(&path) {
             return Ok((mime, source.as_bytes().to_vec()));
         }
+        if let Some(page) = path.strip_prefix("/pages/") {
+            return self.serve_page(page);
+        }
         let relative = path.strip_prefix("/assets/").context("unknown resource")?;
         ensure!(deck::safe_asset_path(relative), "unsafe asset path");
         let root = asset_root(&self.path)?;
@@ -739,22 +877,25 @@ impl Backend {
     pub fn remote_image(&self, uri: &str) -> Result<(Arc<Fetcher>, String)> {
         let path = protocol_path(uri)?;
         let hash = path.strip_prefix("/asset/").context("unknown resource")?;
-        let src = self
-            .deck
-            .slides
-            .iter()
-            .flat_map(deck::Slide::nodes)
-            .find_map(|b| {
-                if let Kind::Image { src, .. } = &b.kind
-                    && src.starts_with("https://")
-                    && image_hash(src) == hash
-                {
-                    Some(src.clone())
-                } else {
-                    None
-                }
-            })
-            .context("unknown remote image")?;
+        let src = if self.doc.is_some() {
+            self.doc_remote_source(hash)
+        } else {
+            self.deck
+                .slides
+                .iter()
+                .flat_map(deck::Slide::nodes)
+                .find_map(|b| {
+                    if let Kind::Image { src, .. } = &b.kind
+                        && src.starts_with("https://")
+                        && image_hash(src) == hash
+                    {
+                        Some(src.clone())
+                    } else {
+                        None
+                    }
+                })
+        }
+        .context("unknown remote image")?;
         // Reject an assets symlink changed since the document was opened.
         asset_root(&self.path)?;
         Ok((Arc::clone(&self.fetcher), src))
@@ -844,6 +985,20 @@ fn absolute(path: &Path) -> Result<PathBuf> {
     let path = std::path::absolute(path)?;
     ensure!(path.file_name().is_some(), "expected a file path");
     Ok(path)
+}
+
+/// Bytes from hex (the page cannot send a binary message), bounded after decoding.
+fn decode_hex(data: &str, max: usize) -> Result<Vec<u8>> {
+    ensure!(
+        data.len() <= max * 2 && data.len().is_multiple_of(2),
+        "file exceeds size limit or has invalid encoding"
+    );
+    data.as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| Ok(u8::from_str_radix(std::str::from_utf8(pair)?, 16)?))
+        .collect()
 }
 
 fn is_pptx(path: &Path) -> bool {
@@ -988,12 +1143,27 @@ fn embedded(path: &str) -> Option<(&'static str, &'static str)> {
         "/animations.js" => ("text/javascript", include_str!("../ui/animations.js")),
         "/playback.js" => ("text/javascript", include_str!("../ui/playback.js")),
         "/animate-panel.js" => ("text/javascript", include_str!("../ui/animate-panel.js")),
+        "/doc/doc.css" => ("text/css; charset=utf-8", include_str!("../ui/doc/doc.css")),
+        "/doc/doc.js" => ("text/javascript", include_str!("../ui/doc/doc.js")),
+        "/doc/inline.js" => ("text/javascript", include_str!("../ui/doc/inline.js")),
+        "/doc/model.js" => ("text/javascript", include_str!("../ui/doc/model.js")),
+        "/doc/edits.js" => ("text/javascript", include_str!("../ui/doc/edits.js")),
+        "/doc/dom.js" => ("text/javascript", include_str!("../ui/doc/dom.js")),
+        "/doc/blocks.js" => ("text/javascript", include_str!("../ui/doc/blocks.js")),
+        "/doc/editor.js" => ("text/javascript", include_str!("../ui/doc/editor.js")),
+        "/doc/menus.js" => ("text/javascript", include_str!("../ui/doc/menus.js")),
+        "/doc/toolbar.js" => ("text/javascript", include_str!("../ui/doc/toolbar.js")),
+        "/doc/comments.js" => ("text/javascript", include_str!("../ui/doc/comments.js")),
+        "/doc/paste.js" => ("text/javascript", include_str!("../ui/doc/paste.js")),
+        "/doc/glyphs.js" => ("text/javascript", include_str!("../ui/doc/glyphs.js")),
         _ => return None,
     })
 }
 
 #[cfg(test)]
 mod animation_tests;
+#[cfg(test)]
+mod doc_tests;
 #[cfg(test)]
 mod font_tests;
 #[cfg(test)]
@@ -1002,3 +1172,5 @@ mod tests;
 mod theme_tests;
 #[cfg(test)]
 mod timing_tests;
+#[cfg(test)]
+mod ui_tests;

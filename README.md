@@ -534,9 +534,14 @@ the web client and inline web-app previews remain unchanged.
 The model uses `canvas` to draft Markdown documents (`docs/*.doc.json`) and
 presentations (`decks/*.deck.json`). Both copy the space's default design;
 slides can use named layouts. Documents support block edits, anchored comments,
-suggestions, history and clean Markdown export. Decks open live in `/studio`;
-document page rendering and studio editing are coming later. Older `deck` tool
-calls remain supported as an alias. See [the canvas design](docs/docs-canvas.md).
+suggestions, history and export to DOCX, PDF, Markdown and HTML. `/studio` opens
+the current doc or deck in the studio window (`/studio docs/q3.doc.json` names
+one, and `nexus-studio docs/q3.doc.json` opens it standalone). A doc opens as a
+calm writing page: an outline on the left, comments in the margin, formatting
+over selected text, `/` for blocks, tracked-change suggestions from the model,
+a page preview and an export menu. Older `deck` tool calls remain supported as
+an alias. See [the canvas design](docs/docs-canvas.md) and
+[studio](docs/studio.md).
 
 ## Commands
 
@@ -556,7 +561,7 @@ Type `/` in the composer for autocomplete. Aliases in parentheses.
 | `/files` (`images`, `scripts`, …) | browse space files / images / scripts |
 | `/apps` (`webapps`) | view web apps and pinned interactive panels |
 | `/pin-panel [name]` (`pin`) | keep the focused panel as a reusable mini-app |
-| `/studio [deck]` (`deck`, `slides`) | open the slide canvas linked to this conversation (see `docs/studio.md`) |
+| `/studio [file]` (`deck`, `slides`) | open the current doc or deck (or the named one) in the studio window linked to this conversation (see `docs/studio.md`) |
 | `/skills` | manage skills (app + project/user/global Agent Skills) |
 | `/usage` (`analytics`, `costs`) | token/cache/cost analytics by backend & model (←/→ for 24h/7d/30d/all windows) |
 | `/compact` (`summarize`) | summarize old messages into a digest |

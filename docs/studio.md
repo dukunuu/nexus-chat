@@ -8,7 +8,8 @@ auto-layout wrapping and reparenting, smart guides, align/distribute, scrub
 fields, font picking/import and a drag-to-reparent layers tree; details and
 remaining limitations are under *Editor status*. D2 adds typed slide transitions and node builds (schema, validation, three
 operations), an Animate panel and step-based presentation playback; see
-*Animations*. Terminal-theme identity and revised comments are implemented.
+*Animations*. Terminal-theme identity and revised comments are implemented. Docs open in studio
+too (*The doc editor*); the link is at version 2.
 Supersedes the editor half of `docs/web-editors.md`; that
 document's device-key pairing stays the plan for remote access (phase S5).
 
@@ -45,7 +46,7 @@ to a conversation.
 | Direct edits, lenient input, history, images | `crates/core/src/deck/{direct,lenient,history,assets,brief}.rs` | see *The `deck` tool* |
 | PowerPoint import | `crates/core/src/deck/import/` | `.pptx` to a deck; see *Import* |
 | Comment threads | `crates/core/src/deck/feedback.rs` | `<deck>.comments.json`, shared by the tool and studio |
-| Link protocol | `crates/core/src/deck/link.rs` | versioned JSON lines; types in core so the web app can reuse them |
+| Link protocol | `crates/core/src/deck/link.rs` | versioned JSON lines (version 2: `path`, `kind` deck or doc); types in core so the web app can reuse them |
 | Terminal side of the link | `crates/tui/src/studio.rs`, `/studio` | spawns studio, turns comments into messages, tells it what the model changed |
 | Desktop app | `crates/studio` (package `nexus-studio`, `publish = false` until S3) | `tao` window + `wry` webview; the Rust backend owns the deck file |
 | Studio UI | `crates/studio/ui/` | HTML/CSS/vanilla JS modules embedded with `include_str!`; no Node build step |
@@ -527,20 +528,32 @@ or restyle the deck.
 
 ## The link
 
-A newline-delimited JSON protocol, version 1 (`deck::link`), one envelope per
-line: `{"version":1,"type":"…",…}`. Messages over 64 KB are rejected.
+A newline-delimited JSON protocol, **version 2** (`deck::link`), one envelope per
+line: `{"version":2,"kind":"deck","type":"…",…}`. Messages over 64 KB are
+rejected. Version 2 renamed `deck_path` to `path` (`deck_path` is still accepted
+on input), added the envelope's `kind` (`deck` or `doc`, present on every message
+that names a file; it must agree with the path's `*.doc.json` ending) and gave docs
+their own `Comment` and `Focus`. Nexus and studio ship together; a peer that speaks
+another version gets `update nexus-studio` (or `update nexus`) instead of
+misbehaving: nexus shows it on the status line, studio in a toast.
 
 | Direction | Message | Meaning |
 |---|---|---|
-| studio → nexus | `Hello{deck_path}` | a deck is open |
-| studio → nexus | `Comment{deck_path, thread_id, slide, block?, point, text}` | Send to nexus on a new pin |
-| studio → nexus | `Reply{deck_path, thread_id, text}` | a reply in a thread, Send to nexus |
-| studio → nexus | `Focus{deck_path, slide, blocks}` | what is on screen and selected (debounced 300 ms) |
-| nexus → studio | `Open{deck_path}` | switch to a deck (the same deck is a no-op, undo history is kept) |
-| nexus → studio | `Focus{deck_path, slide}` | the model changed this slide; jump to it |
+| studio → nexus | `Hello{path}` | a deck or doc is open |
+| studio → nexus | `Comment{path, thread_id, slide, block?, point, text}` | Send to nexus on a new deck pin |
+| studio → nexus | `Comment{path, thread_id, block, range?, quote, text}` (`kind:"doc"`) | Send to nexus on text in a doc; `range` counts characters of the block's plain text |
+| studio → nexus | `Reply{path, thread_id, text}` | a reply in a thread (either kind), Send to nexus |
+| studio → nexus | `Focus{path, slide, blocks}` | what is on screen and selected in a deck (debounced 300 ms) |
+| studio → nexus | `Focus{path, block?, selection?}` (`kind:"doc"`) | the block in view and the selected text of a doc (debounced 300 ms) |
+| nexus → studio | `Open{path}` | switch to a deck or doc (the same file is a no-op, undo history is kept) |
+| nexus → studio | `Focus{path, slide}` / `Focus{path, block}` (`kind:"doc"`) | the model changed this slide or block; jump to it |
 | nexus → studio | `Theme{colors}` | terminal semantic roles as plain hex; chrome only |
-| nexus → studio | `Activity{deck_path, thread_id, state, reason?, detail?}` | latest comment-turn activity, in memory only |
+| nexus → studio | `Activity{path, thread_id, state, reason?, detail?}` | latest comment-turn activity, in memory only |
 | nexus → studio | `Bye` | the conversation ended |
+
+In Rust the doc `Comment` and `Focus` are `Message::DocComment` and
+`Message::DocFocus`; `Line::encode` and `Line::decode` map them to and from the
+wire names, so a peer only ever sees `Comment` and `Focus`.
 
 **Transport today:** the TUI launches `nexus-studio --attach <deck>` as a child
 with piped stdio. Studio reads lines on stdin and writes them on stdout (its own
@@ -611,6 +624,23 @@ rings or pulses.
 - The comment message also carries the deck's current revision and the anchored
   node on one line (`node b4 text 160,200 800x120 style title size=58 : "text"`,
   text up to 300 characters), so the model can edit without a `read`.
+- **Docs** use the same flow. `/studio` opens the most recent doc or deck the model
+  touched (or the one named, such as `/studio docs/q3.doc.json`). When the `canvas`
+  tool creates or edits a doc, the terminal sends `Open` and a doc `Focus` for the
+  first changed block. A doc comment or reply becomes:
+
+  ```
+  Comment on docs/q3.doc.json · b4 "Ship the docs canvas": Say who owns this
+  thread 7c1e… · revision 3f2a91c04b7d
+  block b4 list: "Ship the docs canvas\nComments and suggestions\n…"
+  ```
+
+  The quoted text is the anchored quote (or the block's text when the whole block
+  is commented), then the thread id, the doc revision and the block's plain text
+  (up to 300 characters), so the model can act without a `read`. No page image is
+  attached. The first message after a doc `Focus` change carries
+  `studio: viewing b12, selected "…"` (without the selection part when none). The
+  comment's activity states and `edited blocks b2, b3` summaries work as for decks.
 
 ## Phases
 
@@ -630,9 +660,9 @@ rings or pulses.
 - **S4, web app.** The web client's deck view speaks the link through the host
   and renders the same decks; the web editors plan in `docs/web-editors.md`.
 - **S5, mini-apps and remote.** Open `app` tool web apps in sandboxed studio
-  views, each in its own origin with no IPC. Docs editing comes next, built on
-  the same operation and comment model. Remote hosts use the device-key pairing
-  in `docs/web-editors.md` §1.
+  views, each in its own origin with no IPC. (Docs editing landed with the
+  docs canvas, phase P3; see *The doc editor*.) Remote hosts use the device-key
+  pairing in `docs/web-editors.md` §1.
 
 ## Editor status
 
@@ -740,6 +770,98 @@ or play animations anywhere but present mode. Smart text/font/color changes cros
 color channels, to keep playback compositor-only. Font previews use the
 webview's installed faces, so platform font availability still matters.
 
+## The doc editor
+
+Opening a `*.doc.json` (`nexus-studio docs/q3.doc.json`, `--attach`, `/studio`, or
+Open… in the deck window, which accepts doc paths) puts studio in **doc mode**. The backend keeps the same
+contract as for decks (the file is the single source of truth, autosave, the 500 ms
+poll, the file wins a conflict, comments in `<doc>.comments.json`) with doc
+operations in place of deck ones. `docs/docs-canvas.md` describes the format and the
+operations; this is what the window does.
+
+- **IPC (`Doc*` commands; `Load`, `Undo`, `Redo`, `Reveal`, `ImportAsset` and the
+  comment-thread commands `CommentReply`, `CommentResolve`, `CommentReopen`,
+  `PreviewEdit`, `ApplyEdit`, `DismissEdit` are shared and act on the open kind):**
+  `DocApply{ops}` (checked together through `doc::direct`, one undo step, written at
+  once with history `who = user`), `DocApplyDesign{design?}` (the `apply_design` op),
+  `DocCommentCreate{anchor:{block,range?,quote},text,send}`, `DocResolveEdits{accept}`
+  (every pending suggestion at once; accepting is one undo step), `DocExport{format:
+  docx|pdf|md|html, path?}`, `DocPages{}`, `DocDesigns{}`, `DocImportAsset{name,data}`
+  (hex bytes of a pasted or dropped image, stored by content under the doc's
+  `assets/`), `DocFocus{block?,selection?}` and `NewDoc{title}`. Events: `Doc` (the
+  whole doc, threads, activity, asset hashes, the design state, can_undo/can_redo,
+  `changed` block ids and a notice), `DocFeedback`, `DocPreview` (what a suggestion
+  would change), `DocFocus`, `Designs`, `Pages`. Undo and redo are written to the file,
+  so the model sees them. An external edit reloads as one undo step and the changed
+  blocks flash; a local action that races it is dropped with a toast.
+- **Pages.** `DocPages` paginates with the core layout and answers with the page
+  sizes; each page is a PNG at `nexus://localhost/pages/<rev8>-<n>.png`, drawn by the
+  core renderer when first asked for and served only for the current revision.
+- **Layout.** A slim top bar (title, save state, undo and redo, the link pill, Design,
+  Pages, Export), an outline on the left (headings; it collapses into a drawer below
+  1100 px), the page in the middle at the design's `measure_ch`, and comments in the
+  margin. The chrome follows the terminal palette; the page follows the doc's design
+  (fonts, colors and the `doc` text styles in points at 1 pt = 1.333 px times a screen
+  zoom, 1.2 by default, Cmd+/Cmd−). Spacing is `doc::LAYOUT`, which `doc.css` repeats
+  (tested).
+- **The editing model: one `contenteditable` surface**, not one per block. The browser
+  keeps cross-block selection, arrow keys, spell checking and IME working, which
+  per-block hosts cannot do (a selection that starts in one editable host cannot
+  extend into another). The price is that everything structural is intercepted:
+  Enter, Backspace and Delete at block edges, Tab, deleting or typing over a
+  selection that spans blocks, formatting, paste and drops become pure functions of
+  the doc (`ui/doc/edits.js`) that return operations and a caret; typing inside a
+  part is left to the browser and read back after each input. Typing is batched into
+  one `DocApply` per 700 ms pause; a structural action sends the pending typing with
+  it, so each action is one undo step.
+- **Inline Markdown.** Block text is the doc's Markdown subset. The page shows it
+  rich and writes it back exactly (`ui/doc/inline.js`): `**bold**`, `*italic*`,
+  `~~strike~~`, `` `code` ``, `[links](url)` and `[^footnotes]`, escaping literal
+  `*_~[]<&|` and block-looking line starts. Typing `**bold**`, `_italic_`,
+  `` `code` `` or `~~strike~~` makes the mark; Cmd+B, I, E, Shift+X and K (link) toggle
+  it. A mark that ends in punctuation right before a letter (`*end.*a`) cannot be
+  written in CommonMark; it needs a space after it, like normal text has.
+- **Blocks.** Every kind renders: title, headings 1 to 3 (real `h1`–`h4` in the DOM),
+  paragraph, quote, callout with tone, code with a language label, bulleted, numbered
+  and check lists with nesting up to four deep (checkboxes click), tables (add a row
+  or column from the hover buttons, Tab and Enter move between cells), images with a
+  caption and a width, charts (the deck's renderer), dividers, page breaks and a
+  live table of contents. Markdown shortcuts at the start of a line: `# `, `## `,
+  `### `, `- `, `* `, `1. `, `[] `, `> `, ```` ``` ```` (with Enter or a space) and `---`.
+  `/` opens the insert menu (every kind, filtered as you type, arrow keys and Enter);
+  the handle beside a block drags it or opens its menu (turn into, tone or width,
+  duplicate, move, copy link to block, delete). Pasting HTML or Markdown makes blocks
+  (`insert_markdown` runs in the core parser); plain text keeps its paragraphs; images
+  are imported by content.
+- **Comments, the Claude Docs way.** Select text and use the toolbar's comment button
+  (Cmd+Alt+M): a card opens in the margin beside the text, anchored `{block, range,
+  quote}`, and the text carries a soft highlight. Cards sit at their anchor, stack
+  when they collide, and the open thread slides next to its anchor; hovering a card
+  or its text lights the other. Send to nexus works as on decks and the activity
+  states show on the card. Model comments show their severity (must, should,
+  consider). A thread whose suggestion is all `replace_text` is drawn **inside the
+  text** as a tracked change (deleted text struck in the error color, inserted text
+  underlined in accent2) with Accept and Reject on its card; Accept all and Reject all
+  sit above the margin. Other operations show a before and after on the card (from
+  `DocPreview`). Resolved threads fold into "Resolved (n)".
+- **Page preview, Export, Design.** Pages swaps the editor for the core-rendered
+  page PNGs (read-only, numbered, fit to width; Esc or the button returns, and it
+  refreshes when the revision changes). Export offers DOCX, PDF, Markdown and HTML
+  (a toast with Reveal; "Into template" is disabled until templates arrive). The
+  Design panel shows the doc's design (colors, fonts), switches to another design of
+  the space, and offers "Apply update" when the design's revision moved.
+- **Accessibility.** Headings are real headings, every control has a label, focus
+  rings show on keyboard focus, and `prefers-reduced-motion` turns off transitions
+  and animation.
+- **Known gaps.** Chart data and image alt text are edited through nexus, not the
+  window. Deleting a selection that reaches into a code block or a table clears
+  the covered text rather than merging blocks. Dragging text between blocks is not
+  supported (a drop only takes image files). A doc window has no Open… or New of
+  its own yet (`/studio <file>` switches, as nexus does when the model edits another
+  file), and `.docx` import is the CLI's (`nexus doc`). The page was exercised in
+  Chromium; WebKit, the app's real webview, differs in caret and `beforeinput`
+  details, so it needs a pass in the app itself.
+
 ## Tests
 
 - **Core:** deck round-trips, validation paths, version-1 migration (idempotent,
@@ -829,5 +951,17 @@ webview's installed faces, so platform font availability still matters.
   `ui-dev/shots/toolbar-before-1150-{default,light}.png`,
   `toolbar-after-review-{1150,1280,1440}-{default,light}-{middle,top,right}-{fit,0.5,2}.png`, `toolbar-overflow-420-{default,light}.png` and
   `toolbar-geometry.json`.
+- **Doc editor:** `backend/doc_tests.rs` (open, one undo step per apply, undo and
+  redo on disk, an external edit as one undo step listing its blocks, the file
+  winning, every comment command and suggestion, exports, pages, confined image
+  import, designs, link and mode switches), `backend/ui_tests.rs` (embedding, no
+  markup injection, `doc::LAYOUT` parity, and the JS unit tests below when `node` 22+
+  exists), `node crates/studio/ui-dev/doc-unit.mjs` (inline round trips, shortcuts,
+  local ops, every structural edit; `--parity` feeds the core parser) and
+  `node crates/studio/ui-dev/doc-e2e.mjs` (36 behaviors in Chromium against
+  `doc-mock.js`), plus `node crates/studio/ui-dev/doc-shot.mjs` for 1440×900 shots in
+  `ui-dev/shots/` (gitignored). The TUI tests cover the doc comment message, the
+  focus line, `Open` and focus after a canvas doc edit, activity summaries, the
+  version-mismatch notice and the card hint.
 - **Hermetic:** no network, and no windows opened in Rust tests. Browser harnesses
   use loopback-only static fixtures and mock IPC.

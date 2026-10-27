@@ -1,0 +1,438 @@
+{
+ "doc": {
+  "version": 1,
+  "title": "Q3 strategy",
+  "design": "nexus",
+  "design_rev": "abc",
+  "theme": {
+   "colors": {
+    "bg": "#faf9f6",
+    "fg": "#282923",
+    "accent": "#ae593e",
+    "muted": "#76766b"
+   },
+   "fonts": {
+    "heading": "Inter",
+    "body": "Inter",
+    "mono": "JetBrains Mono"
+   },
+   "text_styles": {
+    "display": {
+     "family": "heading",
+     "size": 81.96,
+     "weight": 800,
+     "italic": false,
+     "line_height": 1,
+     "letter_spacing": 0,
+     "color": "accent"
+    },
+    "title": {
+     "family": "heading",
+     "size": 26.86,
+     "weight": 700,
+     "italic": false,
+     "line_height": 1.15,
+     "letter_spacing": 0,
+     "color": "fg"
+    },
+    "h1": {
+     "family": "heading",
+     "size": 21.48,
+     "weight": 700,
+     "italic": false,
+     "line_height": 1.15,
+     "letter_spacing": 0,
+     "color": "fg"
+    },
+    "h2": {
+     "family": "heading",
+     "size": 17.19,
+     "weight": 600,
+     "italic": false,
+     "line_height": 1.15,
+     "letter_spacing": 0,
+     "color": "fg"
+    },
+    "h3": {
+     "family": "heading",
+     "size": 13.75,
+     "weight": 600,
+     "italic": false,
+     "line_height": 1.15,
+     "letter_spacing": 0,
+     "color": "fg"
+    },
+    "body": {
+     "family": "body",
+     "size": 11,
+     "weight": 400,
+     "italic": false,
+     "line_height": 1.4,
+     "letter_spacing": 0,
+     "color": "fg"
+    },
+    "quote": {
+     "family": "body",
+     "size": 13.75,
+     "weight": 400,
+     "italic": true,
+     "line_height": 1.4,
+     "letter_spacing": 0,
+     "color": "fg"
+    },
+    "lead": {
+     "family": "body",
+     "size": 17.19,
+     "weight": 400,
+     "italic": false,
+     "line_height": 1.15,
+     "letter_spacing": 0,
+     "color": "fg"
+    },
+    "caption": {
+     "family": "body",
+     "size": 8.8,
+     "weight": 400,
+     "italic": false,
+     "line_height": 1.4,
+     "letter_spacing": 0,
+     "color": "muted"
+    },
+    "code": {
+     "family": "mono",
+     "size": 8.8,
+     "weight": 400,
+     "italic": false,
+     "line_height": 1.4,
+     "letter_spacing": 0,
+     "color": "fg"
+    }
+   },
+   "measure_ch": 72
+  },
+  "page": {
+   "size": "a4",
+   "margins_pt": [
+    72,
+    72,
+    72,
+    72
+   ],
+   "header": "",
+   "footer": "{page}"
+  },
+  "blocks": [
+   {
+    "id": "b1",
+    "kind": "title",
+    "text": "Q3 strategy"
+   },
+   {
+    "id": "b2",
+    "kind": "paragraph",
+    "text": "We grew **18%** while [churn](https://example.com/churn) fell, and the new onboarding *shipped* ahead of plan. Details are in `docs/q3.doc.json`."
+   },
+   {
+    "id": "b3",
+    "kind": "toc"
+   },
+   {
+    "id": "b4",
+    "kind": "heading",
+    "level": 1,
+    "text": "Goals"
+   },
+   {
+    "id": "b5",
+    "kind": "list",
+    "ordered": false,
+    "items": [
+     {
+      "text": "Ship the docs canvas",
+      "children": [
+       {
+        "text": "Comments and suggestions"
+       },
+       {
+        "text": "Tracked changes"
+       }
+      ]
+     },
+     {
+      "text": "Templates"
+     },
+     {
+      "text": "Offline export"
+     }
+    ]
+   },
+   {
+    "id": "b6",
+    "kind": "list",
+    "ordered": false,
+    "items": [
+     {
+      "text": "Review the plan with design",
+      "checked": true
+     },
+     {
+      "text": "Send the draft to **finance**",
+      "checked": false
+     },
+     {
+      "text": "Book the launch review",
+      "checked": false
+     }
+    ]
+   },
+   {
+    "id": "b7",
+    "kind": "heading",
+    "level": 2,
+    "text": "Plan"
+   },
+   {
+    "id": "b8",
+    "kind": "list",
+    "ordered": true,
+    "items": [
+     {
+      "text": "Draft the narrative"
+     },
+     {
+      "text": "Agree the numbers"
+     },
+     {
+      "text": "Publish to the team"
+     }
+    ]
+   },
+   {
+    "id": "b9",
+    "kind": "quote",
+    "text": "Make the report and the deck look like one company."
+   },
+   {
+    "id": "b10",
+    "kind": "callout",
+    "tone": "info",
+    "text": "Everything here follows the **Nexus** design, so the deck and this doc share one look."
+   },
+   {
+    "id": "b11",
+    "kind": "callout",
+    "tone": "warn",
+    "text": "Numbers are preliminary until finance signs off."
+   },
+   {
+    "id": "b12",
+    "kind": "heading",
+    "level": 1,
+    "text": "Results"
+   },
+   {
+    "id": "b13",
+    "kind": "table",
+    "header": true,
+    "align": [
+     "left",
+     "right",
+     "right"
+    ],
+    "rows": [
+     [
+      "Region",
+      "Revenue",
+      "Growth"
+     ],
+     [
+      "EU",
+      "$4.1m",
+      "+21%"
+     ],
+     [
+      "US",
+      "$6.3m",
+      "+17%"
+     ],
+     [
+      "APAC",
+      "$2.2m",
+      "+12%"
+     ]
+    ]
+   },
+   {
+    "id": "b14",
+    "kind": "image",
+    "src": "assets/chart.png",
+    "alt": "Revenue by month",
+    "caption": "Figure 1 · Revenue by month",
+    "width": "full"
+   },
+   {
+    "id": "b15",
+    "kind": "chart",
+    "chart": {
+     "chart": "bar",
+     "labels": [
+      "Jul",
+      "Aug",
+      "Sep"
+     ],
+     "series": [
+      {
+       "name": "Revenue",
+       "values": [
+        3.2,
+        4.1,
+        5
+       ]
+      }
+     ]
+    }
+   },
+   {
+    "id": "b16",
+    "kind": "code",
+    "lang": "ts",
+    "text": "const growth = (now: number, then: number) =>\n  (now - then) / then;"
+   },
+   {
+    "id": "b17",
+    "kind": "divider"
+   },
+   {
+    "id": "b18",
+    "kind": "page_break"
+   },
+   {
+    "id": "b19",
+    "kind": "heading",
+    "level": 1,
+    "text": "Appendix"
+   },
+   {
+    "id": "b20",
+    "kind": "paragraph",
+    "text": "Methodology notes live in the shared drive."
+   }
+  ]
+ },
+ "threads": [
+  {
+   "id": "t1",
+   "anchor": {
+    "block": "b2",
+    "range": {
+     "start": 8,
+     "end": 11
+    },
+    "quote": "18%"
+   },
+   "severity": "consider",
+   "created": 1790000000,
+   "resolved": null,
+   "messages": [
+    {
+     "id": "m1",
+     "role": "you",
+     "text": "Where does this number come from?",
+     "created": 1790000000,
+     "edits": []
+    },
+    {
+     "id": "m2",
+     "role": "model",
+     "text": "It is the board deck figure for Q3; I linked the source in the appendix.",
+     "created": 1790000000,
+     "edits": []
+    }
+   ]
+  },
+  {
+   "id": "t2",
+   "anchor": {
+    "block": "b5",
+    "range": {
+     "start": 9,
+     "end": 20
+    },
+    "quote": "docs canvas"
+   },
+   "severity": "must",
+   "created": 1790000000,
+   "resolved": null,
+   "messages": [
+    {
+     "id": "m3",
+     "role": "model",
+     "text": "This goal needs an owner and a date, or it will slip again.",
+     "created": 1790000000,
+     "edits": []
+    }
+   ]
+  },
+  {
+   "id": "t3",
+   "anchor": {
+    "block": "b2",
+    "range": {
+     "start": 61,
+     "end": 74
+    },
+    "quote": "ahead of plan"
+   },
+   "severity": "should",
+   "created": 1790000000,
+   "resolved": null,
+   "messages": [
+    {
+     "id": "m4",
+     "role": "model",
+     "text": "Be specific about how early.",
+     "created": 1790000000,
+     "edits": [
+      {
+       "id": "e1",
+       "why": "Say how early",
+       "ops": [
+        {
+         "op": "replace_text",
+         "id": "b2",
+         "find": "ahead of plan",
+         "replace": "two weeks ahead of plan"
+        }
+       ],
+       "status": "pending",
+       "guards": {}
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "t4",
+   "anchor": {
+    "block": "b20",
+    "range": {
+     "start": 0,
+     "end": 11
+    },
+    "quote": "Methodology"
+   },
+   "severity": "consider",
+   "created": 1790000000,
+   "resolved": 1790000005,
+   "messages": [
+    {
+     "id": "m5",
+     "role": "you",
+     "text": "Link to the drive folder.",
+     "created": 1790000000,
+     "edits": []
+    }
+   ]
+  }
+ ]
+}

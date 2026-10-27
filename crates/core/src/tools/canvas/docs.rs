@@ -23,6 +23,12 @@ impl ToolBox {
         DOC_SCHEMA
     }
 
+    /// Tell the terminal which block studio should jump to. A doc with no blocks
+    /// still opens, so the first block is an empty id then.
+    fn doc_changed(&self, path: &Path, block: Option<String>) {
+        self.deck_changed(path, Some(block.unwrap_or_default()));
+    }
+
     pub(super) fn doc_action(&self, action: &str, v: &Value) -> Result<String> {
         let mut out = if action == "deck_create" {
             self.doc_create(v)?
@@ -133,6 +139,7 @@ impl ToolBox {
         let doc = Doc::check(&serde_json::to_string(&doc)?)
             .map_err(|e| anyhow::anyhow!("{}", located(&e)))?;
         doc::storage::save(&self.space_files_dir, &relative, &doc, Who::Model)?;
+        self.doc_changed(&path, doc.blocks.first().map(|b| b.id.clone()));
         let mut out = format!(
             "created doc · {relative} · {} blocks · revision {}\n{}",
             doc.blocks.len(),
@@ -175,6 +182,14 @@ impl ToolBox {
         let mut next = prepared.next;
         self.doc_images(&mut next, path)?;
         doc::storage::save(&self.space_files_dir, relative, &next, Who::Model)?;
+        self.doc_changed(
+            path,
+            next.blocks
+                .iter()
+                .find(|block| before.block(&block.id) != Some(*block))
+                .or_else(|| next.blocks.first())
+                .map(|block| block.id.clone()),
+        );
         let mut out = format!(
             "edited doc · {relative} · revision {} (was {})\n",
             short(&next.revision()),

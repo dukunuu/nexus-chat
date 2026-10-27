@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>nexus studio</title>
   <link rel="stylesheet" href="/studio.css">
+  <link rel="stylesheet" href="/doc/doc.css">
   <script type="module" src="/app.js"></script>
 </head>
 <body>
@@ -34,6 +35,7 @@
   </main>
   <dialog id="path-dialog"><form method="dialog"><h2 id="path-heading">Open deck</h2><label id="path-label" for="path-input">Path</label><input id="path-input" required autocomplete="off"><p id="path-hint"></p><div class="dialog-actions"><button value="cancel" formnovalidate>Cancel</button><button id="path-confirm" class="primary" value="ok">Open</button></div></form></dialog>
   <dialog id="export-details" aria-labelledby="export-details-heading"><h2 id="export-details-heading">Export approximations</h2><ul id="export-warnings"></ul><form method="dialog"><div class="dialog-actions"><button value="close">Close</button></div></form></dialog>
+  <div id="doc-app" hidden></div>
   <div id="presentation" hidden><div id="present-stage"></div><aside id="presenter"><div class="presenter-label">Next step</div><div id="present-next"></div><div class="presenter-label">Speaker notes</div><div id="present-notes"></div><div id="present-timer">00:00</div></aside><span id="present-counter"></span><span id="present-jump"></span><span id="present-step"></span><button id="presenter-toggle">Presenter · P</button><button id="exit-present">Exit · Esc</button></div>
 </body>
 </html>

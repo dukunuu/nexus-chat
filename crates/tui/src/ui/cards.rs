@@ -528,11 +528,13 @@ fn push_batch_body(
     }
 }
 
-/// A deck card that created or edited slides, successfully.
+/// A canvas card that created or edited a deck or doc, successfully: the ones
+/// studio can open.
 fn is_deck_change(view: &nexus_core::app::ToolView) -> bool {
     view.outcome == nexus_core::app::ToolOutcome::Ok
-        && !view.target.ends_with(".doc.json")
-        && (view.verb.starts_with("created deck") || view.verb.starts_with("edited "))
+        && (view.verb.starts_with("created deck")
+            || view.verb.starts_with("created doc")
+            || view.verb.starts_with("edited "))
 }
 
 /// The slides a `canvas` call rendered, drawn inline in the opened card.
@@ -2251,6 +2253,52 @@ mod tool_card_tests {
             .iter()
             .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect()
+    }
+
+    #[test]
+    fn doc_cards_hint_at_studio_like_deck_cards() {
+        let hint = |rows: &[String]| {
+            rows.iter()
+                .any(|row| row.contains("open in studio · /studio"))
+        };
+        for (action, result, path) in [
+            (
+                "edit",
+                "edited doc · docs/q3.doc.json · revision 0123456789ab (was fedcba987654)\n- update_block b2\n[b2] We grew 18%",
+                "docs/q3.doc.json",
+            ),
+            (
+                "create",
+                "created doc · docs/q3.doc.json · 4 blocks · revision 0123456789ab\n[b1] # Q3 strategy",
+                "docs/q3.doc.json",
+            ),
+        ] {
+            let args = json!({"action": action, "path": path});
+            let rows = text(&card("canvas", args.clone(), result, false, false));
+            assert!(rows[0].contains("doc"), "{rows:?}");
+            assert!(hint(&rows), "{action}: {rows:?}");
+            assert!(
+                !hint(&text(&card("canvas", args.clone(), result, false, true))),
+                "hints off"
+            );
+            // Reading, viewing and failing do not invite opening anything.
+            let failed = text(&card(
+                "canvas",
+                args,
+                "Nothing was written. Problems to fix",
+                false,
+                false,
+            ));
+            assert!(!hint(&failed), "{failed:?}");
+        }
+        let read = text(&card(
+            "canvas",
+            json!({"action": "read", "path": "docs/q3.doc.json"}),
+            "doc · docs/q3.doc.json · 4 blocks · revision 0123456789ab\n[b1] # Q3",
+            false,
+            false,
+        ));
+        assert!(!hint(&read), "{read:?}");
     }
 
     #[test]

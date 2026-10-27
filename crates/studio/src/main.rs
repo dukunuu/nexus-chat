@@ -26,6 +26,8 @@ const HOME: &str = "nexus://localhost/index.html";
 enum Message {
     Command(String),
     Link(LinkMessage),
+    /// A line from nexus that speaks another link version: the window says so.
+    LinkError(String),
     Poll,
 }
 
@@ -59,7 +61,7 @@ fn main() -> Result<()> {
     let window = WindowBuilder::new()
         .with_title(format!(
             "nexus studio — {}",
-            backend.lock().expect("backend lock").deck.title
+            backend.lock().expect("backend lock").title()
         ))
         .with_inner_size(LogicalSize::new(1280.0, 800.0))
         .with_min_inner_size(LogicalSize::new(900.0, 600.0))
@@ -131,10 +133,16 @@ fn start_threads(proxy: &EventLoopProxy<Message>, attached: bool) {
                 let Ok(line) = line else {
                     break;
                 };
-                if let Ok(message) = Line::decode(&line)
-                    && link_proxy.send_event(Message::Link(message)).is_err()
-                {
-                    return;
+                match Line::decode(&line) {
+                    Ok(message) => {
+                        if link_proxy.send_event(Message::Link(message)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) if error.to_string().contains("update nexus") => {
+                        let _ = link_proxy.send_event(Message::LinkError(error.to_string()));
+                    }
+                    Err(_) => {}
                 }
             }
             let _ = link_proxy.send_event(Message::Link(LinkMessage::Bye));
@@ -198,6 +206,7 @@ fn handle_message(message: Message, backend: &Mutex<Backend>) -> (String, String
     let mut backend = backend.lock().expect("backend lock");
     let asynchronous = !matches!(message, Message::Command(_));
     let result = match message {
+        Message::LinkError(message) => Ok(Some(backend::Event::Error { message })),
         Message::Command(source) => Ok(Some(backend.dispatch(&source))),
         Message::Link(message) => backend.receive_link(message).map(Some),
         Message::Poll => backend.poll(),
@@ -219,7 +228,7 @@ fn handle_message(message: Message, backend: &Mutex<Backend>) -> (String, String
             script
         }
     });
-    (format!("nexus studio — {}", backend.deck.title), script)
+    (format!("nexus studio — {}", backend.title()), script)
 }
 
 async fn remote_bytes(
@@ -260,5 +269,19 @@ fn csp() -> &'static str {
     #[cfg(not(target_os = "windows"))]
     {
         "default-src 'self' nexus:; img-src 'self' nexus: data:; style-src 'self' 'unsafe-inline'; script-src 'self' nexus:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The page may load only its own origin and `data:` images, and may not connect
+    /// anywhere. Doc mode adds no source to it.
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn the_content_security_policy_is_unchanged() {
+        assert_eq!(
+            super::csp(),
+            "default-src 'self' nexus:; img-src 'self' nexus: data:; style-src 'self' 'unsafe-inline'; script-src 'self' nexus:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+        );
     }
 }

@@ -1,0 +1,249 @@
+{
+  "version": 2,
+  "title": "Untitled",
+  "theme": {
+    "colors": {
+      "accent": "#ae593e",
+      "bg": "#faf9f6",
+      "fg": "#282923",
+      "muted": "#76766b"
+    },
+    "fonts": {
+      "body": "Inter",
+      "heading": "Inter",
+      "mono": "JetBrains Mono"
+    },
+    "size": {
+      "w": 1920,
+      "h": 1080
+    },
+    "text_styles": {
+      "body": {
+        "family": "body",
+        "size": 42,
+        "weight": 400,
+        "italic": false,
+        "line_height": 1.35,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "caption": {
+        "family": "body",
+        "size": 26,
+        "weight": 400,
+        "italic": false,
+        "line_height": 1.35,
+        "letter_spacing": 0.0,
+        "color": "muted",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "code": {
+        "family": "mono",
+        "size": 36,
+        "weight": 400,
+        "italic": false,
+        "line_height": 1.35,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "display": {
+        "family": "heading",
+        "size": 312.93,
+        "weight": 800,
+        "italic": false,
+        "line_height": 1.0,
+        "letter_spacing": 0.0,
+        "color": "accent",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "heading": {
+        "family": "heading",
+        "size": 81,
+        "weight": 700,
+        "italic": false,
+        "line_height": 1.08,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "lead": {
+        "family": "body",
+        "size": 58,
+        "weight": 400,
+        "italic": false,
+        "line_height": 1.4,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "quote": {
+        "family": "heading",
+        "size": 81,
+        "weight": 500,
+        "italic": false,
+        "line_height": 1.15,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "subheading": {
+        "family": "heading",
+        "size": 58,
+        "weight": 600,
+        "italic": false,
+        "line_height": 1.2,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      },
+      "title": {
+        "family": "heading",
+        "size": 120,
+        "weight": 700,
+        "italic": false,
+        "line_height": 1.08,
+        "letter_spacing": 0.0,
+        "color": "fg",
+        "align": "left",
+        "valign": "top",
+        "transform": "none"
+      }
+    }
+  },
+  "slides": [
+    {
+      "id": "s1",
+      "layout": {
+        "mode": "column",
+        "gap": 32,
+        "padding": [
+          160,
+          160,
+          160,
+          160
+        ],
+        "main": "center",
+        "cross": "stretch"
+      },
+      "children": [
+        {
+          "id": "b_kicker",
+          "kind": "text",
+          "text": "A NEW PERSPECTIVE / 01",
+          "style": "caption",
+          "font": {
+            "letter_spacing": 0.12,
+            "color": "accent"
+          }
+        },
+        {
+          "id": "b1",
+          "kind": "text",
+          "text": "Untitled",
+          "style": "title"
+        },
+        {
+          "id": "b_subtitle",
+          "kind": "text",
+          "text": "A little clarity. A bigger possibility.",
+          "style": "body",
+          "font": {
+            "color": "muted"
+          }
+        }
+      ],
+      "notes": ""
+    },
+    {
+      "id": "s2",
+      "layout": {
+        "mode": "column",
+        "gap": 56,
+        "padding": [
+          120,
+          160,
+          120,
+          160
+        ],
+        "cross": "stretch"
+      },
+      "children": [
+        {
+          "id": "b2",
+          "kind": "text",
+          "text": "Make room for what matters.",
+          "style": "heading"
+        },
+        {
+          "id": "b_row",
+          "name": "Content",
+          "sizing": {
+            "w": "hug",
+            "h": "fill"
+          },
+          "kind": "frame",
+          "layout": {
+            "mode": "row",
+            "gap": 96,
+            "cross": "stretch"
+          },
+          "children": [
+            {
+              "id": "b3",
+              "sizing": {
+                "w": "fill",
+                "h": "hug"
+              },
+              "kind": "text",
+              "text": "- Start with the story\n- Make it memorable\n- Leave room to breathe",
+              "style": "body"
+            },
+            {
+              "id": "b_chart",
+              "sizing": {
+                "w": "fill",
+                "h": "hug"
+              },
+              "kind": "chart",
+              "chart": "bar",
+              "labels": [
+                "Start",
+                "Build",
+                "Grow"
+              ],
+              "series": [
+                {
+                  "name": "Illustrative values",
+                  "values": [
+                    3.0,
+                    5.0,
+                    8.0
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "notes": "Chart values are illustrative placeholders, not measured data."
+    }
+  ]
+}

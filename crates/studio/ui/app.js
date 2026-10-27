@@ -180,8 +180,32 @@ function handleEvent(event, reply) {
   }
   finished?.complete?.(event); pump();
 }
-window.studioEvent = event => handleEvent(event, true);
-window.studioAsyncEvent = event => handleEvent(event, false);
+// Doc mode lives in ./doc/doc.js, loaded when the backend opens a doc. Its
+// events go there; a deck event brings the deck UI back.
+const DOC_EVENTS = new Set(['Doc', 'DocFeedback', 'DocPreview', 'DocFocus', 'Designs', 'Pages']);
+const SHARED_EVENTS = new Set(['Asset', 'Exported', 'Revealed', 'Error', 'Theme']);
+let docUi = null, docQueue = Promise.resolve();
+function route(event, reply) {
+  if (docUi && event.event === 'Deck') {
+    docQueue = docQueue.then(() => { docUi?.unmount(); docUi = null; document.body.classList.remove('doc-mode'); handleEvent(event, reply); });
+    return;
+  }
+  if (DOC_EVENTS.has(event.event) || (docUi && SHARED_EVENTS.has(event.event))) {
+    if (reply) pending = null;
+    docQueue = docQueue.then(async () => {
+      if (!docUi) {
+        const module = await import('./doc/doc.js');
+        docUi = module.mount({ applyTheme, ask });
+        document.body.classList.add('doc-mode');
+      }
+      docUi.handle(event, reply);
+    });
+    return;
+  }
+  handleEvent(event, reply);
+}
+window.studioEvent = event => route(event, true);
+window.studioAsyncEvent = event => route(event, false);
 $('#undo').onclick = () => command({ command:'Undo' }); $('#redo').onclick = () => command({ command:'Redo' });
 function deckMenu(open) { $('#deck-menu').hidden = !open; $('#deck-title').setAttribute('aria-expanded', String(open)); }
 $('#deck-title').onclick = () => deckMenu($('#deck-menu').hidden);
@@ -253,7 +277,7 @@ function ask(heading, label, hint, value, action) {
 }
 pathDialog.addEventListener('close', () => { if (pathDialog.returnValue === 'ok') pathAction($('#path-input').value); });
 $('#rename-deck').onclick = () => { deckMenu(false); ask('Rename deck', 'Title', 'Give this project a name.', state.deck.title, value => { const title = value.trim(); if (title) command(() => ({ command:'Save', deck:{ ...state.deck, title } })); }); };
-$('#open-deck').onclick = () => { deckMenu(false); ask('Open', 'Deck path', 'Enter a local .deck.json or PowerPoint .pptx path.', '', path => command({ command:'Open', path })); };
+$('#open-deck').onclick = () => { deckMenu(false); ask('Open', 'Deck path', 'Enter a local .deck.json, .doc.json or PowerPoint .pptx path.', '', path => command({ command:'Open', path })); };
 $('#new-deck').onclick = () => { deckMenu(false); ask('New deck', 'Title', 'Created in your active space’s files/decks folder.', 'Untitled', title => command({ command:'NewDeck', title })); };
 function insert(block) {
   const slide = api.slide(); if (!slide) { toast('Add a slide first.'); return; }

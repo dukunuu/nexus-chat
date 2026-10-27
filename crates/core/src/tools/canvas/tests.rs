@@ -370,3 +370,44 @@ fn revised_layout_previews() {
     }
     std::fs::remove_dir_all(assets).unwrap();
 }
+
+#[tokio::test]
+async fn doc_creates_and_edits_tell_the_terminal_which_block_to_show() {
+    let f = Fixture::new();
+    create(&f).await;
+    let path = f.file("docs/report.doc.json");
+    let changed = std::mem::take(&mut f.tools.deck_link.lock().unwrap().changed);
+    assert_eq!(changed.len(), 1);
+    assert!(crate::deck::same_file(&changed[0].0, &path));
+    let base = doc(&f);
+    assert_eq!(
+        changed[0].1, base.blocks[0].id,
+        "a new doc opens on its first block"
+    );
+    let paragraph = base.blocks[3].id.clone();
+    call(&f, "edit", json!({"path":"docs/report.doc.json","ops":[{"op":"replace_text","id":paragraph,"find":"carefully","replace":"calmly"}]})).await;
+    let changed = std::mem::take(&mut f.tools.deck_link.lock().unwrap().changed);
+    assert_eq!(changed.len(), 1);
+    assert_eq!(
+        changed[0].1, paragraph,
+        "an edit opens on the first changed block"
+    );
+    // A change that touches no block (the title) still opens the doc, on its first block.
+    call(
+        &f,
+        "edit",
+        json!({"path":"docs/report.doc.json","ops":[{"op":"set_title","title":"Renamed"}]}),
+    )
+    .await;
+    let changed = std::mem::take(&mut f.tools.deck_link.lock().unwrap().changed);
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].1, base.blocks[0].id);
+    // A refused edit tells nobody.
+    call(
+        &f,
+        "edit",
+        json!({"path":"docs/report.doc.json","ops":[{"op":"delete_blocks","ids":["nope"]}]}),
+    )
+    .await;
+    assert!(f.tools.deck_link.lock().unwrap().changed.is_empty());
+}

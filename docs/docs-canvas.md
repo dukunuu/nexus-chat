@@ -310,16 +310,20 @@ terminal-themed shell, and the content follows the doc's design.
 
 - **Layout:** an outline (headings) on the left, the page column in the
   middle at the design's `measure_ch`, and comments on the right. The top bar
-  has style (Title, H1–H3, Body, Quote, Code), bold, italic, strike, code,
-  link, list, check-list, insert (table, image, divider, page break, TOC,
-  chart), Design, Page preview, Export and the link pill.
+  is slim: the title, undo and redo, the link pill, Design, Pages (preview) and
+  Export. Formatting is a floating toolbar over selected text (style menu,
+  bold, italic, strike, code, link, comment), and `/` inserts every block kind.
 - **Editing:**
-  - one `contenteditable` per block, with Markdown shortcuts (`# `, `- `,
-    `1. `, `> `, ``` ``` ```, `---`, `**`, `_`, `` ` ``);
+  - **one `contenteditable` surface** for the whole page (not one per block), so
+    selections, arrow keys, spell checking and IME work across blocks; Enter,
+    Backspace at a block's start, Tab, formatting, pasting and deleting across blocks
+    are intercepted and become operations; Markdown shortcuts (`# `, `- `, `1. `,
+    `[] `, `> `, ```` ``` ````, `---`, `**`, `_`, `` ` ``, `~~`);
   - `/` opens the insert menu;
   - Enter splits a block, Backspace at the start merges it into the previous
-    one, Tab and Shift+Tab nest list items;
-  - a block handle drags blocks to move them;
+    one (or turns a heading or list item into a paragraph first), Tab and
+    Shift+Tab nest list items;
+  - a block handle drags blocks to move them or opens the block menu;
   - pasting HTML or Markdown becomes blocks; images pasted or dropped go to
     `docs/assets/`.
 
@@ -349,10 +353,12 @@ terminal-themed shell, and the content follows the doc's design.
 ## The link (version 2)
 
 Version 2 renames `deck_path` to `path` (accepting `deck_path` on input) and
-adds `kind: "deck" | "doc"`. A doc comment carries `block` and `range`/`quote`
-in place of `slide`/`point`. `Focus` for a doc carries the block in view and
-the selection. Nexus and studio ship together, so both sides move to version 2
-at once, and a version-1 peer gets a clear "update nexus-studio" error.
+adds `kind: "deck" | "doc"` on the envelope. A doc comment carries `block` and
+`range`/`quote` in place of `slide`/`point`. `Focus` for a doc carries the block in
+view and the selected text. Nexus and studio ship together, so both sides move to
+version 2 at once, and a version-1 peer gets a clear "update nexus-studio" error.
+The messages and the doc comment text are in `docs/studio.md` (*The link*), the
+window in *The doc editor*.
 
 In the conversation, a doc comment reads `Comment on docs/q3.doc.json · b4
 "Ship the docs canvas": text`, with the thread id, the doc revision and the
@@ -373,7 +379,7 @@ don't attach a page image; the text is enough.
    - `krilla` vector PDF for docs and decks;
    - DOCX, Markdown and HTML export; DOCX/DOTX and Markdown import;
    - `nexus doc …` CLI parity with `nexus deck …`.
-3. **P3, the studio doc editor.** Doc mode, block editing, comments with
+3. **P3, the studio doc editor (done).** Doc mode, block editing, comments with
    tracked-change suggestions, outline, page preview, export menu, the Design
    panel, and link version 2 with the TUI wiring.
 4. **P4, templates.**

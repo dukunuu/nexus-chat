@@ -53,7 +53,7 @@ function svgNode(tag, attributes = {}) {
   for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value));
   return node;
 }
-function renderChart(block, theme) {
+export function renderChart(block, theme) {
   const svg = svgNode('svg', { viewBox: '0 0 320 180', preserveAspectRatio: 'none' });
   const values = block.series.flatMap(s => s.values);
   const max = values.reduce((max, value) => Math.max(max, Math.abs(value)), 1);

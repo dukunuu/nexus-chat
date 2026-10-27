@@ -20,6 +20,9 @@ impl Backend {
     }
 
     pub(super) fn feedback_event(&self, notes: Vec<String>) -> Event {
+        if self.doc.is_some() {
+            return self.doc_feedback_event(notes);
+        }
         Event::Feedback {
             threads: self.feedback.clone(),
             activities: self.thread_activities(),
