@@ -1940,6 +1940,14 @@ impl OpenRouter {
             .then(|| harmony::sanitize_history(messages))
             .flatten();
         let messages = repaired.as_deref().unwrap_or(messages);
+        // Local chat templates (Qwen, Llama, Mistral) accept one system
+        // message and only as the first; llama.cpp's Jinja raises "System
+        // message must be at the beginning" on any other.
+        let single_system = self
+            .is_local()
+            .then(|| single_leading_system(messages))
+            .flatten();
+        let messages = single_system.as_deref().unwrap_or(messages);
         let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
@@ -3811,6 +3819,42 @@ fn resize_for_api(bytes: &[u8], _files_dir: &std::path::Path) -> Vec<u8> {
     bytes.to_vec()
 }
 
+/// The history with one system message, first: the leading system block
+/// (prompt, space images, compaction digest) merged into it, and any later
+/// system note (nexus-ui errors) sent as a `[nexus]` user message instead.
+/// The merged prefix is the same every turn, so a local prompt cache still
+/// reuses it. `None` when the history already has that shape.
+fn single_leading_system(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
+    let leading = messages.iter().take_while(|m| m.role == "system").count();
+    let later = messages[leading..].iter().any(|m| m.role == "system");
+    if leading <= 1 && !later {
+        return None;
+    }
+    let mut out = Vec::with_capacity(messages.len());
+    if leading > 0 {
+        let mut first = messages[0].clone();
+        for extra in &messages[1..leading] {
+            first.content.push_str("\n\n");
+            first.content.push_str(&extra.content);
+            first.images.extend(extra.images.iter().cloned());
+            first.cache_breakpoint |= extra.cache_breakpoint;
+        }
+        out.push(first);
+    }
+    out.extend(messages[leading..].iter().map(|m| {
+        if m.role == "system" {
+            ChatMessage {
+                role: "user".into(),
+                content: format!("[nexus] {}", m.content),
+                ..m.clone()
+            }
+        } else {
+            m.clone()
+        }
+    }));
+    Some(out)
+}
+
 pub(crate) struct ImagesForTool {
     pub(crate) urls: Vec<String>,
     pub(crate) description: String,
@@ -4573,6 +4617,39 @@ mod tests {
             ]
         );
         assert!(parse_codex_catalog(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn local_requests_carry_one_leading_system_message() {
+        let history = vec![
+            ChatMessage::text("system", "Prompt"),
+            ChatMessage::text("system", "Summary of earlier conversation"),
+            ChatMessage::text("user", "hi"),
+            ChatMessage::text("assistant", "hello"),
+            ChatMessage::text("system", "nexus-ui errors: []"),
+        ];
+        let local = OpenRouter::local("http://127.0.0.1:9931/v1").unwrap();
+        let body = local.chat_completions_body("m", &history, &ChatParams::default(), &[], false);
+        let roles: Vec<&str> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["system", "user", "assistant", "user"]);
+        assert_eq!(
+            body["messages"][0]["content"],
+            "Prompt\n\nSummary of earlier conversation"
+        );
+        assert_eq!(
+            body["messages"][3]["content"],
+            "[nexus] nexus-ui errors: []"
+        );
+        // Already well-formed: untouched. Hosted backends: untouched.
+        assert!(single_leading_system(&history[2..4]).is_none());
+        let hosted = OpenRouter::from_key_auto("sk-or-test".into());
+        let body = hosted.chat_completions_body("m", &history, &ChatParams::default(), &[], false);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 5);
     }
 
     #[test]
