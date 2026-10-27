@@ -1,203 +1,135 @@
-//! Small PDF 1.4 writer: a 2× raster page plus invisible, searchable text.
-//! Helvetica is never painted; `ToUnicode` maps the invisible character codes
-//! back to the original Unicode, including text absent from Helvetica itself.
+//! Vector PDF assembly shared by decks and docs: each page is an SVG drawn
+//! through `krilla-svg`, so text stays real, selectable and font-subsetted.
+//! Nothing here reads the network, the clock or random state, so the same
+//! input always produces the same bytes.
+#![allow(clippy::cast_possible_truncation)]
 
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
+use anyhow::{Context as _, Result, anyhow};
+use krilla::Document;
+use krilla::action::LinkAction;
+use krilla::annotation::{Annotation, LinkAnnotation, Target};
+use krilla::destination::XyzDestination;
+use krilla::geom::{Point, Rect, Size};
+use krilla::metadata::Metadata;
+use krilla::outline::{Outline, OutlineNode};
+use krilla::page::PageSettings;
+use krilla_svg::{SurfaceExt as _, SvgSettings};
+use resvg::usvg;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
-use std::path::Path;
-
-use anyhow::Result;
-
-use super::super::{Deck, Kind, layout_at, render};
-
-fn hex_unicode(text: &str) -> String {
-    text.encode_utf16().fold(String::new(), |mut out, unit| {
-        let _ = write!(out, "{unit:04X}");
-        out
-    })
+/// A clickable rectangle in page coordinates (top left origin, points).
+pub(crate) struct Link {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub uri: String,
 }
 
-fn stream(dict: &str, bytes: &[u8]) -> Vec<u8> {
-    let mut out = format!("<< {dict} /Length {} >>\nstream\n", bytes.len()).into_bytes();
-    out.extend_from_slice(bytes);
-    out.extend_from_slice(b"\nendstream");
-    out
+/// One PDF page: an SVG whose own size is scaled onto `size` points.
+pub(crate) struct Sheet {
+    pub svg: String,
+    pub size: (f32, f32),
+    pub links: Vec<Link>,
 }
 
-fn text_for(node: &super::super::Node, deck: &Deck) -> Option<(String, f64)> {
-    let (text, style, font) = match &node.kind {
-        Kind::Text { text, style, font } => (super::plain(text), style, font),
-        Kind::Code {
-            source,
-            style,
-            font,
-            ..
-        } => (source.clone(), style, font),
-        Kind::Table { rows, style, font } => (
-            rows.iter()
-                .map(|r| r.join("  "))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            style,
-            font,
-        ),
-        _ => return None,
+/// A bookmark; `level` starts at 1 and `page` is zero based.
+pub(crate) struct Bookmark {
+    pub level: u8,
+    pub title: String,
+    pub page: usize,
+    pub y: f32,
+}
+
+fn tree(bookmarks: &[Bookmark]) -> Vec<OutlineNode> {
+    let mut roots = Vec::new();
+    let mut stack: Vec<(u8, OutlineNode)> = Vec::new();
+    let close = |stack: &mut Vec<(u8, OutlineNode)>, roots: &mut Vec<OutlineNode>| {
+        let (_, node) = stack.pop().expect("open outline node");
+        if let Some((_, parent)) = stack.last_mut() {
+            parent.push_child(node);
+        } else {
+            roots.push(node);
+        }
     };
-    let font = deck.theme.resolve_font(style, font);
-    Some((super::transform(&text, font.transform), font.size))
+    for mark in bookmarks {
+        while stack.last().is_some_and(|(level, _)| *level >= mark.level) {
+            close(&mut stack, &mut roots);
+        }
+        let destination = XyzDestination::new(mark.page, Point::from_xy(0.0, mark.y));
+        stack.push((
+            mark.level,
+            OutlineNode::new(mark.title.clone(), destination).with_open(true),
+        ));
+    }
+    while !stack.is_empty() {
+        close(&mut stack, &mut roots);
+    }
+    roots
 }
 
-/// One aspect-correct page per slide, with no network or speaker notes.
-#[allow(clippy::too_many_lines)]
-pub fn export_pdf(deck: &Deck, assets: Option<&Path>) -> Result<Vec<u8>> {
-    let texts = deck
-        .slides
-        .iter()
-        .flat_map(super::visible_nodes)
-        .filter_map(|node| text_for(node, deck))
-        .collect::<Vec<_>>();
-    let chars = texts
-        .iter()
-        .flat_map(|(s, _)| s.chars())
-        .filter(|c| *c != '\n')
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let encoding = chars
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (*c, (i / 255, i % 255 + 1)))
-        .collect::<BTreeMap<_, _>>();
-    // Objects 1/2/3 are catalog, pages and document info. Fonts follow.
-    let mut objects = vec![Vec::new(); 3];
-    let mut font_ids = Vec::new();
-    for chunk in chars.chunks(255) {
-        let font_id = objects.len() + 1;
-        let cmap_id = font_id + 1;
-        font_ids.push(font_id);
-        objects.push(format!("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /ToUnicode {cmap_id} 0 R >>").into_bytes());
-        let mut cmap = String::from(
-            "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def /CMapName /NexusUnicode def /CMapType 2 def 1 begincodespacerange <00> <FF> endcodespacerange\n",
-        );
-        // CMap sections may contain at most 100 mappings each.
-        for (batch, units) in chunk.chunks(100).enumerate() {
-            let _ = writeln!(cmap, "{} beginbfchar", units.len());
-            for (i, c) in units.iter().enumerate() {
-                let _ = writeln!(
-                    cmap,
-                    "<{:02X}> <{}>",
-                    batch * 100 + i + 1,
-                    hex_unicode(&c.to_string())
-                );
+/// Build the PDF. `options` carries the font database the SVGs were measured with.
+pub(crate) fn assemble(
+    sheets: &[Sheet],
+    fonts: &std::sync::Arc<usvg::fontdb::Database>,
+    title: &str,
+    bookmarks: &[Bookmark],
+) -> Result<Vec<u8>> {
+    let options = usvg::Options {
+        fontdb: fonts.clone(),
+        ..usvg::Options::default()
+    };
+    let mut document = Document::new();
+    for sheet in sheets {
+        let (w, h) = sheet.size;
+        let tree = usvg::Tree::from_str(&sheet.svg, &options).context("page SVG")?;
+        let size = Size::from_wh(w, h).context("page size")?;
+        let mut page = document.start_page_with(PageSettings::new(size));
+        let mut surface = page.surface();
+        surface
+            .draw_svg(&tree, size, SvgSettings::default())
+            .context("drawing page")?;
+        surface.finish();
+        for link in &sheet.links {
+            if let Some(rect) = Rect::from_xywh(link.x, link.y, link.w, link.h) {
+                page.add_annotation(Annotation::new_link(
+                    LinkAnnotation::new(
+                        rect,
+                        Target::Action(LinkAction::new(link.uri.clone()).into()),
+                    ),
+                    None,
+                ));
             }
-            cmap.push_str("endbfchar\n");
         }
-        cmap.push_str("endcmap CMapName currentdict /CMap defineresource pop end end");
-        objects.push(stream("", cmap.as_bytes()));
+        page.finish();
     }
+    let mut outline = Outline::new();
+    for node in tree(bookmarks) {
+        outline.push_child(node);
+    }
+    document.set_outline(outline);
+    document.set_metadata(
+        Metadata::new()
+            .title(title.to_string())
+            .creator("nexus studio".into())
+            .producer("nexus".into()),
+    );
+    document
+        .finish()
+        .map_err(|error| anyhow!("PDF assembly failed: {error:?}"))
+}
+
+/// One vector page per slide at half the slide's pixel size, no speaker notes.
+/// Animations appear in their final state, as in the other static exports.
+pub fn export_pdf(deck: &super::super::Deck, assets: Option<&std::path::Path>) -> Result<Vec<u8>> {
     let size = deck.theme.size;
-    let scale = 960.0 / size.w;
-    let (w, h) = (960.0, size.h * scale);
-    let mut pages = Vec::new();
-    for slide in &deck.slides {
-        let png = render::export_slide_at(deck, &slide.id, (size.w * 2.0).round() as u32, assets)?;
-        let image = image::load_from_memory(&png)?.to_rgb8();
-        let mut jpeg = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90).encode_image(&image)?;
-        let page = objects.len() + 1;
-        let image_id = page + 1;
-        let content_id = page + 2;
-        pages.push(page);
-        let fonts = font_ids
-            .iter()
-            .enumerate()
-            .fold(String::new(), |mut out, (i, id)| {
-                let _ = write!(out, "/F{i} {id} 0 R ");
-                out
-            });
-        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w:.4} {h:.4}] /Resources << /XObject << /Im {image_id} 0 R >> /Font << {fonts} >> >> /Contents {content_id} 0 R >>").into_bytes());
-        objects.push(stream(&format!("/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode", image.width(), image.height()), &jpeg));
-        let mut content = format!("q {w:.4} 0 0 {h:.4} 0 0 cm /Im Do Q\n");
-        let rects = layout_at(deck, slide, assets)
-            .into_iter()
-            .collect::<BTreeMap<_, _>>();
-        for node in super::visible_nodes(slide) {
-            let Some((text, px)) = text_for(node, deck) else {
-                continue;
-            };
-            let Some(rect) = rects.get(&node.id) else {
-                continue;
-            };
-            let pt = px * scale;
-            for (line, text) in text.split('\n').enumerate() {
-                let _ = write!(
-                    content,
-                    "BT 3 Tr 1 0 0 1 {:.4} {:.4} Tm ",
-                    rect.x * scale,
-                    h - rect.y * scale - pt * (1.0 + line as f64 * 1.35)
-                );
-                let mut previous_font = None;
-                for ch in text.chars() {
-                    let &(font, code) = &encoding[&ch];
-                    if previous_font != Some(font) {
-                        if previous_font.is_some() {
-                            content.push_str("> Tj ");
-                        }
-                        let _ = write!(content, "/F{font} {pt:.4} Tf <");
-                        previous_font = Some(font);
-                    }
-                    let _ = write!(content, "{code:02X}");
-                }
-                if previous_font.is_some() {
-                    content.push_str("> Tj ");
-                }
-                content.push_str("ET\n");
-            }
-        }
-        objects.push(stream("", content.as_bytes()));
-    }
-    objects[0] = b"<< /Type /Catalog /Pages 2 0 R >>".to_vec();
-    objects[1] = format!(
-        "<< /Type /Pages /Count {} /Kids [{}] >>",
-        pages.len(),
-        pages.iter().fold(String::new(), |mut out, id| {
-            let _ = write!(out, "{id} 0 R ");
-            out
+    let (svgs, fonts) = super::super::render::export_svgs(deck, assets);
+    let sheets = svgs
+        .into_iter()
+        .map(|svg| Sheet {
+            svg,
+            size: (960.0, (size.h * 960.0 / size.w) as f32),
+            links: Vec::new(),
         })
-    )
-    .into_bytes();
-    objects[2] = format!(
-        "<< /Title <FEFF{}> /Creator (nexus studio) >>",
-        hex_unicode(&deck.title)
-    )
-    .into_bytes();
-    let mut out = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
-    let mut offsets = Vec::new();
-    for (i, object) in objects.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
-        out.extend_from_slice(object);
-        out.extend_from_slice(b"\nendobj\n");
-    }
-    let xref = out.len();
-    out.extend_from_slice(
-        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
-    );
-    for offset in offsets {
-        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    out.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R /Info 3 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-            objects.len() + 1
-        )
-        .as_bytes(),
-    );
-    Ok(out)
+        .collect::<Vec<_>>();
+    assemble(&sheets, &fonts, &deck.title, &[])
 }

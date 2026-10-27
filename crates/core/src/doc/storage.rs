@@ -24,7 +24,8 @@ pub fn save(files: &Path, relative: &str, doc: &Doc, who: crate::deck::history::
     let path = confined(files, relative)?;
     let doc = Doc::check(&serde_json::to_string(doc)?).map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let mut threads = super::feedback::load(&path)?;
-    super::feedback::reanchor(&mut threads, &doc);
+    let resolver = |slug: &str| crate::design::load(files, slug);
+    super::feedback::reanchor_with_resolver(&mut threads, &doc, Some(&resolver));
     crate::deck::history::record_before_write_for::<Doc>(&path, &doc.revision(), who)?;
     crate::deck::write_atomic(&path, &serde_json::to_vec_pretty(&doc)?)?;
     if !threads.is_empty() {

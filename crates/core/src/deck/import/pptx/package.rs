@@ -17,7 +17,7 @@ const MAX_ENTRIES: usize = 20_000;
 
 /// A relationship from one part to another part or an external target.
 #[derive(Clone, Debug)]
-pub(super) struct Rel {
+pub(crate) struct Rel {
     pub kind: String,
     /// The target part name (no leading slash) or the external URL.
     pub target: String,
@@ -26,7 +26,7 @@ pub(super) struct Rel {
 
 /// The relationships of one part, by id.
 #[derive(Default, Debug)]
-pub(super) struct Rels(HashMap<String, Rel>);
+pub(crate) struct Rels(HashMap<String, Rel>);
 
 impl Rels {
     pub fn get(&self, id: &str) -> Option<&Rel> {
@@ -45,7 +45,7 @@ impl Rels {
     }
 }
 
-pub(super) struct Package {
+pub(crate) struct Package {
     zip: zip::ZipArchive<Cursor<Vec<u8>>>,
     /// Lower-cased part name to the entry's real name.
     names: HashMap<String, String>,

@@ -48,7 +48,7 @@ pub struct Rect {
 }
 
 /// Where an image `src` lives on disk, if it does. Never fetches.
-pub(super) fn image_path(src: &str, assets: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn image_path(src: &str, assets: Option<&Path>) -> Option<PathBuf> {
     let root = assets?;
     if src.starts_with("https://") {
         return crate::remote_image::Fetcher::new(root).cached(src);

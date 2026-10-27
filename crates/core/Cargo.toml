@@ -29,6 +29,8 @@ futures-util = { workspace = true }
 image = { workspace = true }
 ignore = { workspace = true }
 keyring = { workspace = true }  # connector secrets: OS keychain (connectors/secrets.rs)
+krilla = { workspace = true }  # vector PDF export for docs and decks (doc/export/pdf.rs)
+krilla-svg = { workspace = true }
 open = { workspace = true }
 pdf-extract = { workspace = true }
 png = { workspace = true }

@@ -25,7 +25,7 @@ use super::Imported;
 use super::xml::El;
 
 mod color;
-mod package;
+pub(crate) mod package;
 mod props;
 mod shapes;
 mod text;

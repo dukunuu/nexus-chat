@@ -16,7 +16,7 @@ const MAX_ELEMENTS: usize = 1_500_000;
 
 /// One element: its local name, attributes, children and direct text.
 #[derive(Debug, Default, Clone)]
-pub(super) struct El {
+pub(crate) struct El {
     pub name: String,
     pub attrs: Vec<(String, String)>,
     pub kids: Vec<El>,
@@ -212,7 +212,7 @@ fn attributes(
 /// # Errors
 /// On malformed markup, or a document deeper or larger than the caps.
 #[allow(clippy::too_many_lines)]
-pub(super) fn parse(source: &str) -> Result<El> {
+pub(crate) fn parse(source: &str) -> Result<El> {
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let mut stack: Vec<El> = Vec::new();
     // Namespace declarations in scope, and how many each open element added.

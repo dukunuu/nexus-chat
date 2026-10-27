@@ -2,7 +2,7 @@
 //! (`.pptx`), the inverse of [`super::export`]'s writer.
 
 pub mod pptx;
-mod xml;
+pub(crate) mod xml;
 
 use std::path::{Path, PathBuf};
 

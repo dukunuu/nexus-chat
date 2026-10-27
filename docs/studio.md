@@ -460,9 +460,9 @@ argv (`open -R`, `xdg-open <dir>`, `explorer /select,`), never a shell.
   item/line builds target paragraphs. Blur and typewriter become fade/appear,
   shake becomes a pulse, word builds animate the whole box, easing curves are not
   exported and group `clip` is not honoured.
-- **PDF** pages are 2x rasters (JPEG) with an invisible Helvetica text layer
-  (render mode 3, `ToUnicode` so any Unicode text copies out). It is not vector;
-  vector output would need an svg-to-pdf dependency.
+- **PDF** is vector: each slide's SVG goes through `krilla-svg` (one page per
+  slide at 960 x 540 pt), with fonts embedded and subset as real, selectable
+  text, and deterministic bytes. Docs use the same path (`doc::export::pdf`).
 - **PNG** is a zip with `slide-001.png`, ... at 1920 px by default.
 - **HTML** is one file with the studio's own `helpers.js`, `render.js`,
   `animations.js` and `playback.js` inlined (`include_str!`), assets and fonts as

@@ -1,14 +1,20 @@
 //! Flowing document data, atomic edits, Markdown, history and comments.
 pub mod direct;
+pub mod export;
 pub mod feedback;
+pub mod import;
+pub(crate) mod inline;
+pub mod layout;
 pub mod markdown;
 pub mod model;
 pub mod ops;
+pub mod render;
 pub mod storage;
 pub mod suggest;
 pub mod validate;
 
 pub use crate::deck::history;
+pub use layout::LAYOUT;
 pub use model::{Block, Doc, Kind, ListItem, Page, Theme};
 pub use ops::{Op, apply, apply_with_resolver};
 
@@ -126,5 +132,11 @@ pub fn read_blocks(doc: &Doc, ids: &[String]) -> String {
         .join("\n\n")
 }
 
+#[cfg(test)]
+mod interchange_tests;
+#[cfg(test)]
+mod pdf_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;

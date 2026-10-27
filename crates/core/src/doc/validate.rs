@@ -1,5 +1,5 @@
 //! Located document validation and stable-id repair.
-use super::model::{Block, Doc, Kind, ListItem, Page, Paper, Theme};
+use super::model::{Block, Doc, Kind, ListItem, Page, Theme};
 use crate::deck::{CheckError, Deck};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -38,10 +38,14 @@ pub(crate) fn check_theme(theme: &Theme) -> Vec<CheckError> {
 /// Check margins against physical paper dimensions.
 pub(crate) fn check_page(page: &Page) -> Vec<CheckError> {
     let mut errors = Vec::new();
-    let (w, h) = match page.size {
-        Paper::A4 => (595.28, 841.89),
-        Paper::Letter => (612.0, 792.0),
-    };
+    let (w, h) = page.size.points();
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
+        issue(
+            &mut errors,
+            "$.page.size",
+            "positive finite point dimensions required",
+        );
+    }
     if page.margins_pt.iter().any(|n| !n.is_finite() || *n < 0.0)
         || page.margins_pt[0] + page.margins_pt[2] >= h
         || page.margins_pt[1] + page.margins_pt[3] >= w

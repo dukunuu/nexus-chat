@@ -311,6 +311,11 @@ pub enum Command {
         #[command(subcommand)]
         cmd: DeckCmd,
     },
+    /// Export a document or import a Word/Markdown file, entirely offline.
+    Doc {
+        #[command(subcommand)]
+        cmd: DocCmd,
+    },
     /// Open the local slide editor in a separate desktop window.
     Studio {
         /// Deck to open (otherwise the most recent deck).
@@ -378,6 +383,24 @@ pub enum DeckCmd {
         path: PathBuf,
         /// Deck to write, absolute or relative to the space files, ending in
         /// .deck.json; an existing deck is never overwritten.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DocCmd {
+    /// Export to <space files>/exports; existing files are never overwritten.
+    Export {
+        path: PathBuf,
+        #[arg(long, value_parser = ["docx", "pdf", "md", "html"])]
+        format: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Import a .docx, .dotx or .md as a new docs/*.doc.json file.
+    Import {
+        path: PathBuf,
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -634,6 +657,12 @@ pub async fn run(cmd: Command) -> Result<()> {
             let files = space.files_dir(&resolve_space_name(&db, None)?);
             deck_export(cmd, &files)
         }
+        Command::Doc { cmd } => {
+            let space = space::Space::open()?;
+            let db = db::Db::open(&space.db_path())?;
+            let files = space.files_dir(&resolve_space_name(&db, None)?);
+            doc_files(cmd, &files)
+        }
         Command::Studio { path } => launch_studio(path.as_deref()),
         Command::Update => update().await,
         Command::Status => status(),
@@ -720,6 +749,132 @@ fn deck_export(cmd: DeckCmd, files: &Path) -> Result<()> {
     out(written.display());
     for warning in &output.warnings {
         out(format!("warning: {warning}"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn doc_files(cmd: DocCmd, files: &Path) -> Result<()> {
+    use nexus_core::{
+        deck::export::write_export,
+        doc::{self, Doc},
+    };
+    match cmd {
+        DocCmd::Export {
+            path,
+            format,
+            out: destination,
+        } => {
+            let path = if path.is_absolute() {
+                path
+            } else {
+                files.join(path)
+            };
+            let doc = Doc::check(&std::fs::read_to_string(&path)?).map_err(|e| anyhow!("{e:?}"))?;
+            let assets = path.parent().context("doc folder")?.join("assets");
+            let mut exported = doc.clone();
+            let format = format.parse()?;
+            if format == doc::export::Format::Md {
+                let parent = destination
+                    .as_deref()
+                    .map(std::path::absolute)
+                    .transpose()?
+                    .and_then(|p| p.parent().map(Path::to_path_buf))
+                    .unwrap_or_else(|| files.join("exports"));
+                let target = parent.join("assets");
+                for block in &mut exported.blocks {
+                    if let doc::Kind::Image { src, .. } = &mut block.kind
+                        && !src.starts_with("https://")
+                    {
+                        let image = assets.join(src.strip_prefix("assets/").unwrap_or(src));
+                        ensure!(
+                            std::fs::metadata(&image)?.len()
+                                <= nexus_core::deck::assets::MAX_IMAGE_BYTES,
+                            "image exceeds 16 MB"
+                        );
+                        *src = nexus_core::deck::assets::store_image_bytes(
+                            &std::fs::read(image)?,
+                            src,
+                            "image",
+                            &target,
+                        )?;
+                    }
+                }
+            }
+            let output = doc::export::export(
+                &exported,
+                Some(&assets),
+                &doc::feedback::load(&path)?,
+                format,
+            )?;
+            let destination = destination
+                .as_deref()
+                .map(std::path::absolute)
+                .transpose()?;
+            let written = write_export(&output, files, destination.as_deref())?;
+            out(written.display());
+            for warning in output.warnings {
+                out(format!("warning: {warning}"));
+            }
+        }
+        DocCmd::Import {
+            path,
+            out: destination,
+        } => {
+            let source = if path.exists() {
+                path
+            } else {
+                files.join(path)
+            };
+            let target = if let Some(target) = destination {
+                if target.is_absolute() {
+                    target
+                } else {
+                    files.join(target)
+                }
+            } else {
+                let stem = source.file_stem().unwrap_or_default().to_string_lossy();
+                let stem = stem
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                            c
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect::<String>();
+                let stem = if stem.is_empty() {
+                    "imported".to_string()
+                } else {
+                    stem
+                };
+                let mut target = files.join(format!("docs/{stem}.doc.json"));
+                let mut index = 2;
+                while target.exists() {
+                    target = files.join(format!("docs/{stem}-{index}.doc.json"));
+                    index += 1;
+                }
+                target
+            };
+            ensure!(
+                !target.exists(),
+                "{} already exists; imports never overwrite a doc",
+                target.display()
+            );
+            ensure!(
+                target.to_string_lossy().ends_with(".doc.json"),
+                "--out must end in .doc.json"
+            );
+            let assets = target.parent().context("doc folder")?.join("assets");
+            let imported = doc::import::file(&source, &assets)?;
+            doc::import::write_new(&imported, &target)?;
+            out(target.display());
+            out(format!("{} blocks", imported.doc.blocks.len()));
+            for warning in imported.warnings {
+                out(format!("warning: {warning}"));
+            }
+        }
     }
     Ok(())
 }
@@ -3667,6 +3822,9 @@ fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 #[path = "cli_deck_export_tests.rs"]
 mod deck_export_tests;
+#[cfg(test)]
+#[path = "cli_doc_tests.rs"]
+mod doc_tests;
 
 #[cfg(test)]
 mod tests {

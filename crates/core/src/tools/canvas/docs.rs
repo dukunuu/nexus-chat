@@ -1,11 +1,11 @@
-//! Flowing-document actions; page rendering and studio editing follow in P2/P3.
+//! Flowing-document actions, page previews and offline file interchange.
 use super::*;
 use crate::doc::{self, Doc, Kind as BlockKind, Op as DocOp, feedback as comments};
 
 const DOC_SCHEMA: &str = "\ndoc schema (sent once per session)\n\
 Blocks: {id,kind,style?}. Text kinds title, paragraph, quote: text; heading: level 1–3,text; callout: tone info|warn|success|note,text; code: lang,text. list: ordered,items:[{text,checked?,children?}] (4 deep). table: header,align:[left|center|right],rows:[[text]]. image: src,alt,caption,width:inline|wide|full. chart: chart:{chart:bar|line|pie,labels,series:[{name,values}]}. divider,page_break,toc: no fields. Footnotes: doc.footnotes map.\n\
 Ops: insert_blocks{after?,blocks}, insert_markdown{after?,markdown}, update_block{id,patch:merge patch}, delete_blocks{ids}, move_blocks{ids,after?}, replace_text{id,find,replace,occurrence?,item?} (exact source, all matches unless 1-based occurrence; list item path 2.1), set_page{patch}, set_title{title}, apply_design{design?}. Missing after appends. Ops atomic, ids automatic. revision from read permits a stale edit only when touched blocks stayed unchanged.\n\
-Markdown: # title on create without title; headings #–###, paragraphs, -/1. lists, [ ]/[x] tasks, > quotes, > [!NOTE] callouts, fenced code, pipe tables, ![alt](src \"caption\"), --- divider; inline **bold**, *italic*, `code`, [links](url), ~~strike~~, [^footnotes]. read blocks:[heading-id] gives its whole section. Comments use block and optional plain-text quote; ops attach a reviewed suggestion; thread replies, resolve closes. Export format:md writes clean Markdown and assets, never overwriting.\n";
+Markdown: # title on create without title; headings #–###, paragraphs, -/1. lists, [ ]/[x] tasks, > quotes, > [!NOTE] callouts, fenced code, pipe tables, ![alt](src \"caption\"), --- divider; inline **bold**, *italic*, `code`, [links](url), ~~strike~~, [^footnotes]. read blocks:[heading-id] gives its whole section. Comments use block and optional plain-text quote; ops attach a reviewed suggestion; thread replies, resolve closes. Export format:docx|pdf|md|html, never overwriting. create from accepts .md/.docx/.dotx; approximations are listed. view renders pages; blocks filters pages containing those ids.\n";
 
 impl ToolBox {
     pub(in crate::tools) fn is_doc(v: &Value) -> bool {
@@ -50,7 +50,13 @@ impl ToolBox {
                 "deck_history" => self.doc_history(relative, &path, &doc, v)?,
                 "deck_export" => return self.doc_export(relative, &path, &doc, v),
                 "deck_view" => {
-                    return Ok("Doc page rendering isn't available yet; use read.\n".into());
+                    let blocks: Vec<String> = v
+                        .get("blocks")
+                        .map(|b| serde_json::from_value(b.clone()))
+                        .transpose()
+                        .context("blocks must be ids")?
+                        .unwrap_or_default();
+                    return doc::render::view(&doc, &path, &self.space_files_dir, &blocks);
                 }
                 "deck_fonts" => {
                     let mut deck = Deck::new_from_layouts("Fonts");
@@ -67,27 +73,38 @@ impl ToolBox {
     }
 
     fn doc_create(&self, v: &Value) -> Result<String> {
-        let markdown = if let Some(from) = v["from"].as_str() {
-            ensure!(
-                Path::new(from)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md")),
-                "doc create from requires a .md space file"
-            );
+        let imported = if let Some(from) = v["from"].as_str() {
             let source = assets::find_space_file(from, &self.space_files_dir)
-                .context("no Markdown file in the space files")?;
-            std::fs::read_to_string(source)?
+                .context("no import file in the space files")?;
+            let assets = crate::design::storage::confined(&self.space_files_dir, "docs/assets")?;
+            Some(doc::import::file_confined(
+                &source,
+                &assets,
+                &self.space_files_dir,
+            )?)
         } else {
-            v["markdown"].as_str().unwrap_or_default().to_string()
+            None
         };
-        let mut parsed = doc::markdown::parse_document(&markdown, false);
+        let mut parsed =
+            doc::markdown::parse_document(v["markdown"].as_str().unwrap_or_default(), false);
+        if let Some(imported) = &imported {
+            parsed.blocks.clone_from(&imported.doc.blocks);
+            parsed.footnotes.clone_from(&imported.doc.footnotes);
+        }
         let title = if let Some(title) = v["title"].as_str() {
             title.to_string()
-        } else if let Some(block) = parsed
-            .blocks
-            .iter_mut()
-            .find(|b| matches!(b.kind, BlockKind::Heading { level: 1, .. }))
+        } else if let Some(imported) = &imported
+            && Path::new(v["from"].as_str().unwrap_or_default())
+                .extension()
+                .is_some_and(|e| !e.eq_ignore_ascii_case("md"))
         {
+            imported.doc.title.clone()
+        } else if let Some(block) = parsed.blocks.iter_mut().find(|b| {
+            matches!(
+                b.kind,
+                BlockKind::Heading { level: 1, .. } | BlockKind::Title { .. }
+            )
+        }) {
             let text = block.text().unwrap_or_default().to_string();
             block.kind = BlockKind::Title { text: text.clone() };
             doc::markdown::plain(&text)
@@ -109,16 +126,28 @@ impl ToolBox {
         doc.design = Some(slug.into());
         doc.blocks = parsed.blocks;
         doc.footnotes = parsed.footnotes;
+        if let Some(imported) = &imported {
+            doc.page.clone_from(&imported.doc.page);
+        }
         self.doc_images(&mut doc, &path)?;
         let doc = Doc::check(&serde_json::to_string(&doc)?)
             .map_err(|e| anyhow::anyhow!("{}", located(&e)))?;
         doc::storage::save(&self.space_files_dir, &relative, &doc, Who::Model)?;
-        Ok(format!(
+        let mut out = format!(
             "created doc · {relative} · {} blocks · revision {}\n{}",
             doc.blocks.len(),
             short(&doc.revision()),
             doc::outline(&doc, 4500)
-        ))
+        );
+        if let Some(imported) = imported {
+            if !imported.threads.is_empty() {
+                comments::save(&path, &imported.threads)?;
+            }
+            for warning in imported.warnings {
+                let _ = writeln!(out, "warning: {warning}");
+            }
+        }
+        Ok(out)
     }
 
     fn doc_images(&self, doc: &mut Doc, path: &Path) -> Result<()> {
@@ -332,9 +361,21 @@ impl ToolBox {
         let format = v["format"]
             .as_str()
             .or_else(|| v["text"].as_str())
-            .context("format is required: md")?;
-        if format != "md" {
-            return Ok("Doc export supports md now; other formats arrive in P2.\n".into());
+            .context("format is required: docx, pdf, md or html")?;
+        let format: doc::export::Format = format.parse()?;
+        if format != doc::export::Format::Md {
+            let assets = path.parent().context("doc folder")?.join("assets");
+            let output = doc::export::export(doc, Some(&assets), &comments::load(path)?, format)?;
+            let written = crate::deck::export::write_export(&output, &self.space_files_dir, None)?;
+            let root = self.space_files_dir.canonicalize()?;
+            let mut out = format!(
+                "exported {relative} → {}\n",
+                written.strip_prefix(root)?.display()
+            );
+            for warning in output.warnings {
+                let _ = writeln!(out, "warning: {warning}");
+            }
+            return Ok(out);
         }
         let assets_dir = crate::design::storage::confined(&self.space_files_dir, "exports/assets")?;
         let mut exported = doc.clone();

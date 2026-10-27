@@ -36,12 +36,27 @@ impl Default for Theme {
 }
 
 /// Supported export paper sizes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Paper {
     #[default]
     A4,
     Letter,
+    Custom {
+        w: f64,
+        h: f64,
+    },
+}
+impl Paper {
+    /// Physical width and height in points.
+    #[must_use]
+    pub fn points(self) -> (f64, f64) {
+        match self {
+            Self::A4 => (595.28, 841.89),
+            Self::Letter => (612.0, 792.0),
+            Self::Custom { w, h } => (w, h),
+        }
+    }
 }
 
 /// Page geometry in points; margins are top, right, bottom, left.

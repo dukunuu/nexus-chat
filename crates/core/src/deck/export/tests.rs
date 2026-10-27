@@ -319,13 +319,17 @@ fn pptx_images_crops_fonts_and_missing_assets_are_offline() {
     assert!(!html.contains("https://example.invalid/photo"));
 }
 
+fn has_fonts() -> bool {
+    crate::deck::text::system_fonts().faces().next().is_some()
+}
+
 #[test]
-fn pdf_pages_images_search_layer_unicode_and_determinism() {
+fn pdf_is_vector_with_real_text_unicode_and_determinism() {
     let mut deck = motion();
     deck.slides[1].children.push(Node::new(
         "unicode",
         Kind::Text {
-            text: "Café 東京".into(),
+            text: "Café résumé".into(),
             style: "caption".into(),
             font: Font::default(),
         },
@@ -339,40 +343,67 @@ fn pdf_pages_images_search_layer_unicode_and_determinism() {
         let media = dict.get(b"MediaBox").unwrap().as_array().unwrap();
         assert_eq!(media[2].as_float().unwrap(), 960.0);
         assert_eq!(media[3].as_float().unwrap(), 540.0);
-        let content = String::from_utf8(doc.get_page_content(*page).unwrap()).unwrap();
-        assert!(content.contains("3 Tr"));
-        assert!(content.contains(" Tj"));
     }
-    let mut images = 0;
+    // Text slides are vector: no image XObject covers a page, and the old
+    // invisible-text rendering mode is gone.
     for object in doc.objects.values() {
-        if let Ok(stream) = object.as_stream()
-            && stream
-                .dict
-                .get(b"Subtype")
-                .ok()
-                .and_then(|v| v.as_name().ok())
-                == Some(b"Image".as_slice())
-        {
-            let image = image::load_from_memory(&stream.content).unwrap();
-            assert_eq!((image.width(), image.height()), (3840, 2160));
-            images += 1;
+        if let Ok(stream) = object.as_stream() {
+            assert_ne!(
+                stream
+                    .dict
+                    .get(b"Subtype")
+                    .ok()
+                    .and_then(|v| v.as_name().ok()),
+                Some(b"Image".as_slice())
+            );
         }
     }
-    assert_eq!(images, 2);
-    let text = pdf_extract::extract_text_from_mem(&bytes).unwrap();
+    for page in doc.get_pages().values() {
+        let content = String::from_utf8_lossy(&doc.get_page_content(*page).unwrap()).into_owned();
+        assert!(!content.contains("3 Tr"));
+    }
+    assert!(
+        bytes.len() < 400_000,
+        "vector pages stay small: {}",
+        bytes.len()
+    );
+    if !has_fonts() {
+        return;
+    }
+    // Glyphs are positioned one by one, so extractors may add spaces.
+    let text = pdf_extract::extract_text_from_mem(&bytes)
+        .unwrap()
+        .split_whitespace()
+        .collect::<String>();
     for needle in [
-        "A clearer story",
+        "Aclearerstory",
         "signal",
         "context",
         "evidence",
         "Evidence",
         "Phase",
-        "let evidence = 8;",
-        "Café 東京",
+        "Caféré",
     ] {
         assert!(text.contains(needle), "missing {needle}: {text}");
     }
-    assert!(!text.contains("Pause here"));
+    assert!(!text.contains("Pausehere"));
+    // The code slide's `=` is real text too: every font carries a ToUnicode
+    // map, and one of them maps a glyph to U+003D. (Extractors garble
+    // individually positioned monospace glyphs, so read the map instead.)
+    let maps = doc
+        .objects
+        .values()
+        .filter_map(|o| o.as_dict().ok())
+        .filter(|d| {
+            d.get(b"Subtype").ok().and_then(|t| t.as_name().ok()) == Some(b"Type0".as_slice())
+        })
+        .map(|d| {
+            let id = d.get(b"ToUnicode").unwrap().as_reference().unwrap();
+            let stream = doc.get_object(id).unwrap().as_stream().unwrap();
+            String::from_utf8_lossy(&stream.decompressed_content().unwrap()).into_owned()
+        })
+        .collect::<Vec<_>>();
+    assert!(maps.iter().any(|m| m.contains("> <003D>")), "{maps:?}");
 }
 
 #[test]

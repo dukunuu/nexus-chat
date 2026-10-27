@@ -47,7 +47,7 @@ const CACHE_WIDTH: u32 = 1200;
 
 // -- non-text nodes ------------------------------------------------------------
 
-fn chart(
+pub(crate) fn chart(
     out: &mut String,
     chart: Chart,
     labels: &[String],
@@ -132,7 +132,7 @@ fn chart(
 
 /// The deck image as a PNG data URL, from the deck's own `assets` folder or
 /// the remote-image cache. Never fetches.
-fn image_data(src: &str, assets: Option<&Path>) -> Option<String> {
+pub(crate) fn image_data(src: &str, assets: Option<&Path>) -> Option<String> {
     let path = image_path(src, assets)?;
     let image = image::load_from_memory(&std::fs::read(path).ok()?).ok()?;
     let mut png = std::io::Cursor::new(Vec::new());
@@ -478,6 +478,29 @@ pub(super) fn export_slide_at(
     raster(&body, width_px, height, (size.w, size.h), &ts)
 }
 
+/// Every slide as a standalone SVG at the authored pixel size, with the
+/// font database needed to parse them. Used by the vector PDF export.
+pub(crate) fn export_svgs(
+    deck: &Deck,
+    assets: Option<&Path>,
+) -> (Vec<String>, std::sync::Arc<usvg::fontdb::Database>) {
+    let size = deck.theme.size;
+    let mut ts = Typesetter::new(&deck.theme, assets);
+    let svgs = deck
+        .slides
+        .iter()
+        .map(|slide| {
+            let body = slide_body(deck, slide, assets, &mut ts, &mut 0);
+            format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">{body}</svg>",
+                w = size.w,
+                h = size.h
+            )
+        })
+        .collect();
+    (svgs, ts.options().fontdb.clone())
+}
+
 /// A grid of numbered thumbnails, in the requested order.
 pub fn render_deck_sheet(deck: &Deck, slides: &[String], cols: usize) -> Result<Vec<u8>> {
     sheet_at(deck, slides, cols, None)
@@ -540,13 +563,18 @@ fn file_key(key: &str) -> String {
 
 /// The cache folder for one deck, `<files>/decks/.renders/<stem>`, created on
 /// demand. Refuses a path that passes through a symlink.
-fn render_dir(deck_path: &Path, files: &Path) -> Result<PathBuf> {
+pub(crate) fn render_dir(deck_path: &Path, files: &Path) -> Result<PathBuf> {
     let name = deck_path
         .file_name()
         .context("deck filename")?
         .to_string_lossy();
-    let stem = name.strip_suffix(".deck.json").unwrap_or(&name);
-    let directory = files.join("decks/.renders").join(stem);
+    let (kind, suffix) = if name.ends_with(".doc.json") {
+        ("docs", ".doc.json")
+    } else {
+        ("decks", ".deck.json")
+    };
+    let stem = name.strip_suffix(suffix).unwrap_or(&name);
+    let directory = files.join(kind).join(".renders").join(stem);
     let mut ancestor = directory.as_path();
     while ancestor.starts_with(files) && ancestor != files {
         ensure!(

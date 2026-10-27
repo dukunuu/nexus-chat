@@ -284,7 +284,7 @@ pub fn deck_fonts(theme: &Theme, assets: Option<&Path>) -> Arc<usvg::fontdb::Dat
 }
 
 /// XML-escape text and attribute values.
-pub(super) fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -293,7 +293,7 @@ pub(super) fn escape(text: &str) -> String {
 }
 
 /// A theme role, a hex literal, or the foreground color.
-pub(super) fn color(theme: &Theme, value: &str) -> String {
+pub(crate) fn color(theme: &Theme, value: &str) -> String {
     if let Some(color) = theme.colors.get(value) {
         return color.clone();
     }
@@ -381,7 +381,7 @@ fn mono_stack(theme: &Theme) -> String {
 
 /// How a run of inline text is marked up; the Markdown subset does not nest.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum Mark {
+pub(crate) enum Mark {
     #[default]
     Plain,
     Bold,
@@ -392,7 +392,7 @@ pub(super) enum Mark {
 
 /// A styled stretch of text inside one paragraph.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct Run {
+pub(crate) struct Run {
     pub text: String,
     pub mark: Mark,
 }
@@ -528,7 +528,7 @@ fn transformed(text: &str, transform: Transform) -> String {
 
 /// A font choice for one piece of text.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct Face {
+pub(crate) struct Face {
     pub family: String,
     pub weight: u16,
     pub italic: bool,
@@ -553,7 +553,7 @@ impl Face {
 
 /// A word (with its trailing whitespace) ready to be placed on a line.
 #[derive(Clone, Debug)]
-pub(super) struct Piece {
+pub(crate) struct Piece {
     pub text: String,
     pub face: Face,
     pub mark: Mark,
@@ -564,7 +564,7 @@ pub(super) struct Piece {
 }
 
 /// What a paragraph is set in.
-pub(super) struct Setting<'a> {
+pub(crate) struct Setting<'a> {
     pub family: &'a str,
     pub weight: u16,
     pub italic: bool,
@@ -577,7 +577,7 @@ pub(super) struct Setting<'a> {
 
 type AdvanceKey = (String, u16, bool, u64, u64, String);
 
-pub(super) struct Typesetter<'a> {
+pub(crate) struct Typesetter<'a> {
     pub theme: &'a Theme,
     mono: String,
     options: usvg::Options<'static>,
@@ -587,7 +587,7 @@ pub(super) struct Typesetter<'a> {
 }
 
 /// How a node's text is set, resolved against the theme.
-pub(super) struct TextStyle {
+pub(crate) struct TextStyle {
     pub font: ResolvedFont,
     /// Stack for the node's own family.
     pub stack: String,

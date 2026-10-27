@@ -31,6 +31,9 @@ mod canvas_tests;
 mod design;
 #[path = "canvas/docs.rs"]
 mod docs;
+#[cfg(test)]
+#[path = "canvas/page_tests.rs"]
+mod page_tests;
 #[path = "canvas/read.rs"]
 mod read;
 

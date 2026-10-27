@@ -173,7 +173,7 @@ impl Design {
 }
 
 /// Derive both media from one modular scale. Document roles use exponents
-/// display=9, title=4, h1/quote=3, h2/lead=2, h3=1, body=0, caption/code=-1. Slide sizes are
+/// display=9, title=4, h1/slide quote=3, h2/lead=2, h3/doc quote=1, body=0, caption/code=-1. Slide sizes are
 /// those point sizes times 42/11 (at 1920 px wide), so an 11 pt body is 42 px.
 /// Families stay role references, so changing a role remaps both media. `fonts`
 /// supplies the available roles; absent roles fall back to body.
@@ -242,6 +242,15 @@ pub fn derive_styles(
             other => other,
         };
         slide.insert(name.into(), font);
+    }
+    // A page quote is set like running text, one step up and in italic; only a
+    // slide quote is a display size.
+    if let Some(quote) = doc.get_mut("quote") {
+        quote.size = Some(crate::deck::model::round2(scale.base_pt * scale.ratio));
+        quote.weight = Some(400);
+        quote.italic = Some(true);
+        quote.line_height = Some(1.4);
+        quote.family = Some("body".into());
     }
     (slide, doc)
 }

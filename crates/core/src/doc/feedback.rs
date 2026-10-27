@@ -132,9 +132,17 @@ impl Edit {
     }
     /// Recheck a proposal after an edit; settled edits stay settled.
     pub fn recheck(&mut self, doc: &Doc) {
+        self.recheck_with_resolver(doc, None);
+    }
+    /// Recheck using the same caller-owned designs as proposal preparation.
+    pub fn recheck_with_resolver(
+        &mut self,
+        doc: &Doc,
+        resolver: Option<&crate::design::Resolver<'_>>,
+    ) {
         if matches!(self.status, EditStatus::Pending | EditStatus::Outdated) {
             self.status = if self.guards.iter().any(|(k, v)| snapshot(doc, k) != *v)
-                || super::apply(doc, &self.proposal.ops).is_err()
+                || super::apply_with_resolver(doc, &self.proposal.ops, resolver).is_err()
             {
                 EditStatus::Outdated
             } else {
@@ -154,11 +162,19 @@ pub fn save(path: &Path, threads: &[Thread]) -> Result<()> {
 }
 /// Update anchors and proposal statuses after a successful document edit.
 pub fn reanchor(threads: &mut [Thread], doc: &Doc) {
+    reanchor_with_resolver(threads, doc, None);
+}
+/// Re-anchor and recheck proposals with the space's design resolver.
+pub fn reanchor_with_resolver(
+    threads: &mut [Thread],
+    doc: &Doc,
+    resolver: Option<&crate::design::Resolver<'_>>,
+) {
     for thread in threads {
         thread.anchor.reanchor(doc);
         for message in &mut thread.messages {
             for edit in &mut message.edits {
-                edit.recheck(doc);
+                edit.recheck_with_resolver(doc, resolver);
             }
         }
     }

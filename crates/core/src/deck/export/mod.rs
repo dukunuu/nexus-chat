@@ -13,7 +13,6 @@ use anyhow::{Context as _, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use zip::write::SimpleFileOptions;
 
-use super::text::{Row, classify, inline};
 use super::{Deck, Kind, Transform};
 
 /// Available file formats (`png` is a zip of slide images).
@@ -90,10 +89,7 @@ pub fn export(
     let mut warnings = Vec::new();
     let bytes = match format {
         Format::Pptx => pptx::with_warnings(deck, assets, &mut warnings)?,
-        Format::Pdf => {
-            warnings.push("PDF pages are raster images with an invisible Helvetica text layer, not vector artwork.".into());
-            pdf::export_pdf(deck, assets)?
-        }
+        Format::Pdf => pdf::export_pdf(deck, assets)?,
         Format::Png if options.contact_sheet => images::contact_sheet(deck, assets)?,
         Format::Png => images::export_png(deck, assets, options.width)?,
         Format::Html => html::with_warnings(deck, assets, &mut warnings)?.into_bytes(),
@@ -230,7 +226,7 @@ pub fn write_export(output: &Export, files: &Path, path: Option<&Path>) -> Resul
     unreachable!("unbounded filename sequence")
 }
 
-pub(super) fn zip(parts: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>> {
+pub(crate) fn zip(parts: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
@@ -271,7 +267,10 @@ pub(super) fn visible_nodes(slide: &super::Slide) -> Vec<&super::Node> {
     out
 }
 
+/// Plain text of Markdown-ish slide text (kept for the import round-trip tests).
+#[cfg(test)]
 pub(super) fn plain(text: &str) -> String {
+    use super::text::{Row, classify, inline};
     text.split('\n')
         .map(|line| {
             let text = match classify(line) {
