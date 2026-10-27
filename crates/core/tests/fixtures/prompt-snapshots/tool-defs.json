@@ -219,7 +219,7 @@
           "type": "string"
         },
         "from": {
-          "description": "create: .pptx or .md space file",
+          "description": "space file: create source; design import: template",
           "type": "string"
         },
         "kind": {
@@ -240,7 +240,8 @@
             "list",
             "read",
             "set_default",
-            "edit"
+            "edit",
+            "import"
           ],
           "type": "string"
         },
@@ -293,6 +294,10 @@
             ]
           },
           "type": "array"
+        },
+        "template": {
+          "description": "export: none for a plain file",
+          "type": "string"
         },
         "text": {
           "description": "comment; fonts filter; legacy export format",

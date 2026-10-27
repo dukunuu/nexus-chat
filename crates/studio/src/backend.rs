@@ -20,6 +20,7 @@ mod doc_comments;
 mod exports;
 mod feedback;
 mod fonts;
+mod templates;
 use nexus_core::deck::link::{ActivityState, Message as LinkMessage};
 use std::time::SystemTime;
 
@@ -54,12 +55,24 @@ pub enum Command {
         name: String,
         data: String,
     },
+    ImportTemplate {
+        path: PathBuf,
+    },
+    ImportTemplateData {
+        name: String,
+        data: String,
+    },
+    Designs {},
+    ApplyDesign {
+        design: String,
+    },
     ExportDeck {
         path: PathBuf,
     },
     Export {
         format: deck::export::Format,
         path: Option<PathBuf>,
+        template: Option<String>,
     },
     Reveal {
         path: PathBuf,
@@ -110,6 +123,7 @@ pub enum Command {
     DocExport {
         format: String,
         path: Option<PathBuf>,
+        template: Option<String>,
     },
     DocCommentCreate {
         anchor: nexus_core::doc::feedback::Anchor,
@@ -161,6 +175,7 @@ pub enum Event {
         notice: Option<String>,
         /// Approximations made when a `PowerPoint` file was just imported.
         import_warnings: Vec<String>,
+        template: bool,
     },
     Feedback {
         threads: Vec<nexus_core::deck::feedback::Thread>,
@@ -206,6 +221,11 @@ pub enum Event {
     },
     Designs {
         available: Vec<doc::DesignInfo>,
+    },
+    TemplateImported {
+        slug: String,
+        name: String,
+        warnings: Vec<String>,
     },
     Pages {
         revision: String,
@@ -362,6 +382,12 @@ impl Backend {
             changed: Vec::new(),
             notice: self.load_notice(),
             import_warnings: self.import_warnings.clone(),
+            template: self
+                .deck
+                .design
+                .as_deref()
+                .and_then(|slug| nexus_core::design::load(&self.files_dir, slug).ok())
+                .is_some_and(|d| d.source.is_some()),
             deck: self.deck.clone(),
             colors: self.colors.clone(),
             revision: self.deck.revision(),
@@ -430,7 +456,7 @@ impl Backend {
     pub fn dispatch(&mut self, source: &str) -> Event {
         let result = (|| {
             ensure!(
-                source.len() <= deck::text::MAX_FONT_FILE * 2 + 64 * 1024,
+                source.len() as u64 <= deck::import::MAX_PPTX_BYTES * 2 + 64 * 1024,
                 "command too large"
             );
             let command: Command = serde_json::from_str(source).context("invalid command")?;
@@ -438,7 +464,9 @@ impl Backend {
                 source.len() <= deck::MAX_SOURCE + 64 * 1024
                     || matches!(
                         command,
-                        Command::ImportFontData { .. } | Command::DocImportAsset { .. }
+                        Command::ImportFontData { .. }
+                            | Command::DocImportAsset { .. }
+                            | Command::ImportTemplateData { .. }
                     ),
                 "command too large"
             );
@@ -494,6 +522,15 @@ impl Backend {
     fn execute(&mut self, command: Command) -> Result<Event> {
         if let Some(event) = self.switch_document(&command)? {
             return Ok(event);
+        }
+        match &command {
+            Command::ImportTemplate { path } => return self.import_template(path),
+            Command::ImportTemplateData { name, data } => {
+                return self.import_template_data(name, data);
+            }
+            Command::Designs {} => return self.template_designs(),
+            Command::ApplyDesign { design } => return self.use_design(design),
+            _ => {}
         }
         if self.doc.is_some() {
             return self.doc_execute(command);
@@ -579,9 +616,13 @@ impl Backend {
                 self.open_path(absolute(&path)?)?;
             }
             Command::ExportDeck { path } => {
-                return self.export(deck::export::Format::Json, Some(&absolute(&path)?));
+                return self.export(deck::export::Format::Json, Some(&absolute(&path)?), None);
             }
-            Command::Export { format, path } => return self.export(format, path.as_deref()),
+            Command::Export {
+                format,
+                path,
+                template,
+            } => return self.export(format, path.as_deref(), template.as_deref()),
             Command::Reveal { path } => return self.reveal(&path),
             Command::ImportAsset { path } => {
                 return Ok(Event::Asset {
@@ -1139,6 +1180,7 @@ fn embedded(path: &str) -> Option<(&'static str, &'static str)> {
         "/editing.js" => ("text/javascript", include_str!("../ui/editing.js")),
         "/fields.js" => ("text/javascript", include_str!("../ui/fields.js")),
         "/fonts.js" => ("text/javascript", include_str!("../ui/fonts.js")),
+        "/templates.js" => ("text/javascript", include_str!("../ui/templates.js")),
         "/guides.js" => ("text/javascript", include_str!("../ui/guides.js")),
         "/animations.js" => ("text/javascript", include_str!("../ui/animations.js")),
         "/playback.js" => ("text/javascript", include_str!("../ui/playback.js")),

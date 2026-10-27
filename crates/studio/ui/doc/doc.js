@@ -2,6 +2,7 @@
 // a slim bar, an outline on the left and comments in the margin; formatting
 // appears over selected text only. The page content follows the doc's own design
 // (fonts, colors, point sizes); the chrome follows the terminal theme.
+import { chooseTemplate, templateDrop } from '../templates.js';
 import { editorController } from './editor.js';
 import { menusController } from './menus.js';
 import { toolbarController } from './toolbar.js';
@@ -177,6 +178,10 @@ export function mount(shared) {
       case 'DocPreview': comments.onPreview(event); break;
       case 'DocFocus': if (event.block) scrollToBlock(event.block, true); break;
       case 'Designs': designs.available = event.available; renderDesign(); break;
+      case 'TemplateImported':
+        toast(`Imported ${event.name}`, [['Use for this doc', () => command({ command: 'ApplyDesign', design: event.slug })], ...(event.warnings?.length ? [['Warnings', () => toast(event.warnings.join(' · '))]] : [])]);
+        command({ command: 'DocDesigns' });
+        break;
       case 'Pages': showPages(event); break;
       case 'Theme': shared.applyTheme(event.colors); break;
       case 'Exported': {
@@ -402,6 +407,9 @@ export function mount(shared) {
     }
     if (!designs.available) list.append(el('div', 'menu-empty', 'Loading…'));
     designPop.append(list);
+    const add = el('button', 'menu-row compact', 'Add template…');
+    add.type = 'button'; add.addEventListener('click', () => chooseTemplate(command, toast));
+    designPop.append(add);
     place(designPop, designButton);
   }
   function togglePop(pop, button, open, onOpen) {
@@ -428,15 +436,24 @@ export function mount(shared) {
     const row = el('button', 'menu-row compact');
     row.type = 'button'; row.setAttribute('role', 'menuitem');
     row.append(el('span', 'menu-label', label), el('span', 'menu-hint', hint));
-    row.addEventListener('click', () => { togglePop(exportPop, exportButton, false); command({ command: 'DocExport', format }); });
+    row.addEventListener('click', () => { togglePop(exportPop, exportButton, false); command({ command: 'DocExport', format, ...(plainFile ? { template: 'none' } : {}) }); });
     exportPop.append(row);
   }
-  const template = el('button', 'menu-row compact disabled');
-  template.type = 'button'; template.disabled = true; template.setAttribute('role', 'menuitem');
-  template.append(el('span', 'menu-label', 'Into template'), el('span', 'menu-hint', 'coming soon'));
-  exportPop.append(el('div', 'menu-rule'), template);
+  const template = el('button', 'menu-row compact');
+  template.type = 'button'; template.setAttribute('role', 'menuitemcheckbox');
+  let plainFile = false;
+  function exportMode() {
+    template.disabled = !state.design?.template;
+    template.textContent = `Into template${!plainFile && state.design?.template ? ' · On' : ''}`;
+    template.setAttribute('aria-checked', String(!plainFile && !!state.design?.template));
+  }
+  template.addEventListener('click', () => { plainFile = !plainFile; exportMode(); });
+  const plain = el('button', 'menu-row compact', 'Plain file');
+  plain.type = 'button'; plain.setAttribute('role', 'menuitem');
+  plain.addEventListener('click', () => { togglePop(exportPop, exportButton, false); command({ command: 'DocExport', format: 'docx', template: 'none' }); });
+  exportPop.append(el('div', 'menu-rule'), template, plain);
   overlay.append(exportPop);
-  exportButton.addEventListener('click', () => togglePop(exportPop, exportButton, undefined, () => { place(exportPop, exportButton); exportPop.querySelector('button')?.focus(); }));
+  exportButton.addEventListener('click', () => togglePop(exportPop, exportButton, undefined, () => { exportMode(); place(exportPop, exportButton); exportPop.querySelector('button')?.focus(); }));
   exportPop.addEventListener('keydown', e => {
     const items = [...exportPop.querySelectorAll('button:not(:disabled)')], at = items.indexOf(document.activeElement);
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); items[(at + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus(); }
@@ -448,6 +465,8 @@ export function mount(shared) {
       designButton.setAttribute('aria-expanded', 'false'); exportButton.setAttribute('aria-expanded', 'false');
     }
   }, { signal: lifetime.signal });
+
+  templateDrop(command, toast, lifetime.signal);
 
   // -- page preview -------------------------------------------------------------------------------------------
 

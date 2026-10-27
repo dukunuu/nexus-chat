@@ -543,6 +543,18 @@ a page preview and an export menu. Older `deck` tool calls remain supported as
 an alias. See [the canvas design](docs/docs-canvas.md) and
 [studio](docs/studio.md).
 
+Add a company template with **Design → Add template…** in studio, or drop a
+`.pptx`, `.potx`, `.docx` or `.dotx` onto the window, then choose **Use for this
+doc/deck**. From the CLI: `nexus design import brand.potx --name Corporate`,
+then `nexus design list`. A file already uploaded to `/files` can be imported
+with `canvas {action:"design", op:"import", from:"brand.potx"}`. Use its slug
+with `create {design:"corporate"}` or `apply_design`. Templates are retained in
+`templates/`, with extracted tokens, styles and slide layouts under `design/`.
+PowerPoint and Word exports reuse the matching source package by default;
+choose **Plain file**, `--template none`, or `export {template:"none"}` to opt
+out. Macro-enabled files are refused. Unsupported preview details are reported
+as warnings; the original masters, styles, headers and footers remain in exports.
+
 ## Commands
 
 Type `/` in the composer for autocomplete. Aliases in parentheses.

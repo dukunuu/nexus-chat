@@ -57,6 +57,7 @@ pub struct DesignState {
     pub(super) fonts: BTreeMap<String, String>,
     /// The design's revision moved since the doc copied it.
     pub(super) update_available: bool,
+    pub(super) template: bool,
 }
 
 /// One design of the space, for switching.
@@ -190,6 +191,7 @@ impl Backend {
             .and_then(|slug| nexus_core::design::load(&self.files_dir, slug).ok());
         DesignState {
             slug: doc.design.clone(),
+            template: stored.as_ref().is_some_and(|d| d.source.is_some()),
             name: stored.as_ref().map_or_else(
                 || doc.design.clone().unwrap_or_else(|| "Custom".into()),
                 |d| d.name.clone(),
@@ -441,8 +443,12 @@ impl Backend {
             Command::NewDoc { .. } | Command::NewDeck { .. } | Command::Open { .. } => {
                 bail!("switching documents is handled before the open doc")
             }
-            Command::DocExport { format, path } => {
-                return self.doc_export(&format, path.as_deref());
+            Command::DocExport {
+                format,
+                path,
+                template,
+            } => {
+                return self.doc_export(&format, path.as_deref(), template.as_deref());
             }
             Command::Reveal { path } => return self.reveal(&path),
             Command::DocCommentCreate { anchor, text, send } => {
@@ -546,7 +552,12 @@ impl Backend {
 
     // -- exports ---------------------------------------------------------------
 
-    fn doc_export(&mut self, format: &str, path: Option<&Path>) -> Result<Event> {
+    fn doc_export(
+        &mut self,
+        format: &str,
+        path: Option<&Path>,
+        template: Option<&str>,
+    ) -> Result<Event> {
         let format: doc::export::Format = format.parse()?;
         let assets = asset_root(&self.path)?;
         let session = self.session()?;
@@ -572,7 +583,14 @@ impl Backend {
             output.bytes = doc::markdown::export(&exported).into_bytes();
             output
         } else {
-            doc::export::export(&session.doc, Some(&assets), &session.threads, format)?
+            nexus_core::design::template::export_doc(
+                &session.doc,
+                Some(&assets),
+                &session.threads,
+                &self.files_dir,
+                format,
+                template,
+            )?
         };
         let path = nexus_core::deck::export::write_export(&output, &self.files_dir, path)?;
         self.exports.push(path.clone());
@@ -700,6 +718,7 @@ impl Backend {
             command,
             Command::DocApply { .. }
                 | Command::DocApplyDesign { .. }
+                | Command::ApplyDesign { .. }
                 | Command::Undo {}
                 | Command::Redo {}
                 | Command::ApplyEdit { .. }

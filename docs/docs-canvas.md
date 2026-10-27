@@ -272,8 +272,17 @@ A template is a `.pptx`, `.potx`, `.docx` or `.dotx` that a user uploads, by:
 - adding it to the space files (`/files`) and telling the model;
 - or running `nexus design import <file>`.
 
-Each upload is kept at `<space files>/templates/<slug>.<ext>` and becomes a
-design `design/<slug>.design.json` with `source.template` set.
+Implemented in `design/template/`. Each upload is kept at
+`<space files>/templates/<slug>.<ext>` and creates or refreshes
+`design/<slug>.design.json` with `source.template`, `imported_at` and `sha256`.
+`canvas {action:"design",op:"import",from:"brand.potx"}` imports a space file;
+`nexus design import <file> [--name <name>]` accepts a local file and
+`nexus design list` lists designs. Studio's chooser and file drop use bounded
+chooser-byte IPC; explicit local paths use `ImportTemplate {path}`. Import
+never applies a design without the author's separate **Use for this doc/deck**
+action. The tool result includes colors, fonts, styles, layout slots and a
+core-rendered layout contact sheet. The tool definition/goldens remain unchanged
+(the import operation is accepted by dispatch but not yet advertised there).
 
 - **From PowerPoint** (reusing `deck::import`'s theme and master reading):
   - theme colors become roles, and major/minor fonts become heading/body;
@@ -297,11 +306,50 @@ design `design/<slug>.design.json` with `source.template` set.
     `document.xml`, media and relationships, and maps each block kind to the
     template's style id found by its built-in name (`Heading 1` → whatever id
     the template uses).
-- A deck or doc created from a template exports into it by default. `export
-  {template: "none"}` writes a plain package.
+- A deck or doc following a template design exports into the matching Office
+  package by default. `export {template: "none"}`, CLI `--template none`, and
+  studio's **Plain file** write the original plain package. The studio Export
+  menu defaults **Into template** on when the design has a source.
+- **Extraction mapping and degradation:** PowerPoint title/ctrTitle become
+  `title`, body/obj become `body`, repeated slots get numeric suffixes, pic
+  becomes `image`, and subTitle becomes `subtitle`. Date/footer/slide-number
+  placeholders are skipped with warnings. Layout names are slugged and deduped;
+  `source_layout` and each slot's original placeholder type/idx survive
+  instantiation. Master/layout artwork is locked and content-addressed under
+  `design/assets/<slug>/`; it renders locally but is not duplicated into
+  template slides. Master title, body levels 1–3 and other styles become
+  title, body/subheading/lead and caption. Document styles derive from the same
+  scale. The existing PPTX import approximations (unsupported pictures,
+  effects, gradients and complex shapes) still apply and are reported.
+- Word Normal, Title, Heading 1–3, Quote, Caption and Code/HTML Preformatted
+  map to body/title/h1–h3/quote/caption/code; a monospace style can supply code.
+  Run size, weight, italic, family and color follow style inheritance. Final
+  section page size/margins and default header/footer text are imported;
+  PAGE/NUMPAGES/TITLE fields become `{page}`/`{pages}`/`{title}`. Paragraph
+  spacing cannot be stored in the current schema: a warning explains that
+  preview uses `doc::LAYOUT`. Header/footer artwork, tables and unsupported
+  fields are omitted from preview with warnings but preserved in Word. Other
+  style names and unsupported style properties are reported and retained only
+  in the template package.
+- **Package reuse:** PowerPoint keeps the template's masters, layouts, themes,
+  media and presentation properties, including notes/handout masters. Example
+  slides and their notes are removed. Generated slides, media, slide
+  relationships, presentation slide list and content types are written;
+  template layouts receive real `p:ph` shapes. Freeform content uses a blank
+  layout when available. Word keeps styles, themes, numbering, settings,
+  font tables, headers/footers and the final `sectPr`; it replaces document
+  content, content relationships, generated media, footnotes and comments.
+  Style ids are looked up by case-insensitive built-in **name**, not by id;
+  only used missing styles (and dependencies) are appended. Existing bullet
+  and decimal numbering is reused; missing definitions are added with fresh
+  ids. POTX/DOTX main content types become PPTX/DOCX. Both writers are
+  deterministic. A brand imported from the other Office medium still supplies
+  its shared design, but exports a plain package for that medium.
 - **Safety:** templates are parsed with the bounded readers `deck::import`
-  already uses (sizes, entry counts, no external relationships followed). Macros
-  in `.potm`/`.dotm` are refused and never copied.
+  already uses (250 MB file, 20,000 entries, 24 MB XML/48 MB media parts,
+  600 MB aggregate reads, bounded XML depth/elements). External relationships
+  are never followed. `.potm`, `.pptm`, `.dotm`, `.docm`, VBA parts and disguised
+  macro-enabled packages are refused and never copied.
 
 ## Studio: the doc editor
 

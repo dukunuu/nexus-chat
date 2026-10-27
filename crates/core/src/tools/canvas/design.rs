@@ -3,11 +3,44 @@ use super::*;
 use crate::design::{self, Design};
 
 impl ToolBox {
+    fn canvas_import_design(&self, v: &Value) -> Result<String> {
+        let files = &self.space_files_dir;
+        let from = v["from"].as_str().context("from must name a space file")?;
+        let source = design::storage::confined(files, from)?;
+        let imported = design::template::import_file(files, &source, v["design"].as_str())?;
+        let mut out = format!(
+            "imported design {}\ncolors: {}\nfonts: {}\nstyles: {}\n",
+            imported.slug,
+            serde_json::to_string(&imported.design.colors)?,
+            serde_json::to_string(&imported.design.fonts)?,
+            serde_json::to_string(&imported.design.doc.text_styles)?
+        );
+        for (name, layout) in &imported.design.slide.layouts {
+            let _ = writeln!(
+                out,
+                "layout {name}: {}",
+                design::layouts::slots(layout)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        for warning in &imported.warnings {
+            let _ = writeln!(out, "warning: {warning}");
+        }
+        if let Some(sheet) = design::template::contact_sheet(files, &imported)? {
+            let shown = sheet.strip_prefix(files.canonicalize()?).unwrap_or(&sheet);
+            let _ = writeln!(out, "![template layouts]({})", shown.display());
+        }
+        Ok(out)
+    }
+
     pub(super) fn canvas_design(&self, v: &Value) -> Result<String> {
         let files = &self.space_files_dir;
         let default = design::default_slug(files)?;
         let slug = v["design"].as_str().unwrap_or(&default);
         match v["op"].as_str() {
+            Some("import") => self.canvas_import_design(v),
             Some("list") => {
                 let mut out = String::from("designs\n");
                 for slug in design::list(files)? {
@@ -28,7 +61,9 @@ impl ToolBox {
                         if slug == default { " · default" } else { "" }
                     );
                 }
-                out.push_str("templates: none yet\n");
+                if !out.contains(" · template ") {
+                    out.push_str("templates: none yet\n");
+                }
                 Ok(out)
             }
             Some("read") => {
@@ -82,7 +117,7 @@ impl ToolBox {
                     short(&next.revision())
                 ))
             }
-            _ => bail!("design op must be list, read, edit or set_default"),
+            _ => bail!("design op must be list, read, import, edit or set_default"),
         }
     }
 

@@ -1339,7 +1339,7 @@ pub(super) static CANVAS: ToolSpec = ToolSpec {
         Param {
             name: "from",
             kind: Kind::Str,
-            doc: "create: .pptx or .md space file",
+            doc: "space file: create source; design import: template",
         },
         Param {
             name: "ops",
@@ -1407,8 +1407,13 @@ pub(super) static CANVAS: ToolSpec = ToolSpec {
             doc: "design slug (default: space default)",
         },
         Param {
+            name: "template",
+            kind: Kind::Str,
+            doc: "export: none for a plain file",
+        },
+        Param {
             name: "op",
-            kind: Kind::Enum(&["list", "read", "set_default", "edit"]),
+            kind: Kind::Enum(&["list", "read", "set_default", "edit", "import"]),
             doc: "design operation",
         },
         Param {
@@ -1488,7 +1493,7 @@ pub(super) static CANVAS: ToolSpec = ToolSpec {
             name: "export",
             summary: "Save a file in exports/",
             required: &["path"],
-            optional: &["format", "text"],
+            optional: &["format", "text", "template"],
             read_only: false,
             internal: "deck_export",
         },
@@ -1496,7 +1501,7 @@ pub(super) static CANVAS: ToolSpec = ToolSpec {
             name: "design",
             summary: "Designs and layouts",
             required: &["op"],
-            optional: &["design", "patch"],
+            optional: &["design", "patch", "from"],
             read_only: false,
             internal: "canvas_design",
         },

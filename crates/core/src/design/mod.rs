@@ -2,6 +2,7 @@
 pub mod layouts;
 pub mod lint;
 pub mod storage;
+pub mod template;
 mod validate;
 
 use std::collections::BTreeMap;
@@ -36,6 +37,8 @@ impl Default for Scale {
 pub struct Source {
     pub template: String,
     pub imported_at: String,
+    #[serde(default)]
+    pub sha256: String,
 }
 
 /// Slide-space rhythm, in pixels.

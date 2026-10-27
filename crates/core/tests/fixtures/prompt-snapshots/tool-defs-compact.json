@@ -208,7 +208,8 @@
             "list",
             "read",
             "set_default",
-            "edit"
+            "edit",
+            "import"
           ],
           "type": "string"
         },
@@ -253,6 +254,9 @@
             ]
           },
           "type": "array"
+        },
+        "template": {
+          "type": "string"
         },
         "text": {
           "type": "string"

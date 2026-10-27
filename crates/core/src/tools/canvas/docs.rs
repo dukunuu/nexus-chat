@@ -380,7 +380,14 @@ impl ToolBox {
         let format: doc::export::Format = format.parse()?;
         if format != doc::export::Format::Md {
             let assets = path.parent().context("doc folder")?.join("assets");
-            let output = doc::export::export(doc, Some(&assets), &comments::load(path)?, format)?;
+            let output = crate::design::template::export_doc(
+                doc,
+                Some(&assets),
+                &comments::load(path)?,
+                &self.space_files_dir,
+                format,
+                v["template"].as_str(),
+            )?;
             let written = crate::deck::export::write_export(&output, &self.space_files_dir, None)?;
             let root = self.space_files_dir.canonicalize()?;
             let mut out = format!(

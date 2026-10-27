@@ -8,12 +8,14 @@ impl Backend {
         &mut self,
         format: deck::export::Format,
         path: Option<&Path>,
+        template: Option<&str>,
     ) -> Result<Event> {
-        let output = deck::export::export(
+        let output = nexus_core::design::template::export_deck(
             &self.deck,
             Some(&asset_root(&self.path)?),
+            &self.files_dir,
             format,
-            deck::export::Options::default(),
+            template,
         )?;
         let path = deck::export::write_export(&output, &self.files_dir, path)?;
         self.exports.push(path.clone());

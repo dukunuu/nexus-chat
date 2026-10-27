@@ -1,3 +1,4 @@
+import { chooseTemplate, templateDrop } from './templates.js';
 import { canvasController } from './canvas.js';
 import { stripController } from './strip.js';
 import { panelController } from './panel.js';
@@ -160,11 +161,25 @@ function handleEvent(event, reply) {
     const known = new Set(allNodes(api.slide()).map(n => n.id)); state.selected = new Set([...state.selected].filter(id => known.has(id)));
     if (state.openNewest) { state.openThread = state.threads.at(-1)?.id; state.openNewest = false; }
     if (event.notice) toast(event.notice);
+    state.template = !!event.template;
+    $('#export-template').disabled = !state.template;
+    $('#export-template').setAttribute('aria-checked', String(state.template && !plainFile));
     if (event.import_warnings?.length) showApproximations('Import approximations', 'Imported from PowerPoint', event.import_warnings);
     deckActivities = event.activities;
     renderDeck();
     for (const node of document.querySelectorAll('#canvas .block')) node.classList.toggle('external-flash', state.flash.includes(node.dataset.id));
     if (state.flash.length) { clearTimeout(flashTimer); flashTimer = setTimeout(() => { state.flash = []; document.querySelectorAll('.external-flash').forEach(n => n.classList.remove('external-flash')); }, 1800); }
+  } else if (event.event === 'Designs') {
+    const list = $('#deck-design-list'); list.replaceChildren();
+    for (const design of event.available) {
+      const row = document.createElement('button'); row.textContent = design.name; row.setAttribute('aria-pressed', String(design.current));
+      row.onclick = () => command({ command: 'ApplyDesign', design: design.slug }); list.append(row);
+    }
+  } else if (event.event === 'TemplateImported') {
+    const actions = [['Use for this deck', () => command({ command: 'ApplyDesign', design: event.slug })]];
+    if (event.warnings?.length) actions.push(['Warnings', () => showDetails('Template warnings', event.warnings)]);
+    toast(`Imported ${event.name}`, null, actions);
+    command({ command: 'Designs' });
   } else if (event.event === 'Theme') {
     applyTheme(event.colors);
   } else if (event.event === 'Focus') {
@@ -182,8 +197,8 @@ function handleEvent(event, reply) {
 }
 // Doc mode lives in ./doc/doc.js, loaded when the backend opens a doc. Its
 // events go there; a deck event brings the deck UI back.
-const DOC_EVENTS = new Set(['Doc', 'DocFeedback', 'DocPreview', 'DocFocus', 'Designs', 'Pages']);
-const SHARED_EVENTS = new Set(['Asset', 'Exported', 'Revealed', 'Error', 'Theme']);
+const DOC_EVENTS = new Set(['Doc', 'DocFeedback', 'DocPreview', 'DocFocus', 'Pages']);
+const SHARED_EVENTS = new Set(['Asset', 'Exported', 'Revealed', 'Error', 'Theme', 'Designs', 'TemplateImported']);
 let docUi = null, docQueue = Promise.resolve();
 function route(event, reply) {
   if (docUi && event.event === 'Deck') {
@@ -288,7 +303,21 @@ $('#add-text').onclick = () => insert(textNode('Double-click to edit', { positio
 $('#add-shape').onclick = () => insert({ id:id('b'), kind:'shape', shape:'rect', fill:'accent', position:{ x:480, y:300 }, sizing:{ w:600, h:420 } });
 $('#add-image').onclick = () => ask('Import image', 'Image path', 'PNG, JPEG or WebP. A sanitized copy stays with the deck.', '', path => command({ command:'ImportAsset', path }, event => { if (event.event === 'Asset') insert({ id:id('b'), kind:'image', src:event.src, fit:'contain', position:{ x:240, y:180 }, sizing:{ w:1200, h:720 } }); }));
 $('#speaker-notes').onchange = event => { const slide = api.slide(), notes = event.target.value; if (slide) apply(() => [{ op:'set_notes', slide:slide.id, notes }]); };
-let exportFormat = 'pptx';
+let exportFormat = 'pptx', plainFile = false;
+$('#deck-design').onclick = () => {
+  const pop = $('#deck-design-pop'); pop.hidden = !pop.hidden;
+  $('#deck-design').setAttribute('aria-expanded', String(!pop.hidden));
+  if (!pop.hidden) {
+    const theme = state.deck.theme;
+    $('#deck-design-info').textContent = `${state.deck.design || 'Custom'} · ${Object.values(theme.fonts).join(' / ')}`;
+    command({ command: 'Designs' });
+  }
+};
+$('#add-template').onclick = () => chooseTemplate(command, toast);
+templateDrop(command, toast, undefined, () => !docUi);
+document.addEventListener('pointerdown', event => { if (!event.target.closest('.template-menu')) { $('#deck-design-pop').hidden = true; $('#deck-design').setAttribute('aria-expanded', 'false'); } });
+$('#export-template').onclick = () => { plainFile = !plainFile; $('#export-template').setAttribute('aria-checked', String(state.template && !plainFile)); };
+$('#export-plain').onclick = () => { exportMenu(false); command({ command: 'Export', format: 'pptx', template: 'none' }); };
 function exportMenu(open, focus = false) {
   $('#export-menu').hidden = !open; $('#export').setAttribute('aria-expanded', String(open));
   if (open && focus) $('#export-menu button').focus();
@@ -296,11 +325,11 @@ function exportMenu(open, focus = false) {
 $('#export').onclick = () => exportMenu($('#export-menu').hidden, true);
 for (const item of document.querySelectorAll('#export-menu [data-format]')) item.onclick = () => {
   exportFormat = item.dataset.format; exportMenu(false); $('#export').focus();
-  command({ command:'Export', format:exportFormat });
+  command({ command:'Export', format:exportFormat, ...(plainFile ? { template: 'none' } : {}) });
 };
 $('#export-to').onclick = () => {
   exportMenu(false);
-  ask('Export to…', 'Destination path', `Enter an absolute path for ${exportFormat.toUpperCase()}. Existing names receive a numbered suffix.`, '', path => command({ command:'Export', format:exportFormat, path }));
+  ask('Export to…', 'Destination path', `Enter an absolute path for ${exportFormat.toUpperCase()}. Existing names receive a numbered suffix.`, '', path => command({ command:'Export', format:exportFormat, path, ...(plainFile ? { template: 'none' } : {}) }));
 };
 document.addEventListener('pointerdown', event => { if (!event.target.closest('.export-menu')) exportMenu(false); });
 document.addEventListener('keydown', event => {

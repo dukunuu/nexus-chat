@@ -36,6 +36,9 @@ mod docs;
 mod page_tests;
 #[path = "canvas/read.rs"]
 mod read;
+#[cfg(test)]
+#[path = "canvas/template_tests.rs"]
+mod template_tests;
 
 /// Slides shown as individual images; more become one contact sheet.
 const MAX_SEPARATE_IMAGES: usize = 4;
@@ -1203,7 +1206,15 @@ impl ToolBox {
         let Value::Array(ops) = value else {
             unreachable!("ops stay an array")
         };
-        let resolver = |slug: &str| crate::design::load(&self.space_files_dir, slug);
+        let resolver = |slug: &str| {
+            let design = crate::design::load(&self.space_files_dir, slug)?;
+            crate::design::template::materialize(
+                &self.space_files_dir,
+                &design,
+                &path.parent().context("deck folder")?.join("assets"),
+            )?;
+            Ok(design)
+        };
         let prepared =
             direct::prepare_with_resolver(&deck, ops, Some(&resolver)).map_err(|errors| {
                 anyhow::anyhow!(
@@ -1483,7 +1494,7 @@ impl ToolBox {
     /// Write the deck as a file under `<space files>/exports/`, never
     /// overwriting, and list what had to be approximated.
     fn deck_export(&self, relative: &str, path: &Path, v: &Value) -> Result<String> {
-        use crate::deck::export::{self, Format, Options};
+        use crate::deck::export::{self, Format};
         let format: Format = v["text"]
             .as_str()
             .or_else(|| v["format"].as_str())
@@ -1493,7 +1504,13 @@ impl ToolBox {
             .parse()?;
         let deck = load(path)?;
         let assets = path.parent().map(|dir| dir.join("assets"));
-        let output = export::export(&deck, assets.as_deref(), format, Options::default())?;
+        let output = crate::design::template::export_deck(
+            &deck,
+            assets.as_deref(),
+            &self.space_files_dir,
+            format,
+            v["template"].as_str(),
+        )?;
         let written = export::write_export(&output, &self.space_files_dir, None)?;
         let shown = written
             .strip_prefix(self.space_files_dir.canonicalize().unwrap_or_default())

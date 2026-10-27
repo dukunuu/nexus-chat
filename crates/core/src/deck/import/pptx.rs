@@ -28,8 +28,11 @@ mod color;
 pub(crate) mod package;
 mod props;
 mod shapes;
+mod template;
 mod text;
 mod timing;
+
+pub(crate) use template::{extract_design, theme_tokens};
 
 use color::{Rgba, Theme};
 use package::{Package, Rels};

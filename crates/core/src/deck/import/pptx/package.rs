@@ -38,7 +38,7 @@ impl Rels {
         let mut found: Vec<(&String, &Rel)> = self
             .0
             .iter()
-            .filter(|(_, r)| r.kind.ends_with(kind))
+            .filter(|(_, r)| !r.external && r.kind.ends_with(kind))
             .collect();
         found.sort_by(|a, b| a.0.cmp(b.0));
         found.first().map(|(_, r)| *r)
@@ -129,6 +129,27 @@ impl Package {
         }
         self.read += out.len() as u64;
         Ok(out)
+    }
+
+    /// Sorted part names, for bounded template-package copying.
+    pub(crate) fn names(&self) -> Vec<String> {
+        let mut names: Vec<_> = self.names.values().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Read a part with the same XML/media and aggregate bounds as import.
+    pub(crate) fn raw(&mut self, part: &str) -> Result<Vec<u8>> {
+        self.bytes(
+            part,
+            if std::path::Path::new(part).extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("xml") || ext.eq_ignore_ascii_case("rels")
+            }) {
+                MAX_XML
+            } else {
+                MAX_MEDIA
+            },
+        )
     }
 
     /// A media part's bytes.

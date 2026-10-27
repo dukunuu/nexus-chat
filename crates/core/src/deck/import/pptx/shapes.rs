@@ -97,7 +97,7 @@ fn cnv(el: &El) -> Option<&El> {
     nv(el)?.kid("cNvPr")
 }
 
-fn ph(el: &El) -> Option<&El> {
+pub(super) fn ph(el: &El) -> Option<&El> {
     nv(el)?.path(&["nvPr", "ph"])
 }
 
@@ -163,6 +163,65 @@ fn chain_for<'a>(cx: &Cx<'a>, el: &'a El) -> Chain<'a> {
         .master_tree
         .and_then(|tree| find_ph(tree, layout.and_then(ph).unwrap_or(want), true));
     Chain { layout, master }
+}
+
+/// A layout placeholder, including empty picture and text slots.
+pub(super) fn template_slot(cx: &Cx, st: &mut State, el: &El, slot: &str) -> Option<Node> {
+    let placeholder = ph(el)?;
+    let chain = chain_for(cx, el);
+    let inherited: Vec<_> = std::iter::once(el)
+        .chain(chain.layout)
+        .chain(chain.master)
+        .collect();
+    let xf = first_xfrm(&inherited, false)?;
+    let rect = Space::root(cx.env.scale).rect(&xf);
+    let kind = placeholder.attr("type").unwrap_or("obj");
+    let node_kind = if kind == "pic" {
+        Kind::Image {
+            src: placeholder_src(st)?,
+            fit: crate::deck::Fit::Cover,
+        }
+    } else {
+        let mut body = el.kid("txBody").cloned().unwrap_or_default();
+        body.name = "txBody".into();
+        let mut paragraph = body.kid("p").cloned().unwrap_or_default();
+        paragraph.name = "p".into();
+        let properties = paragraph
+            .find("rPr")
+            .or_else(|| paragraph.kid("endParaRPr"))
+            .cloned();
+        paragraph.kids.retain(|k| k.name == "pPr");
+        let mut run =
+            crate::deck::import::xml::parse(&format!("<a:r><a:t>{slot}</a:t></a:r>")).ok()?;
+        if let Some(mut properties) = properties {
+            properties.name = "rPr".into();
+            run.kids.insert(0, properties);
+        }
+        paragraph.kids.push(run);
+        body.kids.retain(|k| k.name != "p");
+        body.kids.push(paragraph);
+        let role = if matches!(kind, "title" | "ctrTitle") {
+            Role::Title
+        } else {
+            Role::Body
+        };
+        let text = text::build(cx, st, &body, &chain, role, None)?;
+        Kind::Text {
+            text: slot.into(),
+            style: text.style.into(),
+            font: text.font,
+        }
+    };
+    if !st.reserve(1) {
+        return None;
+    }
+    let mut node = make(st, node_kind, name_of(el), rect, xf.rot);
+    node.slot = slot.into();
+    node.source_placeholder = Some(crate::deck::model::Placeholder {
+        kind: kind.into(),
+        idx: placeholder.attr("idx").unwrap_or("0").into(),
+    });
+    Some(node)
 }
 
 // -- paint ---------------------------------------------------------------------

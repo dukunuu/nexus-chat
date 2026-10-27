@@ -316,6 +316,11 @@ pub enum Command {
         #[command(subcommand)]
         cmd: DocCmd,
     },
+    /// Import Office templates as shared designs, or list space designs.
+    Design {
+        #[command(subcommand)]
+        cmd: DesignCmd,
+    },
     /// Open the local slide editor in a separate desktop window.
     Studio {
         /// Deck to open (otherwise the most recent deck).
@@ -366,6 +371,18 @@ pub enum Command {
 }
 
 #[derive(Subcommand)]
+pub enum DesignCmd {
+    /// Store a PPTX/POTX/DOCX/DOTX template and extract its design.
+    Import {
+        path: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List designs and their source templates.
+    List,
+}
+
+#[derive(Subcommand)]
 pub enum DeckCmd {
     /// Export offline; default output is <space files>/exports/<deck-slug>.<ext>.
     Export {
@@ -376,6 +393,9 @@ pub enum DeckCmd {
         /// Explicit output path; existing files are never overwritten.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Use a plain package instead of the design's template.
+        #[arg(long, value_parser = ["none"])]
+        template: Option<String>,
     },
     /// Import a `PowerPoint` file as an editable deck (<space files>/decks by default).
     Import {
@@ -397,6 +417,9 @@ pub enum DocCmd {
         format: String,
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Use a plain package instead of the design's template.
+        #[arg(long, value_parser = ["none"])]
+        template: Option<String>,
     },
     /// Import a .docx, .dotx or .md as a new docs/*.doc.json file.
     Import {
@@ -663,11 +686,50 @@ pub async fn run(cmd: Command) -> Result<()> {
             let files = space.files_dir(&resolve_space_name(&db, None)?);
             doc_files(cmd, &files)
         }
+        Command::Design { cmd } => {
+            let space = space::Space::open()?;
+            let db = db::Db::open(&space.db_path())?;
+            let files = space.files_dir(&resolve_space_name(&db, None)?);
+            design_files(cmd, &files)
+        }
         Command::Studio { path } => launch_studio(path.as_deref()),
         Command::Update => update().await,
         Command::Status => status(),
         Command::Doctor { network } => doctor(network).await,
     }
+}
+
+fn design_files(cmd: DesignCmd, files: &Path) -> Result<()> {
+    use nexus_core::design;
+    match cmd {
+        DesignCmd::Import { path, name } => {
+            let path = if path.exists() {
+                path
+            } else {
+                files.join(path)
+            };
+            let imported = design::template::import_file(files, &path, name.as_deref())?;
+            out(format!("design/{}.design.json", imported.slug));
+            for warning in &imported.warnings {
+                out(format!("warning: {warning}"));
+            }
+            if let Some(sheet) = design::template::contact_sheet(files, &imported)? {
+                out(sheet.display());
+            }
+        }
+        DesignCmd::List => {
+            for slug in design::list(files)? {
+                let design = design::load(files, &slug)?;
+                out(format!(
+                    "{slug} · {}",
+                    design
+                        .source
+                        .map_or_else(|| "built-in/space".into(), |s| s.template)
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `nexus deck import`: write the imported deck and list what was approximated.
@@ -714,8 +776,13 @@ fn deck_import(path: &Path, out_path: Option<&Path>, files: &Path) -> Result<()>
 
 fn deck_export(cmd: DeckCmd, files: &Path) -> Result<()> {
     use nexus_core::deck::{Deck, export};
-    let (path, format, destination) = match cmd {
-        DeckCmd::Export { path, format, out } => (path, format, out),
+    let (path, format, destination, template) = match cmd {
+        DeckCmd::Export {
+            path,
+            format,
+            out,
+            template,
+        } => (path, format, out, template),
         DeckCmd::Import { path, out } => return deck_import(&path, out.as_deref(), files),
     };
     let path = if path.is_absolute() {
@@ -735,11 +802,12 @@ fn deck_export(cmd: DeckCmd, files: &Path) -> Result<()> {
         )
     })?;
     let assets = path.parent().context("deck folder")?.join("assets");
-    let output = export::export(
+    let output = nexus_core::design::template::export_deck(
         &deck,
         Some(&assets),
+        files,
         format.parse()?,
-        export::Options::default(),
+        template.as_deref(),
     )?;
     let destination = destination
         .as_deref()
@@ -764,6 +832,7 @@ fn doc_files(cmd: DocCmd, files: &Path) -> Result<()> {
             path,
             format,
             out: destination,
+            template,
         } => {
             let path = if path.is_absolute() {
                 path
@@ -801,11 +870,13 @@ fn doc_files(cmd: DocCmd, files: &Path) -> Result<()> {
                     }
                 }
             }
-            let output = doc::export::export(
+            let output = nexus_core::design::template::export_doc(
                 &exported,
                 Some(&assets),
                 &doc::feedback::load(&path)?,
+                files,
                 format,
+                template.as_deref(),
             )?;
             let destination = destination
                 .as_deref()
@@ -3825,6 +3896,10 @@ mod deck_export_tests;
 #[cfg(test)]
 #[path = "cli_doc_tests.rs"]
 mod doc_tests;
+
+#[cfg(test)]
+#[path = "cli_design_tests.rs"]
+mod design_tests;
 
 #[cfg(test)]
 mod tests {

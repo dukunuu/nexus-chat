@@ -725,6 +725,14 @@ impl Kind {
     }
 }
 
+/// Original template placeholder identity, retained after slot instantiation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Placeholder {
+    pub kind: String,
+    pub idx: String,
+}
+
 /// One element of a slide's tree.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Node {
@@ -735,6 +743,11 @@ pub struct Node {
     /// Named placeholder in a design layout; removed when instantiated.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub slot: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_placeholder: Option<Placeholder>,
+    /// Inherited artwork: rendered locally, not duplicated into template slides.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub template_background: bool,
     #[serde(default, skip_serializing_if = "Sizing::is_default")]
     pub sizing: Sizing,
     #[serde(default, skip_serializing_if = "is_auto")]
@@ -771,6 +784,8 @@ impl Node {
             id: id.into(),
             name: None,
             slot: String::new(),
+            source_placeholder: None,
+            template_background: false,
             sizing: Sizing::default(),
             position: Position::Auto,
             opacity: 1.0,
@@ -829,6 +844,9 @@ impl Node {
 pub struct Slide {
     #[serde(default)]
     pub id: String,
+    /// Original OPC layout part, used when exporting into a template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_layout: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Background: a theme role or hex color; the theme's `bg` when absent.
@@ -869,6 +887,7 @@ impl Slide {
     pub fn new(id: &str) -> Self {
         Self {
             id: id.into(),
+            source_layout: None,
             name: None,
             fill: None,
             layout: AutoLayout::default(),
