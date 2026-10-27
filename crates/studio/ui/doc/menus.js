@@ -152,14 +152,6 @@ export function menusController(api) {
     ];
     if (index > 0) actions.push(['Move up', () => api.editor.perform(E.moveBlock(state.doc, id, state.doc.blocks[index - 1].id)), false, 'forward']);
     if (index < state.doc.blocks.length - 1) actions.push(['Move down', () => api.editor.perform(E.moveBlock(state.doc, id, state.doc.blocks[index + 2]?.id ?? null)), false, 'back']);
-    if (b.kind === 'table') {
-      const sel = api.editor.selection();
-      const cell = sel?.from.block === id && sel.from.part?.startsWith('cell:') ? sel.from.part.slice(5).split(':').map(Number) : null;
-      if (cell) {
-        actions.push(['Delete row', () => api.editor.perform(E.tableDeleteRow(state.doc, id, cell[0])), false, 'minus']);
-        actions.push(['Delete column', () => api.editor.perform(E.tableDeleteColumn(state.doc, id, cell[1])), false, 'minus']);
-      }
-    }
     actions.push(['Delete', () => api.editor.perform(E.deleteBlock(state.doc, id)), false, 'trash']);
     node.append(el('div', 'menu-rule'));
     group(null, actions);
@@ -184,15 +176,24 @@ export function menusController(api) {
   handle.title = 'Drag to move · click for options';
   const indicator = el('div', 'drop-line');
   indicator.hidden = true;
-  const addRow = el('button', 'table-add row');
-  const addColumn = el('button', 'table-add column');
-  for (const [node, label] of [[addRow, 'Add row'], [addColumn, 'Add column']]) {
-    node.type = 'button'; node.hidden = true; node.append(glyph('plus'));
+  // Table controls: a grip on the hovered row's left edge and on the hovered
+  // column's top edge (click for that row's or column's menu), and a bar along
+  // the bottom and the right edge that adds a row or a column.
+  const tableButton = (className, label, content) => {
+    const node = el('button', className);
+    node.type = 'button'; node.hidden = true;
     node.setAttribute('aria-label', label); node.title = label;
+    if (content) node.append(content);
     node.addEventListener('mousedown', e => e.preventDefault());
-  }
-  overlay.append(handle, indicator, addRow, addColumn);
-  let hovered = null, hideTimer = 0, dragging = null;
+    return node;
+  };
+  const rowGrip = tableButton('table-grip row', 'Row options', el('span', 'grip-dots'));
+  const columnGrip = tableButton('table-grip column', 'Column options', el('span', 'grip-dots'));
+  const addRow = tableButton('table-addbar row', 'Add a row', glyph('plus'));
+  const addColumn = tableButton('table-addbar column', 'Add a column', glyph('plus'));
+  const tableControls = [rowGrip, columnGrip, addRow, addColumn];
+  overlay.append(handle, indicator, ...tableControls);
+  let hovered = null, hideTimer = 0, dragging = null, cell = null, tableMenu = null;
 
   function blockAt(y) {
     for (const child of surface.children) {
@@ -210,30 +211,127 @@ export function menusController(api) {
     const lineTop = first ? first.getBoundingClientRect().top : rect.top;
     const surfaceRect = surface.getBoundingClientRect();
     const view = api.page.getBoundingClientRect();
-    if (rect.bottom < view.top + 8 || rect.top > view.bottom - 8) { handle.hidden = true; addRow.hidden = true; addColumn.hidden = true; return; }
+    if (rect.bottom < view.top + 8 || rect.top > view.bottom - 8) { handle.hidden = true; hideTableControls(); return; }
     handle.hidden = false;
     handle.style.left = `${Math.round(surfaceRect.left - 30)}px`;
     handle.style.top = `${Math.round(Math.max(rect.top, Math.min(lineTop, rect.bottom - 24)) + 2)}px`;
-    const table = node.classList.contains('blk-table') ? node.querySelector('table') : null;
-    addRow.hidden = addColumn.hidden = !table;
-    if (table) {
-      const t = table.getBoundingClientRect();
-      addRow.style.left = `${Math.round(t.left + t.width / 2 - 11)}px`; addRow.style.top = `${Math.round(t.bottom + 4)}px`;
-      addColumn.style.left = `${Math.round(t.right + 4)}px`; addColumn.style.top = `${Math.round(t.top + t.height / 2 - 11)}px`;
-    }
+    placeTableControls(node);
   }
-  function hideHandle() { if (dragging || block) return; handle.hidden = true; addRow.hidden = true; addColumn.hidden = true; hovered = null; }
+  function hideTableControls() { if (tableMenu) return; for (const node of tableControls) node.hidden = true; markCells(null); }
+  function hideHandle() { if (dragging || block || tableMenu) return; handle.hidden = true; hideTableControls(); hovered = null; }
+
+  /** The [row, column] of the table cell under a node, or null. */
+  function cellOf(node) {
+    const part = node?.closest?.('td, th')?.querySelector('[data-part^="cell:"]');
+    return part ? part.dataset.part.slice(5).split(':').map(Number) : null;
+  }
+  function placeTableControls(node) {
+    const table = node?.classList.contains('blk-table') ? node.querySelector('table') : null;
+    if (!table) { hideTableControls(); return; }
+    const t = table.getBoundingClientRect();
+    addRow.hidden = addColumn.hidden = false;
+    Object.assign(addRow.style, { left: `${Math.round(t.left)}px`, top: `${Math.round(t.bottom + 4)}px`, width: `${Math.round(t.width)}px` });
+    Object.assign(addColumn.style, { left: `${Math.round(t.right + 4)}px`, top: `${Math.round(t.top)}px`, height: `${Math.round(t.height)}px` });
+    const rows = table.rows, at = cell && cell[0] < rows.length && cell[1] < rows[cell[0]].cells.length ? cell : null;
+    rowGrip.hidden = columnGrip.hidden = !at;
+    if (!at) return;
+    const r = rows[at[0]].getBoundingClientRect(), c = rows[0].cells[at[1]].getBoundingClientRect();
+    Object.assign(rowGrip.style, { left: `${Math.round(t.left - 7)}px`, top: `${Math.round(r.top + r.height / 2 - 11)}px` });
+    Object.assign(columnGrip.style, { left: `${Math.round(c.left + c.width / 2 - 11)}px`, top: `${Math.round(t.top - 7)}px` });
+  }
+  /** Tint the row or column a grip or menu is about to act on. */
+  function markCells(target) {
+    for (const old of surface.querySelectorAll('.tbl-pick')) old.classList.remove('tbl-pick');
+    if (!target) return;
+    const table = surface.querySelector(`[data-block="${CSS.escape(target.id)}"] table`);
+    if (!table) return;
+    const cells = target.row != null ? [...(table.rows[target.row]?.cells ?? [])] : [...table.rows].map(row => row.cells[target.column]).filter(Boolean);
+    for (const c of cells) c.classList.add('tbl-pick');
+  }
+
+  // -- the table menu: row grip, column grip, or right-click in a cell ----------------------------
+
+  function closeTableMenu() { tableMenu?.node.remove(); tableMenu = null; markCells(null); }
+  function openTableMenu(id, at, rect, scope) {
+    closeTableMenu(); closeBlockMenu(); closeSlash();
+    const b = M.block(state.doc, id);
+    if (!b || b.kind !== 'table') return;
+    const [r, c] = at, rowCount = b.rows.length, columnCount = b.rows[0]?.length ?? 0;
+    const node = el('div', 'popup menu table-menu');
+    node.setAttribute('role', 'menu');
+    node.setAttribute('aria-label', scope === 'row' ? `Row ${r + 1}` : scope === 'column' ? `Column ${c + 1}` : 'Table');
+    const run = result => { closeTableMenu(); if (result) api.editor.perform(result); };
+    const patch = fields => { closeTableMenu(); api.apply([{ op: 'update_block', id, patch: fields }]); };
+    const items = [];
+    if (scope !== 'column') {
+      items.push(['Insert row above', () => run(E.tableAddRow(state.doc, id, r - 1)), 'arrow-up']);
+      items.push(['Insert row below', () => run(E.tableAddRow(state.doc, id, r)), 'arrow-down']);
+    }
+    if (scope !== 'row') {
+      items.push(['Insert column left', () => run(E.tableAddColumn(state.doc, id, c - 1)), 'arrow-left']);
+      items.push(['Insert column right', () => run(E.tableAddColumn(state.doc, id, c)), 'arrow-right']);
+    }
+    items.push(null);
+    if (scope !== 'column' && r === 0) items.push([b.header ? 'Plain first row' : 'Header row', () => patch({ header: !b.header }), 'table', b.header]);
+    if (scope === 'column') {
+      const align = b.align?.[c] || 'left';
+      for (const side of ['left', 'center', 'right']) {
+        items.push([`Align ${side}`, () => patch({ align: Array.from({ length: columnCount }, (_, i) => (i === c ? side : b.align?.[i] || 'left')) }), `align-${side}`, align === side]);
+      }
+    }
+    if (scope !== 'column') items.push(['Delete row', () => run(E.tableDeleteRow(state.doc, id, r)), 'trash', false, rowCount < 2, true]);
+    if (scope !== 'row') items.push(['Delete column', () => run(E.tableDeleteColumn(state.doc, id, c)), 'trash', false, columnCount < 2, true]);
+    for (const item of items) {
+      if (!item) { if (node.lastChild && !node.lastChild.classList.contains('menu-rule')) node.append(el('div', 'menu-rule')); continue; }
+      const [label, action, icon, on, disabled, danger] = item;
+      const row = el('button', `menu-row compact${on ? ' on' : ''}${danger ? ' danger' : ''}`);
+      row.type = 'button'; row.setAttribute('role', 'menuitem'); row.disabled = Boolean(disabled);
+      row.append(glyph(icon), el('span', 'menu-label', label));
+      if (on) row.append(glyph('check'));
+      row.addEventListener('mousedown', e => e.preventDefault());
+      row.addEventListener('click', action);
+      node.append(row);
+    }
+    if (node.lastChild?.classList.contains('menu-rule')) node.lastChild.remove();
+    overlay.append(node);
+    tableMenu = { node, id };
+    markCells(scope === 'row' ? { id, row: r } : scope === 'column' ? { id, column: c } : null);
+    placePopup(node, rect, { prefer: 'below' });
+    node.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
+    node.addEventListener('keydown', e => {
+      const buttons = [...node.querySelectorAll('button:not(:disabled)')], i = buttons.indexOf(document.activeElement);
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); buttons[(i + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length].focus(); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeTableMenu(); surface.focus({ preventScroll: true }); }
+    });
+  }
   api.page.addEventListener('pointermove', e => {
     if (dragging || e.target.closest('.popup')) return;
     clearTimeout(hideTimer);
-    const node = e.target.closest('.popup, .block-handle, .table-add') ? hovered : blockAt(e.clientY);
-    if (node && node !== hovered) showHandle(node); else if (node) showHandle(node);
+    const onControl = e.target.closest('.popup, .block-handle, .table-grip, .table-addbar');
+    const node = onControl ? hovered : blockAt(e.clientY);
+    if (!onControl && !tableMenu) cell = node?.classList.contains('blk-table') ? cellOf(e.target) ?? cell : null;
+    if (node) showHandle(node);
   });
   api.page.addEventListener('pointerleave', () => { hideTimer = setTimeout(hideHandle, 400); });
   api.page.addEventListener('scroll', () => { if (hovered && !dragging) showHandle(hovered); closeSlash(); }, true);
   surface.addEventListener('keydown', e => { if (!e.metaKey && !e.ctrlKey && e.key.length === 1) hideHandle(); });
   addRow.addEventListener('click', () => { const id = hovered?.dataset.block; if (id) api.editor.perform(E.tableAddRow(state.doc, id, M.block(state.doc, id).rows.length - 1)); });
   addColumn.addEventListener('click', () => { const id = hovered?.dataset.block; if (id) api.editor.perform(E.tableAddColumn(state.doc, id, M.block(state.doc, id).rows[0].length - 1)); });
+  rowGrip.addEventListener('click', () => { const id = hovered?.dataset.block; if (id && cell) openTableMenu(id, cell, rowGrip.getBoundingClientRect(), 'row'); });
+  columnGrip.addEventListener('click', () => { const id = hovered?.dataset.block; if (id && cell) openTableMenu(id, cell, columnGrip.getBoundingClientRect(), 'column'); });
+  for (const [grip, scope] of [[rowGrip, 'row'], [columnGrip, 'column']]) {
+    grip.addEventListener('pointerenter', () => { const id = hovered?.dataset.block; if (id && cell && !tableMenu) markCells(scope === 'row' ? { id, row: cell[0] } : { id, column: cell[1] }); });
+    grip.addEventListener('pointerleave', () => { if (!tableMenu) markCells(null); });
+  }
+  // Right-click in a cell: the table menu, without the browser selecting a word first.
+  surface.addEventListener('mousedown', e => { if (e.button === 2 && cellOf(e.target)) e.preventDefault(); });
+  surface.addEventListener('contextmenu', e => {
+    const at = cellOf(e.target), id = e.target.closest('[data-block]')?.dataset.block;
+    if (!at || !id) return;
+    e.preventDefault();
+    cell = at;
+    openTableMenu(id, at, { left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY, width: 0, height: 0 }, 'cell');
+  });
 
   let press = null;
   handle.addEventListener('pointerdown', e => {
@@ -290,6 +388,7 @@ export function menusController(api) {
   document.addEventListener('pointerdown', e => {
     if (slash && !e.target.closest('.slash')) closeSlash();
     if (block && !e.target.closest('.block-menu') && !e.target.closest('.block-handle')) closeBlockMenu();
+    if (tableMenu && !e.target.closest('.table-menu') && !e.target.closest('.table-grip')) closeTableMenu();
   }, { signal: api.signal });
 
   /** Keys while a menu is open. Returns true when consumed. */
@@ -310,8 +409,8 @@ export function menusController(api) {
   }
 
   return {
-    onInput, handleKey, openBlockMenu, closeAll() { closeSlash(); closeBlockMenu(); },
-    get open() { return Boolean(slash || block); },
+    onInput, handleKey, openBlockMenu, closeAll() { closeSlash(); closeBlockMenu(); closeTableMenu(); },
+    get open() { return Boolean(slash || block || tableMenu); },
     reposition() { if (hovered?.isConnected) showHandle(hovered); else hideHandle(); },
     partElement,
   };

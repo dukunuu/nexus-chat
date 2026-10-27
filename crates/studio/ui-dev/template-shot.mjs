@@ -25,9 +25,14 @@ await (await chooser).setFiles({ name: 'brand.dotx', mimeType: 'application/octe
 await page.getByRole('button', { name: 'Use for this doc', exact: true }).click();
 await page.waitForTimeout(100);
 await page.getByRole('button', { name: 'Export', exact: true }).click();
-await page.getByRole('menuitemcheckbox', { name: 'Into template · On' }).waitFor();
+const toggle = page.getByRole('menuitemcheckbox', { name: /Into template/ });
+await toggle.waitFor();
+assert.equal(await toggle.getAttribute('aria-checked'), 'true');
 await shot(page, 'p4-export-into-template');
-await page.getByRole('menuitem', { name: 'Plain file', exact: true }).click();
+// Unchecking the toggle makes the next export a plain file.
+await toggle.click();
+assert.equal(await toggle.getAttribute('aria-checked'), 'false');
+await page.getByRole('menuitem', { name: /Word document/ }).click();
 await page.waitForTimeout(50);
 assert((await page.evaluate(() => window.__templateCommands)).some(c => c.command === 'DocExport' && c.template === 'none'));
 await page.evaluate(() => {

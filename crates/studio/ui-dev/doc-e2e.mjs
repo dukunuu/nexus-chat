@@ -449,9 +449,9 @@ Object.assign(tests, {
     await page.waitForFunction(n => window.__mock.commands.filter(c => c.command === 'DocPages').length > n, before);
     await page.getByRole('button', { name: 'Back to editing' }).click();
     await page.getByRole('button', { name: 'Export' }).click();
-    const items = await page.locator('.export-pop .menu-row').allTextContents();
-    assert.deepEqual(items, ['Word document.docx', 'PDF.pdf', 'Markdown.md', 'Web page.html', 'Into templatecoming soon']);
-    assert.equal(await page.locator('.export-pop .menu-row').last().isDisabled(), true);
+    // Without a template there is no template choice at all.
+    const items = await page.locator('.export-pop .menu-row:visible').allTextContents();
+    assert.deepEqual(items, ['Word document.docx', 'PDF.pdf', 'Markdown.md', 'Web page.html']);
     await shot(page, 'doc-export');
     await page.locator('.export-pop .menu-row', { hasText: 'Markdown' }).click();
     await page.locator('.doc-toast', { hasText: 'Exported q3-strategy.md' }).waitFor();
@@ -507,21 +507,35 @@ Object.assign(tests, {
     await part(page, 'b13', 'cell:1:0').scrollIntoViewIfNeeded();
     const box = await part(page, 'b13', 'cell:1:0').boundingBox();
     await page.mouse.move(box.x + 20, box.y + 10);
-    await page.locator('.table-add.row').waitFor({ state: 'visible' });
-    await page.locator('.table-add.row').click();
-    await page.locator('.table-add.column').click();
+    await page.locator('.table-addbar.row').waitFor({ state: 'visible' });
+    await page.locator('.table-addbar.row').click();
+    await page.locator('.table-addbar.column').click();
     await settle(page);
     const table = await blockOf(page, 'b13');
     assert.equal(table.rows.length, 5);
     assert.equal(table.rows[0].length, 4);
+    // The row grip's menu and a cell's right-click menu delete rows and columns.
+    const second = await part(page, 'b13', 'cell:1:0').boundingBox();
+    await page.mouse.move(second.x + 20, second.y + 6);
+    await page.locator('.table-grip.row').click();
+    await page.locator('.table-menu .menu-row', { hasText: 'Delete row' }).click();
+    await settle(page);
+    assert.equal((await blockOf(page, 'b13')).rows.length, 4);
+    const cell = await part(page, 'b13', 'cell:1:1').boundingBox();
+    await page.mouse.click(cell.x + 10, cell.y + 6, { button: 'right' });
+    await page.locator('.table-menu .menu-row', { hasText: 'Delete column' }).click();
+    await settle(page);
+    const trimmed = await blockOf(page, 'b13');
+    assert.equal(trimmed.rows[0].length, 3);
+    assert.equal(trimmed.rows[0][1], 'Growth');
     // Tab moves between cells; Enter goes down a row.
     await caretAt(page, 'b13', 'cell:0:0', 0);
     await page.keyboard.press('Tab'); await page.keyboard.type('R');
     await page.keyboard.press('Enter'); await page.keyboard.type('D');
     await settle(page);
     const typed = await blockOf(page, 'b13');
-    assert.equal(typed.rows[0][1], 'RevenueR');
-    assert.equal(typed.rows[1][1], '$4.1mD');
+    assert.equal(typed.rows[0][1], 'GrowthR');
+    assert.equal(typed.rows[1][1], '+17%D');
     await page.close();
   },
   async emptyDocShowsPlaceholders() {

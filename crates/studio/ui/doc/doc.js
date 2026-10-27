@@ -247,7 +247,7 @@ export function mount(shared) {
   // -- the page follows the doc's design -----------------------------------------------------------
 
   function applyDocTheme() {
-    const theme = state.doc.theme, set = (name, value) => sheet.style.setProperty(name, value);
+    const theme = state.doc.theme, set = (name, value) => app.style.setProperty(name, value);
     const colors = theme.colors;
     const mix = (a, b, pct) => `color-mix(in srgb, ${a} ${pct}%, ${b})`;
     set('--d-bg', colors.bg || '#ffffff'); set('--d-fg', colors.fg || '#1d1d1f'); set('--d-accent', colors.accent || '#0a6cff');
@@ -274,7 +274,7 @@ export function mount(shared) {
   }
   function setZoom(value) {
     state.zoom = Math.max(.8, Math.min(1.8, Math.round(value * 20) / 20));
-    sheet.style.setProperty('--z', String(state.zoom));
+    app.style.setProperty('--z', String(state.zoom));
     try { localStorage.setItem('nexus-doc-zoom', String(state.zoom)); } catch { /* ignore */ }
     comments.layout();
   }
@@ -439,19 +439,23 @@ export function mount(shared) {
     row.addEventListener('click', () => { togglePop(exportPop, exportButton, false); command({ command: 'DocExport', format, ...(plainFile ? { template: 'none' } : {}) }); });
     exportPop.append(row);
   }
+  // One toggle, shown only when the doc follows a template: checked, every
+  // format above exports into the template's package; unchecked, a plain file.
+  const templateRule = el('div', 'menu-rule');
   const template = el('button', 'menu-row compact');
   template.type = 'button'; template.setAttribute('role', 'menuitemcheckbox');
+  template.append(el('span', 'menu-label', 'Into template'));
   let plainFile = false;
   function exportMode() {
-    template.disabled = !state.design?.template;
-    template.textContent = `Into template${!plainFile && state.design?.template ? ' · On' : ''}`;
-    template.setAttribute('aria-checked', String(!plainFile && !!state.design?.template));
+    const has = Boolean(state.design?.template), on = has && !plainFile;
+    templateRule.hidden = template.hidden = !has;
+    template.replaceChildren(el('span', 'menu-label', 'Into template'), el('span', 'menu-hint', state.design?.name ?? ''));
+    if (on) template.append(glyph('check'));
+    template.classList.toggle('on', on);
+    template.setAttribute('aria-checked', String(on));
   }
   template.addEventListener('click', () => { plainFile = !plainFile; exportMode(); });
-  const plain = el('button', 'menu-row compact', 'Plain file');
-  plain.type = 'button'; plain.setAttribute('role', 'menuitem');
-  plain.addEventListener('click', () => { togglePop(exportPop, exportButton, false); command({ command: 'DocExport', format: 'docx', template: 'none' }); });
-  exportPop.append(el('div', 'menu-rule'), template, plain);
+  exportPop.append(templateRule, template);
   overlay.append(exportPop);
   exportButton.addEventListener('click', () => togglePop(exportPop, exportButton, undefined, () => { exportMode(); place(exportPop, exportButton); exportPop.querySelector('button')?.focus(); }));
   exportPop.addEventListener('keydown', e => {

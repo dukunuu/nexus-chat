@@ -17,6 +17,15 @@ const paths = {
   paragraph: 'M13 4v16M17 4v16M13 4H9a4 4 0 0 0 0 8h4',
   list: 'M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01',
   quote: 'M5 17c-1-4 0-9 4-11M13 17c-1-4 0-9 4-11',
+  check: 'm5 12.5 4.5 4.5L19 7.5',
+  plus: 'M12 5v14M5 12h14',
+  table: 'M3 5h18v14H3ZM3 10h18M9 10v9',
+  'arrow-up': 'M12 19V5m-6 6 6-6 6 6',
+  'arrow-down': 'M12 5v14m-6-6 6 6 6-6',
+  'arrow-left': 'M19 12H5m6-6-6 6 6 6',
+  'arrow-right': 'M5 12h14m-6-6 6 6-6 6',
+  forward: 'M12 19V5m-6 6 6-6 6 6',
+  back: 'M12 5v14m-6-6 6 6 6-6',
 };
 export function glyph(name) {
   if (!paths[name]) return icon(name);

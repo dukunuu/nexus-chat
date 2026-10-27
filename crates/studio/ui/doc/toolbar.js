@@ -37,7 +37,8 @@ export function toolbarController(api) {
   style.setAttribute('aria-haspopup', 'menu');
   style.setAttribute('aria-label', 'Text style');
   style.append(el('span', 'tb-style-label', 'Text'), glyph('down'));
-  bar.append(style, el('span', 'tb-sep'));
+  const styleSep = el('span', 'tb-sep');
+  bar.append(style, styleSep);
 
   const add = (key, icon, label, run) => {
     const b = el('button', 'tb-button');
@@ -119,7 +120,8 @@ export function toolbarController(api) {
     }
     const current = currentStyle();
     style.querySelector('.tb-style-label').textContent = current ? M.styleLabel(current) : selectedBlocks().length > 1 ? 'Mixed' : M.blockLabel(selectedBlocks()[0] || { kind: 'paragraph' });
-    style.disabled = !selectedBlocks().some(b => M.TEXT_KINDS.has(b.kind) || b.kind === 'code');
+    // Table cells, captions and the like have no block style to pick: hide it rather than show a dead control.
+    style.hidden = styleSep.hidden = !selectedBlocks().some(b => M.TEXT_KINDS.has(b.kind) || b.kind === 'code');
     const rect = getSelection().getRangeAt(0).getBoundingClientRect();
     placePopup(bar, rect, { prefer: 'above', align: 'center' });
   }
