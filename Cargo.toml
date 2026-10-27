@@ -50,7 +50,9 @@ tui-textarea-2 = "0.12.0"
 unicode-width = "0.2.2"
 uuid = { version = "1.23.4", features = ["v4"] }
 wry = "0.57.0"
-zip = "8.6.0"
+# Every default feature except zstd: Office packages and our exports only use
+# deflate, and zip 8's zstd 0.13 carries RUSTSEC-2026-0391/0398/0403/0410.
+zip = { version = "8.6.0", default-features = false, features = ["aes-crypto", "bzip2", "deflate64", "deflate", "lzma", "ppmd", "time", "xz"] }
 
 # Development and test builds keep file:line backtraces but not full debug
 # info: full DWARF made the target dir several GB per build (most of it
