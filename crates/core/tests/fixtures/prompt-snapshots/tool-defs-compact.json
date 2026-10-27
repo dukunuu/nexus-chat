@@ -156,8 +156,8 @@
     }
   },
   {
-    "name": "deck",
-    "description": "Build and edit slide decks in space files decks/*.deck.json. Live in /studio (undoable); you see slides as images. Edit directly when asked, then view layout changes; comment when reviewing or unsure. Never invent data, sources or images. One deck per request: edit it, no variants or probe decks. Image src: https or space file (us_1.jpg). Big deck: read slides:[ids|numbers]; history lists or restores versions. Slides are 1920x1080 px. Slide and frame: layout{mode:none|row|column,gap,padding,main,cross,wrap}, children[]. Node: kind,sizing{w,h:px|hug|fill},position:auto|{x,y}; kinds frame text{text,style,font} image{src} shape{shape,fill} table{rows} code{source} chart{chart,labels,series}. Prefer auto-layout and text styles to x,y. Ops: add_slide{after?,slide} delete_slide/delete_node/unwrap{id} move_slide{id,to} set_notes{slide,notes} update_slide/update_node{id,fields: merge patch} insert_node{parent,node} move_node{id,parent} wrap{ids,layout} set_layout{target,layout} set_text_style{name,font} set_theme. ids, base_hash automatic; ops atomic. Comments: anchor to a node; one issue, two sentences max, with why; attach ops for a fix; at most 8, worst first; severity must|should|consider; respect the author's intent; answer the thread you are in.\n- action=create (needs title)\n- action=read (needs path)\n- action=view (needs path)\n- action=fonts (needs path)\n- action=edit (needs path, ops)\n- action=comment (needs path, text)\n- action=resolve (needs path, thread)\n- action=history (needs path)\n- action=export (needs path, text)",
+    "name": "canvas",
+    "description": "Draft writing as a doc (Markdown), presentations as a deck. Space files: docs/*.doc.json or decks/*.deck.json; kind from path or create.kind (default deck). Build slides from layouts with add_slide{layout,slots,after?}; use color roles and text styles; fix design: drift. Edit directly when asked, comment when reviewing or unsure. One file per request: edit it, no variants or probes. Never invent data, sources or images (src: https or space file). Decks: /studio, 1920x1080 px, auto-layout; view after layout changes. Docs: read outline or blocks; no page view yet; export md only. Atomic ops; ids/hashes automatic. Field references arrive with results. Comments: anchor to a block; one issue, two sentences with why; attach ops for fixes; at most 8, worst first; respect intent and facts; answer the thread.\n- action=create\n- action=read (needs path)\n- action=view (needs path)\n- action=fonts (needs path)\n- action=edit (needs path, ops)\n- action=comment (needs path, text)\n- action=resolve (needs path, thread)\n- action=history (needs path)\n- action=export (needs path)\n- action=design (needs op)",
     "parameters": {
       "properties": {
         "action": {
@@ -170,14 +170,46 @@
             "comment",
             "resolve",
             "history",
-            "export"
+            "export",
+            "design"
           ],
           "type": "string"
         },
         "block": {
           "type": "string"
         },
+        "blocks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "design": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string"
+        },
         "from": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "deck",
+            "doc"
+          ],
+          "type": "string"
+        },
+        "markdown": {
+          "type": "string"
+        },
+        "op": {
+          "enum": [
+            "list",
+            "read",
+            "set_default",
+            "edit"
+          ],
           "type": "string"
         },
         "ops": {
@@ -186,7 +218,13 @@
           },
           "type": "array"
         },
+        "patch": {
+          "type": "object"
+        },
         "path": {
+          "type": "string"
+        },
+        "quote": {
           "type": "string"
         },
         "revision": {
@@ -308,7 +346,7 @@
   },
   {
     "name": "media",
-    "description": "Generate and transform media, and manage named video image references.\n- action=generate_image (needs prompt)\n- action=generate_video (needs prompt)\n- action=edit (needs video_id)\n- action=extract_frame (needs video_id)\n- action=stitch (needs video_ids)\n- action=save_reference (needs name, image_id, description)\n- action=list_references\n- action=delete_reference (needs name)",
+    "description": "Generate images/video; transform video locally with ffmpeg; save named image references for video consistency.\n- action=generate_image (needs prompt)\n- action=generate_video (needs prompt)\n- action=edit (needs video_id)\n- action=extract_frame (needs video_id)\n- action=stitch (needs video_ids)\n- action=save_reference (needs name, image_id, description)\n- action=list_references\n- action=delete_reference (needs name)",
     "parameters": {
       "properties": {
         "action": {

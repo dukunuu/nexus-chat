@@ -1,4 +1,4 @@
-//! What the `deck` tool tells the model about a deck: `read` (always within
+//! What the `canvas` tool tells the model about a deck: `read` (always within
 //! the tool-result cap, falling back to an outline), edit summaries with the
 //! rectangles of changed nodes, and the comparison behind stale-revision
 //! handling.

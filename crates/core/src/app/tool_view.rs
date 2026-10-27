@@ -411,7 +411,7 @@ pub(super) fn parse(name: &str, args: &str, result: &str) -> Option<ToolView> {
                 });
             }
         }
-        "deck" => deck_view(&mut view, field("action")?, field("path"), result)?,
+        "canvas" | "deck" => deck_view(&mut view, field("action")?, field("path"), result)?,
         "request_workspace" => {
             view.verb = "workspace".into();
             view.target = field("root")?.into();
@@ -626,16 +626,32 @@ fn batch_target(args: &Value) -> String {
     String::new()
 }
 
-/// The `deck` tool: `created deck`, `edited slide 3`, `viewed 4 slides`,
+/// The `canvas` tool: `created deck`, `edited slide 3`, `viewed 4 slides`,
 /// `commented on slide 2`, with the rendered slides the result shows.
 fn deck_view(view: &mut ToolView, action: &str, path: Option<&str>, result: &str) -> Option<()> {
     let first = result.lines().next().unwrap_or_default();
     let lead = first.split(" · ").next().unwrap_or_default();
-    view.target = path.unwrap_or_default().into();
+    view.target = path
+        .or_else(|| first.split(" · ").nth(1))
+        .unwrap_or_default()
+        .into();
+    let doc = view.target.ends_with(".doc.json") || lead.ends_with(" doc");
     if view.outcome != ToolOutcome::Ok {
         view.verb = match action {
-            "create" => "create deck",
-            "read" => "read deck",
+            "create" => {
+                if doc {
+                    "create doc"
+                } else {
+                    "create deck"
+                }
+            }
+            "read" => {
+                if doc {
+                    "read doc"
+                } else {
+                    "read deck"
+                }
+            }
             "view" | "edit" | "comment" | "resolve" => action,
             _ => return None,
         }
@@ -644,7 +660,7 @@ fn deck_view(view: &mut ToolView, action: &str, path: Option<&str>, result: &str
         return Some(());
     }
     view.verb = match action {
-        "read" => "read deck".into(),
+        "read" => if doc { "read doc" } else { "read deck" }.into(),
         "resolve" => "resolved thread".into(),
         "comment" if lead.starts_with("replied in thread") => "replied in thread".into(),
         "create" | "view" | "edit" | "comment" => lead.into(),
@@ -653,7 +669,8 @@ fn deck_view(view: &mut ToolView, action: &str, path: Option<&str>, result: &str
     if matches!(action, "create" | "read")
         && let Some(count) = first.split(" · ").find(|part| {
             part.split_once(' ').is_some_and(|(n, unit)| {
-                n.parse::<usize>().is_ok() && matches!(unit, "slide" | "slides")
+                n.parse::<usize>().is_ok()
+                    && matches!(unit, "slide" | "slides" | "block" | "blocks")
             })
         })
     {

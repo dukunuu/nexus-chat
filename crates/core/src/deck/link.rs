@@ -137,7 +137,7 @@ impl Line {
     }
 }
 
-/// What the terminal and the `deck` tool share about the open canvas: what
+/// What the terminal and the `canvas` tool share about the open canvas: what
 /// studio is showing, and which decks the model just changed. Studio's link is
 /// per terminal, not per conversation, so this holds no session.
 #[derive(Default)]
@@ -147,8 +147,10 @@ pub struct Context {
     /// Decks the model created or edited since the terminal last looked, with
     /// the first changed slide, in order.
     pub changed: Vec<(PathBuf, String)>,
-    /// Whether the `deck` tool already sent its field reference this session.
+    /// Whether canvas already sent its deck field reference this session.
     pub schema_shown: bool,
+    /// The independent, deferred doc field reference has been returned.
+    pub doc_schema_shown: bool,
     /// Registered comment turns, keyed by chat task id; the bridge drains results.
     pub turns: HashMap<u64, Option<TurnOutcome>>,
     /// Wakes the terminal's event loop when `changed` grows.

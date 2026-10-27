@@ -1,4 +1,4 @@
-//! The `deck` tool: confined, atomic deck actions. Studio and the model share
+//! The `canvas` tool: confined, atomic deck and doc actions. Studio and the model share
 //! the same `*.deck.json` and `*.deck.json.comments.json` files, so every
 //! write here shows up in an open studio window within half a second.
 
@@ -24,7 +24,14 @@ use crate::remote_image::Fetcher;
 
 use super::ToolBox;
 
-#[path = "deck_read.rs"]
+#[cfg(test)]
+#[path = "canvas/tests.rs"]
+mod canvas_tests;
+#[path = "canvas/design.rs"]
+mod design;
+#[path = "canvas/docs.rs"]
+mod docs;
+#[path = "canvas/read.rs"]
 mod read;
 
 /// Slides shown as individual images; more become one contact sheet.
@@ -281,6 +288,7 @@ fn describe(op: &Op, before: &Deck) -> String {
         }
         Op::SetTextStyle { name, .. } => format!("set_text_style {name}"),
         Op::SetTheme { .. } => "set_theme".into(),
+        Op::ApplyDesign { .. } => "apply_design".into(),
         Op::SetTransition { slide, .. } => format!("set_transition slide {}", number(slide)),
         Op::SetAnimation { id, slot, .. } => format!("set_animation {id} {slot:?}"),
         Op::ReorderBuilds { slide, .. } => format!("reorder_builds slide {}", number(slide)),
@@ -509,6 +517,7 @@ const SCHEMA: &str = "\nschema (sent once per session)\n\
 - animation ops: set_transition{slide,transition|null}, set_animation{id,slot:build_in|emphasis|build_out,build|null}, reorder_builds{slide,ids}. Each is atomic with the other ops; update_node and update_slide merge patches also reach animation and transition.\n\
 - images: src is an https URL (fetched when you create or edit, so renders show it) or a space file such as us_1.jpg or files/us_1.jpg (checked by content and copied into decks/assets). view and edit list any image drawn as a placeholder and why. Use the user's own photos and generated images from the space files; do not replace them. For other pictures, find real photos with search mode images and use their https URLs rather than drawing an illustration out of shapes.\n\
 - reading: read slides:[\"s2\",3] returns just those slides in full. A deck over about 7000 characters reads as an outline (`id kind x,y wxh \"text\"`, ids complete) ending in a \"more slides\" line. Edit results list the changed nodes with their rects and the new revision, so edit again without reading; revision is optional, and a stale one is applied when the nodes you touch did not change, else refused with what changed.\n\
+- design: build slides with add_slide{layout,slots,after?}; design op=read lists layout slots; apply_design{design?} refreshes the copied theme. Use color roles and named styles; fix design: lint hints.\n\
 - history lists earlier versions (kept on every write by you or the user, last 50); history with revision restores one as a new, undoable write. One deck per request: edit it instead of creating -redesign copies or probe decks.\n\
 - create also takes text_styles{name:font} to define styles it uses; update_node/update_slide fields.children replaces the children; edit takes up to 500 ops. Small slips (font as a string, kind ellipse, numeric strings, letter_spacing in px, an undefined style, a short path) are repaired and listed as `normalized:` lines; other errors list every located problem with a fix.\n\
 - import: create with from:\"file.pptx\" (a space file) rebuilds a PowerPoint deck: every shape absolute at its place, text as text nodes, pictures copied (crops baked in), tables as text, notes and transitions kept, glows as stacked ellipses. Charts become labelled placeholders and SmartArt becomes shapes or a list; the result lists each approximation. Rebuild what matters with edit, using the original's text and images only.\n\
@@ -633,16 +642,21 @@ fn fonts_text(deck: &Deck, query: Option<&str>) -> String {
 
 /// A new deck: the title slide only, or the given slides, with any text
 /// styles the call defines.
-fn new_deck(title: &str, slides: Option<&Value>, styles: Option<&Value>) -> Result<Deck> {
+fn new_deck(
+    title: &str,
+    slides: Option<&Value>,
+    styles: Option<&Value>,
+    theme: &crate::deck::Theme,
+) -> Result<Deck> {
     if slides.is_none() && styles.is_none() {
         return Ok(Deck::titled(title));
     }
     let slides = slides.cloned().unwrap_or_else(|| {
         json!([{"id": "s1", "children": [{"id": "b1", "kind": "text", "text": title, "style": "title"}]}])
     });
-    let mut deck = json!({"version": 2, "title": title, "slides": slides});
+    let mut deck = json!({"version": 2, "title": title, "slides": slides, "theme": theme});
     if let Some(styles) = styles {
-        deck["theme"] = json!({"text_styles": styles});
+        crate::doc::ops::merge_patch(&mut deck["theme"]["text_styles"], styles);
     }
     Deck::check(&deck.to_string()).map_err(|errors| {
         anyhow::anyhow!(
@@ -734,9 +748,15 @@ impl ToolBox {
         }
     }
 
-    /// Run one `deck` action (`deck_create` … `deck_resolve`). Repairs made to
+    /// Run one canvas action (legacy `deck_*` routes cover both kinds). Repairs made to
     /// the input are reported at the top of the result as `normalized:` lines.
-    pub(super) async fn deck_action(&self, action: &str, v: &Value) -> Result<String> {
+    pub(super) async fn canvas_action(&self, action: &str, v: &Value) -> Result<String> {
+        if action == "canvas_design" {
+            return self.canvas_design(v);
+        }
+        if Self::is_doc(v) {
+            return self.doc_action(action, v);
+        }
         let mut notes = Vec::new();
         match self.deck_dispatch(action, v, &mut notes).await {
             Ok(out) => Ok(with_notes(&out, &notes)),
@@ -929,9 +949,11 @@ impl ToolBox {
         );
         let title = v["title"].as_str().context("title is required")?;
         if let Some(from) = v["from"].as_str().filter(|f| !f.trim().is_empty()) {
-            return self.deck_import(relative, path, title, from).await;
+            return self.deck_import(relative, path, title, from, v).await;
         }
-        let mut lenient = Lenient::for_new_deck();
+        let mut designed = Deck::titled(title);
+        self.copy_deck_design(&mut designed, v)?;
+        let mut lenient = Lenient::for_deck(&designed);
         let mut styles = v.get("text_styles").cloned();
         if let Some(styles) = styles.as_mut() {
             lenient.text_styles(styles);
@@ -948,7 +970,13 @@ impl ToolBox {
             .filter(|n| !notes.contains(n))
             .collect();
         notes.extend(fresh);
-        let deck = new_deck(title, slides_value.as_ref(), styles.as_ref())?;
+        let mut deck = new_deck(
+            title,
+            slides_value.as_ref(),
+            styles.as_ref(),
+            &designed.theme,
+        )?;
+        self.copy_deck_design(&mut deck, v)?;
         write_deck(path, &deck, Who::Model)?;
         self.deck_changed(path, deck.slides.first().map(|s| s.id.clone()));
         let (problems, _) = self.fetch_images(path, &deck, &[]).await;
@@ -962,6 +990,7 @@ impl ToolBox {
         out.push_str(&shown.lines(&deck, path, &self.space_files_dir)?);
         let schema = self.schema_if_fits(out.chars().count());
         out.push_str(schema);
+        self.append_design_lint(&mut out, &deck)?;
         Ok(out)
     }
 
@@ -972,6 +1001,7 @@ impl ToolBox {
         path: &Path,
         title: &str,
         from: &str,
+        v: &Value,
     ) -> Result<String> {
         let Some(source) = assets::find_space_file(from, &self.space_files_dir) else {
             bail!("no file {from:?} in the space files; name a .pptx file from the files list");
@@ -982,7 +1012,9 @@ impl ToolBox {
         })
         .await
         .context("the import was interrupted")??;
-        let deck = imported.deck;
+        let mut deck = imported.deck;
+        self.copy_deck_design(&mut deck, v)?;
+        save(path, &deck)?;
         self.deck_changed(path, deck.slides.first().map(|s| s.id.clone()));
         let shown = Shown::overview(&deck);
         let mut out = format!(
@@ -1004,6 +1036,7 @@ impl ToolBox {
         out.push_str(&shown.lines(&deck, path, &self.space_files_dir)?);
         let schema = self.schema_if_fits(out.chars().count());
         out.push_str(schema);
+        self.append_design_lint(&mut out, &deck)?;
         Ok(out)
     }
 
@@ -1167,17 +1200,19 @@ impl ToolBox {
         let Value::Array(ops) = value else {
             unreachable!("ops stay an array")
         };
-        let prepared = direct::prepare(&deck, ops).map_err(|errors| {
-            anyhow::anyhow!(
-                "Nothing was written. {} to fix:{}",
-                if errors.len() == 1 {
-                    "1 problem".to_string()
-                } else {
-                    format!("{} problems", errors.len())
-                },
-                format_errors(&errors)
-            )
-        })?;
+        let resolver = |slug: &str| crate::design::load(&self.space_files_dir, slug);
+        let prepared =
+            direct::prepare_with_resolver(&deck, ops, Some(&resolver)).map_err(|errors| {
+                anyhow::anyhow!(
+                    "Nothing was written. {} to fix:{}",
+                    if errors.len() == 1 {
+                        "1 problem".to_string()
+                    } else {
+                        format!("{} problems", errors.len())
+                    },
+                    format_errors(&errors)
+                )
+            })?;
         notes.extend(prepared.notes.iter().cloned());
         let next = prepared.next;
         let changed = changed_slides(&deck, &next);
@@ -1205,6 +1240,7 @@ impl ToolBox {
         out.push_str(&shown.lines(&next, path, &self.space_files_dir)?);
         let schema = self.schema_if_fits(out.chars().count());
         out.push_str(schema);
+        self.append_design_lint(&mut out, &next)?;
         Ok(out)
     }
 
@@ -1304,7 +1340,10 @@ fn touched_ids(ops: &[Value]) -> (BTreeSet<String>, bool) {
         if let Some(list) = op["ids"].as_array() {
             ids.extend(list.iter().filter_map(Value::as_str).map(str::to_string));
         }
-        if matches!(op["op"].as_str(), Some("set_text_style" | "set_theme")) {
+        if matches!(
+            op["op"].as_str(),
+            Some("set_text_style" | "set_theme" | "apply_design")
+        ) {
             theme = true;
         }
     }

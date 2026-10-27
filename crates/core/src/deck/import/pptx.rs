@@ -713,6 +713,8 @@ pub fn import_pptx(bytes: &[u8], assets: &Path) -> Result<Imported> {
     let deck = Deck {
         version: 2,
         title: title.chars().take(120).collect(),
+        design: None,
+        design_rev: None,
         theme,
         slides: out_slides,
     };

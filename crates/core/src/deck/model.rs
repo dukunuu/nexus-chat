@@ -732,6 +732,9 @@ pub struct Node {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Named placeholder in a design layout; removed when instantiated.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub slot: String,
     #[serde(default, skip_serializing_if = "Sizing::is_default")]
     pub sizing: Sizing,
     #[serde(default, skip_serializing_if = "is_auto")]
@@ -767,6 +770,7 @@ impl Node {
         Self {
             id: id.into(),
             name: None,
+            slot: String::new(),
             sizing: Sizing::default(),
             position: Position::Auto,
             opacity: 1.0,
@@ -990,6 +994,12 @@ fn style(family: &str, size: f64, weight: u16, line_height: f64, color: Option<&
 #[must_use]
 pub fn default_text_styles() -> BTreeMap<String, Font> {
     [
+        (
+            "display",
+            style("heading", 312.93, 800, 1.0, Some("accent")),
+        ),
+        ("quote", style("heading", 81.0, 500, 1.15, None)),
+        ("lead", style("body", 58.0, 400, 1.4, None)),
         ("title", style("heading", 120.0, 700, 1.08, None)),
         ("heading", style("heading", 81.0, 700, 1.08, None)),
         ("subheading", style("heading", 58.0, 600, 1.2, None)),
@@ -1039,6 +1049,10 @@ impl Theme {
 pub struct Deck {
     pub version: u8,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub design: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub design_rev: Option<String>,
     #[serde(default)]
     pub theme: Theme,
     pub slides: Vec<Slide>,

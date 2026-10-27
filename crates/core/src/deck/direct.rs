@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 
-use super::ops::{apply_step, validate_deck};
+use super::ops::{apply_step, apply_step_with_resolver, resolve_layout_request, validate_deck};
 use super::suggest::{insertion_id, insertion_tree};
 use super::validate::{reserve_id, reserved_ids};
 use super::{CheckError, Deck, Kind, Op};
@@ -50,7 +50,11 @@ fn explicit_ids(ops: &[Value]) -> BTreeSet<String> {
     for op in ops {
         match op["op"].as_str() {
             Some("add_slide") => {
-                ids.extend(reserved_ids(&json!({"slides": [op["slide"]]})));
+                if op.get("layout").is_some() {
+                    reserve_id(op, &mut ids);
+                } else {
+                    ids.extend(reserved_ids(&json!({"slides": [op["slide"]]})));
+                }
             }
             Some("insert_node") => {
                 ids.extend(reserved_ids(
@@ -155,6 +159,16 @@ fn expand(
 /// Every located problem found, or the whole-deck check failures of the
 /// result. Nothing is written either way.
 pub fn prepare(base: &Deck, raw: Vec<Value>) -> Result<Prepared, Vec<CheckError>> {
+    prepare_with_resolver(base, raw, None)
+}
+
+/// Prepare with caller-owned design lookup; layout requests become concrete
+/// slides before the existing insertion/validation machinery runs.
+pub fn prepare_with_resolver(
+    base: &Deck,
+    raw: Vec<Value>,
+    resolver: Option<&crate::design::Resolver<'_>>,
+) -> Result<Prepared, Vec<CheckError>> {
     if raw.is_empty() || raw.len() > MAX_OPS {
         return Err(vec![failure(
             "ops".into(),
@@ -180,7 +194,7 @@ pub fn prepare(base: &Deck, raw: Vec<Value>) -> Result<Prepared, Vec<CheckError>
             }
         };
         for mut value in expanded {
-            match one(&mut working, &mut value, j, &reserved, &mut used) {
+            match one(&mut working, &mut value, j, &reserved, &mut used, resolver) {
                 Ok(op) => ops.push(op),
                 Err(error) => errors.push(error),
             }
@@ -202,8 +216,10 @@ fn one(
     j: usize,
     reserved: &BTreeSet<String>,
     used: &mut BTreeSet<String>,
+    resolver: Option<&crate::design::Resolver<'_>>,
 ) -> Result<Op, CheckError> {
     let path = format!("ops[{j}]");
+    resolve_layout_request(working, value, resolver).map_err(|e| failure(path.clone(), e))?;
     let kind = value["op"].as_str().unwrap_or_default().to_string();
     match kind.as_str() {
         "update_node" => {
@@ -237,7 +253,12 @@ fn one(
         _ => {}
     }
     let op = serde_json::from_value::<Op>(value.clone()).map_err(|e| failure(path.clone(), e))?;
-    apply_step(working, &op).map_err(|e| failure(path, format!("{e:#}")))?;
+    if resolver.is_some() {
+        apply_step_with_resolver(working, &op, resolver)
+    } else {
+        apply_step(working, &op)
+    }
+    .map_err(|e| failure(path, format!("{e:#}")))?;
     Ok(op)
 }
 

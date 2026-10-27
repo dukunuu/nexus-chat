@@ -52,6 +52,20 @@ pub struct CheckError {
 }
 
 impl Deck {
+    /// Start a self-contained deck following a design. Storage supplies its slug
+    /// when the design's display name differs from its filename.
+    #[must_use]
+    pub fn from_design(title: &str, design: &crate::design::Design) -> Self {
+        Self {
+            version: 2,
+            title: title.into(),
+            design: Some(design.slug()),
+            design_rev: Some(design.revision()),
+            theme: design.slide_theme(),
+            slides: Vec::new(),
+        }
+    }
+
     /// SHA-256 of canonical JSON, independent of input object key order.
     #[must_use]
     pub fn revision(&self) -> String {
@@ -100,7 +114,7 @@ impl Deck {
         deck
     }
 
-    /// One title slide and nothing else: what the `deck` tool starts from.
+    /// One title slide and nothing else: what the `canvas` tool starts from.
     #[must_use]
     pub fn titled(title: &str) -> Self {
         Self::check(
@@ -211,7 +225,7 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
-fn hash(value: &impl Serialize) -> String {
+pub(crate) fn hash(value: &impl Serialize) -> String {
     fn sorted(value: Value) -> Value {
         match value {
             Value::Object(map) => Value::Object(

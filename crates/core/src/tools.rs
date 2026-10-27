@@ -3,8 +3,8 @@
 //! `research_lookup`, `files`, `app`, `media`) that dispatch onto a larger
 //! set of specialized implementations below, behind the `ToolExecutor` seam.
 
+mod canvas;
 mod chats;
-mod deck;
 mod effect;
 #[cfg(test)]
 mod image_tests;
@@ -257,7 +257,7 @@ pub struct ToolBox {
     image_search: ImageSearch,
     /// Remote-image preference shared with image-consuming tools.
     pub remote_images: Option<Arc<crate::remote_image::Fetcher>>,
-    /// Test seam: the downloader the `deck` tool uses for https images. Normally
+    /// Test seam: the downloader the `canvas` tool uses for https images. Normally
     /// absent, and each deck gets one rooted at its own `assets/` folder.
     #[cfg(test)]
     pub(crate) deck_images: Option<Arc<crate::remote_image::Fetcher>>,
@@ -1249,7 +1249,7 @@ impl ToolBox {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "tool": { "type": "string", "description": "public tool name, e.g. search, fetch_url, files, app, scripts, research_lookup, skills" },
+                                "tool": { "type": "string", "description": "public tool name, e.g. search, canvas, scripts" },
                                 "arguments": { "type": "object", "description": "that tool's parameters, same shape as a normal call" }
                             },
                             "required": ["tool"]
@@ -1270,10 +1270,10 @@ impl ToolBox {
             &["list", "read", "write", "edit", "run", "python", "install"],
         ));
         defs.push(def(
-            &spec::DECK,
+            &spec::CANVAS,
             &[
                 "create", "read", "view", "fonts", "edit", "comment", "resolve", "history",
-                "export",
+                "export", "design",
             ],
         ));
         let mut search_modes = vec!["web", "academic", "discussion", "images"];
@@ -1963,15 +1963,26 @@ impl ToolBox {
         }
         let (result, status) = match name {
             "deck_create" | "deck_read" | "deck_view" | "deck_edit" | "deck_comment"
-            | "deck_resolve" | "deck_fonts" | "deck_export" | "deck_history" => {
-                let value = serde_json::from_str(args).expect("validated deck arguments");
-                match self.deck_action(name, &value).await {
+            | "deck_resolve" | "deck_fonts" | "deck_export" | "deck_history" | "canvas_design" => {
+                let value = serde_json::from_str(args).expect("validated canvas arguments");
+                match self.canvas_action(name, &value).await {
                     Ok(result) => (result, "done".into()),
                     Err(error) => {
-                        let message = format!("deck failed: {error:#}");
+                        let kind = if Self::is_doc(&value) {
+                            "doc"
+                        } else if name == "canvas_design" {
+                            "design"
+                        } else {
+                            "deck"
+                        };
+                        let message = format!("{kind} failed: {error:#}");
                         // A first create usually fails before any result could
                         // carry the field reference; send it with the error.
-                        let schema = self.deck_schema_if_fits(message.chars().count());
+                        let schema = if Self::is_doc(&value) {
+                            self.doc_schema_if_fits(message.chars().count())
+                        } else {
+                            self.deck_schema_if_fits(message.chars().count())
+                        };
                         (message + schema, "invalid arguments".into())
                     }
                 }

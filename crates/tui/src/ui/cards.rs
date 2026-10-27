@@ -531,10 +531,11 @@ fn push_batch_body(
 /// A deck card that created or edited slides, successfully.
 fn is_deck_change(view: &nexus_core::app::ToolView) -> bool {
     view.outcome == nexus_core::app::ToolOutcome::Ok
+        && !view.target.ends_with(".doc.json")
         && (view.verb.starts_with("created deck") || view.verb.starts_with("edited "))
 }
 
-/// The slides a `deck` call rendered, drawn inline in the opened card.
+/// The slides a `canvas` call rendered, drawn inline in the opened card.
 fn push_slide_thumbnails(
     out: &mut Vec<Line<'static>>,
     view: &nexus_core::app::ToolView,
@@ -905,7 +906,7 @@ fn expanded_tool_body(
         return sources_body(view, width, theme);
     }
     let tool = name.split('_').next().unwrap_or(name);
-    if tool == "deck" && !view.verb.is_empty() {
+    if matches!(tool, "canvas" | "deck") && !view.verb.is_empty() {
         return view
             .output
             .as_deref()

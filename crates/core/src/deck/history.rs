@@ -1,6 +1,6 @@
 //! Deck history: the way back after an edit that went wrong.
 //!
-//! Every write of a deck file, by the `deck` tool and by studio, first keeps
+//! Every write of a deck file, by the `canvas` tool and by studio, first keeps
 //! the version it is about to replace in `<decks folder>/.history/<deck
 //! stem>/<timestamp>-<rev8>-<who>.json`, where `rev8` is the first eight
 //! characters of that version's revision and `who` (`model` or `user`) is the
@@ -13,6 +13,31 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail, ensure};
 
 use super::{Deck, Kind, MAX_SOURCE, write_atomic};
+
+/// The data-specific half of history; storage and filenames stay shared.
+pub trait Document: serde::Serialize + Sized {
+    const MAX_HISTORY_SOURCE: usize;
+    fn check_history(source: &str) -> Option<Self>;
+    fn history_revision(&self) -> String;
+}
+impl Document for Deck {
+    const MAX_HISTORY_SOURCE: usize = MAX_SOURCE;
+    fn check_history(source: &str) -> Option<Self> {
+        Self::check(source).ok()
+    }
+    fn history_revision(&self) -> String {
+        self.revision()
+    }
+}
+impl Document for crate::doc::Doc {
+    const MAX_HISTORY_SOURCE: usize = 2000 * 32 * 1024 + MAX_SOURCE;
+    fn check_history(source: &str) -> Option<Self> {
+        Self::check(source).ok()
+    }
+    fn history_revision(&self) -> String {
+        self.revision()
+    }
+}
 
 /// Versions kept per deck.
 pub const KEEP: usize = 50;
@@ -74,6 +99,20 @@ impl Entry {
         Deck::check(&String::from_utf8(bytes)?)
             .map_err(|e| anyhow::anyhow!("kept version is invalid: {}", e[0].message))
     }
+
+    /// Load a kept deck or doc with its own validator.
+    pub fn load_for<D: Document>(&self) -> Result<D> {
+        ensure!(
+            !self.path.is_symlink(),
+            "kept version must not be a symlink"
+        );
+        let bytes = std::fs::read(&self.path)?;
+        ensure!(
+            bytes.len() <= D::MAX_HISTORY_SOURCE,
+            "kept version is too large"
+        );
+        D::check_history(&String::from_utf8(bytes)?).context("kept version is invalid")
+    }
 }
 
 /// `<folder>/.history/<stem>` for a deck file.
@@ -83,12 +122,29 @@ fn directory(deck_path: &Path) -> Result<PathBuf> {
         .context("deck filename")?
         .to_string_lossy()
         .into_owned();
-    let stem = name.strip_suffix(".deck.json").unwrap_or(&name).to_string();
-    Ok(deck_path
-        .parent()
-        .context("deck folder")?
-        .join(".history")
-        .join(stem))
+    let stem = name
+        .strip_suffix(".deck.json")
+        .or_else(|| name.strip_suffix(".doc.json"))
+        .unwrap_or(&name)
+        .to_string();
+    let parent = deck_path.parent().context("deck folder")?;
+    let folder = if name.ends_with(".doc.json") {
+        parent
+            .ancestors()
+            .find(|p| p.file_name().is_some_and(|n| n == "docs"))
+            .unwrap_or(parent)
+    } else {
+        parent
+    };
+    let root = folder.join(".history");
+    let directory = root.join(stem);
+    if name.ends_with(".doc.json") {
+        ensure!(
+            !root.is_symlink() && !directory.is_symlink(),
+            "history folder must not be a symlink"
+        );
+    }
+    Ok(directory)
 }
 
 fn parse(path: PathBuf) -> Option<Entry> {
@@ -117,6 +173,12 @@ pub fn list(deck_path: &Path) -> Result<Vec<Entry>> {
         .flatten()
         .filter_map(|e| parse(e.path()))
         .collect();
+    if deck_path.to_string_lossy().ends_with(".doc.json") {
+        ensure!(
+            entries.iter().all(|entry| !entry.path.is_symlink()),
+            "kept version must not be a symlink"
+        );
+    }
     entries.sort_by(|a, b| a.stamp.cmp(&b.stamp).then_with(|| a.rev8.cmp(&b.rev8)));
     Ok(entries)
 }
@@ -129,19 +191,28 @@ pub fn list(deck_path: &Path) -> Result<Vec<Entry>> {
 /// # Errors
 /// When the history folder cannot be written.
 pub fn record_before_write(deck_path: &Path, next_revision: &str, who: Who) -> Result<()> {
+    record_before_write_for::<Deck>(deck_path, next_revision, who)
+}
+
+/// Keep a version of either document kind, preserving deck filenames/bytes.
+pub fn record_before_write_for<D: Document>(
+    deck_path: &Path,
+    next_revision: &str,
+    who: Who,
+) -> Result<()> {
     let Ok(bytes) = std::fs::read(deck_path) else {
         return Ok(());
     };
-    if bytes.len() > MAX_SOURCE {
+    if bytes.len() > D::MAX_HISTORY_SOURCE {
         return Ok(());
     }
     let Ok(source) = String::from_utf8(bytes) else {
         return Ok(());
     };
-    let Ok(previous) = Deck::check(&source) else {
+    let Some(previous) = D::check_history(&source) else {
         return Ok(());
     };
-    let revision = previous.revision();
+    let revision = previous.history_revision();
     if revision == next_revision {
         return Ok(());
     }

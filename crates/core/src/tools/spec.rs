@@ -16,6 +16,7 @@ pub(super) enum Kind {
     StrList,
     Edits,
     Objects,
+    Object,
     Slides,
     Enum(&'static [&'static str]),
 }
@@ -64,6 +65,7 @@ impl Param {
                 }
             }),
             Kind::Objects => json!({ "type": "array", "items": { "type": "object" } }),
+            Kind::Object => json!({ "type": "object" }),
             Kind::Slides => {
                 json!({ "type": "array", "items": { "oneOf": [{"type":"object"}, {"type":"string"}] } })
             }
@@ -86,6 +88,7 @@ impl Param {
             Kind::Bool => value.is_boolean(),
             Kind::StrList | Kind::Edits => value.as_array().is_some_and(|a| !a.is_empty()),
             Kind::Objects | Kind::Slides => value.is_array(),
+            Kind::Object => value.is_object(),
         }
     }
 }
@@ -139,7 +142,7 @@ impl ToolSpec {
             if !action.required.is_empty() {
                 let _ = write!(description, " Needs {}", action.required.join(", "));
             }
-            if !action.optional.is_empty() {
+            if !action.optional.is_empty() && !matches!(self.name, "media" | "canvas") {
                 description.push_str(if action.required.is_empty() {
                     " "
                 } else {
@@ -147,7 +150,9 @@ impl ToolSpec {
                 });
                 let _ = write!(description, "optional {}", action.optional.join(", "));
             }
-            if !action.required.is_empty() || !action.optional.is_empty() {
+            if !action.required.is_empty()
+                || (!action.optional.is_empty() && !matches!(self.name, "media" | "canvas"))
+            {
                 description.push('.');
             }
         }
@@ -254,7 +259,7 @@ impl ToolSpec {
 }
 
 pub(super) fn find(name: &str) -> Option<&'static ToolSpec> {
-    all_tools().find(|tool| tool.name == name)
+    all_tools().find(|tool| tool.name == if name == "deck" { "canvas" } else { name })
 }
 
 pub(super) fn current_tools() -> impl Iterator<Item = (&'static str, Vec<&'static str>)> {
@@ -274,6 +279,12 @@ pub(super) fn public_alias(name: &str) -> Option<(&'static str, &'static str, &'
 }
 
 pub(super) fn read_only(name: &str, args: &str) -> Option<bool> {
+    if matches!(name, "canvas" | "deck" | "canvas_design") {
+        let value = serde_json::from_str::<Value>(args).unwrap_or_default();
+        if name == "canvas_design" || value["action"] == "design" {
+            return Some(matches!(value["op"].as_str(), Some("list" | "read")));
+        }
+    }
     if name == "task" {
         let value = serde_json::from_str::<Value>(args).unwrap_or_default();
         return Some(value.get("tools").is_none_or(|tools| tools == "read-only"));
@@ -983,7 +994,7 @@ pub(super) static FILES: ToolSpec = ToolSpec {
 
 pub(super) static MEDIA: ToolSpec = ToolSpec {
     name: "media",
-    purpose: "Generate and transform media, and manage named video image references.",
+    purpose: "Generate images/video; transform video locally with ffmpeg; save named image references for video consistency.",
     selector: Some("action"),
     params: &[
         Param {
@@ -994,7 +1005,7 @@ pub(super) static MEDIA: ToolSpec = ToolSpec {
         Param {
             name: "image_id",
             kind: Kind::Str,
-            doc: "reference image for generate_image, or image being saved for save_reference",
+            doc: "image reference or save target",
         },
         Param {
             name: "size",
@@ -1004,17 +1015,17 @@ pub(super) static MEDIA: ToolSpec = ToolSpec {
         Param {
             name: "duration",
             kind: Kind::Int,
-            doc: "video duration in seconds (default 6, normalized per model)",
+            doc: "seconds (default 6; model-normalized)",
         },
         Param {
             name: "resolution",
             kind: Kind::Str,
-            doc: "video resolution (default 720p, normalized per model)",
+            doc: "default 720p; model-normalized",
         },
         Param {
             name: "aspect_ratio",
             kind: Kind::Str,
-            doc: "video aspect ratio (default 16:9, normalized per model)",
+            doc: "default 16:9; model-normalized",
         },
         Param {
             name: "generate_audio",
@@ -1024,12 +1035,12 @@ pub(super) static MEDIA: ToolSpec = ToolSpec {
         Param {
             name: "first_frame_id",
             kind: Kind::Str,
-            doc: "image ID for the first video frame",
+            doc: "first frame image ID",
         },
         Param {
             name: "last_frame_id",
             kind: Kind::Str,
-            doc: "image ID for the last video frame",
+            doc: "last frame image ID",
         },
         Param {
             name: "ref_image_id",
@@ -1054,7 +1065,7 @@ pub(super) static MEDIA: ToolSpec = ToolSpec {
         Param {
             name: "source_video_id",
             kind: Kind::Str,
-            doc: "source video ID for provider video continuation",
+            doc: "provider continuation source ID",
         },
         Param {
             name: "video_id",
@@ -1137,7 +1148,7 @@ pub(super) static MEDIA: ToolSpec = ToolSpec {
     actions: &[
         ActionSpec {
             name: "generate_image",
-            summary: "Generate an image, optionally using a pasted image reference",
+            summary: "Generate image",
             required: &["prompt"],
             optional: &["image_id", "size"],
             read_only: false,
@@ -1145,7 +1156,7 @@ pub(super) static MEDIA: ToolSpec = ToolSpec {
         },
         ActionSpec {
             name: "generate_video",
-            summary: "Generate a video from text and optional frame or reference images",
+            summary: "Generate video with frame or named references",
             required: &["prompt"],
             optional: &[
                 "duration",
@@ -1165,7 +1176,7 @@ pub(super) static MEDIA: ToolSpec = ToolSpec {
         },
         ActionSpec {
             name: "edit",
-            summary: "Transform a video locally with ffmpeg",
+            summary: "Transform video",
             required: &["video_id"],
             optional: &[
                 "lighting",
@@ -1181,7 +1192,7 @@ pub(super) static MEDIA: ToolSpec = ToolSpec {
         },
         ActionSpec {
             name: "extract_frame",
-            summary: "Extract a video frame locally with ffmpeg",
+            summary: "Extract frame",
             required: &["video_id"],
             optional: &["time_sec", "format"],
             read_only: false,
@@ -1189,7 +1200,7 @@ pub(super) static MEDIA: ToolSpec = ToolSpec {
         },
         ActionSpec {
             name: "stitch",
-            summary: "Concatenate video clips locally with ffmpeg",
+            summary: "Concatenate clips in order",
             required: &["video_ids"],
             optional: &[],
             read_only: false,
@@ -1197,7 +1208,7 @@ pub(super) static MEDIA: ToolSpec = ToolSpec {
         },
         ActionSpec {
             name: "save_reference",
-            summary: "Save a named image reference for video consistency",
+            summary: "Save reference",
             required: &["name", "image_id", "description"],
             optional: &["type"],
             read_only: false,
@@ -1205,7 +1216,7 @@ pub(super) static MEDIA: ToolSpec = ToolSpec {
         },
         ActionSpec {
             name: "list_references",
-            summary: "List saved image references",
+            summary: "List references",
             required: &[],
             optional: &[],
             read_only: true,
@@ -1213,7 +1224,7 @@ pub(super) static MEDIA: ToolSpec = ToolSpec {
         },
         ActionSpec {
             name: "delete_reference",
-            summary: "Delete a named image reference",
+            summary: "Delete reference",
             required: &["name"],
             optional: &[],
             read_only: false,
@@ -1305,25 +1316,20 @@ pub(super) static TASK: ToolSpec = ToolSpec {
     }],
 };
 
-pub(super) static DECK: ToolSpec = ToolSpec {
-    name: "deck",
-    purpose: "Build and edit slide decks in space files decks/*.deck.json. Live in /studio (undoable); you see slides as images. \
-Edit directly when asked, then view layout changes; comment when reviewing or unsure. Never invent data, sources or images. \
-One deck per request: edit it, no variants or probe decks. Image src: https or space file (us_1.jpg). Big deck: read slides:[ids|numbers]; history lists or restores versions. \
-Slides are 1920x1080 px. Slide and frame: layout{mode:none|row|column,gap,padding,main,cross,wrap}, children[]. Node: kind,sizing{w,h:px|hug|fill},position:auto|{x,y}; kinds frame text{text,style,font} image{src} shape{shape,fill} table{rows} code{source} chart{chart,labels,series}. Prefer auto-layout and text styles to x,y. \
-Ops: add_slide{after?,slide} delete_slide/delete_node/unwrap{id} move_slide{id,to} set_notes{slide,notes} update_slide/update_node{id,fields: merge patch} insert_node{parent,node} move_node{id,parent} wrap{ids,layout} set_layout{target,layout} set_text_style{name,font} set_theme. ids, base_hash automatic; ops atomic. \
-Comments: anchor to a node; one issue, two sentences max, with why; attach ops for a fix; at most 8, worst first; severity must|should|consider; respect the author's intent; answer the thread you are in.",
+pub(super) static CANVAS: ToolSpec = ToolSpec {
+    name: "canvas",
+    purpose: "Draft writing as a doc (Markdown), presentations as a deck. Space files: docs/*.doc.json or decks/*.deck.json; kind from path or create.kind (default deck). Build slides from layouts with add_slide{layout,slots,after?}; use color roles and text styles; fix design: drift. Edit directly when asked, comment when reviewing or unsure. One file per request: edit it, no variants or probes. Never invent data, sources or images (src: https or space file). Decks: /studio, 1920x1080 px, auto-layout; view after layout changes. Docs: read outline or blocks; no page view yet; export md only. Atomic ops; ids/hashes automatic. Field references arrive with results. Comments: anchor to a block; one issue, two sentences with why; attach ops for fixes; at most 8, worst first; respect intent and facts; answer the thread.",
     selector: Some("action"),
     params: &[
         Param {
             name: "title",
             kind: Kind::Str,
-            doc: "deck title",
+            doc: "title (doc: first # if omitted)",
         },
         Param {
             name: "path",
             kind: Kind::Str,
-            doc: "decks/name.deck.json",
+            doc: "decks/name.deck.json or docs/name.doc.json",
         },
         Param {
             name: "slides",
@@ -1333,7 +1339,7 @@ Comments: anchor to a node; one issue, two sentences max, with why; attach ops f
         Param {
             name: "from",
             kind: Kind::Str,
-            doc: "create: import a .pptx space file",
+            doc: "create: .pptx or .md space file",
         },
         Param {
             name: "ops",
@@ -1353,12 +1359,12 @@ Comments: anchor to a node; one issue, two sentences max, with why; attach ops f
         Param {
             name: "block",
             kind: Kind::Str,
-            doc: "node id",
+            doc: "node or doc block id",
         },
         Param {
             name: "text",
             kind: Kind::Str,
-            doc: "comment; fonts: filter; export: pptx|pdf|png|html",
+            doc: "comment; fonts filter; legacy export format",
         },
         Param {
             name: "severity",
@@ -1370,27 +1376,69 @@ Comments: anchor to a node; one issue, two sentences max, with why; attach ops f
             kind: Kind::Str,
             doc: "thread id from read",
         },
+        Param {
+            name: "kind",
+            kind: Kind::Enum(&["deck", "doc"]),
+            doc: "create kind",
+        },
+        Param {
+            name: "markdown",
+            kind: Kind::StrOrEmpty,
+            doc: "doc source",
+        },
+        Param {
+            name: "blocks",
+            kind: Kind::StrList,
+            doc: "ids; heading selects its section",
+        },
+        Param {
+            name: "quote",
+            kind: Kind::Str,
+            doc: "anchor's plain text",
+        },
+        Param {
+            name: "format",
+            kind: Kind::Str,
+            doc: "doc: md; deck: pptx|pdf|png|html|json",
+        },
+        Param {
+            name: "design",
+            kind: Kind::Str,
+            doc: "design slug (default: space default)",
+        },
+        Param {
+            name: "op",
+            kind: Kind::Enum(&["list", "read", "set_default", "edit"]),
+            doc: "design operation",
+        },
+        Param {
+            name: "patch",
+            kind: Kind::Object,
+            doc: "merge patch: colors, fonts, font_files, scale, slide/doc.text_styles",
+        },
     ],
     actions: &[
         ActionSpec {
             name: "create",
-            summary: "New deck and contact sheet",
-            required: &["title"],
-            optional: &["path", "slides", "from"],
+            summary: "Create",
+            required: &[],
+            optional: &[
+                "kind", "title", "path", "slides", "markdown", "from", "design",
+            ],
             read_only: false,
             internal: "deck_create",
         },
         ActionSpec {
             name: "read",
-            summary: "Tree with rects, revision, threads",
+            summary: "Outline/tree, revision, threads",
             required: &["path"],
-            optional: &["slides"],
+            optional: &["slides", "blocks"],
             read_only: true,
             internal: "deck_read",
         },
         ActionSpec {
             name: "view",
-            summary: "Render slides (default: studio's slide, else a sheet)",
+            summary: "Deck slides: studio focus or sheet",
             required: &["path"],
             optional: &["slides"],
             read_only: true,
@@ -1416,7 +1464,7 @@ Comments: anchor to a node; one issue, two sentences max, with why; attach ops f
             name: "comment",
             summary: "Pin a comment (ops optional) or reply",
             required: &["path", "text"],
-            optional: &["slide", "block", "severity", "ops", "thread"],
+            optional: &["slide", "block", "severity", "quote", "ops", "thread"],
             read_only: false,
             internal: "deck_comment",
         },
@@ -1439,16 +1487,24 @@ Comments: anchor to a node; one issue, two sentences max, with why; attach ops f
         ActionSpec {
             name: "export",
             summary: "Save a file in exports/",
-            required: &["path", "text"],
-            optional: &[],
+            required: &["path"],
+            optional: &["format", "text"],
             read_only: false,
             internal: "deck_export",
+        },
+        ActionSpec {
+            name: "design",
+            summary: "Designs and layouts",
+            required: &["op"],
+            optional: &["design", "patch"],
+            read_only: false,
+            internal: "canvas_design",
         },
     ],
 };
 
 const TOOLS: &[&ToolSpec] = &[
-    &DECK,
+    &CANVAS,
     &TASK,
     &SKILLS,
     &SCRIPTS,
@@ -1542,46 +1598,55 @@ mod tests {
 
     // Explicit legacy routing expectations, with each action's required arguments.
     const ROUTES: &[(&str, &str, &str)] = &[
-        ("deck", r#"{"action":"create","title":"x"}"#, "deck_create"),
         (
-            "deck",
+            "canvas",
+            r#"{"action":"create","title":"x"}"#,
+            "deck_create",
+        ),
+        (
+            "canvas",
             r#"{"action":"read","path":"decks/x.deck.json"}"#,
             "deck_read",
         ),
         (
-            "deck",
+            "canvas",
             r#"{"action":"view","path":"decks/x.deck.json"}"#,
             "deck_view",
         ),
         (
-            "deck",
+            "canvas",
             r#"{"action":"fonts","path":"decks/x.deck.json","text":"mono"}"#,
             "deck_fonts",
         ),
         (
-            "deck",
+            "canvas",
             r#"{"action":"edit","path":"decks/x.deck.json","ops":[]}"#,
             "deck_edit",
         ),
         (
-            "deck",
+            "canvas",
             r#"{"action":"comment","path":"decks/x.deck.json","slide":"s1","text":"x","severity":"should"}"#,
             "deck_comment",
         ),
         (
-            "deck",
+            "canvas",
             r#"{"action":"resolve","path":"decks/x.deck.json","thread":"t"}"#,
             "deck_resolve",
         ),
         (
-            "deck",
+            "canvas",
             r#"{"action":"history","path":"decks/x.deck.json"}"#,
             "deck_history",
         ),
         (
-            "deck",
+            "canvas",
             r#"{"action":"export","path":"decks/x.deck.json","text":"pptx"}"#,
             "deck_export",
+        ),
+        (
+            "canvas",
+            r#"{"action":"design","op":"set_default","design":"nexus"}"#,
+            "canvas_design",
         ),
         ("task", r#"{"prompt":"x"}"#, "task"),
         ("skills", r#"{"action":"load","name":"x"}"#, "skill"),

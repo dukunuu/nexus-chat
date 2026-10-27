@@ -1,0 +1,122 @@
+//! Design actions and the deck's copied theme and consistency hints.
+use super::*;
+use crate::design::{self, Design};
+
+impl ToolBox {
+    pub(super) fn canvas_design(&self, v: &Value) -> Result<String> {
+        let files = &self.space_files_dir;
+        let default = design::default_slug(files)?;
+        let slug = v["design"].as_str().unwrap_or(&default);
+        match v["op"].as_str() {
+            Some("list") => {
+                let mut out = String::from("designs\n");
+                for slug in design::list(files)? {
+                    let design = design::load(files, &slug)?;
+                    let source = design.source.as_ref().map_or_else(
+                        || {
+                            if files.join(format!("design/{slug}.design.json")).exists() {
+                                "space".into()
+                            } else {
+                                "built-in".into()
+                            }
+                        },
+                        |s| format!("template {}", s.template),
+                    );
+                    let _ = writeln!(
+                        out,
+                        "{slug} · {source}{}",
+                        if slug == default { " · default" } else { "" }
+                    );
+                }
+                out.push_str("templates: none yet\n");
+                Ok(out)
+            }
+            Some("read") => {
+                let design = design::load(files, slug)?;
+                let mut value = serde_json::to_value(&design)?;
+                value["slide"]["layouts"] = json!(
+                    design
+                        .slide
+                        .layouts
+                        .iter()
+                        .map(|(name, slide)| (name, design::layouts::slots(slide)))
+                        .collect::<BTreeMap<_, _>>()
+                );
+                Ok(format!(
+                    "design {slug} · revision {}\n{}\n",
+                    short(&design.revision()),
+                    serde_json::to_string(&value)?
+                ))
+            }
+            Some("set_default") => {
+                design::set_default(files, slug)?;
+                Ok(format!("default design: {slug}\n"))
+            }
+            Some("edit") => {
+                let base = design::load(files, slug)?;
+                let patch = v["patch"].as_object().context("patch must be an object")?;
+                for (key, value) in patch {
+                    ensure!(
+                        matches!(
+                            key.as_str(),
+                            "colors" | "fonts" | "font_files" | "scale" | "slide" | "doc"
+                        ),
+                        "patch.{key}: only tokens and text styles can be edited"
+                    );
+                    if matches!(key.as_str(), "slide" | "doc") {
+                        ensure!(
+                            value
+                                .as_object()
+                                .is_some_and(|o| o.keys().all(|k| k == "text_styles")),
+                            "patch.{key}: only text_styles can be edited"
+                        );
+                    }
+                }
+                let mut value = serde_json::to_value(base)?;
+                crate::doc::ops::merge_patch(&mut value, &v["patch"]);
+                let next = Design::check(&value.to_string())
+                    .map_err(|e| anyhow::anyhow!("{}", located(&e)))?;
+                design::save(files, slug, &next)?;
+                Ok(format!(
+                    "edited design {slug} · revision {}\n",
+                    short(&next.revision())
+                ))
+            }
+            _ => bail!("design op must be list, read, edit or set_default"),
+        }
+    }
+
+    pub(super) fn copy_deck_design(&self, deck: &mut Deck, v: &Value) -> Result<()> {
+        let default = design::default_slug(&self.space_files_dir)?;
+        let slug = v["design"].as_str().unwrap_or(&default);
+        let design = design::load(&self.space_files_dir, slug)?;
+        let styles = v["text_styles"].as_object().map(|styles| {
+            deck.theme
+                .text_styles
+                .iter()
+                .filter(|(name, _)| styles.contains_key(*name))
+                .map(|(name, font)| (name.clone(), font.clone()))
+                .collect::<BTreeMap<_, _>>()
+        });
+        deck.theme = design.slide_theme();
+        if let Some(styles) = styles {
+            deck.theme.text_styles.extend(styles);
+        }
+        deck.design = Some(slug.into());
+        deck.design_rev = Some(design.revision());
+        Ok(())
+    }
+
+    pub(super) fn append_design_lint(&self, out: &mut String, deck: &Deck) -> Result<()> {
+        if let Some(slug) = &deck.design {
+            let design = design::load(&self.space_files_dir, slug)?;
+            if let Some(line) = design::summary(&design::lint_deck(deck, &design)) {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                let _ = writeln!(out, "{line}");
+            }
+        }
+        Ok(())
+    }
+}

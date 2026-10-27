@@ -520,6 +520,15 @@ See the [model-facing schema](crates/core/assets/prompts/interactive-ui.md) for 
 controls and expressions. Complex applications may still need scripts or `/apps`;
 the web client and inline web-app previews remain unchanged.
 
+### Documents and presentations
+
+The model uses `canvas` to draft Markdown documents (`docs/*.doc.json`) and
+presentations (`decks/*.deck.json`). Both copy the space's default design;
+slides can use named layouts. Documents support block edits, anchored comments,
+suggestions, history and clean Markdown export. Decks open live in `/studio`;
+document page rendering and studio editing are coming later. Older `deck` tool
+calls remain supported as an alias. See [the canvas design](docs/docs-canvas.md).
+
 ## Commands
 
 Type `/` in the composer for autocomplete. Aliases in parentheses.

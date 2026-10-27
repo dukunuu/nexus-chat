@@ -87,6 +87,10 @@ pub enum Op {
     SetTheme {
         theme: Theme,
     },
+    /// Re-copy design tokens/styles without altering explicit node overrides.
+    ApplyDesign {
+        design: Option<String>,
+    },
     /// Replace or clear the incoming slide transition.
     SetTransition {
         slide: String,
@@ -108,9 +112,18 @@ pub enum Op {
 /// Apply an entire transaction on a copy. Any invalid or stale operation
 /// discards the copy; the original deck is never changed.
 pub fn apply(deck: &Deck, ops: &[Op]) -> Result<Deck> {
+    apply_with_resolver(deck, ops, None)
+}
+
+/// Apply with caller-owned design lookup, without filesystem access.
+pub fn apply_with_resolver(
+    deck: &Deck,
+    ops: &[Op],
+    resolver: Option<&crate::design::Resolver<'_>>,
+) -> Result<Deck> {
     let mut next = deck.clone();
     for op in ops {
-        step(deck, &mut next, op)?;
+        step(deck, &mut next, op, resolver)?;
     }
     validate_deck(&next).map_err(|errors| {
         anyhow!(
@@ -128,9 +141,17 @@ pub fn apply(deck: &Deck, ops: &[Op]) -> Result<Deck> {
 /// caller can build and locate a long transaction one operation at a time.
 /// `update_node` preconditions are measured against the working copy.
 pub(crate) fn apply_step(working: &mut Deck, op: &Op) -> Result<()> {
+    apply_step_with_resolver(working, op, None)
+}
+
+pub(crate) fn apply_step_with_resolver(
+    working: &mut Deck,
+    op: &Op,
+    resolver: Option<&crate::design::Resolver<'_>>,
+) -> Result<()> {
     let before = working.clone();
     let mut next = before.clone();
-    step(&before, &mut next, op)?;
+    step(&before, &mut next, op, resolver)?;
     *working = next;
     Ok(())
 }
@@ -155,6 +176,36 @@ pub(crate) fn validate_deck(next: &Deck) -> std::result::Result<Deck, Vec<CheckE
         Ok((deck, _)) => Ok(deck),
         Err(errors) => Err(errors),
     }
+}
+
+/// Resolve `add_slide {layout, slots, after?, id?}` into the existing concrete
+/// `AddSlide` operation. This preserves the public freeform payload and makes
+/// prepared suggestions self-contained, even after the design is updated.
+pub fn resolve_layout_request(
+    deck: &Deck,
+    value: &mut Value,
+    resolver: Option<&crate::design::Resolver<'_>>,
+) -> Result<()> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        layout: String,
+        #[serde(default)]
+        slots: std::collections::BTreeMap<String, String>,
+        after: Option<String>,
+        id: Option<String>,
+    }
+    if value["op"] != "add_slide" || value.get("layout").is_none() {
+        return Ok(());
+    }
+    let mut raw = value.clone();
+    raw.as_object_mut().expect("operation").remove("op");
+    let request: Request = serde_json::from_value(raw)?;
+    let design = crate::design::resolve(deck.design.as_deref().unwrap_or("nexus"), resolver)?;
+    let mut slide = crate::design::layouts::instantiate(&design, &request.layout, &request.slots)?;
+    slide.id = request.id.unwrap_or_default();
+    *value = serde_json::json!({"op": "add_slide", "after": request.after, "slide": slide});
+    Ok(())
 }
 
 // -- tree helpers ----------------------------------------------------------------
@@ -309,7 +360,12 @@ fn flow_axis(mode: Mode, rect: &Rect) -> f64 {
 
 // -- operations ------------------------------------------------------------------
 
-fn step(original: &Deck, next: &mut Deck, op: &Op) -> Result<()> {
+fn step(
+    original: &Deck,
+    next: &mut Deck,
+    op: &Op,
+    resolver: Option<&crate::design::Resolver<'_>>,
+) -> Result<()> {
     match op {
         Op::AddSlide { after, slide } => {
             let index = after.as_ref().map_or(Ok(next.slides.len()), |id| {
@@ -383,6 +439,17 @@ fn step(original: &Deck, next: &mut Deck, op: &Op) -> Result<()> {
                 .insert(name.clone(), base.merged(font));
         }
         Op::SetTheme { theme } => next.theme.clone_from(theme),
+        Op::ApplyDesign { design } => {
+            let slug = design
+                .as_deref()
+                .or(next.design.as_deref())
+                .unwrap_or("nexus")
+                .to_string();
+            let design = crate::design::resolve(&slug, resolver)?;
+            next.theme = design.slide_theme();
+            next.design = Some(slug);
+            next.design_rev = Some(design.revision());
+        }
         Op::SetTransition { slide, transition } => {
             set_transition(next, slide, transition.as_ref())?;
         }

@@ -32,6 +32,7 @@ keyring = { workspace = true }  # connector secrets: OS keychain (connectors/sec
 open = { workspace = true }
 pdf-extract = { workspace = true }
 png = { workspace = true }
+pulldown-cmark = { workspace = true }
 rand = { workspace = true }
 resvg = { workspace = true }
 reqwest = { workspace = true }

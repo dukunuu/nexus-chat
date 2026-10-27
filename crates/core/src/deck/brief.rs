@@ -1,4 +1,4 @@
-//! One-line descriptions of fonts and nodes, shared by the `deck` tool and the
+//! One-line descriptions of fonts and nodes, shared by the `canvas` tool and the
 //! terminal's comment messages, so the model sees the same compact shapes
 //! everywhere.
 

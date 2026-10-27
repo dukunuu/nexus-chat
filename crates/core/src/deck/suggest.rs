@@ -55,6 +55,16 @@ pub struct Suggestion {
 /// Invalid proposals do not prevent independent proposals from surviving.
 #[must_use]
 pub fn prepare(base: &Deck, raw: Vec<RawSuggestion>) -> (Vec<Suggestion>, Vec<CheckError>) {
+    prepare_with_resolver(base, raw, None)
+}
+
+/// Prepare proposals with caller-owned design lookup.
+#[must_use]
+pub fn prepare_with_resolver(
+    base: &Deck,
+    raw: Vec<RawSuggestion>,
+    resolver: Option<&crate::design::Resolver<'_>>,
+) -> (Vec<Suggestion>, Vec<CheckError>) {
     let mut valid = Vec::new();
     let mut errors = Vec::new();
     if raw.is_empty() || raw.len() > 5 {
@@ -63,7 +73,7 @@ pub fn prepare(base: &Deck, raw: Vec<RawSuggestion>) -> (Vec<Suggestion>, Vec<Ch
     }
     for (i, raw) in raw.into_iter().enumerate() {
         let path = format!("suggestions[{i}]");
-        match prepare_one(base, raw, i) {
+        match prepare_one(base, raw, i, resolver) {
             Ok(suggestion) => valid.push(suggestion),
             Err(error) => errors.push(CheckError {
                 path: format!("{path}{}", error.path),
@@ -81,7 +91,13 @@ fn failure(path: &str, message: &(impl ToString + ?Sized)) -> CheckError {
     }
 }
 
-fn prepare_one(base: &Deck, raw: RawSuggestion, index: usize) -> Result<Suggestion, CheckError> {
+#[allow(clippy::too_many_lines)] // One pass over the existing operation language.
+fn prepare_one(
+    base: &Deck,
+    raw: RawSuggestion,
+    index: usize,
+    resolver: Option<&crate::design::Resolver<'_>>,
+) -> Result<Suggestion, CheckError> {
     if raw.why.chars().count() > 200 || raw.why.contains(['\r', '\n']) {
         return Err(failure(".why", "expected one line, at most 200 characters"));
     }
@@ -91,6 +107,7 @@ fn prepare_one(base: &Deck, raw: RawSuggestion, index: usize) -> Result<Suggesti
     let mut reserved = reserved_ids(&serde_json::to_value(base).expect("deck JSON"));
     for value in &raw.ops {
         if value["op"] == "add_slide" {
+            reserve_id(value, &mut reserved);
             reserved.extend(reserved_ids(&json!({"slides": [value["slide"]]})));
         } else if value["op"] == "insert_node" {
             reserved.extend(reserved_ids(
@@ -102,8 +119,17 @@ fn prepare_one(base: &Deck, raw: RawSuggestion, index: usize) -> Result<Suggesti
     }
     let mut used = reserved_ids(&serde_json::to_value(base).expect("deck JSON"));
     let mut ops = Vec::new();
+    let mut layout_base = base.clone();
     for (j, mut value) in raw.ops.into_iter().enumerate() {
         let path = format!(".ops[{j}]");
+        super::ops::resolve_layout_request(&layout_base, &mut value, resolver)
+            .map_err(|e| failure(&path, &e))?;
+        if value["op"] == "apply_design" {
+            layout_base.design = value["design"]
+                .as_str()
+                .map(str::to_string)
+                .or(layout_base.design);
+        }
         if value["op"] == "update_node" {
             let id = value["id"].as_str().unwrap_or_default();
             let node = base.node(id).ok_or_else(|| {
@@ -141,9 +167,16 @@ fn prepare_one(base: &Deck, raw: RawSuggestion, index: usize) -> Result<Suggesti
         }
         ops.push(serde_json::from_value::<Op>(value).map_err(|e| failure(&path, &e))?);
     }
-    let next = apply(base, &ops).map_err(|error| {
+    let apply_resolved = |ops: &[Op]| {
+        if resolver.is_some() {
+            super::ops::apply_with_resolver(base, ops, resolver)
+        } else {
+            apply(base, ops)
+        }
+    };
+    let next = apply_resolved(&ops).map_err(|error| {
         let j = (0..ops.len())
-            .find(|j| apply(base, &ops[..=*j]).is_err())
+            .find(|j| apply_resolved(&ops[..=*j]).is_err())
             .unwrap_or(0);
         failure(&format!(".ops[{j}]"), &error)
     })?;

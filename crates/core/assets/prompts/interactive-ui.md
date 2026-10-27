@@ -134,7 +134,7 @@ AND user activation; literal $vars in args refetch after 300ms. Refresh ≥15s, 
 per panel; pauses off-screen/unfocused, stops after 30min idle. Defaults/last data
 stay visible. __openui_loading.q, __openui_refetching.q, __openui_errors.q expose
 query q's status. Query allow-list (only if advertised and read-only): search,
-fetch_url, files, fs, deck, connectors and exposed connector tools. Search, files
+fetch_url, files, fs, canvas, connectors and exposed connector tools. Search, files
 search and connectors may cost: user must press Load first. No shell/proc/task/
 batch/media or LLM queries. Mutation(tool,args) runs only via @Run(ref); writes
 always ask approval. Value: {status,data,error}; idle/loading/success/error.

@@ -21,6 +21,8 @@ pub mod connectors;
 pub mod db;
 pub mod decider;
 pub mod deck;
+pub mod design;
+pub mod doc;
 pub mod eval;
 pub mod extract;
 pub mod host;

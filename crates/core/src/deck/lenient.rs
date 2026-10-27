@@ -1,4 +1,4 @@
-//! Lenient input for the `deck` tool: the small, predictable mistakes a model
+//! Lenient input for the `canvas` tool: the small, predictable mistakes a model
 //! makes (a font given as a string, `kind: "ellipse"`, a text style it never
 //! defined, `"58"` for 58, letter spacing in px) are repaired on the JSON
 //! value before validation, and each repair is reported so the model learns
@@ -178,7 +178,11 @@ impl Context {
             self.number(op, key);
         }
         match kind.as_str() {
-            "add_slide" => self.node(&mut op["slide"], None),
+            "add_slide" => {
+                if let Some(slide) = op.get_mut("slide") {
+                    self.node(slide, None);
+                }
+            }
             "insert_node" => self.node(&mut op["node"], None),
             "update_node" | "update_slide" => {
                 let id = op["id"].as_str().map(str::to_string);

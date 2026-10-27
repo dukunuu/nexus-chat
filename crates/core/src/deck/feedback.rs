@@ -94,23 +94,23 @@ pub struct Edit {
 
 /// One reply, optionally carrying an edit.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Message {
+pub struct Message<E = Edit> {
     pub id: String,
     pub role: Role,
     pub text: String,
     pub created: u64,
-    pub edits: Vec<Edit>,
+    pub edits: Vec<E>,
 }
 
 /// The shared comments sidecar is a JSON array of these threads.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Thread {
+pub struct Thread<A = Anchor, E = Edit> {
     pub id: String,
-    pub anchor: Anchor,
+    pub anchor: A,
     pub severity: Severity,
     pub created: u64,
     pub resolved: Option<u64>,
-    pub messages: Vec<Message>,
+    pub messages: Vec<Message<E>>,
 }
 
 /// Seconds since epoch, for local comment timestamps.
@@ -123,9 +123,17 @@ pub fn now() -> u64 {
 }
 
 impl Message {
-    /// Construct a local or model reply.
+    /// Construct a deck reply, preserving the original default type.
     #[must_use]
     pub fn new(role: Role, text: String, edits: Vec<Edit>) -> Self {
+        Self::new_for(role, text, edits)
+    }
+}
+
+impl<E> Message<E> {
+    /// Construct a reply for either document kind.
+    #[must_use]
+    pub fn new_for(role: Role, text: String, edits: Vec<E>) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             role,
@@ -181,7 +189,9 @@ impl Edit {
                 Op::InsertNode { parent, .. } => keys.push(target(parent)),
                 Op::Wrap { ids, .. } => keys.extend(ids.iter().cloned()),
                 Op::SetLayout { target: id, .. } => keys.push(target(id)),
-                Op::SetTheme { .. } | Op::SetTextStyle { .. } => keys.push("theme".into()),
+                Op::SetTheme { .. } | Op::SetTextStyle { .. } | Op::ApplyDesign { .. } => {
+                    keys.push("theme".into());
+                }
                 Op::SetNotes { slide, .. }
                 | Op::SetTransition { slide, .. }
                 | Op::ReorderBuilds { slide, .. } => keys.push(format!("slide:{slide}")),
@@ -228,13 +238,7 @@ pub fn sidecar(path: &Path) -> PathBuf {
 
 /// Load threads; an absent file is an empty conversation.
 pub fn load(path: &Path) -> Result<Vec<Thread>> {
-    let path = sidecar(path);
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-    ensure!(!path.is_symlink(), "comments file must not be a symlink");
-    let mut threads: Vec<Thread> =
-        serde_json::from_slice(&std::fs::read(path)?).context("invalid comments file")?;
+    let mut threads: Vec<Thread> = load_for(path)?;
     for thread in &mut threads {
         // Version-1 anchors were grid cells of 60 px (on the 1920 px slide).
         if !thread.anchor.px {
@@ -248,6 +252,23 @@ pub fn load(path: &Path) -> Result<Vec<Thread>> {
 
 /// Persist an entire comments transaction atomically.
 pub fn save(path: &Path, threads: &[Thread]) -> Result<()> {
+    save_for(path, threads)
+}
+
+/// Shared sidecar reader; data-specific anchor migration stays with its kind.
+pub fn load_for<A: serde::de::DeserializeOwned, E: serde::de::DeserializeOwned>(
+    path: &Path,
+) -> Result<Vec<Thread<A, E>>> {
+    let path = sidecar(path);
+    ensure!(!path.is_symlink(), "comments file must not be a symlink");
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    serde_json::from_slice(&std::fs::read(path)?).context("invalid comments file")
+}
+
+/// Shared atomic writer; default type parameters keep deck sidecars unchanged.
+pub fn save_for<A: Serialize, E: Serialize>(path: &Path, threads: &[Thread<A, E>]) -> Result<()> {
     super::write_atomic(&sidecar(path), &serde_json::to_vec_pretty(threads)?)
 }
 

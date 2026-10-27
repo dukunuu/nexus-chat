@@ -3075,6 +3075,7 @@ dependencies = [
  "open",
  "pdf-extract",
  "png",
+ "pulldown-cmark",
  "rand 0.10.2",
  "reqwest",
  "reqwest-eventsource",

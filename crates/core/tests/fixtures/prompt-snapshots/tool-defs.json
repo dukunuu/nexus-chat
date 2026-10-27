@@ -13,7 +13,7 @@
                 "type": "object"
               },
               "tool": {
-                "description": "public tool name, e.g. search, fetch_url, files, app, scripts, research_lookup, skills",
+                "description": "public tool name, e.g. search, canvas, scripts",
                 "type": "string"
               }
             },
@@ -180,8 +180,8 @@
     }
   },
   {
-    "name": "deck",
-    "description": "Build and edit slide decks in space files decks/*.deck.json. Live in /studio (undoable); you see slides as images. Edit directly when asked, then view layout changes; comment when reviewing or unsure. Never invent data, sources or images. One deck per request: edit it, no variants or probe decks. Image src: https or space file (us_1.jpg). Big deck: read slides:[ids|numbers]; history lists or restores versions. Slides are 1920x1080 px. Slide and frame: layout{mode:none|row|column,gap,padding,main,cross,wrap}, children[]. Node: kind,sizing{w,h:px|hug|fill},position:auto|{x,y}; kinds frame text{text,style,font} image{src} shape{shape,fill} table{rows} code{source} chart{chart,labels,series}. Prefer auto-layout and text styles to x,y. Ops: add_slide{after?,slide} delete_slide/delete_node/unwrap{id} move_slide{id,to} set_notes{slide,notes} update_slide/update_node{id,fields: merge patch} insert_node{parent,node} move_node{id,parent} wrap{ids,layout} set_layout{target,layout} set_text_style{name,font} set_theme. ids, base_hash automatic; ops atomic. Comments: anchor to a node; one issue, two sentences max, with why; attach ops for a fix; at most 8, worst first; severity must|should|consider; respect the author's intent; answer the thread you are in.\n- action=create: New deck and contact sheet. Needs title; optional path, slides, from.\n- action=read: Tree with rects, revision, threads. Needs path; optional slides.\n- action=view: Render slides (default: studio's slide, else a sheet). Needs path; optional slides.\n- action=fonts: Deck and installed families. Needs path; optional text.\n- action=edit: Apply ops; shows changed slides. Needs path, ops; optional revision.\n- action=comment: Pin a comment (ops optional) or reply. Needs path, text; optional slide, block, severity, ops, thread.\n- action=resolve: Resolve a comment thread. Needs path, thread.\n- action=history: List or restore earlier versions. Needs path; optional revision.\n- action=export: Save a file in exports/. Needs path, text.",
+    "name": "canvas",
+    "description": "Draft writing as a doc (Markdown), presentations as a deck. Space files: docs/*.doc.json or decks/*.deck.json; kind from path or create.kind (default deck). Build slides from layouts with add_slide{layout,slots,after?}; use color roles and text styles; fix design: drift. Edit directly when asked, comment when reviewing or unsure. One file per request: edit it, no variants or probes. Never invent data, sources or images (src: https or space file). Decks: /studio, 1920x1080 px, auto-layout; view after layout changes. Docs: read outline or blocks; no page view yet; export md only. Atomic ops; ids/hashes automatic. Field references arrive with results. Comments: anchor to a block; one issue, two sentences with why; attach ops for fixes; at most 8, worst first; respect intent and facts; answer the thread.\n- action=create: Create.\n- action=read: Outline/tree, revision, threads. Needs path.\n- action=view: Deck slides: studio focus or sheet. Needs path.\n- action=fonts: Deck and installed families. Needs path.\n- action=edit: Apply ops; shows changed slides. Needs path, ops.\n- action=comment: Pin a comment (ops optional) or reply. Needs path, text.\n- action=resolve: Resolve a comment thread. Needs path, thread.\n- action=history: List or restore earlier versions. Needs path.\n- action=export: Save a file in exports/. Needs path.\n- action=design: Designs and layouts. Needs op.",
     "parameters": {
       "properties": {
         "action": {
@@ -194,16 +194,54 @@
             "comment",
             "resolve",
             "history",
-            "export"
+            "export",
+            "design"
           ],
           "type": "string"
         },
         "block": {
-          "description": "node id",
+          "description": "node or doc block id",
+          "type": "string"
+        },
+        "blocks": {
+          "description": "ids; heading selects its section",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "design": {
+          "description": "design slug (default: space default)",
+          "type": "string"
+        },
+        "format": {
+          "description": "doc: md; deck: pptx|pdf|png|html|json",
           "type": "string"
         },
         "from": {
-          "description": "create: import a .pptx space file",
+          "description": "create: .pptx or .md space file",
+          "type": "string"
+        },
+        "kind": {
+          "description": "create kind",
+          "enum": [
+            "deck",
+            "doc"
+          ],
+          "type": "string"
+        },
+        "markdown": {
+          "description": "doc source",
+          "type": "string"
+        },
+        "op": {
+          "description": "design operation",
+          "enum": [
+            "list",
+            "read",
+            "set_default",
+            "edit"
+          ],
           "type": "string"
         },
         "ops": {
@@ -213,8 +251,16 @@
           },
           "type": "array"
         },
+        "patch": {
+          "description": "merge patch: colors, fonts, font_files, scale, slide/doc.text_styles",
+          "type": "object"
+        },
         "path": {
-          "description": "decks/name.deck.json",
+          "description": "decks/name.deck.json or docs/name.doc.json",
+          "type": "string"
+        },
+        "quote": {
+          "description": "anchor's plain text",
           "type": "string"
         },
         "revision": {
@@ -249,7 +295,7 @@
           "type": "array"
         },
         "text": {
-          "description": "comment; fonts: filter; export: pptx|pdf|png|html",
+          "description": "comment; fonts filter; legacy export format",
           "type": "string"
         },
         "thread": {
@@ -257,7 +303,7 @@
           "type": "string"
         },
         "title": {
-          "description": "deck title",
+          "description": "title (doc: first # if omitted)",
           "type": "string"
         }
       },
@@ -352,7 +398,7 @@
   },
   {
     "name": "media",
-    "description": "Generate and transform media, and manage named video image references.\n- action=generate_image: Generate an image, optionally using a pasted image reference. Needs prompt; optional image_id, size.\n- action=generate_video: Generate a video from text and optional frame or reference images. Needs prompt; optional duration, resolution, aspect_ratio, generate_audio, first_frame_id, last_frame_id, ref_image_id, character_refs, location_refs, seed, source_video_id.\n- action=edit: Transform a video locally with ffmpeg. Needs video_id; optional lighting, camera_move, intensity, speed, trim_start, trim_end, remove_audio.\n- action=extract_frame: Extract a video frame locally with ffmpeg. Needs video_id; optional time_sec, format.\n- action=stitch: Concatenate video clips locally with ffmpeg. Needs video_ids.\n- action=save_reference: Save a named image reference for video consistency. Needs name, image_id, description; optional type.\n- action=list_references: List saved image references.\n- action=delete_reference: Delete a named image reference. Needs name.",
+    "description": "Generate images/video; transform video locally with ffmpeg; save named image references for video consistency.\n- action=generate_image: Generate image. Needs prompt.\n- action=generate_video: Generate video with frame or named references. Needs prompt.\n- action=edit: Transform video. Needs video_id.\n- action=extract_frame: Extract frame. Needs video_id.\n- action=stitch: Concatenate clips in order. Needs video_ids.\n- action=save_reference: Save reference. Needs name, image_id, description.\n- action=list_references: List references.\n- action=delete_reference: Delete reference. Needs name.",
     "parameters": {
       "properties": {
         "action": {
@@ -369,7 +415,7 @@
           "type": "string"
         },
         "aspect_ratio": {
-          "description": "video aspect ratio (default 16:9, normalized per model)",
+          "description": "default 16:9; model-normalized",
           "type": "string"
         },
         "camera_move": {
@@ -396,11 +442,11 @@
           "type": "string"
         },
         "duration": {
-          "description": "video duration in seconds (default 6, normalized per model)",
+          "description": "seconds (default 6; model-normalized)",
           "type": "integer"
         },
         "first_frame_id": {
-          "description": "image ID for the first video frame",
+          "description": "first frame image ID",
           "type": "string"
         },
         "format": {
@@ -416,7 +462,7 @@
           "type": "boolean"
         },
         "image_id": {
-          "description": "reference image for generate_image, or image being saved for save_reference",
+          "description": "image reference or save target",
           "type": "string"
         },
         "intensity": {
@@ -424,7 +470,7 @@
           "type": "number"
         },
         "last_frame_id": {
-          "description": "image ID for the last video frame",
+          "description": "last frame image ID",
           "type": "string"
         },
         "lighting": {
@@ -463,7 +509,7 @@
           "type": "boolean"
         },
         "resolution": {
-          "description": "video resolution (default 720p, normalized per model)",
+          "description": "default 720p; model-normalized",
           "type": "string"
         },
         "seed": {
@@ -475,7 +521,7 @@
           "type": "string"
         },
         "source_video_id": {
-          "description": "source video ID for provider video continuation",
+          "description": "provider continuation source ID",
           "type": "string"
         },
         "speed": {
