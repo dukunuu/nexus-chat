@@ -323,10 +323,12 @@ async fn run_command(argv: &[String]) -> Result<String> {
 /// `llama-server --cache-list` prints a count line, then `  N. <user>/<repo>:<quant>`
 /// per downloaded model: the same ids its router mode serves and loads on demand.
 fn parse_llama_cpp(output: &str) -> Result<Vec<String>> {
+    // The count line's capitalization differs between builds and between a
+    // terminal and a pipe (`Number of…` vs `number of…`).
     anyhow::ensure!(
         output
             .lines()
-            .any(|line| line.trim_start().starts_with("Number of models in cache")),
+            .any(|line| line.to_ascii_lowercase().contains("models in cache")),
         "unexpected llama-server --cache-list output"
     );
     Ok(output
@@ -470,6 +472,14 @@ mod tests {
             parse_llama_cpp("Number of models in cache: 0\n")
                 .unwrap()
                 .is_empty()
+        );
+        // What llama-server 0.7.0 prints when stdout is a pipe, as under nexus.
+        assert_eq!(
+            parse_llama_cpp(
+                "number of models in cache: 1\n   1. deucebucket/Qwen3.6-35B-A3B-Cerebellum-GGUF:Q3_K_M\n"
+            )
+            .unwrap(),
+            ["deucebucket/Qwen3.6-35B-A3B-Cerebellum-GGUF:Q3_K_M"]
         );
         assert!(parse_llama_cpp("error: unknown argument\n").is_err());
     }
