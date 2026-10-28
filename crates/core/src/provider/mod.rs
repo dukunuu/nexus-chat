@@ -235,6 +235,10 @@ pub struct ChatParams {
     /// requests so a tool loop stays on the worker holding its cache. One
     /// per turn: `ChatParams` is built fresh for every turn.
     pub codex_turn_state: std::sync::Arc<std::sync::OnceLock<String>>,
+    /// The session backend's quick helper model, for `task` sub-agents that
+    /// run on it. Same provider as the session (never another one); `None`
+    /// when there is none or it is the session model itself.
+    pub subagent_fast_model: Option<String>,
 }
 
 /// A message sent to the completions API. `tool_calls` (assistant requesting

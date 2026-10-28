@@ -608,25 +608,20 @@ async fn local_ollama_embeddings_do_not_write_usage_rows() {
 }
 
 #[test]
-fn chat_subagents_leave_logging_to_the_chat_task() {
-    // The chat task logs every usage event on the turn's channel, including
-    // the ones sub-agents forward, so a logged sub-agent client would count
-    // each sub-agent request twice.
+fn subagents_log_their_own_requests() {
+    // Sub-agents record usage under the model they actually ran on (often the
+    // fast helper), so the chat task must not also log it as the session model.
     let fixture = Fixture::new();
     let app = &fixture.app;
     let provider = crate::provider::openrouter::OpenRouter::from_key_auto("sk-or-test".into());
-    assert_eq!(
-        app.usage_provider(provider.clone(), "chat")
-            .subagent_client()
-            .usage_label(),
-        None
-    );
-    assert_eq!(
-        app.usage_provider(provider, "swarm")
-            .subagent_client()
-            .usage_label(),
-        Some("subagent")
-    );
+    for parent in ["chat", "swarm"] {
+        assert_eq!(
+            app.usage_provider(provider.clone(), parent)
+                .subagent_client()
+                .usage_label(),
+            Some("subagent")
+        );
+    }
 }
 
 #[tokio::test]

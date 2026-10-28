@@ -312,6 +312,19 @@ swarm personas (`app/swarm.rs`); read-only sub-agents run concurrently,
 writing sub-agents get a git worktree each. Deferred until the base loop has
 shipped, because it multiplies cost.
 
+As built: `task { prompt, tools?, max_steps?, model?: fast | session }`.
+
+- **Model.** Read-only tasks default to the backend's fast helper model (same
+  provider, without the session's reasoning effort); workspace tasks default
+  to the session model.
+- **Concurrency.** At most three run at once; the rest wait for a slot.
+- **Usage.** Each sub-agent records its own requests as `subagent` under the
+  model it actually used.
+- **Why steer it to reading and research.** Equal-budget studies (Tran &
+  Kiela, 2026) and SWE-bench comparisons find that splitting one coding job
+  across agents mostly adds tokens, not accuracy. Broad, parallel reading
+  and research is where sub-agents pay off.
+
 ## 5. Permissions and the Decider
 
 ```rust

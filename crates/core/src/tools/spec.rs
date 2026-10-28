@@ -230,6 +230,12 @@ impl ToolSpec {
             {
                 return Err("invalid tool arguments: tools must be read-only or workspace".into());
             }
+            if value
+                .get("model")
+                .is_some_and(|model| !matches!(model.as_str(), Some("fast" | "session")))
+            {
+                return Err("invalid tool arguments: model must be fast or session".into());
+            }
             if value.get("max_steps").is_some_and(|steps| {
                 !steps
                     .as_u64()
@@ -1287,7 +1293,7 @@ pub(super) static REQUEST_WORKSPACE: ToolSpec = ToolSpec {
 
 pub(super) static TASK: ToolSpec = ToolSpec {
     name: "task",
-    purpose: "Delegate a focused investigation to a fresh sub-agent; only its report returns. Workspace tasks require approval and return a branch and diff, never edits to the main tree.",
+    purpose: "Delegate a focused investigation to a fresh sub-agent; only its report returns. Use it for broad reading or research, not to split one coding job. Workspace tasks require approval and return a branch and diff, never edits to the main tree.",
     selector: None,
     params: &[
         Param {
@@ -1305,12 +1311,17 @@ pub(super) static TASK: ToolSpec = ToolSpec {
             kind: Kind::Int,
             doc: "maximum tool rounds, 1–40 (default 20)",
         },
+        Param {
+            name: "model",
+            kind: Kind::Enum(&["fast", "session"]),
+            doc: "fast helper (read-only default) or the session model (workspace default)",
+        },
     ],
     actions: &[ActionSpec {
         name: "task",
-        summary: "Run a focused helper with the session model",
+        summary: "Run a focused helper",
         required: &["prompt"],
-        optional: &["tools", "max_steps"],
+        optional: &["tools", "max_steps", "model"],
         read_only: true,
         internal: "task",
     }],

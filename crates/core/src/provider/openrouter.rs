@@ -685,15 +685,10 @@ impl OpenRouter {
             .is_some_and(|(_, kind)| kind == "chat")
     }
 
-    /// The client a turn's sub-agents run on: unlogged under interactive chat
-    /// (their usage is forwarded to the chat task, which logs it), else logged
-    /// as `subagent`.
+    /// The client a turn's sub-agents run on, logging their requests as
+    /// `subagent` under the model they actually used.
     pub(crate) fn subagent_client(&self) -> Self {
-        if self.app_logs_usage() {
-            self.clone().logged(None, "")
-        } else {
-            self.clone().usage_kind("subagent")
-        }
+        self.clone().usage_kind("subagent")
     }
 
     #[cfg(test)]

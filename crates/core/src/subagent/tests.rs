@@ -196,7 +196,10 @@ async fn read_only_task_is_fresh_restricted_capped_accounted_and_traced() {
     let toolbox = Arc::new(temp.toolbox()).with_subagents(ctx).unwrap();
     let (result, _) = toolbox.run("task", r#"{"prompt":"find callers"}"#).await;
     let (header, report) = result.split_once('\n').unwrap();
-    assert_eq!(header, "sub-agent report (1 steps, 20 tokens):");
+    assert_eq!(
+        header,
+        "sub-agent report (session-model, 1 steps, 20 tokens):"
+    );
     assert!(report.starts_with("HEAD") && report.ends_with("TAIL"));
     assert!(report.chars().count() <= REPORT_CAP);
     assert!(!result.contains("intermediate output"));
@@ -244,21 +247,16 @@ async fn read_only_task_is_fresh_restricted_capped_accounted_and_traced() {
             .all(|message| message.content.contains("not available in this sub-agent"))
     );
     drop(seen);
-    let mut tokens = 0;
-    let mut cost = 0.0;
+    // The sub-agent's client records its own usage under its own model; none
+    // of it reaches the parent's stream (it would be priced as the session
+    // model and move the parent's context bar).
     let mut statuses = Vec::new();
     while let Ok(event) = events.try_recv() {
         match event {
-            StreamEvent::Usage(usage) => {
-                tokens += usage.total_tokens;
-                cost += usage.cost.unwrap();
-            }
             StreamEvent::Status(status) => statuses.push(status),
             other => panic!("child output leaked to parent: {other:?}"),
         }
     }
-    assert_eq!(tokens, 20);
-    assert!((cost - 0.25).abs() < f64::EPSILON);
     assert_eq!(statuses, ["sub-agent: 1/20", "sub-agent: 2/20"]);
     let steps = store.steps_for_session("parent-session").unwrap();
     assert_eq!(steps.len(), 2);
@@ -509,7 +507,7 @@ async fn step_budget_forces_a_final_report_and_never_executes_final_calls() {
     let (report, _) = toolbox
         .run("task", r#"{"prompt":"keep going","max_steps":1}"#)
         .await;
-    assert!(report.starts_with("sub-agent report (1 steps, 20 tokens):"));
+    assert!(report.starts_with("sub-agent report (session-model, 1 steps, 20 tokens):"));
     assert!(report.ends_with("Budget exhausted"));
     let seen = fake.seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
@@ -549,4 +547,40 @@ async fn task_schema_defaults_validation_and_agent_only_availability() {
     }
     toolbox.workspace = None;
     assert!(toolbox.defs().iter().all(|tool| tool.name != "task"));
+}
+
+#[test]
+fn read_only_tasks_default_to_the_fast_model_and_workspace_tasks_to_the_session() {
+    let (events, _rx) = mpsc::unbounded_channel();
+    let with_fast = |fast: Option<&str>| Context {
+        provider: Fake::new(Vec::new()),
+        model: "session-model".into(),
+        params: ChatParams {
+            reasoning_effort: Some("xhigh".into()),
+            subagent_fast_model: fast.map(str::to_string),
+            ..ChatParams::default()
+        },
+        events: events.clone(),
+    };
+    let ctx = with_fast(Some("fast-model"));
+    let (model, params) = route(&ctx, &json!({}), false);
+    assert_eq!(model, "fast-model");
+    // The fast model may not support the session's reasoning effort.
+    assert_eq!(params.reasoning_effort, None);
+    assert_eq!(route(&ctx, &json!({}), true).0, "session-model");
+    assert_eq!(
+        route(&ctx, &json!({"model": "session"}), false).0,
+        "session-model"
+    );
+    let (model, params) = route(&ctx, &json!({"model": "session"}), false);
+    assert_eq!(
+        (model.as_str(), params.reasoning_effort.as_deref()),
+        ("session-model", Some("xhigh"))
+    );
+    assert_eq!(route(&ctx, &json!({"model": "fast"}), true).0, "fast-model");
+    // No helper on this backend: everything stays on the session model.
+    assert_eq!(
+        route(&with_fast(None), &json!({"model": "fast"}), false).0,
+        "session-model"
+    );
 }

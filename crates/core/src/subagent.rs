@@ -19,6 +19,33 @@ use crate::workspace::Workspace;
 
 static NEXT_TASK: AtomicU64 = AtomicU64::new(1);
 const REPORT_CAP: usize = 6_000;
+/// Sub-agents running at once; more wait for a slot. Parallel helpers mostly
+/// buy token spend, and a burst of them trips provider rate limits.
+const MAX_CONCURRENT: usize = 3;
+
+fn slots() -> &'static tokio::sync::Semaphore {
+    static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT))
+}
+
+/// The model a task runs on: `fast` (the backend's helper model) by default
+/// for read-only work, the session model for workspace edits or when asked.
+/// A fast model drops the session's reasoning effort, which it may not support.
+fn route(context: &Context, args: &Value, writable: bool) -> (String, ChatParams) {
+    let fast = args["model"]
+        .as_str()
+        .map_or(!writable, |model| model == "fast");
+    match context.params.subagent_fast_model.as_deref() {
+        Some(model) if fast => (
+            model.to_string(),
+            ChatParams {
+                reasoning_effort: None,
+                ..context.params.clone()
+            },
+        ),
+        _ => (context.model.clone(), context.params.clone()),
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -175,7 +202,7 @@ pub(crate) async fn run(context: &Context, toolbox: &ToolBox, args: &Value) -> R
         toolbox.session_id.clone(),
         args["prompt"].as_str().expect("validated prompt").into(),
     )));
-    let mut params = context.params.clone();
+    let (model, mut params) = route(context, args, writable);
     params.prompt_cache_key = params
         .prompt_cache_key
         .map(|key| format!("{key}:sub:{number}"));
@@ -207,12 +234,24 @@ pub(crate) async fn run(context: &Context, toolbox: &ToolBox, args: &Value) -> R
             },
         ),
     );
-    system.cache_breakpoint = crate::provider::model_needs_cache_breakpoints(&context.model);
+    system.cache_breakpoint = crate::provider::model_needs_cache_breakpoints(&model);
     let messages = vec![
         system,
         ChatMessage::text("user", args["prompt"].as_str().expect("validated prompt")),
     ];
-    let outcome = run_loop(context, &child, &params, messages, max_steps, number).await;
+    let slot = if let Ok(permit) = slots().try_acquire() {
+        permit
+    } else {
+        let _ = context.events.send(StreamEvent::Status(format!(
+            "sub-agent waiting: {MAX_CONCURRENT} already running"
+        )));
+        slots().acquire().await.context("sub-agent slots closed")?
+    };
+    let outcome = run_loop(
+        context, &child, &model, &params, messages, max_steps, number,
+    )
+    .await;
+    drop(slot);
     let review = prepared
         .as_ref()
         .map(|(tree, _)| finish_tree(tree, number))
@@ -228,6 +267,7 @@ pub(crate) async fn run(context: &Context, toolbox: &ToolBox, args: &Value) -> R
 async fn run_loop(
     context: &Context,
     toolbox: &ToolBox,
+    model: &str,
     params: &ChatParams,
     mut messages: Vec<ChatMessage>,
     max_steps: usize,
@@ -244,16 +284,18 @@ async fn run_loop(
         let round = context
             .provider
             .round(Request {
-                model: &context.model,
+                model,
                 messages: &messages,
                 params,
                 tools: &tools,
                 final_round: step == max_steps,
             })
             .await?;
+        // Usage is recorded by the sub-agent's own client, under its own
+        // model; forwarding it would price it as the session model and move
+        // the parent's context bar.
         if let Some(usage) = round.usage {
             tokens += usage.total_tokens;
-            let _ = context.events.send(StreamEvent::Usage(usage));
         }
         let done = round.calls.is_empty() || step == max_steps;
         let request = messages.clone();
@@ -294,12 +336,12 @@ async fn run_loop(
             }
         }
         record_step(
-            context, params, &tools, request, &round, results, step, number, started,
+            model, params, &tools, request, &round, results, step, number, started,
         )
         .await;
         if done {
             return Ok(format!(
-                "sub-agent report ({step} steps, {tokens} tokens):\n{}",
+                "sub-agent report ({model}, {step} steps, {tokens} tokens):\n{}",
                 cap_head_tail(&round.content, REPORT_CAP)
             ));
         }
@@ -309,7 +351,7 @@ async fn run_loop(
 
 #[allow(clippy::too_many_arguments)] // One trace record, mirroring the parent loop.
 async fn record_step(
-    context: &Context,
+    model: &str,
     params: &ChatParams,
     tools: &[ToolDef],
     messages: Vec<ChatMessage>,
@@ -325,7 +367,7 @@ async fn record_step(
         space_id: trace.space_id.clone(),
         turn_id: trace.turn_id.clone(),
         round: u32::try_from(step).unwrap_or(u32::MAX),
-        model: context.model.clone(),
+        model: model.to_string(),
         backend: trace.backend.clone(),
         system: messages[0].content.clone(),
         tools: tools.to_vec(),
