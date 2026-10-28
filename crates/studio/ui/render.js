@@ -161,6 +161,22 @@ const stackFor = (theme, family) => fontStack(theme.fonts?.[family] || family);
 /** A style tag that makes the deck's imported font files usable by name. */
 let fontCss = '';
 const versioned = (path, hash) => hash ? `${path}?v=${hash}` : path;
+// Image masks, drawn the way core's deck::effects::Mask draws them. Huge radii
+// clamp to the box (CSS scales overlapping radii down), so the pill's ends and
+// the arch's top are round on any box. The blob repeats core's BLOB numbers.
+const BLOB_START = [0.52,0.02], BLOB = [[0.78,0,0.99,0.18,0.97,0.46],[0.95,0.74,0.8,0.99,0.5,0.98],[0.22,0.97,0.02,0.8,0.03,0.52],[0.04,0.22,0.26,0.04,0.52,0.02]];
+function blobOutline(steps = 24) {
+  const points = []; let [fx, fy] = BLOB_START;
+  for (const [ax, ay, bx, by, ex, ey] of BLOB) {
+    for (let i = 0; i < steps; i++) {
+      const t = i / steps, u = 1 - t, a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
+      points.push(`${((a * fx + b * ax + c * bx + d * ex) * 100).toFixed(2)}% ${((a * fy + b * ay + c * by + d * ey) * 100).toFixed(2)}%`);
+    }
+    [fx, fy] = [ex, ey];
+  }
+  return `polygon(${points.join(',')})`;
+}
+export const MASKS = { circle:'circle(closest-side)', ellipse:'ellipse(50% 50%)', pill:'inset(0 round 9999px)', arch:'inset(0 round 9999px 9999px 0 0)', hexagon:'polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%)', blob:blobOutline() };
 export function ensureDeckFonts(theme, images = {}) {
   const rules = (theme.font_files || []).map(file => {
     const family = String(file.family).replace(/["'\\;{}<>]/g, '');
@@ -210,7 +226,7 @@ export function renderNode(node, theme, images = {}, parent = { mode: 'none' }) 
     img.style.objectFit = node.fit || 'contain';
     img.style.objectPosition = `${(node.focus?.x ?? .5) * 100}% ${(node.focus?.y ?? .5) * 100}%`;
     el.style.borderRadius = unit(node.radius || 0, theme);
-    if (node.mask === 'circle') content.style.clipPath = 'circle(closest-side)';
+    if (MASKS[node.mask]) content.style.clipPath = MASKS[node.mask];
     content.append(img);
     if (node.overlay) { const scrim = element('div', 'image-overlay'); scrim.style.background = paint(node.overlay.fill, theme); content.append(scrim); }
     el.append(content);

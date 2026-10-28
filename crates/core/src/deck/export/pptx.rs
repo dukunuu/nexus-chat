@@ -13,7 +13,7 @@ use std::path::Path;
 
 use super::super::text::{LAYOUT, Mark, Row, classify, color, escape, inline};
 use super::super::{
-    Align, Deck, Fit, Kind, Node, Rect, ResolvedFont, Shape, Slide, Stroke, Theme, VAlign,
+    Align, Deck, Fit, Kind, Mask, Node, Rect, ResolvedFont, Shape, Slide, Stroke, Theme, VAlign,
     layout_at,
 };
 use anyhow::Result;
@@ -318,17 +318,26 @@ impl Painter<'_> {
             integer(y * focus.y),
             integer(y * (1.0 - focus.y))
         );
+        if node.mask == Some(Mask::Circle) && (rect.w - rect.h).abs() > 0.01 {
+            self.warnings.push(format!("{}: a non-square circle mask becomes an ellipse in PowerPoint; use a square image box for a circle.", node.id));
+        }
+        // A mask without a preset travels in the picture's alpha; its scrim
+        // gets the exact outline as custom geometry.
+        let preset = node.mask.and_then(|mask| effects::preset_mask(mask, rect));
+        let (png, geom, overlay_geom) = match (node.mask, preset) {
+            (Some(_), Some(preset)) => (png, preset.clone(), preset),
+            (Some(mask), None) => (
+                effects::bake_mask(&png, mask, rect, fit, focus)?,
+                geometry(Shape::Rect, 0.0, rect),
+                effects::custom_mask(mask, rect),
+            ),
+            (None, _) => {
+                let geom = geometry(Shape::Rect, node.image_radius.unwrap_or(0.0), rect);
+                (png, geom.clone(), geom)
+            }
+        };
         self.media.push(png);
         let relationship = self.media.len() + 1;
-        let shape = if node.mask == Some(super::super::Mask::Circle) {
-            if (rect.w - rect.h).abs() > 0.01 {
-                self.warnings.push(format!("{}: a non-square circle mask becomes an ellipse in PowerPoint; use a square image box for a circle.", node.id));
-            }
-            Shape::Ellipse
-        } else {
-            Shape::Rect
-        };
-        let geom = geometry(shape, node.image_radius.unwrap_or(0.0), rect);
         let shadow = effects::shadow(node, &self.deck.theme, rect, self.scale);
         let mut picture = format!(
             "<p:pic><p:nvPicPr><p:cNvPr id=\"{id}\" name=\"{}\"/><p:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rId{relationship}\"><a:alphaModFix amt=\"{}\"/></a:blip>{crop}<a:stretch>{inset}</a:stretch></p:blipFill><p:spPr>{}{geom}{shadow}</p:spPr></p:pic>",
@@ -340,7 +349,7 @@ impl Painter<'_> {
             let overlay_id = self.id();
             let _ = write!(
                 picture,
-                "<p:sp>{}<p:spPr>{}{geom}{}<a:ln><a:noFill/></a:ln></p:spPr></p:sp>",
+                "<p:sp>{}<p:spPr>{}{overlay_geom}{}<a:ln><a:noFill/></a:ln></p:spPr></p:sp>",
                 nv(overlay_id, "Image overlay", false, None),
                 xfrm(rect, self.scale, node.rotation, false),
                 effects::fill(&self.deck.theme, Some(&overlay.fill), node.opacity)

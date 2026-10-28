@@ -494,7 +494,7 @@ impl Backend {
     }
 
     /// Store an image by content next to the doc; the page gets its `assets/…` name.
-    fn doc_store_image(&self, bytes: &[u8], label: &str) -> Result<String> {
+    pub(super) fn doc_store_image(&self, bytes: &[u8], label: &str) -> Result<String> {
         let stem = Path::new(label)
             .file_stem()
             .and_then(|s| s.to_str())

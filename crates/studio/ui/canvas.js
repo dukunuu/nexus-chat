@@ -258,11 +258,21 @@ export function canvasController(api) {
     const target = event.target.closest('.block');
     if (target && !locked(target.dataset.id) && !api.state.selected.has(target.dataset.id)) { api.state.selected = new Set([target.dataset.id]); api.selectionChanged(); }
     menu = element('div', 'canvas-menu popover');
-    Object.assign(menu.style, { position:'fixed', left:`${Math.min(event.clientX, window.innerWidth - 250)}px`, top:`${Math.min(event.clientY, window.innerHeight - 180)}px` });
-    for (const [title, action] of [['Add auto-layout · Shift+A', () => api.wrap()], ['Remove auto-layout · Alt+Shift+A', () => api.wrap(true)], ['Duplicate', api.duplicate], ['Delete', api.remove]]) {
-      const control = element('button', '', title); control.onclick = () => { action(); menu.remove(); menu = null; }; menu.append(control);
+    // A shape takes an image; an image can be swapped. Those come first.
+    const one = api.state.selected.size === 1 ? selectedNodes()[0] : null, images = api.images, items = [];
+    if (images.fillable(one)) {
+      items.push(['Paste image into shape · ⌘V', () => images.pasteInto(one)], ['Fill with image…', () => images.pickInto(one)]);
+      if (images.imageBelow(one)) items.push(['Use as mask for image below', () => images.maskBelow(one)]);
+    } else if (one?.kind === 'image') items.push(['Replace image…', () => images.pickInto(one)]);
+    if (items.length) items.push(null);
+    items.push(['Add auto-layout · Shift+A', () => api.wrap()], ['Remove auto-layout · Alt+Shift+A', () => api.wrap(true)], ['Duplicate', api.duplicate], ['Delete', api.remove]);
+    for (const item of items) {
+      if (!item) { menu.append(element('div', 'menu-sep')); continue; }
+      const [title, action] = item, control = element('button', '', title); control.onclick = () => { menu.remove(); menu = null; action(); }; menu.append(control);
     }
+    Object.assign(menu.style, { position:'fixed', left:'0px', top:'0px', visibility:'hidden' });
     document.body.append(menu);
+    Object.assign(menu.style, { left:`${Math.min(event.clientX, window.innerWidth - menu.offsetWidth - 8)}px`, top:`${Math.min(event.clientY, window.innerHeight - menu.offsetHeight - 8)}px`, visibility:'' });
   });
   function nudge(dx, dy) {
     if (api.state.preview) return;

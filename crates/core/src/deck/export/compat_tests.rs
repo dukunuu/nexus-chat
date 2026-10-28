@@ -383,3 +383,53 @@ fn font_map_preserves_google_families_and_known_slides_fonts() {
         assert_eq!(super::pptx::google_font(source), expected);
     }
 }
+
+#[test]
+fn every_image_mask_exports_as_a_preset_or_in_the_pictures_alpha() {
+    let root = std::env::temp_dir().join(format!("nexus-mask-export-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    image::RgbImage::from_pixel(400, 200, image::Rgb([70, 110, 150]))
+        .save(root.join("photo.png"))
+        .unwrap();
+    let picture = |mask: &str, x: u32| json!({"id":mask,"kind":"image","src":"assets/photo.png","fit":"cover","mask":mask,"position":{"x":x,"y":100},"sizing":{"w":400,"h":200}});
+    let mut arch = picture("arch", 900);
+    arch["overlay"] = json!({"fill":{"color":"fg","opacity":0.3}});
+    let deck = Deck::check(&json!({"version":2,"title":"Masks","slides":[{"children":[picture("pill", 0), picture("hexagon", 450), arch, picture("blob", 1350)]}]}).to_string()).unwrap();
+    let bytes = super::pptx::export_pptx(&deck, Some(&root)).unwrap();
+    validate_package(&bytes);
+    let parts = parts(&bytes);
+    let slide = std::str::from_utf8(&parts["ppt/slides/slide1.xml"]).unwrap();
+    for expected in [
+        "prst=\"roundRect\"><a:avLst><a:gd name=\"adj\" fmla=\"val 50000\"/>",
+        // A quarter of the width, as a fraction of the short side.
+        "prst=\"hexagon\"><a:avLst><a:gd name=\"adj\" fmla=\"val 50000\"/>",
+        // The arch's scrim keeps the exact outline.
+        "<a:custGeom>",
+        "<a:arcTo wR=\"20000\" hR=\"20000\" stAng=\"10800000\" swAng=\"5400000\"/>",
+    ] {
+        assert!(slide.contains(expected), "{expected}");
+    }
+    // Arch and blob pictures carry the mask in their alpha.
+    let media: Vec<_> = parts
+        .iter()
+        .filter(|(name, _)| name.starts_with("ppt/media/"))
+        .map(|(_, bytes)| image::load_from_memory(bytes).unwrap().to_rgba8())
+        .collect();
+    let cut = media.iter().filter(|m| m.get_pixel(0, 0)[3] == 0).count();
+    assert_eq!(cut, 2, "arch and blob corners are transparent");
+    assert!(
+        media.iter().all(|m| m.get_pixel(200, 150)[3] == 255),
+        "the middle stays"
+    );
+    // Preset masks come back as the same masks.
+    let back = deck::import::import_pptx(&bytes, &root.join("imported"))
+        .unwrap()
+        .deck;
+    let masks: Vec<_> = back.slides[0]
+        .nodes()
+        .into_iter()
+        .filter_map(|n| n.mask)
+        .collect();
+    assert!(masks.contains(&deck::Mask::Hexagon), "{masks:?}");
+    std::fs::remove_dir_all(root).unwrap();
+}

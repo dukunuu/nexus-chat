@@ -51,6 +51,12 @@ pub enum Command {
     ImportAsset {
         path: PathBuf,
     },
+    /// An image pasted or dropped on a deck: hex bytes, stored like `ImportAsset`.
+    ImportAssetData {
+        data: String,
+    },
+    /// A native Open dialog for an image; replies `Asset` (or `Idle` on cancel).
+    PickImage {},
     ListFonts {},
     ImportFont {
         path: PathBuf,
@@ -594,6 +600,7 @@ impl Backend {
                         command,
                         Command::ImportFontData { .. }
                             | Command::DocImportAsset { .. }
+                            | Command::ImportAssetData { .. }
                             | Command::ImportTemplateData { .. }
                     ),
                 "command too large"
@@ -764,6 +771,12 @@ impl Backend {
             Command::ImportAsset { path } => {
                 return Ok(Event::Asset {
                     src: self.import_asset(&path)?,
+                });
+            }
+            Command::ImportAssetData { data } => {
+                let bytes = decode_hex(&data, 8 * 1024 * 1024)?;
+                return Ok(Event::Asset {
+                    src: self.store_deck_image(bytes)?,
                 });
             }
             // `refuse_doc_command` turned every doc-only command away above.
@@ -992,7 +1005,12 @@ impl Backend {
 
     fn import_asset(&self, path: &Path) -> Result<String> {
         let path = absolute(path)?;
-        let bytes = read_bounded(&path, 8 * 1024 * 1024)?;
+        self.store_deck_image(read_bounded(&path, 8 * 1024 * 1024)?)
+    }
+
+    /// Decode, bound and re-encode an image as PNG in the deck's assets; the
+    /// bytes never reach the deck unchecked.
+    fn store_deck_image(&self, bytes: Vec<u8>) -> Result<String> {
         let mut reader =
             image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
         let mut limits = image::Limits::default();
@@ -1331,6 +1349,7 @@ fn embedded(path: &str) -> Option<(&'static str, &'static str)> {
         "/animations.js" => ("text/javascript", include_str!("../ui/animations.js")),
         "/playback.js" => ("text/javascript", include_str!("../ui/playback.js")),
         "/animate-panel.js" => ("text/javascript", include_str!("../ui/animate-panel.js")),
+        "/images.js" => ("text/javascript", include_str!("../ui/images.js")),
         "/doc/doc.css" => ("text/css; charset=utf-8", include_str!("../ui/doc/doc.css")),
         "/doc/doc.js" => ("text/javascript", include_str!("../ui/doc/doc.js")),
         "/doc/inline.js" => ("text/javascript", include_str!("../ui/doc/inline.js")),

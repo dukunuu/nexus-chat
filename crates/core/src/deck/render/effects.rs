@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use super::super::text::{color, escape};
-use super::super::{Color, Dash, Fill, Fit, Focus, Mask, Node, Rect, Theme};
+use super::super::{Color, Dash, Fill, Fit, Focus, Node, Rect, Theme};
 
 pub(super) fn rgba(theme: &Theme, value: &Color) -> (String, f64) {
     let raw = color(theme, value.value());
@@ -133,14 +133,8 @@ pub(super) fn image(
     let id = *next;
     let Rect { x, y, w, h } = rect;
     let _ = write!(out, "<defs><clipPath id=\"image{id}\">");
-    if node.mask == Some(Mask::Circle) {
-        let _ = write!(
-            out,
-            "<circle cx=\"{}\" cy=\"{}\" r=\"{}\"/>",
-            x + w / 2.0,
-            y + h / 2.0,
-            w.min(h) / 2.0
-        );
+    if let Some(mask) = node.mask {
+        let _ = write!(out, "<path d=\"{}\"/>", mask.path(x, y, w, h));
     } else {
         let _ = write!(
             out,

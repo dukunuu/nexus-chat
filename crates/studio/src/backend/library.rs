@@ -259,6 +259,14 @@ impl Backend {
                 },
                 Then::Template,
             ),
+            Command::PickImage {} => (
+                Ask::Open {
+                    title: "Choose an image".into(),
+                    start: start_in_space,
+                    filters: dialogs::IMAGES,
+                },
+                Then::Image,
+            ),
             Command::ExportAs { format, template } => {
                 self.export_job(self.current_file(), format, template.clone())?
             }
@@ -297,6 +305,7 @@ impl Backend {
         match answer.then {
             Then::Open => self.open_chosen(&chosen),
             Then::Template => self.import_template(&absolute(&chosen)?),
+            Then::Image => self.import_image(&absolute(&chosen)?),
             Then::Export {
                 file,
                 word,
@@ -305,6 +314,17 @@ impl Backend {
             } => self.export_to(&file, &word, template.as_deref(), extension, chosen),
             Then::SaveCopy => self.save_copy_to(&chosen),
         }
+    }
+
+    /// Store the image an image dialog returned with the open deck or doc.
+    fn import_image(&self, chosen: &Path) -> Result<Event> {
+        let src = if self.doc.is_some() {
+            let bytes = super::read_bounded(chosen, 8 * 1024 * 1024)?;
+            self.doc_store_image(&bytes, &chosen.to_string_lossy())?
+        } else {
+            self.import_asset(chosen)?
+        };
+        Ok(Event::Asset { src })
     }
 
     /// Open what an Open dialog returned: nexus files as they are, a
@@ -530,6 +550,7 @@ enum Ask {
 enum Then {
     Open,
     Template,
+    Image,
     Export {
         file: (FileKind, PathBuf),
         word: String,

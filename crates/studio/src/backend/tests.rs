@@ -1133,3 +1133,67 @@ fn history_lists_previews_and_restores_kept_decks() {
         assert!(matches!(event, Event::Error { .. }), "{event:?}");
     }
 }
+
+#[test]
+fn a_shape_becomes_a_masked_image_in_place_as_one_undo_step() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    let slide = backend.deck.slides[0].id.clone();
+    let shape = json!({"id":"shape-a","kind":"shape","shape":"ellipse","fill":"accent","radius":0,"position":{"x":100,"y":100},"sizing":{"w":300,"h":300}});
+    let photo = json!({"id":"photo-a","kind":"image","src":"assets/a.png","fit":"contain","position":{"x":80,"y":80},"sizing":{"w":500,"h":300}});
+    success(send(
+        &mut backend,
+        json!({"command":"Apply","ops":[{"op":"insert_node","parent":slide,"index":0,"node":photo},{"op":"insert_node","parent":slide,"node":shape}]}),
+    ));
+    let undo_depth = backend.undo.len();
+    // What studio sends for "Paste image into shape": the same id, box and place.
+    let image = json!({"id":"shape-a","kind":"image","src":"assets/b.png","fit":"cover","mask":"circle","position":{"x":100,"y":100},"sizing":{"w":300,"h":300}});
+    let index = backend.deck.slides[0]
+        .children
+        .iter()
+        .position(|n| n.id == "shape-a")
+        .unwrap();
+    success(send(
+        &mut backend,
+        json!({"command":"Apply","ops":[{"op":"delete_node","id":"shape-a"},{"op":"insert_node","parent":slide,"index":index,"node":image}]}),
+    ));
+    let swapped = &backend.deck.slides[0].children[index];
+    assert_eq!(swapped.id, "shape-a");
+    assert!(matches!(swapped.kind, Kind::Image { .. }));
+    assert_eq!(swapped.mask, Some(deck::Mask::Circle));
+    assert_eq!(backend.undo.len(), undo_depth + 1);
+    // "Use as mask for image below": the photo takes the box and outline.
+    let hash = backend.deck.node("photo-a").unwrap().hash();
+    success(send(
+        &mut backend,
+        json!({"command":"Apply","ops":[
+            {"op":"update_node","id":"photo-a","fields":{"position":{"x":120,"y":90},"sizing":{"w":200,"h":260},"rotation":null,"fit":"cover","mask":"arch","radius":null},"base_hash":hash},
+            {"op":"delete_node","id":"shape-a"}
+        ]}),
+    ));
+    let photo = &backend.deck.slides[0].children[0];
+    assert_eq!(photo.mask, Some(deck::Mask::Arch));
+    assert!(
+        backend.deck.slides[0]
+            .children
+            .iter()
+            .all(|n| n.id != "shape-a")
+    );
+}
+
+#[test]
+fn every_ui_file_is_embedded() {
+    // A module the page imports but the binary does not serve breaks the
+    // whole UI in the app while the dev server still finds it on disk.
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    for dir in [ui.clone(), ui.join("doc")] {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if !path.is_file() {
+                continue;
+            }
+            let served = format!("/{}", path.strip_prefix(&ui).unwrap().to_string_lossy());
+            assert!(embedded(&served).is_some(), "{served} is not embedded");
+        }
+    }
+}

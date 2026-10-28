@@ -103,3 +103,87 @@ fn studio_effect_numbers_match_core() {
     assert!(js.contains("(node.focus?.x ?? .5) * 100"));
     assert!(js.contains("circle(closest-side)"));
 }
+
+#[test]
+fn masks_have_one_geometry_for_paths_and_hit_tests() {
+    for (name, mask) in [
+        ("circle", Mask::Circle),
+        ("ellipse", Mask::Ellipse),
+        ("pill", Mask::Pill),
+        ("arch", Mask::Arch),
+        ("hexagon", Mask::Hexagon),
+        ("blob", Mask::Blob),
+    ] {
+        assert_eq!(serde_json::to_value(mask).unwrap(), name);
+        // Every mask keeps the middle and cuts the top-left corner.
+        assert!(mask.contains(400.0, 200.0, 200.0, 100.0), "{name} middle");
+        assert!(!mask.contains(400.0, 200.0, 1.0, 1.0), "{name} corner");
+        assert!(mask.path(10.0, 20.0, 400.0, 200.0).ends_with('Z'), "{name}");
+    }
+    // The arch is square at the bottom and round across the top.
+    assert!(Mask::Arch.contains(400.0, 200.0, 1.0, 199.0));
+    assert!(!Mask::Pill.contains(400.0, 200.0, 1.0, 199.0));
+    assert!((Mask::arch_radius(400.0, 200.0) - 200.0).abs() < 1e-9);
+    assert!((Mask::arch_radius(200.0, 400.0) - 100.0).abs() < 1e-9);
+    assert!((Mask::arch_radius(1000.0, 200.0) - 200.0).abs() < 1e-9);
+    // The hexagon's points sit at mid-height on the sides.
+    assert!(Mask::Hexagon.contains(400.0, 200.0, 1.0, 100.0));
+    assert!(!Mask::Hexagon.contains(400.0, 200.0, 90.0, 1.0));
+    // The circle is the largest centered circle, not the box.
+    assert!(!Mask::Circle.contains(400.0, 200.0, 20.0, 100.0));
+    assert!(Mask::Ellipse.contains(400.0, 200.0, 20.0, 100.0));
+}
+
+#[test]
+fn svg_clips_images_to_every_mask() {
+    let root = std::env::temp_dir().join(format!("nexus-masks-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    image::RgbImage::from_pixel(80, 40, image::Rgb([0, 0, 255]))
+        .save(root.join("photo.png"))
+        .unwrap();
+    for mask in ["arch", "hexagon", "blob", "pill"] {
+        let deck = Deck::check(&json!({"version":2,"title":"Masks","theme":{"size":{"w":320,"h":180}},"slides":[{"fill":"#ff0000","children":[{"kind":"image","src":"assets/photo.png","fit":"cover","mask":mask,"sizing":{"w":200,"h":100},"position":{"x":60,"y":40}}]}]}).to_string()).unwrap();
+        let png = render::render_slide_at(&deck, &deck.slides[0].id, 320, Some(&root)).unwrap();
+        let pixels = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert!(
+            pixels.get_pixel(160, 90)[2] > 250,
+            "{mask}: the image fills the middle"
+        );
+        assert!(
+            pixels.get_pixel(61, 41)[0] > 250,
+            "{mask}: the corner shows the slide"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn studio_draws_the_same_blob() {
+    let js = include_str!("../../../studio/ui/render.js");
+    let number = |v: f64| v.to_string();
+    let start = format!(
+        "BLOB_START = [{},{}]",
+        number(effects::BLOB_START.0),
+        number(effects::BLOB_START.1)
+    );
+    let segments = effects::BLOB
+        .iter()
+        .map(|s| {
+            format!(
+                "[{}]",
+                s.iter().map(|v| number(*v)).collect::<Vec<_>>().join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(js.contains(&start), "{start}");
+    assert!(js.contains(&format!("BLOB = [{segments}]")), "{segments}");
+    for clip in [
+        "inset(0 round 9999px)",
+        "inset(0 round 9999px 9999px 0 0)",
+        "polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%)",
+        "ellipse(50% 50%)",
+    ] {
+        assert!(js.contains(clip), "{clip}");
+    }
+}

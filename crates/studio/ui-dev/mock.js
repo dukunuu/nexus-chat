@@ -79,6 +79,9 @@
         if (m.send) sent.push({ type:'Reply', text:m.text, thread:m.thread });
         return emit(feedback());
       }
+      // Images: pasted bytes and the native picker both answer with a stored asset.
+      if (m.command === 'ImportAssetData') return emit({ event:'Asset', src:`assets/pasted-${m.data.length}.png` });
+      if (m.command === 'PickImage') return emit(window.__mock.pickCancels ? { event:'Idle' } : { event:'Asset', src:'assets/picked.png' });
       // Version history: the undo stack stands in for the kept versions.
       if (m.command === 'History') return emit({ event:'History', versions:undo.map((_, i) => ({ id:`v${i}`, at:new Date(Date.now() - (undo.length - i) * 6e4).toISOString(), who:i % 2 ? 'model' : 'user', summary:'Edited 1 block' })).reverse() });
       if (m.command === 'HistoryPreview') return emit({ event:'HistoryPreview', id:m.id, deck:structuredClone(undo[Number(m.id.slice(1))]) });

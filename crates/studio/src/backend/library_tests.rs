@@ -883,3 +883,55 @@ fn a_dialog_is_shown_off_the_backend_and_finished_with_the_answer() {
         Event::Error { .. }
     ));
 }
+
+#[test]
+fn image_dialog_and_pasted_bytes_store_a_sanitized_png_with_the_deck() {
+    let temp = Temp::new();
+    let talk = temp.deck("decks/talk.deck.json", "Talk");
+    let photo = temp.0.join("Private photos/beach.jpg");
+    fs::create_dir_all(photo.parent().unwrap()).unwrap();
+    image::RgbImage::from_pixel(40, 20, image::Rgb([200, 120, 40]))
+        .save(&photo)
+        .unwrap();
+    let (mut backend, dialogs) = temp.opened(&talk, [Some(photo.clone()), None]);
+    let before = backend.deck.clone();
+    // The picker stores a PNG copy beside the deck; the page sees only that.
+    let event = send(&mut backend, json!({"command":"PickImage"}));
+    let Event::Asset { src } = &event else {
+        panic!("{event:?}")
+    };
+    assert!(src.starts_with("assets/") && src.ends_with(".png"), "{src}");
+    assert!(!event.script().contains("Private photos"));
+    let stored = talk.parent().unwrap().join(src);
+    assert_eq!(image::open(&stored).unwrap().width(), 40);
+    assert_eq!(
+        backend.deck, before,
+        "importing an image never edits the deck"
+    );
+    assert_eq!(dialogs.requests()[0].filters, ["Images"]);
+    // A cancel is quiet.
+    assert!(matches!(
+        send(&mut backend, json!({"command":"PickImage"})),
+        Event::Idle {}
+    ));
+    // Pasted bytes take the same path, and the same image is the same asset.
+    let data: String = fs::read(&stored)
+        .unwrap()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let event = send(
+        &mut backend,
+        json!({"command":"ImportAssetData","data":data}),
+    );
+    assert!(
+        matches!(&event, Event::Asset { src: pasted } if pasted == src),
+        "{event:?}"
+    );
+    // Bytes that are not an image are refused.
+    let event = send(
+        &mut backend,
+        json!({"command":"ImportAssetData","data":"00ff00ff"}),
+    );
+    assert!(matches!(event, Event::Error { .. }), "{event:?}");
+}

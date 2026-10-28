@@ -1318,7 +1318,11 @@ fn image_node(st: &mut State, src: String, name: Option<String>, rect: Rect, rot
 fn picture_geometry(pic: &El, node: &mut Node, rect: Rect) {
     if let Some(geom) = sp_pr(pic).and_then(|props| props.kid("prstGeom")) {
         match geom.attr("prst") {
-            Some("ellipse") => node.mask = Some(crate::deck::Mask::Circle),
+            Some("ellipse") if (rect.w - rect.h).abs() <= 0.5 => {
+                node.mask = Some(crate::deck::Mask::Circle);
+            }
+            Some("ellipse") => node.mask = Some(crate::deck::Mask::Ellipse),
+            Some("hexagon") => node.mask = Some(crate::deck::Mask::Hexagon),
             Some("roundRect") => {
                 let fraction = geom
                     .path(&["avLst", "gd"])

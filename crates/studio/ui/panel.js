@@ -1,5 +1,5 @@
 import { allNodes, childrenOf, parentOf, isAbsolute, nodeLabel, resolveFont, slideSize } from './helpers.js';
-import { element, color } from './render.js';
+import { element, color, MASKS } from './render.js';
 import { fields, compact } from './fields.js';
 import { fontController } from './fonts.js';
 import { button, icon } from './icons.js';
@@ -265,6 +265,65 @@ export function panelController(api) {
     heading.onclick = () => { body.hidden = !body.hidden; heading.setAttribute('aria-expanded', String(!body.hidden)); sectionStates.set(key, body.hidden); };
     header.append(heading, ...actions); group.append(header, body); panel.append(group); return body;
   }
+  // -- image: fill or fit, mask, focal point, scrim ---------------------------------------
+  const MASK_TILES = [['none','None'],['rounded','Rounded'],['circle','Circle'],['ellipse','Ellipse'],['pill','Pill'],['arch','Arch'],['hexagon','Hexagon'],['blob','Blob']];
+  function imageFields(body, node) {
+    const fit = element('div', 'segmented image-fit'); fit.setAttribute('aria-label', 'Image fit');
+    for (const [value, title, hint] of [['cover','Fill','Fill the box, cropping the edges'],['contain','Fit','Show the whole image']]) {
+      const control = element('button', '', title); control.type = 'button'; control.title = hint;
+      control.setAttribute('aria-pressed', String((node.fit || 'contain') === value)); control.onclick = () => patch({ fit:value }); fit.append(control);
+    }
+    const replace = element('button', 'image-replace', 'Replace…'); replace.type = 'button'; replace.title = 'Choose another image, or paste one with ⌘V';
+    replace.onclick = () => api.images.pickInto(node);
+    body.append(pair(fit, replace));
+    const grid = element('div', 'mask-grid'), current = node.mask || (node.radius ? 'rounded' : 'none');
+    grid.setAttribute('role', 'group'); grid.setAttribute('aria-label', 'Mask');
+    for (const [name, title] of MASK_TILES) {
+      const tile = element('button', 'mask-tile'); tile.type = 'button'; tile.title = title; tile.setAttribute('aria-label', `${title} mask`);
+      tile.setAttribute('aria-pressed', String(current === name));
+      const swatch = element('span', `mask-swatch ${name}`);
+      if (MASKS[name]) swatch.style.clipPath = MASKS[name];
+      tile.append(swatch, element('span', 'mask-name', title));
+      tile.onclick = () => patch(name === 'none' ? { mask:null, radius:null } : name === 'rounded' ? { mask:null, radius:node.radius || 24 } : { mask:name, radius:null });
+      grid.append(tile);
+    }
+    body.append(grid);
+    body.append(focalPad(node));
+    body.append(toggleRow('Scrim', Boolean(node.overlay), on => patch({ overlay:on ? { fill:{ color:'fg', opacity:.4 } } : null })));
+    if (node.overlay) {
+      const fill = node.overlay.fill;
+      paint(body, 'Scrim color', [typeof fill === 'string' ? fill : fill.color || 'fg'], value => patch({ overlay:{ fill:{ color:value, opacity:fill.opacity ?? .4 } } }));
+      body.append(numeric('Scrim opacity', fill.opacity ?? 1, opacity => patch({ overlay:{ fill:{ color:fill.color || fill, opacity:Math.max(0, Math.min(1, opacity)) } } })));
+    }
+  }
+  function toggleRow(label, value, change) {
+    const row = element('label', 'toggle-row'), box = element('input'); box.type = 'checkbox'; box.checked = value;
+    box.onchange = () => change(box.checked); row.append(element('span', '', label), box); return row;
+  }
+  /** Drag the dot to choose which part of the image stays in view. */
+  function focalPad(node) {
+    const wrap = element('div', 'focus-field'), pad = element('div', 'focus-pad'), dot = element('span', 'focus-dot');
+    const img = document.querySelector(`#canvas [data-id="${CSS.escape(node.id)}"] img`);
+    if (img?.src) pad.style.backgroundImage = `url("${img.src}")`;
+    let at = { x:node.focus?.x ?? .5, y:node.focus?.y ?? .5 };
+    const show = () => { dot.style.left = `${at.x * 100}%`; dot.style.top = `${at.y * 100}%`; pad.setAttribute('aria-valuetext', `${Math.round(at.x * 100)}% across, ${Math.round(at.y * 100)}% down`); };
+    const write = () => api.apply(() => [{ op:'update_node', id:node.id, fields:{ focus:{ x:+at.x.toFixed(3), y:+at.y.toFixed(3) } }, base_hash:api.state.hashes[node.id] || '' }]);
+    const point = event => { const r = pad.getBoundingClientRect(); at = { x:Math.max(0, Math.min(1, (event.clientX - r.left) / r.width)), y:Math.max(0, Math.min(1, (event.clientY - r.top) / r.height)) }; show(); write(); };
+    pad.tabIndex = 0; pad.setAttribute('role', 'slider'); pad.setAttribute('aria-label', 'Focal point'); pad.title = 'Focal point · drag, or use the arrow keys · double-click to center';
+    pad.addEventListener('pointerdown', event => { event.preventDefault(); pad.setPointerCapture(event.pointerId); api.beginGesture(); point(event); });
+    pad.addEventListener('pointermove', event => { if (pad.hasPointerCapture(event.pointerId)) point(event); });
+    pad.addEventListener('pointerup', event => { if (pad.hasPointerCapture(event.pointerId)) { pad.releasePointerCapture(event.pointerId); api.endGesture(); } });
+    pad.addEventListener('pointercancel', () => api.endGesture(true));
+    pad.addEventListener('dblclick', () => { at = { x:.5, y:.5 }; show(); write(); });
+    pad.addEventListener('keydown', event => {
+      const step = event.shiftKey ? .1 : .02, move = { ArrowLeft:[-step, 0], ArrowRight:[step, 0], ArrowUp:[0, -step], ArrowDown:[0, step] }[event.key];
+      if (!move) return;
+      event.preventDefault(); event.stopPropagation();
+      at = { x:Math.max(0, Math.min(1, at.x + move[0])), y:Math.max(0, Math.min(1, at.y + move[1])) }; show(); write();
+    });
+    pad.append(dot); show();
+    wrap.append(element('span', 'focus-label', 'Focal point'), pad); return wrap;
+  }
   function layoutFields(container, layout, target, isSlide) {
     const write = fields => isSlide
       ? api.apply(() => [{ op:'update_slide', id:target.id, fields:{ layout:fields } }])
@@ -389,17 +448,7 @@ export function panelController(api) {
         const row = paint(appearance, 'Stroke', selected.map(n => n.stroke?.color || 'muted'), value => api.updateMany(slide.id, selected.map(n => ({ id:n.id, fields:{ stroke:{ color:value, width:n.stroke?.width || 4 } } }))));
         row.append(toggle('check', 'Stroke enabled', selected.every(n => n.stroke), enabled => patch({ stroke:enabled ? { color:'muted', width:4 } : null })));
       }
-      if (node.kind === 'image') {
-        appearance.append(field('Image fit', node.fit, fit => patch({ fit }), ['contain','cover']));
-        appearance.append(field('Image mask', node.mask || 'none', mask => patch({ mask:mask === 'none' ? null : mask }), ['none','circle']));
-        appearance.append(pair(numeric('Focus X', node.focus?.x ?? .5, x => patch({ focus:{ x:Math.max(0, Math.min(1, x)), y:node.focus?.y ?? .5 } })), numeric('Focus Y', node.focus?.y ?? .5, y => patch({ focus:{ x:node.focus?.x ?? .5, y:Math.max(0, Math.min(1, y)) } }))));
-        const scrim = field('Overlay enabled', node.overlay ? 'on' : 'off', value => patch({ overlay:value === 'on' ? { fill:{ color:'fg', opacity:.4 } } : null }), ['off','on']); appearance.append(scrim);
-        if (node.overlay) {
-          const fill = node.overlay.fill;
-          paint(appearance, 'Overlay color', [typeof fill === 'string' ? fill : fill.color || 'fg'], value => patch({ overlay:{ fill:{ color:value, opacity:fill.opacity ?? .4 } } }));
-          appearance.append(numeric('Overlay opacity', fill.opacity ?? 1, opacity => patch({ overlay:{ fill:{ color:fill.color || fill, opacity:Math.max(0, Math.min(1, opacity)) } } })));
-        }
-      }
+      if (selected.length === 1 && node.kind === 'image') imageFields(section('Image'), node);
     } else {
       const appearance = section('Appearance'), update = fields => api.apply(() => [{ op:'update_slide', id:slide.id, fields }]);
       fillFields(appearance, slide.fill || 'bg', fill => update({ fill }), 'Background');

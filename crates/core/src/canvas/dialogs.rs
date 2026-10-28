@@ -212,6 +212,12 @@ pub const OPEN: &[Filter] = &[
     },
 ];
 
+/// Images studio stores with a deck or doc.
+pub const IMAGES: &[Filter] = &[Filter {
+    name: "Images",
+    extensions: &["png", "jpg", "jpeg", "webp"],
+}];
+
 /// Templates studio can turn into a design.
 pub const TEMPLATES: &[Filter] = &[Filter {
     name: "Office templates",

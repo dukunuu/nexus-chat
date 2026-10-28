@@ -10,6 +10,7 @@ import { applyLocal, signature, slideAssets } from './local.js';
 import { playbackController } from './playback.js';
 import { animatePanelController } from './animate-panel.js';
 import { libraryController } from './library.js';
+import { imagesController } from './images.js';
 
 hydrateIcons();
 const $ = selector => document.querySelector(selector);
@@ -92,6 +93,7 @@ const api = {
 };
 const canvas = canvasController(api), strip = stripController(api), panel = panelController(api), feedback = feedbackController(api), editing = editingController(api);
 const animationPanel = animatePanelController(api), playback = playbackController(api);
+api.images = imagesController(api);
 for (const tab of ['design','animate']) $(`#tab-${tab}`).onclick = () => { state.panelTab = tab; render(); };
 let canvasKey, layersKey, panelKey, feedbackKey, ancillaryFrame, deckActivities;
 const currentCanvasKey = () => signature([api.slide(), state.deck.theme, slideAssets(api.slide(), state.deck.theme, state.images), state.preview]);
@@ -441,7 +443,8 @@ function insert(block) {
 }
 $('#add-text').onclick = () => insert(textNode('Double-click to edit', { position:{ x:160, y:160 }, sizing:{ w:960 } }));
 $('#add-shape').onclick = () => insert({ id:id('b'), kind:'shape', shape:'rect', fill:'accent', position:{ x:480, y:300 }, sizing:{ w:600, h:420 } });
-$('#add-image').onclick = () => ask('Import image', 'Image path', 'PNG, JPEG or WebP. A sanitized copy stays with the deck.', '', path => command({ command:'ImportAsset', path }, event => { if (event.event === 'Asset') insert({ id:id('b'), kind:'image', src:event.src, fit:'contain', position:{ x:240, y:180 }, sizing:{ w:1200, h:720 } }); }));
+// The selected shape takes the image; otherwise it lands on the slide.
+$('#add-image').onclick = () => { const slide = api.slide(), one = state.selected.size === 1 && slide ? allNodes(slide).find(n => state.selected.has(n.id)) : null; api.images.pickInto(one); };
 $('#speaker-notes').onchange = event => { const slide = api.slide(), notes = event.target.value; if (slide) apply(() => [{ op:'set_notes', slide:slide.id, notes }]); };
 let plainFile = false;
 // "Save to exports/ without asking": the quick export, remembered on this device.
