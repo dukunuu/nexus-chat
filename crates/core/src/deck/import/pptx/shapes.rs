@@ -257,8 +257,13 @@ fn paint_of(cx: &Cx, st: &mut State, props: &El) -> Option<Paint> {
                         .tally("Radial gradients are drawn as stacked translucent ellipses");
                     return Some(Paint::Glow(stops));
                 }
-                st.warn
-                    .tally("Linear gradients are drawn as their first color");
+                if props.name != "spPr"
+                    || kid.kid("lin").is_none()
+                    || !(2..=8).contains(&stops.len())
+                {
+                    st.warn
+                        .tally("Unsupported gradients are drawn as their first color");
+                }
                 return stops.first().map(|s| Paint::Color(s.1));
             }
             "pattFill" => {
@@ -338,8 +343,12 @@ fn look(cx: &Cx, st: &mut State, chain_els: &[&El], refs: &StyleRefs) -> Look {
     let mut spec = LineSpec::default();
     for el in chain_els {
         let Some(props) = sp_pr(el) else { continue };
-        if props.kid("effectLst").is_some_and(|e| !e.kids.is_empty()) {
-            st.warn.tally("Shadows and other effects are not imported");
+        if props
+            .kid("effectLst")
+            .is_some_and(|e| e.kids.iter().any(|effect| effect.name != "outerShdw"))
+        {
+            st.warn
+                .tally("Effects other than outer shadows are not imported");
         }
         if fill.is_none() {
             fill = paint_of(cx, st, props);
@@ -409,6 +418,7 @@ fn stroke_of(cx: &Cx, stroke: Option<(Rgba, f64)>) -> Option<Stroke> {
     stroke.map(|(color, width)| Stroke {
         color: cx.env.paint(color),
         width: round2((width * cx.env.scale).clamp(0.5, 200.0)),
+        dash: crate::deck::Dash::Solid,
     })
 }
 
@@ -436,6 +446,7 @@ pub(super) fn tree(
     out: &mut Vec<Node>,
 ) {
     for el in &root.kids {
+        let start = out.len();
         match el.name.as_str() {
             "sp" => shape(cx, st, el, space, out),
             "cxnSp" => connector(cx, st, el, space, out),
@@ -453,6 +464,128 @@ pub(super) fn tree(
             }
             _ => {}
         }
+        if let Some(node) = out.get_mut(start) {
+            native_effects(cx, el, node);
+        }
+        // Like the exporter’s Frame background marker, these names identify
+        // an otherwise ordinary editable shape as the preceding image's scrim.
+        if out.len() == start + 1 && start > 0 {
+            let (before, after) = out.split_at_mut(start);
+            let (image, overlay) = (&mut before[start - 1], &after[0]);
+            if matches!(
+                overlay.name.as_deref(),
+                Some("Image overlay" | "Background overlay")
+            ) && matches!(image.kind, Kind::Image { .. })
+                && (image.opacity - 1.0).abs() < f64::EPSILON
+                && image.sizing == overlay.sizing
+                && image.position == overlay.position
+                && image.rotation == overlay.rotation
+                && let Kind::Shape {
+                    fill: Some(fill), ..
+                } = &overlay.kind
+            {
+                image.overlay = Some(crate::deck::Overlay { fill: fill.clone() });
+                let _ = out.pop();
+            }
+        }
+    }
+}
+
+fn native_effects(cx: &Cx, el: &El, node: &mut Node) {
+    let Some(props) = sp_pr(el) else {
+        return;
+    };
+    if let Some(shadow) = props.path(&["effectLst", "outerShdw"])
+        && let Some(color) = cx.theme.color(shadow)
+        && matches!(
+            node.kind,
+            Kind::Frame { .. } | Kind::Shape { .. } | Kind::Image { .. }
+        )
+    {
+        let distance = shadow.num("dist").unwrap_or(0.0) * cx.env.scale;
+        let direction = (shadow.num("dir").unwrap_or(0.0) / 60_000.0).to_radians();
+        let width = match node.sizing.w {
+            crate::deck::Dim::Fixed(width) => width,
+            _ => 0.0,
+        };
+        node.shadow = Some(crate::deck::Shadow::Custom(crate::deck::ShadowSpec {
+            x: round2((distance * direction.cos()).clamp(-2000.0, 2000.0)),
+            y: round2((distance * direction.sin()).clamp(-2000.0, 2000.0)),
+            blur: round2((shadow.num("blurRad").unwrap_or(0.0) * cx.env.scale).clamp(0.0, 200.0)),
+            spread: round2(
+                ((shadow.num("sx").unwrap_or(100_000.0) / 100_000.0 - 1.0) * width / 2.0)
+                    .clamp(-200.0, 200.0),
+            ),
+            color: crate::deck::Color::Solid(cx.env.paint(color)),
+        }));
+    }
+    let stroke = match &mut node.kind {
+        Kind::Shape { stroke, .. } | Kind::Frame { stroke, .. } => stroke.as_mut(),
+        _ => None,
+    };
+    if let Some(stroke) = stroke {
+        stroke.dash = match props
+            .path(&["ln", "prstDash"])
+            .and_then(|dash| dash.attr("val"))
+        {
+            Some("dash" | "lgDash" | "sysDash") => crate::deck::Dash::Dash,
+            Some("dot" | "sysDot") => crate::deck::Dash::Dot,
+            _ => crate::deck::Dash::Solid,
+        };
+    }
+    if let Some(gradient) = props
+        .kid("gradFill")
+        .filter(|gradient| gradient.kid("lin").is_some())
+        && let Some(paint) = gradient_fill(cx, gradient)
+    {
+        match &mut node.kind {
+            Kind::Shape { fill, .. } => *fill = Some(paint),
+            Kind::Frame { fill, children, .. } => {
+                if fill.is_none()
+                    && let Some(Kind::Shape {
+                        fill: child_fill, ..
+                    }) = children.first_mut().map(|child| &mut child.kind)
+                {
+                    *child_fill = Some(paint);
+                } else {
+                    *fill = Some(paint);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(super) fn gradient_fill(cx: &Cx, gradient: &El) -> Option<crate::deck::Fill> {
+    let stops = gradient
+        .kid("gsLst")?
+        .kids_named("gs")
+        .map(|stop| {
+            Some((
+                stop.num("pos")? / 100_000.0,
+                crate::deck::Color::Solid(cx.env.paint(cx.theme.color(stop)?)),
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if !(2..=8).contains(&stops.len())
+        || !stops.iter().all(|(offset, _)| (0.0..=1.0).contains(offset))
+        || !stops.windows(2).all(|pair| pair[0].0 <= pair[1].0)
+    {
+        return None;
+    }
+    if let Some(linear) = gradient.kid("lin") {
+        Some(crate::deck::Fill::Linear {
+            linear: crate::deck::effects::Linear {
+                angle: (linear.num("ang").unwrap_or(0.0) / 60_000.0 + 90.0).rem_euclid(360.0),
+                stops,
+            },
+        })
+    } else if gradient.kid("path").and_then(|path| path.attr("path")) == Some("circle") {
+        Some(crate::deck::Fill::Radial {
+            radial: crate::deck::effects::Radial { stops },
+        })
+    } else {
+        None
     }
 }
 
@@ -703,7 +836,7 @@ fn glow(cx: &Cx, st: &mut State, stops: &[(f64, Rgba)], w: f64, h: f64) -> Vec<N
             st,
             Kind::Shape {
                 shape: Shape::Ellipse,
-                fill: Some(cx.env.paint(color)),
+                fill: Some(cx.env.paint(color).into()),
                 stroke: None,
                 radius: 0.0,
             },
@@ -743,7 +876,8 @@ fn background(cx: &Cx, st: &mut State, geo: Geometry, look: &Look, rect: Rect) -
             shape,
             fill: Some(
                 look.fill
-                    .map_or_else(|| "#00000000".to_string(), |c| cx.env.paint(c)),
+                    .map_or_else(|| "#00000000".to_string(), |c| cx.env.paint(c))
+                    .into(),
             ),
             stroke: stroke_of(cx, look.stroke),
             radius: round2((radius * own.w.min(own.h)).max(0.0)),
@@ -991,6 +1125,7 @@ fn line(
             stroke: Some(Stroke {
                 color: cx.env.paint(color),
                 width: width_px,
+                dash: crate::deck::Dash::Solid,
             }),
             radius: 0.0,
         },
@@ -1180,6 +1315,25 @@ fn image_node(st: &mut State, src: String, name: Option<String>, rect: Rect, rot
     )
 }
 
+fn picture_geometry(pic: &El, node: &mut Node, rect: Rect) {
+    if let Some(geom) = sp_pr(pic).and_then(|props| props.kid("prstGeom")) {
+        match geom.attr("prst") {
+            Some("ellipse") => node.mask = Some(crate::deck::Mask::Circle),
+            Some("roundRect") => {
+                let fraction = geom
+                    .path(&["avLst", "gd"])
+                    .and_then(|gd| gd.attr("fmla"))
+                    .and_then(|formula| formula.strip_prefix("val "))
+                    .and_then(|number| number.parse::<f64>().ok())
+                    .unwrap_or(16_667.0)
+                    / 100_000.0;
+                node.image_radius = Some(round2(fraction.clamp(0.0, 0.5) * rect.w.min(rect.h)));
+            }
+            _ => {}
+        }
+    }
+}
+
 fn picture(cx: &Cx, st: &mut State, pic: &El, space: &Space, out: &mut Vec<Node>) {
     if hidden(pic) {
         return;
@@ -1205,7 +1359,7 @@ fn picture(cx: &Cx, st: &mut State, pic: &El, space: &Space, out: &mut Vec<Node>
     if sp_pr(pic)
         .and_then(|p| p.kid("prstGeom"))
         .and_then(|g| g.attr("prst"))
-        .is_some_and(|g| g != "rect")
+        .is_some_and(|g| !matches!(g, "rect" | "roundRect" | "ellipse"))
     {
         st.warn
             .tally("Pictures cropped to a shape are drawn as rectangles");
@@ -1230,6 +1384,32 @@ fn picture(cx: &Cx, st: &mut State, pic: &El, space: &Space, out: &mut Vec<Node>
         },
     };
     let mut node = image_node(st, src, name_of(pic), rect, xf.rot);
+    picture_geometry(pic, &mut node, rect);
+    if let Some(inset) = pic.path(&["blipFill", "stretch", "fillRect"]) {
+        let (l, r, t, b) = (
+            inset.num("l").unwrap_or(0.0),
+            inset.num("r").unwrap_or(0.0),
+            inset.num("t").unwrap_or(0.0),
+            inset.num("b").unwrap_or(0.0),
+        );
+        if l + r > 0.0 || t + b > 0.0 {
+            if let Kind::Image { fit, .. } = &mut node.kind {
+                *fit = crate::deck::Fit::Contain;
+            }
+            node.focus = Some(crate::deck::Focus {
+                x: if l + r > 0.0 {
+                    (l / (l + r)).clamp(0.0, 1.0)
+                } else {
+                    0.5
+                },
+                y: if t + b > 0.0 {
+                    (t / (t + b)).clamp(0.0, 1.0)
+                } else {
+                    0.5
+                },
+            });
+        }
+    }
     if missing {
         node.name = Some("Picture (not imported)".into());
     }
@@ -1291,7 +1471,7 @@ fn group(cx: &Cx, st: &mut State, el: &El, space: &Space, depth: usize, out: &mu
     {
         let refs = style_refs(cx, first);
         let looked = look(cx, st, &[first], &refs);
-        fill = looked.fill.map(|c| cx.env.paint(c));
+        fill = looked.fill.map(|c| cx.env.paint(c).into());
         stroke = stroke_of(cx, looked.stroke);
         if let Geometry::Rect { radius: f, .. } = geometry(st, &[first], (xf.w, xf.h)) {
             radius = round2(f * rect.w.min(rect.h));
@@ -1649,7 +1829,8 @@ fn smartart_shapes(cx: &Cx, st: &mut State, root: &El, space: &Space, out: &mut 
                     fill: Some(
                         looked
                             .fill
-                            .map_or_else(|| "#00000000".to_string(), |c| cx.env.paint(c)),
+                            .map_or_else(|| "#00000000".to_string(), |c| cx.env.paint(c))
+                            .into(),
                     ),
                     stroke: stroke_of(cx, looked.stroke),
                     radius,

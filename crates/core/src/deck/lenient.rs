@@ -23,6 +23,9 @@ const NUMBER_KEYS: &[&str] = &[
     "radius",
     "opacity",
     "rotation",
+    "angle",
+    "blur",
+    "spread",
     "x",
     "y",
     "w",
@@ -206,6 +209,11 @@ impl Context {
 
     /// A slide, node or partial node (`fields` of an update), recursively.
     fn node(&mut self, value: &mut Value, id: Option<&str>) {
+        let before = value.clone();
+        super::effects::normalize(value);
+        if *value != before {
+            self.note("gradient [a,b] → linear 180°".into());
+        }
         let Some(map) = value.as_object_mut() else {
             return;
         };

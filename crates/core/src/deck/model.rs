@@ -19,6 +19,8 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
+use super::effects::{Background, Dash, Fill, Focus, Mask, Overlay, Shadow, ShadowSpec};
+
 /// Default slide width in px.
 pub const SLIDE_WIDTH: f64 = 1920.0;
 /// Default slide height in px.
@@ -51,7 +53,7 @@ fn is_false(v: &bool) -> bool {
 fn is_one(v: &f64) -> bool {
     (*v - 1.0).abs() < f64::EPSILON
 }
-fn one() -> f64 {
+pub(super) fn one() -> f64 {
     1.0
 }
 fn body() -> String {
@@ -442,6 +444,8 @@ pub struct Series {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Stroke {
+    #[serde(default, skip_serializing_if = "Dash::is_solid")]
+    pub dash: Dash,
     pub color: String,
     #[serde(serialize_with = "num")]
     pub width: f64,
@@ -648,7 +652,7 @@ pub enum Kind {
         #[serde(default)]
         layout: AutoLayout,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        fill: Option<String>,
+        fill: Option<Fill>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke: Option<Stroke>,
         #[serde(default, skip_serializing_if = "is_zero", serialize_with = "num")]
@@ -676,7 +680,7 @@ pub enum Kind {
         #[serde(default)]
         shape: Shape,
         #[serde(default = "accent_opt", skip_serializing_if = "Option::is_none")]
-        fill: Option<String>,
+        fill: Option<Fill>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke: Option<Stroke>,
         #[serde(default, skip_serializing_if = "is_zero", serialize_with = "num")]
@@ -705,8 +709,8 @@ pub enum Kind {
     },
 }
 
-fn accent_opt() -> Option<String> {
-    Some(accent())
+fn accent_opt() -> Option<Fill> {
+    Some(accent().into())
 }
 
 impl Kind {
@@ -734,7 +738,7 @@ pub struct Placeholder {
 }
 
 /// One element of a slide's tree.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Node {
     #[serde(default)]
     pub id: String,
@@ -768,6 +772,21 @@ pub struct Node {
     /// Entry, emphasis and exit builds; played in present mode only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<Animation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<Shadow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<Focus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<Mask>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<Overlay>,
+    /// Image radius; frame and shape radii remain in their kind payload.
+    #[serde(
+        rename = "radius",
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "num_opt"
+    )]
+    pub image_radius: Option<f64>,
     #[serde(flatten)]
     pub kind: Kind,
 }
@@ -793,6 +812,11 @@ impl Node {
             hidden: false,
             locked: false,
             animation: None,
+            shadow: None,
+            focus: None,
+            mask: None,
+            overlay: None,
+            image_radius: None,
             kind,
         }
     }
@@ -851,7 +875,9 @@ pub struct Slide {
     pub name: Option<String>,
     /// Background: a theme role or hex color; the theme's `bg` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fill: Option<String>,
+    pub fill: Option<Fill>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<Background>,
     #[serde(default)]
     pub layout: AutoLayout,
     #[serde(default)]
@@ -890,6 +916,7 @@ impl Slide {
             source_layout: None,
             name: None,
             fill: None,
+            background: None,
             layout: AutoLayout::default(),
             children: Vec::new(),
             notes: String::new(),
@@ -967,6 +994,8 @@ pub struct Theme {
     pub text_styles: BTreeMap<String, Font>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub font_files: Vec<FontFile>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shadows: BTreeMap<String, ShadowSpec>,
 }
 
 impl Default for Theme {
@@ -977,6 +1006,10 @@ impl Default for Theme {
                 ("fg", "#282923"),
                 ("accent", "#ae593e"),
                 ("muted", "#76766b"),
+                ("accent2", "#284c49"),
+                ("accent3", "#d4a25c"),
+                ("surface", "#f1ebe3"),
+                ("border", "#ded8cf"),
             ]
             .map(|(k, v)| (k.into(), v.into()))
             .into(),
@@ -990,6 +1023,7 @@ impl Default for Theme {
             size: SlideSize::default(),
             text_styles: default_text_styles(),
             font_files: Vec::new(),
+            shadows: super::effects::presets().clone(),
         }
     }
 }

@@ -493,6 +493,24 @@ impl Backend {
         }
     }
 
+    fn deck_image_sources(&self) -> impl Iterator<Item = &str> {
+        self.deck.slides.iter().flat_map(|slide| {
+            slide
+                .background
+                .iter()
+                .map(|background| background.image.as_str())
+                .chain(
+                    slide
+                        .nodes()
+                        .into_iter()
+                        .filter_map(|node| match &node.kind {
+                            Kind::Image { src, .. } => Some(src.as_str()),
+                            _ => None,
+                        }),
+                )
+        })
+    }
+
     fn asset_hashes(&self) -> BTreeMap<String, String> {
         let root = asset_root(&self.path).ok();
         let local = |src: &str| {
@@ -505,20 +523,18 @@ impl Backend {
             })
         };
         let mut images = BTreeMap::new();
-        for node in self.deck.slides.iter().flat_map(deck::Slide::nodes) {
-            if let Kind::Image { src, .. } = &node.kind {
-                if src.starts_with("https://") {
-                    let route = image_hash(src);
-                    images.insert(src.clone(), route.clone());
-                    if let Some(path) = self.fetcher.cached(src)
-                        && let Some(hash) =
-                            self.cached_hash(&path, || read_bounded(&path, 8 * 1024 * 1024).ok())
-                    {
-                        images.insert(format!("/asset/{route}"), hash);
-                    }
-                } else if let Some(hash) = local(src) {
-                    images.insert(src.clone(), hash);
+        for src in self.deck_image_sources() {
+            if src.starts_with("https://") {
+                let route = image_hash(src);
+                images.insert(src.to_owned(), route.clone());
+                if let Some(path) = self.fetcher.cached(src)
+                    && let Some(hash) =
+                        self.cached_hash(&path, || read_bounded(&path, 8 * 1024 * 1024).ok())
+                {
+                    images.insert(format!("/asset/{route}"), hash);
                 }
+            } else if let Some(hash) = local(src) {
+                images.insert(src.to_owned(), hash);
             }
         }
         for file in &self.deck.theme.font_files {
@@ -1020,20 +1036,9 @@ impl Backend {
         let src = if self.doc.is_some() {
             self.doc_remote_source(hash)
         } else {
-            self.deck
-                .slides
-                .iter()
-                .flat_map(deck::Slide::nodes)
-                .find_map(|b| {
-                    if let Kind::Image { src, .. } = &b.kind
-                        && src.starts_with("https://")
-                        && image_hash(src) == hash
-                    {
-                        Some(src.clone())
-                    } else {
-                        None
-                    }
-                })
+            self.deck_image_sources()
+                .find(|src| src.starts_with("https://") && image_hash(src) == hash)
+                .map(str::to_owned)
         }
         .context("unknown remote image")?;
         // Reject an assets symlink changed since the document was opened.
@@ -1318,6 +1323,8 @@ fn embedded(path: &str) -> Option<(&'static str, &'static str)> {
 
 #[cfg(test)]
 mod animation_tests;
+#[cfg(test)]
+mod background_tests;
 #[cfg(test)]
 mod doc_tests;
 #[cfg(test)]

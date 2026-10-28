@@ -24,7 +24,7 @@ export function panelController(api) {
   const paintNodes = () => nodes().filter(n => [...TEXTY,'shape','frame'].includes(n.kind));
   const resolved = node => resolveFont(api.state.deck.theme, node.style || (node.kind === 'code' ? 'code' : 'body'), node.font);
   const textFont = font => api.updateMany(api.slide().id, textNodes().map(n => ({ id:n.id, fields:{ font } })));
-  const currentColor = node => TEXTY.includes(node.kind) ? resolved(node).color : node.fill || 'fg';
+  const currentColor = node => TEXTY.includes(node.kind) ? resolved(node).color : node.fill?.linear?.stops?.[0]?.[1] || node.fill?.radial?.stops?.[0]?.[1] || node.fill || 'fg';
   const bold = () => textFont({ weight:textNodes().every(n => resolved(n).weight >= 700) ? 400 : 700 });
   const italic = () => textFont({ italic:!textNodes().every(n => resolved(n).italic) });
   const order = delta => nodes().forEach(n => reorder(n.id, delta));
@@ -338,9 +338,19 @@ export function panelController(api) {
   }
   function paint(container, label, values, change) {
     const valid = value => Object.hasOwn(api.state.deck.theme.colors, value) || /^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i.test(value);
-    const row = field(label, values, value => { if (valid(value)) change(value); }); row.classList.add('paint-field'); row.lastChild.setAttribute('list', 'paint-roles');
-    const swatch = element('input', 'paint-swatch'); swatch.type = 'color'; swatch.value = color(values[0] || 'fg', api.state.deck.theme); swatch.setAttribute('aria-label', `Custom ${label.toLowerCase()}`); swatch.title = `Custom ${label.toLowerCase()}`; swatch.onchange = () => change(swatch.value);
+    const row = field(label, values.map(value => value && typeof value === 'object' ? value.color : value), value => { if (valid(value)) change(value); }); row.classList.add('paint-field'); row.lastChild.setAttribute('list', 'paint-roles');
+    const swatch = element('input', 'paint-swatch'); swatch.type = 'color'; swatch.value = color(values[0]?.color || values[0] || 'fg', api.state.deck.theme); swatch.setAttribute('aria-label', `Custom ${label.toLowerCase()}`); swatch.title = `Custom ${label.toLowerCase()}`; swatch.onchange = () => change(swatch.value);
     row.insertBefore(swatch, row.lastChild); container.append(row); return row;
+  }
+  function fillFields(container, fill, change, label = 'Fill') {
+    const gradient = fill?.linear, solid = typeof fill === 'string' ? fill : fill?.color || 'bg';
+    container.append(field('Fill type', gradient ? 'linear' : 'solid', type => change(type === 'solid' ? gradient?.stops[0][1] || solid : { linear:{ angle:180, stops:[[0, solid],[1, 'accent']] } }), [['solid','Solid'],['linear','Gradient']]));
+    if (gradient) {
+      const update = (index, value) => change({ linear:{ ...gradient, stops:gradient.stops.map((stop, i) => i === index ? [stop[0], value] : stop) } });
+      paint(container, 'First stop', [gradient.stops[0][1]], value => update(0, value));
+      paint(container, 'Last stop', [gradient.stops.at(-1)[1]], value => update(gradient.stops.length - 1, value));
+      container.append(numeric('Gradient angle', gradient.angle, angle => change({ linear:{ ...gradient, angle } }), '°'));
+    } else paint(container, label, [solid], change);
   }
   function render(preserveLayers = false) {
     fonts.close(); panel.replaceChildren(); renderToolbar();
@@ -371,15 +381,33 @@ export function panelController(api) {
       const text = selected.find(n => TEXTY.includes(n.kind));
       if (text) fonts.render(section('Typography'), text);
       const appearance = section('Appearance'), opacity = numeric('Opacity', selected.map(n => n.opacity ?? 1), n => patch({ opacity:Math.max(0, Math.min(1, n)) }), icon('opacity'));
-      appearance.append(pair(opacity, selected.every(n => ['shape','frame'].includes(n.kind)) ? numeric('Corner radius', selected.map(n => n.radius || 0), n => patch({ radius:Math.max(0, n) }), icon('radius')) : element('span')));
-      paint(appearance, text ? 'Text color' : 'Fill', selected.map(n => TEXTY.includes(n.kind) ? resolveFont(api.state.deck.theme, n.style, n.font).color : n.fill || 'fg'), value => api.updateMany(slide.id, selected.map(n => ({ id:n.id, fields:TEXTY.includes(n.kind) ? { font:{ color:value } } : { fill:value } }))));
+      appearance.append(pair(opacity, selected.every(n => ['shape','frame','image'].includes(n.kind)) ? numeric('Corner radius', selected.map(n => n.radius || 0), n => patch({ radius:Math.max(0, n) }), icon('radius')) : element('span')));
+      if (text) paint(appearance, 'Text color', selected.filter(n => TEXTY.includes(n.kind)).map(n => resolveFont(api.state.deck.theme, n.style, n.font).color), value => textFont({ color:value }));
+      else if (selected.every(n => ['shape','frame'].includes(n.kind))) fillFields(appearance, node.fill, fill => patch({ fill }));
+      if (selected.every(n => ['shape','frame','image'].includes(n.kind))) appearance.append(field('Shadow', typeof node.shadow === 'string' ? node.shadow : 'none', shadow => patch({ shadow:shadow === 'none' ? null : shadow }), ['none',...new Set(['sm','md','lg',...Object.keys(api.state.deck.theme.shadows || {})])]));
       if (selected.every(n => ['shape','frame'].includes(n.kind))) {
         const row = paint(appearance, 'Stroke', selected.map(n => n.stroke?.color || 'muted'), value => api.updateMany(slide.id, selected.map(n => ({ id:n.id, fields:{ stroke:{ color:value, width:n.stroke?.width || 4 } } }))));
         row.append(toggle('check', 'Stroke enabled', selected.every(n => n.stroke), enabled => patch({ stroke:enabled ? { color:'muted', width:4 } : null })));
       }
-      if (node.kind === 'image') appearance.append(field('Image fit', node.fit, fit => patch({ fit }), ['contain','cover']));
+      if (node.kind === 'image') {
+        appearance.append(field('Image fit', node.fit, fit => patch({ fit }), ['contain','cover']));
+        appearance.append(field('Image mask', node.mask || 'none', mask => patch({ mask:mask === 'none' ? null : mask }), ['none','circle']));
+        appearance.append(pair(numeric('Focus X', node.focus?.x ?? .5, x => patch({ focus:{ x:Math.max(0, Math.min(1, x)), y:node.focus?.y ?? .5 } })), numeric('Focus Y', node.focus?.y ?? .5, y => patch({ focus:{ x:node.focus?.x ?? .5, y:Math.max(0, Math.min(1, y)) } }))));
+        const scrim = field('Overlay enabled', node.overlay ? 'on' : 'off', value => patch({ overlay:value === 'on' ? { fill:{ color:'fg', opacity:.4 } } : null }), ['off','on']); appearance.append(scrim);
+        if (node.overlay) {
+          const fill = node.overlay.fill;
+          paint(appearance, 'Overlay color', [typeof fill === 'string' ? fill : fill.color || 'fg'], value => patch({ overlay:{ fill:{ color:value, opacity:fill.opacity ?? .4 } } }));
+          appearance.append(numeric('Overlay opacity', fill.opacity ?? 1, opacity => patch({ overlay:{ fill:{ color:fill.color || fill, opacity:Math.max(0, Math.min(1, opacity)) } } })));
+        }
+      }
     } else {
-      paint(section('Appearance'), 'Background', [slide.fill || 'bg'], fill => api.apply(() => [{ op:'update_slide', id:slide.id, fields:{ fill } }]));
+      const appearance = section('Appearance'), update = fields => api.apply(() => [{ op:'update_slide', id:slide.id, fields }]);
+      fillFields(appearance, slide.fill || 'bg', fill => update({ fill }), 'Background');
+      appearance.append(field('Background image', slide.background?.image || '', image => update({ background:image ? { image, fit:slide.background?.fit || 'cover', overlay:slide.background?.overlay || null } : null })));
+      if (slide.background) {
+        appearance.append(field('Background fit', slide.background.fit, fit => update({ background:{ fit } }), ['cover','contain']));
+        appearance.append(field('Background scrim', slide.background.overlay ? 'on' : 'off', value => update({ background:{ overlay:value === 'on' ? { fill:{ color:'fg', opacity:.5 } } : null } }), ['off','on']));
+      }
       panel.append(element('p', 'hint', 'Select a layer to make it yours. Double-click text to edit.'));
     }
     const themeSection = section('Theme', [], Boolean(node)), presets = element('div', 'quick-actions');

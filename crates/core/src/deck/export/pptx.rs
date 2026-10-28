@@ -18,6 +18,7 @@ use super::super::{
 };
 use anyhow::Result;
 
+mod effects;
 mod package;
 mod timing;
 
@@ -26,6 +27,28 @@ const WIDTH: f64 = 12_192_000.0;
 /// Points across the slide (12700 EMU per point): 960 pt, so 1920 px text
 /// is exported at half its pixel size.
 const WIDTH_PT: f64 = WIDTH / 12_700.0;
+
+/// Portable families available in Google Slides; other families (including
+/// Google Fonts) retain their author-selected name.
+pub(crate) fn google_font(family: &str) -> &str {
+    let first = family
+        .split(',')
+        .next()
+        .unwrap_or(family)
+        .trim()
+        .trim_matches(['\'', '"']);
+    match first.to_ascii_lowercase().as_str() {
+        "system-ui" | "-apple-system" | "sf pro" | "sf pro display" | "sf pro text"
+        | "helvetica neue" | "segoe ui" | "calibri" | "aptos" | "sans-serif" => "Inter",
+        "menlo" | "sf mono" | "sfmono-regular" | "ui-monospace" | "monospace" | "consolas" => {
+            "JetBrains Mono"
+        }
+        "ui-serif" | "serif" | "cambria" | "new york" => "Georgia",
+        "helvetica" => "Arial",
+        "times" => "Times New Roman",
+        _ => first,
+    }
+}
 
 fn integer(value: f64) -> i64 {
     value.round() as i64
@@ -61,7 +84,14 @@ fn line(theme: &Theme, stroke: Option<&Stroke>, scale: f64, opacity: f64, arrow:
                 "<a:ln w=\"{}\">{}{}{}</a:ln>",
                 integer(s.width * scale),
                 fill(theme, Some(&s.color), opacity),
-                "<a:prstDash val=\"solid\"/>",
+                format_args!(
+                    "<a:prstDash val=\"{}\"/>",
+                    match s.dash {
+                        super::super::Dash::Solid => "solid",
+                        super::super::Dash::Dash => "dash",
+                        super::super::Dash::Dot => "dot",
+                    }
+                ),
                 if arrow {
                     "<a:tailEnd type=\"triangle\" w=\"med\" len=\"med\"/>"
                 } else {
@@ -108,21 +138,33 @@ fn geometry(shape: Shape, radius: f64, rect: Rect) -> String {
     format!("<a:prstGeom prst=\"{kind}\"><a:avLst>{adj}</a:avLst></a:prstGeom>")
 }
 
-fn nv(id: u32, name: &str, text: bool, title: bool) -> String {
+fn nv(
+    id: u32,
+    name: &str,
+    text: bool,
+    placeholder: Option<&super::super::model::Placeholder>,
+) -> String {
     format!(
-        "<p:nvSpPr><p:cNvPr id=\"{id}\" name=\"{}\"/><p:cNvSpPr{} /><p:nvPr>{}</p:nvPr></p:nvSpPr>",
+        "<p:nvSpPr><p:cNvPr id=\"{id}\" name=\"{}\"/><p:cNvSpPr{} />{}</p:nvSpPr>",
         escape(name),
-        if text && !title { " txBox=\"1\"" } else { "" },
-        if title { "<p:ph type=\"title\"/>" } else { "" }
+        if text && placeholder.is_none() {
+            " txBox=\"1\""
+        } else {
+            ""
+        },
+        placeholder.map_or_else(
+            || "<p:nvPr/>".into(),
+            crate::design::template::placeholder_xml
+        )
     )
 }
 
 fn run(theme: &Theme, font: &ResolvedFont, text: &str, mark: Mark, opacity: f64) -> String {
-    let family = escape(theme.family(if mark == Mark::Code {
+    let family = escape(google_font(theme.family(if mark == Mark::Code {
         "mono"
     } else {
         &font.family
-    }));
+    })));
     let bold = font.weight >= 600 || mark == Mark::Bold;
     let italic = font.italic || mark == Mark::Italic;
     let pt = font.size * WIDTH_PT / theme.size.w;
@@ -144,7 +186,8 @@ fn paragraphs(
     markdown: bool,
     opacity: f64,
 ) -> String {
-    source.split('\n').fold(String::new(), |mut out, source| {
+    let final_index = source.matches('\n').count();
+    source.split('\n').enumerate().fold(String::new(), |mut out, (index, source)| {
         let mut font = font.clone();
         let row = if markdown { classify(source) } else { Row::Paragraph(source) };
         let (text, bullet, spacing) = match row {
@@ -162,7 +205,12 @@ fn paragraphs(
         let align = match font.align { Align::Left => "l", Align::Center => "ctr", Align::Right => "r" };
         let indent = if matches!(row, Row::Bullet(_) | Row::Numbered(_)) { format!(" marL=\"{}\" indent=\"{}\"", integer(font.size * LAYOUT.list_indent * WIDTH / theme.size.w), -integer(font.size * 0.6 * WIDTH / theme.size.w)) } else { String::new() };
         let runs = if markdown { inline(text).iter().map(|r| run(theme, &font, &r.text, r.mark, opacity)).collect::<String>() } else { run(theme, &font, text, Mark::Plain, opacity) };
-        let _ = write!(out, "<a:p><a:pPr algn=\"{align}\"{indent}><a:lnSpc><a:spcPct val=\"{}\"/></a:lnSpc><a:spcAft><a:spcPts val=\"{}\"/></a:spcAft>{bullet}</a:pPr>{runs}<a:endParaRPr lang=\"en-US\" sz=\"{}\"/></a:p>", integer(font.line_height * 100_000.0), integer(font.size * WIDTH_PT / theme.size.w * spacing * 100.0), integer(font.size * WIDTH_PT / theme.size.w * 100.0));
+        let list = matches!(row, Row::Bullet(_) | Row::Numbered(_));
+        let pt = font.size * WIDTH_PT / theme.size.w * 100.0;
+        let before = if list { LAYOUT.list_item_padding } else { 0.0 };
+        let after = if index == final_index && !list { 0.0 } else { spacing };
+        let bullet_font = if list { format!("<a:buFont typeface=\"{}\"/>", escape(google_font(theme.family(&font.family)))) } else { String::new() };
+        let _ = write!(out, "<a:p><a:pPr algn=\"{align}\"{indent}><a:lnSpc><a:spcPts val=\"{}\"/></a:lnSpc><a:spcBef><a:spcPts val=\"{}\"/></a:spcBef><a:spcAft><a:spcPts val=\"{}\"/></a:spcAft>{bullet_font}{bullet}</a:pPr>{runs}<a:endParaRPr lang=\"en-US\" sz=\"{}\"/></a:p>", integer(font.line_height * pt), integer(before * pt), integer(after * pt), integer(pt));
         out
     })
 }
@@ -206,6 +254,10 @@ impl Painter<'_> {
         source: &str,
         code: bool,
     ) -> String {
+        let title_placeholder = super::super::model::Placeholder {
+            kind: "title".into(),
+            idx: String::new(),
+        };
         let background = if code {
             fill(
                 &self.deck.theme,
@@ -221,7 +273,11 @@ impl Painter<'_> {
                 id,
                 node.name.as_deref().unwrap_or(&node.id),
                 true,
-                self.title.as_deref() == Some(&node.id)
+                node.source_placeholder
+                    .as_ref()
+                    .or_else(
+                        || (self.title.as_deref() == Some(&node.id)).then_some(&title_placeholder)
+                    )
             ),
             xfrm(rect, self.scale, node.rotation, false),
             geometry(Shape::Rect, 0.0, rect),
@@ -233,47 +289,129 @@ impl Painter<'_> {
         &mut self,
         node: &Node,
         id: u32,
-        mut rect: Rect,
+        rect: Rect,
         png: Vec<u8>,
         fit: Fit,
     ) -> Result<String> {
         let image = image::load_from_memory(&png)?;
         let ratio = f64::from(image.width()) / f64::from(image.height());
         let box_ratio = rect.w / rect.h.max(1.0);
-        let mut crop = String::new();
-        if fit == Fit::Contain {
+        let focus = node.focus.unwrap_or_default();
+        let crop = if fit == Fit::Cover {
+            effects::crop(ratio, box_ratio, focus)
+        } else {
+            String::new()
+        };
+        let (x, y) = if fit == Fit::Contain {
             if ratio > box_ratio {
-                let h = rect.w / ratio;
-                rect.y += (rect.h - h) / 2.0;
-                rect.h = h;
+                (0.0, (1.0 - box_ratio / ratio) * 100_000.0)
             } else {
-                let w = rect.h * ratio;
-                rect.x += (rect.w - w) / 2.0;
-                rect.w = w;
+                ((1.0 - ratio / box_ratio) * 100_000.0, 0.0)
             }
         } else {
-            let (x, y) = if ratio > box_ratio {
-                ((1.0 - box_ratio / ratio) * 50_000.0, 0.0)
-            } else {
-                (0.0, (1.0 - ratio / box_ratio) * 50_000.0)
-            };
-            crop = format!(
-                "<a:srcRect l=\"{}\" r=\"{}\" t=\"{}\" b=\"{}\"/>",
-                integer(x),
-                integer(x),
-                integer(y),
-                integer(y)
-            );
-        }
+            (0.0, 0.0)
+        };
+        let inset = format!(
+            "<a:fillRect l=\"{}\" r=\"{}\" t=\"{}\" b=\"{}\"/>",
+            integer(x * focus.x),
+            integer(x * (1.0 - focus.x)),
+            integer(y * focus.y),
+            integer(y * (1.0 - focus.y))
+        );
         self.media.push(png);
         let relationship = self.media.len() + 1;
-        Ok(format!(
-            "<p:pic><p:nvPicPr><p:cNvPr id=\"{id}\" name=\"{}\"/><p:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rId{relationship}\"><a:alphaModFix amt=\"{}\"/></a:blip>{crop}<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>{}{}</p:spPr></p:pic>",
+        let shape = if node.mask == Some(super::super::Mask::Circle) {
+            if (rect.w - rect.h).abs() > 0.01 {
+                self.warnings.push(format!("{}: a non-square circle mask becomes an ellipse in PowerPoint; use a square image box for a circle.", node.id));
+            }
+            Shape::Ellipse
+        } else {
+            Shape::Rect
+        };
+        let geom = geometry(shape, node.image_radius.unwrap_or(0.0), rect);
+        let shadow = effects::shadow(node, &self.deck.theme, rect, self.scale);
+        let mut picture = format!(
+            "<p:pic><p:nvPicPr><p:cNvPr id=\"{id}\" name=\"{}\"/><p:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rId{relationship}\"><a:alphaModFix amt=\"{}\"/></a:blip>{crop}<a:stretch>{inset}</a:stretch></p:blipFill><p:spPr>{}{geom}{shadow}</p:spPr></p:pic>",
             escape(&node.id),
             integer(node.opacity * 100_000.0),
-            xfrm(rect, self.scale, node.rotation, false),
-            geometry(Shape::Rect, 0.0, rect)
-        ))
+            xfrm(rect, self.scale, node.rotation, false)
+        );
+        if let Some(overlay) = &node.overlay {
+            let overlay_id = self.id();
+            let _ = write!(
+                picture,
+                "<p:sp>{}<p:spPr>{}{geom}{}<a:ln><a:noFill/></a:ln></p:spPr></p:sp>",
+                nv(overlay_id, "Image overlay", false, None),
+                xfrm(rect, self.scale, node.rotation, false),
+                effects::fill(&self.deck.theme, Some(&overlay.fill), node.opacity)
+            );
+        }
+        Ok(picture)
+    }
+
+    fn background(&mut self, slide: &Slide) -> Result<(String, String)> {
+        let default_fill = super::super::Fill::from("bg");
+        let fallback = effects::fill(
+            &self.deck.theme,
+            Some(slide.fill.as_ref().unwrap_or(&default_fill)),
+            1.0,
+        );
+        let Some(background) = &slide.background else {
+            return Ok((fallback, String::new()));
+        };
+        let image = super::super::layout::image_path(&background.image, self.assets)
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| image::load_from_memory(&bytes).ok());
+        let Some(image) = image else {
+            self.warnings.push(format!(
+                "{}: background image unavailable ({})",
+                slide.id, background.image
+            ));
+            return Ok((fallback, String::new()));
+        };
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png)?;
+        self.media.push(png.into_inner());
+        let relationship = self.media.len() + 1;
+        let ratio = f64::from(image.width()) / f64::from(image.height());
+        let size = self.deck.theme.size;
+        let crop = if background.fit == Fit::Cover {
+            effects::crop(ratio, size.w / size.h, super::super::Focus::default())
+        } else {
+            String::new()
+        };
+        let (x, y) = if background.fit == Fit::Contain {
+            if ratio > size.w / size.h {
+                (0, integer((1.0 - size.w / ratio / size.h) * 50_000.0))
+            } else {
+                (integer((1.0 - size.h * ratio / size.w) * 50_000.0), 0)
+            }
+        } else {
+            (0, 0)
+        };
+        let fill = format!(
+            "<a:blipFill><a:blip r:embed=\"rId{relationship}\"/>{crop}<a:stretch><a:fillRect l=\"{x}\" r=\"{x}\" t=\"{y}\" b=\"{y}\"/></a:stretch></a:blipFill>"
+        );
+        let overlay = background
+            .overlay
+            .as_ref()
+            .map_or_else(String::new, |overlay| {
+                let id = self.id();
+                let rect = Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: size.w,
+                    h: size.h,
+                };
+                format!(
+                    "<p:sp>{}<p:spPr>{}{}{}<a:ln><a:noFill/></a:ln></p:spPr></p:sp>",
+                    nv(id, "Background overlay", false, None),
+                    xfrm(rect, self.scale, None, false),
+                    geometry(Shape::Rect, 0.0, rect),
+                    effects::fill(&self.deck.theme, Some(&overlay.fill), 1.0)
+                )
+            });
+        Ok((fill, overlay))
     }
 
     fn table(
@@ -308,6 +446,7 @@ impl Painter<'_> {
                     Some(&Stroke {
                         color: font.color.clone(),
                         width: 1.0,
+                        dash: super::super::Dash::Solid,
                     }),
                     self.scale,
                     node.opacity,
@@ -335,19 +474,32 @@ impl Painter<'_> {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn node(&mut self, node: &Node, inherited_opacity: f64) -> Result<String> {
+    fn node(
+        &mut self,
+        node: &Node,
+        inherited_opacity: f64,
+        rotations: &[(Rect, f64)],
+    ) -> Result<String> {
         if node.hidden {
             return Ok(String::new());
         }
-        let Some(rect) = self.rects.get(&node.id).copied() else {
+        let Some(original_rect) = self.rects.get(&node.id).copied() else {
             return Ok(String::new());
         };
+        let mut rect = original_rect;
+        for (parent, angle) in rotations.iter().rev() {
+            let (sin, cos) = angle.to_radians().sin_cos();
+            let (cx, cy) = (parent.x + parent.w / 2.0, parent.y + parent.h / 2.0);
+            let (dx, dy) = (rect.x + rect.w / 2.0 - cx, rect.y + rect.h / 2.0 - cy);
+            rect.x = cx + dx * cos - dy * sin - rect.w / 2.0;
+            rect.y = cy + dx * sin + dy * cos - rect.h / 2.0;
+        }
         let id = self.id();
         let (shape, paragraphs) = match &node.kind {
             Kind::Text { text, .. } | Kind::Code { source: text, .. } => {
                 (true, Some(text.split('\n').count()))
             }
-            Kind::Shape { .. } => (true, None),
+            Kind::Shape { .. } | Kind::Frame { .. } => (true, None),
             _ => (false, None),
         };
         self.ids.insert(
@@ -358,8 +510,15 @@ impl Painter<'_> {
                 paragraphs,
             },
         );
+        let mut child_rotations = rotations.to_vec();
+        if let Some(angle) = node.rotation.filter(|angle| *angle != 0.0) {
+            child_rotations.push((original_rect, angle));
+        }
         let mut node = node.clone();
         node.opacity *= inherited_opacity;
+        node.rotation = Some(
+            node.rotation.unwrap_or(0.0) + rotations.iter().map(|(_, angle)| angle).sum::<f64>(),
+        );
         let theme = &self.deck.theme;
         Ok(match &node.kind {
             Kind::Frame {
@@ -370,27 +529,30 @@ impl Painter<'_> {
                 children,
                 ..
             } => {
-                if *clip && !children.is_empty() {
+                if node.animation.is_some() && !children.is_empty() {
                     self.warnings.push(format!(
-                        "{}: PowerPoint groups do not clip children.",
+                        "{}: flattened frame builds animate its background, not its descendants.",
                         node.id
                     ));
                 }
-                let background_id = self.id();
+                if *clip && !children.is_empty() {
+                    self.warnings.push(format!(
+                        "{}: PowerPoint export does not clip flattened frame children.",
+                        node.id
+                    ));
+                }
                 let mut out = format!(
-                    "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"{id}\" name=\"{}\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr>{}</p:grpSpPr><p:sp>{}<p:spPr>{}{}{}{}</p:spPr></p:sp>",
-                    escape(&node.id),
-                    xfrm(rect, self.scale, node.rotation, true),
-                    nv(background_id, "Frame background", false, false),
-                    xfrm(rect, self.scale, None, false),
+                    "<p:sp>{}<p:spPr>{}{}{}{}{}</p:spPr></p:sp>",
+                    nv(id, node.name.as_deref().unwrap_or(&node.id), false, None),
+                    xfrm(rect, self.scale, node.rotation, false),
                     geometry(Shape::Rect, *radius, rect),
-                    fill(theme, bg.as_deref(), node.opacity),
-                    line(theme, stroke.as_ref(), self.scale, node.opacity, false)
+                    effects::fill(theme, bg.as_ref(), node.opacity),
+                    line(theme, stroke.as_ref(), self.scale, node.opacity, false),
+                    effects::shadow(&node, theme, rect, self.scale)
                 );
                 for child in children {
-                    out.push_str(&self.node(child, node.opacity)?);
+                    out.push_str(&self.node(child, node.opacity, &child_rotations)?);
                 }
-                out.push_str("</p:grpSp>");
                 out
             }
             Kind::Text { text, style, font } => self.text(
@@ -421,8 +583,12 @@ impl Painter<'_> {
                 radius,
             } => {
                 let fallback = Stroke {
-                    color: bg.clone().unwrap_or_else(|| "accent".into()),
+                    color: bg
+                        .as_ref()
+                        .and_then(|f| f.colors().first().copied())
+                        .map_or_else(|| "accent".into(), |c| c.value().to_string()),
                     width: 4.0,
+                    dash: super::super::Dash::Solid,
                 };
                 let stroke = if matches!(shape, Shape::Line | Shape::Arrow) {
                     Some(stroke.as_ref().unwrap_or(&fallback))
@@ -435,18 +601,19 @@ impl Painter<'_> {
                     rect.h = 0.0;
                 }
                 format!(
-                    "<p:sp>{}<p:spPr>{}{}{}{}</p:spPr></p:sp>",
-                    nv(id, &node.id, false, false),
+                    "<p:sp>{}<p:spPr>{}{}{}{}{}</p:spPr></p:sp>",
+                    nv(id, &node.id, false, None),
                     xfrm(rect, self.scale, node.rotation, false),
                     geometry(*shape, *radius, rect),
-                    fill(theme, bg.as_deref(), node.opacity),
+                    effects::fill(theme, bg.as_ref(), node.opacity),
                     line(
                         theme,
                         stroke,
                         self.scale,
                         node.opacity,
                         *shape == Shape::Arrow
-                    )
+                    ),
+                    effects::shadow(&node, theme, rect, self.scale)
                 )
             }
             Kind::Image { src, fit } => {
@@ -512,7 +679,8 @@ pub(super) fn with_warnings(
     }
     let mut package = package::Package::new(deck);
     for (i, slide) in deck.slides.iter().enumerate() {
-        let title = super::visible_nodes(slide).into_iter().find(|n| matches!(&n.kind, Kind::Text { text, .. } if text.lines().any(|l| matches!(classify(l), Row::Heading(..)))))
+        let title = super::visible_nodes(slide).into_iter().find(|node| node.source_placeholder.as_ref().is_some_and(|ph| matches!(ph.kind.as_str(), "title" | "ctrTitle")))
+            .or_else(|| super::visible_nodes(slide).into_iter().find(|n| matches!(&n.kind, Kind::Text { text, .. } if text.lines().any(|l| matches!(classify(l), Row::Heading(..))))))
             .or_else(|| super::visible_nodes(slide).into_iter().find(|n| matches!(&n.kind, Kind::Text { style, .. } if matches!(style.as_str(), "title" | "heading"))))
             .or_else(|| super::visible_nodes(slide).into_iter().find(|n| matches!(n.kind, Kind::Text { .. })));
         let mut painter = Painter {
@@ -526,9 +694,9 @@ pub(super) fn with_warnings(
             warnings,
             title: title.map(|n| n.id.clone()),
         };
-        let mut shapes = String::new();
+        let (background, mut shapes) = painter.background(slide)?;
         for node in &slide.children {
-            shapes.push_str(&painter.node(node, 1.0)?);
+            shapes.push_str(&painter.node(node, 1.0, &[])?);
         }
         let transition = timing::transition(slide, painter.warnings);
         let timing = timing::builds(slide, &painter.ids, painter.warnings);
@@ -541,14 +709,18 @@ pub(super) fn with_warnings(
                     .or_else(|| title.and_then(Node::text))
                     .unwrap_or(&deck.title)
             ),
-            fill(
-                &deck.theme,
-                Some(slide.fill.as_deref().unwrap_or("bg")),
-                1.0
-            ),
+            background,
             package::root_group()
         );
-        package.slide(i + 1, &xml, &slide.notes, painter.media);
+        let layout = slide
+            .source_layout
+            .as_deref()
+            .and_then(|name| name.strip_prefix("ppt/slideLayouts/slideLayout"))
+            .and_then(|name| name.strip_suffix(".xml"))
+            .and_then(|number| number.parse::<usize>().ok())
+            .filter(|index| (1..=5).contains(index))
+            .unwrap_or(if title.is_some() { 5 } else { 1 });
+        package.slide(i + 1, &xml, &slide.notes, painter.media, layout);
     }
     package.finish()
 }

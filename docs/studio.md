@@ -169,8 +169,9 @@ A slide is a **frame** of the theme's size (1920 × 1080 px) holding a tree of
 - **Container** (slide or frame): `layout {mode: none|row|column, wrap, gap,
   gap_cross, padding [t,r,b,l], main: start|center|end|space_between, cross:
   start|center|end|stretch}`, `children`. In `mode: none` every child is
-  absolute. A frame adds `fill`, `stroke {color, width}`, `radius`, `clip`; a
-  slide adds `fill`, `notes`, `name`, `transition` and `builds`.
+  absolute. A frame adds `fill`, `stroke {color, width, dash}`, `radius`, `clip`
+  and `shadow`; a slide adds `fill`, `background`, `notes`, `name`, `transition`
+  and `builds`. See *Visual effects* below.
 - **Node**: `id`, `name?`, `kind`, `sizing {w, h: px | "hug" | "fill", min_w,
   max_w, min_h, max_h}`, `position: "auto" | {x, y}` (absolute: ignore
   auto-layout), `opacity`, `rotation`, `hidden`, `locked` and an `animation` (played in
@@ -195,6 +196,44 @@ A slide is a **frame** of the theme's size (1920 × 1080 px) holding a tree of
   fills missing theme tokens and text styles; every other error names a JSON
   path (`$.slides[1].children[0].font.size`). Limits: 200 slides, 200 nodes per
   slide, frames nested 8 deep, 8 KB of text per node.
+
+### Visual effects
+
+Effects are optional v2 fields; old canonical decks retain their absent fields
+and existing self-contained palettes when loaded and saved.
+
+- **Fills** on slides, frames and shapes accept a solid color, a linear gradient
+  `{"linear":{"angle":135,"stops":[[0,"bg"],[1,"accent2"]]}}`, or a centered
+  elliptical radial gradient `{"radial":{"stops":[[0,"accent"],[1,"bg"]]}}`.
+  Angles follow CSS (0° up, clockwise); stops are ascending offsets in `[0,1]`,
+  with two to eight stops. Fill/effect colors accept roles, hex (including
+  `#RRGGBBAA`) or `{"color":"fg","opacity":0.4}`.
+- **Shadows** on frames, shapes and images accept `"sm"`, `"md"`, `"lg"` or
+  `{x,y,blur,spread,color}` in slide pixels. Blur is 0–200 and follows CSS
+  radius semantics (SVG Gaussian standard deviation = blur/2). New design
+  themes copy their `shadows` tokens; explicit design/theme tokens override
+  the built-in presets. Frame shadows affect the box, not its text.
+- **Images** keep `opacity` and add `radius`, `mask:"circle"`,
+  `focus:{x,y}` (normalized `[0,1]`, default center) and `overlay:{fill}`.
+  `fit:"cover"` crops around the focal point; `contain` positions the fitted
+  picture within the box. Scrims are clipped inside the image's rounded or
+  circle mask. Use square boxes for portable circle portraits.
+- **Slide backgrounds** use
+  `background:{image:"assets/photo.png",fit:"cover",overlay:{fill:{color:"fg",opacity:0.5}}}`.
+  They do not take layout space. Local files and HTTPS backgrounds use the
+  same vetted asset/cache routes and content hashes as image nodes; the UI
+  never fetches arbitrary remote URLs directly. Layout photo slots are
+  full-bleed image nodes so they can be filled with ordinary `add_slide` slots.
+- **Strokes** remain uniform inset borders; `dash` is `solid|dash|dot`.
+  Validation reports located errors (for example
+  `$.slides[0].children[0].shadow.blur`). Lenient tool input repairs
+  `"gradient":[a,b]` to a linear 180° fill.
+
+The properties panel exposes solid/two-stop linear fills and angles, shadow
+presets, image radius/mask/focus/scrim and the slide background image. Core SVG
+uses paint servers, filters and clip paths; studio uses CSS gradients, shadows,
+clipping and object-position. Shadow numbers have a parity test. HTML reuses the
+studio renderer, and vector PDF reuses core SVG.
 
 ### Animations
 
@@ -456,17 +495,39 @@ argv (`open -R`, `xdg-open <dir>`, `explorer /select,`), never a shell.
 
 - **PPTX** is hand-written OOXML. Every node sits at its resolved `layout_at`
   rect (auto-layout is flattened to absolute positions; 1 slide px is
-  12192000/width EMU). Frames are groups with a background shape, text is
-  editable text boxes (Markdown paragraphs, real bullets and numbering, fonts
-  by family name, not embedded), images are pictures with `srcRect` crops, shapes
+  12192000/width EMU). Frames are flattened to top-level background shapes,
+  followed by their descendants in paint order; ancestor rotations are composed
+  around the unrotated box centers and EMUs are rounded consistently. Text is
+  editable fixed text boxes (square wrapping, explicit zero insets, valign
+  anchor and no expanding autofit). Line/paragraph spacing uses exact points,
+  letter spacing uses hundredths of a point, and every run sets size, bold,
+  italic and Latin/EA/CS typefaces. Fonts are referenced, not embedded. Images
+  are pictures with `srcRect` cover crops or contain insets, shapes
   are preset geometry, tables are native tables, code is a mono text box and
-  charts are 2x PNG pictures. Slide transitions use `p:transition` inside
+  charts are 2x PNG pictures. Design title/body slots carry real placeholders
+  matching the five package layouts: Blank, Title, Title and Content, Section
+  Header and Title Only. The package includes presentation/view properties,
+  table styles, master text styles and a full color/font/format theme.
+  Gradients use native `gradFill`, shadows `outerShdw`, rounded pictures
+  `roundRect`, circle pictures `ellipse`, and scrims separate translucent
+  shapes. Photo backgrounds use `p:bg` image fills. Slide transitions use `p:transition` inside
   `mc:AlternateContent` for duration; `smart` becomes Morph with a fade
   fallback. Builds become main-sequence timing (entrance, emphasis, exit; click,
   with and after previous; fly, float, zoom, wipe, fade, appear, pulse);
   item/line builds target paragraphs. Blur and typewriter become fade/appear,
   shake becomes a pulse, word builds animate the whole box, easing curves are not
-  exported and group `clip` is not honoured.
+  exported and frame `clip` is not honoured. A flattened frame build animates
+  its background rather than its descendants; a non-square circle becomes an
+  ellipse. These approximations are reported. Numeric font weights map to
+  normal/bold, and translucent image/scrim or spread-shadow compositing can
+  differ between Office and CSS.
+
+  Portable font mapping: system-ui/Apple system, SF Pro variants, Helvetica
+  Neue, Segoe UI, Calibri and Aptos → Inter; Menlo/SF Mono/Consolas/generic mono
+  → JetBrains Mono; generic serif/Cambria/New York → Georgia; Helvetica → Arial;
+  Times → Times New Roman. Georgia, Inter, JetBrains Mono and other named
+  families (including Google Fonts) are retained. Google Slides availability
+  still needs application-level inspection of the sample exports.
 - **PDF** is vector: each slide's SVG goes through `krilla-svg` (one page per
   slide at 960 x 540 pt), with fonts embedded and subset as real, selectable
   text, and deterministic bytes. Docs use the same path (`doc::export::pdf`).
@@ -506,10 +567,10 @@ copied into `decks/assets/` by content (PNG, JPEG, WebP, at most 16 MB each).
 | text box | one `text` node: the dominant run sets the font; bold and italic runs, links, bullets (`- `), numbering (`1. `) and levels (two spaces each) become Markdown; `a:br` is a line break; autofit `fontScale` applies; a line is 1.2 x the size at 100 % spacing |
 | shape with fill or line and text | a frame (fixed size, rotation) holding a `shape` and a `text` node |
 | shapes | `rect`, `roundRect` (radius), `ellipse`, lines, connectors and arrows (any angle: a line of the right length, rotated), custom paths that are rectangles, rounded rectangles or ellipses (their bounding box inside the shape); fill, line width and color, alpha, rotation; other presets are drawn as rectangles |
-| picture | `image` node, `fit: cover`; `a:srcRect` crops are baked into a copy of the image; opacity kept |
+| picture | `image` node; `a:srcRect` cover crops are baked into a copy of the image; contain insets, focal position, opacity, roundRect radius and circle mask kept; adjacent exported scrims fold back into opaque images |
 | table | `table` node with the cell text (paragraphs joined by a space) and the first cell's font |
 | group | `frame` (`mode: none`) with children placed through `chOff`/`chExt`; groups nested deeper than seven are flattened; the exporter's "Frame background" shape folds back into the frame's fill, stroke and radius |
-| background | solid color: the slide `fill`; picture: a full-bleed `image` node at the back; slide, then layout, then master |
+| background | solid/linear/radial paint: the slide `fill`; picture: a full-bleed `image` node at the back (cover or contain); slide, then layout, then master |
 | notes | `slide.notes` (the notes body placeholder, paragraphs on lines) |
 | transitions | `fade`, `push`, `cover`, `pull` (`slide`), `zoom`, Morph (`smart`) with direction and the 2010 `dur` (else fast 250, medium 500, slow 800 ms); others become `fade` |
 | animations | main-sequence entrance, emphasis and exit effects: appear, fade, fly, wipe, float (rise), zoom (scale), pulse; click, with and after previous; delay, duration; paragraph builds of one shape become one `by: item` build; the order is the order of first appearance |
@@ -517,13 +578,14 @@ copied into `decks/assets/` by content (PNG, JPEG, WebP, at most 16 MB each).
 | SmartArt | its saved drawing as plain shapes in a frame; without one, its text as a list |
 | embedded object | its fallback picture, else a warning |
 
-What degrades (each is a warning, counted when repeated): gradients (a radial
-gradient that fades out becomes ten stacked translucent ellipses, a linear one
-its first color); pattern and picture fills; shadows, glows and other effects
-(dropped); text runs with their own size or color inside one box (the box's
+Linear shape gradients, outer shadows and supported stroke dashes are retained.
+What degrades (each is a warning, counted when repeated): radial shape gradients
+remain stacked translucent ellipses (native radial preservation is a follow-up);
+unsupported gradients use their first color; pattern and picture fills; glows
+and effects other than outer shadows (dropped); text runs with their own size or color inside one box (the box's
 main style); mixed alignment in a box; nested bullet levels (kept as indented
 Markdown, but the renderers draw lists flat); paragraph spacing; vertical text;
-flipped pictures and groups; pictures masked to a shape (drawn as rectangles);
+flipped pictures and groups; pictures masked to unsupported shapes (drawn as rectangles);
 table cell fills, borders and merged cells; pictures in EMF, WMF, SVG, GIF or
 TIFF (a placeholder image); linked (not embedded) pictures; audio and video (the
 poster image stands in); elbow and curved connectors (straight lines); motion

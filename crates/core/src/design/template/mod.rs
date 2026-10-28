@@ -3,6 +3,7 @@
 #![allow(clippy::case_sensitive_file_extension_comparisons)]
 mod package;
 mod powerpoint;
+pub(crate) use powerpoint::placeholder_xml;
 mod word;
 mod word_export;
 

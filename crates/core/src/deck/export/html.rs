@@ -66,6 +66,19 @@ pub(super) fn with_warnings(
     let mut deck = deck.clone();
     for slide in &mut deck.slides {
         slide.notes.clear();
+        if let Some(background) = &mut slide.background {
+            let mut node = super::super::Node::new(
+                "background",
+                Kind::Image {
+                    src: background.image.clone(),
+                    fit: background.fit,
+                },
+            );
+            inline_nodes(std::slice::from_mut(&mut node), assets, warnings);
+            if let Kind::Image { src, .. } = node.kind {
+                background.image = src;
+            }
+        }
         inline_nodes(&mut slide.children, assets, warnings);
     }
     for font in &mut deck.theme.font_files {

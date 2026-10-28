@@ -89,12 +89,24 @@ fn assert_round_trip(original: &Deck) {
         let rects_after = layout_at(back, after, Some(&temp.assets()));
         let imported_nodes = all(after);
         for node in export::visible_nodes(before) {
+            // Flattened, unpainted frames have no PowerPoint shape of their own.
+            if matches!(
+                &node.kind,
+                Kind::Frame {
+                    fill: None,
+                    stroke: None,
+                    ..
+                }
+            ) {
+                continue;
+            }
             let found = imported_nodes
                 .iter()
                 .find(|n| n.name.as_deref() == Some(node.name.as_deref().unwrap_or(&node.id)))
                 .unwrap_or_else(|| panic!("no node for {} on {}", node.id, before.id));
             let expect = match &node.kind {
-                Kind::Frame { .. } | Kind::Code { .. } => "frame",
+                Kind::Frame { .. } => "shape",
+                Kind::Code { .. } => "frame",
                 Kind::Text { .. } => "text",
                 Kind::Image { .. } | Kind::Chart { .. } => "image",
                 Kind::Shape { .. } => "shape",

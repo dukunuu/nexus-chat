@@ -5,6 +5,7 @@
 pub mod assets;
 pub mod brief;
 pub mod direct;
+pub mod effects;
 pub mod export;
 pub mod feedback;
 pub mod history;
@@ -14,11 +15,15 @@ pub mod lenient;
 pub mod link;
 pub mod migrate;
 pub mod model;
+mod node_serde;
 pub mod ops;
 pub mod render;
 pub mod suggest;
 pub mod text;
 pub mod validate;
+
+#[cfg(test)]
+mod effects_tests;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -28,6 +33,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub use effects::{Background, Color, Dash, Fill, Focus, Mask, Overlay, Shadow, ShadowSpec};
 pub use layout::{Rect, image_resolves, layout, layout_at, layout_map};
 pub use model::{
     Align, Animation, AnimationSlot, AutoLayout, Build, BuildBy, Chart, Cross, Deck, Dim,

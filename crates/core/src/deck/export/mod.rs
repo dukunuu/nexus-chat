@@ -6,6 +6,9 @@ pub mod images;
 pub mod pdf;
 pub mod pptx;
 
+#[cfg(test)]
+mod compat_tests;
+
 use std::io::{Cursor, Write as _};
 use std::path::{Component, Path, PathBuf};
 

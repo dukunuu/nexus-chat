@@ -4,6 +4,18 @@ use crate::deck::{Deck, import::xml};
 use anyhow::{Context as _, Result};
 use std::fmt::Write as _;
 
+pub(crate) fn placeholder_xml(ph: &crate::deck::model::Placeholder) -> String {
+    let idx = if ph.idx.is_empty() {
+        String::new()
+    } else {
+        format!(" idx=\"{}\"", crate::doc::inline::escape(&ph.idx))
+    };
+    format!(
+        "<p:nvPr><p:ph type=\"{}\"{idx}/></p:nvPr>",
+        crate::doc::inline::escape(&ph.kind)
+    )
+}
+
 fn scale_attribute(source: &str, key: &str, factor: f64) -> String {
     let needle = format!(" {key}=\"");
     let mut rest = source;
@@ -96,7 +108,9 @@ pub(super) fn merge(
             .filter(|name| base.contains_key(*name))
             .unwrap_or(&blank);
         if slide.source_layout.is_some() {
-            source = package::replace(&source, "bg", "");
+            if slide.background.is_none() {
+                source = package::replace(&source, "bg", "");
+            }
             // Exporter shape names are ids for pictures, and node names for text.
             let mut shapes = package::ranges(&source, "sp");
             shapes.extend(package::ranges(&source, "pic"));
@@ -111,11 +125,7 @@ pub(super) fn merge(
                     .find(|n| Some(n.id.as_str()) == name)
                     .and_then(|n| n.source_placeholder.as_ref())
                 {
-                    let identity = format!(
-                        "<p:nvPr><p:ph type=\"{}\" idx=\"{}\"/></p:nvPr>",
-                        crate::doc::inline::escape(&ph.kind),
-                        crate::doc::inline::escape(&ph.idx)
-                    );
+                    let identity = placeholder_xml(ph);
                     let replaced = package::replace(raw, "nvPr", &identity);
                     source.replace_range(range, &replaced);
                 }
@@ -123,8 +133,13 @@ pub(super) fn merge(
         }
         for key in [
             "x", "y", "cx", "cy", "sz", "spc", "marL", "indent", "lIns", "rIns", "tIns", "bIns",
+            "blurRad", "dist",
         ] {
             source = scale_attribute(&source, key, width / 12_192_000.0);
+        }
+        for range in package::ranges(&source, "spcPts").into_iter().rev() {
+            let scaled = scale_attribute(&source[range.clone()], "val", width / 12_192_000.0);
+            source.replace_range(range, &scaled);
         }
         base.insert(name.clone(), source.into_bytes());
         written.push(name);

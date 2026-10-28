@@ -18,7 +18,7 @@ pub fn lint_deck(deck: &Deck, design: &Design) -> Vec<Drift> {
     let mut out = Vec::new();
     for slide in &deck.slides {
         if let Some(fill) = &slide.fill {
-            color(&mut out, &slide.id, fill, design);
+            paint(&mut out, &slide.id, fill, design);
         }
         for node in slide.nodes() {
             match &node.kind {
@@ -48,7 +48,7 @@ pub fn lint_deck(deck: &Deck, design: &Design) -> Vec<Drift> {
                 }
                 Kind::Shape { fill, stroke, .. } | Kind::Frame { fill, stroke, .. } => {
                     if let Some(fill) = fill {
-                        color(&mut out, &node.id, fill, design);
+                        paint(&mut out, &node.id, fill, design);
                     }
                     if let Some(stroke) = stroke {
                         color(&mut out, &node.id, &stroke.color, design);
@@ -59,6 +59,12 @@ pub fn lint_deck(deck: &Deck, design: &Design) -> Vec<Drift> {
         }
     }
     out
+}
+
+fn paint(out: &mut Vec<Drift>, id: &str, fill: &crate::deck::Fill, design: &Design) {
+    for value in fill.colors() {
+        color(out, id, value.value(), design);
+    }
 }
 
 fn normalized(value: &str) -> String {

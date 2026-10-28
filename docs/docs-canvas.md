@@ -84,7 +84,40 @@ missing. Designs come from the built-in default, from an uploaded template
 - **Slide layouts** are named slide frame trees (the deck v2 node tree) whose
   slot nodes carry `"slot": "<name>"`. The built-in set:
   - `title`, `section`, `content`, `two_column`, `image_left`, `image_right`;
-  - `quote`, `big_number`, `comparison`, `agenda`, `closing`.
+  - `quote`, `big_number`, `comparison`, `agenda`, `closing`;
+  - `cover_image`, `section_color`, `stats`, `timeline`, `image_grid`;
+  - `quote_photo`, `cards`, `team`, `chart_focus`, `closing_image`.
+
+  The ten editorial layouts use the same copper/deep-teal palette, type roles,
+  surface tints and shadow tokens as the original eleven. Photo layouts use
+  full-bleed image slots with scrims; portraits use square circle masks.
+
+  | Layout | Slots |
+  |---|---|
+  | `cover_image`, `closing_image` | `image`, `kicker`, `title`, `subtitle`, `caption` |
+  | `section_color` | `number`, `kicker`, `title`, `subtitle` |
+  | `stats` | `kicker`, `title`, `takeaway`; `stat1_value`, `stat1_label`, `stat1_detail`, through `stat3_*` |
+  | `timeline` | `kicker`, `title`, `caption`; `step1_date`, `step1_title`, `step1_body`, through `step5_*` |
+  | `image_grid` | `kicker`, `title`; `image1`, `caption1`, through `image4`, `caption4` |
+  | `quote_photo` | `kicker`, `image`, `quote`, `attribution`, `role` |
+  | `cards` | `kicker`, `title`, `subtitle`; `card1_icon`, `card1_title`, `card1_body`, through `card3_*` |
+  | `team` | `kicker`, `title`, `subtitle`; `person1_image`, `person1_name`, `person1_role`, through `person4_*` |
+  | `chart_focus` | `kicker`, `title`, `chart`, `label`, `metric`, `takeaway`, `body`, `caption` |
+
+  Image slots, including `chart`, take an asset path or HTTPS URL. `chart` is
+  an image of the author's chart, not a new data-string API; ordinary editable
+  deck chart nodes remain available through canvas edits. Card icons are text
+  or short monograms. Repeats are ordinary slot nodes: omit all fields of a
+  repeat to remove its entire card/person/step, including its decoration. A
+  timeline can therefore show four or five steps, and a grid three or four images.
+
+  Hermetic rich-content fixtures generate landscape and portrait gradient PNGs
+  and an illustrative chart. With `NEXUS_LAYOUT_PREVIEWS=1`, their previews go
+  to `target/layout-previews/rich/<layout>.png`; `NEXUS_PPTX_SAMPLES=1` also
+  writes `target/pptx-samples/rich/<layout>.pptx` and a round-trip report. They
+  are separate from the original gallery test's generic placeholder fixtures.
+  Every new layout is checked for design drift, text overflow and PPTX geometry,
+  text, fonts and effects after re-import.
 
   A template's slide layouts become layouts with its placeholder positions,
   fonts and background art.
@@ -105,7 +138,9 @@ missing. Designs come from the built-in default, from an uploaded template
   design whose revision moved.
 - **Slides from layouts.** `add_slide {layout, slots: {title: "…", body: "…",
   image: "assets/…"}, after?}` instantiates a layout. Slot text and images fill
-  the slot nodes, and an empty slot is removed. The model is told to build
+  the slot nodes, and an empty slot is removed. A frame whose content slots
+  are all unfilled is removed with its decoration, so unused repeats leave no
+  empty card, portrait or badge. The model is told to build
   slides from layouts and to use roles and styles. Freeform nodes remain legal.
 - **Consistency lint.** Every `edit`/`create` result on a deck that follows a
   design ends with one `design:` line when something is off-system, for

@@ -8,6 +8,10 @@ use serde_json::{Value, json};
 use super::{Design, Spacing};
 use crate::deck::{Deck, Kind, Node, Slide};
 
+mod rich;
+#[cfg(test)]
+mod tests;
+
 fn text(slot: &str, style: &str) -> Value {
     json!({"id": slot, "kind": "text", "slot": slot, "text": slot,
            "style": style, "sizing": {"w": "fill"}})
@@ -22,10 +26,10 @@ fn row(children: &[Value], spacing: Spacing) -> Value {
 }
 fn image() -> Value {
     json!({"id": "image", "kind": "image", "slot": "image", "src": "assets/placeholder.png",
-           "fit": "cover", "sizing": {"w": "fill", "h": "fill"}})
+           "fit": "cover", "radius": 32, "shadow": "md", "sizing": {"w": "fill", "h": "fill"}})
 }
 
-/// Eleven spacious, role-only layouts. All geometry uses the supplied rhythm.
+/// Twenty-one role-only layouts, from spacious copy to editorial photo stories.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn builtin(spacing: Spacing) -> BTreeMap<String, Slide> {
@@ -59,7 +63,7 @@ pub fn builtin(spacing: Spacing) -> BTreeMap<String, Slide> {
                 text("subtitle", "body"),
             ],
             "quote" => vec![
-                json!({"kind": "text", "text": "“", "style": "display"}),
+                json!({"kind": "text", "text": "“", "style": "title", "font":{"color":"accent"}}),
                 text("quote", "quote"),
                 json!({"kind": "frame", "layout": {"mode": "row", "gap": spacing.gap, "cross": "center"},
                     "children": [
@@ -82,9 +86,10 @@ pub fn builtin(spacing: Spacing) -> BTreeMap<String, Slide> {
                 );
                 if name == "comparison" {
                     for panel in [&mut left, &mut right] {
-                        panel["fill"] = json!("bg");
-                        panel["stroke"] = json!({"color": "muted", "width": 1});
-                        panel["radius"] = json!(spacing.gap / 2.0);
+                        panel["fill"] =
+                            json!({"linear": {"angle": 145, "stops": [[0, "surface"], [1, "bg"]]}});
+                        panel["shadow"] = json!("sm");
+                        panel["radius"] = json!(spacing.gap);
                         panel["layout"]["padding"] = json!(vec![spacing.gap; 4]);
                     }
                 }
@@ -113,21 +118,47 @@ pub fn builtin(spacing: Spacing) -> BTreeMap<String, Slide> {
             ],
             _ => vec![
                 text("title", "heading"),
-                text("body", "lead"),
+                json!({"kind":"frame", "fill":{"linear":{"angle":100,"stops":[[0,"surface"],[1,"bg"]]}}, "radius":24, "sizing":{"w":"fill"}, "layout":{"mode":"column","padding":48,"cross":"stretch"}, "children":[text("body", "lead")]}),
                 text("caption", "caption"),
             ],
         };
         let mut slide = json!({"id": name, "layout": {"mode": "column", "gap": spacing.gap,
             "padding": spacing.margin, "cross": "stretch",
             "main": if centered { "center" } else { "start" }}, "children": children});
-        if matches!(name, "title" | "closing" | "section") {
+        if matches!(name, "title" | "closing" | "section" | "agenda") {
             slide["children"].as_array_mut().expect("children").insert(0,
                 json!({"kind": "shape", "fill": "accent", "sizing": {"w": spacing.margin, "h": spacing.gap / 4.0}}));
+        }
+        if matches!(name, "section" | "closing") {
+            slide["fill"] = json!({"linear": {"angle":120, "stops":[[0,"accent2"],[1,"fg"]]}});
+            for child in slide["children"].as_array_mut().expect("children") {
+                if child["kind"] == "text" {
+                    child["font"] = json!({"color":"bg"});
+                }
+            }
+        }
+        if matches!(name, "title" | "closing" | "section" | "big_number") {
+            let decoration = json!({"kind":"shape", "shape":"ellipse", "fill":{"radial":{"stops":[[0,{"color":"accent2","opacity":0.16}],[1,{"color":"accent2","opacity":0}]]}}, "position":{"x":1220,"y":-160}, "sizing":{"w":1040,"h":1040}, "locked":true});
+            slide["children"]
+                .as_array_mut()
+                .expect("children")
+                .insert(0, decoration);
+            for child in slide["children"].as_array_mut().expect("children") {
+                if child["slot"] == "title" || child["slot"] == "subtitle" {
+                    child["sizing"]["max_w"] = json!(1280);
+                }
+            }
         }
         // Deck validation supplies stable ids to the non-slot frame decoration.
         let deck =
             Deck::check(&json!({"version": 2, "title": name, "slides": [slide]}).to_string())
                 .expect("built-in layout");
+        layouts.insert(name.into(), deck.slides.into_iter().next().expect("slide"));
+    }
+    for (name, mut slide) in rich::builtin(spacing) {
+        slide["id"] = json!(name);
+        let deck = Deck::check(&json!({"version":2,"title":name,"slides":[slide]}).to_string())
+            .expect("built-in layout");
         layouts.insert(name.into(), deck.slides.into_iter().next().expect("slide"));
     }
     layouts
@@ -151,8 +182,25 @@ pub fn instantiate(
     layout: &str,
     values: &BTreeMap<String, String>,
 ) -> Result<Slide> {
-    fn fill(nodes: &mut Vec<Node>, values: &BTreeMap<String, String>) {
+    fn fill(nodes: &mut Vec<Node>, values: &BTreeMap<String, String>, title_slide: bool) {
         nodes.retain_mut(|node| {
+            if !node.children().is_empty() {
+                let mut descendants = Vec::new();
+                node.walk(&mut descendants);
+                let slots: Vec<_> = descendants
+                    .iter()
+                    .filter(|child| !child.slot.is_empty())
+                    .collect();
+                if !slots.is_empty()
+                    && !slots.iter().any(|child| {
+                        values
+                            .get(&child.slot)
+                            .is_some_and(|value| !value.is_empty())
+                    })
+                {
+                    return false;
+                }
+            }
             if !node.slot.is_empty() {
                 let Some(value) = values.get(&node.slot).filter(|s| !s.is_empty()) else {
                     return false;
@@ -163,10 +211,27 @@ pub fn instantiate(
                     _ => return false,
                 }
             }
+            if node.source_placeholder.is_none() && matches!(node.kind, Kind::Text { .. }) {
+                node.source_placeholder = match node.slot.as_str() {
+                    "title" => Some(crate::deck::model::Placeholder {
+                        kind: if title_slide { "ctrTitle" } else { "title" }.into(),
+                        idx: "0".into(),
+                    }),
+                    "subtitle" if title_slide => Some(crate::deck::model::Placeholder {
+                        kind: "subTitle".into(),
+                        idx: "1".into(),
+                    }),
+                    "body" => Some(crate::deck::model::Placeholder {
+                        kind: "body".into(),
+                        idx: "1".into(),
+                    }),
+                    _ => None,
+                };
+            }
             node.id.clear();
             node.slot.clear();
             if let Some(children) = node.children_mut() {
-                fill(children, values);
+                fill(children, values, title_slide);
             }
             true
         });
@@ -194,6 +259,16 @@ pub fn instantiate(
     let mut slide = template.clone();
     slide.id.clear();
     slide.builds.clear();
-    fill(&mut slide.children, values);
+    if slide.source_layout.is_none() {
+        let index = match layout {
+            "title" | "closing" | "cover_image" | "closing_image" => 2,
+            "section" | "section_color" => 4,
+            "content" | "image_left" | "image_right" | "big_number" | "chart_focus" => 3,
+            _ => 5,
+        };
+        slide.source_layout = Some(format!("ppt/slideLayouts/slideLayout{index}.xml"));
+    }
+    let title_slide = slide.source_layout.as_deref() == Some("ppt/slideLayouts/slideLayout2.xml");
+    fill(&mut slide.children, values, title_slide);
     Ok(slide)
 }

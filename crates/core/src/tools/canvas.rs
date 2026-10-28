@@ -35,6 +35,9 @@ mod docs;
 #[path = "canvas/export_path_tests.rs"]
 mod export_path_tests;
 #[cfg(test)]
+#[path = "canvas/layout_reference_tests.rs"]
+mod layout_reference_tests;
+#[cfg(test)]
 #[path = "canvas/page_tests.rs"]
 mod page_tests;
 #[path = "canvas/read.rs"]
@@ -516,20 +519,22 @@ fn write_tree(
 const SCHEMA: &str = "\nschema (sent once per session)\n\
 - container (slide, frame): layout{mode:none|row|column, wrap, gap, gap_cross, padding:[t,r,b,l], main:start|center|end|space_between, cross:start|center|end|stretch}. mode none = children are absolute. Slides also have fill (color) and notes.\n\
 - node: id name? sizing{w,h: px|\"hug\"|\"fill\", min_w,max_w,min_h,max_h} position:\"auto\"|{x,y} (absolute = ignore auto-layout; every child of a mode:none parent is absolute) opacity rotation hidden locked. hug = fit content, fill = share the leftover main-axis space (or stretch across).\n\
-- frame: fill stroke{color,width} radius clip children[]. A hug frame needs mode row|column.\n\
+- frame: fill stroke{color,width,dash:solid|dash|dot} radius clip children[]. A hug frame needs mode row|column. Frames, shapes and images accept shadow:sm|md|lg or {x,y,blur:0-200,spread,color}; theme.shadows overrides design presets.\n\
 - text: text (Markdown subset: # headings, - lists, **bold**, *italic*, `code`), style (title|heading|subheading|body|caption|code or a name you add), font{family,size px,weight 100-900,italic,line_height x,letter_spacing em,color,align left|center|right,valign top|middle|bottom,transform none|uppercase|lowercase|capitalize}. Text hugs its width unless sized; give it w fill (or a fixed w) so it wraps, h hug so it grows.\n\
 - shape: shape rect|ellipse|line|arrow, fill, stroke{color,width}, radius. image: src, fit contain|cover. table: rows[[..]], style, font. code: language, source, style, font. chart: chart bar|line|pie, labels[], series[{name,values[]}].\n\
+- effects: slide/frame/shape fill accepts a color or {linear:{angle,stops:[[0,color],[1,color]]}} or {radial:{stops:[[0,color],[1,color]]}} (2-8 ascending stops). Colors in fills/effects also accept {color,opacity:0-1} or #RRGGBBAA. Images accept radius, mask:circle, focus:{x:0-1,y:0-1}, overlay:{fill}; opacity is unchanged. Slide background:{image,fit:cover|contain,overlay?:{fill}} is full bleed.\n\
 - colors: theme roles (bg fg accent muted ...) or hex. font.family: a role (heading body mono), a deck font or an installed family (see fonts).\n\
 - layouts that work: column slide, padding 120-160, gap 32-56, cross stretch; text w fill; two columns = a row frame (gap 64-96, cross stretch) with w fill children; centered title = main center.\n\
 - slide transition{type:none|fade|push|slide|cover|zoom|smart, direction?:left|right|up|down, duration_ms:0-5000 (400), easing:linear|ease|ease_in|ease_out|ease_in_out|spring (ease_out)} plays on entering the slide in present mode. smart morphs nodes with the same id or name on the previous slide (position, size, opacity, rotation, fill, font size and color) and fades the rest. Renders and view show the final state of a slide, every build in.\n\
-- node animation{build_in?:Build, emphasis?:Build, build_out?:Build}; Build{effect:appear|fade|rise|fly|scale|wipe|blur|typewriter|pulse|shake, direction?, duration_ms:0-5000 (400), delay_ms:0-10000 (0), easing, trigger:click|with_previous|after_previous (click), by:whole|word|line|item (whole), stagger_ms?:0-10000}. pulse and shake are emphasis only and emphasis takes only them; typewriter and by word|line|item need a text node (item = list line). Slide builds:[node_id,...] is the playback order of animated nodes (a node's slots run in, emphasis, out); animated nodes left out are appended in tree order and unknown ids dropped. A click build starts a step; with_previous and after_previous join the step before them; builds ahead of the first click play on entry. read lists them as `builds: 1 click fade b2 · 2 with-prev rise b3`.\n\
+- node animation{build_in?:Build,emphasis?:Build,build_out?:Build}; Build{effect:appear|fade|rise|fly|scale|wipe|blur|typewriter|pulse|shake,direction?,duration_ms:0-5000 (400),delay_ms:0-10000 (0),easing,trigger:click|with_previous|after_previous (click),by:whole|word|line|item (whole),stagger_ms?:0-10000}. Emphasis takes only pulse/shake; other slots never do. Typewriter and segmentation need text. Slide builds:[node_id,...] orders nodes (in/emphasis/out per node); missing nodes append, unknown ids drop. Click starts a step; with/after_previous joins it; leading non-click builds play on entry.\n\
 - animation ops: set_transition{slide,transition|null}, set_animation{id,slot:build_in|emphasis|build_out,build|null}, reorder_builds{slide,ids}. Each is atomic with the other ops; update_node and update_slide merge patches also reach animation and transition.\n\
-- images: src is an https URL (fetched when you create or edit, so renders show it) or a space file such as us_1.jpg or files/us_1.jpg (checked by content and copied into decks/assets). view and edit list any image drawn as a placeholder and why. Use the user's own photos and generated images from the space files; do not replace them. For other pictures, find real photos with search mode images and use their https URLs rather than drawing an illustration out of shapes.\n\
-- reading: read slides:[\"s2\",3] returns just those slides in full. A deck over about 7000 characters reads as an outline (`id kind x,y wxh \"text\"`, ids complete) ending in a \"more slides\" line. Edit results list the changed nodes with their rects and the new revision, so edit again without reading; revision is optional, and a stale one is applied when the nodes you touch did not change, else refused with what changed.\n\
+- images: src is HTTPS (fetched on create/edit) or a space file (us_1.jpg, files/us_1.jpg; checked and copied into decks/assets). view/edit report placeholders. Use the user's photos/generated images, not replacements; for other pictures use search mode images and HTTPS, not illustrations made of shapes.\n\
+- reading: slides:[\"s2\",3] selects full slides. Large decks read as an outline (`id kind x,y wxh \"text\"`) with complete ids and a more-slides line. Edit returns changed nodes/rects/revision, so edit again without reading. Stale revisions rebase only when touched nodes did not change.\n\
 - design: build slides with add_slide{layout,slots,after?}; design op=read lists layout slots; apply_design{design?} refreshes the copied theme. Use color roles and named styles; fix design: lint hints.\n\
+- new layouts / slots: cover_image,closing_image(image,kicker,title,subtitle,caption); section_color(number,kicker,title,subtitle); stats(kicker,title,takeaway,stat{1..3}_{value,label,detail}); timeline(kicker,title,caption,step{1..5}_{date,title,body}); image_grid(kicker,title,image{1..4},caption{1..4}); quote_photo(kicker,image,quote,attribution,role); cards(kicker,title,subtitle,card{1..3}_{icon,title,body}); team(kicker,title,subtitle,person{1..4}_{image,name,role}); chart_focus(kicker,title,chart,label,metric,takeaway,body,caption). Expand braces to keys like stat1_value. Image slots (including chart) take paths/HTTPS; icons take text. Unfilled repeats lose their decoration too.\n\
 - history lists earlier versions (kept on every write by you or the user, last 50); history with revision restores one as a new, undoable write. One deck per request: edit it instead of creating -redesign copies or probe decks.\n\
 - create also takes text_styles{name:font} to define styles it uses; update_node/update_slide fields.children replaces the children; edit takes up to 500 ops. Small slips (font as a string, kind ellipse, numeric strings, letter_spacing in px, an undefined style, a short path) are repaired and listed as `normalized:` lines; other errors list every located problem with a fix.\n\
-- import: create with from:\"file.pptx\" (a space file) rebuilds a PowerPoint deck: every shape absolute at its place, text as text nodes, pictures copied (crops baked in), tables as text, notes and transitions kept, glows as stacked ellipses. Charts become labelled placeholders and SmartArt becomes shapes or a list; the result lists each approximation. Rebuild what matters with edit, using the original's text and images only.\n\
+- import: create from:\"file.pptx\" places content absolutely, copies pictures with baked crops, and keeps text/tables/notes/transitions. Radial shapes become stacked ellipses, charts placeholders, SmartArt shapes or lists. Approximations are reported; rebuild with the original's text/images only.\n\
 - set_layout converts children like Figma (none to row/column makes them auto; back makes them absolute where they are). wrap{ids,layout} puts siblings in a new frame; unwrap{id} dissolves it. update_node merges: {\"font\":{\"size\":64}} keeps other font fields, null removes one. set_text_style{name,font} changes every node using the style.\n";
 
 fn author(role: &Role) -> &'static str {
@@ -875,6 +880,11 @@ impl ToolBox {
             .iter()
             .filter(|s| ids.is_empty() || ids.contains(&s.id))
         {
+            if let Some(background) = &slide.background
+                && background.image.starts_with("https://")
+            {
+                wanted.push((slide.id.clone(), background.image.clone()));
+            }
             for node in slide.nodes() {
                 if let Kind::Image { src, .. } = &node.kind
                     && src.starts_with("https://")

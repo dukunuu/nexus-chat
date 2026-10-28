@@ -99,21 +99,72 @@ impl Package {
                 .enumerate()
                 .map(|(i, _)| ("slide", format!("slides/slide{}.xml", i + 1))),
         );
+        relationships.extend([
+            ("presProps", "presProps.xml".into()),
+            ("viewProps", "viewProps.xml".into()),
+            ("tableStyles", "tableStyles.xml".into()),
+        ]);
         package.rels("ppt/_rels/presentation.xml.rels", &relationships);
+        package.xml(
+            "ppt/presProps.xml",
+            "presProps",
+            &format!(
+                "<p:presentationPr {NS}><p:showPr loop=\"0\" useTimings=\"1\"/></p:presentationPr>"
+            ),
+        );
+        package.xml("ppt/viewProps.xml", "viewProps", &format!("<p:viewPr {NS} lastView=\"sldView\"><p:normalViewPr/><p:slideViewPr><p:cSldViewPr><p:cViewPr varScale=\"1\"><p:scale><a:sx n=\"1\" d=\"1\"/><a:sy n=\"1\" d=\"1\"/></p:scale><p:origin x=\"0\" y=\"0\"/></p:cViewPr></p:cSldViewPr></p:slideViewPr><p:gridSpacing cx=\"91440\" cy=\"91440\"/></p:viewPr>"));
+        package.parts.insert("ppt/tableStyles.xml".into(), ("application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml".into(), "<a:tblStyleLst xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" def=\"{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}\"/>".as_bytes().to_vec()));
         let map = "<p:clrMap accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" bg1=\"lt1\" bg2=\"lt2\" folHlink=\"folHlink\" hlink=\"hlink\" tx1=\"dk1\" tx2=\"dk2\"/>";
-        package.xml("ppt/slideMasters/slideMaster1.xml", "slideMaster", &format!("<p:sldMaster {NS}><p:cSld><p:spTree>{}</p:spTree></p:cSld>{map}<p:sldLayoutIdLst><p:sldLayoutId id=\"2147483649\" r:id=\"rId1\"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles></p:sldMaster>", root_group()));
-        package.rels(
-            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
-            &[
-                ("slideLayout", "../slideLayouts/slideLayout1.xml".into()),
-                ("theme", "../theme/theme1.xml".into()),
-            ],
-        );
-        package.xml("ppt/slideLayouts/slideLayout1.xml", "slideLayout", &format!("<p:sldLayout {NS} type=\"blank\" preserve=\"1\"><p:cSld name=\"Blank\"><p:spTree>{}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>", root_group()));
-        package.rels(
-            "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
-            &[("slideMaster", "../slideMasters/slideMaster1.xml".into())],
-        );
+        let layout_ids = (1..=5).fold(String::new(), |mut out, n| {
+            let _ = write!(
+                out,
+                "<p:sldLayoutId id=\"{}\" r:id=\"rId{n}\"/>",
+                2_147_483_648_u64 + n
+            );
+            out
+        });
+        let text_styles = [ ("titleStyle", "title"), ("bodyStyle", "body"), ("otherStyle", "body") ].map(|(tag, style)| {
+            let font = deck.theme.resolve_font(style, &crate::deck::Font::default());
+            let size = integer(font.size * super::WIDTH_PT / deck.theme.size.w * 100.0);
+            format!("<p:{tag}><a:lvl1pPr><a:defRPr sz=\"{size}\" b=\"{}\" i=\"{}\">{}<a:latin typeface=\"{}\"/></a:defRPr></a:lvl1pPr></p:{tag}>", u8::from(font.weight >= 600), u8::from(font.italic), super::fill(&deck.theme, Some(&font.color), 1.0), escape(super::google_font(deck.theme.family(&font.family))))
+        }).join("");
+        package.xml("ppt/slideMasters/slideMaster1.xml", "slideMaster", &format!("<p:sldMaster {NS}><p:cSld><p:spTree>{}</p:spTree></p:cSld>{map}<p:sldLayoutIdLst>{layout_ids}</p:sldLayoutIdLst><p:txStyles>{text_styles}</p:txStyles></p:sldMaster>", root_group()));
+        let mut master_rels = (1..=5)
+            .map(|n| ("slideLayout", format!("../slideLayouts/slideLayout{n}.xml")))
+            .collect::<Vec<_>>();
+        master_rels.push(("theme", "../theme/theme1.xml".into()));
+        package.rels("ppt/slideMasters/_rels/slideMaster1.xml.rels", &master_rels);
+        for (index, (name, kind, placeholders)) in [
+            ("Blank", "blank", vec![]),
+            ("Title", "title", vec![("ctrTitle", "0"), ("subTitle", "1")]),
+            (
+                "Title and Content",
+                "tx",
+                vec![("title", "0"), ("body", "1")],
+            ),
+            (
+                "Section Header",
+                "secHead",
+                vec![("title", "0"), ("body", "1")],
+            ),
+            ("Title Only", "titleOnly", vec![("title", "0")]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let n = index + 1;
+            let shapes = placeholders.iter().enumerate().fold(String::new(), |mut out, (i, (kind, idx))| {
+                let rect = crate::deck::Rect { x:deck.theme.size.w / 16.0, y:deck.theme.size.h * if i == 0 { 120.0 / 1080.0 } else { 320.0 / 1080.0 }, w:deck.theme.size.w * 7.0 / 8.0, h:deck.theme.size.h * if i == 0 { 160.0 / 1080.0 } else { 640.0 / 1080.0 } };
+                let ph = crate::deck::model::Placeholder { kind:(*kind).into(), idx:(*idx).into() };
+                let _ = write!(out, "<p:sp>{}<p:spPr>{}</p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>", super::nv(u32::try_from(i + 2).expect("two placeholders"), kind, true, Some(&ph)), super::xfrm(rect, WIDTH / deck.theme.size.w, None, false));
+                out
+            });
+            package.xml(&format!("ppt/slideLayouts/slideLayout{n}.xml"), "slideLayout", &format!("<p:sldLayout {NS} type=\"{kind}\" preserve=\"1\"><p:cSld name=\"{name}\"><p:spTree>{}{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>", root_group()));
+            package.rels(
+                &format!("ppt/slideLayouts/_rels/slideLayout{n}.xml.rels"),
+                &[("slideMaster", "../slideMasters/slideMaster1.xml".into())],
+            );
+        }
         package.xml("ppt/notesMasters/notesMaster1.xml", "notesMaster", &format!("<p:notesMaster {NS}><p:cSld><p:spTree>{}</p:spTree></p:cSld>{map}<p:notesStyle><a:lvl1pPr><a:defRPr sz=\"1200\"/></a:lvl1pPr></p:notesStyle></p:notesMaster>", root_group()));
         package.rels(
             "ppt/notesMasters/_rels/notesMaster1.xml.rels",
@@ -148,9 +199,19 @@ impl Package {
         package
     }
 
-    pub(super) fn slide(&mut self, n: usize, xml: &str, notes: &str, media: Vec<Vec<u8>>) {
+    pub(super) fn slide(
+        &mut self,
+        n: usize,
+        xml: &str,
+        notes: &str,
+        media: Vec<Vec<u8>>,
+        layout: usize,
+    ) {
         self.xml(&format!("ppt/slides/slide{n}.xml"), "slide", xml);
-        let mut rel = vec![("slideLayout", "../slideLayouts/slideLayout1.xml".into())];
+        let mut rel = vec![(
+            "slideLayout",
+            format!("../slideLayouts/slideLayout{layout}.xml"),
+        )];
         for (i, bytes) in media.into_iter().enumerate() {
             let name = format!("slide{n}-{}.png", i + 1);
             rel.push(("image", format!("../media/{name}")));
@@ -207,7 +268,7 @@ fn theme(deck: &Deck) -> String {
         ("dk1", "fg"),
         ("lt1", "bg"),
         ("dk2", "muted"),
-        ("lt2", "bg"),
+        ("lt2", "surface"),
         ("accent1", "accent"),
         ("accent2", "fg"),
         ("accent3", "muted"),
@@ -222,12 +283,22 @@ fn theme(deck: &Deck) -> String {
         let _ = write!(
             out,
             "<a:{name}><a:srgbClr val=\"{}\"/></a:{name}>",
-            rgb(&deck.theme, role).0
+            rgb(
+                &deck.theme,
+                if deck.theme.colors.contains_key(*name) {
+                    name
+                } else if *role == "surface" && !deck.theme.colors.contains_key("surface") {
+                    "bg"
+                } else {
+                    role
+                }
+            )
+            .0
         );
         out
     });
     let font = |role| {
-        let family = escape(deck.theme.family(role));
+        let family = escape(super::google_font(deck.theme.family(role)));
         format!(
             "<a:latin typeface=\"{family}\"/><a:ea typeface=\"{family}\"/><a:cs typeface=\"{family}\"/>"
         )

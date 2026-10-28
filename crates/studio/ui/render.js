@@ -27,7 +27,22 @@ export function availableFont(stack) {
   }
   return 'System UI';
 }
-export const color = (value, theme) => theme.colors[value] || (/^#[0-9a-f]{3,8}$/i.test(value || '') ? value : theme.colors.fg);
+export function color(value, theme) {
+  if (value && typeof value === 'object') {
+    const raw = color(value.color, theme).slice(1), hex = raw.length <= 4 ? [...raw].map(c => c + c).join('') : raw;
+    const alpha = hex.length === 8 ? parseInt(hex.slice(6), 16) / 255 : 1;
+    return `rgba(${parseInt(hex.slice(0, 2), 16)},${parseInt(hex.slice(2, 4), 16)},${parseInt(hex.slice(4, 6), 16)},${alpha * value.opacity})`;
+  }
+  return theme.colors[value] || (/^#[0-9a-f]{3,8}$/i.test(value || '') ? value : theme.colors.fg);
+}
+// Built-in design shadow scale; explicit theme tokens override these values.
+export const shadowPresets = { sm:{ x:0, y:4, blur:12, spread:0, color:{ color:'fg', opacity:.12 } }, md:{ x:0, y:12, blur:32, spread:0, color:{ color:'fg', opacity:.16 } }, lg:{ x:0, y:24, blur:64, spread:0, color:{ color:'fg', opacity:.20 } } };
+export function paint(fill, theme) {
+  const gradient = fill?.linear || fill?.radial;
+  if (!gradient) return color(fill, theme);
+  const stops = gradient.stops.map(([at, value]) => `${color(value, theme)} ${at * 100}%`).join(',');
+  return fill.linear ? `linear-gradient(${gradient.angle}deg,${stops})` : `radial-gradient(ellipse closest-side,${stops})`;
+}
 export function markdown(text) {
   const fragment = document.createDocumentFragment();
   let list;
@@ -172,14 +187,13 @@ function textStyle(el, node, theme) {
   return font;
 }
 export function renderNode(node, theme, images = {}, parent = { mode: 'none' }) {
-  const el = element(node.kind === 'image' ? 'img' : 'div', `block block-${node.kind}`);
+  const el = element('div', `block block-${node.kind}`);
   el.dataset.id = node.id;
   sizeStyle(el, node, theme, parent);
   if (node.kind === 'frame') {
     layoutStyle(el, node.layout, theme);
     if (node.hidden) el.style.display = 'none';
-    if (node.fill) el.style.backgroundColor = color(node.fill, theme);
-    if (node.stroke?.width) el.style.boxShadow = `inset 0 0 0 ${unit(node.stroke.width, theme)} ${color(node.stroke.color, theme)}`;
+    if (node.fill) el.style.background = paint(node.fill, theme);
     if (node.radius) el.style.borderRadius = unit(node.radius, theme);
     if (node.clip) el.style.overflow = 'hidden';
     for (const child of node.children || []) el.append(renderNode(child, theme, images, node.layout || { mode: 'none' }));
@@ -190,12 +204,19 @@ export function renderNode(node, theme, images = {}, parent = { mode: 'none' }) 
     // Only the backend's origin can supply image bytes. Remote images are
     // resolved through the core fetcher and exposed by content hash.
     const path = node.src.startsWith('https://') ? `/asset/${images[node.src] || 'missing'}` : `/assets/${node.src.replace(/^assets\//, '')}`;
-    el.src = node.src.startsWith('data:') ? node.src : versioned(path, images[node.src.startsWith('https://') ? path : node.src]);
-    el.alt = 'Slide image'; el.draggable = false;
-    el.style.objectFit = node.fit || 'contain';
+    const content = element('div', 'image-content'), img = element('img');
+    img.src = node.src.startsWith('data:') ? node.src : versioned(path, images[node.src.startsWith('https://') ? path : node.src]);
+    img.alt = 'Slide image'; img.draggable = false;
+    img.style.objectFit = node.fit || 'contain';
+    img.style.objectPosition = `${(node.focus?.x ?? .5) * 100}% ${(node.focus?.y ?? .5) * 100}%`;
+    el.style.borderRadius = unit(node.radius || 0, theme);
+    if (node.mask === 'circle') content.style.clipPath = 'circle(closest-side)';
+    content.append(img);
+    if (node.overlay) { const scrim = element('div', 'image-overlay'); scrim.style.background = paint(node.overlay.fill, theme); content.append(scrim); }
+    el.append(content);
     naturalSize(el, node, theme, [640, 360], true);
   } else if (node.kind === 'shape') {
-    const fill = node.fill ? color(node.fill, theme) : 'transparent', stroke = node.stroke?.width ? color(node.stroke.color, theme) : null;
+    const fill = node.fill ? paint(node.fill, theme) : 'transparent', stroke = node.stroke?.width ? color(node.stroke.color, theme) : null;
     const width = node.stroke?.width || 0;
     if (node.shape === 'line' || node.shape === 'arrow') {
       const lineColor = stroke || color(node.fill || 'accent', theme), line = width || 4;
@@ -204,8 +225,7 @@ export function renderNode(node, theme, images = {}, parent = { mode: 'none' }) 
       if (node.shape === 'arrow') { const head = element('span', 'shape-head'); head.style.borderLeftColor = lineColor; el.append(head); }
       naturalSize(el, node, theme, [240, 40], false);
     } else {
-      el.style.backgroundColor = fill;
-      if (width) el.style.boxShadow = `inset 0 0 0 ${unit(width, theme)} ${stroke}`;
+      el.style.background = fill;
       el.style.borderRadius = node.shape === 'ellipse' ? '50%' : unit(node.radius || 0, theme);
       naturalSize(el, node, theme, [160, 160], false);
     }
@@ -222,6 +242,20 @@ export function renderNode(node, theme, images = {}, parent = { mode: 'none' }) 
     el.append(renderChart(node, theme));
     naturalSize(el, node, theme, [640, 360], true);
   }
+  if (node.stroke?.width && ['frame','shape'].includes(node.kind) && !['line','arrow'].includes(node.shape)) {
+    if (!node.stroke.dash || node.stroke.dash === 'solid') el.style.boxShadow = `inset 0 0 0 ${unit(node.stroke.width, theme)} ${color(node.stroke.color, theme)}`;
+    else {
+      const border = element('span', 'node-stroke');
+      border.style.border = `${unit(node.stroke.width, theme)} ${{ dash:'dashed', dot:'dotted' }[node.stroke.dash]} ${color(node.stroke.color, theme)}`;
+      el.append(border);
+    }
+  }
+  const shadow = typeof node.shadow === 'string' ? theme.shadows?.[node.shadow] || shadowPresets[node.shadow] : node.shadow;
+  if (shadow && node.kind === 'image' && !shadow.spread) {
+    el.classList.add('image-shadow');
+    for (const key of ['x','y','blur']) el.style.setProperty(`--image-shadow-${key}`, unit(shadow[key], theme));
+    el.style.setProperty('--image-shadow-color', color(shadow.color, theme));
+  } else if (shadow) el.style.boxShadow = [el.style.boxShadow, `${unit(shadow.x, theme)} ${unit(shadow.y, theme)} ${unit(shadow.blur, theme)} ${unit(shadow.spread, theme)} ${color(shadow.color, theme)}`].filter(Boolean).join(', ');
   if (node.hidden) el.style.display = 'none';
   return el;
 }
@@ -232,11 +266,16 @@ export function renderSlide(container, slide, theme, images) {
   container.style.aspectRatio = `${slideSize(theme).w} / ${slideSize(theme).h}`;
   const root = element('div', 'slide-root');
   Object.assign(root.style, { position: 'absolute', inset: '0' });
-  root.style.backgroundColor = container.style.backgroundColor = color(slide?.fill || 'bg', theme);
+  root.style.background = paint(slide?.fill || 'bg', theme);
+  container.style.background = 'transparent';
   root.style.color = theme.colors.fg;
   root.style.fontFamily = stackFor(theme, 'body');
   root.style.setProperty('--mono-font', /mono|code|consolas|menlo/i.test(theme.fonts?.mono || '') ? fontStack(theme.fonts.mono) : '"Menlo", SFMono-Regular, monospace');
   layoutStyle(root, slide?.layout, theme);
   container.append(root);
+  if (slide?.background) {
+    const size = slideSize(theme), background = renderNode({ id:'', kind:'image', src:slide.background.image, fit:slide.background.fit, overlay:slide.background.overlay, position:{ x:0, y:0 }, sizing:{ w:size.w, h:size.h } }, theme, images);
+    background.removeAttribute('data-id'); background.style.pointerEvents = 'none'; root.append(background);
+  }
   if (slide) for (const node of slide.children) root.append(renderNode(node, theme, images, slide.layout || { mode: 'none' }));
 }

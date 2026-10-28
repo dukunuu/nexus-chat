@@ -500,7 +500,8 @@ fn notes_text(pkg: &mut Package, rels: &Rels) -> String {
 /// A slide's background: a color, or a picture at the back of the slide.
 enum Background {
     Color(Rgba),
-    Picture(String),
+    Gradient(crate::deck::Fill),
+    Picture(String, Fit),
 }
 
 fn background(cx: &Cx, st: &mut State, root: &El) -> Option<Background> {
@@ -510,6 +511,9 @@ fn background(cx: &Cx, st: &mut State, root: &El) -> Option<Background> {
             match kid.name.as_str() {
                 "solidFill" => return cx.theme.color(kid).map(Background::Color),
                 "gradFill" => {
+                    if let Some(fill) = shapes::gradient_fill(cx, kid) {
+                        return Some(Background::Gradient(fill));
+                    }
                     st.warn
                         .tally("Gradient fills are drawn as their first color");
                     return kid
@@ -528,7 +532,14 @@ fn background(cx: &Cx, st: &mut State, root: &El) -> Option<Background> {
                 }
                 "blipFill" => {
                     let rid = kid.kid("blip").and_then(|b| b.rel("embed"))?;
-                    return shapes::picture_src(cx, st, rid, None).map(Background::Picture);
+                    let contain = kid.path(&["stretch", "fillRect"]).is_some_and(|inset| {
+                        ["l", "r", "t", "b"]
+                            .iter()
+                            .any(|side| inset.num(side).is_some_and(|value| value > 0.0))
+                    });
+                    return shapes::picture_src(cx, st, rid, None).map(|src| {
+                        Background::Picture(src, if contain { Fit::Contain } else { Fit::Cover })
+                    });
                 }
                 _ => {}
             }
@@ -802,16 +813,11 @@ fn convert_slide(
     match found {
         Some(Background::Color(color)) => {
             let value = env.paint(color);
-            slide.fill = (value != "bg").then_some(value);
+            slide.fill = (value != "bg").then_some(value.into());
         }
-        Some(Background::Picture(src)) if st.reserve(1) => {
-            let mut node = Node::new(
-                &st.fresh(),
-                Kind::Image {
-                    src,
-                    fit: Fit::Cover,
-                },
-            );
+        Some(Background::Gradient(fill)) => slide.fill = Some(fill),
+        Some(Background::Picture(src, fit)) if st.reserve(1) => {
+            let mut node = Node::new(&st.fresh(), Kind::Image { src, fit });
             node.name = Some("Background".into());
             node.sizing = Sizing::fixed(size.w, size.h);
             node.position = crate::deck::Position::Absolute { x: 0.0, y: 0.0 };

@@ -209,8 +209,8 @@ fn pptx_package_geometry_notes_text_timing_and_determinism() {
         list.h * scale
     );
     assert!(slide.contains(&geom));
+    assert!(!slide.contains("<p:grpSp>"), "frames must be flattened");
     for value in [
-        "<p:grpSp>",
         "<p:ph type=\"title\"/>",
         "<a:buAutoNum",
         "<a:buChar",

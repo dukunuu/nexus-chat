@@ -30,6 +30,12 @@ pub fn visit_srcs(value: &mut Value, f: &mut dyn FnMut(&mut String) -> Result<()
             }
         }
         Value::Object(map) => {
+            if let Some(Value::String(image)) = map
+                .get_mut("background")
+                .and_then(|background| background.get_mut("image"))
+            {
+                f(image)?;
+            }
             let is_image = map.get("kind").and_then(Value::as_str) == Some("image");
             let is_patch = map.get("op").and_then(Value::as_str) == Some("update_node");
             if is_image && let Some(Value::String(src)) = map.get_mut("src") {

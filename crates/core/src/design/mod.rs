@@ -99,6 +99,8 @@ pub struct Design {
     pub fonts: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub font_files: Vec<FontFile>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shadows: BTreeMap<String, crate::deck::ShadowSpec>,
     #[serde(default)]
     pub scale: Scale,
     #[serde(default)]
@@ -118,6 +120,7 @@ impl Default for Design {
             colors: theme.colors,
             fonts: theme.fonts,
             font_files: theme.font_files,
+            shadows: theme.shadows,
             scale: Scale::default(),
             slide: SlideDesign {
                 size: theme.size,
@@ -171,6 +174,7 @@ impl Design {
             font_files: self.font_files.clone(),
             size: self.slide.size,
             text_styles: self.slide.text_styles.clone(),
+            shadows: self.shadows.clone(),
         }
     }
 }

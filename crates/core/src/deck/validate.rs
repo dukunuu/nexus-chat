@@ -106,7 +106,12 @@ fn normalize_theme(value: &mut Value, errors: &mut Vec<CheckError>) -> Theme {
                 value["theme"][group] = defaults[group].clone();
             } else if let Some(map) = value["theme"][group].as_object_mut() {
                 for (key, val) in defaults[group].as_object().expect("token map") {
-                    map.entry(key).or_insert_with(|| val.clone());
+                    // Extended design roles are optional on existing decks: do
+                    // not rewrite their self-contained palettes on load.
+                    if group != "colors" || matches!(key.as_str(), "bg" | "fg" | "accent" | "muted")
+                    {
+                        map.entry(key).or_insert_with(|| val.clone());
+                    }
                 }
             }
         }
@@ -167,6 +172,13 @@ fn check_font(font: &Font, theme: &Theme, path: &str, errors: &mut Vec<CheckErro
 }
 
 fn validate_theme(theme: &Theme, errors: &mut Vec<CheckError>) {
+    for (name, spec) in &theme.shadows {
+        super::Shadow::Custom(spec.clone()).check(
+            theme,
+            &format!("$.theme.shadows.{name}"),
+            errors,
+        );
+    }
     for (role, color) in &theme.colors {
         if !is_hex(color) {
             issue(
@@ -419,12 +431,9 @@ struct Walker<'a> {
 }
 
 impl Walker<'_> {
-    fn color_ok(&self, color: &str) -> bool {
-        is_hex(color) || self.theme.colors.contains_key(color)
-    }
-
     fn slide(&mut self, slide: &mut Value, path: &str) {
         fill_id(slide, &format!("s{}", self.slide), self.reserved, self.used);
+        super::effects::normalize(slide);
         self.transition(slide, path);
         let mut shell = slide.clone();
         let children = shell.as_object_mut().and_then(|o| o.remove("children"));
@@ -435,12 +444,18 @@ impl Walker<'_> {
         match serde_json::from_value::<Slide>(shell) {
             Ok(typed) => {
                 self.layout(&typed.layout, &format!("{path}.layout"));
-                if typed.fill.as_deref().is_some_and(|c| !self.color_ok(c)) {
-                    issue(
-                        self.errors,
-                        &format!("{path}.fill"),
-                        "expected theme role or hex color",
-                    );
+                if let Some(fill) = &typed.fill {
+                    fill.check(self.theme, &format!("{path}.fill"), self.errors);
+                }
+                if let Some(background) = &typed.background {
+                    self.image_source(&background.image, &format!("{path}.background.image"));
+                    if let Some(overlay) = &background.overlay {
+                        overlay.fill.check(
+                            self.theme,
+                            &format!("{path}.background.overlay.fill"),
+                            self.errors,
+                        );
+                    }
                 }
             }
             Err(e) => issue(self.errors, path, &e.to_string()),
@@ -675,7 +690,73 @@ impl Walker<'_> {
                 "at most 80 characters",
             );
         }
+        self.node_effects(node, path);
         self.kind(&node.kind, path);
+    }
+
+    fn node_effects(&mut self, node: &Node, path: &str) {
+        if let Some(shadow) = &node.shadow {
+            if !matches!(
+                node.kind,
+                Kind::Frame { .. } | Kind::Shape { .. } | Kind::Image { .. }
+            ) {
+                issue(
+                    self.errors,
+                    &format!("{path}.shadow"),
+                    "shadows require a frame, shape or image",
+                );
+            }
+            shadow.check(self.theme, &format!("{path}.shadow"), self.errors);
+        }
+        if let Some(focus) = node.focus {
+            for (key, value) in [("x", focus.x), ("y", focus.y)] {
+                if !finite(value, 0.0, 1.0) {
+                    issue(
+                        self.errors,
+                        &format!("{path}.focus.{key}"),
+                        "expected 0 to 1",
+                    );
+                }
+            }
+        }
+        if node.image_radius.is_some_and(|r| !finite(r, 0.0, 5000.0)) {
+            issue(
+                self.errors,
+                &format!("{path}.radius"),
+                "expected 0 to 5000 px",
+            );
+        }
+        if let Some(overlay) = &node.overlay {
+            overlay
+                .fill
+                .check(self.theme, &format!("{path}.overlay.fill"), self.errors);
+        }
+        if !matches!(node.kind, Kind::Image { .. })
+            && (node.focus.is_some()
+                || node.mask.is_some()
+                || node.overlay.is_some()
+                || node.image_radius.is_some())
+        {
+            issue(
+                self.errors,
+                path,
+                "focus, mask, overlay and image radius require an image",
+            );
+        }
+    }
+
+    fn image_source(&mut self, src: &str, path: &str) {
+        if src.starts_with("https://") {
+            if let Err(error) = crate::remote_image::validate_url(src) {
+                issue(self.errors, path, &error.to_string());
+            }
+        } else if !safe_asset_path(src) {
+            issue(
+                self.errors,
+                path,
+                "expected HTTPS or a relative assets path without '..'",
+            );
+        }
     }
 
     // One arm per node kind.
@@ -701,7 +782,7 @@ impl Walker<'_> {
             } => {
                 self.layout(layout, &format!("{path}.layout"));
                 if let Some(fill) = fill {
-                    check_color(fill, "fill", self.errors);
+                    fill.check(theme, &format!("{path}.fill"), self.errors);
                 }
                 if let Some(stroke) = stroke {
                     check_color(&stroke.color, "stroke.color", self.errors);
@@ -763,19 +844,7 @@ impl Walker<'_> {
                     issue(self.errors, path, "node text exceeds 8 KB");
                 }
             }
-            Kind::Image { src, .. } => {
-                if src.starts_with("https://") {
-                    if let Err(e) = crate::remote_image::validate_url(src) {
-                        issue(self.errors, &format!("{path}.src"), &e.to_string());
-                    }
-                } else if !safe_asset_path(src) {
-                    issue(
-                        self.errors,
-                        &format!("{path}.src"),
-                        "expected HTTPS or a relative assets path without '..'",
-                    );
-                }
-            }
+            Kind::Image { src, .. } => self.image_source(src, &format!("{path}.src")),
             Kind::Shape {
                 fill,
                 stroke,
@@ -783,7 +852,7 @@ impl Walker<'_> {
                 ..
             } => {
                 if let Some(fill) = fill {
-                    check_color(fill, "fill", self.errors);
+                    fill.check(theme, &format!("{path}.fill"), self.errors);
                 }
                 if let Some(stroke) = stroke {
                     check_color(&stroke.color, "stroke.color", self.errors);

@@ -35,8 +35,11 @@ use anyhow::{Context as _, Result, ensure};
 use base64::Engine as _;
 use resvg::{tiny_skia, usvg};
 
+use super::Fill;
 use super::layout::{Rect, image_path, layout_with};
-use super::model::{Chart, Deck, Fit, Kind, Node, Shape, Slide, Stroke, Theme, VAlign};
+use super::model::{Chart, Deck, Kind, Node, Shape, Slide, Stroke, Theme, VAlign};
+
+mod effects;
 pub use super::text::LAYOUT;
 use super::text::{Typesetter, color, escape, font_stack};
 
@@ -145,9 +148,10 @@ fn stroke_attrs(stroke: Option<&Stroke>, theme: &Theme) -> String {
         || "stroke=\"none\"".into(),
         |s| {
             format!(
-                "stroke=\"{}\" stroke-width=\"{}\"",
+                "stroke=\"{}\" stroke-width=\"{}\"{}",
                 color(theme, &s.color),
-                s.width
+                s.width,
+                effects::dash(s.dash, s.width)
             )
         },
     )
@@ -158,13 +162,17 @@ fn shape(
     out: &mut String,
     kind: Shape,
     rect: Rect,
-    fill: Option<&str>,
+    fill: Option<&Fill>,
     stroke: Option<&Stroke>,
     radius: f64,
     theme: &Theme,
+    next: &mut u32,
 ) {
     let Rect { x, y, w, h } = rect;
-    let fill_color = fill.map_or_else(|| "none".to_string(), |f| color(theme, f));
+    let fill_attrs = fill.map_or_else(
+        || "fill=\"none\"".to_string(),
+        |f| effects::paint(out, f, theme, rect, next),
+    );
     match kind {
         Shape::Rect | Shape::Ellipse => {
             // Strokes are drawn inside the box, like the editor's inset border.
@@ -179,12 +187,12 @@ fn shape(
             if kind == Shape::Rect {
                 let _ = write!(
                     out,
-                    "<rect x=\"{ix}\" y=\"{iy}\" width=\"{iw}\" height=\"{ih}\" rx=\"{radius}\" fill=\"{fill_color}\" {attrs}/>"
+                    "<rect x=\"{ix}\" y=\"{iy}\" width=\"{iw}\" height=\"{ih}\" rx=\"{radius}\" {fill_attrs} {attrs}/>"
                 );
             } else {
                 let _ = write!(
                     out,
-                    "<ellipse cx=\"{}\" cy=\"{}\" rx=\"{}\" ry=\"{}\" fill=\"{fill_color}\" {attrs}/>",
+                    "<ellipse cx=\"{}\" cy=\"{}\" rx=\"{}\" ry=\"{}\" {fill_attrs} {attrs}/>",
                     x + w / 2.0,
                     y + h / 2.0,
                     iw / 2.0,
@@ -196,7 +204,8 @@ fn shape(
             let (line_color, width) = stroke.map_or_else(
                 || {
                     (
-                        fill.map_or_else(|| color(theme, "accent"), |f| color(theme, f)),
+                        fill.and_then(|f| f.colors().first().copied())
+                            .map_or_else(|| color(theme, "accent"), |c| color(theme, c.value())),
                         4.0,
                     )
                 },
@@ -218,7 +227,8 @@ fn shape(
             }
             let _ = write!(
                 out,
-                "<path d=\"{path}\" fill=\"none\" stroke=\"{line_color}\" stroke-width=\"{width}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>"
+                "<path d=\"{path}\" fill=\"none\" stroke=\"{line_color}\" stroke-width=\"{width}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"{}/>",
+                stroke.map_or_else(String::new, |s| effects::dash(s.dash, width))
             );
         }
     }
@@ -256,6 +266,8 @@ impl Painter<'_, '_, '_> {
             }
             out.push('>');
         }
+        let shadowed = !matches!(node.kind, Kind::Frame { .. })
+            && effects::shadow(out, node, theme, self.clips, true);
         let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
         match &node.kind {
             Kind::Frame {
@@ -266,25 +278,32 @@ impl Painter<'_, '_, '_> {
                 children,
                 ..
             } => {
-                if let Some(fill) = fill {
+                if effects::shadow(out, node, theme, self.clips, false) {
                     let _ = write!(
                         out,
-                        "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" rx=\"{radius}\" fill=\"{}\"/>",
-                        color(theme, fill)
+                        "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" rx=\"{radius}\"/></g>"
+                    );
+                }
+                if let Some(fill) = fill {
+                    let attrs = effects::paint(out, fill, theme, rect, self.clips);
+                    let _ = write!(
+                        out,
+                        "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" rx=\"{radius}\" {attrs}/>"
                     );
                 }
                 if let Some(stroke) = stroke.as_ref().filter(|s| s.width > 0.0) {
                     let half = stroke.width / 2.0;
                     let _ = write!(
                         out,
-                        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"/>",
+                        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"{}/>",
                         x + half,
                         y + half,
                         (w - stroke.width).max(0.0),
                         (h - stroke.width).max(0.0),
                         (radius - half).max(0.0),
                         color(theme, &stroke.color),
-                        stroke.width
+                        stroke.width,
+                        effects::dash(stroke.dash, stroke.width)
                     );
                 }
                 if *clip {
@@ -348,10 +367,11 @@ impl Painter<'_, '_, '_> {
                 out,
                 *kind,
                 rect,
-                fill.as_deref(),
+                fill.as_ref(),
                 stroke.as_ref(),
                 *radius,
                 theme,
+                self.clips,
             ),
             Kind::Chart {
                 chart: kind,
@@ -366,22 +386,10 @@ impl Painter<'_, '_, '_> {
                 chart(out, *kind, labels, series, theme);
                 out.push_str("</svg>");
             }
-            Kind::Image { src, fit } => {
-                if let Some(data) = image_data(src, self.assets) {
-                    let _ = write!(
-                        out,
-                        "<svg x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\"><image width=\"{w}\" height=\"{h}\" preserveAspectRatio=\"xMidYMid {}\" href=\"data:image/png;base64,{data}\"/></svg>",
-                        if *fit == Fit::Cover { "slice" } else { "meet" },
-                    );
-                } else {
-                    let _ = write!(
-                        out,
-                        "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"#dddcd5\"/><text x=\"{}\" y=\"{}\" font-size=\"28\" fill=\"#6f6d66\">Image not available</text>",
-                        x + 14.0,
-                        y + 38.0,
-                    );
-                }
-            }
+            Kind::Image { .. } => effects::image(out, node, rect, theme, self.assets, self.clips),
+        }
+        if shadowed {
+            out.push_str("</g>");
         }
         if wrapped {
             out.push_str("</g>");
@@ -399,12 +407,37 @@ fn slide_body(
     let theme = &deck.theme;
     let size = theme.size;
     let rects = layout_with(ts, deck, slide, assets).into_iter().collect();
-    let mut out = format!(
-        "<rect width=\"{}\" height=\"{}\" fill=\"{}\"/>",
-        size.w,
-        size.h,
-        color(theme, slide.fill.as_deref().unwrap_or("bg"))
+    let mut out = String::new();
+    let rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: size.w,
+        h: size.h,
+    };
+    let default_fill = Fill::from("bg");
+    let fill = effects::paint(
+        &mut out,
+        slide.fill.as_ref().unwrap_or(&default_fill),
+        theme,
+        rect,
+        clips,
     );
+    let _ = write!(
+        out,
+        "<rect width=\"{}\" height=\"{}\" {fill}/>",
+        size.w, size.h
+    );
+    if let Some(background) = &slide.background {
+        let mut node = Node::new(
+            "background",
+            Kind::Image {
+                src: background.image.clone(),
+                fit: background.fit,
+            },
+        );
+        node.overlay.clone_from(&background.overlay);
+        effects::image(&mut out, &node, rect, theme, assets, clips);
+    }
     let mut painter = Painter {
         deck,
         assets,

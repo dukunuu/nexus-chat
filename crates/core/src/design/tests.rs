@@ -291,7 +291,7 @@ fn every_builtin_layout_checks_and_renders_to_png() {
         }
     });
     picture.save(assets.join("sample.png")).unwrap();
-    assert_eq!(design.slide.layouts.len(), 11);
+    assert_eq!(design.slide.layouts.len(), 21);
     for (name, layout) in &design.slide.layouts {
         let values = layouts::slots(layout).into_iter().map(|slot| {
             let value = match slot.as_str() {
