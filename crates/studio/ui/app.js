@@ -13,7 +13,11 @@ import { libraryController } from './library.js';
 
 hydrateIcons();
 const $ = selector => document.querySelector(selector);
-const state = { deck:null, revision:'', hashes:{}, images:{}, slideId:null, selected:new Set(), scopeSlide:false, preview:null, threads:[], activities:{}, linked:false, flash:[], mode:'edit', panelTab:'design', playStep:0, properties:false, comments:false, openThread:null, draftAnchor:null, drafts:{}, showResolved:false, zoom:null, panX:0, panY:0, spacePan:false };
+const state = { deck:null, revision:'', hashes:{}, images:{}, slideId:null, selected:new Set(), scopeSlide:false, preview:null, threads:[], activities:{}, linked:false, flash:[], mode:'edit', panelTab:'design', playStep:0, side:null, openThread:null, draftAnchor:null, drafts:{}, showResolved:false, zoom:null, panX:0, panY:0, spacePan:false };
+// One right sidebar: properties, comments, history or design. The two older
+// flags read and write it, so the panel modules keep asking the same question.
+for (const tab of ['properties', 'comments']) Object.defineProperty(state, tab, { get:() => state.side === tab, set:on => { if (on) state.side = tab; else if (state.side === tab) state.side = null; } });
+try { state.leftHidden = localStorage.getItem('nexus-deck-left') === 'hidden'; } catch { state.leftHidden = false; }
 const queue = []; let pending = null, toastTimer, focusTimer, lastFocus = '', flashTimer;
 function applyTheme(colors) {
   const roles = { bg:'bg', surface:'bg', raised:'raised', control:'control', hairline:'border_dim', text:'fg', muted:'fg_dim', faint:'fg_dim', accent:'accent', accent2:'accent2', 'accent-soft':'selection', success:'success', warning:'warning', danger:'error', canvas:'bg', 'on-accent':'bg', code:'raised', present:'bg' };
@@ -124,14 +128,16 @@ function renderAncillary() {
 function renderLabels() {
   $('#deck-title-label').textContent = state.deck.title;
   $('#link-status').title = state.linked ? 'Comments go to your nexus conversation' : 'Not linked to a conversation — open it from nexus with /studio';
-  $('#dirty').textContent = pending?.ops || queue.some(item => item.ops) ? 'Saving' : 'Saved';
+  const saving = Boolean(pending?.ops || queue.some(item => item.ops));
+  $('#dirty').textContent = saving ? 'Saving…' : 'Saved'; $('#save').classList.toggle('busy', saving);
+  renderStatusDot(saving);
   $('#speaker-notes').value = api.slide()?.notes || ''; $('#speaker-notes').disabled = !api.slide();
-  $('#slide-label').textContent = api.slide() ? `Slide ${String(state.deck.slides.indexOf(api.slide()) + 1).padStart(2, '0')} / ${String(state.deck.slides.length).padStart(2, '0')}${api.slide().name ? `  ·  ${api.slide().name}` : ''}` : 'Your canvas';
+  $('#slide-label').textContent = api.slide() ? `Slide ${state.deck.slides.indexOf(api.slide()) + 1} of ${state.deck.slides.length}` : '';
   $('#slide-wrap').hidden = !api.slide(); $('#canvas-empty').hidden = Boolean(api.slide());
 }
 function render() {
   if (!state.deck) return;
-  $('#properties-panel').hidden = !state.properties; $('#comments-panel').hidden = !state.comments;
+  renderSidebar();
   $('#workspace').classList.toggle('commenting', state.mode === 'comment');
   if (deckActivities) { feedback.updateActivities(deckActivities); deckActivities = null; }
   feedback.render(); paintCanvas(); strip.render(); panel.render();
@@ -144,6 +150,7 @@ function render() {
   $('#link-status').title = state.linked ? 'Comments go to your nexus conversation' : 'Not linked to a conversation — open it from nexus with /studio';
   for (const tab of ['design','animate']) $(`#tab-${tab}`).setAttribute('aria-selected',String(state.panelTab === tab));
   feedback.renderPins(); animationPanel.badges(); focusChanged(); playback.refresh();
+  renderSidebar();
 }
 function showDetails(title, items) {
   $('#export-details-heading').textContent = title;
@@ -158,7 +165,10 @@ function handleEvent(event, reply) {
   if (event.event === 'Deck') {
     if (gesture) api.endGesture(true);
     if (event.colors) applyTheme(event.colors);
-    feedback.clearPreview(); authoritative = structuredClone(event.deck);
+    // A kept version stays on screen through later edits; a suggested edit's
+    // preview is stale once the deck moves.
+    if (!state.preview?.history) feedback.clearPreview();
+    authoritative = structuredClone(event.deck);
     Object.assign(state, { deck:authoritative, revision:event.revision, hashes:event.hashes, images:event.images, threads:event.threads || [], linked:event.linked, flash:event.changed || [] });
     // A reply acknowledges only its own command, not previews still in flight.
     for (const item of [pending, ...queue]) if (item?.ops) state.deck = applyLocal(state.deck, item.ops) || state.deck;
@@ -174,14 +184,20 @@ function handleEvent(event, reply) {
     if (event.import_warnings?.length) showApproximations('Import approximations', 'Imported from PowerPoint', event.import_warnings);
     deckActivities = event.activities;
     renderDeck();
+    if (state.side === 'history') command({ command:'History' });
     library.onDocument(event);
     for (const node of document.querySelectorAll('#canvas .block')) node.classList.toggle('external-flash', state.flash.includes(node.dataset.id));
     if (state.flash.length) { clearTimeout(flashTimer); flashTimer = setTimeout(() => { state.flash = []; document.querySelectorAll('.external-flash').forEach(n => n.classList.remove('external-flash')); }, 1800); }
+  } else if (event.event === 'History') {
+    state.versions = event.versions; renderHistory();
+  } else if (event.event === 'HistoryPreview' && event.deck) {
+    showVersion(event.id, event.deck);
   } else if (event.event === 'Designs') {
     const list = $('#deck-design-list'); list.replaceChildren();
     for (const design of event.available) {
-      const row = document.createElement('button'); row.textContent = design.name; row.setAttribute('aria-pressed', String(design.current));
-      row.onclick = () => command({ command: 'ApplyDesign', design: design.slug }); list.append(row);
+      const row = element('button', `design-row${design.current ? ' on' : ''}`); row.type = 'button'; row.setAttribute('aria-pressed', String(design.current));
+      row.append(element('span', 'design-row-name', design.name));
+      row.onclick = () => { if (!design.current) command({ command: 'ApplyDesign', design: design.slug }); }; list.append(row);
     }
   } else if (event.event === 'TemplateImported') {
     const actions = [['Use for this deck', () => command({ command: 'ApplyDesign', design: event.slug })]];
@@ -212,7 +228,7 @@ function handleEvent(event, reply) {
 // Doc mode lives in ./doc/doc.js, loaded when the backend opens a doc. Its
 // events go there; a deck event brings the deck UI back.
 const DOC_EVENTS = new Set(['Doc', 'DocFeedback', 'DocPreview', 'DocFocus', 'Pages']);
-const SHARED_EVENTS = new Set(['Asset', 'Exported', 'Saved', 'Revealed', 'Error', 'Theme', 'Designs', 'TemplateImported', 'Library', 'Idle']);
+const SHARED_EVENTS = new Set(['Asset', 'Exported', 'Saved', 'Revealed', 'Error', 'Theme', 'Designs', 'TemplateImported', 'Library', 'Idle', 'History', 'HistoryPreview']);
 let docUi = null, docQueue = Promise.resolve();
 function route(event, reply) {
   if (docUi && event.event === 'Deck') {
@@ -240,10 +256,118 @@ function deckMenu(open) { $('#deck-menu').hidden = !open; $('#deck-title').setAt
 $('#deck-title').onclick = () => deckMenu($('#deck-menu').hidden);
 document.addEventListener('pointerdown', event => { if (!event.target.closest('.deck-menu')) deckMenu(false); });
 document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#deck-menu').hidden) { deckMenu(false); $('#deck-title').focus(); } });
-function properties() { state.properties = !state.properties; if (state.properties) { state.comments = false; feedback.closeThread(); } render(); }
-$('#toggle-properties').onclick = properties; $('#close-properties').onclick = properties;
-function comments() { state.comments = !state.comments; if (state.comments) state.properties = false; render(); }
-$('#toggle-comments').onclick = comments; $('#close-comments').onclick = comments;
+function openSide(tab) {
+  if (state.side === 'comments' && tab !== 'comments') feedback.closeThread();
+  state.side = tab;
+  if (tab === 'history') { renderHistory(); command({ command:'History' }); }
+  if (tab === 'design') renderDesignPane();
+  render();
+}
+const toggleSide = tab => openSide(state.side === tab ? null : tab);
+function properties() { toggleSide('properties'); }
+function renderSidebar() {
+  $('#sidebar').hidden = !state.side;
+  document.body.classList.toggle('side-open', Boolean(state.side));
+  document.body.classList.toggle('left-hidden', Boolean(state.leftHidden));
+  for (const tab of document.querySelectorAll('#sidebar .side-tabs [role=tab]')) { const on = tab.dataset.side === state.side; tab.setAttribute('aria-selected', String(on)); tab.tabIndex = on ? 0 : -1; }
+  $('#properties-panel').hidden = state.side !== 'properties'; $('#comments-panel').hidden = state.side !== 'comments';
+  $('#history-pane').hidden = state.side !== 'history'; $('#design-pane').hidden = state.side !== 'design';
+  $('#toggle-comments').setAttribute('aria-pressed', String(state.side === 'comments'));
+  $('#toggle-history').setAttribute('aria-pressed', String(state.side === 'history'));
+  $('#deck-design').setAttribute('aria-pressed', String(state.side === 'design'));
+  const count = $('#comment-count').textContent;
+  $('#side-comment-count').textContent = count === '0' ? '' : count; $('#toggle-comments').dataset.count = count;
+  $('#toggle-left').setAttribute('aria-label', state.leftHidden ? 'Show slides' : 'Hide slides');
+}
+for (const tab of document.querySelectorAll('#sidebar .side-tabs [role=tab]')) tab.onclick = () => openSide(tab.dataset.side);
+$('#close-side').onclick = () => openSide(null);
+$('#toggle-comments').onclick = () => toggleSide('comments');
+$('#toggle-history').onclick = () => toggleSide('history');
+$('#deck-design').onclick = () => toggleSide('design');
+$('#more-history').onclick = () => { moreMenu(false); openSide('history'); };
+$('#more-design').onclick = () => { moreMenu(false); openSide('design'); };
+$('#more-properties').onclick = () => { moreMenu(false); openSide('properties'); };
+function toggleLeft() {
+  if (matchMedia('(max-width: 899px)').matches) { $('#strip-pane').classList.toggle('open'); return; }
+  state.leftHidden = !state.leftHidden;
+  try { localStorage.setItem('nexus-deck-left', state.leftHidden ? 'hidden' : ''); } catch { /* storage may be unavailable */ }
+  renderSidebar(); applyViewport();
+}
+$('#toggle-left').onclick = toggleLeft;
+function moreMenu(open) {
+  $('#more-menu').hidden = !open; $('#more').setAttribute('aria-expanded', String(open));
+  if (open) { $('#undo').disabled = false; $('#more-menu button:not(.narrow-only)').focus(); }
+}
+$('#more').onclick = () => moreMenu($('#more-menu').hidden);
+document.addEventListener('pointerdown', event => { if (!event.target.closest('.more-menu')) moreMenu(false); });
+for (const id of ['undo', 'redo', 'play-from-here']) $(`#${id}`).addEventListener('click', () => moreMenu(false));
+document.addEventListener('keydown', event => {
+  if ($('#more-menu').hidden) return;
+  const items = [...document.querySelectorAll('#more-menu button')].filter(b => b.offsetParent), index = items.indexOf(document.activeElement);
+  if (['ArrowDown','ArrowUp','Escape'].includes(event.key)) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (event.key === 'Escape') { moreMenu(false); $('#more').focus(); }
+    else items[(index + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length]?.focus();
+  }
+});
+function renderStatusDot(saving) {
+  const pill = $('#link-status'), working = pill.classList.contains('working');
+  const dot = $('#status-dot');
+  dot.className = `status-dot${saving ? ' saving' : working ? ' working' : ''}`;
+  const label = `${saving ? 'Saving' : 'Saved'} · ${pill.textContent || 'Not linked'}`;
+  dot.title = label; dot.setAttribute('aria-label', label);
+}
+
+// -- version history ------------------------------------------------------------------------
+
+const clockOf = iso => new Date(iso).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+function dayOf(iso) {
+  const d = new Date(iso), today = new Date(), yesterday = new Date(Date.now() - 864e5);
+  if (d.toDateString() === today.toDateString()) return 'Today';
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  return d.toLocaleDateString([], { month:'short', day:'numeric' });
+}
+function element(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
+function versionRow(title, detail, dot, on, run) {
+  const row = element('button', `version${on ? ' on' : ''}`); row.type = 'button';
+  const text = element('span', 'version-text'); text.append(element('span', 'version-title', title), element('span', 'version-detail', detail));
+  row.append(element('span', `version-dot ${dot}`), text); row.onclick = run; return row;
+}
+function renderHistory() {
+  const pane = $('#history-pane'); if (pane.hidden && state.side !== 'history') return;
+  pane.replaceChildren(versionRow('Current version', 'What you see now', 'now', !state.preview?.history, () => { if (state.preview?.history) { feedback.clearPreview(); render(); renderHistory(); } }));
+  if (!state.versions) { pane.append(element('div', 'menu-empty', 'Loading…')); return; }
+  if (!state.versions.length) { pane.append(element('p', 'side-note', 'Earlier versions appear here after the first edit.')); return; }
+  let day = '';
+  for (const v of state.versions) {
+    const d = dayOf(v.at); if (d !== day) { day = d; pane.append(element('div', 'side-eyebrow', d)); }
+    pane.append(versionRow(`${clockOf(v.at)} · ${v.who === 'model' ? 'nexus' : 'You'}`, v.summary, v.who === 'model' ? 'model' : '', state.preview?.history === v.id, () => command({ command:'HistoryPreview', id:v.id })));
+  }
+  pane.append(element('p', 'side-note', 'Each version is the deck before that edit. Restoring makes a new version, so it can be undone too.'));
+}
+function showVersion(versionId, deck) {
+  const version = state.versions?.find(v => v.id === versionId);
+  const slideId = deck.slides.some(s => s.id === state.slideId) ? state.slideId : deck.slides[0]?.id;
+  state.preview = { deck, slideId, before:false, history:versionId }; state.previewTarget = null; state.slideId = slideId || state.slideId;
+  $('#preview-bar').hidden = false;
+  $('#preview-bar strong').textContent = version ? `Before ${version.who === 'model' ? 'nexus\u2019s' : 'your'} edit at ${clockOf(version.at)}` : 'An earlier version';
+  $('#preview-toggle').textContent = 'That version · B for now';
+  $('#preview-apply').textContent = 'Restore this version';
+  $('#preview-apply').onclick = () => { feedback.clearPreview(); command({ command:'HistoryRestore', id:versionId }, event => { if (event.event !== 'Error') toast('Restored that version', null, [['Undo', () => command({ command:'Undo' })]]); }); };
+  render(); renderHistory();
+}
+
+// -- design tab ---------------------------------------------------------------------------------
+
+function renderDesignPane() {
+  const theme = state.deck?.theme; if (!theme) return;
+  const info = $('#deck-design-info'); info.replaceChildren();
+  info.append(element('div', 'side-eyebrow', 'This deck follows'), element('div', 'design-name', state.deck.design || 'Custom'));
+  const swatches = element('span', 'd-swatches');
+  for (const role of ['bg', 'fg', 'accent', 'accent2', 'muted']) { const value = theme.colors?.[role]; if (!value) continue; const swatch = element('span', 'swatch'); swatch.style.background = value; swatch.title = role; swatches.append(swatch); }
+  info.append(swatches, element('div', 'design-fonts', Object.entries(theme.fonts || {}).map(([role, family]) => `${role[0].toUpperCase()}${role.slice(1)} · ${family}`).join('  ·  ')));
+  command({ command:'Designs' });
+}
 for (const mode of ['edit','comment']) $(`#${mode}-mode`).onclick = () => { state.mode = mode; state.selected.clear(); render(); };
 // A slide is 1920 px wide natively (the theme's size). Fit is responsive;
 // numeric zoom is screen pixels per native slide pixel, not a multiple of fit.
@@ -313,9 +437,8 @@ $('#open-library').onclick = () => library.show();
 $('#new-deck').onclick = () => { deckMenu(false); ask('New deck', 'Title', 'Created in your active space’s files/decks folder.', 'Untitled', title => command({ command:'NewDeck', title })); };
 function insert(block) {
   const slide = api.slide(); if (!slide) { toast('Add a slide first.'); return; }
-  state.selected = new Set([block.id]); state.mode = 'edit'; apply(() => [{ op:'insert_node', parent:slide.id, node:block }]); $('#insert-options').hidden = true;
+  state.selected = new Set([block.id]); state.mode = 'edit'; apply(() => [{ op:'insert_node', parent:slide.id, node:block }]);
 }
-$('#insert-toggle').onclick = () => $('#insert-options').hidden = !$('#insert-options').hidden;
 $('#add-text').onclick = () => insert(textNode('Double-click to edit', { position:{ x:160, y:160 }, sizing:{ w:960 } }));
 $('#add-shape').onclick = () => insert({ id:id('b'), kind:'shape', shape:'rect', fill:'accent', position:{ x:480, y:300 }, sizing:{ w:600, h:420 } });
 $('#add-image').onclick = () => ask('Import image', 'Image path', 'PNG, JPEG or WebP. A sanitized copy stays with the deck.', '', path => command({ command:'ImportAsset', path }, event => { if (event.event === 'Asset') insert({ id:id('b'), kind:'image', src:event.src, fit:'contain', position:{ x:240, y:180 }, sizing:{ w:1200, h:720 } }); }));
@@ -324,18 +447,8 @@ let plainFile = false;
 // "Save to exports/ without asking": the quick export, remembered on this device.
 const quickExport = () => { try { return localStorage.getItem('nexus-quick-export') === '1'; } catch { return false; } };
 const exportCommand = format => ({ command:quickExport() ? 'Export' : 'ExportAs', format, ...(plainFile ? { template:'none' } : {}) });
-$('#deck-design').onclick = () => {
-  const pop = $('#deck-design-pop'); pop.hidden = !pop.hidden;
-  $('#deck-design').setAttribute('aria-expanded', String(!pop.hidden));
-  if (!pop.hidden) {
-    const theme = state.deck.theme;
-    $('#deck-design-info').textContent = `${state.deck.design || 'Custom'} · ${Object.values(theme.fonts).join(' / ')}`;
-    command({ command: 'Designs' });
-  }
-};
 $('#add-template').onclick = () => chooseTemplate(command);
 templateDrop(command, toast, undefined, () => !docUi);
-document.addEventListener('pointerdown', event => { if (!event.target.closest('.template-menu')) { $('#deck-design-pop').hidden = true; $('#deck-design').setAttribute('aria-expanded', 'false'); } });
 $('#export-template').onclick = () => { plainFile = !plainFile; $('#export-template').setAttribute('aria-checked', String(state.template && !plainFile)); };
 $('#export-quick').onclick = () => { try { localStorage.setItem('nexus-quick-export', quickExport() ? '0' : '1'); } catch { /* storage may be unavailable */ } syncQuick(); };
 function syncQuick() { $('#export-quick').setAttribute('aria-checked', String(quickExport())); }
@@ -360,9 +473,10 @@ document.addEventListener('keydown', event => {
   } else if (event.key === 'Tab') exportMenu(false);
 });
 document.addEventListener('keydown', event => {
+  if (docUi) return; // doc mode has its own keys
   if (playback.key(event)) return;
   const key = event.key.toLowerCase(), mod = event.metaKey || event.ctrlKey, editingField = event.target.closest('input,textarea,select,[contenteditable]');
-  if (mod && key === '\\') { event.preventDefault(); properties(); return; }
+  if (mod && key === '\\') { event.preventDefault(); if (event.shiftKey) toggleLeft(); else properties(); return; }
   if (mod && ['=','+','-','0'].includes(key)) { event.preventDefault(); zoom(key === '0' ? 0 : key === '-' ? -.1 : .1); return; }
   if (mod && key === 's') { event.preventDefault(); if (editingField) event.target.blur(); toast('Every change is saved to the deck file as you make it.'); return; }
   if (state.scrubbing && event.key === 'Escape') { event.preventDefault(); api.endGesture(true); return; }
@@ -376,7 +490,8 @@ document.addEventListener('keydown', event => {
     if (action) { event.preventDefault(); editing.align(action); return; }
   }
   if (key === 'b' && state.preview) { event.preventDefault(); feedback.togglePreview(); }
-  else if (event.key === 'Escape') { feedback.clearPreview(); state.openThread = null; state.draftAnchor = null; state.selected.clear(); render(); }
+  else if (key === 'v' && !mod) { state.mode = 'edit'; render(); }
+  else if (event.key === 'Escape') { const wasHistory = state.preview?.history; feedback.clearPreview(); if (wasHistory) renderHistory(); state.openThread = null; state.draftAnchor = null; state.selected.clear(); render(); }
   else if (key === 'c') { state.mode = state.mode === 'comment' ? 'edit' : 'comment'; state.selected.clear(); render(); }
   else if (mod && key === 'z') { event.preventDefault(); command({ command:event.shiftKey ? 'Redo' : 'Undo' }); }
   else if (mod && key === 'd') { event.preventDefault(); canvas.duplicate(); }

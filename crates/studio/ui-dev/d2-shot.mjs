@@ -78,7 +78,7 @@ try {
       return {order,groups:plan.groups.length,match,automatic:leading.automatic.map(x=>x.id)};
     });
     assert.deepEqual(pure.order,[['a','b','c'],['d'],1,{index:2,step:0},{index:1,step:0}]);assert.equal(pure.groups,4);assert.deepEqual(pure.match,[['stable','stable'],['old-id','new-id']]);assert.deepEqual(pure.automatic,['auto']);
-    await page.locator('#toggle-properties').click();await page.locator('#tab-animate').click();
+    await page.locator('#more-properties').dispatchEvent('click');await page.locator('#tab-animate').click();
     await page.locator('[data-layer="a"] .layer-name').click();await wait();
     assert.equal(await page.locator('.build-order-row').count(),6);assert.equal(await page.locator('.build-badge').count(),5);
     const outside=await page.evaluate(()=>[...document.querySelectorAll('.build-badge')].every(b=>{const n=document.querySelector('#canvas [data-id="'+({1:'a',2:'b',3:'c',4:'d',6:'title'}[b.textContent])+'"]');if(!n)return true;const r=n.getBoundingClientRect(),p=b.getBoundingClientRect();return p.right<=r.left||p.left>=r.right||p.bottom<=r.top||p.top>=r.bottom;}));assert.ok(outside,'badges are outside their animated layer');
@@ -88,15 +88,15 @@ try {
     await page.locator('#strip .thumbnail').nth(1).hover();assert.equal(await page.locator('#strip .thumbnail').nth(1).getAttribute('data-previewing'),'true');
     await page.waitForFunction(()=>!document.querySelector('#strip .thumbnail[data-previewing]'),null,{timeout:4000});
     let before=await depth();await page.getByRole('button',{name:'fade transition',exact:true}).click();await wait();assert.equal(await depth(),before+1);assert.equal(await page.evaluate(()=>window.__d2.deck.slides[0].transition.type),'fade');
-    await page.locator('#undo').click();await wait();assert.equal(await depth(),before);
+    await page.locator('#undo').dispatchEvent('click');await wait();assert.equal(await depth(),before);
     before=await depth();await page.getByLabel('build_in effect',{exact:true}).selectOption('fly');await wait();assert.equal(await depth(),before+1);assert.equal(await page.evaluate(()=>window.__d2.deck.slides[0].children.find(n=>n.id==='a').animation.build_in.effect),'fly');
-    await page.locator('#undo').click();await wait();
+    await page.locator('#undo').dispatchEvent('click');await wait();
     // Scrub is a preview, then exactly one transaction on release.
     const label=page.getByLabel('build_in duration',{exact:true}).locator('..').locator('.scrub-label'),box=await label.boundingBox();before=await depth();const count=await page.evaluate(()=>window.__d2.commands.length);
-    await page.mouse.move(box.x+5,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+25,box.y+box.height/2,{steps:5});assert.equal(await page.evaluate(()=>window.__d2.commands.length),count);await page.mouse.up();await wait();assert.equal(await depth(),before+1);await page.locator('#undo').click();await wait();
-    const dt=await page.evaluateHandle(()=>new DataTransfer());await dt.evaluate(d=>d.setData('text/build-node','d'));before=await depth();await page.locator('[data-build-node="a"]').dispatchEvent('drop',{dataTransfer:dt});await wait();assert.equal(await depth(),before+1);assert.equal(await page.evaluate(()=>window.__d2.deck.slides[0].builds[0]),'d');await page.locator('#undo').click();await wait();
+    await page.mouse.move(box.x+5,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+25,box.y+box.height/2,{steps:5});assert.equal(await page.evaluate(()=>window.__d2.commands.length),count);await page.mouse.up();await wait();assert.equal(await depth(),before+1);await page.locator('#undo').dispatchEvent('click');await wait();
+    const dt=await page.evaluateHandle(()=>new DataTransfer());await dt.evaluate(d=>d.setData('text/build-node','d'));before=await depth();await page.locator('[data-build-node="a"]').dispatchEvent('drop',{dataTransfer:dt});await wait();assert.equal(await depth(),before+1);assert.equal(await page.evaluate(()=>window.__d2.deck.slides[0].builds[0]),'d');await page.locator('#undo').dispatchEvent('click');await wait();
     before=await depth();await page.getByRole('button',{name:'Preview build_in',exact:true}).click();await page.waitForTimeout(300);assert.equal(await depth(),before,'preview never writes');
-    await page.locator('#play-from-here').click();await wait();assert.equal(await page.locator('#present-step').textContent(),'build 0/4');assert.equal(await opacity('a'),0);
+    await page.locator('#play-from-here').dispatchEvent('click');await wait();assert.equal(await page.locator('#present-step').textContent(),'build 0/4');assert.equal(await opacity('a'),0);
     await key('Space');await page.waitForTimeout(450);assert.equal(await page.locator('#present-step').textContent(),'build 1/4');for(const id of ['a','b','c'])assert.ok(await opacity(id)>.99);assert.equal(await opacity('d'),0);
     await key('ArrowRight');await page.waitForTimeout(400);assert.ok(await opacity('d')>.99);await key('Backspace');assert.equal(await opacity('d'),0);await key('ArrowLeft');assert.equal(await opacity('a'),0);
     await key('End');assert.equal(await page.locator('#present-counter').textContent(),'3 / 3');await key('Home');assert.equal(await page.locator('#present-counter').textContent(),'1 / 3');

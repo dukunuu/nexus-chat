@@ -418,6 +418,10 @@ impl Backend {
                 return Ok(self.doc_feedback_event(vec![]));
             }
             Command::DocApply { ops } => self.apply_ops(ops)?,
+            Command::HistoryRestore { id } => {
+                let kept = self.history_doc(&id)?;
+                self.replace_doc(kept)?;
+            }
             Command::DocApplyDesign { design } => {
                 self.apply_ops(vec![
                     serde_json::json!({"op": "apply_design", "design": design}),
@@ -729,6 +733,7 @@ impl Backend {
                 | Command::Redo {}
                 | Command::ApplyEdit { .. }
                 | Command::DocResolveEdits { .. }
+                | Command::HistoryRestore { .. }
         )
     }
 

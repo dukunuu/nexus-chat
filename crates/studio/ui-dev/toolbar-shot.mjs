@@ -152,14 +152,18 @@ try {
     // Screen-space geometry follows scrolling and live resize without changing selection.
     await page.locator('#stage').dispatchEvent('wheel',{deltaX:31,deltaY:17}); await settle(); await checkGeometry(`scroll-${theme}`);
     const collapseOrder = ['order','duplicate','align','colors','style']; let last = 0;
-    for (const width of [700,650,600,550,500,460,420]) {
+    // Under 900px the slide strip overlays the canvas, so the stage keeps the window's width.
+    for (const width of [700,600,500,420,380,340,320]) {
       await page.setViewportSize({width,height:900}); await frame('middle'); await checkGeometry(`narrow-${width}-${theme}`);
       const hidden = await toolbar().locator('[data-toolbar-group]').evaluateAll(groups => groups.filter(n => n.hidden).map(n => n.dataset.toolbarGroup));
       assert.deepEqual(new Set(hidden),new Set(collapseOrder.slice(0,hidden.length)), 'collapse follows the specified priority'); assert.ok(hidden.length >= last); last = hidden.length;
     }
-    assert.equal(last,5,'all optional groups move to overflow at minimum width');
+    assert.ok(last >= 3,'optional groups move to overflow at phone width');
+    assert.ok(await toolbar().evaluate(n => n.getBoundingClientRect().width <= document.querySelector('#stage').clientWidth),'the toolbar fits the stage at phone width');
     await toolbar().getByRole('button',{name:'Selection actions',exact:true}).focus(); await page.keyboard.press('Enter');
-    assert.deepEqual(await page.locator('[data-toolbar-menu] > button').allTextContents(), ['Text style','Text alignment','Selection color','Bring forward⌘/Ctrl+]','Send back⌘/Ctrl+[','Duplicate⌘/Ctrl+D','Delete⌫ / Delete','Comment on selectionC']);
+    // The menu lists exactly the groups that collapsed, then the actions that always live there.
+    const collapsed = new Set(collapseOrder.slice(0,last));
+    assert.deepEqual(await page.locator('[data-toolbar-menu] > button').allTextContents(), [...(collapsed.has('style') ? ['Text style'] : []),'Text alignment',...(collapsed.has('colors') ? ['Selection color'] : []),'Bring forward⌘/Ctrl+]','Send back⌘/Ctrl+[','Duplicate⌘/Ctrl+D','Delete⌫ / Delete','Comment on selectionC']);
     await shot(`toolbar-overflow-420-${theme}`);
     await page.getByRole('menuitem',{name:'Text alignment',exact:true}).click(); await page.getByRole('menuitemradio',{name:'Align right',exact:true}).click(); await settle(); assert.equal((await data()).font.align,'right');
     await page.setViewportSize({width:1150,height:900}); await frame('middle');

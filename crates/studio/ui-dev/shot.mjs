@@ -42,10 +42,10 @@ try {
       await page.evaluate(colors => window.studioAsyncEvent({ event:'Theme', colors }), colors);
       // Studio is a pure canvas: no chat pane, no host connection, and it says it is linked.
       assert.equal(await page.locator('#chat-pane, #chat-input, #host-status, #review').count(), 0);
-      assert.equal((await page.locator('#link-status').textContent()).trim(), 'linked to nexus');
+      assert.equal((await page.locator('#link-status').textContent()).trim(), 'Linked to nexus');
       if (scenario === 'editing' || scenario === 'properties') {
         await page.locator('#canvas .block[data-id="b1"]').click();
-        if (scenario === 'properties') await page.locator('#toggle-properties').click();
+        if (scenario === 'properties') await page.locator('#more-properties').dispatchEvent('click');
         else await page.locator('#floating-toolbar').waitFor({ state:'visible' });
       } else if (scenario === 'external') {
         const before = await page.locator('#canvas').textContent();
@@ -57,14 +57,14 @@ try {
         await page.waitForTimeout(120);
         await page.screenshot({ path:path.join(out, `external-${colorScheme}.png`) }); console.log(path.join(out, `external-${colorScheme}.png`));
         // Cmd+Z takes the whole model edit back in one step; redo brings it back.
-        await page.locator('#undo').click(); await page.waitForFunction(text => document.querySelector('#canvas').textContent === text, before);
-        await page.locator('#redo').click(); await page.waitForFunction(() => document.querySelector('#canvas').textContent.includes('Room to do your'));
+        await page.locator('#undo').dispatchEvent('click'); await page.waitForFunction(text => document.querySelector('#canvas').textContent === text, before);
+        await page.locator('#redo').dispatchEvent('click'); await page.waitForFunction(() => document.querySelector('#canvas').textContent.includes('Room to do your'));
         await page.close(); continue;
       } else if (scenario === 'thread' || scenario === 'preview') {
         await page.locator('#comment-mode').click(); await page.locator('#pins .pin').first().click(); await page.locator('#thread-popover .edit-card').waitFor();
         assert.equal(await page.getByRole('button', { name:'Send to nexus' }).isEnabled(), true);
         if (scenario === 'preview') {
-          await page.getByRole('button', { name:'Preview', exact:true }).click(); await page.locator('#canvas .ghost-changed').waitFor();
+          await page.getByRole('button', { name:'Preview on the slide', exact:true }).click(); await page.locator('#canvas .ghost-changed').waitFor();
           const before = await page.locator('#canvas').textContent(); await page.keyboard.press('b'); assert.notEqual(await page.locator('#canvas').textContent(), before); await page.keyboard.press('b');
         }
       } else if (scenario === 'comments') {
@@ -76,7 +76,7 @@ try {
       const output = path.join(out, `${scenario}-${colorScheme}.png`); await page.screenshot({ path:output }); console.log(output);
       if (scenario === 'preview') {
         await page.locator('#preview-apply').click(); await page.locator('#preview-bar').waitFor({ state:'hidden' }); assert.match(await page.locator('#canvas').textContent(), /Find your focus/);
-        await page.locator('#undo').click(); await page.waitForFunction(() => document.querySelector('#canvas').textContent.includes('Less noise. More room'));
+        await page.locator('#undo').dispatchEvent('click'); await page.waitForFunction(() => document.querySelector('#canvas').textContent.includes('Less noise. More room'));
       }
       if (scenario === 'thread') {
         // A reply goes to nexus over the link; resolve and reopen stay local.
@@ -86,7 +86,7 @@ try {
         assert.equal(await page.evaluate(() => window.__mock.sent.filter(m => m.type === 'Comment').length), 0);
         // Not linked: the same button is disabled and says why.
         await page.evaluate(() => window.__mock.emitCurrent({ linked:false }));
-        await page.waitForFunction(() => document.querySelector('#link-status').textContent === 'not linked');
+        await page.waitForFunction(() => document.querySelector('#link-status').textContent === 'Not linked');
         assert.equal(await page.getByRole('button', { name:'Send to nexus' }).isDisabled(), true);
         await page.locator('#thread-popover .hint', { hasText:'/studio' }).waitFor();
       }

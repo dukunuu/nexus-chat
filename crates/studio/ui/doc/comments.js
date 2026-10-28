@@ -1,7 +1,7 @@
-// Comments in the margin, the Claude Docs way: each thread is a card beside the
-// text it is about, aligned with its anchor; the text carries a soft highlight;
-// a suggestion made of replace_text operations is drawn in the text as a tracked
-// change with Accept and Reject on its card.
+// Comments in the sidebar: each thread is a card in a stacked list, the text it
+// is about carries a soft highlight, and the two point at each other. A
+// suggestion made of replace_text operations is drawn in the text as a tracked
+// change; its card accepts or rejects it with small icon actions in its header.
 import { inlineTokens, markdownTokens } from '../helpers.js';
 import * as M from './model.js';
 import { parseInline, plainText, toCodePoints, fromCodePoints } from './inline.js';
@@ -31,6 +31,17 @@ function paragraphs(text) {
     out.append(p);
   }
   return out;
+}
+
+/** A small icon action for a card's header row. */
+function action(name, label, run, className = '') {
+  const b = el('button', `icon-button quiet card-action ${className}`.trim());
+  b.type = 'button';
+  b.append(glyph(name));
+  b.title = label;
+  b.setAttribute('aria-label', label);
+  b.addEventListener('click', e => { e.stopPropagation(); run(); });
+  return b;
 }
 
 export function commentsController(api) {
@@ -115,6 +126,7 @@ export function commentsController(api) {
     state.draft = { anchor, text: state.draft?.text || '' };
     state.activeThread = null;
     api.toolbar.hide();
+    if (api.sidebarTab !== 'comments') api.openSidebar('comments');
     refresh();
     root.querySelector('.card.draft textarea')?.focus();
   }
@@ -180,7 +192,8 @@ export function commentsController(api) {
     return row;
   }
 
-  function editCard(thread, edit) {
+  /** One suggested edit. `headed`: its accept and reject live in the card's header. */
+  function editCard(thread, edit, headed = false) {
     const card = el('div', `edit ${edit.status}`);
     if (edit.status !== 'pending') {
       card.append(el('span', 'edit-state', edit.status === 'applied' ? 'Accepted · undo with ⌘Z' : edit.status === 'outdated' ? 'Outdated — the text changed since' : 'Rejected'));
@@ -196,15 +209,19 @@ export function commentsController(api) {
       card.append(diffPreview(thread, edit));
     }
     if (edit.why && !/^suggested edit\.?$/i.test(edit.why.trim())) { const why = el('p', 'edit-why'); why.append(rich(edit.why)); card.append(why); }
-    const actions = el('div', 'd-edit-actions');
-    const accept = el('button', 'primary', 'Accept'), reject = el('button', '', 'Reject');
-    accept.type = reject.type = 'button';
-    accept.addEventListener('click', () => api.command({ command: 'ApplyEdit', owner: thread.id, edit: edit.id }));
-    reject.addEventListener('click', () => api.command({ command: 'DismissEdit', owner: thread.id, edit: edit.id }));
-    actions.append(accept, reject);
-    card.append(actions);
+    if (!headed) {
+      const actions = el('div', 'edit-actions');
+      actions.append(...editActions(thread, edit));
+      card.prepend(actions);
+      card.classList.add('with-actions');
+    }
     return card;
   }
+
+  const editActions = (thread, edit) => [
+    action('check', 'Accept suggestion', () => api.command({ command: 'ApplyEdit', owner: thread.id, edit: edit.id }), 'accept'),
+    action('x', 'Reject suggestion', () => api.command({ command: 'DismissEdit', owner: thread.id, edit: edit.id })),
+  ];
 
   /** Before and after for operations other than replace_text, from the backend's preview. */
   function diffPreview(thread, edit) {
@@ -253,7 +270,7 @@ export function commentsController(api) {
       api.command({ command: 'CommentReply', thread: thread.id, text, send: toNexus }, e => { if (e.event === 'Error') state.drafts[thread.id] = text; });
     };
     area.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(state.linked); } });
-    const note = el('button', '', 'Reply'), ask = el('button', 'primary', 'Send to nexus');
+    const note = el('button', 'small quiet', 'Reply'), ask = el('button', 'small primary-quiet', 'Send to nexus');
     note.type = ask.type = 'button';
     ask.prepend(glyph('send'));
     ask.disabled = !state.linked;
@@ -279,13 +296,13 @@ export function commentsController(api) {
     const head = el('div', 'card-head');
     head.append(author(thread.messages[0]));
     if (model && !thread.resolved) head.append(el('span', `d-severity ${thread.severity}`, SEVERITY[thread.severity] || thread.severity));
-    const resolve = el('button', 'icon-button quiet resolve');
-    resolve.type = 'button';
-    resolve.append(glyph(thread.resolved ? 'redo' : 'check'));
-    resolve.title = thread.resolved ? 'Reopen thread' : 'Resolve thread';
-    resolve.setAttribute('aria-label', resolve.title);
-    resolve.addEventListener('click', e => { e.stopPropagation(); api.command({ command: thread.resolved ? 'CommentReopen' : 'CommentResolve', thread: thread.id }); });
-    head.append(resolve);
+    head.append(el('span', 'spacer'));
+    // One pending suggestion: accept and reject sit in the header. Otherwise
+    // the header resolves the thread and each edit carries its own actions.
+    const pendingHere = thread.resolved ? [] : thread.messages.flatMap(m => m.edits).filter(e => e.status === 'pending');
+    const headed = pendingHere.length === 1 ? pendingHere[0] : null;
+    if (headed) head.append(...editActions(thread, headed));
+    else head.append(action(thread.resolved ? 'redo' : 'check', thread.resolved ? 'Reopen thread' : 'Resolve thread', () => api.command({ command: thread.resolved ? 'CommentReopen' : 'CommentResolve', thread: thread.id })));
     card.append(head);
     if (thread.anchor.quote) card.append(el('blockquote', 'quote', thread.anchor.quote.length > 90 ? `${thread.anchor.quote.slice(0, 89)}…` : thread.anchor.quote));
     else if (thread.anchor.block == null) card.append(el('div', 'quote muted', 'The commented text was removed'));
@@ -294,7 +311,7 @@ export function commentsController(api) {
       const body = el('div', 'message');
       if (i > 0) body.append(author(message));
       body.append(paragraphs(message.text));
-      for (const edit of message.edits) body.append(editCard(thread, edit));
+      for (const edit of message.edits) body.append(editCard(thread, edit, edit === headed));
       card.append(body);
     });
     if (!active && thread.messages.length > 1) card.append(el('div', 'more', `${thread.messages.length - 1} ${thread.messages.length === 2 ? 'reply' : 'replies'}`));
@@ -338,20 +355,16 @@ export function commentsController(api) {
       if (e.key === 'Escape') { e.preventDefault(); cancelDraft(); }
       else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(state.linked); }
     });
-    const cancel = el('button', 'icon-button quiet resolve', ''), note = el('button', '', 'Comment'), ask = el('button', 'primary', 'Send to nexus');
-    cancel.append(glyph('x'));
-    cancel.title = 'Cancel (Esc)';
-    cancel.setAttribute('aria-label', 'Cancel comment');
-    cancel.type = note.type = ask.type = 'button';
+    const cancel = action('x', 'Cancel comment (Esc)', () => cancelDraft()), note = el('button', 'small quiet', 'Comment'), ask = el('button', 'small primary-quiet', 'Send to nexus');
+    note.type = ask.type = 'button';
     ask.prepend(glyph('send'));
     ask.disabled = !state.linked;
     ask.title = state.linked ? 'Send this comment to the conversation' : 'Not linked to a conversation — open it from nexus with /studio';
-    cancel.addEventListener('click', cancelDraft);
     note.addEventListener('click', () => submit(false));
     ask.addEventListener('click', () => submit(true));
     const actions = el('div', 'reply-actions');
     actions.append(note, ask);
-    card.querySelector('.card-head').append(cancel);
+    card.querySelector('.card-head').append(el('span', 'spacer'), cancel);
     card.append(area, actions);
     return card;
   }
@@ -363,10 +376,12 @@ export function commentsController(api) {
     for (const node of surface.querySelectorAll(`mark.cmt[data-thread="${CSS.escape(id)}"]`)) node.classList.toggle('hot', on || state.activeThread === id);
   }
   function open(id) {
+    if (api.sidebarTab !== 'comments') api.openSidebar('comments');
     if (state.activeThread === id) return;
     state.activeThread = id; state.draft = null;
     refresh();
     scrollToAnchor(id);
+    root.querySelector(`.card[data-thread="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest' });
   }
   function close() { if (state.activeThread || state.draft) { state.activeThread = null; refresh(); } }
   function scrollToAnchor(id) {
@@ -384,17 +399,23 @@ export function commentsController(api) {
     const header = el('div', 'margin-head');
     if (pending.length) {
       const label = el('span', 'margin-title', `${pending.length} suggestion${pending.length === 1 ? '' : 's'}`);
-      const accept = el('button', 'primary small', 'Accept all'), reject = el('button', 'small', 'Reject all');
-      accept.type = reject.type = 'button';
-      accept.addEventListener('click', () => api.command({ command: 'DocResolveEdits', accept: true }));
-      reject.addEventListener('click', () => api.command({ command: 'DocResolveEdits', accept: false }));
-      header.append(label, reject, accept);
+      const all = (name, text, accept) => {
+        const b = el('button', `all-action${accept ? ' accept' : ''}`);
+        b.type = 'button';
+        b.append(glyph(name), el('span', '', text));
+        b.title = accept ? 'Accept all suggestions' : 'Reject all suggestions';
+        b.setAttribute('aria-label', b.title);
+        b.addEventListener('click', () => api.command({ command: 'DocResolveEdits', accept }));
+        return b;
+      };
+      header.append(label, all('check', 'All', true), all('x', 'All', false));
       root.append(header);
     }
     const track = el('div', 'margin-track');
     root.append(track);
-    for (const thread of open) track.append(threadCard(thread));
     if (state.draft) track.append(draftCard());
+    for (const thread of open) track.append(threadCard(thread));
+    if (!open.length && !state.draft) track.append(el('p', 'side-note', 'No open comments. Select text and press ⌥⌘M, or use the comment button in the toolbar.'));
     if (done.length) {
       const toggle = el('button', 'resolved-fold quiet');
       toggle.type = 'button';
@@ -405,45 +426,12 @@ export function commentsController(api) {
       list.hidden = !showResolved;
       if (showResolved) for (const thread of done) list.append(threadCard(thread));
       track.append(toggle, list);
-      track.dataset.hasResolved = '1';
     }
-    layout();
   }
 
-  /** Put each card beside its anchor; stack collisions; slide the active one to its anchor. */
-  function layout() {
-    layoutFrame = 0;
-    const track = root.querySelector('.margin-track');
-    if (!track) return;
-    const base = track.getBoundingClientRect().top;
-    const gap = 10;
-    const cards = [...track.querySelectorAll(':scope > .card')].map(card => {
-      const id = card.dataset.thread;
-      const anchor = id ? (surface.querySelector(`mark.cmt[data-thread="${CSS.escape(id)}"]`) || surface.querySelector(`[data-block="${CSS.escape(threadOf(id)?.anchor.block ?? '')}"]`)) : (surface.querySelector('mark.cmt[data-thread="draft"]') || surface.querySelector(`[data-block="${CSS.escape(state.draft?.anchor.block ?? '')}"]`));
-      const wanted = anchor ? anchor.getBoundingClientRect().top - base : 0;
-      return { card, wanted, height: card.offsetHeight, y: wanted };
-    }).sort((a, b) => a.wanted - b.wanted);
-    const activeAt = cards.findIndex(c => c.card.classList.contains('active'));
-    let bottom = -gap;
-    cards.forEach((entry, i) => { if (i >= Math.max(activeAt, 0) || activeAt < 0) { entry.y = Math.max(entry.wanted, bottom + gap); bottom = entry.y + entry.height; } else bottom = Infinity; });
-    if (activeAt >= 0) {
-      cards[activeAt].y = cards[activeAt].wanted;
-      let ceiling = cards[activeAt].y - gap;
-      for (let i = activeAt - 1; i >= 0; i--) { cards[i].y = Math.min(cards[i].wanted, ceiling - cards[i].height); ceiling = cards[i].y - gap; }
-      let floor = cards[activeAt].y + cards[activeAt].height + gap;
-      for (let i = activeAt + 1; i < cards.length; i++) { cards[i].y = Math.max(cards[i].wanted, floor); floor = cards[i].y + cards[i].height + gap; }
-    }
-    // Cards pushed above the track's top by the active card are clamped, so
-    // settle top-down once more: never above 0, never overlapping the card above.
-    let floor = 0;
-    for (const entry of cards) { entry.y = Math.max(entry.y, floor); floor = entry.y + entry.height + gap; }
-    let end = 0;
-    for (const { card, y, height } of cards) { card.style.top = `${Math.round(y)}px`; end = Math.max(end, y + height); }
-    const toggle = track.querySelector('.resolved-fold'), list = track.querySelector('.resolved-list');
-    if (toggle) { toggle.style.top = `${Math.round(end + 16)}px`; if (list) list.style.top = `${Math.round(end + 16 + toggle.offsetHeight + 6)}px`; end += 16 + toggle.offsetHeight + (list?.hidden ? 0 : list.offsetHeight + 6); }
-    track.style.height = `${Math.round(end)}px`;
-  }
-  function scheduleLayout() { if (!layoutFrame) layoutFrame = requestAnimationFrame(layout); }
+  /** Cards stack in the sidebar; nothing to place. Kept for callers that ask after a change. */
+  function layout() { layoutFrame = 0; }
+  function scheduleLayout() {}
 
   /** Recompute highlights and cards after the threads, the doc or the selection of a thread changed. */
   function refresh() {
@@ -467,7 +455,6 @@ export function commentsController(api) {
     if (mark && mark.dataset.thread !== 'draft') open(mark.dataset.thread);
     else if (!mark && state.activeThread && !getSelection().toString()) close();
   });
-  new ResizeObserver(scheduleLayout).observe(surface);
 
   return { begin, refresh, render, layout: scheduleLayout, computeDecos, updateActivities, open, close, onPreview, anchorFromSelection, pendingEdits };
 }

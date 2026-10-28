@@ -19,7 +19,7 @@ const paths = {
   'object-bottom':'M3 21h18M5 3h5v14H5Zm9 5h5v9h-5Z',
   'object-distribute-h':'M2 3v18M22 3v18M6 5h4v14H6Zm8 0h4v14h-4Z',
   'object-distribute-v':'M3 2h18M3 22h18M5 6h14v4H5Zm0 8h14v4H5Z',
-  more:'M5 12h.01M12 12h.01M19 12h.01', minus:'M4 12h16',
+  more:'M5.5 12h.01M12 12h.01M18.5 12h.01', minus:'M4 12h16',
   rotation:'M4 10a8 8 0 1 1 2 8M4 4v6h6', radius:'M5 20V12a7 7 0 0 1 7-7h8',
   opacity:'M12 3a9 9 0 1 0 0 18V3Zm0 0a9 9 0 0 1 0 18',
   absolute:'M3 8V3h5m8 0h5v5m0 8v5h-5M8 21H3v-5M8 8h8v8H8Z',
@@ -55,7 +55,12 @@ const paths = {
   library: 'M3 4h7v7H3Zm11 0h7v7h-7ZM3 15h7v5H3Zm11 0h7v5h-7Z', folder: 'M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z',
   search: 'm20 20-4.5-4.5M10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13Z', 'file-deck': 'M3 5h18v12H3Zm5 16h8m-4-4v4', 'file-doc': 'M6 2h9l5 5v15H6Zm9 0v5h5M9 12h8M9 16h8M9 8h3',
   reveal: 'M3 12s4-7 9-7 9 7 9 7-4 7-9 7-9-7-9-7Zm9-3a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z', rename: 'M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z', copy: 'M9 9h12v12H9ZM15 9V3H3v12h6',
-  panel: 'M3 3h18v18H3Zm6 0v18', forward: 'm7 14 5-5 5 5M5 4h14', transition: 'M3 7h9v10H3Zm11 5h7m-3-3 3 3-3 3', back: 'm7 10 5 5 5-5M5 20h14',
+  panel: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2ZM9 4v16',
+  history: 'M3.5 12a8.5 8.5 0 1 0 2.6-6.1M3.5 4.5v3.6h3.6M12 8v4.2l2.8 1.8',
+  design: 'M12 3a9 9 0 1 0 0 18c1.4 0 1.9-1 1.4-2s0-2 1.4-2h2.2a3 3 0 0 0 3-3c0-6-3.6-11-8-11ZM7.5 11h.01M10 7.5h.01M15 8h.01',
+  image: 'M6 4.5h12A2.5 2.5 0 0 1 20.5 7v10a2.5 2.5 0 0 1-2.5 2.5H6A2.5 2.5 0 0 1 3.5 17V7A2.5 2.5 0 0 1 6 4.5ZM20.5 16l-5-5-8 8.5M9 8.4a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2Z',
+  text: 'M5 6V4.5h14V6M12 4.5v15M9 19.5h6',
+  shape: 'M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z', forward: 'm7 14 5-5 5 5M5 4h14', transition: 'M3 7h9v10H3Zm11 5h7m-3-3 3 3-3 3', back: 'm7 10 5 5 5-5M5 20h14',
 };
 export function icon(name) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');

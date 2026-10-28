@@ -30,13 +30,13 @@ const tests = {
     const page = await open('dark');
     await caretAtEnd(page, 'b20');
     await page.keyboard.type(' Thanks.');
-    assert.equal((await page.locator('#doc-app .save-state').textContent()), 'Saving');
+    assert.equal((await page.locator('#doc-app .status-line.save').textContent()), 'Saving…');
     await settle(page);
     assert.equal((await blockOf(page, 'b20')).text, 'Methodology notes live in the shared drive. Thanks.');
     const applies = await page.evaluate(() => window.__mock.commands.filter(c => c.command === 'DocApply'));
     assert.equal(applies.length, 1, 'typing is batched into one Apply per pause');
     assert.equal(applies[0].ops[0].op, 'update_block');
-    assert.equal(await page.locator('#doc-app .save-state').textContent(), 'Saved');
+    assert.equal(await page.locator('#doc-app .status-line.save').textContent(), 'Saved');
     await page.close();
   },
   async enterAndBackspace() {
@@ -339,24 +339,30 @@ Object.assign(tests, {
     assert.equal(second.send, false);
     await page.close();
   },
-  async cardsAlignAndStack() {
+  async cardsStackInTheSidebar() {
     const page = await open('dark');
+    // Open comments show themselves on a wide window until the sidebar is chosen.
+    await page.locator('.doc-sidebar .side-tab[aria-selected="true"]', { hasText: 'Comments' }).waitFor();
     const tops = (await page.evaluate(() => [...document.querySelectorAll('.margin-track > .card')].map(c => [c.dataset.thread, c.offsetTop, c.offsetHeight]))).sort((a, b) => a[1] - b[1]);
+    assert.ok(tops.length >= 2);
     for (let i = 1; i < tops.length; i++) assert.ok(tops[i][1] >= tops[i - 1][1] + tops[i - 1][2], `cards do not overlap: ${JSON.stringify(tops)}`);
-    // The first card sits beside its anchor.
-    const [card, anchor] = await page.evaluate(() => [document.querySelector('.card[data-thread="t1"]').getBoundingClientRect().top, document.querySelector('mark.cmt[data-thread="t1"]').getBoundingClientRect().top]);
-    assert.ok(Math.abs(card - anchor) < 14, `${card} vs ${anchor}`);
-    // Opening a lower thread slides it to its anchor.
-    await page.locator('.card[data-thread="t2"]').click();
-    await page.waitForTimeout(100);
-    const [c2, a2] = await page.evaluate(() => [document.querySelector('.card[data-thread="t2"]').getBoundingClientRect().top, document.querySelector('mark.cmt[data-thread="t2"]').getBoundingClientRect().top]);
-    assert.ok(Math.abs(c2 - a2) < 14, `active card beside its anchor: ${c2} vs ${a2}`);
+    // The page stays centered with the sidebar open.
+    const [sheet, scroller] = await page.evaluate(() => [document.querySelector('.sheet').getBoundingClientRect(), document.querySelector('.page-scroll').getBoundingClientRect()].map(r => r.left + r.width / 2));
+    assert.ok(Math.abs(sheet - scroller) < 2, `centered: ${sheet} vs ${scroller}`);
+    // Clicking highlighted text opens its card.
+    await page.locator('mark.cmt[data-thread="t2"]').first().click();
+    await page.locator('.card[data-thread="t2"].active').waitFor();
     await shot(page, 'doc-comment-active');
     // Hovering the card tints its text, and the reverse.
     await page.locator('.card[data-thread="t1"]').hover();
     assert.equal(await page.locator('mark.cmt[data-thread="t1"].hot').count() > 0, true);
     await page.locator('mark.cmt[data-thread="t1"]').first().hover();
     assert.ok(await page.locator('.card[data-thread="t1"].hot').count());
+    // Closing the sidebar is remembered; the button brings it back.
+    await page.locator('.doc-sidebar').getByRole('button', { name: /Close/ }).click();
+    assert.equal(await page.locator('.doc-sidebar').isVisible(), false);
+    await page.locator('.doc-top').getByRole('button', { name: /^Comments/ }).click();
+    assert.equal(await page.locator('.doc-sidebar').isVisible(), true);
     await page.close();
   },
   async suggestionsAreTrackedChanges() {
@@ -371,19 +377,19 @@ Object.assign(tests, {
     await settle(page);
     assert.match((await blockOf(page, 'b2')).text, /^We! grew/);
     assert.ok(!(await blockOf(page, 'b2')).text.includes('two weeks'));
-    await page.locator('.card[data-thread="t3"] .edit').getByRole('button', { name: 'Accept' }).click();
+    await page.locator('.card[data-thread="t3"]').getByRole('button', { name: 'Accept suggestion' }).click();
     await page.waitForTimeout(200);
     assert.match((await blockOf(page, 'b2')).text, /two weeks ahead of plan/);
     assert.equal(await page.locator('del.sug-del').count(), 0);
     await page.close();
     const again = await open('dark');
-    await again.getByRole('button', { name: 'Reject all' }).click();
+    await again.getByRole('button', { name: 'Reject all suggestions' }).click();
     await again.waitForTimeout(200);
     assert.equal(await again.locator('del.sug-del').count(), 0);
     assert.ok(!(await blockOf(again, 'b2')).text.includes('two weeks'));
     await again.close();
     const third = await open('dark');
-    await third.getByRole('button', { name: 'Accept all' }).click();
+    await third.getByRole('button', { name: 'Accept all suggestions' }).click();
     await third.waitForTimeout(200);
     assert.match((await blockOf(third, 'b2')).text, /two weeks ahead of plan/);
     await third.close();
@@ -391,7 +397,7 @@ Object.assign(tests, {
   async resolveAndActivity() {
     const page = await open('dark');
     assert.match(await page.locator('.resolved-fold').textContent(), /Resolved \(1\)/);
-    await page.locator('.card[data-thread="t2"] .resolve').click({ force: true });
+    await page.locator('.card[data-thread="t2"]').getByRole('button', { name: 'Resolve thread' }).click();
     await page.waitForTimeout(150);
     assert.match(await page.locator('.resolved-fold').textContent(), /Resolved \(2\)/);
     assert.equal(await page.locator('mark.cmt[data-thread="t2"]').count(), 0, 'resolved threads lose their highlight');
@@ -399,7 +405,8 @@ Object.assign(tests, {
     assert.equal(await page.locator('.resolved-list .card').count(), 2);
     await page.evaluate(() => window.__mock.activity('t1', 'working'));
     await page.waitForTimeout(100);
-    assert.equal(await page.locator('#doc-app .link-pill').textContent(), 'linked · nexus working');
+    assert.equal(await page.locator('#doc-app .status-line.link').textContent(), 'nexus is working');
+    assert.match(await page.locator('#doc-app .status-dot').getAttribute('class'), /working/);
     await page.locator('.card[data-thread="t1"]').click();
     assert.match(await page.locator('.card[data-thread="t1"] .activity').textContent(), /nexus is working/);
     await page.evaluate(() => window.__mock.activity('t1', 'done', 'edited blocks b2'));
@@ -434,7 +441,8 @@ Object.assign(tests, {
   },
   async previewExportDesign() {
     const page = await open('dark');
-    await page.getByRole('button', { name: 'Pages' }).click();
+    await page.getByRole('button', { name: 'More' }).click();
+    await page.locator('.more-pop').getByRole('menuitem', { name: /Page preview/ }).click();
     await page.locator('.preview-page img').first().waitFor();
     assert.equal(await page.locator('.preview-page').count(), 3);
     assert.equal(await page.locator('.page-scroll').isVisible(), false);
@@ -442,12 +450,14 @@ Object.assign(tests, {
     await page.keyboard.press('Escape');
     assert.equal(await page.locator('.page-scroll').isVisible(), true);
     // A new revision refreshes the open preview.
-    await page.getByRole('button', { name: 'Pages' }).click();
+    await page.getByRole('button', { name: 'More' }).click();
+    await page.locator('.more-pop').getByRole('menuitem', { name: /Page preview/ }).click();
     await page.locator('.preview-page img').first().waitFor();
     const before = await page.evaluate(() => window.__mock.commands.filter(c => c.command === 'DocPages').length);
     await page.evaluate(() => window.__mock.externalEdit([{ op: 'set_title', title: 'Changed' }]));
     await page.waitForFunction(n => window.__mock.commands.filter(c => c.command === 'DocPages').length > n, before);
-    await page.getByRole('button', { name: 'Back to editing' }).click();
+    await page.getByRole('button', { name: 'More' }).click();
+    await page.locator('.more-pop').getByRole('menuitem', { name: /Back to editing/ }).click();
     await page.getByRole('button', { name: 'Export' }).click();
     // Without a template there is no template choice at all.
     const items = await page.locator('.export-pop .menu-row:visible').allTextContents();
@@ -457,18 +467,43 @@ Object.assign(tests, {
     await page.locator('.doc-toast', { hasText: 'Exported q3-strategy.md' }).waitFor();
     await page.locator('.doc-toast').getByRole('button', { name: 'Reveal' }).click();
     assert.ok(await page.evaluate(() => window.__mock.commands.some(c => c.command === 'Reveal')));
-    await page.getByRole('button', { name: 'Design' }).click();
+    await page.locator('.doc-top').getByRole('button', { name: 'Design' }).click();
     await page.locator('.design-row', { hasText: 'Warm paper' }).waitFor();
     await shot(page, 'doc-design');
     await page.locator('.design-row', { hasText: 'Warm paper' }).click();
     assert.ok(await page.evaluate(() => window.__mock.commands.some(c => c.command === 'DocApplyDesign' && c.design === 'warm')));
     await page.close();
   },
+  async versionHistoryPreviewsAndRestores() {
+    const page = await open('dark');
+    await caretAtEnd(page, 'b20');
+    await page.keyboard.type(' Thanks.');
+    await settle(page);
+    await page.locator('.doc-top').getByRole('button', { name: 'Version history' }).click();
+    await page.locator('.doc-sidebar .version', { hasText: 'Edited 1 block' }).waitFor();
+    assert.equal(await page.locator('.doc-sidebar .version').count(), 2, 'the current version and one kept version');
+    await page.locator('.doc-sidebar .version').nth(1).click();
+    await page.locator('.history-banner:visible').waitFor();
+    assert.equal(await part(page, 'b20').textContent(), 'Methodology notes live in the shared drive.', 'the kept version is on the page');
+    assert.equal(await page.locator('.surface').getAttribute('contenteditable'), 'false', 'read-only while viewing');
+    await shot(page, 'doc-version');
+    // Esc goes back to the current version without changing anything.
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('.history-banner').isVisible(), false);
+    assert.match(await part(page, 'b20').textContent(), /Thanks\.$/);
+    await page.locator('.doc-sidebar .version').nth(1).click();
+    await page.getByRole('button', { name: 'Restore this version' }).click();
+    await page.waitForFunction(() => window.__mock.commands.some(c => c.command === 'HistoryRestore' && c.id === 'v0'));
+    await page.waitForTimeout(150);
+    assert.equal(await part(page, 'b20').textContent(), 'Methodology notes live in the shared drive.');
+    assert.equal(await page.locator('.surface').getAttribute('contenteditable'), 'true');
+    await page.close();
+  },
   async designUpdateIsAnnounced() {
     const page = await open('dark');
     await page.evaluate(() => { window.__mock.designUpdate = true; window.__mock.emitCurrent(); });
-    await page.getByRole('button', { name: 'Design' }).click();
-    await page.getByText('Update available').waitFor();
+    await page.locator('.doc-top').getByRole('button', { name: 'Design' }).click();
+    await page.getByText('The design changed since this doc copied it').waitFor();
     await page.getByRole('button', { name: 'Apply update' }).click();
     assert.ok(await page.evaluate(() => window.__mock.commands.some(c => c.command === 'DocApplyDesign' && c.design === null)));
     await page.close();
@@ -584,7 +619,7 @@ Object.assign(tests, {
   async narrowWindow() {
     const page = await open('dark', { width: 1000, height: 800 });
     assert.equal(await page.locator('.doc-outline').evaluate(n => n.getBoundingClientRect().right <= 0), true, 'the outline collapses below 1100px');
-    await page.locator('.outline-toggle').click();
+    await page.getByRole('button', { name: /outline/ }).click();
     await page.locator('.doc-outline.open').waitFor();
     await page.locator('.outline-link', { hasText: 'Results' }).click();
     await shot(page, 'doc-narrow');
@@ -935,11 +970,11 @@ Object.assign(tests, {
     await page.locator('.doc-toast', { hasText: 'Exported q3-strategy.pdf' }).waitFor();
     assert.deepEqual((await page.evaluate(() => window.__mock.commands.filter(c => c.command === 'DocExport'))).at(-1), { command: 'DocExport', format: 'pdf' });
     // Save a copy and Add template go through the dialogs too.
-    await page.getByRole('button', { name: 'Export' }).click();
-    await page.locator('.export-pop').getByRole('menuitem', { name: /Save a copy/ }).click();
+    await page.getByRole('button', { name: 'More' }).click();
+    await page.locator('.more-pop').getByRole('menuitem', { name: /Save a copy/ }).click();
     await page.locator('.doc-toast', { hasText: 'Saved a copy: copy.deck.json with 2 assets' }).waitFor();
     assert.deepEqual((await sent()).at(-1), { command: 'SaveCopy' });
-    await page.getByRole('button', { name: 'Design' }).click();
+    await page.locator('.doc-top').getByRole('button', { name: 'Design' }).click();
     await page.getByRole('button', { name: 'Add template…', exact: true }).click();
     await page.locator('.doc-toast', { hasText: 'Imported Brand' }).waitFor();
     assert.deepEqual((await sent()).at(-1), { command: 'PickTemplate' });

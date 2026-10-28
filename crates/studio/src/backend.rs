@@ -21,6 +21,7 @@ mod doc_comments;
 mod exports;
 mod feedback;
 mod fonts;
+mod history;
 mod library;
 pub use library::Answer;
 mod templates;
@@ -185,6 +186,16 @@ pub enum Command {
     SaveCopy {},
     /// A native Open dialog for a `PowerPoint` or Word template.
     PickTemplate {},
+    /// The kept versions of the open deck or doc.
+    History {},
+    /// One kept version, read-only.
+    HistoryPreview {
+        id: String,
+    },
+    /// Make a kept version the document again: one undo step, kept in history too.
+    HistoryRestore {
+        id: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -303,6 +314,16 @@ pub enum Event {
         /// The file an operation just made, to highlight.
         selected: Option<String>,
         notice: Option<String>,
+    },
+    /// The kept versions, newest first.
+    History {
+        versions: Vec<history::Version>,
+    },
+    /// A kept version to show read-only; exactly one of `deck` and `doc` is set.
+    HistoryPreview {
+        id: String,
+        deck: Option<Deck>,
+        doc: Option<nexus_core::doc::Doc>,
     },
     /// A dialog was cancelled or the command changed nothing on screen.
     Idle {},
@@ -640,6 +661,8 @@ impl Backend {
             }
             Command::Designs {} => return self.template_designs(),
             Command::ApplyDesign { design } => return self.use_design(design),
+            Command::History {} => return self.history_event(),
+            Command::HistoryPreview { id } => return self.history_preview(id),
             _ => {}
         }
         if self.doc.is_some() {
@@ -722,6 +745,10 @@ impl Backend {
                 }
             }
             Command::NewDeck { title } => self.new_deck_file(&title)?,
+            Command::HistoryRestore { id } => {
+                let kept = self.history_deck(&id)?;
+                self.replace(kept)?;
+            }
             Command::Open { path } => {
                 self.open_path(absolute(&path)?)?;
             }

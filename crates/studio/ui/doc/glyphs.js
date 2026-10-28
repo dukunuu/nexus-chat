@@ -25,6 +25,11 @@ const paths = {
   'arrow-left': 'M19 12H5m6-6-6 6 6 6',
   'arrow-right': 'M5 12h14m-6-6 6 6-6 6',
   forward: 'M12 19V5m-6 6 6-6 6 6',
+  history: 'M3.5 12a8.5 8.5 0 1 0 2.6-6.1M3.5 4.5v3.6h3.6M12 8v4.2l2.8 1.8',
+  x: 'M6 6l12 12M18 6 6 18',
+  export: 'M12 4v11m-4.5-4.5L12 15l4.5-4.5M5 19h14',
+  panel: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2ZM9 4v16',
+  comment: 'M5 18.5V6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H8.5Z',
   back: 'M12 5v14m-6-6 6 6 6-6',
 };
 export function glyph(name) {

@@ -1,7 +1,8 @@
 // Doc mode: a calm writing surface with the document as the hero. The chrome is
-// a slim bar, an outline on the left and comments in the margin; formatting
-// appears over selected text only. The page content follows the doc's own design
-// (fonts, colors, point sizes); the chrome follows the terminal theme.
+// a slim icon bar, an outline on the left (with the save and link status at its
+// foot) and one right sidebar with Comments, History and Design tabs; the page
+// stays centered between them. Formatting appears over selected text only. The
+// page follows the doc's own design; the chrome follows the terminal theme.
 import { chooseTemplate, templateDrop } from '../templates.js';
 import { editorController } from './editor.js';
 import { menusController } from './menus.js';
@@ -39,40 +40,51 @@ export function mount(shared) {
   // -- the shell -------------------------------------------------------------------------
 
   const top = el('header', 'doc-top');
-  const outlineToggle = el('button', 'icon-button quiet outline-toggle');
-  outlineToggle.type = 'button'; outlineToggle.append(glyph('outline'));
-  outlineToggle.setAttribute('aria-label', 'Toggle outline'); outlineToggle.title = 'Outline';
-  const brand = el('div', 'doc-brand');
-  brand.append(el('span', 'brand-word', 'nexus'), el('span', 'brand-sub', 'docs'));
+  function iconButton(name, label, className = '') {
+    const b = el('button', `icon-button quiet top-icon ${className}`.trim());
+    b.type = 'button';
+    b.append(glyph(name));
+    b.setAttribute('aria-label', label);
+    b.title = label;
+    return b;
+  }
+  const outlineToggle = iconButton('panel', 'Toggle outline (⌘\\)');
+  const crumbs = el('nav', 'doc-crumbs');
+  crumbs.setAttribute('aria-label', 'Breadcrumb');
+  const libraryLink = el('button', 'crumb-link', 'Library');
+  libraryLink.type = 'button'; libraryLink.title = 'Library (⌘/Ctrl+O)';
   const titleInput = el('input', 'doc-title-input');
   titleInput.type = 'text'; titleInput.placeholder = 'Untitled'; titleInput.maxLength = 200; titleInput.spellcheck = false;
   titleInput.setAttribute('aria-label', 'Document title');
-  const saveState = el('span', 'save-state', 'Saved');
-  const pill = el('span', 'link-pill', 'not linked');
-  function barButton(name, label, iconOnly = false, chevron = false) {
-    const b = el('button', iconOnly ? 'icon-button quiet' : 'bar-button');
-    b.type = 'button';
-    b.append(glyph(name));
-    if (!iconOnly) b.append(el('span', '', label));
-    if (chevron) b.append(glyph('down'));
-    b.setAttribute('aria-label', label);
-    if (iconOnly) b.title = label;
-    return b;
-  }
-  const undoButton = barButton('undo', 'Undo', true), redoButton = barButton('redo', 'Redo', true);
-  const libraryButton = barButton('library', 'Library');
-  libraryButton.title = 'Library (⌘/Ctrl+O)';
-  const designButton = barButton('design', 'Design'), previewButton = barButton('pages', 'Pages'), exportButton = barButton('export', 'Export', false, true);
-  designButton.setAttribute('aria-haspopup', 'dialog'); exportButton.setAttribute('aria-haspopup', 'menu');
-  previewButton.setAttribute('aria-pressed', 'false');
-  top.append(outlineToggle, brand, libraryButton, el('span', 'bar-divider'), titleInput, saveState, el('span', 'spacer'), undoButton, redoButton, pill, designButton, previewButton, exportButton);
+  const statusDot = el('span', 'status-dot');
+  statusDot.setAttribute('role', 'img');
+  crumbs.append(libraryLink, el('span', 'crumb-sep', '/'), titleInput, statusDot);
+  const commentsButton = iconButton('comment', 'Comments', 'with-count');
+  const commentCount = el('span', 'count', '');
+  commentsButton.append(commentCount);
+  const historyButton = iconButton('history', 'Version history', 'wide-only');
+  const designButton = iconButton('design', 'Design', 'wide-only');
+  const exportButton = iconButton('export', 'Export');
+  const moreButton = iconButton('more', 'More');
+  for (const b of [exportButton, moreButton]) b.setAttribute('aria-haspopup', 'menu');
+  top.append(outlineToggle, crumbs, el('span', 'spacer'), commentsButton, historyButton, designButton, exportButton, moreButton);
 
   const body = el('div', 'doc-body');
-  const outline = el('nav', 'doc-outline');
-  outline.setAttribute('aria-label', 'Outline');
+  const outline = el('aside', 'doc-outline');
+  const outlineNav = el('nav', 'outline-nav');
+  outlineNav.setAttribute('aria-label', 'Outline');
+  const statusBox = el('div', 'doc-status');
+  statusBox.setAttribute('role', 'status');
+  const saveState = el('div', 'status-line save', 'Saved');
+  const pill = el('div', 'status-line link', 'Not linked');
+  statusBox.append(saveState, pill);
+  outline.append(outlineNav, statusBox);
   const page = el('div', 'page-scroll');
   const grid = el('div', 'page-grid');
   const sheetColumn = el('div', 'sheet-column');
+  const historyBanner = el('div', 'history-banner');
+  historyBanner.setAttribute('role', 'status');
+  historyBanner.hidden = true;
   const sheet = el('article', 'sheet');
   const surface = el('div', 'surface');
   surface.id = 'doc-surface';
@@ -83,19 +95,77 @@ export function mount(shared) {
   surface.setAttribute('aria-label', 'Document');
   sheet.append(surface);
   sheetColumn.append(sheet);
-  sheet.addEventListener('mousedown', e => { if (e.target === sheet) { e.preventDefault(); editor.focusEnd(); } });
-  const margin = el('aside', 'doc-margin');
-  margin.setAttribute('aria-label', 'Comments');
-  grid.append(sheetColumn, margin);
-  page.append(grid);
+  sheet.addEventListener('mousedown', e => { if (e.target === sheet && !historyView) { e.preventDefault(); editor.focusEnd(); } });
+  grid.append(sheetColumn);
+  page.append(historyBanner, grid);
   const previewPane = el('div', 'preview-pane');
   previewPane.hidden = true;
-  body.append(outline, page, previewPane);
+
+  // One sidebar, three tabs; the page keeps the space that is left, centered.
+  const sidebar = el('aside', 'doc-sidebar');
+  sidebar.setAttribute('aria-label', 'Sidebar');
+  const tabs = el('div', 'side-tabs');
+  tabs.setAttribute('role', 'tablist');
+  const panes = {}, tabButtons = {};
+  for (const [key, label] of [['comments', 'Comments'], ['history', 'History'], ['design', 'Design']]) {
+    const tab = el('button', 'side-tab');
+    tab.type = 'button'; tab.setAttribute('role', 'tab'); tab.id = `doc-tab-${key}`;
+    tab.append(el('span', '', label));
+    if (key === 'comments') tab.append(el('span', 'tab-count', ''));
+    tab.addEventListener('click', () => openSidebar(key));
+    tabs.append(tab);
+    tabButtons[key] = tab;
+    const pane = el('div', `side-pane pane-${key}`);
+    pane.setAttribute('role', 'tabpanel'); pane.setAttribute('aria-labelledby', tab.id);
+    panes[key] = pane;
+  }
+  const closeSide = iconButton('x', 'Close sidebar', 'side-close');
+  closeSide.addEventListener('click', () => openSidebar(null));
+  tabs.append(el('span', 'spacer'), closeSide);
+  sidebar.append(tabs, panes.comments, panes.history, panes.design);
+  const margin = panes.comments;
+
+  body.append(outline, page, previewPane, sidebar);
   const overlay = el('div', 'doc-overlay');
   const toastNode = el('div', 'doc-toast');
   toastNode.setAttribute('role', 'status');
   toastNode.hidden = true;
   app.append(top, body, overlay, toastNode);
+
+  // `null` until someone opens or closes the sidebar on this device; until
+  // then, open comments show themselves on a wide window.
+  let sideTab = null, sideChosen = false;
+  try { const stored = localStorage.getItem('nexus-doc-sidebar'); sideChosen = stored !== null; sideTab = stored || null; } catch { /* storage may be unavailable */ }
+  let outlineHidden = false;
+  try { outlineHidden = localStorage.getItem('nexus-doc-outline') === 'hidden'; } catch { /* ignore */ }
+  /** Open the sidebar on a tab, or close it with `null`. */
+  function openSidebar(tab) {
+    sideTab = tab; sideChosen = true;
+    try { localStorage.setItem('nexus-doc-sidebar', tab || ''); } catch { /* ignore */ }
+    renderSidebar();
+    if (tab === 'history') { renderHistory(); requestHistory(); }
+    if (tab === 'design') { command({ command: 'DocDesigns' }); renderDesign(); }
+  }
+  function toggleSidebar(tab) { openSidebar(sideTab === tab ? null : tab); }
+  function renderSidebar() {
+    app.classList.toggle('side-open', Boolean(sideTab));
+    sidebar.hidden = !sideTab;
+    for (const [key, tab] of Object.entries(tabButtons)) {
+      const on = key === sideTab;
+      tab.setAttribute('aria-selected', String(on));
+      tab.tabIndex = on ? 0 : -1;
+      panes[key].hidden = !on;
+    }
+    commentsButton.setAttribute('aria-pressed', String(sideTab === 'comments'));
+    historyButton.setAttribute('aria-pressed', String(sideTab === 'history'));
+    designButton.setAttribute('aria-pressed', String(sideTab === 'design'));
+  }
+  const narrow = () => matchMedia('(max-width: 899px)').matches;
+  function renderOutlinePanel() {
+    app.classList.toggle('outline-hidden', outlineHidden);
+    outlineToggle.title = outlineHidden ? 'Show outline (⌘\\)' : 'Hide outline (⌘\\)';
+    outlineToggle.setAttribute('aria-label', outlineToggle.title);
+  }
 
   /** Document and window listeners end with this window, so switching documents leaks nothing. */
   const lifetime = new AbortController();
@@ -113,7 +183,12 @@ export function mount(shared) {
   }
   function command(cmd, complete) { queue.push({ cmd, complete }); pump(); }
   const ask = cmd => new Promise((resolve, reject) => command(cmd, event => event.event === 'Error' ? reject(new Error(event.message)) : resolve(event)));
-  function renderSave() { saveState.textContent = pending?.ops || editor.hasDirty() || queue.some(q => q.ops) ? 'Saving' : 'Saved'; }
+  function renderSave() {
+    const saving = pending?.ops || editor.hasDirty() || queue.some(q => q.ops);
+    saveState.textContent = saving ? 'Saving…' : 'Saved';
+    saveState.classList.toggle('busy', Boolean(saving));
+    renderStatusDot();
+  }
 
   function toast(text, actions = []) {
     // The library covers the window; its notices go above it.
@@ -182,6 +257,8 @@ export function mount(shared) {
       case 'DocPreview': comments.onPreview(event); break;
       case 'DocFocus': if (event.block) scrollToBlock(event.block, true); break;
       case 'Designs': designs.available = event.available; renderDesign(); break;
+      case 'History': history.versions = event.versions; renderHistory(); break;
+      case 'HistoryPreview': if (event.doc) showVersion(event.id, event.doc); break;
       case 'TemplateImported':
         toast(`Imported ${event.name}`, [['Use for this doc', () => command({ command: 'ApplyDesign', design: event.slug })], ...(event.warnings?.length ? [['Warnings', () => toast(event.warnings.join(' · '))]] : [])]);
         command({ command: 'DocDesigns' });
@@ -244,6 +321,9 @@ export function mount(shared) {
       if (at) { surface.focus({ preventScroll: true }); editor.place(at); }
     }
     if (state.preview && event.revision !== state.pagesRevision) requestPages();
+    if (sideTab === 'history') requestHistory();
+    // A version on show stays on show; the doc it will return to is the new one.
+    if (historyView) { historyView.current = state.doc; renderVersion(); }
     shared.library.onDocument(event);
     if (first && !shared.library.visible) surface.focus({ preventScroll: true });
   }
@@ -297,20 +377,28 @@ export function mount(shared) {
     if (document.activeElement !== titleInput) titleInput.value = state.doc.title;
     sizeTitle();
     document.title = `${state.doc.title || 'Untitled'} — nexus studio`;
-    undoButton.disabled = !state.canUndo; redoButton.disabled = !state.canRedo;
     renderLink();
     renderDesign();
   }
+  /** The save and link status: lines at the foot of the outline, a dot by the title. */
   function renderLink() {
     const activities = Object.values(state.activities);
     const working = activities.some(a => ['working', 'progress'].includes(a.state)), waiting = activities.filter(a => a.state === 'queued').length;
-    pill.textContent = !state.linked ? 'not linked' : working ? 'linked · nexus working' : waiting ? `linked · ${waiting} waiting` : 'linked to nexus';
+    pill.textContent = !state.linked ? 'Not linked' : working ? 'nexus is working' : waiting ? `Linked · ${waiting} waiting` : 'Linked to nexus';
     pill.classList.toggle('connected', state.linked);
     pill.classList.toggle('working', state.linked && working);
     pill.title = state.linked ? 'Comments go to your nexus conversation' : 'Not linked to a conversation — open it from nexus with /studio';
+    renderStatusDot();
+  }
+  function renderStatusDot() {
+    const saving = saveState.classList.contains('busy'), working = pill.classList.contains('working');
+    statusDot.className = `status-dot${saving ? ' saving' : working ? ' working' : ''}`;
+    const label = `${saveState.textContent} · ${pill.textContent}`;
+    statusDot.title = label;
+    statusDot.setAttribute('aria-label', label);
   }
 
-  const sizeTitle = () => { titleInput.style.width = `${Math.min(60, Math.max(10, titleInput.value.length + 2))}ch`; };
+  const sizeTitle = () => { titleInput.style.width = `${Math.min(48, Math.max(8, titleInput.value.length + 1))}ch`; };
   titleInput.addEventListener('input', sizeTitle);
   titleInput.addEventListener('keydown', e => {
     if (e.key === 'Enter') { e.preventDefault(); titleInput.blur(); surface.focus({ preventScroll: true }); }
@@ -324,16 +412,26 @@ export function mount(shared) {
     if (block && plainText(parseInline(block.text)) === old) ops.push({ op: 'update_block', id: block.id, patch: { text: serializeRuns([{ t: title }]) } });
     apply(ops);
   });
-  undoButton.addEventListener('click', undo);
-  redoButton.addEventListener('click', redo);
+  libraryLink.addEventListener('click', () => shared.library.show());
+  commentsButton.addEventListener('click', () => toggleSidebar('comments'));
+  historyButton.addEventListener('click', () => toggleSidebar('history'));
+  designButton.addEventListener('click', () => toggleSidebar('design'));
+  outlineToggle.addEventListener('click', toggleOutline);
+  function toggleOutline() {
+    // Narrow windows show the outline over the page; wide ones give it its column back.
+    if (matchMedia('(max-width: 1099px)').matches) { outline.classList.toggle('open'); return; }
+    outlineHidden = !outlineHidden;
+    try { localStorage.setItem('nexus-doc-outline', outlineHidden ? 'hidden' : ''); } catch { /* ignore */ }
+    renderOutlinePanel();
+  }
 
   // -- outline ------------------------------------------------------------------------------------------
 
   function renderOutline() {
     const entries = M.outline(state.doc);
-    outline.replaceChildren();
-    outline.append(el('div', 'outline-heading', 'Outline'));
-    if (!entries.length) { outline.append(el('p', 'outline-empty', 'Headings appear here.')); return; }
+    outlineNav.replaceChildren();
+    outlineNav.append(el('div', 'outline-heading', 'Outline'));
+    if (!entries.length) { outlineNav.append(el('p', 'outline-empty', 'Headings appear here.')); return; }
     const list = el('ul');
     for (const entry of entries) {
       const li = el('li');
@@ -345,11 +443,11 @@ export function mount(shared) {
       li.append(a);
       list.append(li);
     }
-    outline.append(list);
+    outlineNav.append(list);
     markCurrent();
   }
   function markCurrent() {
-    const links = [...outline.querySelectorAll('[data-goto]')];
+    const links = [...outlineNav.querySelectorAll('[data-goto]')];
     if (!links.length) return;
     const top = page.getBoundingClientRect().top + 96;
     let current = links[0];
@@ -361,7 +459,6 @@ export function mount(shared) {
   }
   let outlineFrame = 0;
   page.addEventListener('scroll', () => { if (!outlineFrame) outlineFrame = requestAnimationFrame(() => { outlineFrame = 0; markCurrent(); }); });
-  outlineToggle.addEventListener('click', () => outline.classList.toggle('open'));
 
   function scrollTo(node) { node.scrollIntoView({ block: 'center', behavior: reduced() ? 'auto' : 'smooth' }); }
   function scrollToBlock(id, flashIt = false) {
@@ -371,14 +468,9 @@ export function mount(shared) {
     if (flashIt) flash([id]);
   }
 
-  // -- design panel ---------------------------------------------------------------------------------------
+  // -- design tab ------------------------------------------------------------------------------------------
 
   const designs = { available: null };
-  const designPop = el('div', 'popup design-pop');
-  designPop.hidden = true;
-  designPop.setAttribute('role', 'dialog');
-  designPop.setAttribute('aria-label', 'Design');
-  overlay.append(designPop);
   const swatchRow = colors => {
     const row = el('span', 'd-swatches');
     for (const role of ['bg', 'fg', 'accent', 'accent2', 'muted']) {
@@ -390,24 +482,25 @@ export function mount(shared) {
     return row;
   };
   function renderDesign() {
-    if (designPop.hidden || !state.design) return;
-    designPop.replaceChildren();
-    const current = el('div', 'design-current');
-    current.append(el('div', 'design-name', state.design.name), swatchRow(state.design.colors));
+    const pane = panes.design;
+    if (pane.hidden || !state.design) return;
+    pane.replaceChildren();
+    const current = el('section', 'design-current');
+    current.append(el('div', 'side-eyebrow', 'This document follows'), el('div', 'design-name', state.design.name), swatchRow(state.design.colors));
     const fonts = el('div', 'design-fonts');
     for (const role of ['heading', 'body', 'mono']) if (state.design.fonts[role]) fonts.append(el('span', '', `${role[0].toUpperCase()}${role.slice(1)} · ${state.design.fonts[role]}`));
     current.append(fonts);
-    designPop.append(el('div', 'pop-eyebrow', 'This document follows'), current);
+    pane.append(current);
     if (state.design.update_available) {
       const update = el('div', 'design-update');
-      update.append(el('span', '', 'Update available'));
-      const apply1 = el('button', 'primary small', 'Apply update');
+      update.append(el('span', '', 'The design changed since this doc copied it'));
+      const apply1 = el('button', 'small', 'Apply update');
       apply1.type = 'button';
       apply1.addEventListener('click', () => command({ command: 'DocApplyDesign', design: null }));
       update.append(apply1);
-      designPop.append(update);
+      pane.append(update);
     }
-    designPop.append(el('div', 'pop-eyebrow', 'Switch design'));
+    pane.append(el('div', 'side-eyebrow', 'Switch design'));
     const list = el('div', 'design-list');
     for (const d of designs.available || []) {
       const row = el('button', `design-row${d.current ? ' on' : ''}`);
@@ -418,27 +511,109 @@ export function mount(shared) {
       list.append(row);
     }
     if (!designs.available) list.append(el('div', 'menu-empty', 'Loading…'));
-    designPop.append(list);
-    const add = el('button', 'menu-row compact', 'Add template…');
-    add.type = 'button'; add.addEventListener('click', () => { togglePop(designPop, designButton, false); chooseTemplate(command); });
-    designPop.append(add);
-    place(designPop, designButton);
+    pane.append(list);
+    const add = el('button', 'side-action', '');
+    add.type = 'button';
+    add.append(glyph('plus'), el('span', '', 'Add template…'));
+    add.addEventListener('click', () => chooseTemplate(command));
+    pane.append(add);
   }
-  function togglePop(pop, button, open, onOpen) {
-    const show = open ?? pop.hidden;
-    for (const [other, b] of [[designPop, designButton], [exportPop, exportButton]]) if (other !== pop) { other.hidden = true; b.setAttribute('aria-expanded', 'false'); }
-    pop.hidden = !show;
-    button.setAttribute('aria-expanded', String(show));
-    if (show) onOpen?.();
-  }
-  function place(pop, button) {
-    const rect = button.getBoundingClientRect();
-    pop.style.top = `${Math.round(rect.bottom + 8)}px`;
-    pop.style.left = `${Math.round(Math.max(8, Math.min(innerWidth - pop.offsetWidth - 8, rect.right - pop.offsetWidth)))}px`;
-  }
-  designButton.addEventListener('click', () => togglePop(designPop, designButton, undefined, () => { command({ command: 'DocDesigns' }); renderDesign(); }));
 
-  // -- export -----------------------------------------------------------------------------------------------
+  // -- history tab ------------------------------------------------------------------------------------------
+
+  const history = { versions: null };
+  let historyView = null, historyTimer = 0;
+  function requestHistory() {
+    clearTimeout(historyTimer);
+    historyTimer = setTimeout(() => command({ command: 'History' }), 120);
+  }
+  const clock = iso => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const dayOf = iso => {
+    const d = new Date(iso), today = new Date(), yesterday = new Date(Date.now() - 864e5);
+    if (d.toDateString() === today.toDateString()) return 'Today';
+    if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric' });
+  };
+  function renderHistory() {
+    const pane = panes.history;
+    if (pane.hidden) return;
+    pane.replaceChildren();
+    const versions = history.versions;
+    const current = el('button', `version${historyView ? '' : ' on'}`);
+    current.type = 'button';
+    current.append(el('span', 'version-dot now'), versionText('Current version', state.canUndo ? 'Undo steps back one edit at a time' : 'What you see now'));
+    current.addEventListener('click', () => leaveVersion());
+    pane.append(current);
+    if (!versions) { pane.append(el('div', 'menu-empty', 'Loading…')); return; }
+    if (!versions.length) { pane.append(el('p', 'side-note', 'Earlier versions appear here after the first edit.')); return; }
+    let day = '';
+    for (const v of versions) {
+      const d = dayOf(v.at);
+      if (d !== day) { day = d; pane.append(el('div', 'side-eyebrow', d)); }
+      const row = el('button', `version${historyView?.id === v.id ? ' on' : ''}`);
+      row.type = 'button';
+      row.append(el('span', `version-dot ${v.who === 'model' ? 'model' : ''}`), versionText(`${clock(v.at)} · ${v.who === 'model' ? 'nexus' : 'You'}`, v.summary));
+      row.title = 'Show the document as it was before this edit';
+      row.addEventListener('click', () => command({ command: 'HistoryPreview', id: v.id }));
+      pane.append(row);
+    }
+    pane.append(el('p', 'side-note', 'Each version is the document before that edit. Restoring makes a new version, so it can be undone too.'));
+  }
+  const versionText = (title, detail) => {
+    const box = el('span', 'version-text');
+    box.append(el('span', 'version-title', title), el('span', 'version-detail', detail));
+    return box;
+  };
+  /** Show a kept version read-only in place of the doc. */
+  function showVersion(id, doc) {
+    apply([]);
+    api.toolbar.hide(); api.menus.closeAll();
+    historyView = { id, kept: doc, current: historyView?.current ?? state.doc };
+    renderVersion();
+    renderHistory();
+    page.scrollTop = 0;
+  }
+  function renderVersion() {
+    if (!historyView) return;
+    const version = history.versions?.find(v => v.id === historyView.id);
+    state.doc = historyView.kept;
+    state.decos = {};
+    surface.contentEditable = 'false';
+    app.classList.add('viewing-version');
+    editor.reconcile();
+    const now = new Map(historyView.current.blocks.map(b => [b.id, JSON.stringify(b)]));
+    for (const b of historyView.kept.blocks) {
+      const node = surface.querySelector(`[data-block="${CSS.escape(b.id)}"]`);
+      node?.classList.toggle('version-differs', now.get(b.id) !== JSON.stringify(b));
+    }
+    historyBanner.replaceChildren();
+    historyBanner.hidden = false;
+    const text = el('span', 'banner-text');
+    text.append(el('strong', '', version ? `Before ${version.who === 'model' ? 'nexus\u2019s' : 'your'} edit at ${clock(version.at)}` : 'An earlier version'), document.createTextNode(' · blocks that differ from now are marked'));
+    const back = el('button', 'quiet small', 'Back to current'), restore = el('button', 'small primary-quiet', 'Restore this version');
+    back.type = restore.type = 'button';
+    back.addEventListener('click', () => leaveVersion());
+    restore.addEventListener('click', () => {
+      const id = historyView.id;
+      leaveVersion();
+      command({ command: 'HistoryRestore', id }, e => { if (e.event !== 'Error') toast('Restored that version', [['Undo', undo]]); });
+    });
+    historyBanner.append(glyph('history'), text, back, restore);
+    state.doc = historyView.current;
+  }
+  function leaveVersion() {
+    if (!historyView) return;
+    state.doc = historyView.current;
+    historyView = null;
+    historyBanner.hidden = true;
+    surface.contentEditable = 'true';
+    app.classList.remove('viewing-version');
+    for (const node of surface.querySelectorAll('.version-differs')) node.classList.remove('version-differs');
+    comments.refresh();
+    renderHistory();
+  }
+
+  // -- export and more menus ---------------------------------------------------------------------------------
 
   const exportPop = el('div', 'popup menu export-pop');
   exportPop.hidden = true;
@@ -448,7 +623,7 @@ export function mount(shared) {
     const row = el('button', 'menu-row compact');
     row.type = 'button'; row.setAttribute('role', 'menuitem');
     row.append(el('span', 'menu-label', label), el('span', 'menu-hint', hint));
-    row.addEventListener('click', () => { togglePop(exportPop, exportButton, false); command({ command: quickExport() ? 'DocExport' : 'ExportAs', format, ...(plainFile ? { template: 'none' } : {}) }); });
+    row.addEventListener('click', () => { closePops(); exportButton.focus(); command({ command: quickExport() ? 'DocExport' : 'ExportAs', format, ...(plainFile ? { template: 'none' } : {}) }); });
     exportPop.append(row);
   }
   // One toggle, shown only when the doc follows a template: checked, every
@@ -481,42 +656,77 @@ export function mount(shared) {
   }
   quick.addEventListener('click', () => { try { localStorage.setItem('nexus-quick-export', quickExport() ? '0' : '1'); } catch { /* storage may be unavailable */ } syncQuick(); });
   syncQuick();
-  const copyRule = el('div', 'menu-rule');
-  const copy = el('button', 'menu-extra');
-  copy.type = 'button'; copy.setAttribute('role', 'menuitem');
-  copy.append(el('span', 'menu-label', 'Save a copy…'), el('span', 'menu-hint', '.doc.json'));
-  copy.addEventListener('click', () => { togglePop(exportPop, exportButton, false); command({ command: 'SaveCopy' }); });
-  exportPop.append(templateRule, template, quick, copyRule, copy);
-  overlay.append(exportPop);
-  exportButton.addEventListener('click', () => togglePop(exportPop, exportButton, undefined, () => { exportMode(); place(exportPop, exportButton); exportPop.querySelector('button')?.focus(); }));
-  exportPop.addEventListener('keydown', e => {
-    const items = [...exportPop.querySelectorAll('button:not(:disabled)')], at = items.indexOf(document.activeElement);
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); items[(at + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus(); }
-    else if (e.key === 'Escape') { e.preventDefault(); togglePop(exportPop, exportButton, false); exportButton.focus(); }
-  });
-  document.addEventListener('pointerdown', e => {
-    if (!e.target.closest('.design-pop, .export-pop, .bar-button')) {
-      designPop.hidden = true; exportPop.hidden = true;
-      designButton.setAttribute('aria-expanded', 'false'); exportButton.setAttribute('aria-expanded', 'false');
+  exportPop.append(templateRule, template, quick);
+
+  const morePop = el('div', 'popup menu more-pop');
+  morePop.hidden = true;
+  morePop.setAttribute('role', 'menu');
+  morePop.setAttribute('aria-label', 'More');
+  const moreItem = (label, hint, run, className = '') => {
+    const row = el('button', `menu-row compact ${className}`.trim());
+    row.type = 'button'; row.setAttribute('role', 'menuitem');
+    row.append(el('span', 'menu-label', label));
+    if (hint) row.append(el('span', 'menu-hint', hint));
+    // Focus goes back to the button, so the doc's keys (Esc, ⌘\\) keep working.
+    row.addEventListener('click', () => { closePops(); moreButton.focus(); run(); });
+    morePop.append(row);
+    return row;
+  };
+  const undoItem = moreItem('Undo', '⌘Z', undo);
+  const redoItem = moreItem('Redo', '⇧⌘Z', redo);
+  morePop.append(el('div', 'menu-rule'));
+  moreItem('Version history', '', () => openSidebar('history'), 'narrow-only');
+  moreItem('Design', '', () => openSidebar('design'), 'narrow-only');
+  const pagesItem = moreItem('Page preview', '', () => setPreview(!state.preview));
+  moreItem('Save a copy…', '.doc.json', () => command({ command: 'SaveCopy' }));
+  moreItem('Library', '⌘O', () => shared.library.show());
+  overlay.append(exportPop, morePop);
+
+  function closePops() {
+    for (const [pop, button] of [[exportPop, exportButton], [morePop, moreButton]]) { pop.hidden = true; button.setAttribute('aria-expanded', 'false'); }
+  }
+  function openPop(pop, button) {
+    const show = pop.hidden;
+    closePops();
+    if (!show) return;
+    if (pop === exportPop) exportMode();
+    if (pop === morePop) {
+      undoItem.disabled = !state.canUndo; redoItem.disabled = !state.canRedo;
+      pagesItem.querySelector('.menu-label').textContent = state.preview ? 'Back to editing' : 'Page preview';
     }
+    pop.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    const rect = button.getBoundingClientRect();
+    pop.style.top = `${Math.round(rect.bottom + 6)}px`;
+    pop.style.left = `${Math.round(Math.max(8, Math.min(innerWidth - pop.offsetWidth - 8, rect.right - pop.offsetWidth)))}px`;
+    pop.querySelector('button:not(:disabled):not([hidden])')?.focus();
+  }
+  exportButton.addEventListener('click', () => openPop(exportPop, exportButton));
+  moreButton.addEventListener('click', () => openPop(morePop, moreButton));
+  for (const [pop, button] of [[exportPop, exportButton], [morePop, moreButton]]) {
+    pop.addEventListener('keydown', e => {
+      const items = [...pop.querySelectorAll('button:not(:disabled)')].filter(b => b.offsetParent), at = items.indexOf(document.activeElement);
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); items[(at + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus(); }
+      else if (e.key === 'Escape') { e.preventDefault(); closePops(); button.focus(); }
+    });
+  }
+  document.addEventListener('pointerdown', e => {
+    if (!e.target.closest('.export-pop, .more-pop, .top-icon')) closePops();
   }, { signal: lifetime.signal });
 
   templateDrop(command, toast, lifetime.signal);
-  libraryButton.addEventListener('click', () => shared.library.show());
 
   // -- page preview -------------------------------------------------------------------------------------------
 
   function requestPages() { command({ command: 'DocPages' }); }
   function setPreview(on) {
+    if (on) leaveVersion();
     state.preview = on;
-    previewButton.setAttribute('aria-pressed', String(on));
-    previewButton.classList.toggle('on', on);
     page.hidden = on; previewPane.hidden = !on;
     api.toolbar.hide();
     if (on) { apply([]); previewPane.replaceChildren(el('p', 'preview-note', 'Laying out pages…')); requestPages(); }
     else surface.focus({ preventScroll: true });
   }
-  previewButton.addEventListener('click', () => setPreview(!state.preview));
   function showPages(event) {
     if (!state.preview) return;
     state.pagesRevision = event.revision;
@@ -577,16 +787,22 @@ export function mount(shared) {
 
   // -- keyboard and focus -------------------------------------------------------------------------------------------
 
-  app.addEventListener('keydown', e => {
+  // On the document, not the doc root: a click that re-renders the focused
+  // control (a version row, a menu item) leaves focus on <body>.
+  document.addEventListener('keydown', e => {
+    if (e.target !== document.body && !app.contains(e.target)) return;
+    if (document.querySelector('dialog[open]') || !document.querySelector('#library')?.hidden) return;
     const mod = e.metaKey || e.ctrlKey;
     if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); toast('Every change is saved to the doc file as you make it.'); return; }
     if (mod && ['=', '+', '-', '0'].includes(e.key)) { e.preventDefault(); setZoom(e.key === '0' ? 1.2 : state.zoom + (e.key === '-' ? -.1 : .1)); return; }
+    if (mod && e.key === '\\') { e.preventDefault(); toggleOutline(); return; }
     if (e.key === 'Escape') {
       if (state.preview) { e.preventDefault(); setPreview(false); return; }
-      if (!designPop.hidden || !exportPop.hidden) { designPop.hidden = true; exportPop.hidden = true; return; }
+      if (historyView) { e.preventDefault(); leaveVersion(); return; }
+      if (!exportPop.hidden || !morePop.hidden) { closePops(); return; }
       if (state.activeThread || state.draft) comments.close();
     }
-  });
+  }, { signal: lifetime.signal });
   let lastFocus = '', focusTimer = 0;
   document.addEventListener('selectionchange', () => {
     if (!state.doc) return;
@@ -611,7 +827,14 @@ export function mount(shared) {
     scrollTo, scrollToBlock, renderLink, lastCaret: null,
     afterRender() { renderSave(); },
     renderSave,
-    setCommentCount() {},
+    openSidebar,
+    get sidebarTab() { return sideTab; },
+    setCommentCount(n) {
+      commentCount.textContent = n ? String(n) : '';
+      tabButtons.comments.querySelector('.tab-count').textContent = n ? String(n) : '';
+      commentsButton.setAttribute('aria-label', n ? `Comments, ${n} open` : 'Comments');
+      if (n && !sideChosen && !sideTab && matchMedia('(min-width: 1100px)').matches) { sideTab = 'comments'; renderSidebar(); }
+    },
   };
   const editor = editorController(api);
   api.editor = editor;
@@ -619,6 +842,8 @@ export function mount(shared) {
   api.toolbar = toolbarController(api);
   api.comments = commentsController(api);
   const comments = api.comments;
+  renderSidebar();
+  renderOutlinePanel();
 
   return {
     handle,

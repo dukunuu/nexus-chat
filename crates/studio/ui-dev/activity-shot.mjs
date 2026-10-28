@@ -47,15 +47,15 @@ try {
     ]) {
       await activity('queued', undefined, reason);
       assert.equal(await text(), expected);
-      assert.equal(await page.locator('#link-status').textContent(), 'linked · 1 waiting');
+      assert.equal(await page.locator('#link-status').textContent(), 'Linked · 1 waiting');
       assert.equal(await page.locator('#pins .activity-busy').count(), 1);
       assert.equal(await page.locator('#pins .activity-busy').evaluate(n => getComputedStyle(n, '::before').animationName), 'activity-spin');
     }
     await activity('queued', undefined, 'draft', 't2');
-    assert.equal(await page.locator('#link-status').textContent(), 'linked · 2 waiting');
+    assert.equal(await page.locator('#link-status').textContent(), 'Linked · 2 waiting');
     await activity('working');
     assert.equal(await text(), 'nexus is working…');
-    assert.equal(await page.locator('#link-status').textContent(), 'linked · nexus working');
+    assert.equal(await page.locator('#link-status').textContent(), 'nexus is working');
     assert.ok((await page.locator('#link-status').boundingBox()).height < 32, 'working pill stays on one line');
     assert.equal(await page.locator('#link-status').evaluate(n => getComputedStyle(n, '::before').animationName), 'activity-pulse');
     await shot('working', theme);
@@ -71,7 +71,7 @@ try {
     assert.equal(await page.locator('.activity-detail code').textContent(), 'metrics');
     assert.equal(await page.locator('.thread-activity button').count(), 0, 'no Undo for an answer-only turn');
     assert.equal(await page.locator('#pins .activity-done').count(), 1);
-    assert.equal(await page.locator('#link-status').textContent(), 'linked · 1 waiting');
+    assert.equal(await page.locator('#link-status').textContent(), 'Linked · 1 waiting');
     await shot('done-excerpt', theme);
     await page.waitForTimeout(4100);
     assert.equal(await page.locator('#pins .activity-done').count(), 0, 'check clears after four seconds');
@@ -104,7 +104,7 @@ try {
     await activity('done', 'edited slide 1');
     assert.equal(await page.locator('#status').textContent(), 'nexus edited slide 1 · View');
     await page.locator('#status').getByRole('button', { name:'View', exact:true }).click();
-    assert.match(await page.locator('#slide-label').textContent(), /Slide 01/);
+    assert.match(await page.locator('#slide-label').textContent(), /Slide 1 of/);
     assert.match(await page.locator('#thread-popover').textContent(), /Comment 1/);
     await activity('future-state', 'ignore me');
     assert.doesNotMatch(await page.locator('#thread-popover').textContent(), /ignore me/);

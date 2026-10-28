@@ -43,7 +43,7 @@ kbd { color:var(--faint); font:11px var(--ui-mono); border:1px solid var(--hairl
 .link-pill::before { content:''; width:6px; height:6px; border-radius:50%; background:var(--faint); flex-shrink:0; }
 .link-pill.connected::before { background:var(--success); }
 .count { font-size:11px; color:var(--muted); background:var(--code); border-radius:5px; min-width:18px; padding:1px 5px; text-align:center; }
-#export { margin-left:10px; }
+
 .export-menu, .template-menu { position:relative; }
 #deck-design-pop { right:0; top:calc(100% + 8px); width:280px; padding:10px; }
 #deck-design-info { font-size:12px; color:var(--muted); padding:6px; overflow-wrap:anywhere; }
@@ -308,3 +308,100 @@ dialog { color:var(--text); background:var(--surface); border:1px solid var(--ha
 @media (prefers-color-scheme:dark) { .slide { --code:#a8a48b20; } }
 @media (prefers-reduced-motion:reduce) { * { animation:none !important; transition:none !important; } }
 @media print { #topbar,#strip-pane,#canvas-heading,#canvas-bottom,#thread-popover,.side-panel,#floating-toolbar,#pins,#status { display:none !important; }main { height:auto; }#stage { padding:0; }#slide-wrap { width:100%; }#canvas { box-shadow:none; }.selected { outline:none !important; } }
+
+/* -- editor chrome: a slim icon bar, status at the foot of the slide strip, one
+      tabbed sidebar on the right, and a floating tool pill under the slide ---------------- */
+#topbar { height:44px; gap:2px; padding:0 8px; background:var(--bg); border-bottom:1px solid color-mix(in srgb, var(--hairline) 40%, transparent); }
+#topbar .spacer { flex:1; }
+.top-icon { width:32px; height:32px; padding:0; border:0; border-radius:7px; display:inline-grid; place-items:center; flex:none; color:var(--muted); background:transparent; }
+.top-icon svg { width:17px; height:17px; }
+.top-icon:hover, .top-icon[aria-pressed=true], .top-icon[aria-expanded=true] { color:var(--text); background:var(--raised); }
+.top-icon.with-count { width:auto; min-width:32px; padding:0 8px; display:inline-flex; gap:6px; }
+#toggle-comments .count { background:none; padding:0; min-width:0; font:500 11px var(--ui-mono); color:var(--accent); }
+#toggle-comments[data-count="0"] .count { display:none; }
+.top-icon[data-icon=more] svg { stroke-width:2.6; }
+.crumbs { display:flex; align-items:center; gap:2px; min-width:0; margin-left:4px; }
+.crumb-link { color:var(--muted); padding:4px 6px; border-radius:6px; font-size:13px; }
+.crumb-link:hover { color:var(--text); background:var(--raised); }
+.crumb-sep { color:var(--faint); padding:0 2px; }
+#deck-title { width:auto; max-width:min(40ch, 34vw); font-size:13px; font-weight:600; padding:4px 6px; gap:4px; color:var(--text); }
+.status-dot { width:6px; height:6px; border-radius:50%; background:var(--success); flex:none; margin:0 4px 0 2px; }
+.status-dot.saving { background:var(--faint); }
+.status-dot.working { background:var(--accent2); animation:activity-pulse 1.4s ease-in-out infinite; }
+.crumb-detail { font:11px var(--ui-mono); color:var(--faint); white-space:nowrap; margin-left:6px; }
+.more-menu { position:relative; }
+#more-menu, #export-menu { right:0; top:calc(100% + 6px); padding:5px; }
+#more-menu { width:230px; }
+#more-menu button { width:100%; height:32px; justify-content:space-between; padding:0 10px; font-size:12.5px; }
+#more-menu kbd { font:11px var(--ui-mono); color:var(--faint); background:none; border:0; padding:0; }
+.narrow-only { display:none !important; }
+
+#strip-pane { width:228px; background:var(--bg); }
+body.left-hidden #strip-pane { display:none; }
+.deck-status { flex:none; display:flex; flex-direction:column; gap:6px; padding:12px 16px 14px; border-top:1px solid color-mix(in srgb, var(--hairline) 30%, transparent); font-size:12px; color:var(--muted); }
+.deck-status .status-line { display:flex; align-items:center; gap:8px; padding:0; margin:0; border:0; font:12px system-ui, sans-serif; color:var(--muted); max-width:none; }
+.deck-status .status-line::before { content:''; width:6px; height:6px; border-radius:50%; background:var(--faint); flex:none; margin:0; }
+.deck-status .status-line.save::before { background:var(--success); }
+.deck-status .status-line.save.busy::before { background:var(--faint); }
+.deck-status .status-line.link.connected::before { background:var(--accent); }
+.deck-status .status-line.link.working::before { background:var(--accent2); animation:activity-pulse 1.4s ease-in-out infinite; }
+
+#stage { padding:28px 28px 76px; }
+#slide-wrap { width:min(100%, calc((100vh - 44px - 150px) * 16 / 9)); }
+#canvas-space { position:relative; }
+#canvas-bottom { position:absolute; left:0; right:0; bottom:0; display:flex; align-items:flex-end; gap:12px; padding:0 16px 14px; pointer-events:none; }
+#canvas-bottom > * { pointer-events:auto; }
+#notes { margin:0; max-width:340px; }
+#notes summary { padding:6px 0; }
+.tool-pill { position:absolute; left:50%; bottom:14px; transform:translateX(-50%); display:flex; gap:2px; padding:4px; border-radius:10px; background:var(--raised); border:1px solid color-mix(in srgb, var(--hairline) 60%, transparent); box-shadow:var(--shadow); }
+.tool-pill button { width:34px; height:32px; padding:0; border-radius:7px; color:var(--muted); display:inline-grid; place-items:center; }
+.tool-pill button:hover { color:var(--text); background:color-mix(in srgb, var(--text) 8%, transparent); }
+.tool-pill button[aria-pressed=true] { color:var(--text); background:var(--control); }
+.tool-pill svg { width:16px; height:16px; }
+.tool-sep { width:1px; margin:6px 3px; background:color-mix(in srgb, var(--hairline) 70%, transparent); }
+.canvas-controls { margin-left:auto; }
+#preview-bar { top:12px; left:16px; right:16px; font-size:12px; }
+#workspace.thread-open #stage { padding-right:28px; }
+
+#sidebar { width:320px; flex-shrink:0; display:flex; flex-direction:column; min-height:0; background:var(--bg); border-left:1px solid color-mix(in srgb, var(--hairline) 30%, transparent); }
+#sidebar[hidden] { display:none; }
+#sidebar .side-tabs { gap:0; padding:6px 6px 0; }
+#sidebar .side-tab { padding:8px 8px 10px; font-size:12.5px; white-space:nowrap; }
+#sidebar .side-pane { flex:1; min-height:0; overflow:auto; scrollbar-width:thin; }
+#sidebar .side-pane[hidden] { display:none; }
+#properties-panel .side-heading { height:40px; padding:6px 12px; border-bottom:1px solid color-mix(in srgb, var(--hairline) 30%, transparent); }
+#history-pane, #design-pane { padding:10px 12px 18px; }
+#close-side { width:28px; height:28px; margin-bottom:5px; padding:0; }
+#design-pane .design-row { width:100%; justify-content:flex-start; gap:10px; padding:8px 10px; border-radius:6px; }
+#design-pane .design-row.on { color:var(--accent); }
+
+@media (max-width:1099px) {
+  /* The sidebar floats over the canvas instead of shrinking the slide. */
+  #sidebar { position:absolute; z-index:65; top:8px; right:8px; bottom:8px; border:1px solid color-mix(in srgb, var(--hairline) 45%, transparent); border-radius:12px; box-shadow:var(--shadow); }
+}
+@media (max-width:899px) {
+  #strip-pane, body.left-hidden #strip-pane { display:flex; position:absolute; z-index:64; left:0; top:0; bottom:0; box-shadow:var(--shadow); transform:translateX(-102%); transition:transform .18s ease; }
+  #strip-pane.open { transform:none; }
+  .crumb-detail { display:none; }
+}
+@media (max-width:639px) {
+  .wide-only { display:none !important; }
+  .narrow-only { display:flex !important; }
+  .crumb-link, .crumb-sep { display:none; }
+  .top-icon { width:40px; height:40px; }
+  #notes, .canvas-controls { display:none; }
+  #stage { padding:20px 12px 76px; align-items:flex-start; }
+  #slide-wrap { width:100%; }
+  #sidebar { top:auto; left:0; right:0; bottom:0; width:auto; height:min(70%, 520px); border-radius:16px 16px 0 0; }
+}
+
+.edit-card .edit-head { display:flex; align-items:flex-start; gap:8px; }
+.edit-card .edit-kicker { flex:1; min-width:0; margin-bottom:6px; }
+.edit-card .edit-actions { flex:none; display:flex; gap:2px; margin:-3px -4px 0 0; }
+.edit-card .edit-summary { margin:0 0 4px; }
+.card-action { width:26px; height:26px; padding:0; border:0; border-radius:6px; display:inline-grid; place-items:center; color:var(--muted); background:transparent; }
+.card-action svg { width:15px; height:15px; }
+.card-action:hover { color:var(--text); background:var(--control); }
+.card-action.accept { color:var(--success); }
+.card-action.accept:hover { background:color-mix(in srgb, var(--success) 16%, transparent); }
+.card-action.reject:hover { color:var(--danger); }

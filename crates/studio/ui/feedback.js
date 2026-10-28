@@ -59,7 +59,7 @@ export function feedbackController(api) {
   function renderLink() {
     const activities = Object.values(state.activities), working = activities.some(a => ['working', 'progress'].includes(a.state)), waiting = activities.filter(a => a.state === 'queued').length;
     const pill = document.querySelector('#link-status');
-    pill.textContent = !state.linked ? 'not linked' : working ? 'linked · nexus working' : waiting ? `linked · ${waiting} waiting` : 'linked to nexus';
+    pill.textContent = !state.linked ? 'Not linked' : working ? 'nexus is working' : waiting ? `Linked · ${waiting} waiting` : 'Linked to nexus';
     pill.classList.toggle('connected', state.linked); pill.classList.toggle('working', state.linked && working);
   }
   function updateActivities(activities) {
@@ -110,20 +110,29 @@ export function feedbackController(api) {
     const row = element('div', `message-author ${message.role}`), avatar = element('span', 'avatar', message.role === 'model' ? '✦' : '❯');
     row.append(avatar, element('span', '', message.role === 'model' ? 'nexus' : 'You'), element('time', '', new Date(message.created * 1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }))); return row;
   }
+  function iconAction(name, label, className, run) {
+    const button = element('button', `card-action ${className}`); button.type = 'button'; button.title = label; button.setAttribute('aria-label', label);
+    button.append(icon(name)); button.onclick = run; return button;
+  }
   function card(owner, edit) {
-    const node = element('div', `edit-card ${edit.status}`), info = element('div', 'edit-info');
-    info.append(element('div', 'edit-kicker', editSummary(edit, state.deck)));
+    const node = element('div', `edit-card ${edit.status}`), info = element('div', 'edit-info'), head = element('div', 'edit-head');
+    head.append(element('div', 'edit-kicker', editSummary(edit, state.deck)));
+    if (edit.status === 'pending') {
+      // Small icon actions in the card's corner, like the doc's suggestions.
+      const actions = element('div', 'edit-actions');
+      actions.append(
+        iconAction('eye', 'Preview on the slide', 'preview', () => { state.previewTarget = { owner, edit:edit.id, slideId:editSlide(state.deck, edit, state.slideId) }; api.command({ command:'PreviewEdit', owner, edit:edit.id }); }),
+        iconAction('check', 'Apply edit', 'accept', () => api.command({ command:'ApplyEdit', owner, edit:edit.id })),
+        iconAction('x', 'Dismiss edit', 'reject', () => api.command({ command:'DismissEdit', owner, edit:edit.id })),
+      );
+      head.append(actions);
+    }
+    info.append(head);
     if (edit.why && !/^suggested edit\.?$/i.test(edit.why.trim())) {
       const reason = element('p', 'edit-summary'); reason.append(inlineMarkdown(edit.why)); info.append(reason);
     }
-    const actions = element('div', 'edit-actions');
-    if (edit.status === 'pending') {
-      const preview = element('button', '', 'Preview'); preview.onclick = () => { state.previewTarget = { owner, edit:edit.id, slideId:editSlide(state.deck, edit, state.slideId) }; api.command({ command:'PreviewEdit', owner, edit:edit.id }); };
-      const apply = element('button', 'primary', 'Apply'); apply.onclick = () => api.command({ command:'ApplyEdit', owner, edit:edit.id });
-      const dismiss = element('button', 'dismiss', 'Dismiss'); dismiss.onclick = () => api.command({ command:'DismissEdit', owner, edit:edit.id });
-      actions.append(preview, apply, dismiss);
-    } else actions.append(element('span', 'edit-status', edit.status === 'outdated' ? 'Outdated — ask again in nexus' : edit.status === 'applied' ? 'Applied · undo with Cmd+Z' : 'Dismissed'));
-    info.append(actions); node.append(info); return node;
+    if (edit.status !== 'pending') info.append(element('span', 'edit-status', edit.status === 'outdated' ? 'Outdated — ask again in nexus' : edit.status === 'applied' ? 'Applied · undo with Cmd+Z' : 'Dismissed'));
+    node.append(info); return node;
   }
   function openThread(thread) { clearPreview(); state.openThread = thread.id; state.draftAnchor = null; state.slideId = thread.anchor.slide; state.selected.clear(); api.render(); }
   function renderPins() {
@@ -215,7 +224,8 @@ export function feedbackController(api) {
     if (event.event === 'Feedback') { state.threads = event.threads; updateActivities(event.activities); render(); if (event.notes.length) api.toast(event.notes.join('; ')); }
     else if (event.event === 'Preview' && state.previewTarget) {
       const target = state.previewTarget; state.preview = { deck:event.deck, slideId:target.slideId, before:false }; state.slideId = target.slideId;
-      document.querySelector('#preview-bar').hidden = false; document.querySelector('#preview-apply').onclick = () => api.command({ command:'ApplyEdit', owner:target.owner, edit:target.edit }); api.render();
+      document.querySelector('#preview-bar').hidden = false; document.querySelector('#preview-bar strong').textContent = 'Suggested edit'; document.querySelector('#preview-toggle').textContent = 'After · B for before'; document.querySelector('#preview-apply').textContent = 'Apply edit';
+      document.querySelector('#preview-apply').onclick = () => api.command({ command:'ApplyEdit', owner:target.owner, edit:target.edit }); api.render();
     }
   }
   function togglePreview() { if (state.preview) { state.preview.before = !state.preview.before; document.querySelector('#preview-toggle').textContent = state.preview.before ? 'Before · B for after' : 'After · B for before'; api.renderCanvas(); renderPins(); } }

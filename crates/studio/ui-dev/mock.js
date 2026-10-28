@@ -79,7 +79,11 @@
         if (m.send) sent.push({ type:'Reply', text:m.text, thread:m.thread });
         return emit(feedback());
       }
-      if (m.command === 'Undo' && undo.length) { redo.push(deck); deck = undo.pop(); sequence++; }
+      // Version history: the undo stack stands in for the kept versions.
+      if (m.command === 'History') return emit({ event:'History', versions:undo.map((_, i) => ({ id:`v${i}`, at:new Date(Date.now() - (undo.length - i) * 6e4).toISOString(), who:i % 2 ? 'model' : 'user', summary:'Edited 1 block' })).reverse() });
+      if (m.command === 'HistoryPreview') return emit({ event:'HistoryPreview', id:m.id, deck:structuredClone(undo[Number(m.id.slice(1))]) });
+      if (m.command === 'HistoryRestore') { undo.push(deck); redo.length = 0; deck = structuredClone(undo[Number(m.id.slice(1))]); sequence++; }
+      else if (m.command === 'Undo' && undo.length) { redo.push(deck); deck = undo.pop(); sequence++; }
       else if (m.command === 'Redo' && redo.length) { undo.push(deck); deck = redo.pop(); sequence++; }
       else if (m.command === 'Apply') { undo.push(deck); redo.length = 0; deck = apply(m.ops); sequence++; }
       else if (m.command === 'Save') deck = m.deck;

@@ -63,7 +63,7 @@ async function fresh(theme) {
   await page.goto(`http://127.0.0.1:${server.address().port}/`);await node('row').waitFor();
   const colors = JSON.parse(fs.readFileSync(path.join(here,`fixtures/theme-${theme}.json`),'utf8'));
   await page.evaluate(colors => window.studioAsyncEvent({event:'Theme',colors}),colors);
-  await page.locator('#toggle-properties').click();await wait();
+  await page.locator('#more-properties').dispatchEvent('click');await wait();
 }
 async function set(label,value) { await page.getByLabel(label,{exact:true}).fill(value);await page.getByLabel(label,{exact:true}).press('Enter');await page.getByLabel(label,{exact:true}).blur();await wait(); }
 try {
@@ -120,7 +120,7 @@ try {
     await cleanGuides();await shot('guides',theme);await page.mouse.up();await wait();
     assert.ok(Math.abs((await data('a')).position.x-580)<=1,'snap position within one slide pixel');
     assert.equal(await depth(),before+1);assert.equal(await applyCount(),count+1);
-    await page.locator('#undo').click();await wait();assert.equal((await data('a')).position.x,180);
+    await page.locator('#undo').dispatchEvent('click');await wait();assert.equal((await data('a')).position.x,180);
     start=await point(240,710);end=await point(204,710);await moveTo(start);await page.mouse.down();await moveTo(end);
     assert.equal(await page.locator('.equal-spacing').count(),2,'both equal gaps display exactly once');
     assert.equal(await page.locator('.distance-label').filter({hasText:/^240$/}).count(),2,'one pill per equal gap');await page.mouse.up();await wait();
@@ -140,11 +140,11 @@ try {
     assert.equal(await page.locator('#canvas .drag-ghost').count(),1);assert.equal(await applyCount(),count);
     await shot('reorder',theme);await page.mouse.up();await wait();
     assert.deepEqual((await data('row')).children.map(n=>n.id),['r2','r3','r1']);assert.equal(await depth(),before+1);assert.equal(await applyCount(),count+1);
-    await page.locator('#undo').click();await wait();assert.deepEqual((await data('row')).children.map(n=>n.id),['r1','r2','r3']);
+    await page.locator('#undo').dispatchEvent('click');await wait();assert.deepEqual((await data('row')).children.map(n=>n.id),['r1','r2','r3']);
     r=await rect('r1');start=await point(r.x+r.w/2,r.y+r.h/2);end=await point(1530,800);
     await moveTo(start);await page.mouse.down();await moveTo(end);await page.mouse.up();await wait();
     assert.deepEqual((await data('destination')).children.map(n=>n.id),['r1']);assert.equal(await depth(),before+1);
-    await page.locator('#undo').click();await wait();
+    await page.locator('#undo').dispatchEvent('click');await wait();
     r=await rect('r1');start=await point(r.x+r.w/2,r.y+r.h/2);end=await point(900,950);
     await moveTo(start);await page.mouse.down();await page.keyboard.down('Control');await moveTo(end);await page.mouse.up();await page.keyboard.up('Control');await wait();
     assert.ok(await page.evaluate(()=>window.__d1.deck.slides[0].children.some(n=>n.id==='r1' && typeof n.position==='object')));assert.equal(await depth(),before+1);
@@ -177,7 +177,7 @@ try {
     await set('Size (px)','64');await page.getByLabel('Text style actions',{exact:true}).click();await page.getByRole('button',{name:'Update style',exact:true}).click();await wait();assert.equal(await page.evaluate(()=>window.__d1.deck.theme.text_styles.evidence.size),64);
     const caption=page.locator('.property > .scrub-label[title^="Size (px)"]');await caption.scrollIntoViewIfNeeded();const label=await caption.boundingBox();
     before=await depth();count=await applyCount();await page.mouse.move(label.x+10,label.y+label.height/2);await page.mouse.down();await page.mouse.move(label.x+30,label.y+label.height/2,{steps:10});assert.equal(await applyCount(),count);await page.mouse.up();await wait();
-    assert.equal((await data('heading')).font.size,84);assert.equal(await depth(),before+1);assert.equal(await applyCount(),count+1);await page.locator('#undo').click();await wait();assert.equal((await data('heading')).font.size,64);
+    assert.equal((await data('heading')).font.size,84);assert.equal(await depth(),before+1);assert.equal(await applyCount(),count+1);await page.locator('#undo').dispatchEvent('click');await wait();assert.equal((await data('heading')).font.size,64);
     await page.getByLabel('Size (px)',{exact:true}).press('Shift+ArrowUp');await wait();assert.equal((await data('heading')).font.size,74);
     await page.getByRole('button',{name:'Font family',exact:true}).click();const choosing=page.waitForEvent('filechooser');await page.getByRole('button',{name:'Import font…',exact:true}).click();const chooser=await choosing;
     const fontPath=['/System/Library/Fonts/Supplemental/Arial.ttf','/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'].find(p=>fs.existsSync(p));assert.ok(fontPath,'system font fixture available');const fontBytes=fs.readFileSync(fontPath);

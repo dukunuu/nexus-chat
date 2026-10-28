@@ -1057,3 +1057,79 @@ fn starting_with_a_pptx_path_imports_it() {
             .starts_with(temp.0.join("other-files").canonicalize().unwrap())
     );
 }
+
+#[test]
+fn history_lists_previews_and_restores_kept_decks() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    let original = backend.deck.clone();
+    let first = backend.deck.slides[0].id.clone();
+    let history = |backend: &mut Backend| {
+        let event = send(backend, json!({"command":"History"}));
+        let Event::History { versions } = event else {
+            panic!("{event:?}")
+        };
+        versions
+    };
+    assert!(
+        history(&mut backend).is_empty(),
+        "a new deck has no history"
+    );
+    for notes in ["first edit", "second edit"] {
+        success(send(
+            &mut backend,
+            json!({"command":"Apply","ops":[{"op":"set_notes","slide":first,"notes":notes}]}),
+        ));
+    }
+    // Newest first; each is the deck before an edit, with who made the edit.
+    let versions = history(&mut backend);
+    assert_eq!(versions.len(), 2);
+    assert!(
+        versions
+            .iter()
+            .all(|v| v.who == "user" && v.at.ends_with('Z') && !v.summary.is_empty()),
+        "{versions:?}"
+    );
+    let oldest = versions[1].id.clone();
+
+    // A preview reads the kept deck and writes nothing.
+    let on_disk = fs::read(&backend.path).unwrap();
+    let event = send(
+        &mut backend,
+        json!({"command":"HistoryPreview","id":oldest}),
+    );
+    let Event::HistoryPreview {
+        id,
+        deck: Some(kept),
+        doc: None,
+    } = event
+    else {
+        panic!("{event:?}")
+    };
+    assert_eq!(id, oldest);
+    assert_eq!(kept, original);
+    assert_eq!(fs::read(&backend.path).unwrap(), on_disk);
+    assert_eq!(history(&mut backend).len(), 2);
+
+    // Restoring is an ordinary write: one undo step, and the deck it replaced is kept.
+    success(send(
+        &mut backend,
+        json!({"command":"HistoryRestore","id":oldest}),
+    ));
+    assert_eq!(backend.deck.slides, original.slides);
+    assert_eq!(
+        Deck::check(&fs::read_to_string(&backend.path).unwrap())
+            .unwrap()
+            .slides,
+        original.slides
+    );
+    assert_eq!(history(&mut backend).len(), 3);
+    success(send(&mut backend, json!({"command":"Undo"})));
+    assert_eq!(backend.deck.slides[0].notes, "second edit");
+
+    // A version that is no longer kept is an error, not a blank page.
+    for command in ["HistoryPreview", "HistoryRestore"] {
+        let event = send(&mut backend, json!({"command":command,"id":"nope"}));
+        assert!(matches!(event, Event::Error { .. }), "{event:?}");
+    }
+}

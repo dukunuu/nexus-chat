@@ -1000,3 +1000,51 @@ fn a_remembered_doc_reopens_and_the_window_title_follows_it() {
         .all(|p| backend.serve(&format!("nexus://localhost{p}")).is_ok());
     assert!(embedded_ok, "the doc UI is served from the embedded files");
 }
+
+#[test]
+fn history_previews_and_restores_kept_docs() {
+    let temp = Temp::new();
+    let mut backend = temp.backend();
+    let start = on_disk(&backend);
+    doc_event(send(
+        &mut backend,
+        json!({"command":"DocApply","ops":[{"op":"update_block","id":"b2","patch":{"text":"We grew **22%**."}}]}),
+    ));
+    let event = send(&mut backend, json!({"command":"History"}));
+    let Event::History { versions } = event else {
+        panic!("{event:?}")
+    };
+    let mine: Vec<_> = versions.iter().filter(|v| v.who == "user").collect();
+    assert_eq!(mine.len(), 1, "{versions:?}");
+    assert_eq!(mine[0].summary, "Edited 1 block");
+    let id = mine[0].id.clone();
+
+    let event = send(&mut backend, json!({"command":"HistoryPreview","id":id}));
+    let Event::HistoryPreview {
+        doc: Some(kept),
+        deck: None,
+        ..
+    } = event
+    else {
+        panic!("{event:?}")
+    };
+    assert_eq!(text(&kept, "b2"), text(&start, "b2"));
+    assert_eq!(
+        text(&on_disk(&backend), "b2"),
+        "We grew **22%**.",
+        "a preview writes nothing"
+    );
+
+    let (doc, _, _) = doc_event(send(
+        &mut backend,
+        json!({"command":"HistoryRestore","id":id}),
+    ));
+    assert_eq!(text(&doc, "b2"), text(&start, "b2"));
+    assert_eq!(on_disk(&backend), doc, "restored to the file at once");
+    let (doc, _, _) = doc_event(send(&mut backend, json!({"command":"Undo"})));
+    assert_eq!(
+        text(&doc, "b2"),
+        "We grew **22%**.",
+        "a restore is one undo step"
+    );
+}
